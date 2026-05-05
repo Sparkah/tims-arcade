@@ -1,19 +1,32 @@
-// GET /api/counts → returns all vote counts as { slug: { likes, dislikes } }
+// GET /api/counts → returns { slug: { likes, dislikes, plays } } for every game.
 //
-// KV binding: VOTES (configured in wrangler.toml / Pages dashboard)
-// Each game's counts stored under key `votes:<slug>` as JSON `{ likes, dislikes }`.
-//
-// Listing every key on each request is fine while the catalog is small (<200 games).
-// If we ever scale beyond that, switch to a single aggregate key updated on each vote.
+// Reads two KV prefixes: `votes:<slug>` for like/dislike, `plays:<slug>` for play count.
 
 export async function onRequestGet({ env }) {
   const out = {};
   let cursor;
+
+  // Pass 1: votes
   do {
     const list = await env.VOTES.list({ prefix: 'votes:', cursor });
     for (const k of list.keys) {
       const v = await env.VOTES.get(k.name, 'json');
-      if (v) out[k.name.slice('votes:'.length)] = v;
+      const slug = k.name.slice('votes:'.length);
+      if (!out[slug]) out[slug] = { likes: 0, dislikes: 0, plays: 0 };
+      if (v) { out[slug].likes = v.likes || 0; out[slug].dislikes = v.dislikes || 0; }
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor);
+
+  // Pass 2: plays
+  cursor = undefined;
+  do {
+    const list = await env.VOTES.list({ prefix: 'plays:', cursor });
+    for (const k of list.keys) {
+      const v = parseInt(await env.VOTES.get(k.name)) || 0;
+      const slug = k.name.slice('plays:'.length);
+      if (!out[slug]) out[slug] = { likes: 0, dislikes: 0, plays: 0 };
+      out[slug].plays = v;
     }
     cursor = list.list_complete ? null : list.cursor;
   } while (cursor);

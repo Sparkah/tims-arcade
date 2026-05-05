@@ -97,7 +97,7 @@ function emptyMessage() {
 }
 
 function card(g) {
-  const c = counts[g.slug] || { likes: 0, dislikes: 0 };
+  const c = counts[g.slug] || { likes: 0, dislikes: 0, plays: 0 };
   const myVote = myVotes[g.slug] || null;
   const isRecent = g.addedDate && (Date.now() - new Date(g.addedDate).getTime() < 3 * 24 * 60 * 60 * 1000);
 
@@ -106,6 +106,7 @@ function card(g) {
   el.innerHTML = `
     <div class="card-thumb" style="background-image: url('/thumbs/${g.slug}.png?v=1')">
       ${isRecent ? '<span class="recent-badge">NEW</span>' : ''}
+      ${c.plays ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
     </div>
     <div class="card-body">
       <div class="card-title"></div>

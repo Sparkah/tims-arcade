@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Apartment Cleaner</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0c0c1a; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function() {
+'use strict';
+
+// ── CANVAS / RESIZE ─────────────────────────────────────────────────────────
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+var W, H, cx, cy, S;
+
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  cx = W / 2; cy = H / 2;
+  S = Math.min(W / 800, H / 600);
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', resize);
+resize();
+
+// ── LOCALISATION ────────────────────────────────────────────────────────────
+var lang = 'en';
+var STRINGS = {
+  en: {
+    title: 'APARTMENT CLEANER', sub: 'Clean every room before sunset!',
+    play: 'PLAY', next: 'NEXT ROOM', retry: 'RETRY',
+    room: 'ROOM', time: 'TIME', clean: 'CLEAN', score: 'SCORE', best: 'BEST',
+    complete: 'ROOM CLEANED!', gameover: "TIME'S UP!",
+    bonus: 'TIME BONUS', combo: 'COMBO',
+    rn0: 'Kitchen', rn1: 'Bathroom', rn2: 'Bedroom', rn3: 'Living Room', rn4: 'Hall', rn5: 'Office',
+  },
+  ru: {
+    title: 'УБОРЩИК КВАРТИР', sub: 'Убери каждую комнату до заката!',
+    play: 'ИГРАТЬ', next: 'СЛЕДУЮЩАЯ', retry: 'ЕЩЁ РАЗ',
+    room: 'КОМНАТА', time: 'ВРЕМЯ', clean: 'ЧИСТО', score: 'ОЧКИ', best: 'РЕКОРД',
+    complete: 'УБРАНО!', gameover: 'ВРЕМЯ ВЫШЛО!',
+    bonus: 'БОНУС', combo: 'КОМБО',
+    rn0: 'Кухня', rn1: 'Ванная', rn2: 'Спальня', rn3: 'Гостиная', rn4: 'Прихожая', rn5: 'Кабинет',
+  },
+};
+function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
+window._setLang = function(l) { lang = (l === 'ru' ? 'ru' : 'en'); };
+
+// ── UTILS ───────────────────────────────────────────────────────────────────
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function rr(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+// deterministic seedable rng
+function mulberry(s) { return function() {
+  s = (s + 0x6D2B79F5) | 0;
+  var t = s;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}; }
+
+// ── CONSTANTS ───────────────────────────────────────────────────────────────
+var HUD_H = 56;
+var PLAYER_R = 18, PLAYER_BRUSH = 28;
+var SPEED_BASE = 5.2;
+
+// Room palettes — each room visually distinct (name resolved at draw via STRINGS rn0..rn5)
+var ROOMS = [
+  { nameKey:'rn0', floor:'#7a5c3b', plank:'#5e4530', accent:'#d4a017' },
+  { nameKey:'rn1', floor:'#a8c8d8', plank:'#85a8b8', accent:'#5dade2' },
+  { nameKey:'rn2', floor:'#7d6c5c', plank:'#5d4f3f', accent:'#c39ee5' },
+  { nameKey:'rn3', floor:'#b8a888', plank:'#8a7a5a', accent:'#e07b5a' },
+  { nameKey:'rn4', floor:'#5d5848', plank:'#403d33', accent:'#f1c40f' },
+  { nameKey:'rn5', floor:'#404a55', plank:'#2c333b', accent:'#48c9b0' },
+];
+
+// ── STATE ───────────────────────────────────────────────────────────────────
+var gs = 'MENU';
+var room = 1, score = 0, best = 0, timeLeft = 0;
+var palette = ROOMS[0];
+var furniture = [], dirt = [];
+var totalDirt = 0;
+var player = { x: 0, y: 0, vx: 0, vy: 0 };
+var particles = [], floats = [], buttons = [];
+var combo = 0, comboT = 0;
+var revealT = 0; // 0..1 reveal animation when room complete
+
+// ── INPUT ───────────────────────────────────────────────────────────────────
+var keys = {};
+document.addEventListener('keydown', function(e) { keys[e.code] = true; });
+document.addEventListener('keyup',   function(e) { keys[e.code] = false; });
+document.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+document.addEventListener('wheel',     function(e) { e.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+
+var touch = { active: false, dx: 0, dy: 0, sx: 0, sy: 0, id: null };
+canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  var t0 = e.changedTouches[0];
+  touch.active = true; touch.id = t0.identifier;
+  touch.sx = t0.clientX; touch.sy = t0.clientY;
+  touch.dx = 0; touch.dy = 0;
+  for (var i = 0; i < buttons.length; i++) {
+    var b = buttons[i];
+    if (t0.clientX >= b.x && t0.clientX <= b.x+b.w && t0.clientY >= b.y && t0.clientY <= b.y+b.h) b.fn();
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t0 = e.changedTouches[i];
+    if (t0.identifier !== touch.id) continue;
+    var dx = t0.clientX - touch.sx, dy = t0.clientY - touch.sy;
+    var d = Math.sqrt(dx*dx + dy*dy);
+    if (d > 8) { touch.dx = dx / Math.max(d, 50); touch.dy = dy / Math.max(d, 50); }
+  }
+}, { passive: false });
+canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    if (e.changedTouches[i].identifier === touch.id) {
+      touch.active = false; touch.dx = 0; touch.dy = 0;
+    }
+  }
+}, { passive: false });
+canvas.addEventListener('click', function(e) {
+  for (var i = 0; i < buttons.length; i++) {
+    var b = buttons[i];
+    if (e.clientX >= b.x && e.clientX <= b.x+b.w && e.clientY >= b.y && e.clientY <= b.y+b.h) b.fn();
+  }
+});
+
+// ── ARENA ───────────────────────────────────────────────────────────────────
+function arena() {
+  var pad = 24 * S;
+  var top = (HUD_H + 8) * S;
+  return { x: pad, y: top, w: W - pad*2, h: H - top - pad };
+}
+
+// ── ROOM SETUP (deterministic per room number) ──────────────────────────────
+function startRoom(n) {
+  room = n;
+  palette = ROOMS[(n - 1) % ROOMS.length];
+  particles = []; floats = []; buttons = [];
+  combo = 0; comboT = 0; revealT = 0;
+  timeLeft = Math.max(28, 75 - (n - 1) * 5);
+
+  var rng = mulberry(n * 9301 + 49297);
+  var ar = arena();
+
+  // Build furniture (rectangles fixed within the room)
+  furniture = [];
+  var furnCount = 4 + (n % 4);
+  var attempts = 0;
+  while (furniture.length < furnCount && attempts < 200) {
+    attempts++;
+    var fw = (60 + rng() * 100) * S;
+    var fh = (40 + rng() * 80) * S;
+    var fx = ar.x + 12*S + rng() * (ar.w - fw - 24*S);
+    var fy = ar.y + 12*S + rng() * (ar.h - fh - 24*S);
+    // skip if overlaps player spawn
+    if (Math.abs(fx + fw/2 - (ar.x + ar.w/2)) < 80*S &&
+        Math.abs(fy + fh/2 - (ar.y + ar.h/2)) < 80*S) continue;
+    // skip if overlaps existing
+    var ok = true;
+    for (var i = 0; i < furniture.length; i++) {
+      var f = furniture[i];
+      if (fx < f.x + f.w + 18*S && fx + fw + 18*S > f.x &&
+          fy < f.y + f.h + 18*S && fy + fh + 18*S > f.y) { ok = false; break; }
+    }
+    if (!ok) continue;
+    furniture.push({ x: fx, y: fy, w: fw, h: fh, kind: Math.floor(rng() * 4) });
+  }
+
+  // Sprinkle dirt patches in walkable area
+  dirt = [];
+  var dirtCount = 36 + n * 6;
+  var triesLeft = dirtCount * 8;
+  while (dirt.length < dirtCount && triesLeft-- > 0) {
+    var dx = ar.x + 16*S + rng() * (ar.w - 32*S);
+    var dy = ar.y + 16*S + rng() * (ar.h - 32*S);
+    if (insideFurniture(dx, dy)) continue;
+    var dr = (10 + rng() * 14) * S;
+    dirt.push({ x: dx, y: dy, r: dr, life: 1, kind: Math.floor(rng() * 3), wobble: rng() * Math.PI * 2 });
+  }
+  totalDirt = dirt.length;
+
+  // Player spawn — center of arena, away from furniture
+  player.x = ar.x + ar.w / 2;
+  player.y = ar.y + ar.h / 2;
+  player.vx = 0; player.vy = 0;
+
+  gs = 'PLAYING';
+}
+window._jumpLevel = function(n) { score = 0; startRoom(n); };
+
+function insideFurniture(x, y) {
+  for (var i = 0; i < furniture.length; i++) {
+    var f = furniture[i];
+    if (x > f.x - 6*S && x < f.x + f.w + 6*S &&
+        y > f.y - 6*S && y < f.y + f.h + 6*S) return true;
+  }
+  return false;
+}
+
+function spawnParticles(x, y, color, n) {
+  for (var i = 0; i < n; i++) {
+    var a = Math.random() * Math.PI * 2;
+    var sp = (1.5 + Math.random() * 3.5) * S;
+    particles.push({ x:x, y:y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp,
+      r:(2 + Math.random()*4)*S, color:color, life:1 });
+  }
+}
+function spawnFloat(x, y, txt, col) {
+  floats.push({ x:x, y:y, txt:txt, col:col||'#fff', life:1.3, vy:-2*S });
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────────
+var lastTs = 0;
+function update(dt) {
+  if (gs === 'LEVELEND') {
+    revealT = Math.min(1, revealT + dt * 1.2);
+  }
+  if (gs !== 'PLAYING') return;
+
+  timeLeft -= dt;
+  if (timeLeft <= 0) { timeLeft = 0; gs = 'GAMEOVER'; return; }
+
+  if (comboT > 0) { comboT -= dt; if (comboT <= 0) combo = 0; }
+
+  // movement
+  var ax = 0, ay = 0;
+  if (keys['ArrowLeft']  || keys['KeyA']) ax -= 1;
+  if (keys['ArrowRight'] || keys['KeyD']) ax += 1;
+  if (keys['ArrowUp']    || keys['KeyW']) ay -= 1;
+  if (keys['ArrowDown']  || keys['KeyS']) ay += 1;
+  if (touch.active) { ax += touch.dx; ay += touch.dy; }
+  var alen = Math.sqrt(ax*ax + ay*ay);
+  if (alen > 0) { ax /= alen; ay /= alen; }
+
+  player.vx = (player.vx + ax * 0.85 * S) * 0.83;
+  player.vy = (player.vy + ay * 0.85 * S) * 0.83;
+  var spd = Math.sqrt(player.vx*player.vx + player.vy*player.vy);
+  var max = SPEED_BASE * S;
+  if (spd > max) { player.vx = player.vx/spd*max; player.vy = player.vy/spd*max; }
+
+  var nx = player.x + player.vx, ny = player.y + player.vy;
+  // collide with furniture (axis-aligned)
+  for (var i = 0; i < furniture.length; i++) {
+    var f = furniture[i], r = PLAYER_R * S;
+    if (nx + r > f.x && nx - r < f.x + f.w && ny + r > f.y && ny - r < f.y + f.h) {
+      // resolve along smaller penetration
+      var px1 = (nx + r) - f.x;            // from left
+      var px2 = (f.x + f.w) - (nx - r);    // from right
+      var py1 = (ny + r) - f.y;
+      var py2 = (f.y + f.h) - (ny - r);
+      var minp = Math.min(px1, px2, py1, py2);
+      if (minp === px1) { nx = f.x - r; player.vx = 0; }
+      else if (minp === px2) { nx = f.x + f.w + r; player.vx = 0; }
+      else if (minp === py1) { ny = f.y - r; player.vy = 0; }
+      else { ny = f.y + f.h + r; player.vy = 0; }
+    }
+  }
+  var ar = arena(), pr = PLAYER_R * S;
+  player.x = clamp(nx, ar.x + pr, ar.x + ar.w - pr);
+  player.y = clamp(ny, ar.y + pr, ar.y + ar.h - pr);
+
+  // collect dirt with brush radius
+  var br = PLAYER_BRUSH * S;
+  for (var i = dirt.length - 1; i >= 0; i--) {
+    var d = dirt[i];
+    var dx = player.x - d.x, dy = player.y - d.y;
+    if (Math.sqrt(dx*dx + dy*dy) < br + d.r * 0.6) {
+      var pts = (d.kind === 0 ? 1 : d.kind === 1 ? 2 : 4) * Math.max(1, Math.floor(combo * 0.5 + 1));
+      score += pts;
+      if (comboT > 0) combo++; else combo = 1;
+      comboT = 1.2;
+      spawnParticles(d.x, d.y, palette.accent, 4 + Math.ceil(d.r));
+      if (combo > 1) spawnFloat(d.x, d.y - 12*S, 'x'+combo+' +'+pts, '#FFD700');
+      dirt.splice(i, 1);
+    } else {
+      d.wobble += dt * 1.6;
+    }
+  }
+
+  if (dirt.length === 0) {
+    var bonus = Math.round(timeLeft * 5);
+    score += bonus;
+    spawnFloat(cx, cy - 30*S, t('bonus')+' +'+bonus, '#2ecc71');
+    spawnParticles(player.x, player.y, '#FFD700', 22);
+    revealT = 0;
+    gs = 'LEVELEND';
+  }
+
+  for (var i = particles.length - 1; i >= 0; i--) {
+    var p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.05*S;
+    p.life -= dt * 1.6;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  for (var i = floats.length - 1; i >= 0; i--) {
+    var f = floats[i];
+    f.y += f.vy; f.life -= dt * 1.0;
+    if (f.life <= 0) floats.splice(i, 1);
+  }
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────
+function drawFloor() {
+  var ar = arena();
+  // wood plank floor with palette
+  ctx.fillStyle = palette.plank;
+  ctx.fillRect(ar.x - 4*S, ar.y - 4*S, ar.w + 8*S, ar.h + 8*S);
+  // wall trim
+  ctx.fillStyle = '#1a1426';
+  ctx.fillRect(ar.x - 12*S, ar.y - 12*S, ar.w + 24*S, 8*S);
+  ctx.fillRect(ar.x - 12*S, ar.y + ar.h + 4*S, ar.w + 24*S, 8*S);
+  ctx.fillRect(ar.x - 12*S, ar.y - 12*S, 8*S, ar.h + 24*S);
+  ctx.fillRect(ar.x + ar.w + 4*S, ar.y - 12*S, 8*S, ar.h + 24*S);
+
+  // planks
+  ctx.fillStyle = palette.floor;
+  var pw = 64 * S, ph = 24 * S;
+  for (var py = ar.y; py < ar.y + ar.h; py += ph) {
+    var off = ((py - ar.y) / ph) % 2 === 0 ? 0 : pw / 2;
+    for (var px = ar.x - pw; px < ar.x + ar.w; px += pw) {
+      ctx.fillRect(px + off, py, pw - 1, ph - 1);
+    }
+  }
+  // grain lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.08)';
+  ctx.lineWidth = 1;
+  for (var py = ar.y; py < ar.y + ar.h; py += ph) {
+    ctx.beginPath();
+    ctx.moveTo(ar.x, py);
+    ctx.lineTo(ar.x + ar.w, py);
+    ctx.stroke();
+  }
+
+  // soft vignette
+  var vg = ctx.createRadialGradient(ar.x + ar.w/2, ar.y + ar.h/2, 0, ar.x + ar.w/2, ar.y + ar.h/2, Math.max(ar.w, ar.h)*0.7);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.35)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(ar.x, ar.y, ar.w, ar.h);
+}
+
+function drawFurniture(f) {
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.32)';
+  ctx.fillRect(f.x + 4*S, f.y + 4*S, f.w, f.h);
+
+  // base
+  if (f.kind === 0) {
+    // sofa
+    ctx.fillStyle = palette.accent;
+    rr(ctx, f.x, f.y, f.w, f.h, 8*S); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    rr(ctx, f.x + 6*S, f.y + 6*S, f.w - 12*S, f.h * 0.32, 6*S); ctx.fill();
+    // cushions
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    var cn = Math.floor(f.w / (40*S));
+    for (var i = 1; i < cn; i++) {
+      var cx0 = f.x + (f.w / cn) * i;
+      ctx.beginPath();
+      ctx.moveTo(cx0, f.y + 14*S);
+      ctx.lineTo(cx0, f.y + f.h - 8*S);
+      ctx.stroke();
+    }
+  } else if (f.kind === 1) {
+    // table (lighter)
+    ctx.fillStyle = '#7a5c3b';
+    rr(ctx, f.x, f.y, f.w, f.h, 4*S); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+    ctx.lineWidth = 1;
+    for (var i = 0; i < 5; i++) {
+      var ly = f.y + (i+1) * (f.h/6);
+      ctx.beginPath(); ctx.moveTo(f.x + 6*S, ly); ctx.lineTo(f.x + f.w - 6*S, ly); ctx.stroke();
+    }
+  } else if (f.kind === 2) {
+    // bed / counter
+    ctx.fillStyle = '#fff';
+    rr(ctx, f.x, f.y, f.w, f.h, 6*S); ctx.fill();
+    ctx.fillStyle = palette.accent;
+    rr(ctx, f.x + 8*S, f.y + 8*S, f.w - 16*S, 14*S, 4*S); ctx.fill();
+    // pillow lines
+    ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+    ctx.beginPath();
+    ctx.moveTo(f.x + f.w/2, f.y + 26*S);
+    ctx.lineTo(f.x + f.w/2, f.y + f.h - 8*S);
+    ctx.stroke();
+  } else {
+    // shelf / cabinet
+    ctx.fillStyle = '#5e4530';
+    rr(ctx, f.x, f.y, f.w, f.h, 4*S); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = 1.5*S;
+    var rows = Math.max(2, Math.floor(f.h / (30*S)));
+    for (var i = 1; i < rows; i++) {
+      var ly = f.y + (i * (f.h / rows));
+      ctx.beginPath(); ctx.moveTo(f.x, ly); ctx.lineTo(f.x + f.w, ly); ctx.stroke();
+    }
+    // small items on shelves
+    for (var i = 0; i < rows; i++) {
+      var sy = f.y + (i + 0.5) * (f.h / rows);
+      ctx.fillStyle = palette.accent;
+      ctx.fillRect(f.x + 8*S, sy - 4*S, 14*S, 8*S);
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(f.x + 30*S, sy - 4*S, 8*S, 8*S);
+    }
+  }
+
+  // outline
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
+  ctx.lineWidth = 1.5*S;
+  rr(ctx, f.x, f.y, f.w, f.h, 4*S); ctx.stroke();
+}
+
+function drawDirt(d) {
+  var wb = Math.sin(d.wobble) * 1.0 * S;
+  ctx.save();
+  ctx.translate(d.x, d.y + wb);
+  if (d.kind === 0) {
+    // dust bunny
+    ctx.fillStyle = '#8a7a68';
+    for (var i = 0; i < 4; i++) {
+      var a = (i/4)*Math.PI*2;
+      ctx.beginPath();
+      ctx.arc(Math.cos(a)*d.r*0.5, Math.sin(a)*d.r*0.5, d.r*0.55, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.fillStyle = '#a39785';
+    ctx.beginPath(); ctx.arc(0, 0, d.r*0.5, 0, Math.PI*2); ctx.fill();
+  } else if (d.kind === 1) {
+    // muddy footprint smudge
+    ctx.fillStyle = '#4a3a28';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, d.r, d.r*0.6, d.wobble * 0.1, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#6b5235';
+    ctx.beginPath();
+    ctx.ellipse(-d.r*0.3, -d.r*0.15, d.r*0.4, d.r*0.25, 0, 0, Math.PI*2);
+    ctx.fill();
+  } else {
+    // crumpled wrapper
+    ctx.fillStyle = '#d4a017';
+    rr(ctx, -d.r, -d.r*0.6, d.r*2, d.r*1.2, d.r*0.3);
+    ctx.fill();
+    ctx.strokeStyle = '#8c6d10';
+    ctx.lineWidth = 1.2*S;
+    ctx.beginPath(); ctx.moveTo(-d.r*0.4, -d.r*0.6); ctx.lineTo(-d.r*0.4, d.r*0.6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( d.r*0.4, -d.r*0.6); ctx.lineTo( d.r*0.4, d.r*0.6); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawPlayer() {
+  var r = PLAYER_R * S, br = PLAYER_BRUSH * S;
+  // brush halo
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.beginPath(); ctx.arc(player.x, player.y, br, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 1.5*S;
+  ctx.beginPath(); ctx.arc(player.x, player.y, br, 0, Math.PI*2); ctx.stroke();
+
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.beginPath(); ctx.ellipse(player.x, player.y + r*0.7, r*0.9, r*0.4, 0, 0, Math.PI*2); ctx.fill();
+
+  // body
+  var grd = ctx.createRadialGradient(player.x - r*0.3, player.y - r*0.3, 0, player.x, player.y, r);
+  grd.addColorStop(0, '#5dade2'); grd.addColorStop(1, '#1f6391');
+  ctx.fillStyle = grd;
+  ctx.beginPath(); ctx.arc(player.x, player.y, r, 0, Math.PI*2); ctx.fill();
+  // bristles around player
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.2*S;
+  for (var i = 0; i < 12; i++) {
+    var a = (i/12)*Math.PI*2 + performance.now()/600;
+    ctx.beginPath();
+    ctx.moveTo(player.x + Math.cos(a)*r, player.y + Math.sin(a)*r);
+    ctx.lineTo(player.x + Math.cos(a)*r*1.35, player.y + Math.sin(a)*r*1.35);
+    ctx.stroke();
+  }
+  // smile/eye for friendliness
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(player.x + r*0.25, player.y - r*0.1, r*0.15, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(player.x + r*0.3, player.y - r*0.1, r*0.07, 0, Math.PI*2); ctx.fill();
+}
+
+function drawHUD() {
+  var bh = HUD_H * S;
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, W, bh);
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, bh); ctx.lineTo(W, bh); ctx.stroke();
+
+  var pad = 14*S, fs = clamp(13*S, 11, 17), fy = bh*0.78;
+  var bigFs = clamp(18*S, 14, 24);
+  ctx.textBaseline = 'alphabetic';
+
+  ctx.fillStyle = '#557'; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText(t('room')+' '+room, pad, bh*0.42);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold '+bigFs+'px sans-serif';
+  ctx.fillText(t(palette.nameKey), pad, fy);
+
+  ctx.fillStyle = '#557'; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText(t('score'), W-pad, bh*0.42);
+  ctx.fillStyle = '#FFD700'; ctx.font = 'bold '+bigFs+'px sans-serif';
+  ctx.fillText(score, W-pad, fy);
+
+  // clean meter
+  var pct = totalDirt > 0 ? Math.round(((totalDirt - dirt.length) / totalDirt) * 100) : 100;
+  var mw = clamp(W*0.32, 110, 240), mh = 10*S;
+  var mx = cx - mw/2, my = bh*0.58;
+  ctx.fillStyle = '#666'; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(t('clean')+' '+pct+'%', cx, bh*0.36);
+  rr(ctx, mx, my, mw, mh, mh/2); ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fill();
+  if (pct > 0) {
+    var fg = ctx.createLinearGradient(mx, 0, mx+mw, 0);
+    fg.addColorStop(0, '#2ecc71'); fg.addColorStop(1, '#1abc9c');
+    rr(ctx, mx, my, mw*pct/100, mh, mh/2); ctx.fillStyle = fg; ctx.fill();
+  }
+
+  // timer
+  var tx = W*0.78;
+  var tc = timeLeft < 10 ? '#e74c3c' : timeLeft < 20 ? '#f39c12' : '#aaa';
+  ctx.fillStyle = tc; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(t('time'), tx, bh*0.42);
+  ctx.font = 'bold '+bigFs+'px sans-serif';
+  ctx.fillText(Math.ceil(timeLeft)+'s', tx, fy);
+
+  if (combo > 1 && comboT > 0) {
+    ctx.globalAlpha = Math.min(1, comboT);
+    ctx.font = 'bold '+clamp(22*S,16,32)+'px sans-serif';
+    ctx.fillStyle = '#FFD700'; ctx.textAlign = 'center';
+    ctx.fillText(t('combo')+' x'+combo+'!', cx, H - 50*S);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawOverlay(title, sub, btnText, btnFn, sub2) {
+  buttons = [];
+  ctx.fillStyle = 'rgba(8,12,28,0.85)';
+  ctx.fillRect(0, 0, W, H);
+
+  var titleFs = clamp(38*S, 22, 56);
+  var subFs   = clamp(16*S, 12, 22);
+  var btnW    = clamp(240*S, 160, 320), btnH = clamp(52*S, 40, 66);
+  var btnX    = cx - btnW/2, btnY = cy + 20*S;
+
+  ctx.shadowColor = 'rgba(46,204,113,0.45)'; ctx.shadowBlur = 30*S;
+  ctx.font = 'bold '+titleFs+'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(title, cx, cy - 50*S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  if (sub) {
+    ctx.font = subFs+'px sans-serif'; ctx.fillStyle = '#9ab';
+    ctx.fillText(sub, cx, cy - 16*S);
+  }
+  if (sub2) {
+    ctx.font = subFs+'px sans-serif'; ctx.fillStyle = '#bcd';
+    ctx.fillText(sub2, cx, cy + 2*S);
+  }
+
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY+btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#1e8449');
+  rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold '+subFs+'px sans-serif'; ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(btnText, cx, btnY + btnH/2);
+  ctx.textBaseline = 'alphabetic';
+
+  buttons.push({ x:btnX, y:btnY, w:btnW, h:btnH, fn:btnFn });
+
+  if (best > 0) {
+    ctx.font = clamp(13*S,10,17)+'px sans-serif'; ctx.fillStyle = '#557';
+    ctx.fillText(t('best')+': '+best, cx, btnY+btnH+28*S);
+  }
+}
+
+// ── MAIN LOOP ───────────────────────────────────────────────────────────────
+function frame(ts) {
+  var dt = Math.min((ts - lastTs) / 1000, 0.08);
+  lastTs = ts;
+
+  update(dt);
+
+  ctx.fillStyle = '#0c0c1a';
+  ctx.fillRect(0, 0, W, H);
+
+  if (gs === 'PLAYING' || gs === 'LEVELEND') {
+    drawFloor();
+    for (var i = 0; i < furniture.length; i++) drawFurniture(furniture[i]);
+    for (var i = 0; i < dirt.length; i++) drawDirt(dirt[i]);
+
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+      ctx.fillStyle = p.color; ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    drawPlayer();
+
+    for (var i = 0; i < floats.length; i++) {
+      var f = floats[i];
+      ctx.globalAlpha = Math.max(0, f.life);
+      ctx.font = 'bold '+clamp(15*S,11,22)+'px sans-serif';
+      ctx.fillStyle = f.col; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+      ctx.fillText(f.txt, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
+
+    drawHUD();
+
+    if (gs === 'LEVELEND') {
+      // bright reveal sweep across the floor
+      var ar = arena();
+      ctx.fillStyle = 'rgba(255,255,200,'+(0.15 * (1 - revealT))+')';
+      ctx.fillRect(ar.x, ar.y, ar.w * revealT, ar.h);
+    }
+  }
+
+  if (gs === 'MENU') {
+    ctx.fillStyle = '#0c0c1a'; ctx.fillRect(0,0,W,H);
+    drawOverlay(t('title'), t('sub'), t('play'), function() { score=0; startRoom(1); });
+  }
+  if (gs === 'LEVELEND' && revealT >= 1) {
+    drawOverlay(t('complete')+' (' + t(palette.nameKey) + ')', t('score')+': '+score, t('next'),
+      function() { startRoom(room+1); });
+  }
+  if (gs === 'GAMEOVER') {
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem('apt_best', best); } catch(e) {}
+    }
+    drawOverlay(t('gameover'), t('score')+': '+score, t('retry'),
+      function() { score=0; startRoom(room); });
+  }
+
+  requestAnimationFrame(frame);
+}
+
+// ── BOOT ────────────────────────────────────────────────────────────────────
+var booted = false;
+function boot() {
+  if (booted) return;
+  booted = true;
+  try { best = parseInt(localStorage.getItem('apt_best')||'0')||0; } catch(e) {}
+  if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
+    window.ysdk.features.LoadingAPI.ready();
+  }
+  gs = 'MENU';
+  lastTs = performance.now();
+  requestAnimationFrame(frame);
+}
+
+(function() {
+  if (typeof YaGames === 'undefined') { setTimeout(boot, 3000); return; }
+  YaGames.init().then(function(ysdk) {
+    window.ysdk = ysdk;
+    try {
+      var l = ysdk.environment && ysdk.environment.i18n && ysdk.environment.i18n.lang;
+      if (l) lang = l.startsWith('ru') ? 'ru' : 'en';
+    } catch(e) {}
+    boot();
+  }).catch(function() { boot(); });
+  setTimeout(boot, 3000);
+})();
+
+})();
+</script>
+</body>
+</html>
