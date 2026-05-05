@@ -91,31 +91,50 @@
         body: JSON.stringify({ slug }),
       }).catch(() => {});
 
-      // Heartbeat — every 2 min while the tab is visible. Each ping counts as
-      // 120 seconds of play time on the server. Stops when the tab is hidden,
-      // resumes when it becomes visible again.
-      const HEARTBEAT_MS = 120 * 1000;
-      let hbTimer = null;
-      function sendHeartbeat() {
-        fetch('/api/heartbeat', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ slug }),
-          keepalive: true,
-        }).catch(() => {});
+      // Heartbeat — track actual visible play time at 5-second granularity,
+      // flush to server every 2 minutes (or on pagehide via sendBeacon).
+      //
+      // Why this shape: hitting the server every 5s would burn KV writes; a
+      // pure 2-min poll loses any session shorter than 2 min. So we tick
+      // locally and flush the *actual delta* instead of a fixed 120s.
+      const TICK_MS  = 5 * 1000;
+      const FLUSH_MS = 120 * 1000;
+      let pending = 0;
+      let tickTimer = null;
+      let flushTimer = null;
+
+      function startTicks() {
+        if (!tickTimer) tickTimer = setInterval(() => { pending += TICK_MS / 1000; }, TICK_MS);
+        if (!flushTimer) flushTimer = setInterval(() => flush(false), FLUSH_MS);
       }
-      function startHeartbeat() {
-        if (hbTimer) return;
-        hbTimer = setInterval(sendHeartbeat, HEARTBEAT_MS);
+      function stopTicks() {
+        if (tickTimer)  { clearInterval(tickTimer);  tickTimer  = null; }
+        if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
       }
-      function stopHeartbeat() {
-        if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+      function flush(useBeacon) {
+        if (pending <= 0) return;
+        const seconds = Math.round(pending);
+        pending = 0;
+        const body = JSON.stringify({ slug, seconds });
+        if (useBeacon && navigator.sendBeacon) {
+          navigator.sendBeacon('/api/heartbeat', new Blob([body], { type: 'application/json' }));
+        } else {
+          fetch('/api/heartbeat', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body,
+            keepalive: true,
+          }).catch(() => {});
+        }
       }
+
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') startHeartbeat();
-        else stopHeartbeat();
+        if (document.visibilityState === 'visible') startTicks();
+        else { stopTicks(); flush(false); }
       });
-      startHeartbeat();
+      window.addEventListener('pagehide', () => { stopTicks(); flush(true); });
+
+      if (document.visibilityState === 'visible') startTicks();
 
       // load current vote counts
       let counts = { likes: 0, dislikes: 0 };
