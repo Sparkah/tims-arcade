@@ -74,8 +74,63 @@ done
 # Build games.json from games.source.json (drop gameDir, add what the site needs)
 jq 'map({slug, title, hook, addedDate, published: (.published // true)})' "$SRC" > "$OUT_MANIFEST"
 
+# ── sitemap.xml + rss.xml + robots.txt ──────────────────────────────────────
+# Generated at sync-time so they're static (cached by CF edge, instant serve).
+
+SITE="https://game-factory.tech"
+NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# robots.txt — let everyone in, point at sitemap
+cat > "$GALLERY/robots.txt" <<EOF
+User-agent: *
+Allow: /
+Disallow: /admin.html
+Disallow: /api/
+
+Sitemap: $SITE/sitemap.xml
+EOF
+
+# sitemap.xml — index + per-game share pages
+{
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+  printf '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+  printf '  <url><loc>%s/</loc><lastmod>%s</lastmod><priority>1.0</priority></url>\n' "$SITE" "$NOW"
+  jq -r --arg site "$SITE" \
+    '.[] | select(.published != false) |
+      "  <url><loc>" + $site + "/p/" + .slug + "</loc><lastmod>" + .addedDate + "T00:00:00Z</lastmod><priority>0.8</priority></url>"' \
+    "$OUT_MANIFEST"
+  printf '</urlset>\n'
+} > "$GALLERY/sitemap.xml"
+
+# rss.xml — newest games first
+{
+  printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+  printf '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">\n'
+  printf '<channel>\n'
+  printf '  <title>Tim'"'"'s Game Lab</title>\n'
+  printf '  <link>%s/</link>\n' "$SITE"
+  printf '  <description>Daily HTML5 browser games. New build most days.</description>\n'
+  printf '  <language>en</language>\n'
+  printf '  <atom:link href="%s/rss.xml" rel="self" type="application/rss+xml"/>\n' "$SITE"
+  printf '  <lastBuildDate>%s</lastBuildDate>\n' "$(date -u +'%a, %d %b %Y %H:%M:%S +0000')"
+  jq -r --arg site "$SITE" '
+    sort_by(.addedDate) | reverse | .[] | select(.published != false) |
+    "  <item>\n" +
+    "    <title>" + (.title | @html) + "</title>\n" +
+    "    <link>" + $site + "/p/" + .slug + "</link>\n" +
+    "    <guid isPermaLink=\"true\">" + $site + "/p/" + .slug + "</guid>\n" +
+    "    <description>" + (.hook // "" | @html) + "</description>\n" +
+    "    <pubDate>" + .addedDate + " 00:00:00 +0000</pubDate>\n" +
+    "  </item>"
+  ' "$OUT_MANIFEST"
+  printf '</channel>\n</rss>\n'
+} > "$GALLERY/rss.xml"
+
 # Total file size summary
 TOTAL_SIZE=$(du -sh "$GALLERY" | awk '{print $1}')
 echo ""
 echo "Done. Manifest: $OUT_MANIFEST"
+echo "        sitemap: $GALLERY/sitemap.xml"
+echo "        rss:     $GALLERY/rss.xml"
+echo "        robots:  $GALLERY/robots.txt"
 echo "Total Gallery/ size: $TOTAL_SIZE"
