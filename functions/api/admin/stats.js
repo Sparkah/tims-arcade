@@ -1,0 +1,111 @@
+// GET /api/admin/stats?token=<ADMIN_TOKEN>
+//
+// Returns aggregate stats for the admin dashboard. Token-gated against the
+// ADMIN_TOKEN env var (configured in CF Pages dashboard → Settings → Environment
+// variables → Production).
+//
+// Response shape:
+// {
+//   totals: { plays, seconds, likes, dislikes },
+//   perGame: [
+//     { slug, plays, seconds, likes, dislikes }
+//   ],
+//   perDay: {                      // last 14 days, keyed by YYYY-MM-DD
+//     "<date>": { totalSeconds, perGame: { <slug>: seconds } }
+//   }
+// }
+
+export async function onRequestGet({ request, env }) {
+  const url = new URL(request.url);
+  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
+
+  const expected = env.ADMIN_TOKEN;
+  if (!expected) {
+    return jsonError('admin_token_not_configured: set ADMIN_TOKEN env var in Pages dashboard', 500);
+  }
+  if (token !== expected) {
+    return jsonError('forbidden', 403);
+  }
+
+  // Aggregate per-game from votes:* / plays:* / seconds:*
+  const perGame = {};
+  function ensure(slug) {
+    if (!perGame[slug]) perGame[slug] = { slug, likes: 0, dislikes: 0, plays: 0, seconds: 0 };
+    return perGame[slug];
+  }
+
+  for (const prefix of ['votes:', 'plays:', 'seconds:']) {
+    let cursor;
+    do {
+      const list = await env.VOTES.list({ prefix, cursor });
+      for (const k of list.keys) {
+        const slug = k.name.slice(prefix.length);
+        const g = ensure(slug);
+        if (prefix === 'votes:') {
+          const v = await env.VOTES.get(k.name, 'json');
+          if (v) { g.likes = v.likes || 0; g.dislikes = v.dislikes || 0; }
+        } else if (prefix === 'plays:') {
+          g.plays = parseInt(await env.VOTES.get(k.name)) || 0;
+        } else {
+          g.seconds = parseInt(await env.VOTES.get(k.name)) || 0;
+        }
+      }
+      cursor = list.list_complete ? null : list.cursor;
+    } while (cursor);
+  }
+
+  // Last 14 days
+  const today = new Date();
+  const dates = [];
+  for (let i = 13; i >= 0; i--) {
+    const d = new Date(today);
+    d.setUTCDate(today.getUTCDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+
+  const perDay = {};
+  for (const date of dates) {
+    perDay[date] = { totalSeconds: 0, perGame: {} };
+  }
+
+  // Walk daily:* keys
+  let cursor;
+  do {
+    const list = await env.VOTES.list({ prefix: 'daily:', cursor });
+    for (const k of list.keys) {
+      // key = daily:<slug>:<date>
+      const rest = k.name.slice('daily:'.length);
+      const lastColon = rest.lastIndexOf(':');
+      if (lastColon < 0) continue;
+      const slug = rest.slice(0, lastColon);
+      const date = rest.slice(lastColon + 1);
+      if (!perDay[date]) continue;
+      const sec = parseInt(await env.VOTES.get(k.name)) || 0;
+      perDay[date].totalSeconds += sec;
+      perDay[date].perGame[slug] = (perDay[date].perGame[slug] || 0) + sec;
+    }
+    cursor = list.list_complete ? null : list.cursor;
+  } while (cursor);
+
+  // Totals
+  const totals = { plays: 0, seconds: 0, likes: 0, dislikes: 0 };
+  for (const slug in perGame) {
+    totals.plays    += perGame[slug].plays;
+    totals.seconds  += perGame[slug].seconds;
+    totals.likes    += perGame[slug].likes;
+    totals.dislikes += perGame[slug].dislikes;
+  }
+
+  const games = Object.values(perGame).sort((a, b) => b.seconds - a.seconds);
+
+  return new Response(JSON.stringify({ totals, perGame: games, perDay }), {
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
+  });
+}
+
+function jsonError(msg, status) {
+  return new Response(JSON.stringify({ error: msg }), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
