@@ -48,18 +48,29 @@ for ((i = 0; i < COUNT; i++)); do
     continue
   fi
 
-  # Copy index.html
+  # Copy index.html. If the source uses the multi-platform placeholder
+  # (<!-- PLATFORM_SDK -->), substitute the gallery's SDK stub so the game
+  # boots inside the iframe without hitting Yandex's real /sdk.js.
   mkdir -p "$OUT_GAMES/$SLUG"
-  cp "$GAME_DIR/index.html" "$OUT_GAMES/$SLUG/index.html"
+  if grep -q '<!-- PLATFORM_SDK -->' "$GAME_DIR/index.html"; then
+    sed 's|<!-- PLATFORM_SDK -->|<script src="/sdk.js"></script>|' \
+      "$GAME_DIR/index.html" > "$OUT_GAMES/$SLUG/index.html"
+  else
+    cp "$GAME_DIR/index.html" "$OUT_GAMES/$SLUG/index.html"
+  fi
 
   # Copy optional asset folders if they exist
-  for sub in fonts sounds data images assets; do
+  for sub in fonts sounds data images assets sprites; do
     [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
   done
 
-  # Copy thumbnail (use desktop_en_1.png; fallback to desktop_ru_1.png)
+  # Copy thumbnail. Two layouts supported:
+  #   1. Flat:        yandex_promo/desktop_en_1.png
+  #   2. Per-language: yandex_promo/en/desktop_1.png  (used by 10_running_away)
   THUMB=""
-  for cand in desktop_en_1.png desktop_ru_1.png mobile_en_1.png; do
+  for cand in \
+    desktop_en_1.png desktop_ru_1.png mobile_en_1.png \
+    en/desktop_1.png ru/desktop_1.png en/mobile_1.png; do
     if [[ -f "$GAME_DIR/yandex_promo/$cand" ]]; then THUMB="$GAME_DIR/yandex_promo/$cand"; break; fi
   done
   if [[ -n "$THUMB" ]]; then
