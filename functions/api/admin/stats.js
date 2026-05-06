@@ -54,6 +54,29 @@ export async function onRequestGet({ request, env }) {
     } while (cursor);
   }
 
+  // A/B thumbnail click counts. Keys: click:<slug>:v<N>
+  // Result attached as g.variants = { 1: clicks, 2: clicks, ... }
+  {
+    let cursor;
+    do {
+      const list = await env.VOTES.list({ prefix: 'click:', cursor });
+      for (const k of list.keys) {
+        const rest = k.name.slice('click:'.length);
+        const lastColon = rest.lastIndexOf(':');
+        if (lastColon < 0) continue;
+        const slug = rest.slice(0, lastColon);
+        const vraw = rest.slice(lastColon + 1);   // "v2"
+        if (!vraw.startsWith('v')) continue;
+        const variant = parseInt(vraw.slice(1));
+        if (!Number.isInteger(variant)) continue;
+        const g = ensure(slug);
+        if (!g.variants) g.variants = {};
+        g.variants[variant] = (g.variants[variant] || 0) + (parseInt(await env.VOTES.get(k.name)) || 0);
+      }
+      cursor = list.list_complete ? null : list.cursor;
+    } while (cursor);
+  }
+
   // Last 14 days
   const today = new Date();
   const dates = [];

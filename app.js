@@ -188,15 +188,41 @@ function emptyMessage() {
   return '<h2>No games yet.</h2>';
 }
 
+function pickVariant(slug, thumbCount) {
+  // Random per pageview — with random pick, impressions are roughly uniform
+  // across variants, so raw click counts give a directional CTR signal
+  // without us paying for impression-write KV ops.
+  if (!thumbCount || thumbCount < 2) return 1;
+  return 1 + Math.floor(Math.random() * thumbCount);
+}
+
+function thumbUrl(slug, variant) {
+  return variant > 1
+    ? `/thumbs/${slug}__v${variant}.png?v=1`
+    : `/thumbs/${slug}.png?v=1`;
+}
+
 function card(g) {
   const c = counts[g.slug] || { likes: 0, dislikes: 0, plays: 0 };
   const myVote = myVotes[g.slug] || null;
   const isRecent = g.addedDate && (Date.now() - new Date(g.addedDate).getTime() < 3 * 24 * 60 * 60 * 1000);
+  const variant  = pickVariant(g.slug, g.thumbCount || 1);
+  const thumb    = thumbUrl(g.slug, variant);
+  const playUrl  = `/play.html?slug=${encodeURIComponent(g.slug)}`;
+
+  // If a preview WebM exists, render it as a muted-autoloop video laid over
+  // the static thumb (still the poster while the video is buffering).
+  const mediaInner = g.hasPreview
+    ? `<video class="card-video" src="/previews/${g.slug}.webm" poster="${thumb}"
+              autoplay loop muted playsinline preload="metadata" aria-hidden="true"></video>`
+    : '';
 
   const el = document.createElement('article');
   el.className = 'card';
+  el.dataset.variant = variant;
   el.innerHTML = `
-    <div class="card-thumb" style="background-image: url('/thumbs/${g.slug}.png?v=1')">
+    <div class="card-thumb" style="background-image: url('${thumb}')">
+      ${mediaInner}
       ${isRecent ? '<span class="recent-badge">NEW</span>' : ''}
       ${c.plays ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
     </div>
@@ -210,14 +236,21 @@ function card(g) {
         <button class="vote dislike ${myVote === 'dislike' ? 'active' : ''}" data-action="dislike" aria-label="Dislike">
           👎 <span class="num">${c.dislikes || 0}</span>
         </button>
-        <a class="play-link" href="/play.html?slug=${encodeURIComponent(g.slug)}">▶ Play</a>
+        <a class="play-link" href="${playUrl}">▶ Play</a>
       </div>
     </div>
   `;
   el.querySelector('.card-title').textContent = g.title;
   el.querySelector('.card-hook').textContent  = g.hook || '';
-  el.querySelector('.card-thumb').addEventListener('click', () => {
-    location.href = `/play.html?slug=${encodeURIComponent(g.slug)}`;
+
+  function goPlay() {
+    if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
+    location.href = playUrl;
+  }
+  el.querySelector('.card-thumb').addEventListener('click', goPlay);
+  el.querySelector('.play-link').addEventListener('click', (e) => {
+    if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
+    // let the link navigation proceed
   });
   el.querySelectorAll('.vote').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -226,6 +259,17 @@ function card(g) {
     });
   });
   return el;
+}
+
+function logVariantClick(slug, variant) {
+  // sendBeacon survives the navigation that's about to happen
+  const body = JSON.stringify({ slug, variant });
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon('/api/click', new Blob([body], { type: 'application/json' }));
+  } else {
+    fetch('/api/click', { method: 'POST', headers: { 'content-type': 'application/json' }, body, keepalive: true })
+      .catch(() => {});
+  }
 }
 
 // ── Voting ────────────────────────────────────────────────────────────────

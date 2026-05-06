@@ -25,7 +25,7 @@ if [[ ! -f "$SRC" ]]; then
   exit 1
 fi
 
-mkdir -p "$OUT_GAMES" "$OUT_THUMBS"
+mkdir -p "$OUT_GAMES" "$OUT_THUMBS" "$GALLERY/previews"
 
 # We need jq for clean JSON manipulation
 if ! command -v jq >/dev/null; then
@@ -84,11 +84,50 @@ for ((i = 0; i < COUNT; i++)); do
     echo "  ⚠ $SLUG has no thumbnail"
   fi
 
-  echo "  ✓ $SLUG (published=$PUB)"
+  # Thumb variants for A/B testing — <gameDir>/thumb_variants/v2.png, v3.png, …
+  # Default thumb (above) is variant v1. Sync writes them as <slug>__v2.png, __v3.png, …
+  THUMB_COUNT=1
+  rm -f "$OUT_THUMBS/${SLUG}__v"*.png 2>/dev/null
+  if [[ -d "$GAME_DIR/thumb_variants" ]]; then
+    for vfile in "$GAME_DIR/thumb_variants"/v*.png; do
+      [[ -f "$vfile" ]] || continue
+      VNAME=$(basename "$vfile" .png)   # e.g. v2
+      cp "$vfile" "$OUT_THUMBS/${SLUG}__${VNAME}.png"
+      THUMB_COUNT=$((THUMB_COUNT + 1))
+    done
+  fi
+
+  # Preview video (3s gameplay loop) — produced by record_preview.js
+  HAS_PREVIEW=false
+  if [[ -f "$GAME_DIR/preview.webm" ]]; then
+    cp "$GAME_DIR/preview.webm" "$GALLERY/previews/$SLUG.webm"
+    HAS_PREVIEW=true
+  else
+    rm -f "$GALLERY/previews/$SLUG.webm" 2>/dev/null
+  fi
+
+  # Stash counts for manifest enrichment below
+  echo "$SLUG $THUMB_COUNT $HAS_PREVIEW" >> "$GALLERY/.sync.tmp"
+
+  echo "  ✓ $SLUG (published=$PUB, thumbCount=$THUMB_COUNT, preview=$HAS_PREVIEW)"
 done
 
-# Build games.json from games.source.json (drop gameDir, add what the site needs)
-jq 'map({slug, title, hook, genre: (.genre // "other"), addedDate, published: (.published // true)})' "$SRC" > "$OUT_MANIFEST"
+# Build games.json from games.source.json — enrich with thumbCount + hasPreview
+TMP_META="$GALLERY/.sync.tmp"
+META_JSON=$(awk '{ printf "\"%s\":{\"thumbCount\":%s,\"hasPreview\":%s},", $1, $2, $3 }' "$TMP_META" \
+  | sed 's/,$//' | awk '{ print "{" $0 "}" }')
+rm -f "$TMP_META"
+
+jq --argjson meta "$META_JSON" '
+  map({
+    slug, title, hook,
+    genre: (.genre // "other"),
+    addedDate,
+    published: (.published // true),
+    thumbCount: ($meta[.slug].thumbCount // 1),
+    hasPreview: ($meta[.slug].hasPreview // false)
+  })
+' "$SRC" > "$OUT_MANIFEST"
 
 # ── sitemap.xml + rss.xml + robots.txt ──────────────────────────────────────
 # Generated at sync-time so they're static (cached by CF edge, instant serve).
