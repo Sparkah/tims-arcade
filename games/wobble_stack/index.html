@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Tower Balance</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── GAME-SPECIFIC CONFIG ─────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'TOWER BALANCE',
+    sub:   'Tap / SPACE to drop. Land centred to grow your streak — wider blocks at 3+!',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'TOWER FELL!',
+    streak: 'STREAK',
+    height: 'HEIGHT',
+    perfect: 'PERFECT!',
+    nice: 'NICE',
+  },
+  ru: {
+    title: 'БАЛАНС БАШНИ',
+    sub:   'Тап / ПРОБЕЛ — бросок. В центр — серия растёт, после x3 блоки шире!',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'БАШНЯ УПАЛА!',
+    streak: 'СЕРИЯ',
+    height: 'ВЫСОТА',
+    perfect: 'В ЦЕНТР!',
+    nice: 'ОТЛИЧНО',
+  },
+};
+
+var SPRITE_NAMES = ['block_red', 'block_blue', 'block_green', 'block_yellow', 'block_purple', 'platform_pivot', 'fail_dust'];
+var BLOCK_COLORS = ['block_red', 'block_blue', 'block_green', 'block_yellow', 'block_purple'];
+var BLOCK_HEX = { block_red: '#ff5566', block_blue: '#4dd0e1', block_green: '#7ee08a', block_yellow: '#ffcc4d', block_purple: '#b18bff' };
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER
+var score = 0, best = 0;
+var streak = 0;
+var heightCount = 0;
+var endedSent = false;
+
+// Design-space coords. Portrait 600x900.
+var DW = 600, DH = 900;
+
+// Pivot location and platform
+var pivot = { x: DW / 2, y: DH - 80 };
+var plankW = 280;
+var plankH = 22;
+
+// Tilt physics — angle, angular velocity, damping
+var tilt = 0;
+var tiltVel = 0;
+var FAIL_TILT = 25 * Math.PI / 180;
+var GRAVITY = 0.0009;
+var TILT_DAMP = 0.985;
+var WOBBLE_DECAY = 0.92;
+var wobble = 0;
+
+var spawner = null;
+var stack = [];
+
+// Spawn config
+var SPAWN_Y = 100;
+var SPAWN_SPEED = 320;
+var BLOCK_W_NORMAL = 90;
+var BLOCK_W_WIDE = 130;
+var BLOCK_H = 38;
+
+var cameraY = 0;
+var nextSpawnTimer = 0;
+var freezePhysics = false;     // screenshot mode
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+function rand(a, b) { return a + Math.random() * (b - a); }
+function randi(a, b) { return Math.floor(a + Math.random() * (b - a)); }
+
+function pickColor() { return BLOCK_COLORS[randi(0, BLOCK_COLORS.length)]; }
+
+function worldToScreen(wx, wy) {
+  return { x: wx * GF.S + (GF.W - DW * GF.S) / 2, y: (wy - cameraY) * GF.S + (GF.H - DH * GF.S) / 2 };
+}
+
+function localToWorld(localX, localY) {
+  var c = Math.cos(tilt), s = Math.sin(tilt);
+  var rx = localX * c - (-localY) * s;
+  var ry = localX * s + (-localY) * c;
+  return { x: pivot.x + rx, y: pivot.y + ry };
+}
+
+function computeCOM() {
+  if (stack.length === 0) return 0;
+  var totalMass = 0, weightedX = 0;
+  for (var i = 0; i < stack.length; i++) {
+    var b = stack[i];
+    var mass = 1 + i * 0.18;
+    totalMass += mass;
+    weightedX += b.localX * mass;
+  }
+  return totalMass > 0 ? weightedX / totalMass : 0;
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  score = 0;
+  streak = 0;
+  heightCount = 0;
+  tilt = 0;
+  tiltVel = 0;
+  wobble = 0;
+  cameraY = 0;
+  endedSent = false;
+  nextSpawnTimer = 0;
+  stack = [];
+  // Initial base block centred on plank
+  stack.push({ localX: 0, localY: 0, w: 140, h: BLOCK_H, color: 'block_blue' });
+  spawnNextBlock();
+  gs = 'PLAYING';
+}
+
+function spawnNextBlock() {
+  var wide = streak >= 3;
+  var w = wide ? BLOCK_W_WIDE : BLOCK_W_NORMAL;
+  var dir = (heightCount % 2 === 0) ? 1 : -1;
+  spawner = {
+    x: DW / 2,
+    y: SPAWN_Y + cameraY,
+    w: w,
+    h: BLOCK_H,
+    vx: dir * SPAWN_SPEED * (1 + Math.min(0.6, heightCount * 0.04)),
+    color: pickColor(),
+    wide: wide,
+    falling: false,
+    fy: 0,
+  };
+}
+
+function dropBlock() {
+  if (gs !== 'PLAYING' || !spawner || spawner.falling) return;
+  spawner.falling = true;
+  spawner.fy = 0;
+}
+
+function placeBlock() {
+  if (!spawner) return;
+  // Compute new block's plank-local x by inverse-rotating its world offset.
+  var c = Math.cos(-tilt), s = Math.sin(-tilt);
+  var dx = spawner.x - pivot.x;
+  var dy = spawner.y - pivot.y;
+  var rx = dx * c - dy * s;
+  var localX = rx;
+  var localY = stack.reduce(function(a, b){ return a + b.h; }, 0);
+
+  var block = {
+    localX: localX,
+    localY: localY,
+    w: spawner.w,
+    h: spawner.h,
+    color: spawner.color,
+  };
+
+  // Total miss: if no overlap with previous block → fail immediately
+  var prev = stack[stack.length - 1];
+  var prevLeft = prev.localX - prev.w / 2;
+  var prevRight = prev.localX + prev.w / 2;
+  var newLeft = block.localX - block.w / 2;
+  var newRight = block.localX + block.w / 2;
+  if (newRight < prevLeft - 6 || newLeft > prevRight + 6) {
+    spawnFailBurst(spawner.x, spawner.y);
+    GF.setShake(1.4);
+    gs = 'GAMEOVER';
+    if (score > best) { best = score; try { localStorage.setItem('wobble_stack_best', best); } catch (e) {} }
+    if (!endedSent) { endedSent = true; if (GF.gameEnded) GF.gameEnded(); }
+    spawner = null;
+    return;
+  }
+
+  // Score & streak
+  var deltaX = Math.abs(block.localX - prev.localX);
+  var perfectThresh = 8;
+  var screenSpawnX = spawner.x * GF.S + (GF.W - DW * GF.S) / 2;
+  var screenSpawnY = (spawner.y - cameraY) * GF.S + (GF.H - DH * GF.S) / 2;
+  if (deltaX <= perfectThresh) {
+    streak++;
+    score += 10 * streak;
+    GF.spawnFloat(screenSpawnX, screenSpawnY - 30 * GF.S, GF.t('perfect'), '#ffd23f');
+    GF.spawnParticles(screenSpawnX, screenSpawnY, '#ffd23f', 18);
+    GF.setShake(0.4);
+  } else if (deltaX <= 26) {
+    score += 4;
+    GF.spawnFloat(screenSpawnX, screenSpawnY - 30 * GF.S, GF.t('nice'), '#7ee08a');
+    GF.spawnParticles(screenSpawnX, screenSpawnY, BLOCK_HEX[block.color], 8);
+  } else {
+    streak = 0;
+    score += 1;
+    GF.spawnParticles(screenSpawnX, screenSpawnY, BLOCK_HEX[block.color], 6);
+  }
+
+  stack.push(block);
+  heightCount++;
+
+  // Tilt impulse from offset
+  var impulse = (block.localX / 280) * 0.022;
+  tiltVel += impulse;
+  wobble += Math.abs(impulse) * 0.35;
+
+  // Camera follow
+  var stackTopWorld = pivot.y - stack.reduce(function(a, b){ return a + b.h; }, 0);
+  var desiredCam = Math.min(0, stackTopWorld - 240);
+  cameraY = desiredCam;
+
+  spawner = null;
+  nextSpawnTimer = 0.22;
+}
+
+function spawnFailBurst(wx, wy) {
+  var sx = wx * GF.S + (GF.W - DW * GF.S) / 2;
+  var sy = (wy - cameraY) * GF.S + (GF.H - DH * GF.S) / 2;
+  GF.spawnParticles(sx, sy, '#bdb1a8', 26);
+}
+
+function gameOverFromTilt() {
+  if (gs !== 'PLAYING') return;
+  GF.setShake(1.6);
+  spawnFailBurst(pivot.x, pivot.y - 40);
+  gs = 'GAMEOVER';
+  if (score > best) { best = score; try { localStorage.setItem('wobble_stack_best', best); } catch (e) {} }
+  if (!endedSent) { endedSent = true; if (GF.gameEnded) GF.gameEnded(); }
+}
+
+// Screenshot helper — produce a stable mid-game tower for promo shots.
+// Use small alternating offsets that average to ~0 so COM doesn't drift the
+// tilt during the screenshot wait. No initial tilt; the tower stays standing.
+window._jumpLevel = function(n) {
+  startGame();
+  n = n || 5;
+  // Symmetric offset so the centre of mass stays at 0 → tower won't drift over.
+  // We mirror each pair: +o then -o around the running centre.
+  var offsets = [0, 4, -3, 5, -4, 3, -2, 4, -3, 2];
+  for (var i = 0; i < Math.max(3, n); i++) {
+    var prev = stack[stack.length - 1];
+    var localY = stack.reduce(function(a, b){ return a + b.h; }, 0);
+    var offsetX = offsets[i % offsets.length];
+    stack.push({
+      localX: offsetX,
+      localY: localY,
+      w: i < 3 ? 90 : 130,
+      h: BLOCK_H,
+      color: BLOCK_COLORS[i % BLOCK_COLORS.length],
+    });
+    heightCount++;
+    score += 10;
+  }
+  streak = 5;
+  // Force a frozen, stable lean so the screenshots show the wobble tension
+  // without the tower actually falling during the screenshot wait.
+  tilt = 0.05;
+  tiltVel = 0;
+  wobble = 0;
+  freezePhysics = true;
+  var stackTopWorld = pivot.y - stack.reduce(function(a, b){ return a + b.h; }, 0);
+  cameraY = Math.min(0, stackTopWorld - 240);
+  spawnNextBlock();
+};
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', function(e) {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault();
+    if (gs === 'PLAYING') dropBlock();
+  }
+});
+document.getElementById('c').addEventListener('pointerdown', function(e) {
+  if (gs === 'PLAYING') dropBlock();
+});
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+
+  // Pendulum-ish tilt physics (skipped while screenshot freeze flag is on)
+  if (!freezePhysics) {
+    var com = computeCOM();
+    var heightFactor = 1 + heightCount * 0.06;
+    var torque = (com / plankW) * GRAVITY * heightFactor;
+    tiltVel += torque * dt * 1000;
+    tiltVel += (Math.random() - 0.5) * wobble * 0.0009 * dt * 1000;
+    wobble *= WOBBLE_DECAY;
+    tiltVel *= TILT_DAMP;
+    tilt += tiltVel * dt * 1000;
+
+    if (Math.abs(tilt) > FAIL_TILT) { gameOverFromTilt(); return; }
+  }
+
+  // Spawn the next block after a short delay
+  if (!spawner && nextSpawnTimer > 0) {
+    nextSpawnTimer -= dt;
+    if (nextSpawnTimer <= 0) spawnNextBlock();
+  }
+
+  // Move spawner
+  if (spawner) {
+    if (!spawner.falling) {
+      spawner.x += spawner.vx * dt;
+      spawner.y = SPAWN_Y + cameraY;
+      var leftEdge = 60, rightEdge = DW - 60;
+      if (spawner.x < leftEdge)  { spawner.x = leftEdge;  spawner.vx = Math.abs(spawner.vx); }
+      if (spawner.x > rightEdge) { spawner.x = rightEdge; spawner.vx = -Math.abs(spawner.vx); }
+    } else {
+      spawner.fy += 1800 * dt;
+      spawner.y += spawner.fy * dt;
+      var topStackHeight = stack.reduce(function(a, b){ return a + b.h; }, 0);
+      var topWorldY = pivot.y - topStackHeight;
+      if (spawner.y + spawner.h / 2 >= topWorldY) {
+        spawner.y = topWorldY - spawner.h / 2;
+        placeBlock();
+      }
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  // Sky
+  var sky = ctx.createLinearGradient(0, 0, 0, GF.H);
+  sky.addColorStop(0, '#0d0f25');
+  sky.addColorStop(0.6, '#1c1442');
+  sky.addColorStop(1, '#2b1d3a');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  drawStars(ctx);
+  drawGroundGlow(ctx);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawWorld(ctx);
+    if (gs === 'PLAYING') drawHUD(ctx);
+  }
+
+  if (gs === 'MENU') {
+    drawMenuTower(ctx);
+    GF.drawOverlay({ title: GF.t('title'), sub: GF.t('sub'), btnText: GF.t('play'),  btnFn: startGame, bestText: best > 0 ? GF.t('best') + ': ' + best : null });
+  }
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + score + '  ·  ' + GF.t('height') + ': ' + heightCount,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  }
+}
+
+var STAR_FIELD = null;
+function drawStars(ctx) {
+  if (!STAR_FIELD) {
+    STAR_FIELD = [];
+    for (var i = 0; i < 80; i++) {
+      STAR_FIELD.push({ x: Math.random(), y: Math.random() * 0.7, r: Math.random() * 1.4 + 0.3, a: Math.random() * 0.7 + 0.3 });
+    }
+  }
+  for (var i = 0; i < STAR_FIELD.length; i++) {
+    var st = STAR_FIELD[i];
+    ctx.globalAlpha = st.a;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(st.x * GF.W, st.y * GF.H, st.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawGroundGlow(ctx) {
+  var pivotScreen = worldToScreen(pivot.x, pivot.y);
+  var grd = ctx.createRadialGradient(pivotScreen.x, pivotScreen.y + 60 * GF.S, 10, pivotScreen.x, pivotScreen.y + 60 * GF.S, 320 * GF.S);
+  grd.addColorStop(0, 'rgba(120,80,200,0.55)');
+  grd.addColorStop(0.5, 'rgba(80,50,140,0.2)');
+  grd.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, pivotScreen.y, GF.W, GF.H - pivotScreen.y);
+  ctx.strokeStyle = 'rgba(170,140,230,0.35)';
+  ctx.lineWidth = 2 * GF.S;
+  ctx.beginPath(); ctx.moveTo(0, pivotScreen.y + 60 * GF.S); ctx.lineTo(GF.W, pivotScreen.y + 60 * GF.S); ctx.stroke();
+}
+
+function drawWorld(ctx) {
+  drawPivot(ctx);
+  drawPlank(ctx);
+  for (var i = 0; i < stack.length; i++) drawBlock(ctx, stack[i]);
+  if (spawner) drawSpawner(ctx);
+  drawStreakMeter(ctx);
+}
+
+function drawPivot(ctx) {
+  var p = worldToScreen(pivot.x, pivot.y);
+  GF.drawSprite('platform_pivot', p.x, p.y + 36 * GF.S, 120 * GF.S, function(c, x, y, sz) {
+    c.save();
+    var baseW = sz * 0.95;
+    var baseH = sz * 0.7;
+    var bx = x, by = y;
+    var grd = c.createLinearGradient(bx, by - baseH, bx, by + baseH * 0.5);
+    grd.addColorStop(0, '#9a86ff');
+    grd.addColorStop(0.6, '#5b4ca0');
+    grd.addColorStop(1, '#2c2654');
+    c.fillStyle = grd;
+    c.beginPath();
+    c.moveTo(bx, by - baseH);
+    c.lineTo(bx + baseW / 2, by + baseH * 0.5);
+    c.lineTo(bx - baseW / 2, by + baseH * 0.5);
+    c.closePath();
+    c.fill();
+    c.strokeStyle = 'rgba(255,255,255,0.18)';
+    c.lineWidth = 2;
+    c.stroke();
+    c.fillStyle = '#e6dffd';
+    c.beginPath(); c.arc(bx, by - baseH, sz * 0.07, 0, Math.PI * 2); c.fill();
+    c.restore();
+  });
+}
+
+function drawPlank(ctx) {
+  var p = worldToScreen(pivot.x, pivot.y);
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(tilt);
+  var pw = plankW * GF.S, ph = plankH * GF.S;
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  GF.rr(ctx, -pw / 2 + 3 * GF.S, -ph / 2 + 5 * GF.S, pw, ph, 6 * GF.S);
+  ctx.fill();
+  var grd = ctx.createLinearGradient(0, -ph / 2, 0, ph / 2);
+  grd.addColorStop(0, '#d3c3a1');
+  grd.addColorStop(0.6, '#8a6f48');
+  grd.addColorStop(1, '#5a3f24');
+  ctx.fillStyle = grd;
+  GF.rr(ctx, -pw / 2, -ph / 2, pw, ph, 6 * GF.S);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(60,30,10,0.4)';
+  ctx.lineWidth = 1;
+  for (var i = -3; i <= 3; i++) {
+    var yy = (i / 3) * (ph / 2) * 0.7;
+    ctx.beginPath(); ctx.moveTo(-pw / 2 + 8, yy); ctx.lineTo(pw / 2 - 8, yy); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 1.5 * GF.S;
+  ctx.beginPath(); ctx.moveTo(-pw / 2 + 6, -ph / 2 + 2); ctx.lineTo(pw / 2 - 6, -ph / 2 + 2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawBlock(ctx, block) {
+  var centerLocalY = block.localY + block.h / 2;
+  var w = localToWorld(block.localX, centerLocalY);
+  var screen = worldToScreen(w.x, w.y);
+  ctx.save();
+  ctx.translate(screen.x, screen.y);
+  ctx.rotate(tilt);
+  var bw = block.w * GF.S, bh = block.h * GF.S;
+  GF.drawSprite(block.color, 0, 0, Math.max(bw, bh) * 1.05, function(c, x, y, sz) {
+    var col = BLOCK_HEX[block.color] || '#aaa';
+    var grd = c.createLinearGradient(0, -bh / 2, 0, bh / 2);
+    grd.addColorStop(0, lighten(col, 0.25));
+    grd.addColorStop(1, darken(col, 0.25));
+    c.fillStyle = grd;
+    GF.rr(c, -bw / 2, -bh / 2, bw, bh, 6 * GF.S);
+    c.fill();
+    c.strokeStyle = 'rgba(255,255,255,0.25)';
+    c.lineWidth = 1.5 * GF.S;
+    GF.rr(c, -bw / 2 + 2, -bh / 2 + 2, bw - 4, bh - 4, 5 * GF.S);
+    c.stroke();
+  });
+  ctx.restore();
+}
+
+function drawSpawner(ctx) {
+  if (!spawner) return;
+  var screen = worldToScreen(spawner.x, spawner.y);
+  ctx.save();
+  ctx.translate(screen.x, screen.y);
+  var bw = spawner.w * GF.S, bh = spawner.h * GF.S;
+  GF.drawSprite(spawner.color, 0, 0, Math.max(bw, bh) * 1.05, function(c, x, y, sz) {
+    var col = BLOCK_HEX[spawner.color] || '#aaa';
+    var grd = c.createLinearGradient(0, -bh / 2, 0, bh / 2);
+    grd.addColorStop(0, lighten(col, 0.3));
+    grd.addColorStop(1, darken(col, 0.3));
+    c.fillStyle = grd;
+    GF.rr(c, -bw / 2, -bh / 2, bw, bh, 6 * GF.S);
+    c.fill();
+    c.strokeStyle = 'rgba(255,255,255,0.4)';
+    c.lineWidth = 1.5 * GF.S;
+    GF.rr(c, -bw / 2 + 2, -bh / 2 + 2, bw - 4, bh - 4, 5 * GF.S);
+    c.stroke();
+  });
+  if (!spawner.falling) {
+    var stackHeight = stack.reduce(function(a, b){ return a + b.h; }, 0);
+    var topWorldY = pivot.y - stackHeight;
+    var topScreen = worldToScreen(spawner.x, topWorldY);
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.lineWidth = 1.5 * GF.S;
+    ctx.setLineDash([6 * GF.S, 6 * GF.S]);
+    ctx.beginPath();
+    ctx.moveTo(0, bh / 2);
+    ctx.lineTo(0, topScreen.y - screen.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+function drawHUD(ctx) {
+  var fs = GF.clamp(18 * GF.S, 14, 24);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('score') + ': ' + score, 14 * GF.S, 14 * GF.S);
+  ctx.textAlign = 'right';
+  ctx.fillText(GF.t('height') + ': ' + heightCount, GF.W - 14 * GF.S, 14 * GF.S);
+  drawTiltMeter(ctx);
+}
+
+function drawTiltMeter(ctx) {
+  var w = GF.clamp(180 * GF.S, 120, 260);
+  var h = GF.clamp(8 * GF.S, 6, 12);
+  var x = GF.W / 2 - w / 2;
+  var y = 14 * GF.S;
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  GF.rr(ctx, x, y, w, h, h / 2); ctx.fill();
+  var t = GF.clamp(tilt / FAIL_TILT, -1, 1);
+  var mx = x + w / 2 + t * (w / 2 - h / 2);
+  var col = Math.abs(t) > 0.7 ? '#ff5566' : (Math.abs(t) > 0.4 ? '#ffcc4d' : '#7ee08a');
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.arc(mx, y + h / 2, h * 0.95, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.beginPath(); ctx.moveTo(GF.W / 2, y - 2); ctx.lineTo(GF.W / 2, y + h + 2); ctx.stroke();
+}
+
+function drawStreakMeter(ctx) {
+  var fs = GF.clamp(15 * GF.S, 11, 18);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = streak >= 3 ? '#ffd23f' : '#fff';
+  ctx.fillText(GF.t('streak') + ': ' + streak + (streak >= 3 ? ' WIDE!' : ''), GF.W / 2, 36 * GF.S);
+}
+
+function drawMenuTower(ctx) {
+  var p = worldToScreen(pivot.x, pivot.y);
+  drawPivot(ctx);
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(0.05);
+  var pw = plankW * GF.S, ph = plankH * GF.S;
+  ctx.fillStyle = '#8a6f48';
+  GF.rr(ctx, -pw / 2, -ph / 2, pw, ph, 6 * GF.S); ctx.fill();
+  var demoColors = ['block_blue', 'block_red', 'block_green', 'block_yellow'];
+  var ww = 90 * GF.S, hh = BLOCK_H * GF.S;
+  var offsets = [0, -8, 6, -3];
+  for (var i = 0; i < demoColors.length; i++) {
+    ctx.save();
+    ctx.translate(offsets[i] * GF.S, -ph / 2 - hh / 2 - i * hh);
+    var col = BLOCK_HEX[demoColors[i]];
+    var grd = ctx.createLinearGradient(0, -hh / 2, 0, hh / 2);
+    grd.addColorStop(0, lighten(col, 0.25));
+    grd.addColorStop(1, darken(col, 0.25));
+    ctx.fillStyle = grd;
+    GF.rr(ctx, -ww / 2, -hh / 2, ww, hh, 6 * GF.S);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function lighten(hex, amt) {
+  var c = parseInt(hex.slice(1), 16);
+  var r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+  r = Math.min(255, Math.round(r + (255 - r) * amt));
+  g = Math.min(255, Math.round(g + (255 - g) * amt));
+  b = Math.min(255, Math.round(b + (255 - b) * amt));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+function darken(hex, amt) {
+  var c = parseInt(hex.slice(1), 16);
+  var r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
+  r = Math.max(0, Math.round(r * (1 - amt)));
+  g = Math.max(0, Math.round(g * (1 - amt)));
+  b = Math.max(0, Math.round(b * (1 - amt)));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: DW,
+  designH: DH,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'wobble_stack',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('wobble_stack_best') || '0') || 0; } catch (e) {}
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

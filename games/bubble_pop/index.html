@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Bubble Pop Lab</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── GAME-SPECIFIC CONFIG ─────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Bubble Pop Lab',
+    sub:   'Drag through 3+ same-color bubbles to pop',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'GAME OVER',
+    chain: 'CHAIN',
+    colors: 'COLORS',
+  },
+  ru: {
+    title: 'Лаб Пузырей',
+    sub:   'Соедини 3+ одного цвета и лопни',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'ИГРА ОКОНЧЕНА',
+    chain: 'ЦЕПЬ',
+    colors: 'ЦВЕТА',
+  },
+};
+
+var SPRITE_NAMES = ['bubble_red', 'bubble_blue', 'bubble_green', 'bubble_yellow', 'bubble_purple', 'pop_burst'];
+
+// ── COLOR PALETTE ────────────────────────────────────────────────────────
+var COLORS = [
+  { id: 0, name: 'bubble_red',    fill: '#ff4d6d', glow: '#ff8aa0' },
+  { id: 1, name: 'bubble_blue',   fill: '#4dc3ff', glow: '#9be0ff' },
+  { id: 2, name: 'bubble_green',  fill: '#5dd97c', glow: '#a3eeb2' },
+  { id: 3, name: 'bubble_yellow', fill: '#ffd24d', glow: '#ffe89a' },
+  { id: 4, name: 'bubble_purple', fill: '#c47dff', glow: '#dfb1ff' },
+];
+
+// ── HEX GRID ─────────────────────────────────────────────────────────────
+var COLS = 7;
+var ROWS = 10;
+var grid = [];
+var startTime = 0;
+var elapsedSec = 0;
+var activeColors = 3;
+var lastEscalate = 0;
+
+var path = [];
+var pathColor = -1;
+var dragging = false;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var score = 0, best = 0;
+var lastChain = 0;
+var endedReported = false;
+
+// ── HEX MATH ─────────────────────────────────────────────────────────────
+function hexLayout() {
+  var marginX = 12 * GF.S;
+  var marginTop = 70 * GF.S;
+  var marginBottom = 30 * GF.S;
+  var availW = GF.W - marginX * 2;
+  var availH = GF.H - marginTop - marginBottom;
+  var rByW = availW / (Math.sqrt(3) * (COLS + 0.5));
+  var rByH = availH / (2 + 1.5 * (ROWS - 1));
+  var r = Math.min(rByW, rByH);
+  var totalW = Math.sqrt(3) * r * (COLS + 0.5);
+  var totalH = 2 * r + 1.5 * r * (ROWS - 1);
+  var ox = (GF.W - totalW) / 2 + Math.sqrt(3) * r / 2;
+  var oy = marginTop + r;
+  return { r: r, ox: ox, oy: oy, totalH: totalH };
+}
+
+function hexCenter(col, row, layout) {
+  var w = Math.sqrt(3) * layout.r;
+  var h = 1.5 * layout.r;
+  var x = layout.ox + col * w + (row & 1 ? w / 2 : 0);
+  var y = layout.oy + row * h;
+  return { x: x, y: y };
+}
+
+var NEI_EVEN = [[+1,0],[-1,0],[0,-1],[-1,-1],[0,+1],[-1,+1]];
+var NEI_ODD  = [[+1,0],[-1,0],[+1,-1],[0,-1],[+1,+1],[0,+1]];
+function neighbors(col, row) {
+  var arr = (row & 1) ? NEI_ODD : NEI_EVEN;
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var c = col + arr[i][0], r = row + arr[i][1];
+    if (c >= 0 && c < COLS && r >= 0 && r < ROWS) out.push({ col: c, row: r });
+  }
+  return out;
+}
+
+function inBounds(c, r) { return c >= 0 && c < COLS && r >= 0 && r < ROWS; }
+
+function pointToHex(px, py, layout) {
+  var w = Math.sqrt(3) * layout.r;
+  var h = 1.5 * layout.r;
+  var bestC = -1, bestR = -1, bestD = layout.r * layout.r;
+  var rGuess = Math.round((py - layout.oy) / h);
+  for (var dr = -2; dr <= 2; dr++) {
+    var r = rGuess + dr;
+    if (r < 0 || r >= ROWS) continue;
+    var cGuess = Math.round((px - layout.ox - (r & 1 ? w / 2 : 0)) / w);
+    for (var dc = -2; dc <= 2; dc++) {
+      var c = cGuess + dc;
+      if (c < 0 || c >= COLS) continue;
+      var ctr = hexCenter(c, r, layout);
+      var dx = px - ctr.x, dy = py - ctr.y;
+      var d2 = dx * dx + dy * dy;
+      if (d2 < bestD) { bestD = d2; bestC = c; bestR = r; }
+    }
+  }
+  if (bestC < 0) return null;
+  return { col: bestC, row: bestR };
+}
+
+// ── GRID OPS ─────────────────────────────────────────────────────────────
+function newGrid() {
+  grid = [];
+  for (var c = 0; c < COLS; c++) {
+    grid[c] = [];
+    for (var r = 0; r < ROWS; r++) {
+      grid[c][r] = { color: randomColor(), popping: 0, falling: 0 };
+    }
+  }
+}
+
+function randomColor() {
+  return Math.floor(Math.random() * activeColors);
+}
+
+function pathContains(c, r) {
+  for (var i = 0; i < path.length; i++) if (path[i].col === c && path[i].row === r) return true;
+  return false;
+}
+
+function isAdjacent(a, b) {
+  var nbs = neighbors(a.col, a.row);
+  for (var i = 0; i < nbs.length; i++) if (nbs[i].col === b.col && nbs[i].row === b.row) return true;
+  return false;
+}
+
+function applyGravity() {
+  for (var c = 0; c < COLS; c++) {
+    var stack = [];
+    for (var r = 0; r < ROWS; r++) if (grid[c][r] && grid[c][r].color >= 0) stack.push(grid[c][r]);
+    var emptyN = ROWS - stack.length;
+    for (var r2 = 0; r2 < ROWS; r2++) {
+      if (r2 < emptyN) {
+        grid[c][r2] = { color: randomColor(), popping: 0, falling: 1 };
+      } else {
+        grid[c][r2] = stack[r2 - emptyN];
+        grid[c][r2].falling = 0;
+      }
+    }
+  }
+}
+
+function hasAnyChain() {
+  var seen = {};
+  for (var c = 0; c < COLS; c++) {
+    for (var r = 0; r < ROWS; r++) {
+      var k = c + ',' + r;
+      if (seen[k]) continue;
+      var col = grid[c][r].color;
+      if (col < 0) { seen[k] = true; continue; }
+      // BFS for same color
+      var stack = [{ col: c, row: r }];
+      var visited = {};
+      var count = 0;
+      while (stack.length) {
+        var cur = stack.pop();
+        var ck = cur.col + ',' + cur.row;
+        if (visited[ck]) continue;
+        if (grid[cur.col][cur.row].color !== col) continue;
+        visited[ck] = true;
+        seen[ck] = true;
+        count++;
+        if (count >= 3) return true;
+        var nbs = neighbors(cur.col, cur.row);
+        for (var i = 0; i < nbs.length; i++) stack.push(nbs[i]);
+      }
+    }
+  }
+  return false;
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  score = 0;
+  lastChain = 0;
+  activeColors = 3;
+  startTime = performance.now();
+  lastEscalate = 0;
+  elapsedSec = 0;
+  newGrid();
+  path = [];
+  pathColor = -1;
+  dragging = false;
+  endedReported = false;
+  gs = 'PLAYING';
+}
+
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('bubble_pop_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  if (!endedReported) {
+    endedReported = true;
+    if (GF.gameEnded) GF.gameEnded();
+  }
+}
+
+window._jumpLevel = function(n) {
+  startGame();
+  activeColors = Math.min(5, 3 + Math.floor((n || 5) / 2));
+  newGrid();
+  score = 1500 + (n || 5) * 320;
+  elapsedSec = (n || 5) * 12;
+  startTime = performance.now() - elapsedSec * 1000;
+};
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function pointerDown(px, py) {
+  if (gs !== 'PLAYING') return;
+  var layout = hexLayout();
+  var h = pointToHex(px, py, layout);
+  if (!h) return;
+  var cell = grid[h.col][h.row];
+  if (!cell || cell.color < 0) return;
+  path = [h];
+  pathColor = cell.color;
+  dragging = true;
+}
+
+function pointerMove(px, py) {
+  if (!dragging || gs !== 'PLAYING') return;
+  var layout = hexLayout();
+  var h = pointToHex(px, py, layout);
+  if (!h) return;
+  if (path.length >= 2) {
+    var prev = path[path.length - 2];
+    if (prev.col === h.col && prev.row === h.row) { path.pop(); return; }
+  }
+  if (pathContains(h.col, h.row)) return;
+  if (grid[h.col][h.row].color !== pathColor) return;
+  var last = path[path.length - 1];
+  if (!isAdjacent(last, h)) return;
+  path.push(h);
+}
+
+function pointerUp() {
+  if (!dragging) return;
+  dragging = false;
+  if (path.length >= 3) commitPop();
+  path = [];
+  pathColor = -1;
+}
+
+function commitPop() {
+  var n = path.length;
+  var base = n * 10;
+  var bonus = Math.floor(Math.pow(n - 2, 1.7) * 25);
+  var total = base + bonus;
+  score += total;
+  lastChain = n;
+
+  var layout = hexLayout();
+  var sumX = 0, sumY = 0;
+  for (var i = 0; i < path.length; i++) {
+    var p = path[i];
+    var cell = grid[p.col][p.row];
+    var ctr = hexCenter(p.col, p.row, layout);
+    sumX += ctr.x; sumY += ctr.y;
+    GF.spawnParticles(ctr.x, ctr.y, COLORS[cell.color].fill, 18);
+    cell.popping = 1;
+    cell.color = -1;
+  }
+  GF.spawnFloat(sumX / n, sumY / n - 18 * GF.S, '+' + total, '#fff');
+  if (n >= 5) GF.setShake(0.5);
+  else if (n >= 4) GF.setShake(0.25);
+
+  setTimeout(function () {
+    applyGravity();
+    if (!hasAnyChain()) {
+      setTimeout(gameOver, 400);
+    }
+  }, 60);
+}
+
+// Mouse + touch wiring
+GF.canvas.addEventListener('mousedown', function (e) { pointerDown(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mousemove', function (e) { if (dragging) pointerMove(e.clientX, e.clientY); });
+window.addEventListener('mouseup', function () { pointerUp(); });
+GF.canvas.addEventListener('touchstart', function (e) {
+  if (e.touches && e.touches[0]) pointerDown(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function (e) {
+  if (e.touches && e.touches[0]) pointerMove(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchend', function () { pointerUp(); }, { passive: false });
+GF.canvas.addEventListener('touchcancel', function () { pointerUp(); }, { passive: false });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+  elapsedSec = (performance.now() - startTime) / 1000;
+  var step = Math.floor(elapsedSec / 30);
+  if (step > lastEscalate && activeColors < COLORS.length) {
+    lastEscalate = step;
+    activeColors = Math.min(COLORS.length, 3 + step);
+  }
+  for (var c = 0; c < COLS; c++) {
+    for (var r = 0; r < ROWS; r++) {
+      var cell = grid[c][r];
+      if (!cell) continue;
+      if (cell.falling) cell.falling = Math.max(0, cell.falling - dt * 4);
+      if (cell.popping) cell.popping = Math.max(0, cell.popping - dt * 3);
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var grad = ctx.createLinearGradient(0, 0, 0, GF.H);
+  grad.addColorStop(0, '#0e1530');
+  grad.addColorStop(0.55, '#0a0a1c');
+  grad.addColorStop(1, '#06060e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  ctx.strokeStyle = 'rgba(80,160,220,0.05)';
+  ctx.lineWidth = 1;
+  var gp = 40 * GF.S;
+  for (var gx = 0; gx < GF.W; gx += gp) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, GF.H); ctx.stroke(); }
+  for (var gy = 0; gy < GF.H; gy += gp) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(GF.W, gy); ctx.stroke(); }
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawGrid(ctx);
+    drawPath(ctx);
+    drawHUD();
+  }
+  if (gs === 'MENU') GF.drawOverlay({ title: GF.t('title'), sub: GF.t('sub'), btnText: GF.t('play'),  btnFn: startGame, bestText: best > 0 ? GF.t('best') + ': ' + best : null });
+  if (gs === 'GAMEOVER') GF.drawOverlay({ title: GF.t('gameover'), sub: GF.t('score') + ': ' + score, btnText: GF.t('retry'), btnFn: startGame, bestText: GF.t('best') + ': ' + best });
+}
+
+function drawGrid(ctx) {
+  var layout = hexLayout();
+  var R = layout.r;
+  for (var c = 0; c < COLS; c++) {
+    for (var r = 0; r < ROWS; r++) {
+      var cell = grid[c][r];
+      if (!cell) continue;
+      var ctr = hexCenter(c, r, layout);
+      drawHex(ctx, ctr.x, ctr.y, R * 0.97, 'rgba(255,255,255,0.025)', 'rgba(120,180,220,0.08)');
+      if (cell.color < 0) continue;
+      var col = COLORS[cell.color];
+      var size = R * 1.55;
+      var off = (cell.falling || 0) * R * 1.5;
+      drawBubble(ctx, ctr.x, ctr.y - off, size, col);
+    }
+  }
+}
+
+function drawHex(ctx, cx, cy, r, fill, stroke) {
+  ctx.beginPath();
+  for (var i = 0; i < 6; i++) {
+    var a = Math.PI / 6 + i * Math.PI / 3;
+    var x = cx + Math.cos(a) * r;
+    var y = cy + Math.sin(a) * r;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+}
+
+function drawBubble(ctx, x, y, size, col) {
+  GF.drawSprite(col.name, x, y, size, function (c, x2, y2, s) {
+    proceduralBubble(c, x2, y2, s, col);
+  });
+}
+
+function proceduralBubble(c, x, y, s, col) {
+  var r = s / 2;
+  var glow = c.createRadialGradient(x, y, r * 0.6, x, y, r * 1.15);
+  glow.addColorStop(0, col.glow + 'cc');
+  glow.addColorStop(1, col.fill + '00');
+  c.fillStyle = glow;
+  c.beginPath(); c.arc(x, y, r * 1.15, 0, Math.PI * 2); c.fill();
+  var body = c.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
+  body.addColorStop(0, '#ffffff');
+  body.addColorStop(0.18, col.glow);
+  body.addColorStop(0.65, col.fill);
+  body.addColorStop(1, shadeColor(col.fill, -0.35));
+  c.fillStyle = body;
+  c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+  c.strokeStyle = 'rgba(255,255,255,0.35)';
+  c.lineWidth = 1.5;
+  c.beginPath(); c.arc(x, y, r - 0.5, 0, Math.PI * 2); c.stroke();
+  c.fillStyle = 'rgba(255,255,255,0.55)';
+  c.beginPath();
+  c.ellipse(x - r * 0.35, y - r * 0.4, r * 0.28, r * 0.18, -0.5, 0, Math.PI * 2);
+  c.fill();
+  c.fillStyle = 'rgba(255,255,255,0.8)';
+  c.beginPath(); c.arc(x - r * 0.5, y - r * 0.5, r * 0.06, 0, Math.PI * 2); c.fill();
+}
+
+function shadeColor(hex, amt) {
+  var n = parseInt(hex.replace('#', ''), 16);
+  var r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  function ad(v) { return Math.max(0, Math.min(255, Math.round(v + 255 * amt))); }
+  return 'rgb(' + ad(r) + ',' + ad(g) + ',' + ad(b) + ')';
+}
+
+function drawPath(ctx) {
+  if (!path.length) return;
+  var layout = hexLayout();
+  var col = pathColor >= 0 ? COLORS[pathColor] : COLORS[0];
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = col.glow;
+  ctx.lineWidth = 8 * GF.S;
+  ctx.shadowColor = col.fill;
+  ctx.shadowBlur = 18 * GF.S;
+  ctx.beginPath();
+  var first = hexCenter(path[0].col, path[0].row, layout);
+  ctx.moveTo(first.x, first.y);
+  for (var i = 1; i < path.length; i++) {
+    var p = hexCenter(path[i].col, path[i].row, layout);
+    ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 3 * GF.S;
+  for (var j = 0; j < path.length; j++) {
+    var ctr = hexCenter(path[j].col, path[j].row, layout);
+    ctx.beginPath();
+    ctx.arc(ctr.x, ctr.y, layout.r * 0.85, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  if (path.length >= 1) {
+    var last = hexCenter(path[path.length - 1].col, path[path.length - 1].row, layout);
+    var txt = path.length >= 3 ? path.length + ' POP!' : path.length + '';
+    ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 22) + 'px sans-serif';
+    ctx.fillStyle = path.length >= 3 ? '#9bff9b' : '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(txt, last.x, last.y - layout.r * 1.4);
+  }
+}
+
+function drawHUD() {
+  var c = GF.ctx;
+  var fs = GF.clamp(16 * GF.S, 12, 22);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textBaseline = 'top';
+  c.fillStyle = '#fff';
+  c.textAlign = 'left';
+  c.fillText(GF.t('score') + ': ' + score, 12 * GF.S, 12 * GF.S);
+  c.textAlign = 'right';
+  c.fillStyle = '#9ab';
+  c.fillText(GF.t('best') + ': ' + best, GF.W - 12 * GF.S, 12 * GF.S);
+  c.textAlign = 'center';
+  c.fillStyle = '#cdd';
+  var sec = Math.floor(elapsedSec);
+  var mm = Math.floor(sec / 60), ss = sec % 60;
+  var timeStr = (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
+  c.fillText(GF.t('colors') + ': ' + activeColors + '   ' + timeStr, GF.W / 2, 12 * GF.S);
+
+  if (lastChain >= 3) {
+    c.textAlign = 'center';
+    c.fillStyle = '#9bff9b';
+    c.font = 'bold ' + GF.clamp(13 * GF.S, 11, 18) + 'px sans-serif';
+    c.fillText(GF.t('chain') + ' x' + lastChain, GF.W / 2, 12 * GF.S + fs + 4 * GF.S);
+  }
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 540,
+  designH: 900,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'bubble_pop',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('bubble_pop_best') || '0') || 0; } catch (e) {}
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Donut Drift Arena</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0e1c; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── GAME-SPECIFIC CONFIG ─────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'DONUT DRIFT',
+    sub:   'Hold to drift. Sweep the rink clean.',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT RINK',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'TIME UP', cleared: 'RINK CLEARED!',
+    level: 'RINK', combo: 'COMBO', clean: 'CLEAN',
+    target: 'TARGET', time: 'TIME',
+    hold: 'HOLD to drift',
+  },
+  ru: {
+    title: 'ПОНЧИК-ДРИФТ',
+    sub:   'Зажми, чтобы дрифтить. Очисти каток.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЬШЕ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'ВРЕМЯ ВЫШЛО', cleared: 'КАТОК ОЧИЩЕН!',
+    level: 'КАТОК', combo: 'КОМБО', clean: 'ЧИСТО',
+    target: 'ЦЕЛЬ', time: 'ТАЙМ',
+    hold: 'ЗАЖМИ для дрифта',
+  },
+};
+
+var SPRITE_NAMES = ['donut_drift', 'crumb_small', 'mud_blob', 'ice_zone', 'dirt_zone', 'drift_streak', 'finish_flag'];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU'; // MENU | PLAYING | CLEARED | GAMEOVER
+var score = 0, best = 0;
+var level = 1;
+var timeLeft = 60;
+var targetClean = 0.65;
+var combo = 0, comboTimer = 0;
+var maxCombo = 0;
+
+// Rink (logical world coords; we draw centered + scaled per-rink)
+var RINK_W = 720, RINK_H = 480;
+var rinkX = 0, rinkY = 0;
+var rinkScaleVal = 1;
+
+// Player donut
+var donut = {
+  x: 0, y: 0,
+  heading: 0,
+  velAng: 0,
+  speed: 0,
+  drifting: false,
+  driftTime: 0,
+  spinSpeed: 0,
+};
+
+var crumbs = [];
+var crumbsTotal = 0;
+var crumbsCleaned = 0;
+
+var trail = [];
+
+// Hold input flag
+var holding = false;
+
+var FORWARD_ACCEL = 220;
+var MAX_SPEED = 320;
+var DRIFT_TURN = 2.4;
+var GRIP_TURN  = 1.6;
+var SLIDE_RATE = 6.0;
+var DRIFT_SLIDE_RATE = 1.5;
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  level = 1;
+  score = 0;
+  combo = 0; comboTimer = 0; maxCombo = 0;
+  startLevel();
+}
+
+function startLevel() {
+  resizeRink();
+  donut.x = rinkX + RINK_W * rinkScaleVal / 2;
+  donut.y = rinkY + RINK_H * rinkScaleVal / 2 + 40 * rinkScaleVal;
+  donut.heading = -Math.PI / 2;
+  donut.velAng = donut.heading;
+  donut.speed = 80;
+  donut.drifting = false;
+  donut.driftTime = 0;
+  donut.spinSpeed = 0;
+  trail = [];
+  spawnCrumbs(level);
+  timeLeft = Math.max(35, 60 - (level - 1) * 4);
+  targetClean = Math.min(0.85, 0.55 + (level - 1) * 0.04);
+  combo = 0; comboTimer = 0;
+  gs = 'PLAYING';
+}
+
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('donut_drift_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  try { GF.gameEnded(); } catch (e) {}
+}
+
+function rinkCleared() {
+  var pct = crumbsTotal === 0 ? 1 : crumbsCleaned / crumbsTotal;
+  var bonus = Math.floor(pct * 500 + timeLeft * 8 + maxCombo * 40);
+  score += bonus;
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('donut_drift_best', best); } catch (e) {}
+  }
+  gs = 'CLEARED';
+  try { GF.gameEnded(); } catch (e) {}
+}
+
+function nextLevel() {
+  level += 1;
+  startLevel();
+}
+
+// ── RINK / CRUMB SETUP ───────────────────────────────────────────────────
+function resizeRink() {
+  var marginY = 40 * GF.S;
+  var marginX = 24 * GF.S;
+  var availW = GF.W - marginX * 2;
+  var availH = GF.H - marginY * 2 - 60 * GF.S;
+  var sx = availW / RINK_W;
+  var sy = availH / RINK_H;
+  var s = Math.min(sx, sy, GF.S * 1.6);
+  var rw = RINK_W * s, rh = RINK_H * s;
+  rinkX = (GF.W - rw) / 2;
+  rinkY = (GF.H - rh) / 2 + 8 * GF.S;
+  rinkScaleVal = s;
+}
+
+function spawnCrumbs(lvl) {
+  crumbs = [];
+  var s = rinkScaleVal;
+  var baseN = 90 + lvl * 14;
+  for (var i = 0; i < baseN; i++) {
+    var px = rinkX + 24 * s + Math.random() * (RINK_W * s - 48 * s);
+    var py = rinkY + 24 * s + Math.random() * (RINK_H * s - 48 * s);
+    var type = Math.random();
+    var col, r;
+    if (type < 0.55) { col = '#caa275'; r = (3 + Math.random() * 2) * s; }
+    else if (type < 0.85) { col = '#7a4a2a'; r = (4 + Math.random() * 3) * s; }
+    else { col = '#d8b85a'; r = (3 + Math.random() * 2) * s; }
+    crumbs.push({ x: px, y: py, r: r, col: col, clean: false });
+  }
+  var clusters = 4 + lvl;
+  for (var k = 0; k < clusters; k++) {
+    var cxp = rinkX + 60 * s + Math.random() * (RINK_W * s - 120 * s);
+    var cyp = rinkY + 60 * s + Math.random() * (RINK_H * s - 120 * s);
+    var nC = 8 + Math.floor(Math.random() * 8);
+    for (var j = 0; j < nC; j++) {
+      var ang = Math.random() * Math.PI * 2;
+      var rd = Math.random() * 38 * s;
+      crumbs.push({
+        x: cxp + Math.cos(ang) * rd,
+        y: cyp + Math.sin(ang) * rd,
+        r: (3 + Math.random() * 3) * s,
+        col: '#7a4a2a',
+        clean: false
+      });
+    }
+  }
+  crumbsTotal = crumbs.length;
+  crumbsCleaned = 0;
+}
+
+window._jumpLevel = function(n) {
+  level = (n && n > 0) ? n : 5;
+  score = 240 + level * 50;
+  best = Math.max(best, score);
+  startLevel();
+  // pre-clean some crumbs for visual interest (mid-game look)
+  var pre = Math.floor(crumbs.length * 0.35);
+  for (var i = 0; i < pre; i++) {
+    crumbs[i].clean = true;
+    crumbsCleaned++;
+  }
+  // seed a juicy drift trail
+  donut.drifting = true;
+  donut.driftTime = 1.2;
+  combo = 6; comboTimer = 1.5; maxCombo = 8;
+  var s = rinkScaleVal;
+  for (var k = 0; k < 28; k++) {
+    var ang = donut.heading;
+    trail.push({
+      x: donut.x - Math.cos(ang) * (k * 6) * s,
+      y: donut.y - Math.sin(ang) * (k * 6) * s,
+      r: (12 + k * 0.8) * s,
+      life: 0.85
+    });
+  }
+};
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function setHold(v) {
+  if (gs !== 'PLAYING') {
+    holding = false;
+    donut.drifting = false;
+    return;
+  }
+  holding = v;
+  if (v && !donut.drifting) {
+    donut.drifting = true;
+    donut.driftTime = 0;
+  } else if (!v && donut.drifting) {
+    donut.drifting = false;
+    if (donut.driftTime > 0.4) {
+      var gained = Math.floor(donut.driftTime * 18);
+      combo += 1;
+      if (combo > maxCombo) maxCombo = combo;
+      comboTimer = 1.6;
+      var pts = Math.floor(gained * (1 + combo * 0.25));
+      score += pts;
+      GF.spawnFloat(donut.x, donut.y - 20 * rinkScaleVal, '+' + pts + ' x' + combo, '#ffd166');
+    } else {
+      combo = 0; comboTimer = 0;
+    }
+    donut.driftTime = 0;
+  }
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyZ') {
+    setHold(true);
+  }
+});
+document.addEventListener('keyup', function(e) {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyZ') {
+    setHold(false);
+  }
+});
+
+// Pointer hold (whole-screen press = drift). pointerdown also triggers
+// any GF button click first via canvas listener — these are independent.
+var pointerActive = false;
+document.addEventListener('pointerdown', function(e) {
+  pointerActive = true;
+  setHold(true);
+});
+document.addEventListener('pointerup', function() {
+  if (pointerActive) {
+    pointerActive = false;
+    setHold(false);
+  }
+});
+document.addEventListener('pointercancel', function() {
+  pointerActive = false;
+  setHold(false);
+});
+window.addEventListener('blur', function() {
+  pointerActive = false;
+  setHold(false);
+});
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+
+  timeLeft -= dt;
+  if (timeLeft <= 0) {
+    timeLeft = 0;
+    var pct = crumbsTotal === 0 ? 1 : crumbsCleaned / crumbsTotal;
+    if (pct >= targetClean) rinkCleared();
+    else gameOver();
+    return;
+  }
+
+  donut.speed = Math.min(MAX_SPEED, donut.speed + FORWARD_ACCEL * dt);
+
+  var turn = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA']) turn -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) turn += 1;
+  if (GF.touch.active) turn += GF.touch.dx;
+  turn = Math.max(-1, Math.min(1, turn));
+
+  // No steering input + drifting → auto-curve toward arena center
+  if (turn === 0 && donut.drifting) {
+    var s = rinkScaleVal;
+    var ccx = rinkX + RINK_W * s / 2;
+    var ccy = rinkY + RINK_H * s / 2;
+    var toC = Math.atan2(ccy - donut.y, ccx - donut.x);
+    var diff = wrapAng(toC - donut.heading);
+    turn = Math.max(-1, Math.min(1, diff * 0.6));
+  }
+
+  var turnRate = donut.drifting ? DRIFT_TURN : GRIP_TURN;
+  donut.heading += turn * turnRate * dt;
+
+  var slide = donut.drifting ? DRIFT_SLIDE_RATE : SLIDE_RATE;
+  var d = wrapAng(donut.heading - donut.velAng);
+  donut.velAng += d * slide * dt;
+
+  var moveScale = (rinkScaleVal / GF.S) * 0.7 + 0.5;
+  donut.x += Math.cos(donut.velAng) * donut.speed * dt * moveScale;
+  donut.y += Math.sin(donut.velAng) * donut.speed * dt * moveScale;
+
+  // Wall bounces
+  var s2 = rinkScaleVal;
+  var pad = 18 * s2;
+  if (donut.x < rinkX + pad) {
+    donut.x = rinkX + pad;
+    donut.velAng = Math.PI - donut.velAng;
+    donut.heading = donut.velAng;
+    donut.speed *= 0.7;
+    GF.setShake(0.5);
+    GF.spawnParticles(donut.x, donut.y, '#fff', 6);
+  } else if (donut.x > rinkX + RINK_W * s2 - pad) {
+    donut.x = rinkX + RINK_W * s2 - pad;
+    donut.velAng = Math.PI - donut.velAng;
+    donut.heading = donut.velAng;
+    donut.speed *= 0.7;
+    GF.setShake(0.5);
+    GF.spawnParticles(donut.x, donut.y, '#fff', 6);
+  }
+  if (donut.y < rinkY + pad) {
+    donut.y = rinkY + pad;
+    donut.velAng = -donut.velAng;
+    donut.heading = donut.velAng;
+    donut.speed *= 0.7;
+    GF.setShake(0.5);
+    GF.spawnParticles(donut.x, donut.y, '#fff', 6);
+  } else if (donut.y > rinkY + RINK_H * s2 - pad) {
+    donut.y = rinkY + RINK_H * s2 - pad;
+    donut.velAng = -donut.velAng;
+    donut.heading = donut.velAng;
+    donut.speed *= 0.7;
+    GF.setShake(0.5);
+    GF.spawnParticles(donut.x, donut.y, '#fff', 6);
+  }
+
+  if (donut.drifting) {
+    donut.driftTime += dt;
+    donut.spinSpeed = lerpf(donut.spinSpeed, 9, dt * 4);
+    var perp = donut.velAng + Math.PI / 2;
+    var widening = 1 + Math.min(donut.driftTime * 0.6, 1.8);
+    var spread = 14 * s2;
+    for (var i = 0; i < 2; i++) {
+      var off = (i === 0 ? -1 : 1) * spread * widening;
+      trail.push({
+        x: donut.x + Math.cos(perp) * off - Math.cos(donut.velAng) * 12 * s2,
+        y: donut.y + Math.sin(perp) * off - Math.sin(donut.velAng) * 12 * s2,
+        r: (8 + Math.random() * 4) * s2 * (0.7 + widening * 0.5),
+        life: 0.95
+      });
+    }
+    if (Math.random() < 0.6) {
+      GF.spawnParticles(donut.x, donut.y, '#fff7c2', 1);
+    }
+  } else {
+    donut.spinSpeed = lerpf(donut.spinSpeed, 2.4, dt * 4);
+  }
+
+  if (combo > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) { combo = 0; comboTimer = 0; }
+  }
+
+  var sweepRadius = (donut.drifting ? 28 : 14) * s2 * (1 + Math.min(donut.driftTime * 0.4, 1.2));
+  for (var t = trail.length - 1; t >= 0; t--) {
+    var seg = trail[t];
+    seg.life -= dt * 1.1;
+    if (seg.life <= 0) trail.splice(t, 1);
+  }
+
+  for (var ci = 0; ci < crumbs.length; ci++) {
+    var cm = crumbs[ci];
+    if (cm.clean) continue;
+    var dx = cm.x - donut.x;
+    var dy = cm.y - donut.y;
+    var d2 = dx*dx + dy*dy;
+    if (d2 < sweepRadius * sweepRadius) {
+      cm.clean = true;
+      crumbsCleaned++;
+      var basePts = donut.drifting ? 6 : 2;
+      var pts = Math.floor(basePts * (1 + combo * 0.5));
+      score += pts;
+      GF.spawnParticles(cm.x, cm.y, cm.col, 3);
+    }
+  }
+
+  var pct2 = crumbsTotal === 0 ? 1 : crumbsCleaned / crumbsTotal;
+  if (pct2 >= 0.98) {
+    rinkCleared();
+  }
+}
+
+function wrapAng(a) {
+  while (a >  Math.PI) a -= Math.PI * 2;
+  while (a < -Math.PI) a += Math.PI * 2;
+  return a;
+}
+function lerpf(a, b, x) { return a + (b - a) * x; }
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var grd = ctx.createLinearGradient(0, 0, 0, GF.H);
+  grd.addColorStop(0, '#2a1336');
+  grd.addColorStop(1, '#150818');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING' || gs === 'CLEARED' || gs === 'GAMEOVER') {
+    drawRink(ctx);
+    drawTrail(ctx);
+    drawCrumbs(ctx);
+    drawDonut(ctx);
+    drawHUD(ctx);
+  }
+
+  if (gs === 'MENU') {
+    drawTitleBackdrop(ctx);
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub: GF.t('sub'),
+      btnText: GF.t('play'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+  }
+  if (gs === 'CLEARED') {
+    GF.drawOverlay({
+      title: GF.t('cleared'),
+      sub: GF.t('score') + ': ' + Math.floor(score),
+      sub2: GF.t('level') + ' ' + level + '  •  ' + Math.round(targetClean*100) + '%+',
+      btnText: GF.t('next'),
+      btnFn: nextLevel,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  }
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + Math.floor(score),
+      sub2: GF.t('clean') + ': ' + Math.round((crumbsCleaned/Math.max(1,crumbsTotal))*100) + '% / ' + Math.round(targetClean*100) + '%',
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  }
+}
+
+function drawTitleBackdrop(ctx) {
+  var s = GF.S;
+  var rw = 520 * s, rh = 320 * s;
+  var rx = GF.cx - rw / 2, ry = GF.cy - rh / 2;
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  ctx.fillStyle = '#3b2049';
+  GF.rr(ctx, rx, ry, rw, rh, 24 * s);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawRink(ctx) {
+  var s = rinkScaleVal;
+  var rw = RINK_W * s, rh = RINK_H * s;
+  ctx.fillStyle = '#3b2049';
+  GF.rr(ctx, rinkX - 8 * s, rinkY - 8 * s, rw + 16 * s, rh + 16 * s, 22 * s);
+  ctx.fill();
+
+  var grd = ctx.createLinearGradient(rinkX, rinkY, rinkX, rinkY + rh);
+  grd.addColorStop(0, '#4a2c66');
+  grd.addColorStop(1, '#2c1740');
+  ctx.fillStyle = grd;
+  GF.rr(ctx, rinkX, rinkY, rw, rh, 18 * s);
+  ctx.fill();
+
+  ctx.save();
+  ctx.beginPath();
+  GF.rr(ctx, rinkX, rinkY, rw, rh, 18 * s);
+  ctx.clip();
+  var rg = ctx.createRadialGradient(rinkX + rw/2, rinkY + rh/2, 0, rinkX + rw/2, rinkY + rh/2, Math.max(rw, rh) * 0.55);
+  rg.addColorStop(0, 'rgba(255, 255, 255, 0.08)');
+  rg.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = rg;
+  ctx.fillRect(rinkX, rinkY, rw, rh);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  var step = 40 * s;
+  for (var gx = rinkX; gx < rinkX + rw; gx += step) {
+    ctx.beginPath(); ctx.moveTo(gx, rinkY); ctx.lineTo(gx, rinkY + rh); ctx.stroke();
+  }
+  for (var gy = rinkY; gy < rinkY + rh; gy += step) {
+    ctx.beginPath(); ctx.moveTo(rinkX, gy); ctx.lineTo(rinkX + rw, gy); ctx.stroke();
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(rinkX + rw/2, rinkY + rh/2, 60 * s, 0, Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+
+function drawTrail(ctx) {
+  for (var i = 0; i < trail.length; i++) {
+    var t = trail[i];
+    ctx.globalAlpha = Math.max(0, t.life * 0.55);
+    ctx.fillStyle = '#ff8ad9';
+    ctx.beginPath(); ctx.arc(t.x, t.y, t.r, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = Math.max(0, t.life * 0.25);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(t.x, t.y, t.r * 0.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCrumbs(ctx) {
+  for (var i = 0; i < crumbs.length; i++) {
+    var c = crumbs[i];
+    if (c.clean) continue;
+    ctx.fillStyle = c.col;
+    ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.arc(c.x - c.r * 0.3, c.y - c.r * 0.3, c.r * 0.35, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawDonut(ctx) {
+  var s = rinkScaleVal;
+  var size = 36 * s;
+  ctx.save();
+  ctx.translate(donut.x, donut.y);
+  var spin = (performance.now() / 1000) * donut.spinSpeed;
+  ctx.rotate(spin);
+
+  GF.drawSprite('donut_drift', 0, 0, size * 1.2, function(c, x, y, sz) {
+    var r = sz * 0.5;
+    c.fillStyle = 'rgba(0,0,0,0.35)';
+    c.beginPath(); c.arc(0, sz * 0.18, r * 0.95, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#f7c39a';
+    c.beginPath(); c.arc(0, 0, r, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#ff6fa3';
+    c.beginPath(); c.arc(0, -sz * 0.04, r * 0.9, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#ff97c1';
+    c.beginPath();
+    for (var ang = 0; ang < Math.PI * 2; ang += 0.4) {
+      var rr2 = r * 0.86 + Math.sin(ang * 5) * r * 0.06;
+      var px = Math.cos(ang) * rr2;
+      var py = Math.sin(ang) * rr2 - sz * 0.04;
+      if (ang === 0) c.moveTo(px, py); else c.lineTo(px, py);
+    }
+    c.closePath(); c.fill();
+    c.fillStyle = '#3a1432';
+    c.beginPath(); c.arc(0, 0, r * 0.32, 0, Math.PI * 2); c.fill();
+    var sCols = ['#ffd166', '#06d6a0', '#118ab2', '#fff'];
+    for (var k = 0; k < 8; k++) {
+      var a = (k / 8) * Math.PI * 2;
+      var sr = r * 0.62;
+      c.save();
+      c.translate(Math.cos(a) * sr, Math.sin(a) * sr - sz * 0.04);
+      c.rotate(a);
+      c.fillStyle = sCols[k % sCols.length];
+      c.fillRect(-r * 0.07, -r * 0.02, r * 0.14, r * 0.04);
+      c.restore();
+    }
+    c.fillStyle = 'rgba(255,255,255,0.45)';
+    c.beginPath(); c.arc(-r * 0.35, -r * 0.45, r * 0.18, 0, Math.PI * 2); c.fill();
+  });
+
+  ctx.restore();
+
+  if (donut.drifting) {
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.translate(donut.x, donut.y);
+    ctx.rotate(donut.velAng);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.moveTo(-size * 0.6, -size * 0.55);
+    ctx.lineTo(-size * 1.6, -size * 0.2);
+    ctx.lineTo(-size * 1.6, size * 0.2);
+    ctx.lineTo(-size * 0.6, size * 0.55);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawHUD(ctx) {
+  var fs = GF.clamp(16 * GF.S, 12, 22);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('level') + ' ' + level, 14 * GF.S, 12 * GF.S);
+
+  ctx.textAlign = 'center';
+  var pct = crumbsTotal === 0 ? 0 : Math.floor((crumbsCleaned / crumbsTotal) * 100);
+  var tgt = Math.floor(targetClean * 100);
+  var tCol = pct >= tgt ? '#06d6a0' : '#fff';
+  ctx.fillStyle = tCol;
+  ctx.fillText(pct + '% / ' + tgt + '%', GF.cx, 12 * GF.S);
+  ctx.font = GF.clamp(13 * GF.S, 10, 18) + 'px sans-serif';
+  ctx.fillStyle = timeLeft < 10 ? '#ff6fa3' : '#cbd';
+  ctx.fillText(GF.t('time') + ': ' + timeLeft.toFixed(1) + 's', GF.cx, 12 * GF.S + fs + 2);
+
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ffd166';
+  ctx.fillText(GF.t('score') + ': ' + Math.floor(score), GF.W - 14 * GF.S, 12 * GF.S);
+
+  if (combo > 0) {
+    ctx.font = 'bold ' + GF.clamp(15 * GF.S, 11, 22) + 'px sans-serif';
+    ctx.fillStyle = '#ff6fa3';
+    ctx.fillText(GF.t('combo') + ' x' + combo, GF.W - 14 * GF.S, 12 * GF.S + fs + 2);
+  }
+
+  var barW = Math.min(GF.W * 0.6, 420 * GF.S);
+  var barH = 10 * GF.S;
+  var barX = GF.cx - barW / 2;
+  var barY = GF.H - 22 * GF.S;
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  GF.rr(ctx, barX, barY, barW, barH, barH / 2);
+  ctx.fill();
+  var tgtX = barX + barW * targetClean;
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.fillRect(tgtX - 1, barY - 4, 2, barH + 8);
+  var fillW = barW * (crumbsTotal === 0 ? 0 : crumbsCleaned / crumbsTotal);
+  if (fillW > 0) {
+    var grd2 = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    grd2.addColorStop(0, '#ff6fa3');
+    grd2.addColorStop(1, '#06d6a0');
+    ctx.fillStyle = grd2;
+    GF.rr(ctx, barX, barY, fillW, barH, barH / 2);
+    ctx.fill();
+  }
+
+  if (!donut.drifting && donut.driftTime === 0 && timeLeft > 50) {
+    ctx.font = GF.clamp(13 * GF.S, 10, 18) + 'px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.55)';
+    ctx.textAlign = 'left';
+    ctx.fillText(GF.t('hold'), 14 * GF.S, GF.H - 36 * GF.S);
+  }
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'donut_drift',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('donut_drift_best') || '0') || 0; } catch (e) {}
+    resizeRink();
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+window.addEventListener('resize', function() {
+  if (gs === 'PLAYING' || gs === 'CLEARED' || gs === 'GAMEOVER') {
+    resizeRink();
+  }
+});
+
+})();
+</script>
+</body>
+</html>
