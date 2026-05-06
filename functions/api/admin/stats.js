@@ -54,6 +54,28 @@ export async function onRequestGet({ request, env }) {
     } while (cursor);
   }
 
+  // Player comments from rate-on-leave. Keys: comment:<slug>:<id>
+  // Newest first, capped at 60 to avoid blowing up the response.
+  const comments = [];
+  {
+    let cursor;
+    do {
+      const list = await env.VOTES.list({ prefix: 'comment:', cursor });
+      for (const k of list.keys) {
+        const rest = k.name.slice('comment:'.length);
+        const lastColon = rest.lastIndexOf(':');
+        if (lastColon < 0) continue;
+        const slug = rest.slice(0, lastColon);
+        const id = rest.slice(lastColon + 1);
+        const data = await env.VOTES.get(k.name, 'json');
+        if (!data) continue;
+        comments.push({ slug, id, vote: data.vote, comment: data.comment, ts: data.ts });
+      }
+      cursor = list.list_complete ? null : list.cursor;
+    } while (cursor);
+  }
+  comments.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
   // A/B thumbnail click counts. Keys: click:<slug>:v<N>
   // Result attached as g.variants = { 1: clicks, 2: clicks, ... }
   {
@@ -121,7 +143,7 @@ export async function onRequestGet({ request, env }) {
 
   const games = Object.values(perGame).sort((a, b) => b.seconds - a.seconds);
 
-  return new Response(JSON.stringify({ totals, perGame: games, perDay }), {
+  return new Response(JSON.stringify({ totals, perGame: games, perDay, comments: comments.slice(0, 60) }), {
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
 }
