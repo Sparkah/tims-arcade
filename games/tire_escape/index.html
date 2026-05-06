@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Tire Escape</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── GAME-SPECIFIC CONFIG ─────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'TIRE ESCAPE',
+    sub:   'Tap or SPACE to kick up. Bounce off cars, dodge the cops behind.',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'CAUGHT!',
+    distance: 'DIST',
+    bounce: 'BOUNCE',
+  },
+  ru: {
+    title: 'ПОБЕГ ШИНЫ',
+    sub:   'Тап или ПРОБЕЛ — толчок вверх. Отскакивай от машин, копы сзади.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'ПОЙМАЛИ!',
+    distance: 'ДИСТ',
+    bounce: 'ОТСКОК',
+  },
+};
+
+var SPRITE_NAMES = ['tire', 'cop_car', 'parked_car', 'street_sign', 'brick_wall', 'dust_particle'];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER
+var bonusScore = 0, best = 0;
+var distance = 0;           // metres (pixels / 10 in design space)
+var combo = 0, comboTimer = 0;
+var cameraX = 0;            // world scroll (px in design space)
+var scrollSpeed = 0;        // current world scroll px/sec
+var BASE_SPEED = 280;       // design-space px/sec
+var GRAVITY = 1500;         // design-space px/sec^2
+
+// Player tire — position is in world coords
+var tire = {
+  x: 0, y: 0,
+  vy: 0,
+  r: 28,
+  rot: 0,
+  rotSpeed: 0,
+  onGround: false,
+  groundCooldown: 0,
+};
+
+// Obstacles in world. {x, y, w, h, type, hit, bounciness}
+var obstacles = [];
+var spawnX = 600;
+
+// Cops chase from the left. Lose when copX > tire.x.
+var copX = -300;
+var COP_BASE_SPEED_RATIO = 0.92;
+var copPanic = 0;
+
+// Background props
+var bgFar = [];
+var bgNear = [];
+
+// Ground line in design space
+var GROUND_Y = 460;
+
+var bounceFlash = 0;
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+function rand(a, b) { return a + Math.random() * (b - a); }
+function randi(a, b) { return Math.floor(rand(a, b)); }
+
+function spawnObstacle(x) {
+  var roll = Math.random();
+  var ob;
+  if (roll < 0.45) {
+    var w = rand(110, 160);
+    ob = { x: x, y: GROUND_Y - 56, w: w, h: 56, type: 'car', hit: false, bounciness: 0.78 };
+  } else if (roll < 0.75) {
+    ob = { x: x, y: GROUND_Y - 90, w: 14, h: 90, type: 'sign', hit: false, bounciness: 0.65 };
+  } else if (roll < 0.92) {
+    var ww = rand(50, 80);
+    var wh = rand(70, 110);
+    ob = { x: x, y: GROUND_Y - wh, w: ww, h: wh, type: 'wall', hit: false, bounciness: 0.55 };
+  } else {
+    ob = { x: x, y: GROUND_Y - 140, w: 60, h: 140, type: 'wall', hit: false, bounciness: 0.55 };
+  }
+  obstacles.push(ob);
+  return ob;
+}
+
+function buildBg() {
+  bgFar = [];
+  bgNear = [];
+  for (var i = 0; i < 60; i++) {
+    bgFar.push({
+      x: i * 140 + rand(-30, 30),
+      w: rand(80, 130),
+      h: rand(160, 260),
+      hue: randi(220, 280),
+    });
+  }
+  for (var j = 0; j < 80; j++) {
+    bgNear.push({
+      x: j * 90 + rand(-15, 15),
+      type: Math.random() < 0.6 ? 'lamp' : 'curb',
+    });
+  }
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  bonusScore = 0;
+  distance = 0;
+  combo = 0;
+  comboTimer = 0;
+  cameraX = 0;
+  scrollSpeed = BASE_SPEED;
+  tire.x = 200;
+  tire.y = GROUND_Y - tire.r;
+  tire.vy = 0;
+  tire.rot = 0;
+  tire.rotSpeed = 6;
+  tire.onGround = true;
+  tire.groundCooldown = 0;
+  obstacles = [];
+  spawnX = 700;
+  copX = -260;
+  copPanic = 0;
+  bounceFlash = 0;
+  buildBg();
+  for (var i = 0; i < 8; i++) {
+    spawnObstacle(spawnX);
+    spawnX += rand(180, 320);
+  }
+  gs = 'PLAYING';
+}
+
+function gameOver() {
+  var total = getDisplayScore();
+  if (total > best) {
+    best = total;
+    try { localStorage.setItem('tire_escape_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  try { GF.gameEnded(); } catch (e) {}
+}
+
+window._jumpLevel = function(n) {
+  startGame();
+  var jumps = (n && n > 0) ? n : 5;
+  distance = jumps * 600;
+  bonusScore = jumps * 800;
+  combo = 4 + (jumps % 4);
+  comboTimer = 1.0;
+  scrollSpeed = BASE_SPEED + jumps * 30;
+  tire.y = GROUND_Y - tire.r - 80;
+  tire.vy = -120;
+  tire.rotSpeed = 18;
+  copX = tire.x - 320;
+  for (var i = 0; i < 12; i++) {
+    spawnObstacle(spawnX);
+    spawnX += rand(140, 240);
+  }
+};
+
+// ── INPUT (one-button kick) ──────────────────────────────────────────────
+var kickQueued = false;
+var lastKick = 0;
+document.addEventListener('keydown', function(e) {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
+    if (gs === 'PLAYING') kickQueued = true;
+    e.preventDefault();
+  }
+});
+document.addEventListener('touchstart', function(e) {
+  if (gs !== 'PLAYING') return;
+  kickQueued = true;
+}, { passive: true });
+document.addEventListener('mousedown', function(e) {
+  if (gs !== 'PLAYING') return;
+  kickQueued = true;
+});
+
+function applyKick() {
+  var now = performance.now();
+  if (now - lastKick < 90) return;
+  lastKick = now;
+  if (tire.onGround || tire.groundCooldown > 0) {
+    tire.vy = -620;
+    tire.onGround = false;
+    tire.groundCooldown = 0;
+    spawnDust(tire.x, GROUND_Y, 10);
+  } else {
+    if (tire.vy > 0) {
+      tire.vy = -360;
+      spawnDust(tire.x, tire.y + tire.r * 0.6, 6);
+    }
+  }
+  tire.rotSpeed += 8;
+}
+
+function spawnDust(wx_, wy_, n) {
+  var sx = (wx_ - cameraX) * GF.S;
+  var sy = wy_ * GF.S;
+  GF.spawnParticles(sx, sy, '#9a8a70', n);
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') { kickQueued = false; return; }
+  if (dt > 0.05) dt = 0.05;
+
+  if (kickQueued) { applyKick(); kickQueued = false; }
+
+  // Difficulty ramp
+  var targetSpeed = BASE_SPEED + Math.min(220, distance * 0.04);
+  scrollSpeed += (targetSpeed - scrollSpeed) * 0.02;
+
+  cameraX += scrollSpeed * dt;
+  tire.x = cameraX + 200;
+
+  // Physics
+  tire.vy += GRAVITY * dt;
+  tire.y += tire.vy * dt;
+
+  // Ground collision
+  var groundTop = GROUND_Y - tire.r;
+  if (tire.y >= groundTop) {
+    if (!tire.onGround && tire.vy > 60) spawnDust(tire.x, GROUND_Y, 5);
+    tire.y = groundTop;
+    tire.vy *= -0.18;
+    if (Math.abs(tire.vy) < 40) tire.vy = 0;
+    tire.onGround = true;
+    tire.groundCooldown = 0.08;
+  } else {
+    tire.onGround = false;
+    if (tire.groundCooldown > 0) tire.groundCooldown -= dt;
+  }
+
+  if (tire.onGround) tire.rotSpeed = scrollSpeed / 60;
+  else tire.rotSpeed *= (1 - dt * 0.4);
+  tire.rot += tire.rotSpeed * dt;
+
+  // Spawn ahead
+  while (spawnX < cameraX + 1400) {
+    spawnObstacle(spawnX);
+    var minGap = Math.max(140, 260 - distance * 0.005);
+    spawnX += rand(minGap, minGap + 180);
+  }
+
+  // Cull behind
+  for (var i = obstacles.length - 1; i >= 0; i--) {
+    if (obstacles[i].x + obstacles[i].w < cameraX - 100) obstacles.splice(i, 1);
+  }
+
+  // Tire vs obstacle (circle vs AABB)
+  for (var j = 0; j < obstacles.length; j++) {
+    var ob = obstacles[j];
+    if (ob.x - tire.x > 200) break;
+    if (ob.x + ob.w < tire.x - 200) continue;
+    var nx = Math.max(ob.x, Math.min(tire.x, ob.x + ob.w));
+    var ny = Math.max(ob.y, Math.min(tire.y, ob.y + ob.h));
+    var dx = tire.x - nx, dy = tire.y - ny;
+    var d2 = dx*dx + dy*dy;
+    if (d2 < tire.r * tire.r) {
+      var d = Math.sqrt(d2) || 0.0001;
+      var pushX = dx / d, pushY = dy / d;
+      var pen = tire.r - d;
+      tire.x += pushX * pen;
+      tire.y += pushY * pen;
+      var dot = (-scrollSpeed) * pushX + tire.vy * pushY;
+      var bounciness = ob.bounciness || 0.7;
+      tire.vy = (tire.vy - 2 * dot * pushY) * bounciness;
+      if (Math.abs(pushY) < 0.3) {
+        tire.vy = Math.min(tire.vy, -260 * bounciness);
+      }
+      if (tire.vy < -900) tire.vy = -900;
+      if (tire.vy > 900)  tire.vy = 900;
+
+      if (!ob.hit) {
+        ob.hit = true;
+        combo += 1;
+        comboTimer = 1.5;
+        bounceFlash = 0.4;
+        var pts = 25 + combo * 10;
+        bonusScore += pts;
+        tire.rotSpeed += 6;
+        var sxw = (tire.x - cameraX) * GF.S;
+        var syw = tire.y * GF.S;
+        GF.spawnParticles(sxw, syw, '#ffcf60', 14);
+        var col = combo >= 3 ? '#ffcf60' : '#fff';
+        GF.spawnFloat(sxw, syw - 30 * GF.S, '+' + pts + (combo > 1 ? ' x' + combo : ''), col);
+        if (combo >= 5) GF.setShake(0.5);
+      }
+    }
+  }
+
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) { combo = 0; comboTimer = 0; }
+  }
+
+  // Cops
+  var copSpeed = scrollSpeed * COP_BASE_SPEED_RATIO;
+  if (comboTimer < 0.5) copSpeed += 60;
+  copX += copSpeed * dt;
+
+  distance += scrollSpeed * dt * 0.1;
+
+  var copDist = tire.x - copX;
+  copPanic = GF.clamp(1 - copDist / 320, 0, 1);
+
+  if (copX > tire.x - tire.r - 6) {
+    GF.setShake(1.0);
+    gameOver();
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var skyGrad = ctx.createLinearGradient(0, 0, 0, GF.H);
+  skyGrad.addColorStop(0, '#1a0a2a');
+  skyGrad.addColorStop(0.6, '#2a1040');
+  skyGrad.addColorStop(1, '#3a1a30');
+  ctx.fillStyle = skyGrad;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawBgFar();
+    drawBgNear();
+    drawGround();
+    drawObstacles();
+    drawCops();
+    drawTire();
+    drawHUD();
+    if (gs === 'PLAYING') drawCopPanicVignette();
+  }
+
+  if (gs === 'MENU') {
+    drawBgFar();
+    drawBgNear();
+    drawGround();
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub: GF.t('sub'),
+      btnText: GF.t('play'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+  }
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + getDisplayScore() + '   ' + GF.t('distance') + ': ' + Math.floor(distance) + 'm',
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  }
+}
+
+function getDisplayScore() {
+  return Math.floor(distance) + bonusScore;
+}
+
+function wxs(x) { return (x - cameraX) * GF.S; }
+function wys(y) { return y * GF.S; }
+
+function drawBgFar() {
+  var c = GF.ctx;
+  var par = cameraX * 0.2;
+  for (var i = 0; i < bgFar.length; i++) {
+    var b = bgFar[i];
+    var x = (b.x - par) * GF.S;
+    if (x + b.w * GF.S < 0 || x > GF.W) continue;
+    var y = (GROUND_Y - b.h) * GF.S;
+    var w = b.w * GF.S;
+    var h = b.h * GF.S;
+    c.fillStyle = 'hsl(' + b.hue + ', 38%, 22%)';
+    c.fillRect(x, y, w, h);
+    c.fillStyle = 'hsl(' + b.hue + ', 70%, 60%)';
+    var winW = 6 * GF.S, winH = 8 * GF.S;
+    for (var wxp = x + 8 * GF.S; wxp < x + w - 8 * GF.S; wxp += 14 * GF.S) {
+      for (var wyp = y + 14 * GF.S; wyp < y + h - 10 * GF.S; wyp += 18 * GF.S) {
+        if (((wxp + wyp) | 0) % 3 === 0) c.fillRect(wxp, wyp, winW, winH);
+      }
+    }
+  }
+}
+
+function drawBgNear() {
+  var c = GF.ctx;
+  var par = cameraX * 0.55;
+  for (var i = 0; i < bgNear.length; i++) {
+    var b = bgNear[i];
+    var x = (b.x - par) * GF.S;
+    if (x < -50 || x > GF.W + 50) continue;
+    if (b.type === 'lamp') {
+      var px = x;
+      var groundY = GROUND_Y * GF.S;
+      c.fillStyle = '#3a3a4a';
+      c.fillRect(px, groundY - 90 * GF.S, 3 * GF.S, 90 * GF.S);
+      c.fillStyle = 'rgba(255,210,120,0.8)';
+      c.beginPath();
+      c.arc(px + 1.5 * GF.S, groundY - 90 * GF.S, 8 * GF.S, 0, Math.PI * 2);
+      c.fill();
+      c.fillStyle = 'rgba(255,210,120,0.18)';
+      c.beginPath();
+      c.arc(px + 1.5 * GF.S, groundY - 90 * GF.S, 28 * GF.S, 0, Math.PI * 2);
+      c.fill();
+    } else {
+      c.fillStyle = '#1a1018';
+      c.fillRect(x, GROUND_Y * GF.S, 20 * GF.S, 4 * GF.S);
+    }
+  }
+}
+
+function drawGround() {
+  var c = GF.ctx;
+  var groundY = GROUND_Y * GF.S;
+  var grad = c.createLinearGradient(0, groundY, 0, GF.H);
+  grad.addColorStop(0, '#1c1c24');
+  grad.addColorStop(1, '#0a0a14');
+  c.fillStyle = grad;
+  c.fillRect(0, groundY, GF.W, GF.H - groundY);
+  c.strokeStyle = '#ffcf60';
+  c.lineWidth = 2 * GF.S;
+  c.beginPath();
+  c.moveTo(0, groundY);
+  c.lineTo(GF.W, groundY);
+  c.stroke();
+  c.strokeStyle = 'rgba(255,255,255,0.18)';
+  c.lineWidth = 3 * GF.S;
+  c.setLineDash([20 * GF.S, 30 * GF.S]);
+  var dashOff = (cameraX * GF.S) % (50 * GF.S);
+  c.beginPath();
+  c.moveTo(0 - dashOff, groundY + 28 * GF.S);
+  c.lineTo(GF.W, groundY + 28 * GF.S);
+  c.stroke();
+  c.setLineDash([]);
+}
+
+function drawObstacles() {
+  var c = GF.ctx;
+  for (var i = 0; i < obstacles.length; i++) {
+    var ob = obstacles[i];
+    var x = wxs(ob.x);
+    var y = wys(ob.y);
+    var w = ob.w * GF.S;
+    var h = ob.h * GF.S;
+    if (x + w < -20 || x > GF.W + 20) continue;
+
+    if (ob.type === 'car')      drawParkedCar(c, x, y, w, h, ob.hit);
+    else if (ob.type === 'sign') drawStreetSign(c, x, y, w, h, ob.hit);
+    else                          drawBrickWall(c, x, y, w, h, ob.hit);
+  }
+}
+
+function drawParkedCar(c, x, y, w, h, hit) {
+  if (GF.sprites && GF.sprites.parked_car) {
+    c.save();
+    if (hit) c.globalAlpha = 0.85;
+    c.drawImage(GF.sprites.parked_car, x, y - h * 0.2, w, h * 1.2);
+    c.restore();
+    return;
+  }
+  c.fillStyle = hit ? '#5a3a3a' : '#c83838';
+  GF.rr(c, x, y + h * 0.4, w, h * 0.6, 6 * GF.S); c.fill();
+  c.fillStyle = hit ? '#3a2a3a' : '#882020';
+  GF.rr(c, x + w * 0.18, y, w * 0.64, h * 0.5, 5 * GF.S); c.fill();
+  c.fillStyle = '#4a90c0';
+  c.fillRect(x + w * 0.22, y + h * 0.08, w * 0.25, h * 0.32);
+  c.fillRect(x + w * 0.55, y + h * 0.08, w * 0.25, h * 0.32);
+  c.fillStyle = '#000';
+  c.beginPath(); c.arc(x + w * 0.22, y + h, h * 0.16, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(x + w * 0.78, y + h, h * 0.16, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#666';
+  c.beginPath(); c.arc(x + w * 0.22, y + h, h * 0.08, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(x + w * 0.78, y + h, h * 0.08, 0, Math.PI * 2); c.fill();
+}
+
+function drawStreetSign(c, x, y, w, h, hit) {
+  if (GF.sprites && GF.sprites.street_sign) {
+    c.save();
+    if (hit) c.globalAlpha = 0.85;
+    c.drawImage(GF.sprites.street_sign, x - w * 1.2, y, w * 3.4, h);
+    c.restore();
+    return;
+  }
+  c.fillStyle = hit ? '#5a5a6a' : '#888';
+  c.fillRect(x + w * 0.4, y + h * 0.25, w * 0.2, h * 0.75);
+  var sw = w * 4, sh = h * 0.28;
+  var sx = x - w * 1.5, sy = y;
+  c.fillStyle = hit ? '#5a3030' : '#cc2020';
+  GF.rr(c, sx, sy, sw, sh, 4 * GF.S); c.fill();
+  c.strokeStyle = '#fff';
+  c.lineWidth = 2 * GF.S;
+  GF.rr(c, sx + 3 * GF.S, sy + 3 * GF.S, sw - 6 * GF.S, sh - 6 * GF.S, 2 * GF.S);
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + (sh * 0.55) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText('STOP', sx + sw / 2, sy + sh / 2 + 2);
+}
+
+function drawBrickWall(c, x, y, w, h, hit) {
+  if (GF.sprites && GF.sprites.brick_wall) {
+    c.save();
+    if (hit) c.globalAlpha = 0.85;
+    c.drawImage(GF.sprites.brick_wall, x, y, w, h);
+    c.restore();
+    return;
+  }
+  c.fillStyle = hit ? '#4a2a2a' : '#883820';
+  c.fillRect(x, y, w, h);
+  c.strokeStyle = 'rgba(0,0,0,0.5)';
+  c.lineWidth = 1.5 * GF.S;
+  var bh = 12 * GF.S;
+  var bw = 22 * GF.S;
+  for (var by = y; by < y + h; by += bh) {
+    c.beginPath(); c.moveTo(x, by); c.lineTo(x + w, by); c.stroke();
+    var off = ((by - y) / bh) % 2 === 0 ? 0 : bw / 2;
+    for (var bxp = x + off; bxp < x + w; bxp += bw) {
+      c.beginPath(); c.moveTo(bxp, by); c.lineTo(bxp, by + bh); c.stroke();
+    }
+  }
+  c.fillStyle = '#3a1a10';
+  c.fillRect(x, y, w, 4 * GF.S);
+}
+
+function drawCops() {
+  var c = GF.ctx;
+  var x = (copX - cameraX) * GF.S;
+  var groundY = GROUND_Y * GF.S;
+  var w = 80 * GF.S;
+  var h = 44 * GF.S;
+  if (x < -w * 1.2) return;
+
+  if (GF.sprites && GF.sprites.cop_car) {
+    c.drawImage(GF.sprites.cop_car, x - w / 2, groundY - h, w, h);
+  } else {
+    c.fillStyle = '#1a1a2a';
+    GF.rr(c, x - w / 2, groundY - h * 0.55, w, h * 0.55, 5 * GF.S); c.fill();
+    c.fillStyle = '#0a0a1a';
+    GF.rr(c, x - w * 0.4, groundY - h, w * 0.8, h * 0.5, 4 * GF.S); c.fill();
+    c.fillStyle = '#3a6a8a';
+    c.fillRect(x - w * 0.32, groundY - h * 0.92, w * 0.6, h * 0.32);
+    c.fillStyle = '#000';
+    c.beginPath(); c.arc(x - w * 0.3, groundY, h * 0.18, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(x + w * 0.3, groundY, h * 0.18, 0, Math.PI * 2); c.fill();
+    var t = performance.now() / 130;
+    var blueOn = Math.sin(t) > 0;
+    c.fillStyle = blueOn ? '#4080ff' : '#ff4040';
+    c.fillRect(x - w * 0.18, groundY - h * 1.05, w * 0.16, h * 0.12);
+    c.fillStyle = blueOn ? '#ff4040' : '#4080ff';
+    c.fillRect(x + w * 0.02, groundY - h * 1.05, w * 0.16, h * 0.12);
+  }
+
+  var pulse = (Math.sin(performance.now() / 100) + 1) / 2;
+  c.globalAlpha = 0.4 + pulse * 0.4;
+  var grad = c.createRadialGradient(x, groundY - h * 0.7, 4 * GF.S, x, groundY - h * 0.7, 90 * GF.S);
+  grad.addColorStop(0, 'rgba(255,80,80,0.6)');
+  grad.addColorStop(1, 'rgba(255,80,80,0)');
+  c.fillStyle = grad;
+  c.beginPath();
+  c.arc(x, groundY - h * 0.7, 90 * GF.S, 0, Math.PI * 2);
+  c.fill();
+  c.globalAlpha = 1;
+}
+
+function drawTire() {
+  var c = GF.ctx;
+  var x = (tire.x - cameraX) * GF.S;
+  var y = tire.y * GF.S;
+  var r = tire.r * GF.S;
+
+  c.fillStyle = 'rgba(0,0,0,0.45)';
+  c.beginPath();
+  c.ellipse(x, GROUND_Y * GF.S + 4 * GF.S, r * 0.9, r * 0.25, 0, 0, Math.PI * 2);
+  c.fill();
+
+  c.save();
+  c.translate(x, y);
+  c.rotate(tire.rot);
+
+  if (GF.sprites && GF.sprites.tire) {
+    c.drawImage(GF.sprites.tire, -r, -r, r * 2, r * 2);
+  } else {
+    c.fillStyle = '#1a1a1a';
+    c.beginPath(); c.arc(0, 0, r, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = '#3a3a3a';
+    c.lineWidth = 3 * GF.S;
+    c.beginPath(); c.arc(0, 0, r * 0.88, 0, Math.PI * 2); c.stroke();
+    for (var k = 0; k < 12; k++) {
+      var ang = (k / 12) * Math.PI * 2;
+      c.beginPath();
+      c.moveTo(Math.cos(ang) * r * 0.78, Math.sin(ang) * r * 0.78);
+      c.lineTo(Math.cos(ang) * r * 0.92, Math.sin(ang) * r * 0.92);
+      c.stroke();
+    }
+    c.fillStyle = '#888';
+    c.beginPath(); c.arc(0, 0, r * 0.4, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#444';
+    c.beginPath(); c.arc(0, 0, r * 0.18, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = '#aaa';
+    c.lineWidth = 2 * GF.S;
+    for (var s = 0; s < 5; s++) {
+      var sa = (s / 5) * Math.PI * 2;
+      c.beginPath();
+      c.moveTo(Math.cos(sa) * r * 0.18, Math.sin(sa) * r * 0.18);
+      c.lineTo(Math.cos(sa) * r * 0.4, Math.sin(sa) * r * 0.4);
+      c.stroke();
+    }
+  }
+  c.restore();
+
+  if (bounceFlash > 0) {
+    c.strokeStyle = 'rgba(255,207,96,' + bounceFlash + ')';
+    c.lineWidth = 4 * GF.S;
+    c.beginPath();
+    c.arc(x, y, r + 6 * GF.S * (1 - bounceFlash), 0, Math.PI * 2);
+    c.stroke();
+    bounceFlash = Math.max(0, bounceFlash - 0.04);
+  }
+}
+
+function drawHUD() {
+  var c = GF.ctx;
+  var fs = GF.clamp(18 * GF.S, 14, 26);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textBaseline = 'top';
+
+  c.textAlign = 'left';
+  c.fillStyle = '#fff';
+  c.fillText(GF.t('distance') + ': ' + Math.floor(distance) + 'm', 14 * GF.S, 14 * GF.S);
+
+  c.textAlign = 'right';
+  c.fillStyle = '#ffcf60';
+  c.fillText(GF.t('score') + ': ' + getDisplayScore(), GF.W - 14 * GF.S, 14 * GF.S);
+
+  if (combo > 0) {
+    c.textAlign = 'center';
+    var t = comboTimer / 1.5;
+    var pulse = 1 + (1 - t) * 0.2;
+    c.font = 'bold ' + (fs * 1.4 * pulse) + 'px sans-serif';
+    c.fillStyle = combo >= 5 ? '#ff4080' : combo >= 3 ? '#ffcf60' : '#fff';
+    c.fillText('x' + combo + ' ' + GF.t('bounce'), GF.W / 2, 14 * GF.S);
+    var barW = 140 * GF.S;
+    var barH = 6 * GF.S;
+    var bx = GF.W / 2 - barW / 2;
+    var by = 14 * GF.S + fs * 1.5;
+    c.fillStyle = 'rgba(255,255,255,0.15)';
+    c.fillRect(bx, by, barW, barH);
+    c.fillStyle = combo >= 5 ? '#ff4080' : '#ffcf60';
+    c.fillRect(bx, by, barW * t, barH);
+  }
+}
+
+function drawCopPanicVignette() {
+  if (copPanic <= 0) return;
+  var c = GF.ctx;
+  var alpha = copPanic * 0.45 * (0.6 + 0.4 * Math.sin(performance.now() / 80));
+  var grad = c.createRadialGradient(GF.W / 2, GF.H / 2, GF.W * 0.3, GF.W / 2, GF.H / 2, GF.W * 0.7);
+  grad.addColorStop(0, 'rgba(255,30,30,0)');
+  grad.addColorStop(1, 'rgba(255,30,30,' + alpha + ')');
+  c.fillStyle = grad;
+  c.fillRect(0, 0, GF.W, GF.H);
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'tire_escape',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('tire_escape_best') || '0') || 0; } catch (e) {}
+    buildBg();
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>
