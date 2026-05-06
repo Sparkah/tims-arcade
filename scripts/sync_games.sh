@@ -64,6 +64,11 @@ for ((i = 0; i < COUNT; i++)); do
     [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
   done
 
+  # Copy optional sibling files used by the game-factory framework
+  for sibling in gf-lib.js; do
+    [[ -f "$GAME_DIR/$sibling" ]] && cp "$GAME_DIR/$sibling" "$OUT_GAMES/$SLUG/$sibling"
+  done
+
   # Copy thumbnail. Two layouts supported:
   #   1. Flat:        yandex_promo/desktop_en_1.png
   #   2. Per-language: yandex_promo/en/desktop_1.png  (used by 10_running_away)
