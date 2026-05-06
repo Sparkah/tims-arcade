@@ -440,6 +440,16 @@ window.GF = {
   gameEnded: function () {
     try { window.parent.postMessage({ type: 'gf:gameEnded' }, '*'); } catch (_) {}
   },
+  // Register a state-getter for the post-build-tester gate.
+  //   GF.exposeState(() => ({ gs, score, level, lives, ... }));
+  // The gate calls window.__gfState() during playtest to verify the game
+  // actually has progression and reaches terminal states.
+  exposeState: function (getter) {
+    if (typeof getter !== 'function') return;
+    window.__gfState = function () {
+      try { return getter(); } catch (e) { return { __error: String(e) }; }
+    };
+  },
 };
 
 // Screenshot helpers — exposed at window for external tooling (take_screenshots.js)

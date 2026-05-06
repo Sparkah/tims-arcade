@@ -1,0 +1,1059 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Slingshot Scrap</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a2030; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── GAME-SPECIFIC CONFIG ─────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Slingshot Scrap',
+    sub:   'Sling junk into the recycle pit',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT LEVEL',
+    score: 'SHOTS', best: 'BEST',
+    gameover: 'OUT OF AMMO',
+    levelClear: 'LEVEL CLEAR',
+    win: 'ALL CLEAR!',
+    level: 'LEVEL', ammo: 'AMMO',
+    targets: 'TRASH',
+    drag: 'Drag from slingshot to aim',
+  },
+  ru: {
+    title: 'Хлам из Рогатки',
+    sub:   'Запусти мусор в яму переработки',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЬШЕ',
+    score: 'ВЫСТРЕЛЫ', best: 'РЕКОРД',
+    gameover: 'ПАТРОНЫ КОНЧИЛИСЬ',
+    levelClear: 'УРОВЕНЬ ПРОЙДЕН',
+    win: 'ВСЕ УРОВНИ!',
+    level: 'УРОВЕНЬ', ammo: 'СНАРЯДЫ',
+    targets: 'МУСОР',
+    drag: 'Тяни от рогатки',
+  },
+};
+
+var SPRITE_NAMES = ['slingshot_frame', 'ammo_can', 'ammo_brick', 'ammo_explosive', 'target_bottle', 'target_can', 'target_box', 'recycle_bin', 'dust_puff'];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU'; // MENU | PLAYING | CLEARING | LEVEL_CLEAR | GAMEOVER | WIN
+var levelIdx = 0;
+var totalShots = 0;
+var best = 0;
+
+// World coords are in design space (designW = 1280, designH = 720).
+var WORLD_W = 1280, WORLD_H = 720;
+var GROUND_Y = 600;
+
+var slingX = 200, slingY = 460;        // slingshot anchor (top of fork)
+var slingBaseY = 600;                  // slingshot base (foot on ground)
+
+// Dynamic entities
+var ammoQueue = [];
+var currentAmmo = null;
+var targets = [];
+var pit = { x: 1100, y: 600, w: 160, h: 100 };
+var explosions = [];
+var dustPuffs = [];
+
+// Drag state
+var dragging = false;
+var dragStartX = 0, dragStartY = 0;
+var dragX = 0, dragY = 0;
+
+// Physics constants
+var GRAV = 0.55;
+var FRICTION_GROUND = 0.86;
+var FRICTION_AIR = 0.998;
+var BOUNCE = 0.42;
+var MAX_DRAG = 200;
+var POWER_MULT = 0.18;
+var SETTLE_THRESHOLD = 0.4;
+var EXPLOSION_RADIUS = 160;
+
+// Levels — pit position, target stack layout, ammo
+var LEVELS = [
+  // Level 1: simple stack near pit, easy intro
+  {
+    pit: { x: 1080, y: 600, w: 180, h: 100 },
+    ammo: ['can', 'can', 'brick'],
+    stack: [
+      { x: 880, y: 568, type: 'box' },
+      { x: 920, y: 568, type: 'can' },
+      { x: 960, y: 568, type: 'bottle' },
+      { x: 900, y: 530, type: 'bottle' },
+      { x: 940, y: 530, type: 'can' },
+    ],
+  },
+  // Level 2
+  {
+    pit: { x: 1100, y: 600, w: 160, h: 100 },
+    ammo: ['can', 'brick', 'can'],
+    stack: [
+      { x: 820, y: 568, type: 'box' },
+      { x: 860, y: 568, type: 'box' },
+      { x: 920, y: 568, type: 'can' },
+      { x: 960, y: 568, type: 'can' },
+      { x: 840, y: 530, type: 'bottle' },
+      { x: 940, y: 530, type: 'bottle' },
+      { x: 890, y: 492, type: 'can' },
+    ],
+  },
+  // Level 3: tall tower
+  {
+    pit: { x: 1100, y: 600, w: 160, h: 100 },
+    ammo: ['brick', 'can', 'explosive'],
+    stack: [
+      { x: 920, y: 568, type: 'box' },
+      { x: 920, y: 530, type: 'box' },
+      { x: 920, y: 492, type: 'can' },
+      { x: 920, y: 454, type: 'can' },
+      { x: 920, y: 416, type: 'bottle' },
+    ],
+  },
+  // Level 4: wide flat heap
+  {
+    pit: { x: 1100, y: 600, w: 160, h: 100 },
+    ammo: ['brick', 'brick', 'explosive'],
+    stack: [
+      { x: 800, y: 568, type: 'can' },
+      { x: 840, y: 568, type: 'bottle' },
+      { x: 880, y: 568, type: 'box' },
+      { x: 920, y: 568, type: 'can' },
+      { x: 960, y: 568, type: 'box' },
+      { x: 1000, y: 568, type: 'bottle' },
+      { x: 820, y: 530, type: 'can' },
+      { x: 900, y: 530, type: 'bottle' },
+      { x: 980, y: 530, type: 'can' },
+    ],
+  },
+  // Level 5: pit further away
+  {
+    pit: { x: 1140, y: 600, w: 120, h: 100 },
+    ammo: ['can', 'brick', 'explosive', 'can'],
+    stack: [
+      { x: 820, y: 568, type: 'box' },
+      { x: 860, y: 568, type: 'box' },
+      { x: 900, y: 568, type: 'box' },
+      { x: 840, y: 530, type: 'can' },
+      { x: 880, y: 530, type: 'can' },
+      { x: 860, y: 492, type: 'bottle' },
+    ],
+  },
+  // Level 6: pyramid
+  {
+    pit: { x: 1100, y: 600, w: 160, h: 100 },
+    ammo: ['brick', 'brick', 'explosive', 'can'],
+    stack: [
+      { x: 800, y: 568, type: 'box' }, { x: 840, y: 568, type: 'box' },
+      { x: 880, y: 568, type: 'box' }, { x: 920, y: 568, type: 'box' },
+      { x: 960, y: 568, type: 'box' }, { x: 1000, y: 568, type: 'box' },
+      { x: 820, y: 530, type: 'can' }, { x: 860, y: 530, type: 'can' },
+      { x: 900, y: 530, type: 'can' }, { x: 940, y: 530, type: 'can' },
+      { x: 980, y: 530, type: 'can' },
+      { x: 840, y: 492, type: 'bottle' }, { x: 880, y: 492, type: 'bottle' },
+      { x: 920, y: 492, type: 'bottle' }, { x: 960, y: 492, type: 'bottle' },
+      { x: 880, y: 454, type: 'can' }, { x: 920, y: 454, type: 'can' },
+      { x: 900, y: 416, type: 'bottle' },
+    ],
+  },
+  // Level 7: split
+  {
+    pit: { x: 1180, y: 600, w: 80, h: 100 },
+    ammo: ['can', 'brick', 'explosive', 'brick'],
+    stack: [
+      { x: 760, y: 568, type: 'box' }, { x: 800, y: 568, type: 'can' },
+      { x: 840, y: 568, type: 'bottle' },
+      { x: 940, y: 568, type: 'bottle' }, { x: 980, y: 568, type: 'can' },
+      { x: 1020, y: 568, type: 'box' },
+      { x: 780, y: 530, type: 'can' }, { x: 820, y: 530, type: 'bottle' },
+      { x: 960, y: 530, type: 'can' }, { x: 1000, y: 530, type: 'bottle' },
+      { x: 800, y: 492, type: 'bottle' }, { x: 980, y: 492, type: 'can' },
+    ],
+  },
+  // Level 8: huge mixed
+  {
+    pit: { x: 1140, y: 600, w: 120, h: 100 },
+    ammo: ['brick', 'brick', 'explosive', 'explosive', 'can'],
+    stack: [
+      { x: 760, y: 568, type: 'box' }, { x: 800, y: 568, type: 'box' },
+      { x: 840, y: 568, type: 'can' }, { x: 880, y: 568, type: 'can' },
+      { x: 920, y: 568, type: 'box' }, { x: 960, y: 568, type: 'box' },
+      { x: 1000, y: 568, type: 'bottle' }, { x: 1040, y: 568, type: 'bottle' },
+      { x: 780, y: 530, type: 'bottle' }, { x: 820, y: 530, type: 'can' },
+      { x: 860, y: 530, type: 'bottle' }, { x: 900, y: 530, type: 'can' },
+      { x: 940, y: 530, type: 'bottle' }, { x: 980, y: 530, type: 'can' },
+      { x: 1020, y: 530, type: 'box' },
+      { x: 800, y: 492, type: 'can' }, { x: 840, y: 492, type: 'box' },
+      { x: 880, y: 492, type: 'bottle' }, { x: 920, y: 492, type: 'can' },
+      { x: 960, y: 492, type: 'box' }, { x: 1000, y: 492, type: 'can' },
+      { x: 840, y: 454, type: 'bottle' }, { x: 880, y: 454, type: 'can' },
+      { x: 920, y: 454, type: 'bottle' }, { x: 960, y: 454, type: 'can' },
+      { x: 880, y: 416, type: 'box' }, { x: 920, y: 416, type: 'box' },
+    ],
+  },
+];
+
+function targetProps(type) {
+  if (type === 'box')    return { w: 38, h: 38, mass: 1.4, color: '#a87a4a' };
+  if (type === 'can')    return { w: 28, h: 38, mass: 0.9, color: '#bababa' };
+  if (type === 'bottle') return { w: 22, h: 42, mass: 0.7, color: '#5fa84a' };
+  return { w: 30, h: 30, mass: 1.0, color: '#888' };
+}
+
+function ammoProps(type) {
+  if (type === 'can')       return { r: 16, mass: 0.7, color: '#cccccc' };
+  if (type === 'brick')     return { r: 22, mass: 1.8, color: '#a85a3a' };
+  if (type === 'explosive') return { r: 20, mass: 1.0, color: '#e74c3c' };
+  return { r: 18, mass: 1.0, color: '#888' };
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startLevel(idx) {
+  if (idx >= LEVELS.length) {
+    gs = 'WIN';
+    GF.gameEnded();
+    return;
+  }
+  levelIdx = idx;
+  var L = LEVELS[idx];
+  pit = { x: L.pit.x, y: L.pit.y, w: L.pit.w, h: L.pit.h };
+  ammoQueue = L.ammo.slice();
+  targets = [];
+  for (var i = 0; i < L.stack.length; i++) {
+    var s = L.stack[i];
+    var p = targetProps(s.type);
+    targets.push({
+      x: s.x, y: s.y, vx: 0, vy: 0,
+      w: p.w, h: p.h, mass: p.mass, type: s.type, color: p.color,
+      alive: true, settled: true, inPit: false,
+      angle: 0, vAng: 0, hitFlash: 0,
+    });
+  }
+  currentAmmo = null;
+  explosions = [];
+  dustPuffs = [];
+  loadNextAmmo();
+  gs = 'PLAYING';
+}
+
+function startGame() {
+  totalShots = 0;
+  startLevel(0);
+}
+
+function loadNextAmmo() {
+  if (ammoQueue.length === 0) {
+    setTimeout(function() {
+      if (gs === 'PLAYING' && targets.filter(function(t){return t.alive && !t.inPit;}).length > 0) {
+        gameOver();
+      }
+    }, 1500);
+    currentAmmo = null;
+    return;
+  }
+  var type = ammoQueue.shift();
+  var p = ammoProps(type);
+  currentAmmo = {
+    type: type, x: slingX, y: slingY - 20, vx: 0, vy: 0,
+    r: p.r, mass: p.mass, color: p.color,
+    flying: false, settled: false, hasHit: false, exploded: false,
+    landTimer: 0,
+  };
+}
+
+function gameOver() {
+  if (totalShots > 0 && (best === 0 || totalShots < best)) {
+    best = totalShots;
+    try { localStorage.setItem('slingshot_scrap_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+}
+
+function levelClear() {
+  if (levelIdx === LEVELS.length - 1) {
+    if (totalShots > 0 && (best === 0 || totalShots < best)) {
+      best = totalShots;
+      try { localStorage.setItem('slingshot_scrap_best', best); } catch (e) {}
+    }
+    gs = 'WIN';
+  } else {
+    gs = 'LEVEL_CLEAR';
+  }
+  GF.gameEnded();
+}
+
+// Screenshot helper
+window._jumpLevel = function(n) {
+  totalShots = (n||5) * 2;
+  startLevel(Math.min((n||5) - 1, LEVELS.length - 1));
+  for (var i = 0; i < targets.length; i++) {
+    var t = targets[i];
+    if (Math.random() < 0.45) {
+      t.vx = (Math.random() - 0.5) * 6;
+      t.vy = -Math.random() * 4 - 1;
+      t.settled = false;
+      t.angle = Math.random() * Math.PI * 2;
+      t.vAng = (Math.random() - 0.5) * 0.2;
+    }
+  }
+  if (currentAmmo) {
+    currentAmmo.flying = true;
+    currentAmmo.x = slingX + 240;
+    currentAmmo.y = slingY - 80;
+    currentAmmo.vx = 12;
+    currentAmmo.vy = -3;
+  }
+  for (var k = 0; k < 6; k++) {
+    dustPuffs.push({ x: 700 + Math.random()*300, y: 520 + Math.random()*80, r: 10 + Math.random()*15, life: 1 });
+  }
+  explosions.push({ x: 900, y: 520, r: 80, maxR: 120, life: 0.7 });
+};
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function worldFromScreen(sx, sy) {
+  var sc = GF.S;
+  var offX = (GF.W - WORLD_W * sc) / 2;
+  var offY = (GF.H - WORLD_H * sc) / 2;
+  return { x: (sx - offX) / sc, y: (sy - offY) / sc };
+}
+
+function onPressStart(sx, sy) {
+  if (gs !== 'PLAYING') return;
+  if (!currentAmmo || currentAmmo.flying) return;
+  var w = worldFromScreen(sx, sy);
+  var dx = w.x - slingX, dy = w.y - slingY;
+  if (Math.sqrt(dx*dx + dy*dy) < 320 || w.x < WORLD_W * 0.5) {
+    dragging = true;
+    dragStartX = w.x; dragStartY = w.y;
+    dragX = w.x; dragY = w.y;
+  }
+}
+
+function onPressMove(sx, sy) {
+  if (!dragging) return;
+  var w = worldFromScreen(sx, sy);
+  dragX = w.x; dragY = w.y;
+}
+
+function onPressEnd() {
+  if (!dragging) return;
+  dragging = false;
+  if (!currentAmmo || currentAmmo.flying) return;
+  var pullX = slingX - dragX;
+  var pullY = slingY - dragY;
+  var pullLen = Math.sqrt(pullX*pullX + pullY*pullY);
+  if (pullLen < 25) return;
+  var clamped = Math.min(pullLen, MAX_DRAG);
+  var nx = pullX / pullLen, ny = pullY / pullLen;
+  currentAmmo.x = slingX - nx * 30;
+  currentAmmo.y = slingY - ny * 30;
+  currentAmmo.vx = nx * clamped * POWER_MULT * 4;
+  currentAmmo.vy = ny * clamped * POWER_MULT * 4;
+  currentAmmo.flying = true;
+  currentAmmo.landTimer = 0;
+  totalShots++;
+  GF.spawnParticles(slingX, slingY, '#d4a574', 8);
+}
+
+function setupInput() {
+  var canvas = GF.canvas;
+  canvas.addEventListener('mousedown', function(e) { onPressStart(e.clientX, e.clientY); });
+  canvas.addEventListener('mousemove', function(e) { onPressMove(e.clientX, e.clientY); });
+  canvas.addEventListener('mouseup',   function(e) { onPressEnd(); });
+  canvas.addEventListener('mouseleave',function(e) { if (dragging) onPressEnd(); });
+  canvas.addEventListener('touchstart', function(e) {
+    if (e.touches.length > 0) onPressStart(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', function(e) {
+    if (e.touches.length > 0) onPressMove(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: false });
+  canvas.addEventListener('touchend',   function(e) { onPressEnd(); }, { passive: false });
+  canvas.addEventListener('touchcancel',function(e) { onPressEnd(); }, { passive: false });
+}
+
+// ── PHYSICS ──────────────────────────────────────────────────────────────
+function rectCircleCollide(rx, ry, rw, rh, cx, cy, cr) {
+  var left = rx - rw/2, right = rx + rw/2;
+  var top = ry - rh, bottom = ry;
+  var nearestX = Math.max(left, Math.min(cx, right));
+  var nearestY = Math.max(top, Math.min(cy, bottom));
+  var dx = cx - nearestX, dy = cy - nearestY;
+  var d2 = dx*dx + dy*dy;
+  if (d2 < cr*cr) {
+    var d = Math.sqrt(d2) || 0.001;
+    return { nx: dx/d, ny: dy/d, depth: cr - d };
+  }
+  return null;
+}
+
+function rectsOverlap(a, b) {
+  var al = a.x - a.w/2, ar = a.x + a.w/2;
+  var at = a.y - a.h, ab = a.y;
+  var bl = b.x - b.w/2, br = b.x + b.w/2;
+  var bt = b.y - b.h, bb = b.y;
+  if (ar < bl || al > br || ab < bt || at > bb) return null;
+  var ox = Math.min(ar - bl, br - al);
+  var oy = Math.min(ab - bt, bb - at);
+  return { ox: ox, oy: oy, axis: ox < oy ? 'x' : 'y',
+    sx: a.x < b.x ? -1 : 1, sy: a.y < b.y ? -1 : 1 };
+}
+
+function inPit(t) {
+  return t.x > pit.x && t.x < pit.x + pit.w && t.y > pit.y - 10 && t.y < pit.y + pit.h;
+}
+
+function explodeAt(x, y) {
+  explosions.push({ x: x, y: y, r: 0, maxR: EXPLOSION_RADIUS, life: 1 });
+  GF.spawnParticles(x, y, '#ff8a3c', 30);
+  GF.spawnParticles(x, y, '#ffcc40', 20);
+  GF.setShake(1.5);
+  for (var i = 0; i < targets.length; i++) {
+    var t = targets[i];
+    if (!t.alive || t.inPit) continue;
+    var dx = (t.x) - x, dy = (t.y - t.h/2) - y;
+    var d = Math.sqrt(dx*dx + dy*dy);
+    if (d < EXPLOSION_RADIUS && d > 0.1) {
+      var force = (1 - d / EXPLOSION_RADIUS) * 22 / Math.max(t.mass, 0.4);
+      t.vx += (dx / d) * force;
+      t.vy += (dy / d) * force - 3;
+      t.settled = false;
+      t.vAng += (Math.random() - 0.5) * 0.4;
+    }
+  }
+}
+
+function updatePhysics(dt) {
+  if (currentAmmo && currentAmmo.flying) {
+    currentAmmo.vy += GRAV;
+    currentAmmo.vx *= FRICTION_AIR;
+    currentAmmo.x += currentAmmo.vx;
+    currentAmmo.y += currentAmmo.vy;
+
+    // Pit drop check (no ground there)
+    var inPitCol = currentAmmo.x > pit.x && currentAmmo.x < pit.x + pit.w;
+    if (currentAmmo.y + currentAmmo.r > GROUND_Y && !inPitCol) {
+      currentAmmo.y = GROUND_Y - currentAmmo.r;
+      currentAmmo.vy = -currentAmmo.vy * BOUNCE;
+      currentAmmo.vx *= FRICTION_GROUND;
+      if (Math.abs(currentAmmo.vy) < 1.5 && Math.abs(currentAmmo.vx) < 0.5) {
+        currentAmmo.flying = false;
+        currentAmmo.settled = true;
+        currentAmmo.landTimer = 30;
+      }
+    } else if (inPitCol && currentAmmo.y > pit.y + pit.h + 30) {
+      retireAmmo();
+    }
+
+    if (currentAmmo && (currentAmmo.x > WORLD_W + 100 || currentAmmo.x < -100 || currentAmmo.y > WORLD_H + 200)) {
+      retireAmmo();
+    }
+
+    if (currentAmmo) {
+      for (var i = 0; i < targets.length; i++) {
+        var t = targets[i];
+        if (!t.alive || t.inPit) continue;
+        var col = rectCircleCollide(t.x, t.y, t.w, t.h, currentAmmo.x, currentAmmo.y, currentAmmo.r);
+        if (col) {
+          currentAmmo.x += col.nx * col.depth * 0.6;
+          currentAmmo.y += col.ny * col.depth * 0.6;
+          var av = Math.sqrt(currentAmmo.vx*currentAmmo.vx + currentAmmo.vy*currentAmmo.vy);
+          var transfer = Math.min(av * (currentAmmo.mass / (currentAmmo.mass + t.mass)) * 0.9, 18);
+          t.vx += -col.nx * transfer * 0.7;
+          t.vy += -col.ny * transfer * 0.7 - 1.5;
+          t.settled = false;
+          t.vAng += (Math.random() - 0.5) * 0.3 + (-col.nx) * 0.05;
+          var dot = currentAmmo.vx * col.nx + currentAmmo.vy * col.ny;
+          currentAmmo.vx -= 2 * dot * col.nx * BOUNCE;
+          currentAmmo.vy -= 2 * dot * col.ny * BOUNCE;
+          currentAmmo.vx *= 0.7;
+          currentAmmo.vy *= 0.7;
+          t.hitFlash = 1;
+          GF.spawnParticles(currentAmmo.x, currentAmmo.y, '#d4c098', 6);
+          GF.setShake(Math.min(0.4, transfer * 0.05));
+
+          if (currentAmmo.type === 'explosive' && !currentAmmo.exploded) {
+            currentAmmo.exploded = true;
+            explodeAt(currentAmmo.x, currentAmmo.y);
+            retireAmmo();
+            break;
+          }
+        }
+      }
+    }
+
+    if (currentAmmo && !currentAmmo.flying && currentAmmo.landTimer > 0) {
+      currentAmmo.landTimer--;
+      if (currentAmmo.landTimer <= 0) {
+        retireAmmo();
+      }
+    }
+  }
+
+  for (var j = 0; j < targets.length; j++) {
+    var tj = targets[j];
+    if (!tj.alive) continue;
+    if (tj.hitFlash > 0) tj.hitFlash = Math.max(0, tj.hitFlash - 0.06);
+
+    if (tj.inPit) {
+      tj.vy += GRAV;
+      tj.x += tj.vx;
+      tj.y += tj.vy;
+      if (tj.y > pit.y + pit.h + 20) {
+        tj.alive = false;
+        GF.spawnParticles(tj.x, pit.y + pit.h/2, '#3ba55d', 12);
+      }
+      continue;
+    }
+
+    if (!tj.settled) {
+      tj.vy += GRAV;
+      tj.vx *= FRICTION_AIR;
+      tj.x += tj.vx;
+      tj.y += tj.vy;
+      tj.angle += tj.vAng;
+      tj.vAng *= 0.97;
+
+      if (tj.y > GROUND_Y) {
+        if (tj.x > pit.x && tj.x < pit.x + pit.w) {
+          tj.inPit = true;
+          continue;
+        }
+        tj.y = GROUND_Y;
+        tj.vy = -tj.vy * BOUNCE;
+        tj.vx *= FRICTION_GROUND;
+        tj.vAng *= 0.5;
+        if (Math.abs(tj.vy) < SETTLE_THRESHOLD && Math.abs(tj.vx) < SETTLE_THRESHOLD) {
+          tj.vy = 0; tj.vx = 0;
+          tj.settled = true;
+          tj.vAng = 0;
+          if (Math.abs(tj.angle) < 0.3) tj.angle = 0;
+          dustPuffs.push({ x: tj.x, y: GROUND_Y - 4, r: 8, life: 0.8 });
+        }
+      }
+
+      if (tj.x < -200 || tj.x > WORLD_W + 200) {
+        tj.alive = false;
+      }
+    }
+
+    if (tj.alive && !tj.inPit && inPit(tj)) {
+      tj.inPit = true;
+    }
+  }
+
+  // Target-target collisions
+  for (var a = 0; a < targets.length; a++) {
+    var ta = targets[a];
+    if (!ta.alive || ta.inPit) continue;
+    for (var b = a + 1; b < targets.length; b++) {
+      var tb = targets[b];
+      if (!tb.alive || tb.inPit) continue;
+      if (ta.settled && tb.settled) continue;
+      var ov = rectsOverlap(ta, tb);
+      if (!ov) continue;
+      if (ov.axis === 'x') {
+        var pushA = ta.settled ? 0 : ov.ox / 2;
+        var pushB = tb.settled ? 0 : ov.ox / 2;
+        if (ta.settled) pushB = ov.ox;
+        if (tb.settled) pushA = ov.ox;
+        ta.x += ov.sx * pushA;
+        tb.x -= ov.sx * pushB;
+        if (!ta.settled && !tb.settled) {
+          var avg = (ta.vx + tb.vx) / 2;
+          ta.vx = avg * 0.6; tb.vx = avg * 0.6;
+        } else if (ta.settled) {
+          tb.vx *= -0.4;
+        } else {
+          ta.vx *= -0.4;
+        }
+      } else {
+        var top = ta.y < tb.y ? ta : tb;
+        var bot = top === ta ? tb : ta;
+        if (!top.settled) {
+          top.y -= ov.oy;
+          top.vy = -top.vy * 0.3;
+          top.vx *= 0.85;
+          top.vAng += (Math.random() - 0.5) * 0.04;
+          if (Math.abs(top.vy) < SETTLE_THRESHOLD && Math.abs(top.vx) < SETTLE_THRESHOLD && bot.settled) {
+            top.vy = 0; top.vx = 0; top.settled = true;
+            top.vAng = 0;
+            if (Math.abs(top.angle) < 0.3) top.angle = 0;
+          }
+        } else if (!bot.settled) {
+          bot.y += ov.oy;
+        }
+      }
+    }
+  }
+
+  if (gs === 'PLAYING') {
+    var aliveTargets = targets.filter(function(t){return t.alive && !t.inPit;}).length;
+    if (aliveTargets === 0) {
+      gs = 'CLEARING';
+      setTimeout(function() {
+        if (gs === 'CLEARING') levelClear();
+      }, 800);
+    }
+  }
+
+  for (var e = explosions.length - 1; e >= 0; e--) {
+    var ex = explosions[e];
+    ex.r += (ex.maxR - ex.r) * 0.3;
+    ex.life -= 0.04;
+    if (ex.life <= 0) explosions.splice(e, 1);
+  }
+
+  for (var d = dustPuffs.length - 1; d >= 0; d--) {
+    var dp = dustPuffs[d];
+    dp.r += 0.5;
+    dp.life -= 0.05;
+    if (dp.life <= 0) dustPuffs.splice(d, 1);
+  }
+}
+
+function retireAmmo() {
+  if (!currentAmmo) return;
+  currentAmmo = null;
+  setTimeout(function() {
+    if (gs === 'PLAYING') {
+      loadNextAmmo();
+    }
+  }, 400);
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function applyCamera(c) {
+  var sc = GF.S;
+  var offX = (GF.W - WORLD_W * sc) / 2;
+  var offY = (GF.H - WORLD_H * sc) / 2;
+  c.translate(offX, offY);
+  c.scale(sc, sc);
+}
+
+function drawWorld(c) {
+  var sky = c.createLinearGradient(0, 0, 0, WORLD_H);
+  sky.addColorStop(0, '#3a4a6e');
+  sky.addColorStop(0.6, '#5a7090');
+  sky.addColorStop(1, '#7a8aa0');
+  c.fillStyle = sky;
+  c.fillRect(0, 0, WORLD_W, WORLD_H);
+
+  c.fillStyle = '#2e3e58';
+  c.beginPath();
+  c.moveTo(0, 480);
+  c.bezierCurveTo(200, 420, 400, 460, 600, 440);
+  c.bezierCurveTo(800, 420, 1000, 470, 1280, 450);
+  c.lineTo(1280, GROUND_Y); c.lineTo(0, GROUND_Y); c.closePath();
+  c.fill();
+
+  var groundGrad = c.createLinearGradient(0, GROUND_Y, 0, WORLD_H);
+  groundGrad.addColorStop(0, '#7d6048');
+  groundGrad.addColorStop(1, '#4a3825');
+  c.fillStyle = groundGrad;
+  c.fillRect(0, GROUND_Y, WORLD_W, WORLD_H - GROUND_Y);
+
+  c.strokeStyle = 'rgba(0,0,0,0.15)';
+  c.lineWidth = 1;
+  for (var i = 0; i < 40; i++) {
+    var gx = i * 32;
+    c.beginPath();
+    c.moveTo(gx, GROUND_Y + 8); c.lineTo(gx + 16, GROUND_Y + 12);
+    c.stroke();
+  }
+
+  drawPit(c);
+  drawSlingshot(c);
+}
+
+function drawPit(c) {
+  var pitGrad = c.createLinearGradient(0, pit.y, 0, pit.y + pit.h);
+  pitGrad.addColorStop(0, '#0a1818');
+  pitGrad.addColorStop(1, '#1a2a2a');
+  c.fillStyle = pitGrad;
+  c.fillRect(pit.x, pit.y, pit.w, pit.h);
+
+  GF.drawSprite('recycle_bin', pit.x + pit.w/2, pit.y + pit.h/2, Math.max(pit.w, pit.h), function(c2, x, y, s) {
+    c2.fillStyle = '#2a8a4a';
+    c2.fillRect(pit.x - 8, pit.y - 12, pit.w + 16, 14);
+    c2.fillStyle = '#3ba55d';
+    c2.fillRect(pit.x - 8, pit.y - 12, pit.w + 16, 6);
+
+    c2.save();
+    c2.translate(pit.x + pit.w/2, pit.y + 16);
+    var R = 14;
+    for (var k = 0; k < 3; k++) {
+      var ang = k * (Math.PI*2/3) - Math.PI/2;
+      var ax = Math.cos(ang) * R, ay = Math.sin(ang) * R;
+      c2.save();
+      c2.translate(ax, ay);
+      c2.rotate(ang + Math.PI/3);
+      c2.fillStyle = '#ffffff';
+      c2.beginPath();
+      c2.moveTo(-7, -3); c2.lineTo(7, -3); c2.lineTo(0, 6); c2.closePath();
+      c2.fill();
+      c2.restore();
+    }
+    c2.restore();
+  });
+}
+
+function drawSlingshot(c) {
+  GF.drawSprite('slingshot_frame', slingX, (slingY + slingBaseY) / 2, 200, function(c2, x, y, s) {
+    c2.strokeStyle = '#6b4520';
+    c2.lineWidth = 14;
+    c2.lineCap = 'round';
+    c2.beginPath();
+    c2.moveTo(slingX, slingBaseY);
+    c2.lineTo(slingX, slingY + 20);
+    c2.stroke();
+    c2.beginPath();
+    c2.moveTo(slingX, slingY + 20);
+    c2.lineTo(slingX - 28, slingY - 30);
+    c2.stroke();
+    c2.beginPath();
+    c2.moveTo(slingX, slingY + 20);
+    c2.lineTo(slingX + 28, slingY - 30);
+    c2.stroke();
+    c2.strokeStyle = 'rgba(255,220,180,0.15)';
+    c2.lineWidth = 2;
+    c2.beginPath();
+    c2.moveTo(slingX - 4, slingBaseY); c2.lineTo(slingX - 4, slingY + 25);
+    c2.stroke();
+  });
+
+  c.strokeStyle = '#6a3a2a';
+  c.lineWidth = 4;
+  c.lineCap = 'round';
+  if (currentAmmo && !currentAmmo.flying && dragging) {
+    var pullX = slingX - dragX, pullY = slingY - dragY;
+    var pullLen = Math.sqrt(pullX*pullX + pullY*pullY);
+    var clamped = Math.min(pullLen, MAX_DRAG);
+    var nx = pullX / (pullLen || 1), ny = pullY / (pullLen || 1);
+    var aimX = slingX - nx * clamped, aimY = slingY - ny * clamped;
+    c.beginPath();
+    c.moveTo(slingX - 28, slingY - 30);
+    c.lineTo(aimX, aimY);
+    c.lineTo(slingX + 28, slingY - 30);
+    c.stroke();
+    c.fillStyle = 'rgba(255,255,255,0.5)';
+    var simVx = nx * clamped * POWER_MULT * 4;
+    var simVy = ny * clamped * POWER_MULT * 4;
+    var sx = aimX, sy = aimY;
+    for (var t = 1; t <= 18; t++) {
+      sx += simVx; sy += simVy;
+      simVy += GRAV;
+      simVx *= FRICTION_AIR;
+      if (sy > GROUND_Y || sx > WORLD_W) break;
+      var alpha = 1 - t / 18;
+      c.globalAlpha = alpha * 0.8;
+      c.beginPath();
+      c.arc(sx, sy, 4 - t*0.15, 0, Math.PI*2);
+      c.fill();
+    }
+    c.globalAlpha = 1;
+  } else {
+    var ax = slingX, ay = slingY - 8;
+    if (currentAmmo && !currentAmmo.flying) { ax = currentAmmo.x; ay = currentAmmo.y; }
+    c.beginPath();
+    c.moveTo(slingX - 28, slingY - 30);
+    c.lineTo(ax, ay);
+    c.lineTo(slingX + 28, slingY - 30);
+    c.stroke();
+  }
+}
+
+function drawTarget(c, t) {
+  c.save();
+  c.translate(t.x, t.y - t.h/2);
+  c.rotate(t.angle);
+  var flash = t.hitFlash || 0;
+  GF.drawSprite('target_' + t.type, 0, 0, Math.max(t.w, t.h) * 1.2, function(c2, x, y, s) {
+    drawTargetProcedural(c2, t, flash);
+  });
+  c.restore();
+}
+
+function drawTargetProcedural(c, t, flash) {
+  var w = t.w, h = t.h;
+  if (t.type === 'box') {
+    c.fillStyle = flash > 0.5 ? '#e8c074' : '#a87a4a';
+    GF.rr(c, -w/2, -h/2, w, h, 4);
+    c.fill();
+    c.strokeStyle = '#5a3e22';
+    c.lineWidth = 2;
+    c.stroke();
+    c.strokeStyle = '#6a4e32';
+    c.lineWidth = 3;
+    c.beginPath();
+    c.moveTo(-w/2, 0); c.lineTo(w/2, 0); c.stroke();
+    c.beginPath();
+    c.moveTo(0, -h/2); c.lineTo(0, -h/2 + 6);
+    c.moveTo(0, h/2); c.lineTo(0, h/2 - 6);
+    c.stroke();
+  } else if (t.type === 'can') {
+    c.fillStyle = flash > 0.5 ? '#fff' : '#bababa';
+    GF.rr(c, -w/2, -h/2, w, h, 3);
+    c.fill();
+    c.strokeStyle = '#666';
+    c.lineWidth = 1.5;
+    c.stroke();
+    c.strokeStyle = 'rgba(255,255,255,0.5)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(-w/2, -h/2 + 4); c.lineTo(w/2, -h/2 + 4); c.stroke();
+    c.beginPath();
+    c.moveTo(-w/2, h/2 - 4); c.lineTo(w/2, h/2 - 4); c.stroke();
+    c.fillStyle = '#c84848';
+    c.fillRect(-w/2, -4, w, 8);
+  } else if (t.type === 'bottle') {
+    c.fillStyle = flash > 0.5 ? '#a8e898' : '#5fa84a';
+    GF.rr(c, -w/2, -h/2 + 8, w, h - 8, 4);
+    c.fill();
+    c.fillRect(-w/4, -h/2, w/2, 12);
+    c.fillStyle = '#c0c060';
+    c.fillRect(-w/4 + 1, -h/2 - 2, w/2 - 2, 4);
+    c.fillStyle = 'rgba(255,255,255,0.25)';
+    c.fillRect(-w/2 + 3, -h/2 + 12, 3, h - 16);
+    c.strokeStyle = '#2a5e1e';
+    c.lineWidth = 1.5;
+    GF.rr(c, -w/2, -h/2 + 8, w, h - 8, 4);
+    c.stroke();
+  }
+}
+
+function drawAmmo(c, a) {
+  GF.drawSprite('ammo_' + a.type, a.x, a.y, a.r * 2.4, function(c2, x, y, s) {
+    drawAmmoProcedural(c2, a);
+  });
+}
+
+function drawAmmoProcedural(c, a) {
+  c.save();
+  c.translate(a.x, a.y);
+  if (a.type === 'can') {
+    c.fillStyle = '#cccccc';
+    c.beginPath(); c.arc(0, 0, a.r, 0, Math.PI*2); c.fill();
+    c.strokeStyle = '#666'; c.lineWidth = 2; c.stroke();
+    c.fillStyle = '#c84848';
+    c.fillRect(-a.r, -a.r*0.3, a.r*2, a.r*0.6);
+  } else if (a.type === 'brick') {
+    c.fillStyle = '#a85a3a';
+    GF.rr(c, -a.r, -a.r*0.7, a.r*2, a.r*1.4, 3);
+    c.fill();
+    c.strokeStyle = '#6a3018'; c.lineWidth = 2; c.stroke();
+    c.strokeStyle = 'rgba(0,0,0,0.3)';
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(-a.r, 0); c.lineTo(a.r, 0); c.stroke();
+  } else if (a.type === 'explosive') {
+    c.fillStyle = '#222';
+    c.beginPath(); c.arc(0, 0, a.r, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#444';
+    c.beginPath(); c.arc(-a.r*0.3, -a.r*0.3, a.r*0.5, 0, Math.PI*2); c.fill();
+    c.strokeStyle = '#aa6020';
+    c.lineWidth = 3;
+    c.beginPath();
+    c.moveTo(0, -a.r);
+    c.lineTo(a.r*0.4, -a.r*1.4);
+    c.stroke();
+    var tt = (Date.now() % 400) / 400;
+    c.fillStyle = '#ffcc40';
+    c.beginPath(); c.arc(a.r*0.4, -a.r*1.4, 3 + Math.sin(tt * Math.PI*2) * 1.5, 0, Math.PI*2); c.fill();
+  }
+  c.restore();
+}
+
+function drawHUD(c) {
+  var fs = 22;
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  c.fillText(GF.t('level') + ' ' + (levelIdx + 1) + '/' + LEVELS.length, 16, 16);
+
+  c.textAlign = 'right';
+  c.fillText(GF.t('score') + ': ' + totalShots, WORLD_W - 16, 16);
+
+  c.textAlign = 'center';
+  c.font = 'bold ' + (fs - 4) + 'px sans-serif';
+  c.fillStyle = '#ffd';
+  c.fillText(GF.t('ammo'), WORLD_W/2, 16);
+
+  var px = WORLD_W/2 - (1 + Math.min(ammoQueue.length, 5)) * 18;
+  var py = 50;
+  if (currentAmmo) {
+    drawMiniAmmo(c, px, py, currentAmmo.type, true);
+    px += 36;
+  }
+  for (var i = 0; i < ammoQueue.length && i < 6; i++) {
+    drawMiniAmmo(c, px + i * 32, py, ammoQueue[i], false);
+  }
+
+  var alive = targets.filter(function(t){return t.alive && !t.inPit;}).length;
+  c.textAlign = 'left';
+  c.font = '16px sans-serif';
+  c.fillStyle = '#bdf';
+  c.fillText(GF.t('targets') + ': ' + alive + '/' + targets.length, 16, 48);
+
+  if (levelIdx === 0 && totalShots === 0 && !dragging && currentAmmo && !currentAmmo.flying) {
+    c.font = 'bold 22px sans-serif';
+    c.fillStyle = 'rgba(255,255,255,0.85)';
+    c.textAlign = 'center';
+    c.fillText(GF.t('drag'), slingX + 80, slingY - 100);
+  }
+}
+
+function drawMiniAmmo(c, x, y, type, highlight) {
+  c.save();
+  c.translate(x, y);
+  if (highlight) {
+    c.fillStyle = 'rgba(255,255,200,0.3)';
+    c.beginPath(); c.arc(0, 8, 16, 0, Math.PI*2); c.fill();
+  }
+  if (type === 'can') {
+    c.fillStyle = '#cccccc';
+    c.beginPath(); c.arc(0, 8, 10, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#c84848';
+    c.fillRect(-10, 5, 20, 6);
+  } else if (type === 'brick') {
+    c.fillStyle = '#a85a3a';
+    c.fillRect(-12, 0, 24, 16);
+    c.strokeStyle = '#6a3018'; c.lineWidth = 1; c.strokeRect(-12, 0, 24, 16);
+  } else if (type === 'explosive') {
+    c.fillStyle = '#222';
+    c.beginPath(); c.arc(0, 8, 10, 0, Math.PI*2); c.fill();
+    c.strokeStyle = '#aa6020'; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(0, -2); c.lineTo(4, -8); c.stroke();
+    c.fillStyle = '#ffcc40';
+    c.beginPath(); c.arc(4, -8, 2, 0, Math.PI*2); c.fill();
+  }
+  c.restore();
+}
+
+function drawExplosions(c) {
+  for (var i = 0; i < explosions.length; i++) {
+    var ex = explosions[i];
+    c.globalAlpha = ex.life * 0.7;
+    var grad = c.createRadialGradient(ex.x, ex.y, 0, ex.x, ex.y, ex.r);
+    grad.addColorStop(0, '#fff7c0');
+    grad.addColorStop(0.4, '#ff8a3c');
+    grad.addColorStop(1, 'rgba(160,40,20,0)');
+    c.fillStyle = grad;
+    c.beginPath(); c.arc(ex.x, ex.y, ex.r, 0, Math.PI*2); c.fill();
+  }
+  c.globalAlpha = 1;
+}
+
+function drawDustPuffs(c) {
+  for (var i = 0; i < dustPuffs.length; i++) {
+    var dp = dustPuffs[i];
+    c.globalAlpha = dp.life * 0.5;
+    GF.drawSprite('dust_puff', dp.x, dp.y, dp.r * 4, function(c2, x, y, s) {
+      c2.fillStyle = '#c8a878';
+      c2.beginPath(); c2.arc(dp.x, dp.y, dp.r, 0, Math.PI*2); c2.fill();
+    });
+  }
+  c.globalAlpha = 1;
+}
+
+// ── UPDATE / DRAW HOOKS ──────────────────────────────────────────────────
+function update(dt) {
+  if (gs === 'PLAYING' || gs === 'CLEARING') {
+    updatePhysics(dt);
+  }
+}
+
+function draw(c) {
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  c.save();
+  applyCamera(c);
+  drawWorld(c);
+  for (var i = 0; i < targets.length; i++) {
+    if (targets[i].alive) drawTarget(c, targets[i]);
+  }
+  drawDustPuffs(c);
+  if (currentAmmo) drawAmmo(c, currentAmmo);
+  drawExplosions(c);
+  c.restore();
+
+  c.save();
+  applyCamera(c);
+  if (gs === 'PLAYING' || gs === 'CLEARING') {
+    drawHUD(c);
+  }
+  c.restore();
+
+  if (gs === 'MENU') {
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub: GF.t('sub'),
+      btnText: GF.t('play'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+  } else if (gs === 'LEVEL_CLEAR') {
+    GF.drawOverlay({
+      title: GF.t('levelClear'),
+      sub: GF.t('score') + ': ' + totalShots,
+      btnText: GF.t('next'),
+      btnFn: function() { startLevel(levelIdx + 1); },
+    });
+  } else if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + totalShots,
+      btnText: GF.t('retry'),
+      btnFn: function() { startLevel(levelIdx); },
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+  } else if (gs === 'WIN') {
+    GF.drawOverlay({
+      title: GF.t('win'),
+      sub: GF.t('score') + ': ' + totalShots,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+  }
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: WORLD_W,
+  designH: WORLD_H,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'slingshot_scrap',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('slingshot_scrap_best') || '0') || 0; } catch (e) {}
+    setupInput();
+    // Boot straight into level 1 to satisfy Yandex (no title screen)
+    startGame();
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>
