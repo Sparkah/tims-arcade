@@ -3,12 +3,15 @@ let games = [];   // from games.json
 let counts = {};  // from /api/counts
 let myVotes = JSON.parse(localStorage.getItem('myVotes') || '{}');
 let activeTab = 'top';
+let activeGenre = 'all';
 let searchTerm = '';
 
-const grid   = document.getElementById('grid');
-const empty  = document.getElementById('empty');
-const tabs   = document.getElementById('tabs');
-const search = document.getElementById('search');
+const grid     = document.getElementById('grid');
+const empty    = document.getElementById('empty');
+const tabs     = document.getElementById('tabs');
+const genres   = document.getElementById('genres');
+const featured = document.getElementById('featured');
+const search   = document.getElementById('search');
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 init();
@@ -27,6 +30,7 @@ async function init() {
   } catch (e) { /* ignore — works offline-style */ }
 
   attachEvents();
+  renderGenres();
   render();
 }
 
@@ -39,15 +43,49 @@ function attachEvents() {
     activeTab = btn.dataset.tab;
     render();
   });
+  genres.addEventListener('click', (e) => {
+    const btn = e.target.closest('.genre');
+    if (!btn) return;
+    document.querySelectorAll('.genre').forEach(g => g.classList.remove('active'));
+    btn.classList.add('active');
+    activeGenre = btn.dataset.genre;
+    render();
+  });
   search.addEventListener('input', (e) => {
     searchTerm = e.target.value.trim().toLowerCase();
     render();
   });
 }
 
+function renderGenres() {
+  // Count games per genre (only published ones)
+  const counts = { all: 0 };
+  for (const g of games) {
+    if (g.published === false) continue;
+    counts.all += 1;
+    const k = g.genre || 'other';
+    counts[k] = (counts[k] || 0) + 1;
+  }
+  // Hide row if there's only one genre — filter is meaningless
+  const distinct = Object.keys(counts).filter(k => k !== 'all');
+  if (distinct.length <= 1) { genres.innerHTML = ''; return; }
+
+  // Order: all first, then by frequency desc
+  const ordered = ['all', ...distinct.sort((a, b) => counts[b] - counts[a])];
+  genres.innerHTML = ordered.map(g => `
+    <button class="genre ${g === activeGenre ? 'active' : ''}" data-genre="${g}">
+      ${g === 'all' ? 'All genres' : g}<span class="count">${counts[g]}</span>
+    </button>
+  `).join('');
+}
+
 // ── Filtering / sorting ───────────────────────────────────────────────────
 function visible() {
   let list = games.filter(g => g.published !== false);
+
+  if (activeGenre !== 'all') {
+    list = list.filter(g => (g.genre || 'other') === activeGenre);
+  }
 
   if (searchTerm) {
     list = list.filter(g =>
@@ -78,6 +116,7 @@ function netScore(g) {
 
 // ── Rendering ─────────────────────────────────────────────────────────────
 function render() {
+  renderFeatured();
   const list = visible();
   grid.innerHTML = '';
   if (list.length === 0) {
@@ -87,6 +126,59 @@ function render() {
   }
   empty.classList.add('hidden');
   for (const g of list) grid.appendChild(card(g));
+}
+
+function engagementScore(g) {
+  const c = counts[g.slug] || {};
+  // Total minutes weighted heaviest, then plays, then likes-dislikes
+  const minutes = (c.seconds || 0) / 60;
+  const plays   = c.plays || 0;
+  const net     = (c.likes || 0) - (c.dislikes || 0);
+  return minutes * 3 + plays * 1 + net * 5;
+}
+
+function renderFeatured() {
+  // Only show on the default top-rated tab with no filters/search applied
+  if (activeTab !== 'top' || activeGenre !== 'all' || searchTerm) {
+    featured.classList.add('hidden');
+    featured.innerHTML = '';
+    return;
+  }
+  const eligible = games.filter(g => g.published !== false);
+  if (eligible.length < 2) { featured.classList.add('hidden'); return; }
+
+  const top = eligible.slice().sort((a, b) => engagementScore(b) - engagementScore(a))[0];
+  if (!top) { featured.classList.add('hidden'); return; }
+
+  // If there's no engagement data anywhere, fall back to the newest game
+  const topScore = engagementScore(top);
+  const game = topScore > 0
+    ? top
+    : eligible.slice().sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0))[0];
+
+  const c = counts[game.slug] || { likes: 0, dislikes: 0, plays: 0, seconds: 0 };
+  const minutes = Math.round((c.seconds || 0) / 60);
+  const playUrl = `/play.html?slug=${encodeURIComponent(game.slug)}`;
+
+  featured.innerHTML = `
+    <article class="hero" style="background-image: url('/thumbs/${game.slug}.png?v=1')">
+      <div class="hero-thumb" style="background-image: url('/thumbs/${game.slug}.png?v=1')"></div>
+      <div class="hero-content">
+        <div class="hero-badge">${topScore > 0 ? '🔥 Trending' : '✨ Featured'}</div>
+        <h2 class="hero-title"></h2>
+        <p class="hero-hook"></p>
+        <div class="hero-stats">
+          <span>👍 ${c.likes || 0}</span>
+          <span>▶ ${c.plays || 0}</span>
+          ${minutes > 0 ? `<span>⏱ ${minutes}m total play</span>` : ''}
+        </div>
+        <a class="hero-cta" href="${playUrl}">▶ Play featured game</a>
+      </div>
+    </article>
+  `;
+  featured.querySelector('.hero-title').textContent = game.title;
+  featured.querySelector('.hero-hook').textContent  = game.hook || '';
+  featured.classList.remove('hidden');
 }
 
 function emptyMessage() {

@@ -88,7 +88,7 @@ for ((i = 0; i < COUNT; i++)); do
 done
 
 # Build games.json from games.source.json (drop gameDir, add what the site needs)
-jq 'map({slug, title, hook, addedDate, published: (.published // true)})' "$SRC" > "$OUT_MANIFEST"
+jq 'map({slug, title, hook, genre: (.genre // "other"), addedDate, published: (.published // true)})' "$SRC" > "$OUT_MANIFEST"
 
 # ── sitemap.xml + rss.xml + robots.txt ──────────────────────────────────────
 # Generated at sync-time so they're static (cached by CF edge, instant serve).

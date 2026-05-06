@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-SLUG="" GAME_DIR="" TITLE="" HOOK="" PUBLISHED="true"
+SLUG="" GAME_DIR="" TITLE="" HOOK="" GENRE="other" PUBLISHED="true"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,6 +27,7 @@ while [[ $# -gt 0 ]]; do
     --game-dir)    GAME_DIR="$2"; shift 2 ;;
     --title)       TITLE="$2"; shift 2 ;;
     --hook)        HOOK="$2"; shift 2 ;;
+    --genre)       GENRE="$2"; shift 2 ;;
     --unpublished) PUBLISHED="false"; shift ;;
     -h|--help)
       sed -n '2,21p' "$0"; exit 0 ;;
@@ -36,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SLUG" || -z "$GAME_DIR" || -z "$TITLE" || -z "$HOOK" ]]; then
-  echo "Error: --slug --game-dir --title --hook are all required."
+  echo "Error: --slug --game-dir --title --hook are all required. Optional: --genre <cleaning|arcade|puzzle|dodge|multiplayer|other>"
   exit 1
 fi
 
@@ -60,9 +61,10 @@ NEW_ENTRY=$(jq -n \
   --arg gd     "$GAME_DIR" \
   --arg title  "$TITLE" \
   --arg hook   "$HOOK" \
+  --arg genre  "$GENRE" \
   --arg date   "$ADDED_DATE" \
   --argjson pub "$PUBLISHED" \
-  '{slug:$slug, gameDir:$gd, title:$title, hook:$hook, addedDate:$date, published:$pub}')
+  '{slug:$slug, gameDir:$gd, title:$title, hook:$hook, genre:$genre, addedDate:$date, published:$pub}')
 
 TMP="$(mktemp)"
 jq --argjson new "$NEW_ENTRY" \
