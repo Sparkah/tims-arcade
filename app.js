@@ -208,17 +208,45 @@ function render() {
   }
   empty.classList.add('hidden');
 
-  // First batch paints immediately so the visible area is interactive fast.
-  // The rest is deferred to idle time so 30+ thumbs don't block first paint.
-  const FIRST_BATCH = 6;
-  const firstBatch = list.slice(0, FIRST_BATCH);
-  const rest       = list.slice(FIRST_BATCH);
-  for (const g of firstBatch) grid.appendChild(card(g));
+  // Two-pass paint:
+  //   1. First 4 cards render with EAGER images + video previews → visible
+  //      area is interactive immediately.
+  //   2. The rest paint in a single idle batch with LAZY native loading and
+  //      no inline video — videos hydrate per-card when scrolled into view.
+  // Without this, 17+ thumbs (~250KB each) all start downloading at once,
+  // causing the 1-2s hitching Tim observed.
+  const EAGER = 4;
+  const eagerSet = list.slice(0, EAGER);
+  const rest     = list.slice(EAGER);
+  for (let i = 0; i < eagerSet.length; i++) {
+    grid.appendChild(card(eagerSet[i], { eager: true, priority: i < 2 }));
+  }
   if (rest.length === 0) return;
   const paintRest = () => {
     const frag = document.createDocumentFragment();
-    for (const g of rest) frag.appendChild(card(g));
+    for (const g of rest) frag.appendChild(card(g, { eager: false, priority: false }));
     grid.appendChild(frag);
+    // Hydrate videos lazily as cards scroll into view.
+    if ('IntersectionObserver' in window) {
+      const obs = new IntersectionObserver((entries) => {
+        for (const ent of entries) {
+          if (!ent.isIntersecting) continue;
+          const slot = ent.target.querySelector('.card-video-slot[data-src]');
+          if (slot) {
+            const v = document.createElement('video');
+            v.className = 'card-video';
+            v.src = slot.dataset.src;
+            v.poster = slot.dataset.poster || '';
+            v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
+            v.preload = 'metadata';
+            v.setAttribute('aria-hidden', 'true');
+            slot.replaceWith(v);
+          }
+          obs.unobserve(ent.target);
+        }
+      }, { rootMargin: '160px 0px' });
+      grid.querySelectorAll('.card[data-lazy="1"]').forEach(c => obs.observe(c));
+    }
   };
   if ('requestIdleCallback' in window) {
     requestIdleCallback(paintRest, { timeout: 800 });
@@ -304,7 +332,8 @@ function thumbUrl(slug, variant) {
     : `/thumbs/${slug}.png?v=1`;
 }
 
-function card(g) {
+function card(g, opts) {
+  opts = opts || { eager: true, priority: false };
   const c = counts[g.slug] || { likes: 0, dislikes: 0, plays: 0 };
   const myVote = myVotes[g.slug] || null;
   const isRecent = g.addedDate && (Date.now() - new Date(g.addedDate).getTime() < 3 * 24 * 60 * 60 * 1000);
@@ -312,18 +341,38 @@ function card(g) {
   const thumb    = thumbUrl(g.slug, variant);
   const playUrl  = `/play.html?slug=${encodeURIComponent(g.slug)}`;
 
-  // If a preview WebM exists, render it as a muted-autoloop video laid over
-  // the static thumb (still the poster while the video is buffering).
-  const mediaInner = g.hasPreview
-    ? `<video class="card-video" src="/previews/${g.slug}.webm" poster="${thumb}"
-              autoplay loop muted playsinline preload="metadata" aria-hidden="true"></video>`
-    : '';
+  // Eager (above-the-fold) cards get the inline autoplay video right away.
+  // Lazy cards get a slot div the IntersectionObserver upgrades to a real
+  // <video> when the card scrolls into view — keeps initial bandwidth small.
+  let mediaInner = '';
+  if (g.hasPreview) {
+    if (opts.eager) {
+      mediaInner = `<video class="card-video" src="/previews/${g.slug}.webm" poster="${thumb}"
+                          autoplay loop muted playsinline preload="metadata" aria-hidden="true"></video>`;
+    } else {
+      mediaInner = `<div class="card-video-slot"
+                         data-src="/previews/${g.slug}.webm"
+                         data-poster="${thumb}"></div>`;
+    }
+  }
+
+  // Native lazy-loading + fetchpriority lets the browser sequence requests:
+  // first 2 cards = high priority + eager fetch; next 2 = eager but normal;
+  // rest = lazy + low-priority background fetch.
+  const imgLoading  = opts.eager ? 'eager' : 'lazy';
+  const imgPriority = opts.priority ? 'high' : (opts.eager ? 'auto' : 'low');
+  const imgDecoding = opts.eager ? 'sync' : 'async';
+  const imgTag = `<img class="card-thumb-img" src="${thumb}" alt=""
+                       loading="${imgLoading}" fetchpriority="${imgPriority}"
+                       decoding="${imgDecoding}">`;
 
   const el = document.createElement('article');
   el.className = 'card';
   el.dataset.variant = variant;
+  if (!opts.eager) el.dataset.lazy = '1';
   el.innerHTML = `
-    <div class="card-thumb" data-num="${specimenNum(g)}" style="background-image: url('${thumb}')">
+    <div class="card-thumb" data-num="${specimenNum(g)}">
+      ${imgTag}
       ${mediaInner}
       ${isRecent ? '<span class="recent-badge">NEW</span>' : ''}
       ${c.plays ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
