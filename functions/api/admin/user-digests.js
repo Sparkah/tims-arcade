@@ -51,44 +51,52 @@ export async function onRequestGet({ request, env }) {
   }
 
   // ── Resolve project id from the public token ─────────────────────────
-  // The public key starts with `phc_`; PostHog API needs the numeric project
-  // id. Fastest path: the personal API key can list projects.
+  // Require an EXACT api_token match. Falling back to projects[0] could
+  // silently mix data from a different project on a multi-project key.
   const projectId = await getProjectId(env);
-  if (!projectId) return jsonError('could_not_resolve_posthog_project', 502);
+  if (!projectId) return jsonError('could_not_resolve_posthog_project (need exact api_token match)', 502);
 
-  // ── Pull recent persons (last 30 days) ───────────────────────────────
+  // ── Pull recent persons ──────────────────────────────────────────────
   const persons = await fetchPersons(env, projectId);
-  // Filter to those with at least 1 event so we don't waste tokens on empty profiles
-  const usersWithActivity = persons.filter(p => (p.event_count || 0) > 0);
 
-  // ── For each, fetch top-N events + summarize ─────────────────────────
-  // Cap at 50 users per refresh to bound cost; sort by recency.
-  const sorted = usersWithActivity
+  // ── Pick the latest USERS_TO_DIGEST users by recency ─────────────────
+  // CF Pages Functions have bounded wall-clock; 50 sequential fetches +
+  // LLM calls will time out. Cap to a small batch on cold load and
+  // parallelize the per-user pulls.
+  const USERS_TO_DIGEST = 12;
+  const sorted = persons
     .sort((a, b) => new Date(b.last_seen || 0) - new Date(a.last_seen || 0))
-    .slice(0, 50);
+    .slice(0, USERS_TO_DIGEST);
 
-  const enriched = [];
-  for (const p of sorted) {
-    const events = await fetchPersonEvents(env, projectId, p.distinct_ids?.[0] || p.id);
-    const topEvents = bucketEvents(events);
-    const digest = await summarize(env, p, events);
-    enriched.push({
-      id: p.distinct_ids?.[0] || p.id,
+  // Per-user enrichment in parallel (bounded fan-out — 12 concurrent
+  // fetches is well within CF's subrequest limit of 50).
+  const enriched = await Promise.all(sorted.map(async (p) => {
+    const distinctId = p.distinct_ids?.[0] || p.id;
+    const events = await fetchPersonEvents(env, projectId, distinctId);
+    return {
+      id: distinctId,
       email: p.properties?.email || null,
       first_seen: p.created_at,
       last_seen: p.last_seen,
       event_count: events.length,
-      top_events: topEvents,
-      digest,
-    });
-  }
+      top_events: bucketEvents(events),
+      digest: await summarize(env, p, events),
+      _person: p,
+    };
+  }));
+
+  // Drop users with zero events post-fetch — pre-filtering on persons.event_count
+  // doesn't work because PostHog often omits that field on the persons endpoint.
+  const usersWithEvents = enriched.filter(u => u.event_count > 0);
 
   const body = {
     generated_at: new Date().toISOString(),
     total_users: persons.length,
     anonymous: persons.filter(p => !p.properties?.email).length,
     identified: persons.filter(p => !!p.properties?.email).length,
-    users: enriched,
+    showing: usersWithEvents.length,
+    cap: USERS_TO_DIGEST,
+    users: usersWithEvents.map(u => { const { _person, ...rest } = u; return rest; }),
   };
 
   const response = new Response(JSON.stringify(body), {
@@ -105,20 +113,15 @@ export async function onRequestGet({ request, env }) {
 // ─────────────────────────────────────────────────────────────────────────
 
 async function getProjectId(env) {
-  // List projects accessible to this personal API key. Match on token prefix
-  // since PostHog includes the public token in project metadata.
   const r = await fetch(`${POSTHOG_HOST}/api/projects/`, {
     headers: { 'authorization': `Bearer ${env.POSTHOG_PERSONAL_KEY}` },
   });
   if (!r.ok) return null;
   const data = await r.json();
   const projects = data.results || data || [];
-  // Match by api_token prefix
-  const match = projects.find(p =>
-    p.api_token === env.PUBLIC_POSTHOG_KEY ||
-    (p.api_token && env.PUBLIC_POSTHOG_KEY && p.api_token.slice(0, 10) === env.PUBLIC_POSTHOG_KEY.slice(0, 10))
-  );
-  return match ? match.id : (projects[0] && projects[0].id);
+  // EXACT match only — picking a different project would silently mix data.
+  const match = projects.find(p => p.api_token === env.PUBLIC_POSTHOG_KEY);
+  return match ? match.id : null;
 }
 
 async function fetchPersons(env, projectId) {
