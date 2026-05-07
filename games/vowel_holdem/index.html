@@ -1,0 +1,1128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Vowel Hold'em</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a3d24; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script src="./wordlist.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: "Vowel Hold'em",
+    sub:   "Spell longer than the bot. Bet your chips.",
+    play: 'PLAY', retry: 'NEW GAME', next: 'NEXT HAND',
+    score: 'CHIPS', best: 'BEST',
+    gameover: 'BUSTED', won: 'YOU WIN!',
+    bet10: 'BET 10', bet25: 'BET 25', bet50: 'BET 50',
+    check: 'CHECK', call: 'CALL', fold: 'FOLD', reveal: 'REVEAL',
+    pot: 'POT', you: 'YOU', bot: 'BOT', hand: 'HAND',
+    flop: 'FLOP', turn: 'TURN', river: 'RIVER', showdown: 'SHOWDOWN',
+    yourWord: 'Your word', botWord: 'Bot',
+    invalid: 'Not a word', tooShort: 'Min 3 letters', noHand: 'Use 1+ hand letter',
+    win: 'You win!', lose: 'Bot wins', tie: 'Split pot',
+    botFolded: 'Bot folded', youFolded: 'You folded',
+    clear: 'CLEAR', tray: 'Tap letters to spell',
+  },
+  ru: {
+    title: "Холдем гласных",
+    sub:   "Собери слово длиннее бота. Ставь фишки.",
+    play: 'ИГРАТЬ', retry: 'СНОВА', next: 'НОВЫЙ КОН',
+    score: 'ФИШКИ', best: 'РЕКОРД',
+    gameover: 'ПРОИГРЫШ', won: 'ПОБЕДА!',
+    bet10: 'СТАВКА 10', bet25: 'СТАВКА 25', bet50: 'СТАВКА 50',
+    check: 'ЧЕК', call: 'КОЛЛ', fold: 'ПАС', reveal: 'ВСКРЫТЬ',
+    pot: 'БАНК', you: 'ТЫ', bot: 'БОТ', hand: 'РУКА',
+    flop: 'ФЛОП', turn: 'ТЕРН', river: 'РИВЕР', showdown: 'ВСКРЫТИЕ',
+    yourWord: 'Твоё слово', botWord: 'Бот',
+    invalid: 'Не слово', tooShort: 'Мин. 3 буквы', noHand: 'Нужна 1+ карта руки',
+    win: 'Ты выиграл!', lose: 'Бот выиграл', tie: 'Банк делится',
+    botFolded: 'Бот спасовал', youFolded: 'Ты спасовал',
+    clear: 'СБРОС', tray: 'Нажми на буквы',
+  },
+};
+
+// ── TUNABLES ─────────────────────────────────────────────────────────────
+var STARTING_CHIPS    = 100;
+var HAND_CONSONANTS   = 5;
+var FLOP_VOWELS       = 3;
+var TURN_VOWELS       = 1;
+var RIVER_VOWELS      = 1;
+var MIN_BET           = 10;
+var BLIND             = 5;
+var BOT_BLUFF_PROB    = 0.18;
+var MAX_HANDS         = 20;
+var WIN_CHIP_TARGET   = 500;
+
+// ── WORDLIST ─────────────────────────────────────────────────────────────
+var WORDS = null; // built on boot
+function buildWordSet() {
+  if (WORDS) return;
+  WORDS = Object.create(null);
+  var raw = (typeof WORDLIST_RAW === 'string') ? WORDLIST_RAW : '';
+  var parts = raw.split(' ');
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i].length >= 3) WORDS[parts[i]] = 1;
+  }
+}
+function isWord(w) { return !!(WORDS && w && WORDS[w.toLowerCase()]); }
+
+// ── DETERMINISTIC RNG (seeded daily) ─────────────────────────────────────
+function seededRng(seed) {
+  var s = seed >>> 0;
+  return function() {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+function dailySeed() {
+  var d = new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+}
+var rng = Math.random;
+
+// ── LETTER POOLS (frequency-weighted) ────────────────────────────────────
+// Consonants: weighted by Scrabble-ish frequency. No Q without U → reduce Q weight.
+var CONSONANTS = 'BBCCDDDFFGGGHHHJKLLLLMMMNNNNNNPPRRRRRRSSSSSTTTTTTVWWXYZ';
+// Vowels: AEIOU weighted, Y rare
+var VOWELS     = 'AAAAAAAAAEEEEEEEEEEEEEIIIIIIIIIOOOOOOOOUUUUY';
+function pick(pool) { return pool.charAt(Math.floor(rng() * pool.length)); }
+function dealConsonants(n) {
+  var r = [];
+  for (var i = 0; i < n; i++) r.push(pick(CONSONANTS));
+  return r;
+}
+function dealVowels(n) {
+  var r = [];
+  for (var i = 0; i < n; i++) r.push(pick(VOWELS));
+  return r;
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | DEAL | PREFLOP | FLOP | TURN | RIVER | SHOWDOWN | SETTLE | GAMEOVER | WON
+var chips = STARTING_CHIPS;
+var best = 0;
+var handNum = 0;
+var pot = 0;
+var playerBet = 0, botBet = 0;
+var playerChipsAtHandStart = STARTING_CHIPS;
+var botChips = 1000;        // bot has effectively unlimited bankroll for fluid play
+var playerHand = [];        // [{ch, area, idx, sel}]
+var botHand = [];
+var community = [];         // [{ch, revealed}]
+var tray = [];              // selected card refs (in order)
+var lastResult = null;      // { msg, sub, color }
+var actionMsg = null;       // transient feedback
+var actionMsgT = 0;
+var revealStarted = false;
+var botWord = '';
+var botWordLen = 0;
+var endHandT = 0;
+var phase = 'PREFLOP';      // betting phase (PREFLOP / POSTRIVER) — used during DEAL / FLOP / TURN / RIVER auto-progression
+var awaitingPlayer = false; // true when waiting for player bet decision
+var pendingCallAmount = 0;  // amount player must call
+var botActed = false;
+var dailyMode = true;
+
+// Layout cache (recomputed on resize via getLayout)
+function getLayout() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var portrait = H > W;
+  var cardW, cardH, gap;
+  if (portrait) {
+    cardW = Math.min(W * 0.13, 70);
+    gap = cardW * 0.25;
+  } else {
+    cardW = Math.min(H * 0.13, 80);
+    gap = cardW * 0.22;
+  }
+  cardH = cardW * 1.4;
+
+  var commY, handY, trayY, btnY;
+  if (portrait) {
+    commY = H * 0.32;
+    trayY = H * 0.50;
+    handY = H * 0.66;
+    btnY  = H * 0.83;
+  } else {
+    commY = H * 0.30;
+    trayY = H * 0.50;
+    handY = H * 0.68;
+    btnY  = H * 0.86;
+  }
+
+  return {
+    W: W, H: H, S: S, portrait: portrait,
+    cardW: cardW, cardH: cardH, gap: gap,
+    commY: commY, handY: handY, trayY: trayY, btnY: btnY,
+  };
+}
+
+// ── HAND LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  chips = STARTING_CHIPS;
+  handNum = 0;
+  if (dailyMode) rng = seededRng(dailySeed());
+  else rng = Math.random;
+  newHand();
+  GF.gameStarted();
+}
+
+function newHand() {
+  if (chips <= 0) { return endGame('GAMEOVER'); }
+  if (handNum >= MAX_HANDS) {
+    if (chips > STARTING_CHIPS) return endGame('WON');
+    return endGame('GAMEOVER'); // didn't grow stack
+  }
+  handNum++;
+  pot = 0;
+  playerBet = 0;
+  botBet = 0;
+  playerChipsAtHandStart = chips;
+  tray = [];
+  community = [];
+  lastResult = null;
+  revealStarted = false;
+  botWord = '';
+  botWordLen = 0;
+  phase = 'PREFLOP';
+  pendingCallAmount = 0;
+  botActed = false;
+  endHandT = 0;
+
+  // Post blinds
+  var blindAmt = Math.min(BLIND, chips);
+  chips -= blindAmt; playerBet += blindAmt; pot += blindAmt;
+  botChips -= BLIND; botBet += BLIND; pot += BLIND;
+
+  // Deal
+  playerHand = dealConsonants(HAND_CONSONANTS).map(function(ch, i) {
+    return { ch: ch, area: 'hand', idx: i, sel: false };
+  });
+  botHand = dealConsonants(HAND_CONSONANTS).map(function(ch, i) {
+    return { ch: ch, area: 'bothand', idx: i, sel: false };
+  });
+
+  gs = 'PREFLOP';
+  awaitingPlayer = true;
+}
+
+function dealFlop() {
+  var v = dealVowels(FLOP_VOWELS);
+  for (var i = 0; i < v.length; i++) {
+    community.push({ ch: v[i], area: 'comm', idx: community.length, sel: false, revealed: true });
+  }
+  gs = 'FLOP';
+  // brief pause then advance
+  setTimeout(dealTurn, 700);
+}
+
+function dealTurn() {
+  var v = dealVowels(TURN_VOWELS);
+  for (var i = 0; i < v.length; i++) {
+    community.push({ ch: v[i], area: 'comm', idx: community.length, sel: false, revealed: true });
+  }
+  gs = 'TURN';
+  setTimeout(dealRiver, 700);
+}
+
+function dealRiver() {
+  var v = dealVowels(RIVER_VOWELS);
+  for (var i = 0; i < v.length; i++) {
+    community.push({ ch: v[i], area: 'comm', idx: community.length, sel: false, revealed: true });
+  }
+  gs = 'RIVER';
+  // post-river betting round
+  phase = 'POSTRIVER';
+  pendingCallAmount = 0;
+  botActed = false;
+  awaitingPlayer = true;
+  // Bot might bet first occasionally (we let player act first for simplicity)
+}
+
+// ── BOT LOGIC ────────────────────────────────────────────────────────────
+function botBestWord(handLetters, commLetters) {
+  // Greedy: try to find longest word in WORDLIST_RAW that uses ≥1 hand letter and is buildable from available letters
+  var avail = {}; // letter -> count
+  var i, c;
+  for (i = 0; i < handLetters.length; i++) {
+    c = handLetters[i].toLowerCase();
+    avail[c] = (avail[c] || 0) + 1;
+  }
+  for (i = 0; i < commLetters.length; i++) {
+    c = commLetters[i].toLowerCase();
+    avail[c] = (avail[c] || 0) + 1;
+  }
+  var handSet = {};
+  for (i = 0; i < handLetters.length; i++) handSet[handLetters[i].toLowerCase()] = 1;
+
+  // Iterate full wordlist (8K words). For perf: skip very short.
+  var raw = WORDLIST_RAW;
+  var parts = raw.split(' ');
+  var best = '';
+  // Sort by length desc would be ideal but we iterate all
+  for (i = 0; i < parts.length; i++) {
+    var w = parts[i];
+    if (w.length < 3) continue;
+    if (w.length <= best.length) continue;
+    // Need ≥1 letter from hand
+    var usesHand = false;
+    var need = {};
+    for (var k = 0; k < w.length; k++) need[w[k]] = (need[w[k]] || 0) + 1;
+    var ok = true;
+    for (var L in need) {
+      if (!avail[L] || avail[L] < need[L]) { ok = false; break; }
+    }
+    if (!ok) continue;
+    // verify ≥1 hand letter
+    for (var j = 0; j < w.length; j++) {
+      if (handSet[w[j]]) { usesHand = true; break; }
+    }
+    if (!usesHand) continue;
+    best = w;
+  }
+  return best;
+}
+
+function botPreflopAction() {
+  // Estimate consonant strength: more common consonants = stronger
+  var goodCs = 'NRSTLDM';
+  var score = 0;
+  for (var i = 0; i < botHand.length; i++) {
+    if (goodCs.indexOf(botHand[i].ch) >= 0) score++;
+  }
+  var bluff = rng() < BOT_BLUFF_PROB;
+  // If player checked (pendingCallAmount = 0), bot may raise or check
+  if (pendingCallAmount === 0) {
+    if (score >= 3 || bluff) {
+      var bet = MIN_BET;
+      botChips -= bet; botBet += bet; pot += bet;
+      pendingCallAmount = bet - playerBet > 0 ? bet - playerBet : MIN_BET;
+      // Set call requirement for player (bot raised to bet level)
+      pendingCallAmount = botBet - playerBet;
+      flashAction('Bot bets ' + bet);
+    } else {
+      flashAction('Bot checks');
+    }
+  } else {
+    // Player bet — bot decides call/fold/raise
+    if (score >= 3 || bluff) {
+      // call
+      var need = pendingCallAmount;
+      botChips -= need; botBet += need; pot += need;
+      pendingCallAmount = 0;
+      flashAction('Bot calls');
+    } else if (score >= 2) {
+      // call
+      var need2 = pendingCallAmount;
+      botChips -= need2; botBet += need2; pot += need2;
+      pendingCallAmount = 0;
+      flashAction('Bot calls');
+    } else {
+      // fold preflop is rare — give player blind back and pot
+      flashAction('Bot folds');
+      chips += pot;
+      lastResult = { msg: GF.t('botFolded'), sub: '+' + pot, color: '#7ee787' };
+      gs = 'SETTLE';
+      endHandT = performance.now();
+      return;
+    }
+  }
+  botActed = true;
+  awaitingPlayer = (pendingCallAmount > 0);
+  // If both have acted and bets equal, advance to flop
+  if (botActed && pendingCallAmount === 0) {
+    awaitingPlayer = false;
+    setTimeout(dealFlop, 600);
+  }
+}
+
+function botPostriverAction() {
+  // Bot computes its best word on the spot
+  var commCh = community.map(function(c) { return c.ch; });
+  var handCh = botHand.map(function(c) { return c.ch; });
+  if (!botWord) {
+    botWord = botBestWord(handCh, commCh);
+    botWordLen = botWord.length;
+  }
+  var bluff = rng() < BOT_BLUFF_PROB;
+  var strong = botWordLen >= 6;
+  var medium = botWordLen >= 4;
+
+  if (pendingCallAmount === 0) {
+    if (strong || (medium && bluff)) {
+      var bet = strong ? MIN_BET * 2 : MIN_BET;
+      botChips -= bet; botBet += bet; pot += bet;
+      pendingCallAmount = botBet - playerBet;
+      flashAction('Bot bets ' + bet);
+    } else {
+      flashAction('Bot checks');
+    }
+  } else {
+    if (strong || bluff || medium) {
+      var need = pendingCallAmount;
+      botChips -= need; botBet += need; pot += need;
+      pendingCallAmount = 0;
+      flashAction('Bot calls');
+    } else {
+      flashAction('Bot folds');
+      chips += pot;
+      lastResult = { msg: GF.t('botFolded'), sub: '+' + pot, color: '#7ee787' };
+      gs = 'SETTLE';
+      endHandT = performance.now();
+      return;
+    }
+  }
+  botActed = true;
+  awaitingPlayer = (pendingCallAmount > 0);
+  if (botActed && pendingCallAmount === 0) {
+    awaitingPlayer = false;
+    setTimeout(showdown, 500);
+  }
+}
+
+// ── PLAYER ACTIONS ───────────────────────────────────────────────────────
+function playerBetAction(amount) {
+  if (!awaitingPlayer) return;
+  amount = Math.min(amount, chips);
+  if (amount < MIN_BET && pendingCallAmount === 0) return; // can't bet less than min
+  chips -= amount; playerBet += amount; pot += amount;
+  if (pendingCallAmount > 0) {
+    // calling/raising
+    if (amount >= pendingCallAmount) {
+      var raise = amount - pendingCallAmount;
+      pendingCallAmount = 0;
+      if (raise > 0) {
+        // counter-raise to bot
+        pendingCallAmount = 0;
+        // bot needs to react — set call obligation on bot
+        // simple: bot acts again after a beat
+        awaitingPlayer = false;
+        setTimeout(botActsAfterRaise, 500);
+        return;
+      }
+    }
+  } else {
+    // opening bet — bot must respond
+    pendingCallAmount = playerBet - botBet;
+    awaitingPlayer = false;
+    setTimeout(botActsAfterPlayer, 500);
+    return;
+  }
+  awaitingPlayer = false;
+  if (botActed && pendingCallAmount === 0) {
+    if (phase === 'PREFLOP') setTimeout(dealFlop, 500);
+    else setTimeout(showdown, 500);
+  }
+}
+
+function botActsAfterPlayer() {
+  if (phase === 'PREFLOP') botPreflopAction();
+  else botPostriverAction();
+}
+
+function botActsAfterRaise() {
+  // Bot responds to a player raise — usually call if invested, sometimes fold
+  if (rng() < 0.7) {
+    var need = playerBet - botBet;
+    if (need > 0) {
+      botChips -= need; botBet += need; pot += need;
+    }
+    pendingCallAmount = 0;
+    flashAction('Bot calls');
+    awaitingPlayer = false;
+    if (phase === 'PREFLOP') setTimeout(dealFlop, 500);
+    else setTimeout(showdown, 500);
+  } else {
+    flashAction('Bot folds');
+    chips += pot;
+    lastResult = { msg: GF.t('botFolded'), sub: '+' + pot, color: '#7ee787' };
+    gs = 'SETTLE';
+    endHandT = performance.now();
+  }
+}
+
+function playerCheckAction() {
+  if (!awaitingPlayer) return;
+  if (pendingCallAmount > 0) return; // can't check, must call/fold
+  awaitingPlayer = false;
+  if (!botActed) {
+    setTimeout(botActsAfterPlayer, 500);
+  } else {
+    if (phase === 'PREFLOP') setTimeout(dealFlop, 500);
+    else setTimeout(showdown, 500);
+  }
+}
+
+function playerCallAction() {
+  if (!awaitingPlayer || pendingCallAmount <= 0) return;
+  var amt = Math.min(pendingCallAmount, chips);
+  chips -= amt; playerBet += amt; pot += amt;
+  pendingCallAmount = 0;
+  awaitingPlayer = false;
+  if (phase === 'PREFLOP') setTimeout(dealFlop, 500);
+  else setTimeout(showdown, 500);
+}
+
+function playerFoldAction() {
+  if (!awaitingPlayer) return;
+  // forfeit pot to bot (player loses what they put in)
+  // chips already deducted; pot stays with bot
+  lastResult = { msg: GF.t('youFolded'), sub: '-' + (pot - 0), color: '#ff8c8c' };
+  gs = 'SETTLE';
+  endHandT = performance.now();
+  awaitingPlayer = false;
+}
+
+// ── SPELLING TRAY ────────────────────────────────────────────────────────
+function toggleCard(card) {
+  if (gs !== 'RIVER' && gs !== 'SHOWDOWN') return;
+  if (card.sel) {
+    // remove from tray
+    card.sel = false;
+    var idx = tray.indexOf(card);
+    if (idx >= 0) tray.splice(idx, 1);
+  } else {
+    if (tray.length >= 10) return;
+    card.sel = true;
+    tray.push(card);
+  }
+}
+
+function clearTray() {
+  for (var i = 0; i < tray.length; i++) tray[i].sel = false;
+  tray = [];
+}
+
+function trayWord() {
+  return tray.map(function(c) { return c.ch.toLowerCase(); }).join('');
+}
+
+function trayUsesHand() {
+  for (var i = 0; i < tray.length; i++) if (tray[i].area === 'hand') return true;
+  return false;
+}
+
+// ── SHOWDOWN ─────────────────────────────────────────────────────────────
+function showdown() {
+  gs = 'SHOWDOWN';
+  awaitingPlayer = true; // player builds word, then clicks REVEAL
+  // Compute bot word now
+  var commCh = community.map(function(c) { return c.ch; });
+  var handCh = botHand.map(function(c) { return c.ch; });
+  if (!botWord) {
+    botWord = botBestWord(handCh, commCh);
+    botWordLen = botWord.length;
+  }
+}
+
+function reveal() {
+  if (gs !== 'SHOWDOWN') return;
+  var w = trayWord();
+  if (w.length < 3) {
+    flashAction(GF.t('tooShort'));
+    return;
+  }
+  if (!trayUsesHand()) {
+    flashAction(GF.t('noHand'));
+    return;
+  }
+  if (!isWord(w)) {
+    flashAction(GF.t('invalid'));
+    return;
+  }
+  // Compare lengths
+  var pl = w.length;
+  var bl = botWordLen;
+  var msg, sub, col;
+  if (pl > bl) {
+    chips += pot;
+    msg = GF.t('win'); sub = '+' + pot; col = '#7ee787';
+  } else if (bl > pl) {
+    msg = GF.t('lose'); sub = '"' + (botWord || '—') + '"'; col = '#ff8c8c';
+  } else {
+    var split = Math.floor(pot / 2);
+    chips += split;
+    msg = GF.t('tie'); sub = '"' + w + '" vs "' + (botWord || '—') + '"'; col = '#ffd95a';
+  }
+  lastResult = { msg: msg, sub: sub, color: col, playerW: w, botW: botWord };
+  gs = 'SETTLE';
+  endHandT = performance.now();
+  awaitingPlayer = false;
+  GF.spawnParticles(GF.cx, GF.cy, col, 30);
+}
+
+function endGame(state) {
+  gs = state;
+  awaitingPlayer = false;
+  if (chips > best) {
+    best = chips;
+    try { localStorage.setItem('vowel_holdem_best', best); } catch (e) {}
+  }
+  GF.gameEnded();
+}
+
+function flashAction(s) {
+  actionMsg = s;
+  actionMsgT = 1.6;
+}
+
+// Screenshot helper — fast-forwards into different rich states based on n
+window._jumpLevel = function(n) {
+  startGame();
+  n = n || 1;
+  function selByCh(arr, ch) {
+    for (var i = 0; i < arr.length; i++) if (arr[i].ch === ch && !arr[i].sel) { arr[i].sel = true; tray.push(arr[i]); return; }
+  }
+  if (n === 1 || n == null) {
+    // showdown state with PLANTS spelled
+    pot = 65; chips = 95; playerBet = 35; botBet = 35; pendingCallAmount = 0;
+    playerHand = 'PLNTS'.split('').map(function(ch, i) { return { ch: ch, area: 'hand', idx: i, sel: false }; });
+    botHand   = 'BCDRT'.split('').map(function(ch, i) { return { ch: ch, area: 'bothand', idx: i, sel: false }; });
+    community = 'AEIOU'.split('').map(function(ch, i) { return { ch: ch, area: 'comm', idx: i, sel: false, revealed: true }; });
+    tray = [];
+    selByCh(playerHand, 'P'); selByCh(playerHand, 'L'); selByCh(community, 'A'); selByCh(playerHand, 'N'); selByCh(playerHand, 'T'); selByCh(playerHand, 'S');
+    gs = 'SHOWDOWN';
+    awaitingPlayer = true;
+  } else if (n === 2) {
+    // preflop betting — bot is hidden, player has 5 fresh consonants and pending call
+    pot = 40; chips = 80; playerBet = 20; botBet = 20; pendingCallAmount = 10;
+    playerHand = 'CHRMS'.split('').map(function(ch, i) { return { ch: ch, area: 'hand', idx: i, sel: false }; });
+    botHand   = 'BFGJK'.split('').map(function(ch, i) { return { ch: ch, area: 'bothand', idx: i, sel: false }; });
+    community = [];
+    tray = [];
+    gs = 'PREFLOP';
+    awaitingPlayer = true;
+  }
+};
+
+// ── DRAWING ──────────────────────────────────────────────────────────────
+function isVowel(ch) { return 'AEIOUY'.indexOf(ch.toUpperCase()) >= 0; }
+
+function drawCard(ctx, x, y, w, h, ch, opts) {
+  opts = opts || {};
+  var radius = w * 0.12;
+  // shadow
+  if (!opts.flat) {
+    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+    ctx.shadowBlur = w * 0.15;
+    ctx.shadowOffsetY = w * 0.06;
+  }
+  GF.rr(ctx, x, y, w, h, radius);
+  if (opts.bg) {
+    ctx.fillStyle = opts.bg;
+  } else {
+    var grad = ctx.createLinearGradient(x, y, x, y + h);
+    grad.addColorStop(0, '#fafafa');
+    grad.addColorStop(1, '#e3e3e3');
+    ctx.fillStyle = grad;
+  }
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetY = 0;
+
+  // border
+  ctx.strokeStyle = opts.borderColor || (opts.sel ? '#ffd95a' : 'rgba(0,0,0,0.18)');
+  ctx.lineWidth = opts.sel ? Math.max(2, w * 0.06) : Math.max(1, w * 0.025);
+  ctx.stroke();
+
+  // small corner letter
+  var smallFs = w * 0.20;
+  ctx.fillStyle = opts.letterColor || (isVowel(ch) ? '#c0392b' : '#1a1a1a');
+  ctx.font = 'bold ' + smallFs + 'px Georgia, serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText(ch, x + w * 0.12, y + h * 0.08);
+  ctx.save();
+  ctx.translate(x + w * 0.88, y + h * 0.92);
+  ctx.rotate(Math.PI);
+  ctx.fillText(ch, 0, 0);
+  ctx.restore();
+
+  // big centre letter
+  var bigFs = w * 0.55;
+  ctx.font = 'bold ' + bigFs + 'px Georgia, serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(ch, x + w / 2, y + h / 2);
+}
+
+function drawCardBack(ctx, x, y, w, h) {
+  var radius = w * 0.12;
+  ctx.shadowColor = 'rgba(0,0,0,0.4)';
+  ctx.shadowBlur = w * 0.15;
+  ctx.shadowOffsetY = w * 0.06;
+  GF.rr(ctx, x, y, w, h, radius);
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, '#5a3870');
+  grad.addColorStop(1, '#2c1a3a');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  ctx.strokeStyle = '#7e5a96';
+  ctx.lineWidth = Math.max(1, w * 0.04);
+  ctx.stroke();
+  // diamond pattern
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+  ctx.lineWidth = 1;
+  for (var i = -h; i < w + h; i += w * 0.18) {
+    ctx.beginPath();
+    ctx.moveTo(x + i, y);
+    ctx.lineTo(x + i + h, y + h);
+    ctx.stroke();
+  }
+}
+
+// Click hit-list (rebuilt every frame)
+var hits = []; // {x,y,w,h, fn}
+
+function addHit(x, y, w, h, fn) {
+  hits.push({ x: x, y: y, w: w, h: h, fn: fn });
+}
+
+function tryHit(px, py) {
+  for (var i = hits.length - 1; i >= 0; i--) {
+    var h = hits[i];
+    if (px >= h.x && px <= h.x + h.w && py >= h.y && py <= h.y + h.h) {
+      h.fn();
+      return true;
+    }
+  }
+  return false;
+}
+
+GF.canvas.addEventListener('click', function(e) { tryHit(e.clientX, e.clientY); });
+GF.canvas.addEventListener('touchstart', function(e) {
+  if (e.changedTouches && e.changedTouches[0]) {
+    var t = e.changedTouches[0];
+    tryHit(t.clientX, t.clientY);
+  }
+}, { passive: false });
+
+function drawHUD(ctx) {
+  var L = getLayout();
+  var fs = GF.clamp(16 * L.S, 12, 22);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('score') + ': ' + chips, 12 * L.S, 12 * L.S);
+  ctx.textAlign = 'right';
+  ctx.fillText(GF.t('hand') + ' ' + handNum + '/' + MAX_HANDS, L.W - 12 * L.S, 12 * L.S);
+  // Pot — left-aligned next to chips so it doesn't collide with the bot cards
+  if (pot > 0) {
+    ctx.textAlign = 'left';
+    var potFs = GF.clamp(16 * L.S, 12, 22);
+    ctx.font = 'bold ' + potFs + 'px sans-serif';
+    ctx.fillStyle = '#ffd95a';
+    ctx.fillText('| ' + GF.t('pot') + ': ' + pot, 130 * L.S, 12 * L.S);
+  }
+}
+
+function drawCommunity(ctx) {
+  var L = getLayout();
+  var slots = FLOP_VOWELS + TURN_VOWELS + RIVER_VOWELS; // 5
+  var totalW = slots * L.cardW + (slots - 1) * L.gap;
+  var startX = (L.W - totalW) / 2;
+  var y = L.commY;
+
+  // label
+  var lblFs = GF.clamp(13 * L.S, 10, 18);
+  ctx.font = 'bold ' + lblFs + 'px sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  var lbl = GF.t('flop');
+  if (gs === 'TURN') lbl = GF.t('turn');
+  else if (gs === 'RIVER' || gs === 'SHOWDOWN' || gs === 'SETTLE') lbl = GF.t('river');
+  else if (gs === 'PREFLOP' || gs === 'DEAL') lbl = GF.t('flop') + '/' + GF.t('turn') + '/' + GF.t('river');
+  ctx.fillText(lbl, L.W / 2, y - 8 * L.S);
+
+  for (var i = 0; i < slots; i++) {
+    var x = startX + i * (L.cardW + L.gap);
+    var card = community[i];
+    if (card) {
+      var sel = card.sel;
+      drawCard(ctx, x, y, L.cardW, L.cardH, card.ch, { sel: sel });
+      if (gs === 'SHOWDOWN' || (gs === 'RIVER' && community.length === 5)) {
+        addHit(x, y, L.cardW, L.cardH, (function(c) { return function() { toggleCard(c); }; })(card));
+      }
+    } else {
+      // empty slot outline
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+      ctx.lineWidth = 2;
+      GF.rr(ctx, x, y, L.cardW, L.cardH, L.cardW * 0.12);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawHand(ctx) {
+  var L = getLayout();
+  var n = playerHand.length;
+  var totalW = n * L.cardW + (n - 1) * L.gap;
+  var startX = (L.W - totalW) / 2;
+  var y = L.handY;
+
+  var lblFs = GF.clamp(13 * L.S, 10, 18);
+  ctx.font = 'bold ' + lblFs + 'px sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(GF.t('you') + ' — ' + GF.t('hand'), L.W / 2, y - 8 * L.S);
+
+  for (var i = 0; i < n; i++) {
+    var x = startX + i * (L.cardW + L.gap);
+    var card = playerHand[i];
+    var sel = card.sel;
+    drawCard(ctx, x, y, L.cardW, L.cardH, card.ch, { sel: sel });
+    if (gs === 'RIVER' || gs === 'SHOWDOWN') {
+      addHit(x, y, L.cardW, L.cardH, (function(c) { return function() { toggleCard(c); }; })(card));
+    }
+  }
+}
+
+function drawBotHand(ctx) {
+  var L = getLayout();
+  var n = botHand.length;
+  var topCardW = L.cardW * 0.7;
+  var topCardH = L.cardH * 0.7;
+  var topGap = L.gap * 0.7;
+  var totalW = n * topCardW + (n - 1) * topGap;
+  var startX = (L.W - totalW) / 2;
+  var y = 50 * L.S;
+
+  var lblFs = GF.clamp(12 * L.S, 9, 16);
+  ctx.font = 'bold ' + lblFs + 'px sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('bot'), L.W / 2, y - lblFs - 6 * L.S);
+
+  var showFront = (gs === 'SETTLE' && lastResult && lastResult.botW);
+  for (var i = 0; i < n; i++) {
+    var x = startX + i * (topCardW + topGap);
+    if (showFront) {
+      drawCard(ctx, x, y, topCardW, topCardH, botHand[i].ch, {});
+    } else {
+      drawCardBack(ctx, x, y, topCardW, topCardH);
+    }
+  }
+}
+
+function drawTray(ctx) {
+  var L = getLayout();
+  var w = L.W * 0.9;
+  var h = L.cardH * 0.65;
+  var x = (L.W - w) / 2;
+  var y = L.trayY - h / 2;
+
+  // bg
+  GF.rr(ctx, x, y, w, h, h * 0.2);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  if (tray.length === 0) {
+    var fs = GF.clamp(14 * L.S, 11, 18);
+    ctx.font = fs + 'px sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(GF.t('tray'), L.W / 2, y + h / 2);
+  } else {
+    // draw selected letters in order
+    var ts = h * 0.55;
+    ctx.font = 'bold ' + ts + 'px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    var spacing = ts * 0.85;
+    var totalW = tray.length * spacing;
+    var sx = L.W / 2 - totalW / 2 + spacing / 2;
+    for (var i = 0; i < tray.length; i++) {
+      ctx.fillStyle = isVowel(tray[i].ch) ? '#ff8c5a' : '#fff';
+      ctx.fillText(tray[i].ch, sx + i * spacing, y + h / 2);
+    }
+  }
+
+  // CLEAR button (top-right of tray)
+  if (tray.length > 0 && (gs === 'RIVER' || gs === 'SHOWDOWN')) {
+    var bw = 70 * L.S, bh = 30 * L.S;
+    var bx = x + w - bw - 8 * L.S, by = y + 8 * L.S;
+    GF.rr(ctx, bx, by, bw, bh, bh / 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.18)';
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + GF.clamp(11 * L.S, 9, 14) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(GF.t('clear'), bx + bw / 2, by + bh / 2);
+    addHit(bx, by, bw, bh, clearTray);
+  }
+}
+
+function drawButton(ctx, x, y, w, h, label, fn, opts) {
+  opts = opts || {};
+  var enabled = opts.enabled !== false;
+  GF.rr(ctx, x, y, w, h, h * 0.25);
+  if (opts.primary) {
+    var grad = ctx.createLinearGradient(x, y, x, y + h);
+    grad.addColorStop(0, enabled ? '#2ecc71' : '#3a4a3a');
+    grad.addColorStop(1, enabled ? '#27ae60' : '#2a3a2a');
+    ctx.fillStyle = grad;
+  } else if (opts.danger) {
+    ctx.fillStyle = enabled ? 'rgba(192, 57, 43, 0.85)' : 'rgba(60, 30, 30, 0.6)';
+  } else {
+    ctx.fillStyle = enabled ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
+  }
+  ctx.fill();
+  ctx.strokeStyle = enabled ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.1)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  var fs = GF.clamp(13 * GF.S, 10, 17);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = enabled ? '#fff' : 'rgba(255,255,255,0.4)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  if (enabled) addHit(x, y, w, h, fn);
+}
+
+function drawActionBar(ctx) {
+  var L = getLayout();
+  var y = L.btnY;
+  var btnH = GF.clamp(48 * L.S, 38, 60);
+
+  // Layout: 2 rows on portrait, 1 row on landscape
+  if (L.portrait) {
+    // Row 1: Bet 10 / Bet 25 / Bet 50
+    // Row 2: Check/Call / Fold / Reveal (or Next Hand etc.)
+    var row1Y = y;
+    var row2Y = y + btnH + 8 * L.S;
+    var pad = 8 * L.S;
+    var bw = (L.W - 4 * pad) / 3;
+
+    if (gs === 'PREFLOP' || gs === 'RIVER') {
+      drawButton(ctx, pad, row1Y, bw, btnH, GF.t('bet10'), function() { playerBetAction(MIN_BET); }, { enabled: awaitingPlayer && chips >= MIN_BET });
+      drawButton(ctx, pad * 2 + bw, row1Y, bw, btnH, GF.t('bet25'), function() { playerBetAction(25); }, { enabled: awaitingPlayer && chips >= 25 });
+      drawButton(ctx, pad * 3 + 2 * bw, row1Y, bw, btnH, GF.t('bet50'), function() { playerBetAction(50); }, { enabled: awaitingPlayer && chips >= 50 });
+
+      var checkLabel = pendingCallAmount > 0 ? (GF.t('call') + ' ' + Math.min(pendingCallAmount, chips)) : GF.t('check');
+      var checkFn = pendingCallAmount > 0 ? playerCallAction : playerCheckAction;
+      drawButton(ctx, pad, row2Y, bw, btnH, checkLabel, checkFn, { enabled: awaitingPlayer, primary: true });
+      drawButton(ctx, pad * 2 + bw, row2Y, bw, btnH, GF.t('fold'), playerFoldAction, { enabled: awaitingPlayer, danger: true });
+      if (gs === 'RIVER' && community.length === 5) {
+        drawButton(ctx, pad * 3 + 2 * bw, row2Y, bw, btnH, GF.t('reveal'), reveal, { enabled: !awaitingPlayer && tray.length > 0, primary: true });
+      }
+    } else if (gs === 'SHOWDOWN') {
+      drawButton(ctx, pad, row1Y, L.W - 2 * pad, btnH, GF.t('reveal'), reveal, { enabled: tray.length > 0, primary: true });
+    } else if (gs === 'SETTLE') {
+      drawButton(ctx, pad, row1Y, L.W - 2 * pad, btnH, GF.t('next'), newHand, { primary: true });
+    }
+  } else {
+    // Landscape: single row of 6
+    var pad2 = 10 * L.S;
+    var bw2 = (L.W - 7 * pad2) / 6;
+    if (gs === 'PREFLOP' || gs === 'RIVER') {
+      drawButton(ctx, pad2, y, bw2, btnH, GF.t('bet10'), function() { playerBetAction(MIN_BET); }, { enabled: awaitingPlayer && chips >= MIN_BET });
+      drawButton(ctx, pad2 * 2 + bw2, y, bw2, btnH, GF.t('bet25'), function() { playerBetAction(25); }, { enabled: awaitingPlayer && chips >= 25 });
+      drawButton(ctx, pad2 * 3 + 2 * bw2, y, bw2, btnH, GF.t('bet50'), function() { playerBetAction(50); }, { enabled: awaitingPlayer && chips >= 50 });
+      var checkLabel2 = pendingCallAmount > 0 ? (GF.t('call') + ' ' + Math.min(pendingCallAmount, chips)) : GF.t('check');
+      var checkFn2 = pendingCallAmount > 0 ? playerCallAction : playerCheckAction;
+      drawButton(ctx, pad2 * 4 + 3 * bw2, y, bw2, btnH, checkLabel2, checkFn2, { enabled: awaitingPlayer, primary: true });
+      drawButton(ctx, pad2 * 5 + 4 * bw2, y, bw2, btnH, GF.t('fold'), playerFoldAction, { enabled: awaitingPlayer, danger: true });
+      if (gs === 'RIVER' && community.length === 5) {
+        drawButton(ctx, pad2 * 6 + 5 * bw2, y, bw2, btnH, GF.t('reveal'), reveal, { enabled: !awaitingPlayer && tray.length > 0, primary: true });
+      }
+    } else if (gs === 'SHOWDOWN') {
+      drawButton(ctx, L.W * 0.35, y, L.W * 0.3, btnH, GF.t('reveal'), reveal, { enabled: tray.length > 0, primary: true });
+    } else if (gs === 'SETTLE') {
+      drawButton(ctx, L.W * 0.35, y, L.W * 0.3, btnH, GF.t('next'), newHand, { primary: true });
+    }
+  }
+}
+
+function drawSettleResult(ctx) {
+  if (!lastResult) return;
+  var L = getLayout();
+  var w = L.W * 0.8;
+  var h = 90 * L.S;
+  var x = (L.W - w) / 2;
+  var y = L.trayY - h / 2;
+
+  GF.rr(ctx, x, y, w, h, 12 * L.S);
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fill();
+  ctx.strokeStyle = lastResult.color;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = lastResult.color;
+  var fs1 = GF.clamp(22 * L.S, 16, 28);
+  ctx.font = 'bold ' + fs1 + 'px sans-serif';
+  ctx.fillText(lastResult.msg, L.W / 2, y + h * 0.35);
+
+  if (lastResult.sub) {
+    var fs2 = GF.clamp(14 * L.S, 11, 18);
+    ctx.font = fs2 + 'px sans-serif';
+    ctx.fillStyle = '#ddd';
+    ctx.fillText(lastResult.sub, L.W / 2, y + h * 0.7);
+  }
+}
+
+function drawActionMsg(ctx) {
+  if (!actionMsg || actionMsgT <= 0) return;
+  var L = getLayout();
+  var fs = GF.clamp(16 * L.S, 12, 22);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.globalAlpha = Math.min(1, actionMsgT);
+  ctx.fillStyle = '#ffd95a';
+  ctx.fillText(actionMsg, L.W / 2, 38 * L.S);
+  ctx.globalAlpha = 1;
+}
+
+function drawTable(ctx) {
+  var L = getLayout();
+  // felt
+  var grad = ctx.createRadialGradient(L.W / 2, L.H / 2, 60, L.W / 2, L.H / 2, Math.max(L.W, L.H) * 0.7);
+  grad.addColorStop(0, '#1a6e3f');
+  grad.addColorStop(1, '#0a3d24');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, L.W, L.H);
+
+  // table edge ring
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+  ctx.lineWidth = 8 * L.S;
+  ctx.beginPath();
+  ctx.ellipse(L.W / 2, L.H / 2, L.W * 0.45, L.H * 0.35, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (actionMsgT > 0) actionMsgT -= dt;
+  // No real-time logic; turn-based
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  hits = []; // reset hit list
+  drawTable(ctx);
+
+  if (gs === 'MENU') {
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub: GF.t('sub'),
+      btnText: GF.t('play'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+    return;
+  }
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + chips,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+    return;
+  }
+  if (gs === 'WON') {
+    GF.drawOverlay({
+      title: GF.t('won'),
+      sub: GF.t('score') + ': ' + chips,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+    return;
+  }
+
+  drawHUD(ctx);
+  drawBotHand(ctx);
+  drawCommunity(ctx);
+  if (gs === 'SETTLE') {
+    drawSettleResult(ctx);
+  } else {
+    drawTray(ctx);
+  }
+  drawHand(ctx);
+  drawActionBar(ctx);
+  drawActionMsg(ctx);
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'vowel_holdem',
+  onReady: function() {
+    buildWordSet();
+    try { best = parseInt(localStorage.getItem('vowel_holdem_best') || '0') || 0; } catch (e) {}
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Test hooks (only used by E2E playtest harness — not user-facing)
+window.__test_isWord = function(w) { return isWord(w); };
+window.__test_botBest = function(h, c) { return botBestWord(h, c); };
+
+// Expose state for post-build-tester gate
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    chips: chips,
+    handNum: handNum,
+    pot: pot,
+    playerBet: playerBet,
+    botBet: botBet,
+    community: community.length,
+    trayLen: tray.length,
+    awaitingPlayer: awaitingPlayer,
+    pendingCallAmount: pendingCallAmount,
+    botWordLen: botWordLen,
+    STARTING_CHIPS: STARTING_CHIPS,
+    HAND_CONSONANTS: HAND_CONSONANTS,
+    FLOP_VOWELS: FLOP_VOWELS,
+    TURN_VOWELS: TURN_VOWELS,
+    RIVER_VOWELS: RIVER_VOWELS,
+    MIN_BET: MIN_BET,
+    BLIND: BLIND,
+    BOT_BLUFF_PROB: BOT_BLUFF_PROB,
+    MAX_HANDS: MAX_HANDS,
+    WIN_CHIP_TARGET: WIN_CHIP_TARGET,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

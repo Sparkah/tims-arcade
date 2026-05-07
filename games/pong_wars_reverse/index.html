@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pong Wars Reverse</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #07070f; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'PONG WARS REVERSE',
+    sub:   'Both paddles are yours. MISS to convert enemy tiles. Hit and you protect the wrong team.',
+    sub2:  'Daily seed — everyone races the same board today',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'RED', best: 'TODAY BEST',
+    gameover: 'BLUE WINS', winTitle: 'RED WINS',
+    bounces: 'BOUNCES',
+    daySeed: 'Day seed',
+    redCov: 'RED COVERAGE',
+    instruct: 'Mouse: red paddle (top)   Arrows / A·D: blue paddle (bottom)',
+  },
+  ru: {
+    title: 'ПОНГ-ВОЙНЫ НАОБОРОТ',
+    sub:   'У тебя обе ракетки. ПРОМАХИВАЙСЯ, чтобы перекрашивать чужие клетки. Попал — спас не ту сторону.',
+    sub2:  'Сид дня — у всех сегодня одинаковое поле',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'КРАСНЫЕ', best: 'РЕКОРД ДНЯ',
+    gameover: 'ПОБЕДА СИНИХ', winTitle: 'ПОБЕДА КРАСНЫХ',
+    bounces: 'ОТСКОКОВ',
+    daySeed: 'Сид дня',
+    redCov: 'ЗОНА КРАСНЫХ',
+    instruct: 'Мышь: красная ракетка (сверху)   Стрелки / A·D: синяя (снизу)',
+  },
+};
+
+// ── TUNABLES (named in DESIGN.md, exposed via GF.exposeState) ────────────
+var GRID_W = 40;
+var GRID_H = 30;
+var BOUNCE_BUDGET = 200;
+var BALL_SPEED = 4.5;
+var PADDLE_W = 80;
+var PADDLE_H = 10;
+var WIN_THRESHOLD = 0.6;
+var DAILY_SEED_SALT = 'pong_wars_reverse';
+var SPIN_FACTOR = 0.15;
+var MIN_VERTICAL_SPEED = 2.0;
+
+// ── PALETTE ──────────────────────────────────────────────────────────────
+var COL_RED       = '#ff4d6d';
+var COL_RED_DEEP  = '#7a1428';
+var COL_BLUE      = '#4dc4ff';
+var COL_BLUE_DEEP = '#103a5c';
+var COL_BG        = '#07070f';
+var COL_BALL      = '#ffe066';
+var COL_GRID      = 'rgba(255,255,255,0.05)';
+
+// ── STATE ────────────────────────────────────────────────────────────────
+var gs = 'MENU';                  // MENU | PLAYING | WIN | GAMEOVER
+var grid = [];                    // GRID_W * GRID_H, 0 = blue, 1 = red
+var ball = { x: 0, y: 0, vx: 0, vy: 0, r: 0 };
+var paddleRed  = { x: 0, w: 0 };  // top — red half (rows 0..GRID_H/2-1 are red home)
+var paddleBlue = { x: 0, w: 0 };  // bottom — blue half
+var bouncesLeft = BOUNCE_BUDGET;
+var redCount = 0;
+var bestToday = 0;
+var seed = 0;
+var seedKey = '';
+var dailyBestKey = '';
+var lastFlipTs = 0;
+
+// Field rect — recomputed each frame from canvas size
+function field() {
+  var s = GF.S;
+  var pad = 24 * s;
+  var hudH = 80 * s;
+  var aspect = GRID_W / GRID_H;
+  var availW = GF.W - pad * 2;
+  var availH = GF.H - hudH - pad * 2;
+  var w, h;
+  if (availW / availH > aspect) {
+    h = availH;
+    w = h * aspect;
+  } else {
+    w = availW;
+    h = w / aspect;
+  }
+  var x = (GF.W - w) / 2;
+  var y = hudH + (availH - h) / 2 + pad / 2;
+  return { x: x, y: y, w: w, h: h, cellW: w / GRID_W, cellH: h / GRID_H };
+}
+
+// ── SEEDED RNG ───────────────────────────────────────────────────────────
+function makeRng(s) {
+  var x = s | 0;
+  return function() {
+    x = (x + 0x6D2B79F5) | 0;
+    var t = x;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function dayKey() {
+  var d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+
+function computeSeed() {
+  var d = new Date();
+  var n = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+  // Mix in a stable hash of the salt so different games with same date diverge.
+  var h = 5381;
+  for (var i = 0; i < DAILY_SEED_SALT.length; i++) {
+    h = ((h << 5) + h + DAILY_SEED_SALT.charCodeAt(i)) | 0;
+  }
+  return (n ^ h) >>> 0;
+}
+
+// ── GRID HELPERS ─────────────────────────────────────────────────────────
+function gridIdx(cx, cy) { return cy * GRID_W + cx; }
+
+function buildGrid() {
+  grid = new Uint8Array(GRID_W * GRID_H);
+  // Top half (rows 0..GRID_H/2-1) is red home (1), bottom half is blue home (0).
+  // Wait — by colour: red=1, blue=0. Top is red home so red lives there at start.
+  for (var y = 0; y < GRID_H; y++) {
+    for (var x = 0; x < GRID_W; x++) {
+      grid[gridIdx(x, y)] = (y < GRID_H / 2) ? 1 : 0;
+    }
+  }
+  countRed();
+}
+
+function countRed() {
+  var n = 0;
+  for (var i = 0; i < grid.length; i++) if (grid[i] === 1) n++;
+  redCount = n;
+}
+
+// ── ROUND LIFECYCLE ──────────────────────────────────────────────────────
+function startRound() {
+  buildGrid();
+  bouncesLeft = BOUNCE_BUDGET;
+  seed = computeSeed();
+  var rng = makeRng(seed);
+
+  // Spawn ball near vertical centre, deterministic horizontal offset.
+  var f = field();
+  ball.r = Math.max(6 * GF.S, Math.min(f.cellW, f.cellH) * 0.45);
+  ball.x = f.x + f.w * (0.3 + rng() * 0.4);
+  ball.y = f.y + f.h * 0.5;
+  // Initial direction: aimed up or down, with deterministic horizontal sign.
+  var ang = (rng() * 0.6 - 0.3) + (rng() < 0.5 ? -Math.PI / 2 : Math.PI / 2);
+  ball.vx = Math.cos(ang) * BALL_SPEED * GF.S;
+  ball.vy = Math.sin(ang) * BALL_SPEED * GF.S;
+  // Make sure vertical speed isn't too shallow so ball actually crosses tiles.
+  enforceMinVertical();
+
+  // Paddles centred on their respective half-axes.
+  paddleRed.w  = PADDLE_W * GF.S;
+  paddleBlue.w = PADDLE_W * GF.S;
+  paddleRed.x  = f.x + f.w / 2 - paddleRed.w / 2;
+  paddleBlue.x = f.x + f.w / 2 - paddleBlue.w / 2;
+
+  // Pull today's best from storage.
+  seedKey = dayKey();
+  dailyBestKey = 'pong_wars_reverse_best_' + seedKey;
+  try { bestToday = parseInt(localStorage.getItem(dailyBestKey) || '0', 10) || 0; } catch (_) {}
+
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+
+function endRound() {
+  var pct = Math.round((redCount / (GRID_W * GRID_H)) * 100);
+  if (pct > bestToday) {
+    bestToday = pct;
+    try { localStorage.setItem(dailyBestKey, String(pct)); } catch (_) {}
+  }
+  gs = (redCount / (GRID_W * GRID_H) >= WIN_THRESHOLD) ? 'WIN' : 'GAMEOVER';
+  GF.setShake(0.7);
+  GF.gameEnded();
+}
+
+window._jumpLevel = function() { startRound(); };
+
+// ── INPUT (paddles) ──────────────────────────────────────────────────────
+var mouseX = -1;
+GF.canvas.addEventListener('mousemove', function(e) { mouseX = e.clientX; });
+
+// Two-touch tracker — touches on red half drag red, on blue half drag blue.
+var touchRedId = null, touchBlueId = null;
+var touchRedX = -1, touchBlueX = -1;
+GF.canvas.addEventListener('touchstart', function(e) {
+  e.preventDefault();
+  var f = field();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    if (t.clientY < f.y + f.h / 2) {
+      if (touchRedId === null) { touchRedId = t.identifier; touchRedX = t.clientX; }
+    } else {
+      if (touchBlueId === null) { touchBlueId = t.identifier; touchBlueX = t.clientX; }
+    }
+  }
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function(e) {
+  e.preventDefault();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    if (t.identifier === touchRedId)  touchRedX  = t.clientX;
+    if (t.identifier === touchBlueId) touchBlueX = t.clientX;
+  }
+}, { passive: false });
+GF.canvas.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    if (t.identifier === touchRedId)  { touchRedId = null; touchRedX = -1; }
+    if (t.identifier === touchBlueId) { touchBlueId = null; touchBlueX = -1; }
+  }
+}, { passive: false });
+
+// ── PHYSICS ──────────────────────────────────────────────────────────────
+function enforceMinVertical() {
+  var minV = MIN_VERTICAL_SPEED * GF.S;
+  if (Math.abs(ball.vy) < minV) {
+    ball.vy = (ball.vy >= 0 ? 1 : -1) * minV;
+  }
+}
+
+function consumeBounce() {
+  bouncesLeft--;
+  if (bouncesLeft <= 0) endRound();
+}
+
+function ballCellAt(x, y) {
+  var f = field();
+  var cx = Math.floor((x - f.x) / f.cellW);
+  var cy = Math.floor((y - f.y) / f.cellH);
+  if (cx < 0 || cx >= GRID_W || cy < 0 || cy >= GRID_H) return -1;
+  return gridIdx(cx, cy);
+}
+
+// Ball owner colour: which side it currently belongs to (1=red, 0=blue).
+// Determined by where it's flipping FROM: when ball is moving INTO an enemy
+// tile we flip the tile to the ball's colour. The ball's own colour is set
+// by the LAST tile it converted (initial colour = the tile it spawned on).
+var ballColour = 1;
+
+function step(dt) {
+  if (gs !== 'PLAYING') return;
+  var f = field();
+
+  // Paddle input — mouse for red, keys (or touch on red half) for red.
+  // Wait — assignment: mouse-X drives RED, arrow-keys drive BLUE.
+  if (touchRedX >= 0) {
+    paddleRed.x = touchRedX - paddleRed.w / 2;
+  } else if (mouseX >= 0) {
+    paddleRed.x = mouseX - paddleRed.w / 2;
+  }
+  // Blue: keys
+  var blueDx = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA']) blueDx -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) blueDx += 1;
+  if (touchBlueX >= 0) {
+    paddleBlue.x = touchBlueX - paddleBlue.w / 2;
+  } else {
+    paddleBlue.x += blueDx * 7 * GF.S;
+  }
+  paddleRed.x  = GF.clamp(paddleRed.x,  f.x, f.x + f.w - paddleRed.w);
+  paddleBlue.x = GF.clamp(paddleBlue.x, f.x, f.x + f.w - paddleBlue.w);
+
+  // Move ball
+  var steps = 2; // sub-stepping for tile-perfect collisions
+  var sub = 1 / steps;
+  for (var s = 0; s < steps; s++) {
+    ball.x += ball.vx * sub;
+    ball.y += ball.vy * sub;
+
+    // Wall left/right (hard wall, costs a bounce)
+    if (ball.x - ball.r < f.x) {
+      ball.x = f.x + ball.r; ball.vx = Math.abs(ball.vx); consumeBounce();
+      if (gs !== 'PLAYING') break;
+    } else if (ball.x + ball.r > f.x + f.w) {
+      ball.x = f.x + f.w - ball.r; ball.vx = -Math.abs(ball.vx); consumeBounce();
+      if (gs !== 'PLAYING') break;
+    }
+
+    // Wall top/bottom — also hard, costs a bounce
+    if (ball.y - ball.r < f.y) {
+      ball.y = f.y + ball.r; ball.vy = Math.abs(ball.vy); consumeBounce();
+      if (gs !== 'PLAYING') break;
+    } else if (ball.y + ball.r > f.y + f.h) {
+      ball.y = f.y + f.h - ball.r; ball.vy = -Math.abs(ball.vy); consumeBounce();
+      if (gs !== 'PLAYING') break;
+    }
+
+    // Tile collision: pong-wars-style — when ball is over an enemy tile, flip
+    // the tile and reflect along the dominant axis. We sample 4 cardinal
+    // probes around the ball; each enemy tile we hit gets flipped, and we
+    // only consume ONE bounce per visit (the dominant-axis reflection).
+    var cellNow = ballCellAt(ball.x, ball.y);
+    if (cellNow >= 0) {
+      // Determine ball colour by the cell it's currently inside (if same colour)
+      // — used for paddle protection logic.
+      var cur = grid[cellNow];
+      // Probes: which cardinal neighbours are enemy?
+      var probes = [
+        { dx: ball.r,  dy: 0,       axis: 'x', sign: -1 },
+        { dx: -ball.r, dy: 0,       axis: 'x', sign:  1 },
+        { dx: 0,       dy: ball.r,  axis: 'y', sign: -1 },
+        { dx: 0,       dy: -ball.r, axis: 'y', sign:  1 },
+      ];
+      var flippedAny = false;
+      var flipAxis = null;
+      for (var p = 0; p < probes.length; p++) {
+        var pr = probes[p];
+        var idx = ballCellAt(ball.x + pr.dx, ball.y + pr.dy);
+        if (idx < 0 || idx === cellNow) continue;
+        if (grid[idx] !== ballColour) {
+          // Flip tile to ball's colour
+          grid[idx] = ballColour;
+          if (ballColour === 1) redCount++; else redCount--;
+          flippedAny = true;
+          flipAxis = pr.axis;
+        }
+      }
+      if (flippedAny) {
+        if (flipAxis === 'x') ball.vx = -ball.vx;
+        else if (flipAxis === 'y') ball.vy = -ball.vy;
+        consumeBounce();
+        lastFlipTs = performance.now();
+        if (gs !== 'PLAYING') break;
+      }
+      // Re-set ball colour from the tile underneath (after potential flips)
+      // so paddle-hits use the right notion.
+      var idx2 = ballCellAt(ball.x, ball.y);
+      if (idx2 >= 0) ballColour = grid[idx2];
+    }
+
+    // Paddle collisions — top paddle (red) is at field top with PADDLE_H below it;
+    // bottom paddle (blue) is at field bottom with PADDLE_H above it.
+    var ph = PADDLE_H * GF.S;
+    var redY  = f.y + 4 * GF.S;             // top paddle line
+    var blueY = f.y + f.h - 4 * GF.S - ph;  // bottom paddle line
+    // Red paddle: only triggers if ball moving up (vy < 0)
+    if (ball.vy < 0 &&
+        ball.y - ball.r < redY + ph &&
+        ball.y - ball.r > redY - 4 * GF.S &&
+        ball.x > paddleRed.x && ball.x < paddleRed.x + paddleRed.w) {
+      ball.y = redY + ph + ball.r;
+      ball.vy = Math.abs(ball.vy);
+      // Spin from offset
+      var off = (ball.x - (paddleRed.x + paddleRed.w / 2)) / (paddleRed.w / 2);
+      ball.vx += off * SPIN_FACTOR * BALL_SPEED * GF.S;
+      // Cap speed
+      var sp = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+      var maxSp = BALL_SPEED * 1.4 * GF.S;
+      if (sp > maxSp) { ball.vx *= maxSp / sp; ball.vy *= maxSp / sp; }
+      enforceMinVertical();
+      consumeBounce();
+      GF.spawnParticles(ball.x, ball.y, COL_RED, 8);
+      if (gs !== 'PLAYING') break;
+    }
+    if (ball.vy > 0 &&
+        ball.y + ball.r > blueY &&
+        ball.y + ball.r < blueY + ph + 4 * GF.S &&
+        ball.x > paddleBlue.x && ball.x < paddleBlue.x + paddleBlue.w) {
+      ball.y = blueY - ball.r;
+      ball.vy = -Math.abs(ball.vy);
+      var off2 = (ball.x - (paddleBlue.x + paddleBlue.w / 2)) / (paddleBlue.w / 2);
+      ball.vx += off2 * SPIN_FACTOR * BALL_SPEED * GF.S;
+      var sp2 = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+      var maxSp2 = BALL_SPEED * 1.4 * GF.S;
+      if (sp2 > maxSp2) { ball.vx *= maxSp2 / sp2; ball.vy *= maxSp2 / sp2; }
+      enforceMinVertical();
+      consumeBounce();
+      GF.spawnParticles(ball.x, ball.y, COL_BLUE, 8);
+      if (gs !== 'PLAYING') break;
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawField(ctx) {
+  var f = field();
+  // Background panel
+  ctx.fillStyle = '#0d0d1a';
+  ctx.fillRect(f.x - 6 * GF.S, f.y - 6 * GF.S, f.w + 12 * GF.S, f.h + 12 * GF.S);
+
+  // Tiles
+  var cw = f.cellW, ch = f.cellH;
+  for (var y = 0; y < GRID_H; y++) {
+    for (var x = 0; x < GRID_W; x++) {
+      var v = grid[gridIdx(x, y)];
+      ctx.fillStyle = (v === 1) ? COL_RED_DEEP : COL_BLUE_DEEP;
+      ctx.fillRect(f.x + x * cw, f.y + y * ch, cw + 0.5, ch + 0.5);
+    }
+  }
+
+  // Centre seam
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4 * GF.S, 4 * GF.S]);
+  ctx.beginPath();
+  ctx.moveTo(f.x, f.y + f.h / 2);
+  ctx.lineTo(f.x + f.w, f.y + f.h / 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function drawPaddles(ctx) {
+  var f = field();
+  var ph = PADDLE_H * GF.S;
+  var redY  = f.y + 4 * GF.S;
+  var blueY = f.y + f.h - 4 * GF.S - ph;
+  // Red paddle (top)
+  ctx.fillStyle = COL_RED;
+  GF.rr(ctx, paddleRed.x, redY, paddleRed.w, ph, ph / 2);
+  ctx.fill();
+  // Blue paddle (bottom)
+  ctx.fillStyle = COL_BLUE;
+  GF.rr(ctx, paddleBlue.x, blueY, paddleBlue.w, ph, ph / 2);
+  ctx.fill();
+}
+
+function drawBall(ctx) {
+  // Glow trail
+  var glowR = ball.r * 1.8;
+  var grad = ctx.createRadialGradient(ball.x, ball.y, ball.r * 0.3, ball.x, ball.y, glowR);
+  grad.addColorStop(0, 'rgba(255,224,102,0.9)');
+  grad.addColorStop(1, 'rgba(255,224,102,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, glowR, 0, Math.PI * 2); ctx.fill();
+  // Core
+  ctx.fillStyle = COL_BALL;
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawHUD(ctx) {
+  var s = GF.S;
+  var fs = GF.clamp(15 * s, 11, 20);
+  var fs2 = GF.clamp(13 * s, 10, 17);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  // Bounces remaining bar
+  var pad = 18 * s;
+  var barX = pad, barY = pad, barW = Math.min(280 * s, GF.W * 0.32), barH = 14 * s;
+  var pct = bouncesLeft / BOUNCE_BUDGET;
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  GF.rr(ctx, barX, barY + fs + 4 * s, barW, barH, barH / 2);
+  ctx.fill();
+  ctx.fillStyle = '#ffe066';
+  GF.rr(ctx, barX, barY + fs + 4 * s, barW * pct, barH, barH / 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('bounces') + ': ' + bouncesLeft + ' / ' + BOUNCE_BUDGET, barX, barY);
+
+  // Red coverage on the right
+  var redPct = Math.round((redCount / (GRID_W * GRID_H)) * 100);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = COL_RED;
+  ctx.font = 'bold ' + (fs * 1.4) + 'px sans-serif';
+  ctx.fillText(redPct + '%', GF.W - pad, barY);
+  ctx.font = 'bold ' + fs2 + 'px sans-serif';
+  ctx.fillStyle = '#9ab';
+  ctx.fillText(GF.t('redCov'), GF.W - pad, barY + fs * 1.4 + 2 * s);
+
+  // Threshold marker text under the cov number
+  ctx.fillStyle = (redPct >= WIN_THRESHOLD * 100) ? '#48c9b0' : '#5a5a72';
+  ctx.fillText('target ' + Math.round(WIN_THRESHOLD * 100) + '%', GF.W - pad, barY + fs * 1.4 + 2 * s + fs2 + 2 * s);
+
+  // Bottom: instructions (only first few seconds, fades after first flip)
+  if (lastFlipTs === 0 || performance.now() - lastFlipTs < 4000) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = fs2 + 'px sans-serif';
+    ctx.fillText(GF.t('instruct'), GF.cx, GF.H - pad - fs2);
+  }
+}
+
+function draw(ctx) {
+  ctx.fillStyle = COL_BG;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  // Subtle grid
+  ctx.strokeStyle = COL_GRID;
+  ctx.lineWidth = 1;
+  for (var i = 0; i < GF.W; i += 40) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, GF.H); ctx.stroke();
+  }
+  for (var j = 0; j < GF.H; j += 40) {
+    ctx.beginPath(); ctx.moveTo(0, j); ctx.lineTo(GF.W, j); ctx.stroke();
+  }
+
+  drawField(ctx);
+
+  if (gs === 'PLAYING' || gs === 'WIN' || gs === 'GAMEOVER') {
+    drawPaddles(ctx);
+    drawBall(ctx);
+    drawHUD(ctx);
+  }
+
+  if (gs === 'MENU') {
+    var seedStr = String(computeSeed());
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub:   GF.t('sub'),
+      sub2:  GF.t('daySeed') + ': ' + seedStr.slice(-6),
+      btnText: GF.t('play'),
+      btnFn:   startRound,
+      bestText: bestToday > 0 ? GF.t('best') + ': ' + bestToday + '%' : null,
+    });
+  }
+  if (gs === 'WIN') {
+    var p = Math.round((redCount / (GRID_W * GRID_H)) * 100);
+    GF.drawOverlay({
+      title: GF.t('winTitle'),
+      sub:   GF.t('score') + ': ' + p + '%',
+      btnText: GF.t('retry'),
+      btnFn: function() { gs = 'MENU'; },
+      bestText: GF.t('best') + ': ' + bestToday + '%',
+    });
+  }
+  if (gs === 'GAMEOVER') {
+    var p2 = Math.round((redCount / (GRID_W * GRID_H)) * 100);
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub:   GF.t('score') + ': ' + p2 + '%',
+      btnText: GF.t('retry'),
+      btnFn: function() { gs = 'MENU'; },
+      bestText: GF.t('best') + ': ' + bestToday + '%',
+    });
+  }
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  saveKey: 'pong_wars_reverse',
+  onReady: function() {
+    seedKey = dayKey();
+    dailyBestKey = 'pong_wars_reverse_best_' + seedKey;
+    try { bestToday = parseInt(localStorage.getItem(dailyBestKey) || '0', 10) || 0; } catch (_) {}
+    buildGrid();
+    gs = 'MENU';
+  },
+  onUpdate: step,
+  onDraw: draw,
+});
+
+// Expose state for the post-build-tester gate.
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    bouncesLeft: bouncesLeft,
+    redCount: redCount,
+    redFraction: redCount / (GRID_W * GRID_H),
+    GRID_W: GRID_W,
+    GRID_H: GRID_H,
+    BOUNCE_BUDGET: BOUNCE_BUDGET,
+    BALL_SPEED: BALL_SPEED,
+    PADDLE_W: PADDLE_W,
+    PADDLE_H: PADDLE_H,
+    WIN_THRESHOLD: WIN_THRESHOLD,
+    DAILY_SEED_SALT: DAILY_SEED_SALT,
+    SPIN_FACTOR: SPIN_FACTOR,
+    MIN_VERTICAL_SPEED: MIN_VERTICAL_SPEED,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

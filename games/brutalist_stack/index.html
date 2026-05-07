@@ -1,0 +1,882 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Brutalist Stack</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a0f08; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── GAME-SPECIFIC CONFIG ─────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'BRUTALIST STACK',
+    sub:   'Drag blocks to stack. R or right-click to rotate. Squat foundations cast longer shadows.',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SHADOW', best: 'BEST',
+    gameover: 'COLLAPSED!',
+    won: 'SUNSET!',
+    blocks: 'BLOCKS',
+    sun: 'SUN',
+    rotate: 'ROTATE',
+    tilt: 'TILT',
+  },
+  ru: {
+    title: 'БРУТАЛИСТСКАЯ СТОПКА',
+    sub:   'Перетаскивай блоки. R или правый клик — поворот. Широкое основание даёт длиннее тень.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ТЕНЬ', best: 'РЕКОРД',
+    gameover: 'ОБРУШЕНИЕ!',
+    won: 'ЗАКАТ!',
+    blocks: 'БЛОКИ',
+    sun: 'СОЛНЦЕ',
+    rotate: 'ПОВОРОТ',
+    tilt: 'НАКЛОН',
+  },
+};
+
+var SPRITE_NAMES = []; // procedural concrete art
+
+// ── DESIGN-SPACE / TUNABLES ──────────────────────────────────────────────
+var DW = 600, DH = 900;
+var BLOCK_BUDGET     = 20;
+var SUN_TICK_DEGREES = 5;
+var INITIAL_SUN_ANGLE = 15;
+var SHADOW_TILT_FAIL = 30;
+var BLOCK_SHAPES     = ['1x1','2x1','1x2','2x2','L'];
+var GRAVITY          = 0.45;
+var RESTITUTION      = 0.08;
+var TILT_DECAY       = 0.92;
+var FOUNDATION_WIDTH = 12;
+var GROUND_Y_RATIO   = 0.85;
+
+var CELL = 36;
+var GROUND_Y;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var score = 0, best = 0;
+var blocksLeft = BLOCK_BUDGET;
+var sunAngle = INITIAL_SUN_ANGLE;
+var stack = [];
+var held = null;
+var pointer = { x: 0, y: 0, down: false };
+var cumulativeTilt = 0;
+var failFrames = 0;
+var endedSent = false;
+var rotateBtn = null;
+var shapeQueue = [];
+var shadowPixels = 0;
+var sceneTimer = 0;
+
+var CONCRETE = ['#9aa0a8','#a8a8a0','#8e9498','#b0a89c','#7e848a'];
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+function rand(a,b){ return a + Math.random()*(b-a); }
+function randi(a,b){ return Math.floor(rand(a,b)); }
+function pickTint(){ return CONCRETE[randi(0,CONCRETE.length)]; }
+
+function dx(x){ return (x - DW/2) * GF.S + GF.cx; }
+function dy(y){ return (y - DH/2) * GF.S + GF.cy; }
+function dxy(x,y){ return { x: dx(x), y: dy(y) }; }
+function ds(v){ return v * GF.S; }
+function screenToDesign(sx, sy){
+  return { x: (sx - GF.cx) / GF.S + DW/2, y: (sy - GF.cy) / GF.S + DH/2 };
+}
+
+function shapeCells(name){
+  switch(name){
+    case '1x1': return [{cx:0,cy:0}];
+    case '2x1': return [{cx:0,cy:0},{cx:1,cy:0}];
+    case '1x2': return [{cx:0,cy:0},{cx:0,cy:1}];
+    case '2x2': return [{cx:0,cy:0},{cx:1,cy:0},{cx:0,cy:1},{cx:1,cy:1}];
+    case 'L':   return [{cx:0,cy:0},{cx:0,cy:1},{cx:1,cy:1}];
+    default:    return [{cx:0,cy:0}];
+  }
+}
+
+function rotateCellsCW(cells){
+  var out = cells.map(function(c){ return { cx: -c.cy, cy: c.cx }; });
+  var minX = Infinity, minY = Infinity;
+  for (var i = 0; i < out.length; i++){
+    if (out[i].cx < minX) minX = out[i].cx;
+    if (out[i].cy < minY) minY = out[i].cy;
+  }
+  return out.map(function(c){ return { cx: c.cx - minX, cy: c.cy - minY }; });
+}
+
+function cellsBounds(cells){
+  var w = 0, h = 0;
+  for (var i = 0; i < cells.length; i++){
+    if (cells[i].cx + 1 > w) w = cells[i].cx + 1;
+    if (cells[i].cy + 1 > h) h = cells[i].cy + 1;
+  }
+  return { w: w * CELL, h: h * CELL, cw: w, ch: h };
+}
+
+function newHeldBlock(){
+  if (shapeQueue.length === 0) return null;
+  var name = shapeQueue.shift();
+  var b = {
+    shape: name,
+    rot: 0,
+    cells: shapeCells(name),
+    tint: pickTint(),
+    x: DW/2,
+    y: 130,
+    dragging: false,
+  };
+  var bounds = cellsBounds(b.cells);
+  b.w = bounds.w; b.h = bounds.h;
+  return b;
+}
+
+function computeCOM(){
+  if (stack.length === 0) return DW/2;
+  var totalMass = 0, weightedX = 0;
+  for (var i = 0; i < stack.length; i++){
+    var b = stack[i];
+    var mass = b.cells.length * (1 + i * 0.04);
+    totalMass += mass;
+    weightedX += b.cx * mass;
+  }
+  return totalMass > 0 ? weightedX / totalMass : DW/2;
+}
+
+function stackHeightTopY(){
+  if (stack.length === 0) return GROUND_Y;
+  var top = GROUND_Y;
+  for (var i = 0; i < stack.length; i++){
+    if (stack[i].y < top) top = stack[i].y;
+  }
+  return top;
+}
+
+function recomputeTilt(){
+  var com = computeCOM();
+  var foundationCx = stack.length > 0 ? stack[0].cx : DW/2;
+  var lateralOffset = Math.abs(com - foundationCx);
+  var stackTopY = stackHeightTopY();
+  var stackHeightPx = (GROUND_Y - stackTopY);
+  var heightFactor = Math.max(0, stackHeightPx / DH);
+  cumulativeTilt = lateralOffset * heightFactor * GRAVITY * 2.4;
+  if (cumulativeTilt < 4) cumulativeTilt = Math.max(0, cumulativeTilt - RESTITUTION * 4);
+  return cumulativeTilt;
+}
+
+function buildShapeQueue(){
+  shapeQueue = [];
+  shapeQueue.push('2x1');
+  for (var i = 1; i < BLOCK_BUDGET; i++){
+    var roll = Math.random();
+    if (i < 4){
+      shapeQueue.push(roll < 0.4 ? '2x1' : roll < 0.7 ? '1x1' : roll < 0.85 ? '2x2' : roll < 0.95 ? '1x2' : 'L');
+    } else {
+      shapeQueue.push(roll < 0.28 ? '1x1' : roll < 0.55 ? '2x1' : roll < 0.72 ? '1x2' : roll < 0.88 ? '2x2' : 'L');
+    }
+  }
+}
+
+// ── SNAP / PLACEMENT ─────────────────────────────────────────────────────
+function snapHeld(){
+  if (!held) return;
+  var bounds = cellsBounds(held.cells);
+  var topLeftX = held.x - bounds.w / 2;
+  var topLeftY = held.y - bounds.h / 2;
+
+  var snapStep = CELL / 2;
+  topLeftX = Math.round(topLeftX / snapStep) * snapStep;
+
+  var supportY = GROUND_Y;
+  for (var i = 0; i < held.cells.length; i++){
+    var c = held.cells[i];
+    var colLeft  = topLeftX + c.cx * CELL;
+    var colRight = colLeft + CELL;
+    for (var j = 0; j < stack.length; j++){
+      var b = stack[j];
+      var bLeft = b.x;
+      var bRight = b.x + b.w;
+      if (colRight > bLeft + 0.01 && colLeft < bRight - 0.01){
+        var candidateTopLeftY = b.y - (c.cy + 1) * CELL;
+        if (candidateTopLeftY < supportY) supportY = candidateTopLeftY;
+      }
+    }
+    var groundCandidate = GROUND_Y - (c.cy + 1) * CELL;
+    if (groundCandidate < supportY) supportY = groundCandidate;
+  }
+  topLeftY = supportY;
+
+  var bb = bounds;
+  held.x = topLeftX + bb.w / 2;
+  held.y = topLeftY + bb.h / 2;
+  held.snappedTopLeftX = topLeftX;
+  held.snappedTopLeftY = topLeftY;
+}
+
+function heldOverlapsStack(){
+  if (!held) return false;
+  var topLeftX = held.snappedTopLeftX !== undefined ? held.snappedTopLeftX : (held.x - held.w/2);
+  var topLeftY = held.snappedTopLeftY !== undefined ? held.snappedTopLeftY : (held.y - held.h/2);
+  for (var i = 0; i < held.cells.length; i++){
+    var c = held.cells[i];
+    var hcx = topLeftX + c.cx * CELL;
+    var hcy = topLeftY + c.cy * CELL;
+    for (var j = 0; j < stack.length; j++){
+      var b = stack[j];
+      for (var k = 0; k < b.cells.length; k++){
+        var bc = b.cells[k];
+        var bcx = b.x + bc.cx * CELL;
+        var bcy = b.y + bc.cy * CELL;
+        if (hcx + 0.5 < bcx + CELL - 0.5 && hcx + CELL - 0.5 > bcx + 0.5 &&
+            hcy + 0.5 < bcy + CELL - 0.5 && hcy + CELL - 0.5 > bcy + 0.5){
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function heldHasSupport(){
+  if (!held) return false;
+  var topLeftX = held.snappedTopLeftX !== undefined ? held.snappedTopLeftX : (held.x - held.w/2);
+  var topLeftY = held.snappedTopLeftY !== undefined ? held.snappedTopLeftY : (held.y - held.h/2);
+  for (var i = 0; i < held.cells.length; i++){
+    var c = held.cells[i];
+    var bottomY = topLeftY + (c.cy + 1) * CELL;
+    var leftX = topLeftX + c.cx * CELL;
+    var rightX = leftX + CELL;
+    if (Math.abs(bottomY - GROUND_Y) < 1.5) return true;
+    for (var j = 0; j < stack.length; j++){
+      var b = stack[j];
+      if (Math.abs(bottomY - b.y) < 1.5){
+        var bLeft = b.x;
+        var bRight = b.x + b.w;
+        if (rightX > bLeft + 0.5 && leftX < bRight - 0.5) return true;
+      }
+    }
+  }
+  return false;
+}
+
+function placeHeld(){
+  if (!held) return false;
+  snapHeld();
+  if (heldOverlapsStack()) return false;
+  if (!heldHasSupport()) return false;
+  // Reject placements that drift outside design bounds
+  if (held.snappedTopLeftX < -CELL || held.snappedTopLeftX + held.w > DW + CELL) return false;
+  var topLeftX = held.snappedTopLeftX;
+  var topLeftY = held.snappedTopLeftY;
+  var bounds = cellsBounds(held.cells);
+  var b = {
+    shape: held.shape,
+    cells: held.cells.slice(),
+    rot: held.rot,
+    x: topLeftX,
+    y: topLeftY,
+    w: bounds.w,
+    h: bounds.h,
+    cw: bounds.cw,
+    ch: bounds.ch,
+    tint: held.tint,
+    cx: topLeftX + bounds.w / 2,
+  };
+  stack.push(b);
+  blocksLeft--;
+  sunAngle += SUN_TICK_DEGREES;
+  recomputeTilt();
+
+  var sp = dxy(b.cx, topLeftY + bounds.h);
+  GF.spawnParticles(sp.x, sp.y, '#cdc6b8', 8);
+  GF.setShake(0.18);
+
+  computeShadow();
+  score = Math.round(shadowPixels);
+
+  if (blocksLeft <= 0){
+    held = null;
+    triggerWin();
+    return true;
+  }
+  held = newHeldBlock();
+  return true;
+}
+
+function triggerWin(){
+  gs = 'WIN';
+  if (score > best){ best = score; try { localStorage.setItem('brutalist_stack_best', best); } catch(e){} }
+  if (!endedSent){ endedSent = true; if (GF.gameEnded) GF.gameEnded(); }
+  GF.setShake(0.6);
+  for (var i = 0; i < 24; i++){
+    GF.spawnParticles(GF.cx + (Math.random()-0.5)*GF.W*0.5, GF.cy, '#ffb854', 1);
+  }
+}
+
+function triggerCollapse(){
+  gs = 'GAMEOVER';
+  if (!endedSent){ endedSent = true; if (GF.gameEnded) GF.gameEnded(); }
+  GF.setShake(1.4);
+  for (var i = 0; i < stack.length; i++){
+    var b = stack[i];
+    var sp = dxy(b.cx, b.y + b.h/2);
+    GF.spawnParticles(sp.x, sp.y, '#9a948a', 5);
+  }
+}
+
+// ── SHADOW ───────────────────────────────────────────────────────────────
+function computeShadow(){
+  if (stack.length === 0){ shadowPixels = 0; return; }
+  var ang = sunAngle * Math.PI / 180;
+  var tanA = Math.tan(ang);
+  var intervals = [];
+  for (var i = 0; i < stack.length; i++){
+    var b = stack[i];
+    var hTop = GROUND_Y - b.y;
+    var hBot = GROUND_Y - (b.y + b.h);
+    var sLeft = b.x - hTop * tanA;
+    var sRight = (b.x + b.w) - hBot * tanA;
+    if (sLeft > sRight){ var t = sLeft; sLeft = sRight; sRight = t; }
+    intervals.push({ a: sLeft, b: sRight });
+  }
+  intervals.sort(function(a,b){ return a.a - b.a; });
+  var total = 0;
+  var curA = intervals[0].a, curB = intervals[0].b;
+  for (var j = 1; j < intervals.length; j++){
+    if (intervals[j].a <= curB){
+      if (intervals[j].b > curB) curB = intervals[j].b;
+    } else {
+      total += (curB - curA);
+      curA = intervals[j].a; curB = intervals[j].b;
+    }
+  }
+  total += (curB - curA);
+  shadowPixels = Math.max(0, total);
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function onPointerDown(sx, sy){
+  pointer.down = true;
+  pointer.x = sx; pointer.y = sy;
+  if (rotateBtn && sx >= rotateBtn.x && sx <= rotateBtn.x + rotateBtn.w && sy >= rotateBtn.y && sy <= rotateBtn.y + rotateBtn.h){
+    rotateHeld();
+    return;
+  }
+  if (gs === 'PLAYING' && held){
+    held.dragging = true;
+    var d = screenToDesign(sx, sy);
+    held.x = d.x;
+    held.y = Math.max(80, d.y - 80);
+  }
+}
+function onPointerMove(sx, sy){
+  pointer.x = sx; pointer.y = sy;
+  if (pointer.down && gs === 'PLAYING' && held && held.dragging){
+    var d = screenToDesign(sx, sy);
+    held.x = d.x;
+    held.y = Math.max(80, d.y - 80);
+  }
+}
+function onPointerUp(sx, sy){
+  pointer.down = false;
+  if (gs === 'PLAYING' && held && held.dragging){
+    held.dragging = false;
+    snapHeld();
+    if (!placeHeld()){
+      held.x = DW/2;
+      held.y = 130;
+      held.snappedTopLeftX = undefined;
+      held.snappedTopLeftY = undefined;
+      GF.spawnFloat(GF.cx, GF.cy - 60 * GF.S, GF.lang === 'ru' ? 'НЕ ОПОРА' : 'NO SUPPORT', '#ff7766');
+    }
+  }
+}
+
+function rotateHeld(){
+  if (!held) return;
+  held.cells = rotateCellsCW(held.cells);
+  held.rot = (held.rot + 1) % 4;
+  var bounds = cellsBounds(held.cells);
+  held.w = bounds.w; held.h = bounds.h;
+  GF.spawnFloat(GF.cx, GF.cy - 80 * GF.S, GF.t('rotate'), '#ffd66b');
+}
+
+(function(){
+  var cv = GF.canvas;
+  cv.addEventListener('mousedown', function(e){
+    if (e.button === 2){ e.preventDefault(); rotateHeld(); return; }
+    onPointerDown(e.clientX, e.clientY);
+  });
+  cv.addEventListener('mousemove', function(e){ onPointerMove(e.clientX, e.clientY); });
+  window.addEventListener('mouseup', function(e){ onPointerUp(e.clientX, e.clientY); });
+  cv.addEventListener('touchstart', function(e){
+    if (e.changedTouches.length){
+      var t = e.changedTouches[0];
+      onPointerDown(t.clientX, t.clientY);
+    }
+  }, { passive: false });
+  cv.addEventListener('touchmove', function(e){
+    if (e.changedTouches.length){
+      var t = e.changedTouches[0];
+      onPointerMove(t.clientX, t.clientY);
+    }
+  }, { passive: false });
+  cv.addEventListener('touchend', function(e){
+    if (e.changedTouches.length){
+      var t = e.changedTouches[0];
+      onPointerUp(t.clientX, t.clientY);
+    }
+  }, { passive: false });
+  document.addEventListener('keydown', function(e){
+    if (e.code === 'KeyR') rotateHeld();
+  });
+})();
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame(){
+  GROUND_Y = DH * GROUND_Y_RATIO;
+  blocksLeft = BLOCK_BUDGET;
+  sunAngle = INITIAL_SUN_ANGLE;
+  cumulativeTilt = 0;
+  failFrames = 0;
+  shadowPixels = 0;
+  score = 0;
+  endedSent = false;
+  stack = [];
+  buildShapeQueue();
+  held = newHeldBlock();
+  gs = 'PLAYING';
+  if (GF.gameStarted) GF.gameStarted();
+}
+
+function jumpToBusyState(){
+  startGame();
+  // Build a wide brutalist tower for screenshots: solid 4-wide foundation,
+  // narrower mid section, single-cell crown. ~10 placements.
+  var placements = [
+    { shape:'2x1', x: DW/2 - CELL*1.5 },  // foundation L
+    { shape:'2x1', x: DW/2 + CELL*0.5 },  // foundation R
+    { shape:'2x1', x: DW/2 - CELL*1.5 },  // 2nd row L
+    { shape:'2x1', x: DW/2 + CELL*0.5 },  // 2nd row R
+    { shape:'2x2', x: DW/2 - CELL },      // 3rd row centre 2x2
+    { shape:'2x1', x: DW/2 - CELL },      // 5th row
+    { shape:'1x1', x: DW/2 - CELL*0.5 },  // narrow
+    { shape:'L',   x: DW/2 - CELL*0.5 },
+    { shape:'1x1', x: DW/2 - CELL*0.5 },  // crown
+    { shape:'1x1', x: DW/2 + CELL*0.5 },
+  ];
+  for (var i = 0; i < placements.length && blocksLeft > 0; i++){
+    var p = placements[i];
+    if (!held) held = newHeldBlock();
+    if (!held) break;
+    held.shape = p.shape;
+    held.cells = shapeCells(p.shape);
+    var b = cellsBounds(held.cells);
+    held.w = b.w; held.h = b.h;
+    held.tint = CONCRETE[i % CONCRETE.length];
+    held.x = p.x;
+    held.y = 200;
+    if (!placeHeld()){
+      held.x = DW/2;
+      held.y = 200;
+      placeHeld();
+    }
+  }
+  // Roll back sun a bit so shadow is dramatic but still visible (~55deg)
+  sunAngle = 55;
+  computeShadow();
+  score = Math.round(shadowPixels);
+  if (!held) held = newHeldBlock();
+}
+
+window._jumpLevel = function(){ jumpToBusyState(); };
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt){
+  sceneTimer += dt;
+  if (gs !== 'PLAYING') return;
+  recomputeTilt();
+  if (cumulativeTilt > SHADOW_TILT_FAIL){
+    failFrames++;
+    if (failFrames >= 2) triggerCollapse();
+  } else {
+    failFrames = 0;
+  }
+  if (held && !held.dragging){
+    held.x += (DW/2 - held.x) * 0.06;
+    held.y += (130 - held.y) * 0.06;
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx){
+  drawSky(ctx);
+  drawSun(ctx);
+  drawGround(ctx);
+  drawShadows(ctx);
+  drawStack(ctx);
+  if (gs === 'PLAYING' && held) drawHeld(ctx);
+  if (gs === 'PLAYING'){
+    drawHUD(ctx);
+    drawRotateButton(ctx);
+  }
+  if (gs === 'MENU'){
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub: GF.t('sub'),
+      btnText: GF.t('play'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+  }
+  if (gs === 'GAMEOVER'){
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  }
+  if (gs === 'WIN'){
+    GF.drawOverlay({
+      title: GF.t('won'),
+      sub: GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  }
+}
+
+function drawSky(ctx){
+  var p = (sunAngle - INITIAL_SUN_ANGLE) / (SUN_TICK_DEGREES * BLOCK_BUDGET);
+  p = GF.clamp(p, 0, 1);
+  var topR = Math.round(GF.lerp(60, 28, p));
+  var topG = Math.round(GF.lerp(30, 18, p));
+  var topB = Math.round(GF.lerp(80, 40, p));
+  var midR = Math.round(GF.lerp(220, 240, p));
+  var midG = Math.round(GF.lerp(120, 90, p));
+  var midB = Math.round(GF.lerp(60, 40, p));
+  var horR = Math.round(GF.lerp(255, 240, p));
+  var horG = Math.round(GF.lerp(180, 110, p));
+  var horB = Math.round(GF.lerp(80, 50, p));
+  var grad = ctx.createLinearGradient(0, 0, 0, GF.H);
+  grad.addColorStop(0, 'rgb('+topR+','+topG+','+topB+')');
+  grad.addColorStop(0.55, 'rgb('+midR+','+midG+','+midB+')');
+  grad.addColorStop(0.78, 'rgb('+horR+','+horG+','+horB+')');
+  grad.addColorStop(1, '#1a0f08');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+}
+
+function drawSun(ctx){
+  var horizonY = dy(GROUND_Y);
+  var p = sunAngle / 180;
+  var sunX = GF.W * (1 - p) * 0.9 + GF.W * 0.05;
+  var sunY = horizonY - ds(40);
+  var rad = ds(64);
+  var gg = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, rad * 2.2);
+  gg.addColorStop(0, 'rgba(255,220,140,0.85)');
+  gg.addColorStop(0.4, 'rgba(255,160,70,0.35)');
+  gg.addColorStop(1, 'rgba(255,120,40,0)');
+  ctx.fillStyle = gg;
+  ctx.beginPath(); ctx.arc(sunX, sunY, rad * 2.2, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#fff2c0';
+  ctx.beginPath(); ctx.arc(sunX, sunY, rad, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#ffd07a';
+  ctx.beginPath(); ctx.arc(sunX, sunY, rad * 0.7, 0, Math.PI*2); ctx.fill();
+}
+
+function drawGround(ctx){
+  var gy = dy(GROUND_Y);
+  var g = ctx.createLinearGradient(0, gy, 0, GF.H);
+  g.addColorStop(0, '#2a1a10');
+  g.addColorStop(0.4, '#1a1008');
+  g.addColorStop(1, '#0a0604');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, gy, GF.W, GF.H - gy);
+  ctx.fillStyle = 'rgba(255,160,70,0.4)';
+  ctx.fillRect(0, gy - 1, GF.W, 2);
+  ctx.strokeStyle = 'rgba(255,200,140,0.25)';
+  ctx.lineWidth = ds(2);
+  ctx.setLineDash([ds(8), ds(6)]);
+  var guideW = ds(FOUNDATION_WIDTH * CELL / 2);
+  ctx.beginPath();
+  ctx.moveTo(GF.cx - guideW, gy);
+  ctx.lineTo(GF.cx + guideW, gy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(255,255,255,0.04)';
+  for (var i = 0; i < 28; i++){
+    var rx = (i * 47 + 13) % GF.W;
+    var ry = gy + ds((i * 23 % 80) + 10);
+    ctx.fillRect(rx, ry, ds(3), ds(2));
+  }
+}
+
+function drawShadows(ctx){
+  if (stack.length === 0) return;
+  var ang = sunAngle * Math.PI / 180;
+  // Cap the shadow projection so it stays visible. Real tan blows up past 80°.
+  var tanA = Math.tan(Math.min(ang, 80 * Math.PI / 180));
+  var gy = dy(GROUND_Y);
+  ctx.save();
+  // Shadow extends below ground line as a flat dark wedge for contrast
+  ctx.fillStyle = 'rgba(8,4,2,0.78)';
+  for (var i = 0; i < stack.length; i++){
+    var b = stack[i];
+    var hTop = GROUND_Y - b.y;
+    var hBot = GROUND_Y - (b.y + b.h);
+    var tlx = b.x - hTop * tanA;
+    var trx = b.x + b.w - hTop * tanA;
+    var blx = b.x - hBot * tanA;
+    var brx = b.x + b.w - hBot * tanA;
+    ctx.beginPath();
+    ctx.moveTo(dx(tlx), gy);
+    ctx.lineTo(dx(trx), gy);
+    ctx.lineTo(dx(brx), gy + ds(8));
+    ctx.lineTo(dx(blx), gy + ds(8));
+    ctx.closePath();
+    ctx.fill();
+  }
+  // Add subtle ground-shadow strip overlay for the union of shadows
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  for (var k = 0; k < stack.length; k++){
+    var b2 = stack[k];
+    var h2 = GROUND_Y - b2.y;
+    var sl = b2.x - h2 * tanA;
+    var sr = b2.x + b2.w - (GROUND_Y - (b2.y + b2.h)) * tanA;
+    if (sl > sr){ var t = sl; sl = sr; sr = t; }
+    ctx.fillRect(dx(sl), gy + ds(1), ds(sr - sl), ds(6));
+  }
+  ctx.restore();
+}
+
+function lighten(hex, amt){
+  var r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  r = Math.min(255, r + Math.round(255*amt));
+  g = Math.min(255, g + Math.round(255*amt));
+  b = Math.min(255, b + Math.round(255*amt));
+  return '#' + r.toString(16).padStart(2,'0') + g.toString(16).padStart(2,'0') + b.toString(16).padStart(2,'0');
+}
+function darken(hex, amt){
+  var r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  r = Math.max(0, r - Math.round(255*amt));
+  g = Math.max(0, g - Math.round(255*amt));
+  b = Math.max(0, b - Math.round(255*amt));
+  return '#' + r.toString(16).padStart(2,'0') + g.toString(16).padStart(2,'0') + b.toString(16).padStart(2,'0');
+}
+
+function drawConcreteBlock(ctx, b, x, y, w, h, tint, alpha){
+  ctx.save();
+  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, lighten(tint, 0.18));
+  grad.addColorStop(1, darken(tint, 0.18));
+  GF.rr(ctx, x, y, w, h, ds(3));
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.lineWidth = ds(1.2);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  var seed = Math.abs((b && b.cx ? b.cx : x) | 0) % 7;
+  for (var i = 0; i < 6; i++){
+    var px = x + ((i * 13 + seed * 17) % Math.max(1, w - ds(4))) + ds(2);
+    var py = y + ((i * 7 + seed * 11) % Math.max(1, h - ds(4))) + ds(2);
+    ctx.fillRect(px, py, ds(2), ds(2));
+  }
+  if (b && b.cells && b.cells.length > 1){
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = ds(0.8);
+    var cwScreen = ds(CELL);
+    var cwCount = b.cw || Math.round(w / ds(CELL));
+    var chCount = b.ch || Math.round(h / ds(CELL));
+    for (var ci = 1; ci < cwCount; ci++){
+      ctx.beginPath();
+      ctx.moveTo(x + ci * cwScreen, y);
+      ctx.lineTo(x + ci * cwScreen, y + h);
+      ctx.stroke();
+    }
+    for (var cj = 1; cj < chCount; cj++){
+      ctx.beginPath();
+      ctx.moveTo(x, y + cj * cwScreen);
+      ctx.lineTo(x + w, y + cj * cwScreen);
+      ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+function drawStack(ctx){
+  ctx.save();
+  var tiltDeg = Math.min(cumulativeTilt, SHADOW_TILT_FAIL + 10);
+  var foundationCx = stack.length > 0 ? stack[0].cx : DW/2;
+  var sign = computeCOM() < foundationCx ? -1 : 1;
+  var tiltRad = tiltDeg * Math.PI / 180 * sign;
+  if (gs === 'GAMEOVER') tiltRad = (cumulativeTilt + 50) * Math.PI / 180 * sign;
+  var pivotX = foundationCx;
+  var pivotY = GROUND_Y;
+  ctx.translate(dx(pivotX), dy(pivotY));
+  ctx.rotate(tiltRad);
+  ctx.translate(-dx(pivotX), -dy(pivotY));
+  for (var i = 0; i < stack.length; i++){
+    var b = stack[i];
+    var sx = dx(b.x), sy = dy(b.y);
+    var sw = ds(b.w), sh = ds(b.h);
+    drawConcreteBlock(ctx, b, sx, sy, sw, sh, b.tint, 1);
+  }
+  ctx.restore();
+}
+
+function drawHeld(ctx){
+  if (!held) return;
+  if (held.dragging){
+    var oldX = held.x, oldY = held.y;
+    snapHeld();
+    var ghostTopLeftX = held.snappedTopLeftX;
+    var ghostTopLeftY = held.snappedTopLeftY;
+    var bounds = cellsBounds(held.cells);
+    var valid = !heldOverlapsStack() && heldHasSupport();
+    drawConcreteBlock(ctx, held, dx(ghostTopLeftX), dy(ghostTopLeftY), ds(bounds.w), ds(bounds.h), valid ? '#88dd88' : '#dd6666', 0.55);
+    held.x = oldX; held.y = oldY;
+  }
+  var bb = cellsBounds(held.cells);
+  var heldTopLeftX = held.x - bb.w/2;
+  var heldTopLeftY = held.y - bb.h/2;
+  drawConcreteBlock(ctx, held, dx(heldTopLeftX), dy(heldTopLeftY), ds(bb.w), ds(bb.h), held.tint, held.dragging ? 0.95 : 0.85);
+  if (!held.dragging){
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,210,120,0.55)';
+    ctx.lineWidth = ds(2);
+    ctx.setLineDash([ds(6), ds(4)]);
+    GF.rr(ctx, dx(heldTopLeftX) - ds(4), dy(heldTopLeftY) - ds(4), ds(bb.w) + ds(8), ds(bb.h) + ds(8), ds(6));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+
+function drawHUD(ctx){
+  var fs = GF.clamp(18 * GF.S, 13, 26);
+  var pad = ds(14);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(pad - ds(4), pad - ds(2), ds(150), ds(36));
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('blocks') + ': ' + blocksLeft, pad, pad);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(GF.W - pad - ds(160), pad - ds(2), ds(160), ds(36));
+  ctx.fillStyle = '#ffd66b';
+  ctx.fillText(GF.t('score') + ': ' + score, GF.W - pad, pad);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(GF.cx - ds(60), pad - ds(2), ds(120), ds(36));
+  ctx.fillStyle = '#fff2c0';
+  ctx.fillText(GF.t('sun') + ' ' + Math.round(sunAngle) + 'deg', GF.cx, pad);
+  var tiltBarW = ds(180);
+  var tiltBarH = ds(8);
+  var tiltBarX = GF.cx - tiltBarW/2;
+  var tiltBarY = pad + ds(40);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(tiltBarX, tiltBarY, tiltBarW, tiltBarH);
+  var tiltP = GF.clamp(cumulativeTilt / SHADOW_TILT_FAIL, 0, 1);
+  var tiltColor = tiltP < 0.55 ? '#7ee08a' : tiltP < 0.85 ? '#ffd66b' : '#ff6b54';
+  ctx.fillStyle = tiltColor;
+  ctx.fillRect(tiltBarX, tiltBarY, tiltBarW * tiltP, tiltBarH);
+  var lfs = GF.clamp(11 * GF.S, 9, 16);
+  ctx.font = 'bold ' + lfs + 'px sans-serif';
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText(GF.t('tilt') + ' ' + Math.round(cumulativeTilt) + 'deg', GF.cx, tiltBarY + tiltBarH + ds(3));
+}
+
+function drawRotateButton(ctx){
+  if (!held) { rotateBtn = null; return; }
+  var bw = ds(90), bh = ds(56);
+  var bx = GF.W - bw - ds(18);
+  var by = GF.H - bh - ds(18);
+  rotateBtn = { x: bx, y: by, w: bw, h: bh };
+  ctx.save();
+  GF.rr(ctx, bx, by, bw, bh, ds(12));
+  var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
+  grad.addColorStop(0, '#f0a060');
+  grad.addColorStop(1, '#d07040');
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = ds(1.5); ctx.stroke();
+  var cx0 = bx + bw/2 - ds(20), cy0 = by + bh/2;
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = ds(2.2);
+  ctx.beginPath();
+  ctx.arc(cx0, cy0, ds(12), Math.PI * 0.6, Math.PI * 1.9);
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(cx0 + ds(11), cy0 - ds(6));
+  ctx.lineTo(cx0 + ds(16), cy0 - ds(2));
+  ctx.lineTo(cx0 + ds(8), cy0 - ds(1));
+  ctx.closePath(); ctx.fill();
+  var lfs = GF.clamp(13 * GF.S, 10, 18);
+  ctx.font = 'bold ' + lfs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('R', bx + bw/2 + ds(5), by + bh/2);
+  ctx.restore();
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: DW,
+  designH: DH,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'brutalist_stack',
+  onReady: function(){
+    GROUND_Y = DH * GROUND_Y_RATIO;
+    try { best = parseInt(localStorage.getItem('brutalist_stack_best') || '0') || 0; } catch(e){}
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+GF.exposeState(function(){
+  return {
+    gs: gs,
+    score: score,
+    best: best,
+    blocksLeft: blocksLeft,
+    sunAngle: sunAngle,
+    cumulativeTilt: cumulativeTilt,
+    stackHeight: stack.length,
+    BLOCK_BUDGET: BLOCK_BUDGET,
+    SUN_TICK_DEGREES: SUN_TICK_DEGREES,
+    INITIAL_SUN_ANGLE: INITIAL_SUN_ANGLE,
+    SHADOW_TILT_FAIL: SHADOW_TILT_FAIL,
+    BLOCK_SHAPES: BLOCK_SHAPES,
+    GRAVITY: GRAVITY,
+    RESTITUTION: RESTITUTION,
+    TILT_DECAY: TILT_DECAY,
+    FOUNDATION_WIDTH: FOUNDATION_WIDTH,
+    GROUND_Y_RATIO: GROUND_Y_RATIO,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
