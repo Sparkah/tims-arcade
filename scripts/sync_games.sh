@@ -128,6 +128,7 @@ jq --argjson meta "$META_JSON" '
     genre: (.genre // "other"),
     addedDate,
     published: (.published // true),
+    num: (.gameDir | capture("/(?<n>[0-9]+)_") | .n // ""),
     thumbCount: ($meta[.slug].thumbCount // 1),
     hasPreview: ($meta[.slug].hasPreview // false)
   })
