@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Token Budget</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── STRINGS ──────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'TOKEN BUDGET',
+    sub:   'Route tasks. Mind the tokens.',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'BUDGET DRAINED',
+    win: 'BUDGET SAVED!',
+    wave: 'WAVE', tokens: 'TOKENS', tasksLbl: 'TASKS',
+    nextwave: 'NEXT WAVE',
+    cheap: 'haiku', expensive: 'opus',
+    drag: 'Drag agents onto the grid',
+  },
+  ru: {
+    title: 'БЮДЖЕТ ТОКЕНОВ',
+    sub:   'Маршрутизируй задачи. Считай токены.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'БЮДЖЕТ ИСЧЕРПАН',
+    win: 'БЮДЖЕТ СПАСЁН!',
+    wave: 'ВОЛНА', tokens: 'ТОКЕНЫ', tasksLbl: 'ЗАДАЧИ',
+    nextwave: 'СЛЕД. ВОЛНА',
+    cheap: 'хайку', expensive: 'опус',
+    drag: 'Тащите агентов на поле',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (must match DESIGN.md) ──────────────────────────────────────
+var GRID_W                   = 8;
+var GRID_H                   = 6;
+var START_TOKENS             = 100;
+var CHEAP_COST               = 1;
+var CHEAP_SPEED              = 0.5;
+var CHEAP_MAX_COMPLEXITY     = 2;
+var EXPENSIVE_COST           = 5;
+var EXPENSIVE_SPEED          = 1.0;
+var EXPENSIVE_MAX_COMPLEXITY = 5;
+var WAVE_COUNT               = 10;
+var TASKS_PER_WAVE_BASE      = 3;
+var WAVE_BONUS_TOKENS        = 20;
+var STUCK_DECAY_PER_SEC      = 1;
+
+// ── STATE ────────────────────────────────────────────────────────────────
+var gs = 'MENU'; // MENU | PLAYING | GAMEOVER | WIN
+var grid = [];   // grid[c][r] = null or { kind, cooldown, pulse }
+var tasks = [];
+var tokens = 0;
+var wave = 0;
+var waveTaskCount = 0;
+var waveTasksCleared = 0;
+var waveTasksSpawned = 0;
+var spawnTimer = 0;
+var spawnQueue = [];
+var inWave = false;
+var score = 0;
+var best = 0;
+var didEndCallback = false;
+
+var dragging = null;
+
+var L = { gridX: 0, gridY: 0, hex: 0, hudH: 0, trayY: 0, trayH: 0 };
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+function computeLayout() {
+  var W = GF.W, H = GF.H;
+  L.hudH = GF.clamp(54 * GF.S, 44, 72);
+  L.trayH = GF.clamp(96 * GF.S, 72, 120);
+  var gridAreaH = H - L.hudH - L.trayH - 20 * GF.S;
+  var gridAreaW = W - 32 * GF.S;
+  // Flat-top hex layout
+  // hex width = 2 * size; horizontal step = 1.5 * size
+  // hex height = sqrt(3) * size; vertical step = sqrt(3) * size
+  // Odd columns are offset down by sqrt(3)/2 * size
+  var sqrt3 = Math.sqrt(3);
+  var maxByW = gridAreaW / (1.5 * (GRID_W - 1) + 2);
+  var maxByH = gridAreaH / (sqrt3 * GRID_H + sqrt3 / 2);
+  L.hex = Math.floor(Math.min(maxByW, maxByH));
+  if (L.hex < 12) L.hex = 12;
+  var totalW = (1.5 * (GRID_W - 1) + 2) * L.hex;
+  var totalH = (sqrt3 * GRID_H + sqrt3 / 2) * L.hex;
+  L.gridX = Math.floor((W - totalW) / 2 + L.hex);
+  L.gridY = Math.floor(L.hudH + (gridAreaH - totalH) / 2 + L.hex * sqrt3 / 2);
+  L.trayY = H - L.trayH;
+}
+
+function hexCenter(c, r) {
+  var sqrt3 = Math.sqrt(3);
+  var x = L.gridX + c * 1.5 * L.hex;
+  var y = L.gridY + r * sqrt3 * L.hex + (c % 2 === 1 ? sqrt3 / 2 * L.hex : 0);
+  return { x: x, y: y };
+}
+
+function hexAtPoint(x, y) {
+  for (var c = 0; c < GRID_W; c++) {
+    for (var r = 0; r < GRID_H; r++) {
+      var p = hexCenter(c, r);
+      if (GF.dist(x, y, p.x, p.y) <= L.hex * 0.85) return { c: c, r: r };
+    }
+  }
+  return null;
+}
+
+function nextHex(c, r) {
+  var nc = c + 1;
+  if (nc >= GRID_W) return null; // exits the board
+  return { c: nc, r: r };
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  computeLayout();
+  grid = [];
+  for (var c = 0; c < GRID_W; c++) {
+    grid[c] = [];
+    for (var r = 0; r < GRID_H; r++) grid[c][r] = null;
+  }
+  tasks = [];
+  tokens = START_TOKENS;
+  wave = 0;
+  waveTaskCount = 0;
+  waveTasksCleared = 0;
+  waveTasksSpawned = 0;
+  spawnQueue = [];
+  spawnTimer = 0;
+  inWave = false;
+  score = 0;
+  didEndCallback = false;
+  dragging = null;
+  gs = 'PLAYING';
+  try { GF.gameStarted(); } catch (_) {}
+  startNextWave();
+}
+
+function endGame(won) {
+  gs = won ? 'WIN' : 'GAMEOVER';
+  score = Math.max(0, Math.floor(tokens)) + (won ? wave : Math.max(0, wave - 1)) * 50;
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('token_budget_best', best); } catch (e) {}
+  }
+  if (!didEndCallback) {
+    didEndCallback = true;
+    try { GF.gameEnded(); } catch (_) {}
+  }
+}
+
+window._jumpLevel = function(n) {
+  startGame();
+  var preset = [
+    ['cheap',     1, 1],
+    ['cheap',     1, 3],
+    ['cheap',     2, 2],
+    ['expensive', 3, 1],
+    ['expensive', 4, 3],
+    ['cheap',     5, 0],
+    ['cheap',     5, 4],
+    ['expensive', 6, 2],
+  ];
+  for (var i = 0; i < preset.length; i++) placeAgentAt(preset[i][0], preset[i][1], preset[i][2], true);
+  tokens = 80;
+  var target = (n && n > 0 && n <= WAVE_COUNT) ? n : 4;
+  wave = target - 1;
+  startNextWave();
+  for (var k = 0; k < 70; k++) update(0.1);
+};
+
+// ── WAVES ────────────────────────────────────────────────────────────────
+function startNextWave() {
+  if (wave >= WAVE_COUNT) return;
+  wave += 1;
+  var count = TASKS_PER_WAVE_BASE + Math.floor((wave - 1) * 0.5);
+  if (count > 7) count = 7;
+  waveTaskCount = count;
+  waveTasksCleared = 0;
+  waveTasksSpawned = 0;
+  spawnQueue = [];
+  for (var i = 0; i < count; i++) {
+    var maxC = Math.min(5, 2 + Math.floor(wave * 0.4));
+    var minC = 1;
+    var c = minC + Math.floor(Math.random() * (maxC - minC + 1));
+    spawnQueue.push({ complexity: c, delay: i * 1.2 + 0.4 });
+  }
+  spawnTimer = 0;
+  inWave = true;
+}
+
+function spawnTask(complexity) {
+  var row = Math.floor(Math.random() * GRID_H);
+  var p = hexCenter(0, row);
+  tasks.push({
+    col: 0, row: row,
+    complexity: complexity,
+    x: p.x - L.hex * 1.2, y: p.y,
+    tx: p.x, ty: p.y,
+    hopping: true, hopT: 0, hopDur: 0.6,
+    decay: 0,
+    alive: true,
+    exited: false
+  });
+  waveTasksSpawned += 1;
+}
+
+function tickSpawn(dt) {
+  if (!inWave) return;
+  spawnTimer += dt;
+  for (var i = 0; i < spawnQueue.length; i++) {
+    var s = spawnQueue[i];
+    if (s.delay !== null && spawnTimer >= s.delay) {
+      spawnTask(s.complexity);
+      s.delay = null;
+    }
+  }
+}
+
+function checkWaveClear() {
+  if (!inWave) return;
+  if (waveTasksSpawned >= waveTaskCount && tasks.length === 0) {
+    inWave = false;
+    tokens += WAVE_BONUS_TOKENS;
+    GF.spawnFloat(GF.cx, GF.cy - 80 * GF.S, '+' + WAVE_BONUS_TOKENS + ' ' + GF.t('tokens'), '#4dd0e1');
+    GF.setShake(0.18);
+    score += 50;
+    if (wave >= WAVE_COUNT) endGame(true);
+  }
+}
+
+// ── AGENTS ───────────────────────────────────────────────────────────────
+function agentDef(kind) {
+  if (kind === 'expensive') {
+    return { cost: EXPENSIVE_COST, speed: EXPENSIVE_SPEED, maxC: EXPENSIVE_MAX_COMPLEXITY, color: '#f15bb5', label: 'o' };
+  }
+  return { cost: CHEAP_COST, speed: CHEAP_SPEED, maxC: CHEAP_MAX_COMPLEXITY, color: '#4dd0e1', label: 'h' };
+}
+
+function placeAgentAt(kind, c, r, free) {
+  if (c < 0 || c >= GRID_W || r < 0 || r >= GRID_H) return false;
+  if (grid[c][r]) return false;
+  var def = agentDef(kind);
+  if (!free && tokens < def.cost) return false;
+  if (!free) tokens -= def.cost;
+  grid[c][r] = { kind: kind, cooldown: 0, pulse: 0 };
+  var p = hexCenter(c, r);
+  GF.spawnParticles(p.x, p.y, def.color, 14);
+  return true;
+}
+
+function removeAgentAt(c, r) {
+  var a = grid[c][r];
+  if (!a) return false;
+  var def = agentDef(a.kind);
+  var refund = Math.floor(def.cost * 0.5);
+  tokens += refund;
+  grid[c][r] = null;
+  var p = hexCenter(c, r);
+  GF.spawnParticles(p.x, p.y, '#ffd166', 14);
+  if (refund > 0) GF.spawnFloat(p.x, p.y - 12 * GF.S, '+' + refund, '#ffd166');
+  return true;
+}
+
+// ── TASK STEP / ROUTING ──────────────────────────────────────────────────
+function tickTasks(dt) {
+  // Tick agent cooldowns + pulses
+  for (var c = 0; c < GRID_W; c++) {
+    for (var r = 0; r < GRID_H; r++) {
+      var a = grid[c][r];
+      if (!a) continue;
+      if (a.cooldown > 0) a.cooldown -= dt;
+      if (a.pulse > 0) a.pulse -= dt * 2;
+    }
+  }
+
+  for (var i = tasks.length - 1; i >= 0; i--) {
+    var t = tasks[i];
+    if (!t.alive) { tasks.splice(i, 1); continue; }
+
+    if (t.hopping) {
+      // Smooth lerp toward target
+      var k = 1 - Math.pow(0.0001, dt / Math.max(0.05, t.hopDur));
+      t.x = t.x + (t.tx - t.x) * k;
+      t.y = t.y + (t.ty - t.y) * k;
+      t.hopT += dt;
+      if (t.hopT >= t.hopDur || GF.dist(t.x, t.y, t.tx, t.ty) < L.hex * 0.05) {
+        t.x = t.tx; t.y = t.ty;
+        t.hopping = false; t.hopT = 0;
+        if (t.col >= GRID_W) {
+          t.alive = false;
+          t.exited = true;
+          waveTasksCleared += 1;
+          GF.spawnParticles(t.x, t.y, '#7CFC00', 18);
+          GF.spawnFloat(t.x, t.y - 12 * GF.S, 'OK', '#7CFC00');
+          continue;
+        }
+      } else {
+        if (t.decay > 0) {
+          tokens -= STUCK_DECAY_PER_SEC * dt * Math.min(1, t.decay);
+          if (tokens <= 0 && (tasks.length > 0 || waveTasksSpawned < waveTaskCount)) {
+            tokens = 0; endGame(false); return;
+          }
+        }
+        continue;
+      }
+    }
+
+    var agent = (t.col >= 0 && t.col < GRID_W) ? grid[t.col][t.row] : null;
+
+    if (!agent) {
+      t.decay = Math.min(1.5, t.decay + dt * 0.6);
+      tokens -= STUCK_DECAY_PER_SEC * dt;
+      if (tokens <= 0 && (tasks.length > 0 || waveTasksSpawned < waveTaskCount)) {
+        tokens = 0; endGame(false); return;
+      }
+      continue;
+    }
+
+    var def = agentDef(agent.kind);
+    if (def.maxC < t.complexity) {
+      t.decay = Math.min(1.5, t.decay + dt * 0.7);
+      tokens -= STUCK_DECAY_PER_SEC * dt;
+      if (tokens <= 0 && (tasks.length > 0 || waveTasksSpawned < waveTaskCount)) {
+        tokens = 0; endGame(false); return;
+      }
+      continue;
+    }
+
+    if (t.decay > 0) t.decay = Math.max(0, t.decay - dt * 1.2);
+    if (agent.cooldown > 0) continue;
+
+    var hopDur = 0.45 / Math.max(0.2, def.speed);
+    var n = nextHex(t.col, t.row);
+    var nx, ny;
+    if (n) {
+      var p = hexCenter(n.c, n.r);
+      nx = p.x; ny = p.y;
+      t.col = n.c; t.row = n.r;
+    } else {
+      var pCur = hexCenter(t.col, t.row);
+      nx = pCur.x + L.hex * 1.6;
+      ny = pCur.y;
+      t.col = GRID_W;
+    }
+    t.tx = nx; t.ty = ny;
+    t.hopping = true; t.hopT = 0; t.hopDur = hopDur;
+    agent.cooldown = hopDur * 0.95;
+    agent.pulse = 0.5;
+    GF.spawnParticles(t.x, t.y, def.color, 6);
+  }
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+GF.canvas.addEventListener('mousedown', function(ev) { onPointerDown(ev.clientX, ev.clientY); });
+GF.canvas.addEventListener('mousemove', function(ev) { onPointerMove(ev.clientX, ev.clientY); });
+GF.canvas.addEventListener('mouseup',   function(ev) { onPointerUp(ev.clientX, ev.clientY); });
+GF.canvas.addEventListener('touchstart', function(ev) {
+  ev.preventDefault();
+  if (ev.touches && ev.touches.length > 0) onPointerDown(ev.touches[0].clientX, ev.touches[0].clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function(ev) {
+  ev.preventDefault();
+  if (ev.touches && ev.touches.length > 0) onPointerMove(ev.touches[0].clientX, ev.touches[0].clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchend', function(ev) {
+  ev.preventDefault();
+  if (ev.changedTouches && ev.changedTouches.length > 0) onPointerUp(ev.changedTouches[0].clientX, ev.changedTouches[0].clientY);
+}, { passive: false });
+
+function trayLayout() {
+  var bw = GF.clamp(150 * GF.S, 110, 200);
+  var bh = L.trayH - 16 * GF.S;
+  var by = L.trayY + 8 * GF.S;
+  var gap = 16 * GF.S;
+  var totalW = bw * 2 + gap;
+  var bx = (GF.W - totalW) / 2;
+  return {
+    cheap:     { x: bx,           y: by, w: bw, h: bh, kind: 'cheap' },
+    expensive: { x: bx + bw + gap, y: by, w: bw, h: bh, kind: 'expensive' },
+    nextWave:  { x: GF.W - 130 * GF.S - 12 * GF.S, y: L.trayY + L.trayH/2 - 24*GF.S, w: 130*GF.S, h: 48*GF.S }
+  };
+}
+
+function pointInRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+
+function onPointerDown(x, y) {
+  if (gs !== 'PLAYING') return;
+  var T = trayLayout();
+  if (pointInRect(x, y, T.cheap)) {
+    var def = agentDef('cheap');
+    if (tokens < def.cost) return;
+    dragging = { kind: 'cheap', x: x, y: y };
+    return;
+  }
+  if (pointInRect(x, y, T.expensive)) {
+    var def2 = agentDef('expensive');
+    if (tokens < def2.cost) return;
+    dragging = { kind: 'expensive', x: x, y: y };
+    return;
+  }
+  if (!inWave && wave < WAVE_COUNT && pointInRect(x, y, T.nextWave)) {
+    startNextWave();
+    return;
+  }
+  var hit = hexAtPoint(x, y);
+  if (hit && grid[hit.c][hit.r]) {
+    removeAgentAt(hit.c, hit.r);
+  }
+}
+
+function onPointerMove(x, y) {
+  if (dragging) { dragging.x = x; dragging.y = y; }
+}
+
+function onPointerUp(x, y) {
+  if (dragging) {
+    var hit = hexAtPoint(x, y);
+    if (hit && !grid[hit.c][hit.r]) {
+      placeAgentAt(dragging.kind, hit.c, hit.r, false);
+    }
+    dragging = null;
+  }
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+  tickSpawn(dt);
+  tickTasks(dt);
+  checkWaveClear();
+  if (tokens <= 0 && (tasks.length > 0 || waveTasksSpawned < waveTaskCount)) {
+    tokens = 0;
+    endGame(false);
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function hexPath(ctx, x, y, size) {
+  ctx.beginPath();
+  for (var i = 0; i < 6; i++) {
+    var a = (Math.PI / 3) * i;
+    var px = x + size * Math.cos(a);
+    var py = y + size * Math.sin(a);
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+}
+
+function draw(ctx) {
+  // Background gradient
+  var grad = ctx.createLinearGradient(0, 0, 0, GF.H);
+  grad.addColorStop(0, '#0a0a14');
+  grad.addColorStop(1, '#10122a');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  // Faint circuit grid
+  ctx.strokeStyle = 'rgba(77,208,225,0.05)';
+  ctx.lineWidth = 1;
+  var step = 32 * GF.S;
+  for (var gx = 0; gx <= GF.W; gx += step) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, GF.H); ctx.stroke(); }
+  for (var gy = 0; gy <= GF.H; gy += step) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(GF.W, gy); ctx.stroke(); }
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WIN') {
+    drawHexGrid(ctx);
+    drawAgents(ctx);
+    drawTasks(ctx);
+    drawHUD(ctx);
+    drawTray(ctx);
+    if (dragging) drawDragGhost(ctx);
+  }
+
+  if (gs === 'MENU') {
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub: GF.t('sub'),
+      btnText: GF.t('play'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null
+    });
+  }
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best
+    });
+  }
+  if (gs === 'WIN') {
+    GF.drawOverlay({
+      title: GF.t('win'),
+      sub: GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best
+    });
+  }
+}
+
+function drawHexGrid(ctx) {
+  for (var c = 0; c < GRID_W; c++) {
+    for (var r = 0; r < GRID_H; r++) {
+      var p = hexCenter(c, r);
+      hexPath(ctx, p.x, p.y, L.hex * 0.94);
+      var fill = '#171a2e';
+      if (c === 0) fill = '#1a2236';
+      if (c === GRID_W - 1) fill = '#1a2a1f';
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(120,160,200,0.18)';
+      ctx.lineWidth = Math.max(1, 1.2 * GF.S);
+      ctx.stroke();
+    }
+  }
+
+  if (dragging) {
+    var hit = hexAtPoint(dragging.x, dragging.y);
+    if (hit && !grid[hit.c][hit.r]) {
+      var p2 = hexCenter(hit.c, hit.r);
+      hexPath(ctx, p2.x, p2.y, L.hex * 0.94);
+      ctx.fillStyle = 'rgba(77,208,225,0.18)';
+      ctx.fill();
+      ctx.strokeStyle = '#4dd0e1';
+      ctx.lineWidth = Math.max(2, 2.4 * GF.S);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawAgents(ctx) {
+  for (var c = 0; c < GRID_W; c++) {
+    for (var r = 0; r < GRID_H; r++) {
+      var a = grid[c][r];
+      if (!a) continue;
+      var p = hexCenter(c, r);
+      var def = agentDef(a.kind);
+      var size = L.hex * 0.6;
+      if (a.pulse > 0) size *= (1 + a.pulse * 0.15);
+      ctx.shadowColor = def.color;
+      ctx.shadowBlur = 14 * GF.S;
+      ctx.fillStyle = def.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.lineWidth = Math.max(1, 1.5 * GF.S);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, size * 0.78, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = '#0a0a14';
+      var fs = Math.max(11, size * 0.85);
+      ctx.font = 'bold ' + fs + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(def.label, p.x, p.y);
+    }
+  }
+}
+
+function drawTasks(ctx) {
+  for (var i = 0; i < tasks.length; i++) {
+    var t = tasks[i];
+    var size = L.hex * 0.4;
+    var decay = GF.clamp(t.decay, 0, 1);
+    var rC = Math.floor(70 + 185 * decay);
+    var gC = Math.floor(200 - 160 * decay);
+    var bC = Math.floor(220 - 200 * decay);
+    var col = 'rgb(' + rC + ',' + gC + ',' + bC + ')';
+    var pulse = decay > 0 ? (1 + 0.15 * Math.sin(performance.now() * 0.012)) : 1;
+    ctx.shadowColor = col;
+    ctx.shadowBlur = (8 + 14 * decay) * GF.S;
+    ctx.fillStyle = col;
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillRect(-size * pulse / 2, -size * pulse / 2, size * pulse, size * pulse);
+    ctx.restore();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#0a0a14';
+    var fs = Math.max(11, size * 0.8);
+    ctx.font = 'bold ' + fs + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(t.complexity), t.x, t.y + 1);
+  }
+}
+
+function drawHUD(ctx) {
+  ctx.fillStyle = 'rgba(8,10,22,0.85)';
+  ctx.fillRect(0, 0, GF.W, L.hudH);
+  ctx.strokeStyle = 'rgba(77,208,225,0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, L.hudH);
+  ctx.lineTo(GF.W, L.hudH);
+  ctx.stroke();
+
+  var fs = GF.clamp(13 * GF.S, 11, 18);
+  var bigFs = GF.clamp(22 * GF.S, 16, 30);
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = '#9ab';
+  ctx.font = fs + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('wave'), 14 * GF.S, L.hudH * 0.32);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + bigFs + 'px sans-serif';
+  ctx.fillText(wave + '/' + WAVE_COUNT, 14 * GF.S, L.hudH * 0.66);
+
+  ctx.fillStyle = '#9ab';
+  ctx.textAlign = 'center';
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(GF.t('tokens'), GF.cx, L.hudH * 0.32);
+  var tokCol = tokens > 30 ? '#4dd0e1' : (tokens > 10 ? '#ffd166' : '#ff5566');
+  ctx.fillStyle = tokCol;
+  ctx.font = 'bold ' + bigFs + 'px sans-serif';
+  ctx.fillText(String(Math.ceil(tokens)), GF.cx, L.hudH * 0.66);
+
+  ctx.fillStyle = '#9ab';
+  ctx.textAlign = 'right';
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(GF.t('tasksLbl'), GF.W - 14 * GF.S, L.hudH * 0.32);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + bigFs + 'px sans-serif';
+  ctx.fillText(String(tasks.length), GF.W - 14 * GF.S, L.hudH * 0.66);
+}
+
+function drawTray(ctx) {
+  var T = trayLayout();
+  ctx.fillStyle = 'rgba(8,10,22,0.9)';
+  ctx.fillRect(0, L.trayY, GF.W, L.trayH);
+  ctx.strokeStyle = 'rgba(77,208,225,0.25)';
+  ctx.beginPath();
+  ctx.moveTo(0, L.trayY);
+  ctx.lineTo(GF.W, L.trayY);
+  ctx.stroke();
+
+  drawAgentButton(ctx, T.cheap, 'cheap');
+  drawAgentButton(ctx, T.expensive, 'expensive');
+
+  if (!inWave && wave < WAVE_COUNT) {
+    drawNextWaveButton(ctx, T.nextWave);
+  } else if (inWave) {
+    ctx.fillStyle = '#5a6a8a';
+    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(GF.t('drag'), GF.W - 18 * GF.S, L.trayY + L.trayH / 2);
+  }
+}
+
+function drawAgentButton(ctx, b, kind) {
+  var def = agentDef(kind);
+  var afford = tokens >= def.cost;
+  ctx.fillStyle = afford ? 'rgba(20,24,44,0.95)' : 'rgba(20,24,44,0.6)';
+  GF.rr(ctx, b.x, b.y, b.w, b.h, 12 * GF.S);
+  ctx.fill();
+  ctx.strokeStyle = afford ? def.color : 'rgba(150,160,180,0.4)';
+  ctx.lineWidth = Math.max(1.5, 2 * GF.S);
+  ctx.stroke();
+
+  var cx0 = b.x + b.h * 0.5;
+  var cy0 = b.y + b.h * 0.5;
+  var rad = b.h * 0.32;
+  ctx.shadowColor = afford ? def.color : 'transparent';
+  ctx.shadowBlur = afford ? 10 * GF.S : 0;
+  ctx.fillStyle = afford ? def.color : '#3a3f55';
+  ctx.beginPath();
+  ctx.arc(cx0, cy0, rad, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#0a0a14';
+  ctx.font = 'bold ' + Math.max(11, rad * 1.1) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(def.label, cx0, cy0);
+
+  var tx = b.x + b.h + 4 * GF.S;
+  var ty = b.y + 8 * GF.S;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = afford ? '#fff' : '#7a8094';
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 11, 19) + 'px sans-serif';
+  ctx.fillText(GF.t(kind), tx, ty);
+  ctx.fillStyle = afford ? '#9ab' : '#5a6378';
+  ctx.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  ctx.fillText('cost ' + def.cost + ' / max c' + def.maxC, tx, ty + GF.clamp(20 * GF.S, 14, 24));
+}
+
+function drawNextWaveButton(ctx, b) {
+  var grad = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+  grad.addColorStop(0, '#2ecc71');
+  grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.h / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('nextwave'), b.x + b.w / 2, b.y + b.h / 2);
+}
+
+function drawDragGhost(ctx) {
+  var def = agentDef(dragging.kind);
+  var size = L.hex * 0.6;
+  ctx.globalAlpha = 0.85;
+  ctx.shadowColor = def.color;
+  ctx.shadowBlur = 16 * GF.S;
+  ctx.fillStyle = def.color;
+  ctx.beginPath();
+  ctx.arc(dragging.x, dragging.y, size, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#0a0a14';
+  ctx.font = 'bold ' + Math.max(11, size * 0.85) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(def.label, dragging.x, dragging.y);
+}
+
+window.addEventListener('resize', function() { computeLayout(); });
+window.addEventListener('orientationchange', function() { computeLayout(); });
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'token_budget',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('token_budget_best') || '0') || 0; } catch (e) {}
+    computeLayout();
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Expose state for post-build-tester gate
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    score: score,
+    best: best,
+    wave: wave,
+    tokens: tokens,
+    tasksRemaining: tasks.length,
+    waveTaskCount: waveTaskCount,
+    waveTasksCleared: waveTasksCleared,
+    inWave: inWave,
+    GRID_W: GRID_W,
+    GRID_H: GRID_H,
+    START_TOKENS: START_TOKENS,
+    CHEAP_COST: CHEAP_COST,
+    CHEAP_SPEED: CHEAP_SPEED,
+    CHEAP_MAX_COMPLEXITY: CHEAP_MAX_COMPLEXITY,
+    EXPENSIVE_COST: EXPENSIVE_COST,
+    EXPENSIVE_SPEED: EXPENSIVE_SPEED,
+    EXPENSIVE_MAX_COMPLEXITY: EXPENSIVE_MAX_COMPLEXITY,
+    WAVE_COUNT: WAVE_COUNT,
+    TASKS_PER_WAVE_BASE: TASKS_PER_WAVE_BASE,
+    WAVE_BONUS_TOKENS: WAVE_BONUS_TOKENS,
+    STUCK_DECAY_PER_SEC: STUCK_DECAY_PER_SEC
+  };
+});
+
+})();
+</script>
+</body>
+</html>

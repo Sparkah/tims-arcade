@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Gunsmith Draft</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #14110c; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── GAME-SPECIFIC CONFIG ─────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Gunsmith Draft',
+    sub:   'Draft parts. Fill orders. Beat the deck.',
+    play: 'PLAY', retry: 'RETRY', cont: 'CONTINUE',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'WORKSHOP CLOSED',
+    win: 'ALL ORDERS SHIPPED',
+    deck: 'DECK',
+    orders: 'ORDERS',
+    discard: 'DISCARD',
+    discard_hint: 'Tap card then DISCARD to swap (1 turn)',
+    drag_hint: 'Drag parts onto matching slots',
+    rifle: 'Rifle', pistol: 'Pistol', shotgun: 'Shotgun', smg: 'SMG',
+    barrel: 'Barrel', stock: 'Stock', scope: 'Scope', magazine: 'Mag', grip: 'Grip',
+    wild: 'Any', joker: 'Joker',
+    shipped: 'SHIPPED!',
+    failed: 'Unfilled',
+    runs_dry: 'Deck empty',
+  },
+  ru: {
+    title: 'Оружейный Драфт',
+    sub:   'Бери детали. Закрывай заказы. Победи колоду.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', cont: 'ДАЛЬШЕ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'МАСТЕРСКАЯ ЗАКРЫТА',
+    win: 'ВСЕ ЗАКАЗЫ ВЫПОЛНЕНЫ',
+    deck: 'КОЛОДА',
+    orders: 'ЗАКАЗЫ',
+    discard: 'СБРОС',
+    discard_hint: 'Выбери карту и жми СБРОС (1 ход)',
+    drag_hint: 'Тяни детали в нужные слоты',
+    rifle: 'Винтовка', pistol: 'Пистолет', shotgun: 'Дробовик', smg: 'ПП',
+    barrel: 'Ствол', stock: 'Приклад', scope: 'Прицел', magazine: 'Магазин', grip: 'Рукоять',
+    wild: 'Любая', joker: 'Джокер',
+    shipped: 'ОТГРУЖЕНО!',
+    failed: 'Не закрыт',
+    runs_dry: 'Колода пуста',
+  },
+};
+
+var SPRITE_NAMES = []; // procedural drawing only
+
+// ── TUNABLES (DESIGN.md commitments) ─────────────────────────────────────
+var DECK_SIZE = 30;
+var HAND_SIZE = 5;
+var CRAFT_SLOTS = 4;
+var JOKER_RATIO = 0.10;
+var ACTIVE_CONTRACTS = 3;
+var CONTRACT_VALUE_BASE = 50;
+var JOKER_RARITY_PENALTY = 0.5;
+var FAILED_CONTRACT_PENALTY = 10;
+var PART_TYPES = 5;
+
+var PART_DEFS = [
+  { id:'barrel',   color:'#c97a2d' },
+  { id:'stock',    color:'#8c5a2a' },
+  { id:'scope',    color:'#3a8fb7' },
+  { id:'magazine', color:'#7d8c93' },
+  { id:'grip',     color:'#5d4037' },
+];
+
+// Each contract has CRAFT_SLOTS=4 required parts; 'any' accepts anything.
+var CONTRACT_RECIPES = [
+  { id:'rifle',   parts:['barrel','stock','magazine','scope'], mult:1.4 },
+  { id:'pistol',  parts:['barrel','grip','magazine','any'],    mult:1.0 },
+  { id:'shotgun', parts:['barrel','stock','grip','any'],       mult:1.1 },
+  { id:'smg',     parts:['barrel','magazine','grip','stock'],  mult:1.25 },
+];
+
+var RARITY_COLORS = {
+  1: '#9aa2a8',
+  2: '#5dbd5d',
+  3: '#4dabf7',
+  4: '#a374ff',
+  5: '#ffb84d',
+};
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WIN
+var score = 0, best = 0;
+var deck = [];               // remaining cards
+var hand = [];               // up to HAND_SIZE cards
+var contracts = [];          // ACTIVE_CONTRACTS active orders
+var contractsFulfilled = 0;
+var selectedHand = -1;       // index of hand card selected for tap-to-discard
+var drag = null;             // active drag descriptor
+var hoverSlot = null;        // {ci, si} during drag
+
+// ── DECK / CARDS ─────────────────────────────────────────────────────────
+function rollRarity() {
+  // Weighted distribution: 1=common ... 5=legendary
+  var r = Math.random();
+  if (r < 0.36) return 1;
+  if (r < 0.66) return 2;
+  if (r < 0.86) return 3;
+  if (r < 0.96) return 4;
+  return 5;
+}
+
+function buildDeck() {
+  var d = [];
+  var jokerCount = Math.round(DECK_SIZE * JOKER_RATIO);
+  var partCount = DECK_SIZE - jokerCount;
+  for (var i = 0; i < partCount; i++) {
+    var pt = PART_DEFS[Math.floor(Math.random() * PART_DEFS.length)].id;
+    d.push({ kind:'part', part: pt, rarity: rollRarity() });
+  }
+  for (var j = 0; j < jokerCount; j++) {
+    d.push({ kind:'joker', rarity: rollRarity() });
+  }
+  for (var k = d.length - 1; k > 0; k--) {
+    var n = Math.floor(Math.random() * (k + 1));
+    var tmp = d[k]; d[k] = d[n]; d[n] = tmp;
+  }
+  return d;
+}
+
+function newContract() {
+  var recipe = CONTRACT_RECIPES[Math.floor(Math.random() * CONTRACT_RECIPES.length)];
+  return {
+    recipe: recipe,
+    slots: [null, null, null, null],
+    filled: false,
+  };
+}
+
+function refillHand() {
+  while (hand.length < HAND_SIZE && deck.length > 0) {
+    hand.push(deck.pop());
+  }
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  score = 0;
+  contractsFulfilled = 0;
+  deck = buildDeck();
+  hand = [];
+  contracts = [];
+  for (var i = 0; i < ACTIVE_CONTRACTS; i++) contracts.push(newContract());
+  refillHand();
+  selectedHand = -1;
+  drag = null;
+  hoverSlot = null;
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+
+function gameOver() {
+  // Apply failed contract penalty for any unfilled slot in unfulfilled contracts
+  var unfilled = 0;
+  for (var i = 0; i < contracts.length; i++) {
+    if (!contracts[i].filled) {
+      for (var j = 0; j < contracts[i].slots.length; j++) {
+        if (contracts[i].slots[j] === null) unfilled++;
+      }
+    }
+  }
+  score -= FAILED_CONTRACT_PENALTY * unfilled;
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('gunsmith_draft_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+}
+
+function gameWin() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('gunsmith_draft_best', best); } catch (e) {}
+  }
+  gs = 'WIN';
+  GF.gameEnded();
+}
+
+// Helper for screenshots / testing — fast-forward into a populated state.
+window._jumpLevel = function(n) {
+  startGame();
+  var dense = (typeof n === 'number') ? Math.max(1, Math.min(5, n)) : 3;
+  if (contracts[0]) {
+    var rec = contracts[0].recipe.parts;
+    for (var s = 0; s < Math.min(dense, 3); s++) {
+      var need = rec[s];
+      var card = need === 'any'
+        ? { kind:'part', part: PART_DEFS[s % PART_DEFS.length].id, rarity: 3 + (s % 2) }
+        : { kind:'part', part: need, rarity: 3 + (s % 3) };
+      contracts[0].slots[s] = card;
+    }
+  }
+  hand = [
+    { kind:'part', part:'barrel', rarity:5 },
+    { kind:'part', part:'scope', rarity:4 },
+    { kind:'joker', rarity:3 },
+    { kind:'part', part:'magazine', rarity:2 },
+    { kind:'part', part:'grip', rarity:3 },
+  ];
+  deck = deck.slice(0, Math.max(8, DECK_SIZE - dense * 4));
+  score = 60 + dense * 20;
+};
+
+// ── PLACEMENT LOGIC ──────────────────────────────────────────────────────
+function slotAccepts(contract, slotIdx, card) {
+  var need = contract.recipe.parts[slotIdx];
+  if (card.kind === 'joker') return true;
+  if (need === 'any') return true;
+  return card.part === need;
+}
+
+function placeCard(handIdx, ci, si) {
+  var card = hand[handIdx];
+  var c = contracts[ci];
+  if (!c || c.filled) return false;
+  if (c.slots[si] !== null) return false;
+  if (!slotAccepts(c, si, card)) return false;
+  c.slots[si] = card;
+  hand.splice(handIdx, 1);
+  var allFilled = true;
+  for (var k = 0; k < c.slots.length; k++) {
+    if (c.slots[k] === null) { allFilled = false; break; }
+  }
+  if (allFilled) shipContract(ci);
+  refillHand();
+  selectedHand = -1;
+  endTurnCheck();
+  return true;
+}
+
+function shipContract(ci) {
+  var c = contracts[ci];
+  c.filled = true;
+  contractsFulfilled++;
+
+  var raritySum = 0;
+  for (var i = 0; i < c.slots.length; i++) {
+    var card = c.slots[i];
+    var r = card.rarity;
+    if (card.kind === 'joker') r = r * JOKER_RARITY_PENALTY;
+    raritySum += r;
+  }
+  var gain = Math.round(CONTRACT_VALUE_BASE + raritySum * 10 * c.recipe.mult);
+  score += gain;
+
+  GF.spawnFloat(GF.cx, GF.cy * 0.6, '+' + gain, '#FFD700');
+  GF.spawnParticles(GF.cx, GF.cy * 0.6, '#FFD700', 40);
+  GF.setShake(0.8);
+
+  setTimeout(function() {
+    if (gs === 'PLAYING') {
+      contracts[ci] = newContract();
+      endTurnCheck();
+    }
+  }, 700);
+}
+
+function discardSelected() {
+  if (selectedHand < 0 || selectedHand >= hand.length) return;
+  if (deck.length === 0) {
+    hand.splice(selectedHand, 1);
+    selectedHand = -1;
+    endTurnCheck();
+    return;
+  }
+  hand.splice(selectedHand, 1);
+  hand.push(deck.pop());
+  selectedHand = -1;
+  GF.spawnParticles(GF.cx, GF.H * 0.85, '#888', 12);
+  endTurnCheck();
+}
+
+function endTurnCheck() {
+  if (deck.length > 0) return;
+  // Deck is empty. Decide terminal state based on hand + remaining contracts.
+  if (!anyPlayablePlacement()) {
+    var unfilled = 0;
+    for (var i = 0; i < contracts.length; i++) {
+      if (!contracts[i].filled) {
+        for (var j = 0; j < contracts[i].slots.length; j++) {
+          if (contracts[i].slots[j] === null) unfilled++;
+        }
+      }
+    }
+    if (unfilled === 0 && contractsFulfilled >= 3) gameWin();
+    else gameOver();
+  }
+}
+
+function anyPlayablePlacement() {
+  for (var h = 0; h < hand.length; h++) {
+    for (var c = 0; c < contracts.length; c++) {
+      if (contracts[c].filled) continue;
+      for (var s = 0; s < contracts[c].slots.length; s++) {
+        if (contracts[c].slots[s] !== null) continue;
+        if (slotAccepts(contracts[c], s, hand[h])) return true;
+      }
+    }
+  }
+  return false;
+}
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+function getLayout() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var hudH = H * 0.10;
+  var contractAreaH = H * 0.42;
+  var handAreaH = H * 0.30;
+
+  var cMargin = 14 * S;
+  var cW = (W - cMargin * (ACTIVE_CONTRACTS + 1)) / ACTIVE_CONTRACTS;
+  var cH = contractAreaH - 28 * S;
+  var cY = hudH + 6 * S;
+  var contractRects = [];
+  for (var i = 0; i < ACTIVE_CONTRACTS; i++) {
+    contractRects.push({
+      x: cMargin + i * (cW + cMargin),
+      y: cY,
+      w: cW,
+      h: cH,
+    });
+  }
+
+  function slotRectsFor(cr) {
+    var pad = 8 * GF.S;
+    var titleH = 36 * GF.S;
+    var availW = cr.w - pad * 2;
+    var availH = cr.h - titleH - pad * 2 - 24 * GF.S;
+    var slotSize = Math.min((availW - pad) / 2, (availH - pad) / 2);
+    var gx = cr.x + pad + (availW - slotSize * 2 - pad) / 2;
+    var gy = cr.y + titleH + pad;
+    var rs = [];
+    for (var r = 0; r < 2; r++) {
+      for (var c = 0; c < 2; c++) {
+        rs.push({
+          x: gx + c * (slotSize + pad),
+          y: gy + r * (slotSize + pad),
+          w: slotSize,
+          h: slotSize,
+        });
+      }
+    }
+    return rs;
+  }
+
+  var handY = H - handAreaH;
+  var handGap = 8 * S;
+  var handPad = 14 * S;
+  var maxCardW = (W - handPad * 2 - handGap * (HAND_SIZE - 1)) / HAND_SIZE;
+  var cardH = Math.min(maxCardW * 1.4, handAreaH - 24 * S);
+  var cardW = cardH / 1.4;
+  if (cardW > maxCardW) { cardW = maxCardW; cardH = cardW * 1.4; }
+  var totalW = cardW * HAND_SIZE + handGap * (HAND_SIZE - 1);
+  var startX = (W - totalW) / 2;
+  var handRects = [];
+  for (var hi = 0; hi < HAND_SIZE; hi++) {
+    handRects.push({
+      x: startX + hi * (cardW + handGap),
+      y: handY + 12 * S,
+      w: cardW,
+      h: cardH,
+    });
+  }
+
+  var discBtnW = Math.min(140 * S, W * 0.28);
+  var discBtnH = 44 * S;
+  var discBtn = {
+    x: W - discBtnW - 14 * S,
+    y: H - discBtnH - 10 * S,
+    w: discBtnW,
+    h: discBtnH,
+  };
+
+  return {
+    hudH: hudH,
+    contractRects: contractRects,
+    slotRectsFor: slotRectsFor,
+    handRects: handRects,
+    cardW: cardW,
+    cardH: cardH,
+    discBtn: discBtn,
+    handY: handY,
+  };
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function pointerDown(x, y) {
+  if (gs !== 'PLAYING') return;
+  var lay = getLayout();
+
+  var b = lay.discBtn;
+  if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+    discardSelected();
+    return;
+  }
+
+  for (var i = 0; i < hand.length; i++) {
+    var r = lay.handRects[i];
+    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+      drag = {
+        cardIdx: i,
+        startX: x,
+        startY: y,
+        x: x,
+        y: y,
+        moved: false,
+      };
+      selectedHand = i;
+      return;
+    }
+  }
+}
+
+function pointerMove(x, y) {
+  if (!drag) return;
+  drag.x = x;
+  drag.y = y;
+  var dx = x - drag.startX, dy = y - drag.startY;
+  if (Math.sqrt(dx*dx + dy*dy) > 6) drag.moved = true;
+
+  hoverSlot = null;
+  var lay = getLayout();
+  for (var ci = 0; ci < contracts.length; ci++) {
+    if (contracts[ci].filled) continue;
+    var slots = lay.slotRectsFor(lay.contractRects[ci]);
+    for (var si = 0; si < slots.length; si++) {
+      if (contracts[ci].slots[si] !== null) continue;
+      var r = slots[si];
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+        if (slotAccepts(contracts[ci], si, hand[drag.cardIdx])) {
+          hoverSlot = { ci: ci, si: si };
+        }
+        return;
+      }
+    }
+  }
+}
+
+function pointerUp(x, y) {
+  if (!drag) return;
+  var lay = getLayout();
+  var placed = false;
+  for (var ci = 0; ci < contracts.length && !placed; ci++) {
+    if (contracts[ci].filled) continue;
+    var slots = lay.slotRectsFor(lay.contractRects[ci]);
+    for (var si = 0; si < slots.length && !placed; si++) {
+      var r = slots[si];
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+        if (placeCard(drag.cardIdx, ci, si)) {
+          GF.spawnParticles(r.x + r.w/2, r.y + r.h/2, '#7CFC00', 14);
+          GF.setShake(0.3);
+          placed = true;
+        }
+      }
+    }
+  }
+  drag = null;
+  hoverSlot = null;
+}
+
+(function bindInput() {
+  var canvas = document.getElementById('c');
+  canvas.addEventListener('mousedown', function(e) {
+    pointerDown(e.clientX, e.clientY);
+  });
+  canvas.addEventListener('mousemove', function(e) {
+    pointerMove(e.clientX, e.clientY);
+  });
+  canvas.addEventListener('mouseup', function(e) {
+    pointerUp(e.clientX, e.clientY);
+  });
+  canvas.addEventListener('mouseleave', function(e) {
+    if (drag) pointerUp(e.clientX, e.clientY);
+  });
+  canvas.addEventListener('touchstart', function(e) {
+    if (e.changedTouches.length > 0) {
+      var t = e.changedTouches[0];
+      pointerDown(t.clientX, t.clientY);
+    }
+  }, { passive: false });
+  canvas.addEventListener('touchmove', function(e) {
+    if (e.changedTouches.length > 0) {
+      var t = e.changedTouches[0];
+      pointerMove(t.clientX, t.clientY);
+    }
+  }, { passive: false });
+  canvas.addEventListener('touchend', function(e) {
+    if (e.changedTouches.length > 0) {
+      var t = e.changedTouches[0];
+      pointerUp(t.clientX, t.clientY);
+    }
+  }, { passive: false });
+})();
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) { /* nothing time-based; pressure is the deck */ }
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  drawWorkbench(ctx);
+
+  if (gs === 'MENU') {
+    drawMenuBackdrop(ctx);
+    GF.drawOverlay({
+      title: GF.t('title'),
+      sub: GF.t('sub'),
+      btnText: GF.t('play'),
+      btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null,
+    });
+    return;
+  }
+
+  drawHUD(ctx);
+  drawContracts(ctx);
+  drawHand(ctx);
+  drawDiscardButton(ctx);
+
+  if (drag && drag.moved) drawDraggedCard(ctx);
+
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('runs_dry') + ' · ' + GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+    return;
+  }
+
+  if (gs === 'WIN') {
+    GF.drawOverlay({
+      title: GF.t('win'),
+      sub: GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+    return;
+  }
+}
+
+function drawWorkbench(ctx) {
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#1f1812');
+  g.addColorStop(0.5, '#3a2a1c');
+  g.addColorStop(1, '#1a1208');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+  ctx.lineWidth = 1;
+  for (var y = 60; y < GF.H; y += 64 * GF.S) {
+    ctx.beginPath();
+    ctx.moveTo(0, y); ctx.lineTo(GF.W, y);
+    ctx.stroke();
+  }
+  var vg = ctx.createRadialGradient(GF.cx, GF.cy, GF.W * 0.3, GF.cx, GF.cy, GF.W * 0.9);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+}
+
+function drawMenuBackdrop(ctx) {
+  var t = (performance.now() % 60000) / 1000;
+  for (var i = 0; i < 8; i++) {
+    var px = ((i * 187 + t * 22) % (GF.W + 200)) - 100;
+    var py = ((i * 113 + t * 14) % (GF.H + 200)) - 100;
+    ctx.globalAlpha = 0.10;
+    drawPartIcon(ctx, PART_DEFS[i % PART_DEFS.length].id, px, py, 70 * GF.S, '#888');
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHUD(ctx) {
+  var fs = GF.clamp(16 * GF.S, 12, 22);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('deck') + ': ' + deck.length + '/' + DECK_SIZE, 14 * GF.S, 14 * GF.S);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#FFD700';
+  ctx.fillText(GF.t('orders') + ': ' + contractsFulfilled + '/3', GF.cx, 14 * GF.S);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('score') + ': ' + score, GF.W - 14 * GF.S, 14 * GF.S);
+
+  // Deck progress bar
+  var barW = GF.W * 0.96;
+  var barX = (GF.W - barW) / 2;
+  var barY = 14 * GF.S + fs + 6 * GF.S;
+  var barH = 4 * GF.S;
+  GF.rr(ctx, barX, barY, barW, barH, barH/2);
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  ctx.fill();
+  var pct = deck.length / DECK_SIZE;
+  GF.rr(ctx, barX, barY, Math.max(2, barW * pct), barH, barH/2);
+  ctx.fillStyle = pct > 0.5 ? '#5dbd5d' : pct > 0.25 ? '#ffb84d' : '#e74c3c';
+  ctx.fill();
+}
+
+function drawContracts(ctx) {
+  var lay = getLayout();
+  for (var i = 0; i < contracts.length; i++) {
+    drawContractCard(ctx, contracts[i], lay.contractRects[i], i);
+  }
+}
+
+function drawContractCard(ctx, c, r, idx) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur = 14;
+  ctx.shadowOffsetY = 6;
+  GF.rr(ctx, r.x, r.y, r.w, r.h, 10 * GF.S);
+  ctx.fillStyle = c.filled ? '#52c577' : '#f4ecd8';
+  ctx.fill();
+  ctx.restore();
+
+  ctx.lineWidth = 2 * GF.S;
+  ctx.strokeStyle = c.filled ? '#2a7e3f' : '#5a4a32';
+  GF.rr(ctx, r.x, r.y, r.w, r.h, 10 * GF.S);
+  ctx.stroke();
+
+  // Pin
+  ctx.fillStyle = '#c0392b';
+  ctx.beginPath();
+  ctx.arc(r.x + r.w/2, r.y + 3 * GF.S, 4 * GF.S, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Title
+  var titleFs = GF.clamp(15 * GF.S, 11, 19);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = c.filled ? '#fff' : '#3a2a18';
+  ctx.fillText(GF.t(c.recipe.id), r.x + r.w/2, r.y + 10 * GF.S);
+
+  var subFs = GF.clamp(11 * GF.S, 9, 14);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = c.filled ? '#dfffe4' : '#5a4a32';
+  ctx.fillText('×' + c.recipe.mult.toFixed(2), r.x + r.w/2, r.y + 10 * GF.S + titleFs + 2 * GF.S);
+
+  // Slots
+  var slotRects = getLayout().slotRectsFor(r);
+  for (var s = 0; s < slotRects.length; s++) {
+    drawSlot(ctx, c, s, slotRects[s], idx);
+  }
+
+  if (c.filled) {
+    ctx.font = 'bold ' + GF.clamp(13 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(GF.t('shipped'), r.x + r.w/2, r.y + r.h - 22 * GF.S);
+  }
+}
+
+function drawSlot(ctx, contract, slotIdx, r, ci) {
+  var need = contract.recipe.parts[slotIdx];
+  var card = contract.slots[slotIdx];
+  var partDef = PART_DEFS.filter(function(p){return p.id===need;})[0];
+  var slotColor = need === 'any' ? '#888' : (partDef ? partDef.color : '#888');
+  var hovered = hoverSlot && hoverSlot.ci === ci && hoverSlot.si === slotIdx;
+
+  if (card) {
+    GF.rr(ctx, r.x, r.y, r.w, r.h, 8 * GF.S);
+    ctx.fillStyle = '#2a2018';
+    ctx.fill();
+    drawMiniCard(ctx, card, r);
+  } else {
+    GF.rr(ctx, r.x, r.y, r.w, r.h, 8 * GF.S);
+    ctx.fillStyle = hovered ? 'rgba(46,204,113,0.35)' : 'rgba(0,0,0,0.18)';
+    ctx.fill();
+    ctx.lineWidth = 2 * GF.S;
+    ctx.setLineDash([5 * GF.S, 4 * GF.S]);
+    ctx.strokeStyle = hovered ? '#2ecc71' : slotColor + 'aa';
+    GF.rr(ctx, r.x, r.y, r.w, r.h, 8 * GF.S);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.globalAlpha = 0.30;
+    var iconSize = Math.min(r.w, r.h) * 0.55;
+    if (need === 'any') {
+      drawWildIcon(ctx, r.x + r.w/2, r.y + r.h/2, iconSize);
+    } else {
+      drawPartIcon(ctx, need, r.x + r.w/2, r.y + r.h/2, iconSize, slotColor);
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.font = 'bold ' + GF.clamp(10 * GF.S, 8, 13) + 'px sans-serif';
+    ctx.fillStyle = '#3a2a18';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    var lbl = need === 'any' ? GF.t('wild') : GF.t(need);
+    ctx.fillText(lbl, r.x + r.w/2, r.y + r.h - 4 * GF.S);
+  }
+}
+
+function drawMiniCard(ctx, card, r) {
+  GF.rr(ctx, r.x + 2*GF.S, r.y + 2*GF.S, r.w - 4*GF.S, r.h - 4*GF.S, 6 * GF.S);
+  ctx.fillStyle = RARITY_COLORS[card.rarity] || '#888';
+  ctx.fill();
+
+  var pad = 5 * GF.S;
+  GF.rr(ctx, r.x + pad, r.y + pad, r.w - pad*2, r.h - pad*2, 4 * GF.S);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fill();
+
+  var size = Math.min(r.w, r.h) * 0.55;
+  if (card.kind === 'joker') {
+    drawJokerIcon(ctx, r.x + r.w/2, r.y + r.h/2, size);
+  } else {
+    drawPartIcon(ctx, card.part, r.x + r.w/2, r.y + r.h/2, size, '#fff');
+  }
+
+  ctx.font = 'bold ' + GF.clamp(10 * GF.S, 8, 13) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('★'.repeat(card.rarity), r.x + r.w/2, r.y + r.h - 3 * GF.S);
+}
+
+function drawHand(ctx) {
+  var lay = getLayout();
+  for (var i = 0; i < hand.length; i++) {
+    if (drag && drag.cardIdx === i && drag.moved) continue;
+    var r = lay.handRects[i];
+    drawCard(ctx, hand[i], r.x, r.y, r.w, r.h, selectedHand === i);
+  }
+}
+
+function drawCard(ctx, card, x, y, w, h, selected) {
+  var lift = selected ? -8 * GF.S : 0;
+
+  ctx.save();
+  ctx.shadowColor = selected ? 'rgba(255,215,0,0.7)' : 'rgba(0,0,0,0.55)';
+  ctx.shadowBlur = selected ? 22 : 12;
+  ctx.shadowOffsetY = selected ? -2 : 6;
+  GF.rr(ctx, x, y + lift, w, h, 10 * GF.S);
+  ctx.fillStyle = '#2a2018';
+  ctx.fill();
+  ctx.restore();
+
+  GF.rr(ctx, x + 3*GF.S, y + 3*GF.S + lift, w - 6*GF.S, h - 6*GF.S, 8 * GF.S);
+  var rcol = card.kind === 'joker' ? '#ffb84d' : (RARITY_COLORS[card.rarity] || '#888');
+  var grd = ctx.createLinearGradient(x, y + lift, x, y + h + lift);
+  grd.addColorStop(0, rcol);
+  grd.addColorStop(1, shade(rcol, -40));
+  ctx.fillStyle = grd;
+  ctx.fill();
+
+  var pad = 8 * GF.S;
+  GF.rr(ctx, x + pad, y + pad + lift, w - pad*2, h - pad*2, 6 * GF.S);
+  ctx.fillStyle = 'rgba(20,12,8,0.55)';
+  ctx.fill();
+
+  ctx.lineWidth = 2 * GF.S;
+  ctx.strokeStyle = selected ? '#FFD700' : '#0a0805';
+  GF.rr(ctx, x + 1, y + 1 + lift, w - 2, h - 2, 9 * GF.S);
+  ctx.stroke();
+
+  var iconSize = Math.min(w, h) * 0.45;
+  if (card.kind === 'joker') {
+    drawJokerIcon(ctx, x + w/2, y + h * 0.42 + lift, iconSize);
+  } else {
+    drawPartIcon(ctx, card.part, x + w/2, y + h * 0.42 + lift, iconSize, '#fff');
+  }
+
+  ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  var lblKey = card.kind === 'joker' ? 'joker' : card.part;
+  ctx.fillText(GF.t(lblKey).toUpperCase(), x + w/2, y + 12 * GF.S + lift);
+
+  ctx.font = 'bold ' + GF.clamp(13 * GF.S, 10, 16) + 'px sans-serif';
+  ctx.fillStyle = '#FFD700';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('★'.repeat(card.rarity), x + w/2, y + h - 10 * GF.S + lift);
+
+  if (card.kind === 'joker') {
+    ctx.font = GF.clamp(9 * GF.S, 7, 11) + 'px sans-serif';
+    ctx.fillStyle = '#ffd9b3';
+    ctx.fillText('×' + JOKER_RARITY_PENALTY, x + w/2, y + h - 26 * GF.S + lift);
+  }
+}
+
+function drawDraggedCard(ctx) {
+  if (!drag || !hand[drag.cardIdx]) return;
+  var lay = getLayout();
+  var w = lay.cardW, h = lay.cardH;
+  drawCard(ctx, hand[drag.cardIdx], drag.x - w/2, drag.y - h/2, w, h, true);
+}
+
+function drawDiscardButton(ctx) {
+  var lay = getLayout();
+  var b = lay.discBtn;
+  var enabled = selectedHand >= 0;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)';
+  ctx.shadowBlur = 8;
+  ctx.shadowOffsetY = 3;
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.h/2);
+  var grd = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+  if (enabled) {
+    grd.addColorStop(0, '#c0392b'); grd.addColorStop(1, '#7d2018');
+  } else {
+    grd.addColorStop(0, '#555'); grd.addColorStop(1, '#333');
+  }
+  ctx.fillStyle = grd;
+  ctx.fill();
+  ctx.restore();
+
+  ctx.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('discard'), b.x + b.w/2, b.y + b.h/2);
+}
+
+// ── PART ICONS (pure canvas) ─────────────────────────────────────────────
+function drawPartIcon(ctx, partId, cx, cy, size, color) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  var s = size;
+  ctx.lineWidth = Math.max(1, s * 0.06);
+  ctx.lineCap = 'round';
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+
+  if (partId === 'barrel') {
+    ctx.fillRect(-s*0.45, -s*0.10, s*0.9, s*0.20);
+    ctx.fillStyle = shade(color, -30);
+    ctx.beginPath(); ctx.arc(s*0.45, 0, s*0.10, -Math.PI/2, Math.PI/2); ctx.fill();
+    ctx.beginPath(); ctx.arc(-s*0.45, 0, s*0.10, Math.PI/2, -Math.PI/2, true); ctx.fill();
+  } else if (partId === 'stock') {
+    ctx.beginPath();
+    ctx.moveTo(-s*0.45, -s*0.20);
+    ctx.lineTo(s*0.45, -s*0.10);
+    ctx.lineTo(s*0.45, s*0.10);
+    ctx.lineTo(-s*0.45, s*0.30);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = shade(color, -50);
+    ctx.stroke();
+  } else if (partId === 'scope') {
+    ctx.fillRect(-s*0.40, -s*0.12, s*0.80, s*0.24);
+    ctx.fillStyle = shade(color, -20);
+    ctx.beginPath();
+    ctx.arc(0, 0, s*0.16, 0, Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(0, 0, s*0.07, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = shade(color, -50);
+    ctx.lineWidth = Math.max(1, s*0.04);
+    ctx.beginPath(); ctx.moveTo(-s*0.16, 0); ctx.lineTo(s*0.16, 0); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -s*0.16); ctx.lineTo(0, s*0.16); ctx.stroke();
+  } else if (partId === 'magazine') {
+    ctx.beginPath();
+    GF.rr(ctx, -s*0.25, -s*0.40, s*0.50, s*0.80, s*0.06);
+    ctx.fill();
+    ctx.fillStyle = shade(color, -40);
+    for (var i = 0; i < 4; i++) {
+      ctx.fillRect(-s*0.18, -s*0.30 + i * s*0.18, s*0.36, s*0.10);
+    }
+  } else if (partId === 'grip') {
+    ctx.beginPath();
+    ctx.moveTo(-s*0.05, -s*0.40);
+    ctx.lineTo(s*0.20, -s*0.40);
+    ctx.lineTo(s*0.20, s*0.10);
+    ctx.lineTo(-s*0.20, s*0.40);
+    ctx.lineTo(-s*0.30, s*0.30);
+    ctx.lineTo(-s*0.05, -s*0.10);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = shade(color, -50);
+    ctx.lineWidth = Math.max(1, s*0.04);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawWildIcon(ctx, cx, cy, size) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.floor(size * 0.7) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', 0, 0);
+  ctx.restore();
+}
+
+function drawJokerIcon(ctx, cx, cy, size) {
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(-size*0.45, size*0.15);
+  ctx.lineTo(-size*0.30, -size*0.30);
+  ctx.lineTo(-size*0.05, size*0.05);
+  ctx.lineTo(size*0.05, -size*0.30);
+  ctx.lineTo(size*0.30, size*0.05);
+  ctx.lineTo(size*0.45, -size*0.30);
+  ctx.lineTo(size*0.45, size*0.15);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#FFD700';
+  ctx.beginPath(); ctx.arc(-size*0.30, -size*0.32, size*0.06, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(size*0.05, -size*0.32, size*0.06, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(size*0.45, -size*0.32, size*0.06, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.font = 'bold ' + Math.floor(size * 0.30) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('J', 0, size*0.05);
+  ctx.restore();
+}
+
+function shade(hex, percent) {
+  var c = hex.replace('#','');
+  if (c.length === 3) c = c.split('').map(function(x){return x+x;}).join('');
+  var num = parseInt(c, 16);
+  var r = (num >> 16) & 0xff, g = (num >> 8) & 0xff, b = num & 0xff;
+  var amt = percent / 100;
+  if (amt < 0) {
+    r = Math.max(0, Math.floor(r * (1 + amt)));
+    g = Math.max(0, Math.floor(g * (1 + amt)));
+    b = Math.max(0, Math.floor(b * (1 + amt)));
+  } else {
+    r = Math.min(255, Math.floor(r + (255 - r) * amt));
+    g = Math.min(255, Math.floor(g + (255 - g) * amt));
+    b = Math.min(255, Math.floor(b + (255 - b) * amt));
+  }
+  return '#' + ((1<<24) + (r<<16) + (g<<8) + b).toString(16).slice(1);
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'gunsmith_draft',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('gunsmith_draft_best') || '0') || 0; } catch (e) {}
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Expose state for the post-build-tester gate.
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    score: score,
+    best: best,
+    deckRemaining: deck.length,
+    handSize: hand.length,
+    contractsFulfilled: contractsFulfilled,
+    activeContracts: contracts.length,
+    unfilledContracts: contracts.filter(function(c){return !c.filled;}).length,
+    DECK_SIZE: DECK_SIZE,
+    HAND_SIZE: HAND_SIZE,
+    CRAFT_SLOTS: CRAFT_SLOTS,
+    JOKER_RATIO: JOKER_RATIO,
+    ACTIVE_CONTRACTS: ACTIVE_CONTRACTS,
+    CONTRACT_VALUE_BASE: CONTRACT_VALUE_BASE,
+    JOKER_RARITY_PENALTY: JOKER_RARITY_PENALTY,
+    FAILED_CONTRACT_PENALTY: FAILED_CONTRACT_PENALTY,
+    PART_TYPES: PART_TYPES,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
