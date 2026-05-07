@@ -2,6 +2,7 @@
 let games = [];   // from games.json
 let counts = {};  // from /api/counts
 let myVotes = JSON.parse(localStorage.getItem('myVotes') || '{}');
+let me = null;    // { signed_in, email, uid, exp_ts } from /api/me
 let activeTab = 'top';
 let activeGenre = 'all';
 let searchTerm = '';
@@ -47,6 +48,14 @@ async function init() {
     if (r.ok) counts = await r.json();
   } catch (e) { /* ignore — works offline-style */ }
 
+  // Read auth state — populates the sign-in pill + per-user vote map.
+  // When signed in, the user's votes come from server (no per-device drift).
+  try {
+    const r = await fetch('/api/me', { cache: 'no-store', credentials: 'same-origin' });
+    if (r.ok) me = await r.json();
+  } catch (e) { me = null; }
+  paintAuthPill();
+
   // Header metadata: build = highest specimen number, date = today
   const hero = document.getElementById('hero');
   if (hero) {
@@ -64,6 +73,21 @@ async function init() {
 // Helper — specimen number padded for display ("022")
 function specimenNum(g) {
   return g.num ? String(g.num).padStart(3, '0') : '—';
+}
+
+function paintAuthPill() {
+  const link = document.getElementById('auth-link');
+  const user = document.getElementById('auth-user');
+  const letter = document.getElementById('auth-user-letter');
+  if (!link || !user) return;
+  if (me && me.signed_in) {
+    link.style.display = 'none';
+    user.style.display = 'inline-flex';
+    letter.textContent = (me.email[0] || '?').toUpperCase() + ' · ' + me.email.split('@')[0];
+  } else {
+    link.style.display = 'inline-flex';
+    user.style.display = 'none';
+  }
 }
 
 function attachEvents() {
@@ -307,18 +331,14 @@ function logVariantClick(slug, variant) {
 // ── Voting ────────────────────────────────────────────────────────────────
 async function vote(slug, action, cardEl) {
   const prev = myVotes[slug] || null;
-  let next;
-  if (prev === action) next = null;        // toggle off — remove vote
-  else next = action;                      // switch or new vote
+  const next = prev === action ? null : action;
 
-  // delta math
+  // Optimistic local update — paint instantly, server reconciles
   let dl = 0, dd = 0;
   if (prev === 'like')    dl -= 1;
   if (prev === 'dislike') dd -= 1;
   if (next === 'like')    dl += 1;
   if (next === 'dislike') dd += 1;
-
-  // Optimistic update
   if (next) myVotes[slug] = next; else delete myVotes[slug];
   localStorage.setItem('myVotes', JSON.stringify(myVotes));
   if (!counts[slug]) counts[slug] = { likes: 0, dislikes: 0 };
@@ -326,16 +346,28 @@ async function vote(slug, action, cardEl) {
   counts[slug].dislikes = Math.max(0, (counts[slug].dislikes || 0) + dd);
   refreshCard(cardEl, slug);
 
-  // Server update
+  // Server update. Two paths:
+  //   - Signed in: server enforces per-user vote map (multi-vote-proof)
+  //   - Anon: legacy delta path (client-side dedup via localStorage)
   try {
+    const body = (me && me.signed_in)
+      ? { slug, vote: next || 'clear' }
+      : { slug, deltaLike: dl, deltaDislike: dd };
     const r = await fetch('/api/vote', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ slug, deltaLike: dl, deltaDislike: dd }),
+      credentials: 'same-origin',
+      body: JSON.stringify(body),
     });
     if (r.ok) {
       const updated = await r.json();
-      counts[slug] = updated;
+      counts[slug] = { likes: updated.likes, dislikes: updated.dislikes };
+      // Server may correct our optimistic state (e.g. desync). Trust it.
+      if (updated.myVote !== undefined) {
+        if (updated.myVote === 'like' || updated.myVote === 'dislike') myVotes[slug] = updated.myVote;
+        else delete myVotes[slug];
+        localStorage.setItem('myVotes', JSON.stringify(myVotes));
+      }
       refreshCard(cardEl, slug);
     }
   } catch (e) { /* offline-tolerant */ }
