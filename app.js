@@ -76,14 +76,16 @@ function specimenNum(g) {
 }
 
 function paintAuthPill() {
-  const link = document.getElementById('auth-link');
-  const user = document.getElementById('auth-user');
-  const letter = document.getElementById('auth-user-letter');
+  const link    = document.getElementById('auth-link');
+  const user    = document.getElementById('auth-user');
+  const initial = document.getElementById('auth-user-initial');
+  const emailEl = document.getElementById('auth-user-email');
   if (!link || !user) return;
   if (me && me.signed_in) {
     link.style.display = 'none';
     user.style.display = 'inline-flex';
-    letter.textContent = (me.email[0] || '?').toUpperCase() + ' · ' + me.email.split('@')[0];
+    if (initial) initial.textContent = (me.email[0] || '?').toUpperCase();
+    if (emailEl) emailEl.textContent = ' · ' + me.email.split('@')[0];
   } else {
     link.style.display = 'inline-flex';
     user.style.display = 'none';
@@ -217,7 +219,7 @@ function renderFeatured() {
   const playUrl = `/play.html?slug=${encodeURIComponent(game.slug)}`;
 
   featured.innerHTML = `
-    <article class="hero" style="background-image: url('/thumbs/${game.slug}.png?v=1')">
+    <article class="hero">
       <div class="hero-thumb" style="background-image: url('/thumbs/${game.slug}.png?v=1')"></div>
       <div class="hero-content">
         <div class="hero-badge">${topScore > 0 ? '🔥 Trending' : '✨ Featured'}</div>

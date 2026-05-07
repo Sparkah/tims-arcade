@@ -255,7 +255,11 @@ function startRun() {
   bullets = []; particles = []; floats = []; buttons = [];
   startTime = performance.now() / 1000;
   elapsed = 0; score = 0; screenShake = 0;
+  liveRank = null;
+  newBestPopped = false;
   gs = 'PLAYING';
+  // Warm/refresh live-rank board in the background — non-blocking.
+  fetchLeaderboard();
 }
 window._jumpLevel = function(/*n*/) { startRun(); };
 window._invincible = false;  // screenshot tool toggles this on
@@ -274,11 +278,17 @@ function spawnFloat(x, y, txt, col) {
 
 // ── UPDATE ──────────────────────────────────────────────────────────────────
 var lastTs = 0;
+var lastLiveRankAt = 0;
 function update(dt) {
   if (gs !== 'PLAYING') return;
 
   var now = performance.now() / 1000;
   elapsed = now - startTime;
+  // Recompute projected daily rank ~4×/sec (cheap; just compares numbers)
+  if (now - lastLiveRankAt > 0.25) {
+    lastLiveRankAt = now;
+    liveRank = computeLiveRank(Math.floor(elapsed * 10));
+  }
   if (elapsed >= GAME_DURATION) {
     score = Math.floor(elapsed * 10);
     onRunEnded(true);
@@ -369,6 +379,7 @@ function update(dt) {
 }
 
 function onRunEnded(survived) {
+  var beatAllTime = false;
   // Update best for today (per-seed) and all-time
   try {
     var dayKey = getDayKey();
@@ -382,9 +393,15 @@ function onRunEnded(survived) {
     todayBest = Math.max(dayBest, score);
 
     var atime = parseInt(localStorage.getItem('dodge_alltime_best')||'0')||0;
+    if (score > atime && atime > 0) beatAllTime = true; // require a prior best to celebrate
     if (score > atime) localStorage.setItem('dodge_alltime_best', String(score));
     allTimeBest = Math.max(atime, score);
   } catch(e) {}
+  if (beatAllTime && !newBestPopped) {
+    newBestPopped = true;
+    spawnFloat(player.x, player.y - 24, (lang === 'ru' ? 'НОВЫЙ РЕКОРД!' : 'NEW BEST!'), '#FFD700');
+    spawnParticles(player.x, player.y, '#FFD700', 24);
+  }
   gs = survived ? 'CLEARED' : 'GAMEOVER';
   try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}
   submitAndFetchLeaderboard();
@@ -393,7 +410,10 @@ function onRunEnded(survived) {
 // ── LEADERBOARD ─────────────────────────────────────────────────────────────
 var playerName = '';
 var leaderboard = [];   // [{name, score, ts}]
+var liveBoard = [];     // full top-N for live-rank computation during PLAYING
+var liveRank = null;    // your projected daily rank computed against liveBoard each frame
 var myRank = null;
+var newBestPopped = false; // ensure NEW BEST! float fires only once per run
 
 function ensurePlayerName() {
   if (playerName) return playerName;
@@ -412,8 +432,26 @@ function fetchLeaderboard() {
   var date = getDayKey();
   return fetch('/api/scores?slug=daily_dodge&date=' + date, { cache: 'no-store' })
     .then(function(r) { return r.ok ? r.json() : { entries: [] }; })
-    .then(function(data) { leaderboard = (data.entries || []).slice(0, 5); })
+    .then(function(data) {
+      var all = data.entries || [];
+      leaderboard = all.slice(0, 5);
+      // keep a fuller copy for live-rank during play (sorted desc by score)
+      liveBoard = all.slice(0, 50).sort(function(a,b){ return b.score - a.score; });
+    })
     .catch(function() { /* offline-tolerant */ });
+}
+
+// Compute the player's projected daily rank vs cached liveBoard entries.
+// Returns null if board is empty (no rank to show).
+function computeLiveRank(myScore) {
+  if (!liveBoard || liveBoard.length === 0) return null;
+  if (myScore <= 0) return null;
+  // count entries with score strictly greater than mine; rank = that+1
+  var ahead = 0;
+  for (var i = 0; i < liveBoard.length; i++) {
+    if (liveBoard[i].score > myScore) ahead++; else break;
+  }
+  return ahead + 1;
 }
 
 // ── SHARE CARD (client-side PNG render) ─────────────────────────────────────
@@ -683,6 +721,37 @@ function drawHUD() {
   ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
   rr(ctx, tx, ty, tw * (elapsed / GAME_DURATION), th, th/2);
   ctx.fillStyle = '#48c9b0'; ctx.fill();
+
+  // ── Live daily rank pill (just below HUD, top-center) ────────────────────
+  // Adds *social* pressure during play: shows your projected position vs
+  // everyone else who's run today's seed already.
+  if (liveRank && liveRank > 0) {
+    var pillTxt = (lang === 'ru' ? '#' : '#') + liveRank + ' / ' + liveBoard.length;
+    var labelTxt = (lang === 'ru' ? 'МЕСТО' : 'RANK');
+    var pillFs = clamp(13*S, 11, 17);
+    var lblFs  = clamp(10*S, 8, 13);
+    ctx.font = 'bold ' + pillFs + 'px sans-serif';
+    var pw = ctx.measureText(pillTxt).width + clamp(46*S, 36, 64);
+    var ph = clamp(24*S, 20, 32);
+    var px = cx - pw/2, py = bh + 6*S;
+    rr(ctx, px, py, pw, ph, ph/2);
+    ctx.fillStyle = liveRank === 1 ? 'rgba(255,215,0,0.18)' : 'rgba(72,201,176,0.14)';
+    ctx.strokeStyle = liveRank === 1 ? 'rgba(255,215,0,0.6)' : 'rgba(72,201,176,0.5)';
+    ctx.lineWidth = 1.2*S;
+    ctx.fill(); ctx.stroke();
+    // label inside pill, left
+    ctx.font = 'bold ' + lblFs + 'px sans-serif';
+    ctx.fillStyle = '#557';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(labelTxt, px + clamp(10*S, 8, 14), py + ph/2);
+    // value, right
+    ctx.font = 'bold ' + pillFs + 'px sans-serif';
+    ctx.fillStyle = liveRank === 1 ? '#FFD700' : '#48c9b0';
+    ctx.textAlign = 'right';
+    ctx.fillText(pillTxt, px + pw - clamp(10*S, 8, 14), py + ph/2);
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+  }
 }
 
 function drawOverlay(title, sub, btnText, btnFn, sub2) {

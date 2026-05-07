@@ -92,7 +92,8 @@ canvas{display:block;touch-action:none}
       </div>
     </div>
     <button class="online-btn" onclick="AudioManager.playClick();joinOnline()">PLAY ONLINE</button>
-    <div style="margin-top:24px;font-size:12px;color:#555">
+    <div id="menu-stats" style="margin-top:18px;font-size:12px;color:#888;line-height:1.6;text-align:center;min-height:18px"></div>
+    <div style="margin-top:14px;font-size:12px;color:#555">
       <label>Volume: <input type="range" min="0" max="100" value="70" style="width:100px;vertical-align:middle" oninput="AudioManager.setVolume('master',this.value/100)"></label>
     </div>
   </div>
@@ -214,6 +215,11 @@ const STRINGS = {
     deaths_label: 'Deaths:',
     time_up: "TIME'S UP!",
     respawned: 'Respawned!',
+    best_time_label: 'Best survival:',
+    best_caught_label: 'Most caught:',
+    rounds_played_label: 'Rounds played:',
+    new_best: 'NEW BEST!',
+    lifetime_stats: 'Your record',
   },
   ru: {
     title: 'CREATURE HUNT',
@@ -290,10 +296,83 @@ const STRINGS = {
     deaths_label: 'Смертей:',
     time_up: 'ВРЕМЯ ВЫШЛО!',
     respawned: 'Возрождение!',
+    best_time_label: 'Лучшее выживание:',
+    best_caught_label: 'Больше всего поймано:',
+    rounds_played_label: 'Сыграно раундов:',
+    new_best: 'НОВЫЙ РЕКОРД!',
+    lifetime_stats: 'Ваш рекорд',
   }
 };
 
 function t(key) { return (STRINGS[gameLang] || STRINGS.en)[key] || STRINGS.en[key] || key; }
+
+// ── Persistent Best (iter#1 ladder) ────────────────────────────
+// Adapted for multiplayer: tracks best survival time (human),
+// most humans caught in a round (creature), and total rounds played.
+const BEST_KEY = 'creature_hunt_best';
+const PersonalBest = (function() {
+  function load() {
+    try {
+      const raw = localStorage.getItem(BEST_KEY);
+      if (raw) {
+        const o = JSON.parse(raw);
+        return {
+          bestSurvivalSec: Number(o.bestSurvivalSec) || 0,
+          bestCaught: Number(o.bestCaught) || 0,
+          roundsPlayed: Number(o.roundsPlayed) || 0,
+        };
+      }
+    } catch(_) {}
+    return { bestSurvivalSec: 0, bestCaught: 0, roundsPlayed: 0 };
+  }
+  function save(state) {
+    try { localStorage.setItem(BEST_KEY, JSON.stringify(state)); } catch(_) {}
+  }
+  let cache = load();
+  function get() { return Object.assign({}, cache); }
+  // Returns object describing what was beaten this round:
+  //   { newBestTime: bool, newBestCaught: bool }
+  function recordRound(role, survivalSec, caughtCount) {
+    cache.roundsPlayed = (cache.roundsPlayed || 0) + 1;
+    let newBestTime = false, newBestCaught = false;
+    if (role === 'human') {
+      if (survivalSec > cache.bestSurvivalSec) {
+        cache.bestSurvivalSec = survivalSec;
+        newBestTime = true;
+      }
+    } else if (role === 'creature') {
+      if (caughtCount > cache.bestCaught) {
+        cache.bestCaught = caughtCount;
+        newBestCaught = true;
+      }
+    }
+    save(cache);
+    return { newBestTime, newBestCaught };
+  }
+  function fmtTime(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    const m = Math.floor(sec / 60), s = sec % 60;
+    return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+  return { get, recordRound, fmtTime };
+})();
+
+function renderMenuStats() {
+  const el = document.getElementById('menu-stats');
+  if (!el) return;
+  const pb = PersonalBest.get();
+  if (!pb.roundsPlayed) { el.innerHTML = ''; return; }
+  const parts = [];
+  parts.push('<span style="color:#aaa">' + t('lifetime_stats') + '</span>');
+  parts.push(t('rounds_played_label') + ' <span style="color:#ddd">' + pb.roundsPlayed + '</span>');
+  if (pb.bestSurvivalSec > 0) {
+    parts.push(t('best_time_label') + ' <span style="color:#5e5">' + PersonalBest.fmtTime(pb.bestSurvivalSec) + '</span>');
+  }
+  if (pb.bestCaught > 0) {
+    parts.push(t('best_caught_label') + ' <span style="color:#f88">' + pb.bestCaught + '/10</span>');
+  }
+  el.innerHTML = parts.join(' &middot; ');
+}
 
 function detectLanguage() {
   return Platform.detectLanguage();
@@ -2828,6 +2907,14 @@ function renderHUD() {
     html += `<div>${t('time_left')} <span style="color:${timerColor}">${rMins}:${rSecs < 10 ? '0' : ''}${rSecs}</span></div>`;
   }
 
+  // Persistent best (iter#1) — show the target the player is chasing
+  const _pb = PersonalBest.get();
+  if (playerRole === 'human' && _pb.bestSurvivalSec > 0) {
+    html += `<div style="color:#888;font-size:11px">${t('best_time_label')} <span style="color:#5e5">${PersonalBest.fmtTime(_pb.bestSurvivalSec)}</span></div>`;
+  } else if (playerRole === 'creature' && _pb.bestCaught > 0) {
+    html += `<div style="color:#888;font-size:11px">${t('best_caught_label')} <span style="color:#f88">${_pb.bestCaught}/10</span></div>`;
+  }
+
   if (mpState === 'playing') {
     html += `<div style="color:#4af;font-size:11px">${t('online')} · ${mpLatency}ms</div>`;
   }
@@ -3476,6 +3563,15 @@ function endGame(won) {
   const time = Math.floor(gameTime / 1000);
   const mins = Math.floor(time / 60), secs = time % 60;
 
+  // Persistent best (iter#1): survival sec for human = how long they lasted alive
+  // (cap at full game time if they survived); for creature = total caught.
+  const survivalSec = (playerRole === 'human')
+    ? (player.alive ? time : Math.max(0, time))
+    : 0;
+  const caughtCount = (playerRole === 'creature') ? caught.length : 0;
+  const bestResult = PersonalBest.recordRound(playerRole, survivalSec, caughtCount);
+  const pb = PersonalBest.get();
+
   let title, titleColor, stats;
 
   if (playerRole === 'creature') {
@@ -3484,6 +3580,10 @@ function endGame(won) {
     stats = `${t('time_label')} ${mins}:${secs < 10 ? '0' : ''}${secs}<br>`;
     stats += `${t('humans_caught')} <span style="color:#f88">${caught.length}/10</span>`;
     if (won) stats += `<br><span style="color:#f44">${t('none_escaped')}</span>`;
+    if (bestResult.newBestCaught) {
+      stats += `<br><span style="color:#fa4;font-weight:bold;letter-spacing:1px">${t('new_best')}</span>`;
+    }
+    stats += `<br><span style="color:#888;font-size:13px">${t('best_caught_label')} <span style="color:#f88">${pb.bestCaught}/10</span> &middot; ${t('rounds_played_label')} <span style="color:#ccc">${pb.roundsPlayed}</span></span>`;
   } else {
     title = won ? t('you_survived') : t('game_over');
     titleColor = won ? '#5e5' : '#f44';
@@ -3492,6 +3592,10 @@ function endGame(won) {
     stats += player.alive
       ? `<span style="color:#5e5">${t('you_escaped')}</span>`
       : `<span style="color:#f55">${t('you_were_caught_stat')}</span>`;
+    if (bestResult.newBestTime) {
+      stats += `<br><span style="color:#fa4;font-weight:bold;letter-spacing:1px">${t('new_best')}</span>`;
+    }
+    stats += `<br><span style="color:#888;font-size:13px">${t('best_time_label')} <span style="color:#5e5">${PersonalBest.fmtTime(pb.bestSurvivalSec)}</span> &middot; ${t('rounds_played_label')} <span style="color:#ccc">${pb.roundsPlayed}</span></span>`;
   }
 
   document.getElementById('go-title').textContent = title;
@@ -3500,6 +3604,7 @@ function endGame(won) {
   document.getElementById('game-over').style.display = 'flex';
   showTouchControls(false);
   showPauseBtn(false);
+  renderMenuStats();
 }
 
 // ── Multiplayer Client ─────────────────────────────────────────
@@ -4149,6 +4254,7 @@ function setup() {
   resize();
 
   applyLocalization();
+  renderMenuStats();
   requestAnimationFrame(gameLoop);
 }
 
