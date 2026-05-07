@@ -19,14 +19,16 @@
 
 set -euo pipefail
 
-SLUG="" GAME_DIR="" TITLE="" HOOK="" GENRE="other" PUBLISHED="true"
+SLUG="" GAME_DIR="" TITLE="" TITLE_RU="" HOOK="" HOOK_RU="" GENRE="other" PUBLISHED="true"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --slug)        SLUG="$2"; shift 2 ;;
     --game-dir)    GAME_DIR="$2"; shift 2 ;;
     --title)       TITLE="$2"; shift 2 ;;
+    --title-ru)    TITLE_RU="$2"; shift 2 ;;
     --hook)        HOOK="$2"; shift 2 ;;
+    --hook-ru)     HOOK_RU="$2"; shift 2 ;;
     --genre)       GENRE="$2"; shift 2 ;;
     --unpublished) PUBLISHED="false"; shift ;;
     -h|--help)
@@ -37,9 +39,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SLUG" || -z "$GAME_DIR" || -z "$TITLE" || -z "$HOOK" ]]; then
-  echo "Error: --slug --game-dir --title --hook are all required. Optional: --genre <cleaning|arcade|puzzle|dodge|multiplayer|other>"
+  echo "Error: --slug --game-dir --title --hook are all required."
+  echo "Optional: --title-ru --hook-ru --genre <cleaning|arcade|puzzle|dodge|multiplayer|other>"
   exit 1
 fi
+
+# Default RU fields to EN if not provided — sync will fall back to EN anyway,
+# but keeping the field present makes the source file self-documenting.
+[[ -z "$TITLE_RU" ]] && TITLE_RU="$TITLE"
+[[ -z "$HOOK_RU" ]] && HOOK_RU="$HOOK"
 
 if ! command -v jq >/dev/null; then
   echo "Error: jq is required. Install with: brew install jq"
@@ -57,14 +65,16 @@ fi
 ADDED_DATE="$(date +%Y-%m-%d)"
 
 NEW_ENTRY=$(jq -n \
-  --arg slug   "$SLUG" \
-  --arg gd     "$GAME_DIR" \
-  --arg title  "$TITLE" \
-  --arg hook   "$HOOK" \
-  --arg genre  "$GENRE" \
-  --arg date   "$ADDED_DATE" \
-  --argjson pub "$PUBLISHED" \
-  '{slug:$slug, gameDir:$gd, title:$title, hook:$hook, genre:$genre, addedDate:$date, published:$pub}')
+  --arg slug      "$SLUG" \
+  --arg gd        "$GAME_DIR" \
+  --arg title     "$TITLE" \
+  --arg title_ru  "$TITLE_RU" \
+  --arg hook      "$HOOK" \
+  --arg hook_ru   "$HOOK_RU" \
+  --arg genre     "$GENRE" \
+  --arg date      "$ADDED_DATE" \
+  --argjson pub   "$PUBLISHED" \
+  '{slug:$slug, gameDir:$gd, title:$title, title_ru:$title_ru, hook:$hook, hook_ru:$hook_ru, genre:$genre, addedDate:$date, published:$pub}')
 
 TMP="$(mktemp)"
 jq --argjson new "$NEW_ENTRY" \

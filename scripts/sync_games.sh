@@ -120,7 +120,11 @@ rm -f "$TMP_META"
 
 jq --argjson meta "$META_JSON" '
   map({
-    slug, title, hook,
+    slug,
+    title,
+    title_ru: (.title_ru // .title),
+    hook,
+    hook_ru: (.hook_ru // .hook),
     genre: (.genre // "other"),
     addedDate,
     published: (.published // true),

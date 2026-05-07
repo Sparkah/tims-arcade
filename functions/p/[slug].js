@@ -36,35 +36,53 @@ export async function onRequest({ params, env, request }) {
     );
   }
 
+  // Pick language from Accept-Language; ru-* gets Russian copy, else English.
+  // Yandex's crawlers honour Accept-Language so this gives clean per-language
+  // OG meta when shared in Russian / English contexts.
+  const acceptLang = (request.headers.get('Accept-Language') || '').toLowerCase();
+  const lang = acceptLang.split(',')[0].startsWith('ru') ? 'ru' : 'en';
+
   const site  = new URL('/', request.url).origin;
-  const title = `${game.title} — Tim's Game Lab`;
-  const hook  = game.hook || 'A small browser game from Tim\'s Game Lab.';
+  const titleEn = game.title;
+  const titleRu = game.title_ru || game.title;
+  const hookEn  = game.hook || 'A small browser game from Tim\'s Game Lab.';
+  const hookRu  = game.hook_ru || game.hook || 'Маленькая браузерная игра.';
+
+  const ogTitle = lang === 'ru' ? titleRu : titleEn;
+  const ogHook  = lang === 'ru' ? hookRu : hookEn;
+  const pageTitle = `${ogTitle} — Tim's Game Lab`;
+
   const img   = `${site}/thumbs/${slug}.png`;
   const url   = `${site}/p/${slug}`;
   const playUrl = `/play.html?slug=${encodeURIComponent(slug)}`;
 
   const html = `<!DOCTYPE html>
-<html lang="en">
+<html lang="${lang}">
 <head>
 <meta charset="UTF-8">
-<title>${escapeHtml(title)}</title>
-<meta name="description" content="${escapeHtml(hook)}">
+<title>${escapeHtml(pageTitle)}</title>
+<meta name="description" content="${escapeHtml(ogHook)}">
 <link rel="canonical" href="${url}">
+<link rel="alternate" hreflang="en" href="${url}">
+<link rel="alternate" hreflang="ru" href="${url}?lang=ru">
+<link rel="alternate" hreflang="x-default" href="${url}">
 
-<!-- Open Graph -->
+<!-- Open Graph (language-aware) -->
 <meta property="og:type" content="website">
 <meta property="og:url" content="${url}">
-<meta property="og:title" content="${escapeHtml(game.title)}">
-<meta property="og:description" content="${escapeHtml(hook)}">
+<meta property="og:title" content="${escapeHtml(ogTitle)}">
+<meta property="og:description" content="${escapeHtml(ogHook)}">
 <meta property="og:image" content="${img}">
 <meta property="og:image:width" content="1600">
 <meta property="og:image:height" content="900">
 <meta property="og:site_name" content="Tim's Game Lab">
+<meta property="og:locale" content="${lang === 'ru' ? 'ru_RU' : 'en_US'}">
+<meta property="og:locale:alternate" content="${lang === 'ru' ? 'en_US' : 'ru_RU'}">
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="${escapeHtml(game.title)}">
-<meta name="twitter:description" content="${escapeHtml(hook)}">
+<meta name="twitter:title" content="${escapeHtml(ogTitle)}">
+<meta name="twitter:description" content="${escapeHtml(ogHook)}">
 <meta name="twitter:image" content="${img}">
 
 <!-- Redirect humans into the game after the meta is parsed -->
@@ -80,15 +98,21 @@ p{color:#8a8aa0;font-size:15px;line-height:1.5;margin-bottom:18px}
 a.btn{display:inline-block;background:#4dd0e1;color:#0a0a14;padding:10px 22px;border-radius:999px;font-weight:700;text-decoration:none;font-size:15px}
 a.btn:hover{filter:brightness(1.1)}
 small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
+.alt{margin-top:8px;font-size:13px;color:#6a6a82}
+.alt p{font-size:13px;margin-bottom:0}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <img src="${img}" alt="${escapeHtml(game.title)}">
-  <h1>${escapeHtml(game.title)}</h1>
-  <p>${escapeHtml(hook)}</p>
-  <a class="btn" href="${playUrl}">▶ Play now</a>
-  <small>Loading the game… or <a href="/" style="color:#8a8aa0">browse all games</a></small>
+  <img src="${img}" alt="${escapeHtml(ogTitle)}">
+  <h1>${escapeHtml(ogTitle)}</h1>
+  <p>${escapeHtml(ogHook)}</p>
+  <a class="btn" href="${playUrl}">${lang === 'ru' ? '▶ Играть' : '▶ Play now'}</a>
+  <div class="alt">
+    <p><strong>${lang === 'ru' ? titleEn : titleRu}</strong></p>
+    <p>${escapeHtml(lang === 'ru' ? hookEn : hookRu)}</p>
+  </div>
+  <small>${lang === 'ru' ? 'Загружается…' : 'Loading the game…'} <a href="/" style="color:#8a8aa0">${lang === 'ru' ? 'все игры' : 'browse all games'}</a></small>
 </div>
 </body>
 </html>`;

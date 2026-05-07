@@ -6,6 +6,24 @@ let activeTab = 'top';
 let activeGenre = 'all';
 let searchTerm = '';
 
+// Language detection: ru-* visitors get Russian copy, everyone else English.
+// Override available via localStorage.lang ('en' | 'ru') or ?lang= query.
+const LANG = (function () {
+  const url = new URLSearchParams(location.search).get('lang');
+  if (url === 'en' || url === 'ru') {
+    localStorage.setItem('lang', url);
+    return url;
+  }
+  const stored = localStorage.getItem('lang');
+  if (stored === 'en' || stored === 'ru') return stored;
+  return (navigator.language || 'en').toLowerCase().startsWith('ru') ? 'ru' : 'en';
+})();
+const T = LANG === 'ru'
+  ? { title: 'title_ru', hook: 'hook_ru', play: '▶ Играть', play_count_pre: '▶ ' }
+  : { title: 'title',    hook: 'hook',    play: '▶ Play',   play_count_pre: '▶ ' };
+function gameTitle(g) { return g[T.title] || g.title; }
+function gameHook(g)  { return g[T.hook]  || g.hook; }
+
 const grid     = document.getElementById('grid');
 const empty    = document.getElementById('empty');
 const tabs     = document.getElementById('tabs');
@@ -89,8 +107,8 @@ function visible() {
 
   if (searchTerm) {
     list = list.filter(g =>
-      (g.title || '').toLowerCase().includes(searchTerm) ||
-      (g.hook  || '').toLowerCase().includes(searchTerm)
+      gameTitle(g).toLowerCase().includes(searchTerm) ||
+      gameHook(g).toLowerCase().includes(searchTerm)
     );
   }
 
@@ -176,8 +194,8 @@ function renderFeatured() {
       </div>
     </article>
   `;
-  featured.querySelector('.hero-title').textContent = game.title;
-  featured.querySelector('.hero-hook').textContent  = game.hook || '';
+  featured.querySelector('.hero-title').textContent = gameTitle(game);
+  featured.querySelector('.hero-hook').textContent  = gameHook(game);
   featured.classList.remove('hidden');
 }
 
@@ -240,8 +258,8 @@ function card(g) {
       </div>
     </div>
   `;
-  el.querySelector('.card-title').textContent = g.title;
-  el.querySelector('.card-hook').textContent  = g.hook || '';
+  el.querySelector('.card-title').textContent = gameTitle(g);
+  el.querySelector('.card-hook').textContent  = gameHook(g);
 
   function goPlay() {
     if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
