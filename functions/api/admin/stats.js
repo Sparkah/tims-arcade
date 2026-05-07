@@ -143,7 +143,56 @@ export async function onRequestGet({ request, env }) {
 
   const games = Object.values(perGame).sort((a, b) => b.seconds - a.seconds);
 
-  return new Response(JSON.stringify({ totals, perGame: games, perDay, comments: comments.slice(0, 60) }), {
+  // ── Daily highlights: today's pulse + tomorrow's iteration queue ─────────
+  const todayKey = dates[dates.length - 1];      // YYYY-MM-DD UTC
+  const yesterdayKey = dates[dates.length - 2];
+
+  const todayBlock = perDay[todayKey] || { totalSeconds: 0, perGame: {} };
+  const yesterdayBlock = perDay[yesterdayKey] || { totalSeconds: 0, perGame: {} };
+
+  // Today's top game by seconds played
+  let todayTop = null;
+  for (const [slug, secs] of Object.entries(todayBlock.perGame)) {
+    if (!todayTop || secs > todayTop.seconds) todayTop = { slug, seconds: secs };
+  }
+
+  // Iteration queue — applies the same logic as eligibility_check.sh:
+  // threshold (likes>=3 OR plays>=5 AND avg_sec>=30), engagement score,
+  // top 3. We don't know iteration count from KV, so we surface candidates
+  // and let the caller worry about the 14-iter cap.
+  const iterationQueue = games
+    .map(g => {
+      const avgSec = g.plays > 0 ? Math.round(g.seconds / g.plays) : 0;
+      const eligible = (g.likes || 0) >= 3 || ((g.plays || 0) >= 5 && avgSec >= 30);
+      const engagement = g.plays * avgSec + ((g.likes || 0) - (g.dislikes || 0)) * 5;
+      return { slug: g.slug, plays: g.plays, avgSec, likes: g.likes, dislikes: g.dislikes, engagement, eligible };
+    })
+    .filter(g => g.eligible)
+    .sort((a, b) => b.engagement - a.engagement)
+    .slice(0, 5);   // surface up to 5 — top-3 will actually be picked
+
+  // Comments since 24h ago — what's NEW for the morning scan
+  const dayAgoMs = Date.now() - 24 * 60 * 60 * 1000;
+  const newComments = comments.filter(c => c.ts && c.ts >= dayAgoMs);
+
+  const highlights = {
+    todayDate: todayKey,
+    todayPlays: Object.values(todayBlock.perGame).reduce((a, b) => a + (b > 0 ? 1 : 0), 0), // unique games played today
+    todaySeconds: todayBlock.totalSeconds,
+    yesterdaySeconds: yesterdayBlock.totalSeconds,
+    secondsDelta: todayBlock.totalSeconds - yesterdayBlock.totalSeconds,
+    todayTop,                  // { slug, seconds } | null
+    iterationQueue,            // up to 5 eligible, sorted by engagement
+    newCommentsCount: newComments.length,
+  };
+
+  return new Response(JSON.stringify({
+    totals,
+    perGame: games,
+    perDay,
+    comments: comments.slice(0, 60),
+    highlights,
+  }), {
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
 }
