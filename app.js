@@ -376,6 +376,7 @@ function card(g, opts) {
       ${mediaInner}
       ${isRecent ? '<span class="recent-badge">NEW</span>' : ''}
       ${c.plays ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
+      ${c.comments ? `<span class="comment-count">💬 ${c.comments}</span>` : ''}
     </div>
     <div class="card-body">
       <div class="card-title"></div>
