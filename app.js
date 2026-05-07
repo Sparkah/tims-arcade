@@ -1,6 +1,7 @@
 // ── State ─────────────────────────────────────────────────────────────────
 let games = [];   // from games.json
-let counts = {};  // from /api/counts
+let counts = {};  // from /api/counts (cumulative all-time)
+let todayScores = {}; // from /api/trending — { slug: {seconds, comments, score} }
 let myVotes = JSON.parse(localStorage.getItem('myVotes') || '{}');
 let me = null;    // { signed_in, email, uid, exp_ts } from /api/me
 let activeTab = 'top';
@@ -47,6 +48,17 @@ async function init() {
     const r = await fetch('/api/counts', { cache: 'no-store' });
     if (r.ok) counts = await r.json();
   } catch (e) { /* ignore — works offline-style */ }
+
+  // Today's trending signal (per-day seconds + comments). Used by the
+  // featured hero so the spotlight rotates daily instead of camping on
+  // the all-time leader.
+  try {
+    const r = await fetch('/api/trending', { cache: 'no-store' });
+    if (r.ok) {
+      const payload = await r.json();
+      todayScores = payload.games || {};
+    }
+  } catch (e) { todayScores = {}; }
 
   // Read auth state — populates the sign-in pill + per-user vote map.
   // When signed in, the user's votes come from server (no per-device drift).
@@ -276,14 +288,29 @@ function renderFeatured() {
   const eligible = games.filter(g => g.published !== false);
   if (eligible.length < 2) { featured.classList.add('hidden'); return null; }
 
-  const top = eligible.slice().sort((a, b) => engagementScore(b) - engagementScore(a))[0];
-  if (!top) { featured.classList.add('hidden'); return null; }
+  // Trending = top engagement TODAY (per-day seconds + comments × 60).
+  // Falls through to all-time engagement if today's signal is empty (e.g.
+  // first visitor of the day before any heartbeat lands), then to newest.
+  const todayScore = (g) => (todayScores[g.slug] && todayScores[g.slug].score) || 0;
+  const sortedToday = eligible.slice().sort((a, b) => todayScore(b) - todayScore(a));
+  const todayTop   = sortedToday[0];
+  const todayBest  = todayTop ? todayScore(todayTop) : 0;
 
-  // If there's no engagement data anywhere, fall back to the newest game
-  const topScore = engagementScore(top);
-  const game = topScore > 0
-    ? top
-    : eligible.slice().sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0))[0];
+  let game, topScore;
+  if (todayBest > 0) {
+    game = todayTop;
+    topScore = todayBest;
+  } else {
+    const sortedAll = eligible.slice().sort((a, b) => engagementScore(b) - engagementScore(a));
+    const allTop = sortedAll[0];
+    if (allTop && engagementScore(allTop) > 0) {
+      game = allTop;
+      topScore = engagementScore(allTop);
+    } else {
+      game = eligible.slice().sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0))[0];
+      topScore = 0;
+    }
+  }
 
   const c = counts[game.slug] || { likes: 0, dislikes: 0, plays: 0, seconds: 0 };
   const minutes = Math.round((c.seconds || 0) / 60);
