@@ -17,9 +17,12 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SITE="https://game-factory.tech"
+SITE="${SITE:-https://game-factory.tech}"
 QUIET=0
-[[ "${1:-}" == "--quiet" ]] && QUIET=1
+for a in "$@"; do
+  [[ "$a" == "--quiet" ]] && QUIET=1
+  [[ "$a" == --site=* ]] && SITE="${a#--site=}"
+done
 
 ok=true
 fail() { echo "  ❌ $*"; ok=false; }
