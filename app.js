@@ -55,14 +55,6 @@ async function init() {
     hero.setAttribute('data-build', String(maxN).padStart(3, '0'));
     hero.setAttribute('data-date', dateStr);
   }
-  // Hero stat block
-  const totalEl = document.getElementById('hero-stat-count');
-  const genreEl = document.getElementById('hero-stat-genre');
-  if (totalEl) totalEl.textContent = String(games.filter(g => g.published !== false).length).padStart(2, '0');
-  if (genreEl) {
-    const distinct = new Set(games.filter(g => g.published !== false).map(g => g.genre || 'other'));
-    genreEl.textContent = String(distinct.size).padStart(2, '0');
-  }
 
   attachEvents();
   renderGenres();
