@@ -348,6 +348,7 @@
     html[data-theme="editorial"] .rate-send { background: transparent; color: var(--ink); border: none; border-bottom: 1px solid var(--ink); border-radius: 0; padding: 0 0 1px; font-family: var(--font-display); font-style: italic; font-size: 15px; text-transform: none; letter-spacing: 0; }
   </style>
 
+  <script src="/posthog-init"></script>
   <script src="/identity.js"></script>
   <script>
     const params = new URLSearchParams(location.search);
@@ -378,6 +379,8 @@
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ slug }),
       }).catch(() => {});
+
+      if (window.posthog) posthog.capture('game_play_started', { slug, game_title: game.title });
 
       // Heartbeat — track ACTUAL ACTIVE play time. Two layers of defense
       // against inflated session times:
@@ -502,21 +505,45 @@
       // The "More games" rail must NEVER pop mid-game — it would yank focus
       // off the canvas while the player is still in a round. We surface it
       // only after the game actively signals end-of-round via postMessage
-      // (see GF.gameEnded() in gf-lib.js), and only ONCE per page load.
+      // (see GF.gameEnded() in gf-lib.js), and dismiss it the moment the
+      // player resumes play (gf:gameStarted, or a click inside the iframe).
       const rail = document.getElementById('more-rail');
       let railShown = false;
       function showRail() {
         if (railShown) return;
         rail.classList.add('visible');
         railShown = true;
+        if (window.posthog) posthog.capture('more_games_rail_shown', { slug });
+      }
+      function hideRail() {
+        if (!rail.classList.contains('visible')) return;
+        rail.classList.remove('visible');
       }
       window.addEventListener('message', (e) => {
         const data = e && e.data;
-        if (data && data.type === 'gf:gameEnded') showRail();
+        if (!data) return;
+        if (data.type === 'gf:gameEnded') showRail();
+        if (data.type === 'gf:gameStarted') hideRail();
       });
-      document.getElementById('more-close').addEventListener('click', () => {
-        rail.classList.remove('visible');
-      });
+      document.getElementById('more-close').addEventListener('click', hideRail);
+
+      // Defensive auto-hide: if the player taps inside the game iframe
+      // (any "Next Level", "Retry", or just resuming play), dismiss the rail
+      // — even if the game itself never emits gf:gameStarted.
+      const frameEl = document.getElementById('frame');
+      function bindIframeDismiss() {
+        try {
+          const idoc = frameEl.contentDocument;
+          if (!idoc) return;
+          const handler = () => hideRail();
+          idoc.addEventListener('mousedown', handler, { capture: true });
+          idoc.addEventListener('touchstart', handler, { capture: true, passive: true });
+          idoc.addEventListener('keydown', handler, { capture: true });
+        } catch (_) { /* cross-origin guard — should never trip for our games */ }
+      }
+      frameEl.addEventListener('load', bindIframeDismiss);
+      // also bind immediately in case the iframe loaded before this code ran
+      bindIframeDismiss();
 
       // load current vote counts
       let counts = { likes: 0, dislikes: 0 };
@@ -532,6 +559,10 @@
       document.getElementById('like').addEventListener('click', () => onVote('like'));
       document.getElementById('dislike').addEventListener('click', () => onVote('dislike'));
 
+      function trackVote(action) {
+        if (window.posthog) posthog.capture('game_voted', { slug, action, seconds_played: Math.round(pending) });
+      }
+
       // Share button — Web Share API on mobile (and recent desktop), clipboard
       // copy fallback elsewhere. Always shares the /p/<slug> URL so the link
       // unfurls with the OG card on Twitter/Telegram/Slack/etc.
@@ -542,10 +573,12 @@
         try {
           if (navigator.share) {
             await navigator.share(data);
+            if (window.posthog) posthog.capture('game_shared', { slug, method: 'share_api' });
           } else {
             await navigator.clipboard.writeText(shareUrl);
             shareBtn.innerHTML = '✓ Copied';
             setTimeout(() => { shareBtn.innerHTML = '↗ Share'; }, 1600);
+            if (window.posthog) posthog.capture('game_shared', { slug, method: 'clipboard' });
           }
         } catch (e) { /* user cancelled */ }
       });
@@ -553,6 +586,7 @@
       function onVote(action) {
         const prev = myVotes[slug] || null;
         const next = prev === action ? null : action;
+        trackVote(next || 'clear');
         let dl = 0, dd = 0;
         if (prev === 'like')    dl -= 1;
         if (prev === 'dislike') dd -= 1;
@@ -617,6 +651,7 @@
 
       async function send(vote) {
         const comment = document.getElementById('rate-comment').value.trim().slice(0, 500);
+        if (window.posthog) posthog.capture('game_feedback_submitted', { slug, vote, has_comment: comment.length > 0 });
         try {
           const body = JSON.stringify({ slug, vote, comment });
           if (navigator.sendBeacon) {

@@ -55,6 +55,10 @@ async function init() {
     if (r.ok) me = await r.json();
   } catch (e) { me = null; }
   paintAuthPill();
+  // Identify signed-in user so PostHog links events to the person profile.
+  if (me && me.signed_in && window.posthog) {
+    posthog.identify(me.uid, { email: me.email });
+  }
 
   // Header metadata: build = highest specimen number, date = today
   const hero = document.getElementById('hero');
@@ -92,6 +96,9 @@ function paintAuthPill() {
   }
 }
 
+// Debounce helper for search tracking — avoids an event per keystroke.
+let _searchDebounce = null;
+
 function attachEvents() {
   tabs.addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');
@@ -99,6 +106,7 @@ function attachEvents() {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     btn.classList.add('active');
     activeTab = btn.dataset.tab;
+    if (window.posthog) posthog.capture('tab_changed', { tab: activeTab });
     render();
   });
   genres.addEventListener('click', (e) => {
@@ -107,12 +115,27 @@ function attachEvents() {
     document.querySelectorAll('.genre').forEach(g => g.classList.remove('active'));
     btn.classList.add('active');
     activeGenre = btn.dataset.genre;
+    if (window.posthog) posthog.capture('genre_filter_applied', { genre: activeGenre });
     render();
   });
   search.addEventListener('input', (e) => {
     searchTerm = e.target.value.trim().toLowerCase();
+    clearTimeout(_searchDebounce);
+    if (searchTerm) {
+      _searchDebounce = setTimeout(() => {
+        if (window.posthog) posthog.capture('game_searched', { query_length: searchTerm.length });
+      }, 600);
+    }
     render();
   });
+
+  // Reset PostHog identity when user signs out.
+  const signOutLink = document.querySelector('.out[href*="logout"]');
+  if (signOutLink) {
+    signOutLink.addEventListener('click', () => {
+      if (window.posthog) posthog.reset();
+    });
+  }
 }
 
 function renderGenres() {
@@ -303,11 +326,13 @@ function card(g) {
 
   function goPlay() {
     if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
+    if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'thumbnail' });
     location.href = playUrl;
   }
   el.querySelector('.card-thumb').addEventListener('click', goPlay);
   el.querySelector('.play-link').addEventListener('click', (e) => {
     if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
+    if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'play_link' });
     // let the link navigation proceed
   });
   el.querySelectorAll('.vote').forEach(btn => {
@@ -342,6 +367,7 @@ async function vote(slug, action, cardEl) {
   if (next === 'like')    dl += 1;
   if (next === 'dislike') dd += 1;
   if (next) myVotes[slug] = next; else delete myVotes[slug];
+  if (window.posthog) posthog.capture('gallery_vote_cast', { slug, action: next || 'clear', previous_vote: prev });
   localStorage.setItem('myVotes', JSON.stringify(myVotes));
   if (!counts[slug]) counts[slug] = { likes: 0, dislikes: 0 };
   counts[slug].likes    = Math.max(0, (counts[slug].likes    || 0) + dl);
