@@ -27,6 +27,25 @@ export async function onRequestGet({ request, env }) {
     return jsonError('forbidden', 403);
   }
 
+  // Server-side cache via Cloudflare Cache API (does NOT count against KV ops).
+  // Token-keyed so a leaked token doesn't poison the cache for the real one.
+  // 5-minute TTL — admin views see data ≤5 min stale; cuts KV walks by ~60x
+  // when the dashboard is reloaded or hit by eligibility_check.sh.
+  // Pass `?nocache=1` on the URL to force-refresh.
+  const cache = caches.default;
+  const cacheKey = new Request(`https://cache.tims-arcade/admin-stats?t=${token}`, { method: 'GET' });
+  const noCache = url.searchParams.get('nocache') === '1';
+
+  if (!noCache) {
+    const cached = await cache.match(cacheKey);
+    if (cached) {
+      // Add a header so I can spot-check cache hits in DevTools / curl
+      const r = new Response(cached.body, cached);
+      r.headers.set('x-cache', 'HIT');
+      return r;
+    }
+  }
+
   // Aggregate per-game from votes:* / plays:* / seconds:*
   const perGame = {};
   function ensure(slug) {
@@ -186,15 +205,28 @@ export async function onRequestGet({ request, env }) {
     newCommentsCount: newComments.length,
   };
 
-  return new Response(JSON.stringify({
+  const responseBody = JSON.stringify({
     totals,
     perGame: games,
     perDay,
     comments: comments.slice(0, 60),
     highlights,
-  }), {
-    headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
+
+  const fresh = new Response(responseBody, {
+    headers: {
+      'content-type': 'application/json',
+      // Cache API will honour Cache-Control on .put. 300s = 5 min.
+      'cache-control': 'public, max-age=300',
+      'x-cache': 'MISS',
+    },
+  });
+
+  // Stash a clone in the edge cache for the next 5 min of admin views.
+  // Errors here are non-fatal — worst case the next call recomputes.
+  try { await cache.put(cacheKey, fresh.clone()); } catch (e) { /* ignore */ }
+
+  return fresh;
 }
 
 function jsonError(msg, status) {

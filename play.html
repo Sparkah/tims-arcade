@@ -217,20 +217,52 @@
         body: JSON.stringify({ slug }),
       }).catch(() => {});
 
-      // Heartbeat — track actual visible play time at 5-second granularity,
-      // flush to server every 2 minutes (or on pagehide via sendBeacon).
+      // Heartbeat — track ACTUAL ACTIVE play time. Two layers of defense
+      // against inflated session times:
+      //   1. Page Visibility API: pause when tab is hidden / minimised
+      //   2. Inactivity timeout: pause after 60s with no input (mouse, key,
+      //      touch — counted both on parent doc AND inside the game iframe).
+      //   3. Flush cap: each flush reports max FLUSH_MS_CAP seconds, which
+      //      prevents any leak from blowing up the daily total.
       //
-      // Why this shape: hitting the server every 5s would burn KV writes; a
-      // pure 2-min poll loses any session shorter than 2 min. So we tick
-      // locally and flush the *actual delta* instead of a fixed 120s.
-      const TICK_MS  = 5 * 1000;
-      const FLUSH_MS = 120 * 1000;
+      // Why bother with all three: tab-visible-but-walked-away is the
+      // common case (laptop open in coffee shop, player back from bathroom).
+      // Without #2, we'd report walking-away minutes as engagement.
+      const TICK_MS       = 5 * 1000;
+      const FLUSH_MS      = 120 * 1000;
+      const INACTIVE_MS   = 60 * 1000;        // 60s no input → pause
+      const FLUSH_CAP_SEC = 130;              // hard cap per flush submission
       let pending = 0;
       let tickTimer = null;
       let flushTimer = null;
+      let lastActivity = Date.now();
+      let isActive = true;
+
+      function markActive() {
+        lastActivity = Date.now();
+        if (!isActive && document.visibilityState === 'visible') {
+          isActive = true;
+          startTicks();
+        }
+      }
+      // Listen on parent doc (covers HUD clicks, vote buttons, share)
+      ['mousemove', 'mousedown', 'keydown', 'touchstart', 'wheel', 'pointermove'].forEach(evt => {
+        document.addEventListener(evt, markActive, { passive: true, capture: true });
+      });
 
       function startTicks() {
-        if (!tickTimer) tickTimer = setInterval(() => { pending += TICK_MS / 1000; }, TICK_MS);
+        if (!tickTimer) tickTimer = setInterval(() => {
+          // Inactivity guard — if no input for INACTIVE_MS, pause + flush
+          if (Date.now() - lastActivity > INACTIVE_MS) {
+            isActive = false;
+            stopTicks();
+            flush(false);
+            return;
+          }
+          pending += TICK_MS / 1000;
+          // Hard safety cap on `pending` itself in case timer drift accumulates
+          if (pending > FLUSH_CAP_SEC * 2) pending = FLUSH_CAP_SEC * 2;
+        }, TICK_MS);
         if (!flushTimer) flushTimer = setInterval(() => flush(false), FLUSH_MS);
       }
       function stopTicks() {
@@ -239,7 +271,9 @@
       }
       function flush(useBeacon) {
         if (pending <= 0) return;
-        const seconds = Math.round(pending);
+        // Cap per-flush reported seconds. Defends against any logic bug
+        // accumulating huge pending values.
+        const seconds = Math.min(FLUSH_CAP_SEC, Math.round(pending));
         pending = 0;
         const body = JSON.stringify({ slug, seconds });
         if (useBeacon && navigator.sendBeacon) {
@@ -254,9 +288,26 @@
         }
       }
 
+      // Wire iframe activity tracking too — game iframe is same-origin so we
+      // can listen to its document. Fires after iframe finishes loading.
+      iframe.addEventListener('load', () => {
+        try {
+          const iDoc = iframe.contentDocument;
+          if (!iDoc) return;
+          ['mousemove', 'mousedown', 'keydown', 'touchstart', 'pointermove'].forEach(evt => {
+            iDoc.addEventListener(evt, markActive, { passive: true, capture: true });
+          });
+        } catch (e) { /* cross-origin — shouldn't happen for /games/<slug>/ */ }
+      });
+
       document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') startTicks();
-        else { stopTicks(); flush(false); }
+        if (document.visibilityState === 'visible') {
+          markActive();   // treat tab return as activity
+        } else {
+          isActive = false;
+          stopTicks();
+          flush(false);
+        }
       });
       window.addEventListener('pagehide', () => { stopTicks(); flush(true); });
 
