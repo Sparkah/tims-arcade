@@ -8,23 +8,39 @@ let activeTab = 'top';
 let activeGenre = 'all';
 let searchTerm = '';
 
-// Language detection: ru-* visitors get Russian copy, everyone else English.
-// Override available via localStorage.lang ('en' | 'ru') or ?lang= query.
+// Language detection — 6 supported: en (default), ru, es, pt, tr, ar.
+// Override via ?lang=<code> or localStorage.lang. navigator.language picks
+// the best match by 2-letter prefix; unknown languages fall through to en.
+const SUPPORTED_LANGS = ['en', 'ru', 'es', 'pt', 'tr', 'ar'];
 const LANG = (function () {
   const url = new URLSearchParams(location.search).get('lang');
-  if (url === 'en' || url === 'ru') {
+  if (url && SUPPORTED_LANGS.includes(url)) {
     localStorage.setItem('lang', url);
     return url;
   }
   const stored = localStorage.getItem('lang');
-  if (stored === 'en' || stored === 'ru') return stored;
-  return (navigator.language || 'en').toLowerCase().startsWith('ru') ? 'ru' : 'en';
+  if (stored && SUPPORTED_LANGS.includes(stored)) return stored;
+  const nav = (navigator.language || 'en').toLowerCase().slice(0, 2);
+  return SUPPORTED_LANGS.includes(nav) ? nav : 'en';
 })();
-const T = LANG === 'ru'
-  ? { title: 'title_ru', hook: 'hook_ru', play: '▶ Играть', play_count_pre: '▶ ' }
-  : { title: 'title',    hook: 'hook',    play: '▶ Play',   play_count_pre: '▶ ' };
-function gameTitle(g) { return g[T.title] || g.title; }
-function gameHook(g)  { return g[T.hook]  || g.hook; }
+// Per-language UI strings. The title/hook field names follow the convention
+// `title_<lang>` / `hook_<lang>`; English uses bare `title` / `hook`.
+const TI18N = {
+  en: { title: 'title',    hook: 'hook',    play: '▶ Play' },
+  ru: { title: 'title_ru', hook: 'hook_ru', play: '▶ Играть' },
+  es: { title: 'title_es', hook: 'hook_es', play: '▶ Jugar' },
+  pt: { title: 'title_pt', hook: 'hook_pt', play: '▶ Jogar' },
+  tr: { title: 'title_tr', hook: 'hook_tr', play: '▶ Oyna' },
+  ar: { title: 'title_ar', hook: 'hook_ar', play: '▶ العب' },
+};
+const T = TI18N[LANG] || TI18N.en;
+T.play_count_pre = '▶ ';
+// Set <html lang> + dir for screen readers + RTL handling on Arabic.
+document.documentElement.setAttribute('lang', LANG);
+if (LANG === 'ar') document.documentElement.setAttribute('dir', 'rtl');
+// gameTitle / gameHook fall back: requested-lang → english → undefined-safe ''.
+function gameTitle(g) { return g[T.title] || g.title || ''; }
+function gameHook(g)  { return g[T.hook]  || g.hook  || ''; }
 
 const grid     = document.getElementById('grid');
 const empty    = document.getElementById('empty');
