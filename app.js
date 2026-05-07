@@ -197,8 +197,9 @@ function netScore(g) {
 
 // ── Rendering ─────────────────────────────────────────────────────────────
 function render() {
-  renderFeatured();
-  const list = visible();
+  const featuredSlug = renderFeatured();
+  let list = visible();
+  if (featuredSlug) list = list.filter(g => g.slug !== featuredSlug);
   grid.innerHTML = '';
   if (list.length === 0) {
     empty.classList.remove('hidden');
@@ -206,7 +207,24 @@ function render() {
     return;
   }
   empty.classList.add('hidden');
-  for (const g of list) grid.appendChild(card(g));
+
+  // First batch paints immediately so the visible area is interactive fast.
+  // The rest is deferred to idle time so 30+ thumbs don't block first paint.
+  const FIRST_BATCH = 6;
+  const firstBatch = list.slice(0, FIRST_BATCH);
+  const rest       = list.slice(FIRST_BATCH);
+  for (const g of firstBatch) grid.appendChild(card(g));
+  if (rest.length === 0) return;
+  const paintRest = () => {
+    const frag = document.createDocumentFragment();
+    for (const g of rest) frag.appendChild(card(g));
+    grid.appendChild(frag);
+  };
+  if ('requestIdleCallback' in window) {
+    requestIdleCallback(paintRest, { timeout: 800 });
+  } else {
+    setTimeout(paintRest, 50);
+  }
 }
 
 function engagementScore(g) {
@@ -219,17 +237,19 @@ function engagementScore(g) {
 }
 
 function renderFeatured() {
-  // Only show on the default top-rated tab with no filters/search applied
+  // Only show on the default top-rated tab with no filters/search applied.
+  // Returns the slug of the featured game so render() can dedupe it from
+  // the card grid below — otherwise the same game appears twice.
   if (activeTab !== 'top' || activeGenre !== 'all' || searchTerm) {
     featured.classList.add('hidden');
     featured.innerHTML = '';
-    return;
+    return null;
   }
   const eligible = games.filter(g => g.published !== false);
-  if (eligible.length < 2) { featured.classList.add('hidden'); return; }
+  if (eligible.length < 2) { featured.classList.add('hidden'); return null; }
 
   const top = eligible.slice().sort((a, b) => engagementScore(b) - engagementScore(a))[0];
-  if (!top) { featured.classList.add('hidden'); return; }
+  if (!top) { featured.classList.add('hidden'); return null; }
 
   // If there's no engagement data anywhere, fall back to the newest game
   const topScore = engagementScore(top);
@@ -260,6 +280,7 @@ function renderFeatured() {
   featured.querySelector('.hero-title').textContent = gameTitle(game);
   featured.querySelector('.hero-hook').textContent  = gameHook(game);
   featured.classList.remove('hidden');
+  return game.slug;
 }
 
 function emptyMessage() {
