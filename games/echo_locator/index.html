@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Echo Locator</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #03030a; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Echo Locator',
+    sub:   'Ping the dark. Find the exit before they find you.',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT LEVEL',
+    score: 'LEVEL', best: 'BEST',
+    gameover: 'CAUGHT', drained: 'BATTERY DRAINED', won: 'EXIT FOUND',
+    battery: 'BATTERY', level: 'LVL',
+    'tut_goal':     'Goal: Find the hidden exit tile.',
+    'tut_controls': 'Controls: WASD/arrows move, click to ping.',
+    'tut_win':      'Win: Step onto the exit tile.',
+    'tut_lose':     'Lose: Creature touches you, or battery hits 0.',
+    'tut_tip':      'Tip: Pings draw creatures closer. Refuel at glowing nodes.',
+    tutTitle:     'How to play',
+    closeBtn:     'GOT IT',
+  },
+  ru: {
+    title: 'Эхолот в Тумане',
+    sub:   'Эхо-импульс в темноте. Найди выход, пока не нашли тебя.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЬШЕ',
+    score: 'УРОВЕНЬ', best: 'РЕКОРД',
+    gameover: 'ПОЙМАНЫ', drained: 'БАТАРЕЯ СЕЛА', won: 'ВЫХОД НАЙДЕН',
+    battery: 'БАТАРЕЯ', level: 'УР.',
+    'tut_goal':     'Цель: Найди скрытый тайл выхода.',
+    'tut_controls': 'Управление: WASD/стрелки — ход, клик — эхо.',
+    'tut_win':      'Победа: Встань на тайл выхода.',
+    'tut_lose':     'Проигрыш: Существо коснулось вас, или батарея = 0.',
+    'tut_tip':      'Совет: Эхо привлекает существ. Заряжайся на узлах.',
+    tutTitle:     'Как играть',
+    closeBtn:     'ПОНЯТНО',
+  },
+};
+
+// ── TUNABLES (named in DESIGN.md — exposed via GF.exposeState) ───────────
+var GRID_W = 32;
+var GRID_H = 32;
+var PING_RADIUS = 8;
+var PING_LIFETIME = 0.6;
+var BATTERY_MAX = 12;
+var CHARGE_REFILL = 5;
+var NUM_CHARGES = 3;
+var NUM_CREATURES = 3;
+var CREATURE_STEP_PER_PING = 1;
+var TILE_PX = 18;
+
+// ── DETERMINISTIC SEEDED RNG ─────────────────────────────────────────────
+function seededRng(seed) {
+  var s = (seed >>> 0) || 1;
+  return function() {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+var rng = Math.random;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | GAMEOVER | WON
+var level = 1;
+var best = 0;
+var battery = BATTERY_MAX;
+var batteryCap = BATTERY_MAX;
+var creature_dist = 99;
+var exit_found = false;
+var showTutorial = false;        // overlay during PLAYING when ? pressed
+
+var grid = [];                   // 0 = floor, 1 = wall
+var player = { gx: 0, gy: 0, mx: 0, my: 0, lerp: 0 };
+var exitTile = { gx: 0, gy: 0 };
+var creatures = [];              // {gx, gy, mx, my, lerp}
+var charges = [];                // {gx, gy, used}
+var pings = [];                  // {x, y, life, max, radius}
+var deathReason = '';            // 'caught' | 'drained'
+
+// ── LEVEL GEN ────────────────────────────────────────────────────────────
+function newGrid() {
+  // Borders walls; interior rooms with random walls (~25% wall density on inner).
+  grid = new Array(GRID_W * GRID_H);
+  for (var y = 0; y < GRID_H; y++) {
+    for (var x = 0; x < GRID_W; x++) {
+      var idx = y * GRID_W + x;
+      if (x === 0 || y === 0 || x === GRID_W - 1 || y === GRID_H - 1) {
+        grid[idx] = 1;
+      } else {
+        grid[idx] = (rng() < 0.18) ? 1 : 0;
+      }
+    }
+  }
+}
+function tileAt(gx, gy) {
+  if (gx < 0 || gy < 0 || gx >= GRID_W || gy >= GRID_H) return 1;
+  return grid[gy * GRID_W + gx];
+}
+function isFloor(gx, gy) { return tileAt(gx, gy) === 0; }
+function pickFloor() {
+  for (var i = 0; i < 200; i++) {
+    var x = 1 + Math.floor(rng() * (GRID_W - 2));
+    var y = 1 + Math.floor(rng() * (GRID_H - 2));
+    if (isFloor(x, y)) return { gx: x, gy: y };
+  }
+  return { gx: 1, gy: 1 };
+}
+function dist2(ax, ay, bx, by) { var dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
+
+// Carve a connected path from start to end so the level is solvable.
+function carvePath(sx, sy, ex, ey) {
+  var x = sx, y = sy;
+  var safety = 0;
+  while ((x !== ex || y !== ey) && safety++ < 1000) {
+    grid[y * GRID_W + x] = 0;
+    if (x !== ex && (rng() < 0.5 || y === ey)) x += (ex > x) ? 1 : -1;
+    else if (y !== ey) y += (ey > y) ? 1 : -1;
+  }
+  grid[ey * GRID_W + ex] = 0;
+}
+
+function startLevel(lvl) {
+  level = Math.max(1, lvl | 0);
+  // Seed by date + level (daily challenge style).
+  var d = new Date();
+  var seed = d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+  rng = seededRng(seed * 1000 + level);
+
+  newGrid();
+  var p = pickFloor();
+  player.gx = p.gx; player.gy = p.gy;
+  player.mx = p.gx; player.my = p.gy; player.lerp = 1;
+
+  // Exit far from player.
+  var ex;
+  for (var i = 0; i < 200; i++) {
+    ex = pickFloor();
+    if (dist2(ex.gx, ex.gy, player.gx, player.gy) > GRID_W * 0.45) break;
+  }
+  exitTile.gx = ex.gx; exitTile.gy = ex.gy;
+  carvePath(player.gx, player.gy, exitTile.gx, exitTile.gy);
+
+  // Difficulty ramp: +1 creature per level, battery cap floor 8.
+  var nCre = NUM_CREATURES + (level - 1);
+  batteryCap = Math.max(8, BATTERY_MAX - (level - 1));
+  battery = batteryCap;
+
+  creatures = [];
+  for (var k = 0; k < nCre; k++) {
+    var cre;
+    for (var t = 0; t < 50; t++) {
+      cre = pickFloor();
+      if (dist2(cre.gx, cre.gy, player.gx, player.gy) > 8) break;
+    }
+    creatures.push({ gx: cre.gx, gy: cre.gy, mx: cre.gx, my: cre.gy, lerp: 1 });
+  }
+
+  charges = [];
+  for (var c = 0; c < NUM_CHARGES; c++) {
+    var ch = pickFloor();
+    charges.push({ gx: ch.gx, gy: ch.gy, used: false });
+  }
+
+  pings = [];
+  exit_found = false;
+  creature_dist = 99;
+  deathReason = '';
+  gs = 'PLAYING';
+  showTutorial = false;
+  try { GF.gameStarted(); } catch (e) {}
+}
+
+function startGame() {
+  // First-time tutorial flag (informational; tutorial is on MENU anyway).
+  try { localStorage.setItem('echo_locator_seen_tutorial', '1'); } catch (e) {}
+  startLevel(1);
+}
+
+function gameOver(reason) {
+  deathReason = reason || 'caught';
+  if (level - 1 > best) {
+    best = level - 1;
+    try { localStorage.setItem('echo_locator_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  try { GF.gameEnded(); } catch (e) {}
+  GF.setShake(1.0);
+}
+
+function levelWon() {
+  if (level > best) {
+    best = level;
+    try { localStorage.setItem('echo_locator_best', best); } catch (e) {}
+  }
+  gs = 'WON';
+  try { GF.gameEnded(); } catch (e) {}
+}
+
+// ── INPUT HANDLERS ───────────────────────────────────────────────────────
+var keyHeld = {};
+document.addEventListener('keydown', function(e) {
+  if (gs === 'PLAYING' && !showTutorial) {
+    if (!keyHeld[e.code]) {
+      keyHeld[e.code] = true;
+      var dx = 0, dy = 0;
+      if (e.code === 'ArrowLeft'  || e.code === 'KeyA') dx = -1;
+      if (e.code === 'ArrowRight' || e.code === 'KeyD') dx =  1;
+      if (e.code === 'ArrowUp'    || e.code === 'KeyW') dy = -1;
+      if (e.code === 'ArrowDown'  || e.code === 'KeyS') dy =  1;
+      if (dx || dy) tryMovePlayer(dx, dy);
+    }
+  }
+});
+document.addEventListener('keyup', function(e) { keyHeld[e.code] = false; });
+
+GF.canvas.addEventListener('click', function(e) {
+  if (gs !== 'PLAYING') return;
+  if (showTutorial) return; // tutorial close handled by button hit
+  // Skip if the click hit a HUD button area (handled separately).
+  if (hitHudButton(e.clientX, e.clientY)) return;
+  if (battery <= 0) return;
+  emitPing(e.clientX, e.clientY);
+});
+GF.canvas.addEventListener('touchstart', function(e) {
+  if (gs !== 'PLAYING') return;
+  var t = e.changedTouches[0];
+  if (showTutorial) {
+    return;
+  }
+  if (hitHudButton(t.clientX, t.clientY)) return;
+  // On-screen D-pad: corners of left half.
+  if (handleTouchDpad(t.clientX, t.clientY)) return;
+  if (battery <= 0) return;
+  emitPing(t.clientX, t.clientY);
+}, { passive: false });
+
+// HUD button hits: ? help button + dpad fallback for touch.
+var hudBtns = [];
+function hitHudButton(px, py) {
+  for (var i = 0; i < hudBtns.length; i++) {
+    var b = hudBtns[i];
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) { b.fn(); return true; }
+  }
+  return false;
+}
+function handleTouchDpad(px, py) {
+  // Tap left third of screen = move (toward tap quadrant relative to player on-screen).
+  // Otherwise let it ping.
+  var third = GF.W * 0.30;
+  if (px > third) return false;
+  // Map zones: top=up, bottom=down, left=left, right=right within left third.
+  var midY = GF.H * 0.5;
+  var midX = third * 0.5;
+  if (Math.abs(py - midY) > Math.abs(px - midX)) {
+    tryMovePlayer(0, py < midY ? -1 : 1);
+  } else {
+    tryMovePlayer(px < midX ? -1 : 1, 0);
+  }
+  return true;
+}
+
+function emitPing(sx, sy) {
+  var view = computeView();
+  // Ping center anchored at player tile (sonar emanates from you).
+  var px = view.ox + (player.gx + 0.5) * view.tile;
+  var py = view.oy + (player.gy + 0.5) * view.tile;
+  pings.push({ x: px, y: py, life: PING_LIFETIME, max: PING_LIFETIME,
+    radius: PING_RADIUS * view.tile });
+  battery -= 1;
+  GF.setShake(0.18);
+
+  // Creatures step toward player when they hear a ping.
+  for (var i = 0; i < creatures.length; i++) creatureStep(creatures[i]);
+  // Pickup charges if standing on one (checked after move too — keeps refuel feel responsive).
+  pickupChargeIfHere();
+
+  // Loss check: battery depleted with exit not found.
+  if (battery <= 0 && gs === 'PLAYING') {
+    // Allow this ping's reveal to complete first.
+    setTimeout(function() {
+      if (gs === 'PLAYING' && battery <= 0) gameOver('drained');
+    }, 700);
+  }
+}
+
+function tryMovePlayer(dx, dy) {
+  if (gs !== 'PLAYING') return;
+  if (_screenshotMode) return; // freeze movement during capture
+  var nx = player.gx + dx, ny = player.gy + dy;
+  if (!isFloor(nx, ny)) return;
+  player.gx = nx; player.gy = ny; player.lerp = 0;
+  pickupChargeIfHere();
+  // Win check.
+  if (player.gx === exitTile.gx && player.gy === exitTile.gy) {
+    exit_found = true;
+    levelWon();
+    return;
+  }
+  // Loss check: creature on player tile.
+  for (var i = 0; i < creatures.length; i++) {
+    if (creatures[i].gx === player.gx && creatures[i].gy === player.gy) {
+      creature_dist = 0;
+      gameOver('caught');
+      return;
+    }
+  }
+}
+
+function pickupChargeIfHere() {
+  for (var i = 0; i < charges.length; i++) {
+    var c = charges[i];
+    if (!c.used && c.gx === player.gx && c.gy === player.gy) {
+      c.used = true;
+      battery = Math.min(batteryCap, battery + CHARGE_REFILL);
+      GF.spawnFloat(GF.W*0.5, GF.H*0.5 - 30, '+' + CHARGE_REFILL, '#5dffb0');
+      GF.setShake(0.25);
+    }
+  }
+}
+
+function creatureStep(cre) {
+  // Greedy step toward player (axis with greater distance).
+  var dx = player.gx - cre.gx;
+  var dy = player.gy - cre.gy;
+  var ax = Math.abs(dx), ay = Math.abs(dy);
+  var step = CREATURE_STEP_PER_PING;
+  for (var s = 0; s < step; s++) {
+    var moved = false;
+    if (ax >= ay) {
+      var nx = cre.gx + Math.sign(dx);
+      if (isFloor(nx, cre.gy)) { cre.gx = nx; moved = true; }
+      else {
+        var ny = cre.gy + Math.sign(dy || 1);
+        if (isFloor(cre.gx, ny)) { cre.gy = ny; moved = true; }
+      }
+    } else {
+      var ny2 = cre.gy + Math.sign(dy);
+      if (isFloor(cre.gx, ny2)) { cre.gy = ny2; moved = true; }
+      else {
+        var nx2 = cre.gx + Math.sign(dx || 1);
+        if (isFloor(nx2, cre.gy)) { cre.gx = nx2; moved = true; }
+      }
+    }
+    cre.lerp = 0;
+    if (!moved) break;
+    dx = player.gx - cre.gx;
+    dy = player.gy - cre.gy;
+    ax = Math.abs(dx); ay = Math.abs(dy);
+    if (cre.gx === player.gx && cre.gy === player.gy) {
+      creature_dist = 0;
+      gameOver('caught');
+      return;
+    }
+  }
+  // Update min distance for state telemetry.
+  var d = Math.abs(player.gx - cre.gx) + Math.abs(player.gy - cre.gy);
+  if (d < creature_dist) creature_dist = d;
+}
+
+// ── CAMERA / VIEW ────────────────────────────────────────────────────────
+// Camera follows the player. Tile size is chosen so that PING_RADIUS * tile
+// fits comfortably (~45% of min screen dimension), making the visible reveal
+// fill the frame and the void feel claustrophobic instead of sparse.
+function computeView() {
+  var minSide = Math.min(GF.W, GF.H);
+  // Want ping radius (in px) ~ 0.42 of minSide → tile = 0.42 * minSide / PING_RADIUS
+  var tile = Math.max(20, Math.min(56, (minSide * 0.42) / PING_RADIUS));
+  // Camera centers on player smoothed pos.
+  var psmoothX = player.mx + (player.gx - player.mx) * player.lerp;
+  var psmoothY = player.my + (player.gy - player.my) * player.lerp;
+  var ox = GF.cx - (psmoothX + 0.5) * tile;
+  var oy = GF.cy - (psmoothY + 0.5) * tile;
+  return { tile: tile, ox: ox, oy: oy };
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  // Animate ping ring expansion and lerp positions.
+  for (var i = pings.length - 1; i >= 0; i--) {
+    pings[i].life -= dt;
+    if (pings[i].life <= 0) pings.splice(i, 1);
+  }
+  player.lerp = Math.min(1, player.lerp + dt * 12);
+  for (var k = 0; k < creatures.length; k++) {
+    creatures[k].lerp = Math.min(1, creatures[k].lerp + dt * 8);
+  }
+
+  // Update min creature distance.
+  var minD = 99;
+  for (var c = 0; c < creatures.length; c++) {
+    var d = Math.abs(player.gx - creatures[c].gx) + Math.abs(player.gy - creatures[c].gy);
+    if (d < minD) minD = d;
+  }
+  creature_dist = minD;
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  ctx.fillStyle = '#020208';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WON') {
+    drawWorld(ctx);
+    drawHUD(ctx);
+    if (gs === 'PLAYING' && showTutorial) drawTutorialOverlay(ctx);
+  }
+  if (gs === 'MENU')     drawMenuOverlay(ctx);
+  if (gs === 'GAMEOVER') drawGameOverOverlay(ctx);
+  if (gs === 'WON')      drawWonOverlay(ctx);
+}
+
+function drawWorld(ctx) {
+  var view = computeView();
+  var tile = view.tile;
+  // For each ping, compute reveal alpha per tile.
+  // Player tile always visible (faintly).
+  // Walls: revealed only inside ping circle (with falloff).
+  // Creatures: silhouettes inside ping circle.
+  // Exit: faint glow when inside ping circle.
+  // Charges (unused): subtle pulse always visible (so player has SOMETHING to navigate to).
+  // 1) Tiles & walls
+  for (var y = 0; y < GRID_H; y++) {
+    for (var x = 0; x < GRID_W; x++) {
+      var t = grid[y * GRID_W + x];
+      var tx = view.ox + x * tile;
+      var ty = view.oy + y * tile;
+      var lit = pingLight(tx + tile/2, ty + tile/2);
+      if (t === 1) {
+        if (lit > 0.02) {
+          ctx.fillStyle = 'rgba(80,180,220,' + (lit * 0.85).toFixed(3) + ')';
+          ctx.fillRect(tx, ty, tile, tile);
+          ctx.strokeStyle = 'rgba(140,220,255,' + (lit * 0.95).toFixed(3) + ')';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(tx + 0.5, ty + 0.5, tile - 1, tile - 1);
+        }
+      } else {
+        // Floor: extremely faint when lit.
+        if (lit > 0.02) {
+          ctx.fillStyle = 'rgba(30,90,140,' + (lit * 0.18).toFixed(3) + ')';
+          ctx.fillRect(tx, ty, tile, tile);
+        }
+      }
+    }
+  }
+  // 2) Charges — always faint pulse so player can spot fuel
+  var pulse = 0.35 + 0.25 * Math.sin(performance.now() / 280);
+  for (var ci = 0; ci < charges.length; ci++) {
+    var ch = charges[ci];
+    if (ch.used) continue;
+    var cx = view.ox + (ch.gx + 0.5) * tile;
+    var cy = view.oy + (ch.gy + 0.5) * tile;
+    var litC = Math.max(pulse * 0.55, pingLight(cx, cy));
+    ctx.fillStyle = 'rgba(120,255,180,' + litC.toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(cx, cy, tile * 0.32, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,' + (litC * 0.7).toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(cx, cy, tile * 0.14, 0, Math.PI*2); ctx.fill();
+  }
+  // 3) Exit tile — only revealed when ping touches it
+  var ex = view.ox + (exitTile.gx + 0.5) * tile;
+  var ey = view.oy + (exitTile.gy + 0.5) * tile;
+  var litE = pingLight(ex, ey);
+  if (litE > 0.05) {
+    exit_found = exit_found || litE > 0.2;
+    ctx.fillStyle = 'rgba(255,210,90,' + (litE * 0.85).toFixed(3) + ')';
+    ctx.fillRect(ex - tile*0.45, ey - tile*0.45, tile*0.9, tile*0.9);
+    ctx.strokeStyle = 'rgba(255,255,255,' + (litE * 0.9).toFixed(3) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(ex, ey - tile*0.3);
+    ctx.lineTo(ex + tile*0.3, ey);
+    ctx.lineTo(ex, ey + tile*0.3);
+    ctx.lineTo(ex - tile*0.3, ey);
+    ctx.closePath();
+    ctx.stroke();
+  }
+  // 4) Creatures — silhouettes only inside ping ring
+  for (var k = 0; k < creatures.length; k++) {
+    var cr = creatures[k];
+    var smoothX = cr.mx + (cr.gx - cr.mx) * cr.lerp;
+    var smoothY = cr.my + (cr.gy - cr.my) * cr.lerp;
+    if (cr.lerp >= 1) { cr.mx = cr.gx; cr.my = cr.gy; }
+    var crx = view.ox + (smoothX + 0.5) * tile;
+    var cry = view.oy + (smoothY + 0.5) * tile;
+    var litK = pingLight(crx, cry);
+    if (litK > 0.05) {
+      ctx.fillStyle = 'rgba(255,80,90,' + (litK * 0.95).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(crx, cry, tile * 0.42, 0, Math.PI*2);
+      ctx.fill();
+      // jagged inner mark
+      ctx.fillStyle = 'rgba(20,0,0,' + (litK * 0.95).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(crx - tile*0.12, cry - tile*0.08, tile*0.07, 0, Math.PI*2);
+      ctx.arc(crx + tile*0.12, cry - tile*0.08, tile*0.07, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(255,255,255,' + (litK * 0.4).toFixed(3) + ')';
+      ctx.beginPath();
+      ctx.arc(crx - tile*0.12, cry - tile*0.08, tile*0.025, 0, Math.PI*2);
+      ctx.arc(crx + tile*0.12, cry - tile*0.08, tile*0.025, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+  // 5) Player — always visible (faintly lit dot)
+  var psmoothX = player.mx + (player.gx - player.mx) * player.lerp;
+  var psmoothY = player.my + (player.gy - player.my) * player.lerp;
+  if (player.lerp >= 1) { player.mx = player.gx; player.my = player.gy; }
+  var px = view.ox + (psmoothX + 0.5) * tile;
+  var py = view.oy + (psmoothY + 0.5) * tile;
+  // Soft player aura
+  var grad = ctx.createRadialGradient(px, py, 0, px, py, tile * 1.6);
+  grad.addColorStop(0, 'rgba(120,200,255,0.45)');
+  grad.addColorStop(1, 'rgba(120,200,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(px - tile*1.6, py - tile*1.6, tile*3.2, tile*3.2);
+  ctx.fillStyle = '#bfe8ff';
+  ctx.beginPath(); ctx.arc(px, py, tile * 0.32, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(px, py, tile * 0.13, 0, Math.PI*2); ctx.fill();
+
+  // 6) Ping rings (always drawn — show the active sweep)
+  for (var pi = 0; pi < pings.length; pi++) {
+    var pg = pings[pi];
+    var f = 1 - (pg.life / pg.max);   // 0..1
+    var r = pg.radius * f;
+    var aRing = (1 - f) * 0.85;
+    ctx.strokeStyle = 'rgba(120,220,255,' + aRing.toFixed(3) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(pg.x, pg.y, r, 0, Math.PI*2); ctx.stroke();
+  }
+}
+
+// pingLight — for a world-space point, return 0..1 reveal strength based on
+// the closest active ping. Inside radius decays with falloff over lifetime.
+function pingLight(wx, wy) {
+  if (!pings.length) return 0;
+  var best = 0;
+  for (var i = 0; i < pings.length; i++) {
+    var pg = pings[i];
+    var d = Math.sqrt((wx - pg.x) * (wx - pg.x) + (wy - pg.y) * (wy - pg.y));
+    var f = 1 - (pg.life / pg.max); // 0..1
+    var ringR = pg.radius * f;
+    var thickness = pg.radius * 0.55;
+    // High inside the expanding ring band, soft outside.
+    var inside = pg.radius * (f + 0.15);
+    if (d > inside) continue;
+    var lifeFade = pg.life / pg.max; // 1->0
+    var distFalloff = 1 - Math.max(0, (d - 0)) / inside;
+    var v = Math.max(0, distFalloff) * Math.max(0, lifeFade);
+    // Ring band intensifies edge so silhouettes pop.
+    var bandDist = Math.abs(d - ringR);
+    if (bandDist < thickness * 0.6) {
+      v = Math.min(1, v + (1 - bandDist / (thickness * 0.6)) * 0.45 * lifeFade);
+    }
+    if (v > best) best = v;
+  }
+  return Math.min(1, best);
+}
+
+// ── HUD ──────────────────────────────────────────────────────────────────
+function drawHUD(ctx) {
+  hudBtns = [];
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  // Battery bar top-left
+  var pad = 10 * GF.S;
+  var bw = GF.clamp(180 * GF.S, 130, 240);
+  var bh = GF.clamp(18 * GF.S, 14, 24);
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  GF.rr(ctx, pad - 4, pad - 4, bw + 8, bh + 8, 6); ctx.fill();
+  ctx.fillStyle = 'rgba(20,40,60,0.9)';
+  ctx.fillRect(pad, pad, bw, bh);
+  var pct = battery / batteryCap;
+  var col = pct > 0.5 ? '#5dffb0' : pct > 0.25 ? '#ffd24a' : '#ff5a6a';
+  ctx.fillStyle = col;
+  ctx.fillRect(pad, pad, bw * pct, bh);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('battery') + ' ' + battery + '/' + batteryCap, pad + 8, pad + bh / 2);
+
+  // Level top-right
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#bcd';
+  ctx.fillText(GF.t('level') + ' ' + level, GF.W - pad - 44 * GF.S, pad);
+
+  // ? button (HUD help) — re-opens tutorial
+  var qSize = GF.clamp(34 * GF.S, 28, 44);
+  var qx = GF.W - pad - qSize;
+  var qy = pad;
+  ctx.fillStyle = 'rgba(20,40,60,0.85)';
+  GF.rr(ctx, qx, qy, qSize, qSize, 8); ctx.fill();
+  ctx.strokeStyle = 'rgba(120,200,255,0.6)';
+  ctx.lineWidth = 1.5;
+  GF.rr(ctx, qx + 0.5, qy + 0.5, qSize - 1, qSize - 1, 8); ctx.stroke();
+  ctx.fillStyle = '#cfe8ff';
+  ctx.font = 'bold ' + Math.floor(qSize * 0.55) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', qx + qSize / 2, qy + qSize / 2 + 1);
+  hudBtns.push({ x: qx, y: qy, w: qSize, h: qSize, fn: function() { showTutorial = true; }});
+}
+
+// ── OVERLAYS ─────────────────────────────────────────────────────────────
+function drawMenuOverlay(ctx) {
+  // Darken
+  ctx.fillStyle = 'rgba(2,2,12,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(40 * GF.S, 24, 60);
+  var lineFs  = GF.clamp(15 * GF.S, 12, 19);
+  var subFs   = GF.clamp(15 * GF.S, 12, 20);
+
+  // Title with glow
+  ctx.shadowColor = 'rgba(120,220,255,0.55)';
+  ctx.shadowBlur = 28 * GF.S;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 130 * GF.S);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+
+  // Sub
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#9ab';
+  ctx.fillText(GF.t('sub'), GF.cx, GF.cy - 100 * GF.S);
+
+  // Tutorial copy block (ABOVE the play button — required)
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  ctx.font = lineFs + 'px sans-serif';
+  ctx.fillStyle = '#cfe8ff';
+  for (var i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], GF.cx, GF.cy - 60 * GF.S + i * (lineFs + 6 * GF.S));
+  }
+
+  // PLAY button
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 90 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3ae28b'); grad.addColorStop(1, '#1f9d5d');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + subFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  if (best > 0) {
+    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#557';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 28 * GF.S);
+  }
+
+  // Wire button via GF.drawOverlay-like buttons array. Use canvas-level click handler.
+  hudBtns = [{ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame }];
+}
+
+function drawTutorialOverlay(ctx) {
+  ctx.fillStyle = 'rgba(2,2,12,0.85)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(28 * GF.S, 20, 38);
+  var lineFs  = GF.clamp(15 * GF.S, 12, 19);
+
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#cfe8ff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('tutTitle'), GF.cx, GF.cy - 100 * GF.S);
+
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  ctx.font = lineFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  for (var i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], GF.cx, GF.cy - 50 * GF.S + i * (lineFs + 8 * GF.S));
+  }
+
+  var btnW = GF.clamp(200 * GF.S, 140, 260), btnH = GF.clamp(48 * GF.S, 38, 60);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 70 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3ae28b'); grad.addColorStop(1, '#1f9d5d');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + lineFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('closeBtn'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  hudBtns = [{ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { showTutorial = false; }}];
+}
+
+function drawGameOverOverlay(ctx) {
+  ctx.fillStyle = 'rgba(2,2,12,0.88)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(40 * GF.S, 24, 56);
+  var subFs   = GF.clamp(15 * GF.S, 12, 20);
+
+  ctx.shadowColor = 'rgba(255,80,90,0.55)';
+  ctx.shadowBlur = 28 * GF.S;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(deathReason === 'drained' ? GF.t('drained') : GF.t('gameover'), GF.cx, GF.cy - 40 * GF.S);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#9ab';
+  ctx.fillText(GF.t('level') + ' ' + level, GF.cx, GF.cy - 6 * GF.S);
+
+  var btnW = GF.clamp(220 * GF.S, 160, 300), btnH = GF.clamp(50 * GF.S, 40, 64);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 24 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3ae28b'); grad.addColorStop(1, '#1f9d5d');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + subFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  if (best > 0) {
+    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#557';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 28 * GF.S);
+  }
+
+  hudBtns = [{ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { startLevel(1); }}];
+}
+
+function drawWonOverlay(ctx) {
+  ctx.fillStyle = 'rgba(2,12,8,0.88)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(40 * GF.S, 24, 56);
+  var subFs   = GF.clamp(15 * GF.S, 12, 20);
+
+  ctx.shadowColor = 'rgba(255,210,90,0.55)';
+  ctx.shadowBlur = 28 * GF.S;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 40 * GF.S);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  ctx.fillText(GF.t('level') + ' ' + level + ' ✓', GF.cx, GF.cy - 6 * GF.S);
+
+  var btnW = GF.clamp(220 * GF.S, 160, 300), btnH = GF.clamp(50 * GF.S, 40, 64);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 24 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ffd24a'); grad.addColorStop(1, '#cf9b1f');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + subFs + 'px sans-serif';
+  ctx.fillStyle = '#241200';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('next'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  hudBtns = [{ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { startLevel(level + 1); }}];
+}
+
+// ── SCREENSHOT HELPERS (for take_screenshots.js) ─────────────────────────
+var _screenshotMode = false;
+var _screenshotIntervalId = null;
+function _fireScreenshotPings() {
+  var view = computeView();
+  var px = view.ox + (player.gx + 0.5) * view.tile;
+  var py = view.oy + (player.gy + 0.5) * view.tile;
+  // Two fresh long-lived pings each tick — keeps the frame revealed during capture.
+  pings.push({ x: px, y: py, life: PING_LIFETIME * 1.6, max: PING_LIFETIME * 1.6, radius: PING_RADIUS * view.tile });
+  pings.push({ x: px + view.tile * 4, y: py + view.tile * 2, life: PING_LIFETIME * 1.6, max: PING_LIFETIME * 1.6, radius: PING_RADIUS * 0.85 * view.tile });
+}
+window._setupForScreenshot = function(lvl) {
+  startLevel(Math.max(1, (lvl | 0) || 1));
+  _screenshotMode = true;
+  // Pin a creature close so the silhouette pops in frame.
+  if (creatures.length) {
+    creatures[0].gx = player.gx + 3;
+    creatures[0].gy = player.gy + 1;
+    if (!isFloor(creatures[0].gx, creatures[0].gy)) {
+      grid[creatures[0].gy * GRID_W + creatures[0].gx] = 0;
+    }
+    creatures[0].mx = creatures[0].gx; creatures[0].my = creatures[0].gy; creatures[0].lerp = 1;
+    creature_dist = Math.abs(player.gx - creatures[0].gx) + Math.abs(player.gy - creatures[0].gy);
+  }
+  // Plant a charge near visible area so node appears.
+  if (charges.length) {
+    charges[0].gx = player.gx - 2; charges[0].gy = player.gy - 2;
+    if (!isFloor(charges[0].gx, charges[0].gy)) grid[charges[0].gy * GRID_W + charges[0].gx] = 0;
+    charges[0].used = false;
+  }
+  // Move exit a few tiles away so it ALSO falls in the ping area.
+  exitTile.gx = player.gx + 5; exitTile.gy = player.gy - 1;
+  if (!isFloor(exitTile.gx, exitTile.gy)) grid[exitTile.gy * GRID_W + exitTile.gx] = 0;
+  // Lock battery to a healthy mid value so the HUD bar reads well.
+  battery = Math.max(6, batteryCap - 4);
+  _fireScreenshotPings();
+  if (_screenshotIntervalId) clearInterval(_screenshotIntervalId);
+  _screenshotIntervalId = setInterval(_fireScreenshotPings, 250);
+};
+window._jumpLevel = function(n) {
+  // Special-case: 99 = drive into terminal state (post-build-tester gate uses this).
+  if (n === 99) {
+    if (_screenshotIntervalId) { clearInterval(_screenshotIntervalId); _screenshotIntervalId = null; }
+    _screenshotMode = false;
+    startLevel(1);
+    gameOver('drained');
+    return;
+  }
+  window._setupForScreenshot(n || 1);
+};
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs, level: level, battery: battery, batteryCap: batteryCap,
+    creature_dist: creature_dist, exit_found: exit_found,
+    GRID_W: GRID_W, GRID_H: GRID_H, PING_RADIUS: PING_RADIUS,
+    PING_LIFETIME: PING_LIFETIME, BATTERY_MAX: BATTERY_MAX,
+    CHARGE_REFILL: CHARGE_REFILL, NUM_CHARGES: NUM_CHARGES,
+    NUM_CREATURES: NUM_CREATURES, CREATURE_STEP_PER_PING: CREATURE_STEP_PER_PING,
+    TILE_PX: TILE_PX,
+  };
+});
+
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'echo_locator',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('echo_locator_best') || '0') || 0; } catch (e) {}
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>
