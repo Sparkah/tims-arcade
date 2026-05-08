@@ -69,10 +69,13 @@ for ((i = 0; i < COUNT; i++)); do
     [[ -f "$GAME_DIR/$sibling" ]] && cp "$GAME_DIR/$sibling" "$OUT_GAMES/$SLUG/$sibling"
   done
 
-  # ── Build journal artefacts (for /lab/<slug>) ────────────────────────────
-  # Expose the agent's design + runtime-gate output + iteration log so the
-  # public lab page can render a per-game story. All optional; all read-only.
-  for journal in DESIGN.md runtime_gate.json iterations.log YANDEX_REJECTIONS.md; do
+  # ── Lab page artefacts (genesis + iteration log) ─────────────────────────
+  # The lab page leads with idea-genesis content — sources, synthesizer
+  # reasoning, alternatives — not technical artefacts. genesis.json is
+  # the primary source; iterations.log is supporting (when the game has
+  # earned engagement signal). Other artefacts (DESIGN.md, runtime_gate)
+  # are skipped — they're development-internal, not public-facing content.
+  for journal in genesis.json iterations.log; do
     [[ -f "$GAME_DIR/$journal" ]] && cp "$GAME_DIR/$journal" "$OUT_GAMES/$SLUG/$journal"
   done
 

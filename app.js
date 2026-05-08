@@ -209,6 +209,15 @@ function visible() {
     list.sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0));
   } else if (activeTab === 'liked') {
     list = list.filter(g => myVotes[g.slug] === 'like');
+  } else if (activeTab === 'myplayed') {
+    // Personal play history — read localStorage entries written by play.html.
+    // Sort by recency of MY plays, not addedDate.
+    let played;
+    try { played = JSON.parse(localStorage.getItem('myPlayed') || '[]'); }
+    catch { played = []; }
+    const orderBySlug = new Map(played.map((e, i) => [e.slug, i]));
+    list = list.filter(g => orderBySlug.has(g.slug));
+    list.sort((a, b) => orderBySlug.get(a.slug) - orderBySlug.get(b.slug));
   } else if (activeTab === 'top') {
     list.sort((a, b) => netScore(b) - netScore(a));
   } else {
@@ -355,8 +364,9 @@ function renderFeatured() {
 }
 
 function emptyMessage() {
-  if (activeTab === 'liked')  return '<h2>No liked games yet.</h2><p>Tap 👍 on something you enjoyed.</p>';
-  if (activeTab === 'recent') return '<h2>No new games this week.</h2><p>Check back tomorrow — the factory builds one most days.</p>';
+  if (activeTab === 'liked')    return '<h2>No liked games yet.</h2><p>Tap 👍 on something you enjoyed.</p>';
+  if (activeTab === 'myplayed') return '<h2>No play history yet.</h2><p>Open any game and it\'ll show up here. Up to your last 50 plays are remembered locally on this device.</p>';
+  if (activeTab === 'recent')   return '<h2>No new games this week.</h2><p>Check back tomorrow — the factory builds one most days.</p>';
   if (searchTerm)             return `<h2>No games matching “${escapeHtml(searchTerm)}”.</h2>`;
   return '<h2>No games yet.</h2>';
 }
