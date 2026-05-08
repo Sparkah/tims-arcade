@@ -69,6 +69,13 @@ for ((i = 0; i < COUNT; i++)); do
     [[ -f "$GAME_DIR/$sibling" ]] && cp "$GAME_DIR/$sibling" "$OUT_GAMES/$SLUG/$sibling"
   done
 
+  # ── Build journal artefacts (for /lab/<slug>) ────────────────────────────
+  # Expose the agent's design + runtime-gate output + iteration log so the
+  # public lab page can render a per-game story. All optional; all read-only.
+  for journal in DESIGN.md runtime_gate.json iterations.log YANDEX_REJECTIONS.md; do
+    [[ -f "$GAME_DIR/$journal" ]] && cp "$GAME_DIR/$journal" "$OUT_GAMES/$SLUG/$journal"
+  done
+
   # Copy thumbnail. Two layouts supported:
   #   1. Flat:        yandex_promo/desktop_en_1.png
   #   2. Per-language: yandex_promo/en/desktop_1.png  (used by 10_running_away)

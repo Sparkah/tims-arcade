@@ -420,6 +420,7 @@ function card(g, opts) {
       ${isRecent ? '<span class="recent-badge">NEW</span>' : ''}
       ${c.plays ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
       ${c.comments ? `<span class="comment-count">💬 ${c.comments}</span>` : ''}
+      <a class="lab-link" href="/lab.html?slug=${encodeURIComponent(g.slug)}" title="Build journal" aria-label="Open build journal">📓</a>
     </div>
     <div class="card-body">
       <div class="card-title"></div>
@@ -430,6 +431,9 @@ function card(g, opts) {
         </button>
         <button class="vote dislike ${myVote === 'dislike' ? 'active' : ''}" data-action="dislike" aria-label="Dislike">
           👎 <span class="num">${c.dislikes || 0}</span>
+        </button>
+        <button class="vote comments-open" data-action="comments" aria-label="Read & leave comments">
+          💬 <span class="num">${c.comments || 0}</span>
         </button>
         <a class="play-link" href="${playUrl}">▶ Play</a>
       </div>
@@ -443,7 +447,12 @@ function card(g, opts) {
     if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'thumbnail' });
     location.href = playUrl;
   }
-  el.querySelector('.card-thumb').addEventListener('click', goPlay);
+  el.querySelector('.card-thumb').addEventListener('click', (e) => {
+    // The 📓 lab link sits inside .card-thumb — let it navigate without
+    // triggering goPlay.
+    if (e.target.closest('.lab-link')) return;
+    goPlay();
+  });
   el.querySelector('.play-link').addEventListener('click', (e) => {
     if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
     if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'play_link' });
@@ -452,11 +461,144 @@ function card(g, opts) {
   el.querySelectorAll('.vote').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      vote(g.slug, btn.dataset.action, el);
+      const action = btn.dataset.action;
+      if (action === 'comments') {
+        openCommentModal(g);
+        return;
+      }
+      vote(g.slug, action, el);
     });
   });
   return el;
 }
+
+// ── Comment modal ─────────────────────────────────────────────────────────
+// Opens from any card's 💬 button. Reads /api/comments and posts via
+// /api/feedback (vote='neutral' so freeform notes don't pollute like/dislike).
+const _commentModalState = { slug: null };
+
+function openCommentModal(g) {
+  _commentModalState.slug = g.slug;
+  const m = document.getElementById('comment-modal');
+  if (!m) return;
+  document.getElementById('comment-modal-title').textContent = `Comments — ${gameTitle(g)}`;
+  document.getElementById('comment-modal-input').value = '';
+  document.getElementById('comment-modal-counter').textContent = '0 / 500';
+  document.getElementById('comment-modal-submit').disabled = true;
+  document.getElementById('comment-modal-list').innerHTML =
+    '<div class="comment-modal-empty">Loading…</div>';
+  m.classList.remove('hidden');
+  m.setAttribute('aria-hidden', 'false');
+  loadModalComments(g.slug);
+  if (window.posthog) posthog.capture('comments_modal_opened', { slug: g.slug });
+}
+
+function closeCommentModal() {
+  const m = document.getElementById('comment-modal');
+  if (!m) return;
+  m.classList.add('hidden');
+  m.setAttribute('aria-hidden', 'true');
+  _commentModalState.slug = null;
+}
+
+function relTimeShort(ts) {
+  if (!ts) return '';
+  const sec = Math.max(1, Math.round((Date.now() - ts) / 1000));
+  if (sec < 60) return sec + 's ago';
+  const min = Math.round(sec / 60);
+  if (min < 60) return min + 'm ago';
+  const hr = Math.round(min / 60);
+  if (hr < 24) return hr + 'h ago';
+  const d = Math.round(hr / 24);
+  return d + 'd ago';
+}
+
+function escapeText(s) {
+  const d = document.createElement('div');
+  d.textContent = String(s == null ? '' : s);
+  return d.innerHTML;
+}
+
+async function loadModalComments(slug) {
+  const list = document.getElementById('comment-modal-list');
+  try {
+    const r = await fetch(`/api/comments?slug=${encodeURIComponent(slug)}&limit=20`, { cache: 'no-store' });
+    if (!r.ok) throw new Error('http ' + r.status);
+    const d = await r.json();
+    const cs = (d && d.comments) || [];
+    if (!cs.length) {
+      list.innerHTML = '<div class="comment-modal-empty">No comments yet — leave the first one above.</div>';
+      return;
+    }
+    list.innerHTML = cs.map(cm => {
+      const emoji = cm.vote === 'like' ? '👍' : cm.vote === 'dislike' ? '👎' : '💬';
+      return `<div class="comment-modal-row">
+        <div class="vote-emoji">${emoji}</div>
+        <div>
+          <div>${escapeText(cm.comment)}</div>
+          <div class="meta">${escapeText(relTimeShort(cm.ts))}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = '<div class="comment-modal-empty">Couldn\'t load comments. Try again.</div>';
+  }
+}
+
+(function wireCommentModal() {
+  const m = document.getElementById('comment-modal');
+  if (!m) return;
+  m.addEventListener('click', (e) => {
+    if (e.target.dataset && e.target.dataset.close) closeCommentModal();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !m.classList.contains('hidden')) closeCommentModal();
+  });
+  const input = document.getElementById('comment-modal-input');
+  const counter = document.getElementById('comment-modal-counter');
+  const submit = document.getElementById('comment-modal-submit');
+  input.addEventListener('input', () => {
+    const n = input.value.length;
+    counter.textContent = `${n} / 500`;
+    submit.disabled = n < 2;
+  });
+  document.getElementById('comment-modal-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const slug = _commentModalState.slug;
+    const text = input.value.trim().slice(0, 500);
+    if (!slug || text.length < 2) return;
+    submit.disabled = true;
+    submit.textContent = '…';
+    try {
+      const body = JSON.stringify({ slug, vote: 'neutral', comment: text });
+      await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body, keepalive: true,
+      });
+      // Optimistic local prepend
+      const list = document.getElementById('comment-modal-list');
+      const empty = list.querySelector('.comment-modal-empty');
+      if (empty) list.innerHTML = '';
+      list.insertAdjacentHTML('afterbegin',
+        `<div class="comment-modal-row">
+          <div class="vote-emoji">💬</div>
+          <div>
+            <div>${escapeText(text)}</div>
+            <div class="meta">just now · you</div>
+          </div>
+        </div>`);
+      input.value = '';
+      counter.textContent = '0 / 500';
+      if (window.posthog) posthog.capture('comment_posted_modal', { slug, length: text.length });
+    } catch (err) {
+      counter.textContent = 'Error — try again';
+    } finally {
+      submit.textContent = 'Post';
+      submit.disabled = input.value.length < 2;
+    }
+  });
+})();
 
 function logVariantClick(slug, variant) {
   // sendBeacon survives the navigation that's about to happen
