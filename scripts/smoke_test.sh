@@ -55,12 +55,24 @@ else
   fail "/games.json → parse failed or count=$count (expected ≥6)"
 fi
 
-# 3. /api/counts returns application/json
-counts_ct=$(curl -sI "$SITE/api/counts?b=$bust" | awk -F': *' 'tolower($1)=="content-type" {print tolower($2); exit}' | tr -d '\r\n')
+# 3. /api/counts returns application/json. RETRY 4× with backoff because
+# CF Pages function endpoints can transiently 404→fallback during deploy
+# propagation (~30-90s window). A single failed read here triggered a
+# false-positive auto-rollback on 2026-05-08, reverting today's daily
+# batch — never again.
+counts_ct=""
+for attempt in 1 2 3 4; do
+  counts_ct=$(curl -sI "$SITE/api/counts?b=$(date +%s%N)" \
+    | awk -F': *' 'tolower($1)=="content-type" {print tolower($2); exit}' \
+    | tr -d '\r\n')
+  if [[ "$counts_ct" == application/json* ]]; then break; fi
+  note "/api/counts attempt $attempt: '$counts_ct' — waiting 15s for CF deploy to settle"
+  sleep 15
+done
 if [[ "$counts_ct" == application/json* ]]; then
   pass "/api/counts → application/json"
 else
-  fail "/api/counts → '$counts_ct' (expected application/json)"
+  fail "/api/counts → '$counts_ct' after 4 attempts (expected application/json)"
 fi
 
 # 4. /posthog-init serves the real PostHog snippet, not the no-op stub
