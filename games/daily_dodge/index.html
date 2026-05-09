@@ -56,6 +56,7 @@ var STRINGS = {
     locked: 'LOCKED',
     unlockAt: 'Survive',
     unlocked: 'UNLOCKED!',
+    closeCalls: 'CLOSE CALLS',
   },
   ru: {
     title: 'Увороты Дня',
@@ -75,6 +76,7 @@ var STRINGS = {
     locked: 'ЗАКРЫТО',
     unlockAt: 'Выживи',
     unlocked: 'ОТКРЫТ!',
+    closeCalls: 'НА ВОЛОСОК',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -150,6 +152,11 @@ var screenShake = 0;
 var skinIdx = 0;                // active skin index
 var bestEverSeconds = 0;        // all-time best survival in seconds (drives unlocks)
 var newlyUnlockedSkin = null;   // name of skin unlocked this run, surfaced on game-over
+// iter#3 — Close-call (near-miss) feedback
+var closeCallCount = 0;         // close calls accumulated this run
+var bestCloseCalls = 0;         // best close-calls in any single run (persisted)
+var timeDilation = 1;           // 1.0 normal, dips below on close call (micro slow-mo)
+var dilationTimer = 0;          // seconds remaining in dilation
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
@@ -285,6 +292,8 @@ function startRun() {
   liveRank = null;
   newBestPopped = false;
   newlyUnlockedSkin = null;
+  closeCallCount = 0;
+  timeDilation = 1; dilationTimer = 0;
   gs = 'PLAYING';
   // Warm/refresh live-rank board in the background — non-blocking.
   fetchLeaderboard();
@@ -351,6 +360,16 @@ var lastLiveRankAt = 0;
 function update(dt) {
   if (gs !== 'PLAYING') return;
 
+  // iter#3 — micro slow-mo on close call (decays smoothly back to 1.0)
+  if (dilationTimer > 0) {
+    dilationTimer -= dt;
+    timeDilation = 0.55;
+  } else {
+    timeDilation = Math.min(1, timeDilation + dt * 4);
+  }
+  // Apply dilation to bullet motion (player keeps full responsiveness)
+  var bdt = dt * timeDilation;
+
   var now = performance.now() / 1000;
   elapsed = now - startTime;
   // Recompute projected daily rank ~4×/sec (cheap; just compares numbers)
@@ -402,13 +421,13 @@ function update(dt) {
     var b = bullets[i];
     if (b.kind === 3) {
       // spinner — rotate velocity slowly
-      b.spinPhase += dt * 1.6;
+      b.spinPhase += bdt * 1.6;
       var r2 = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
-      var ang = Math.atan2(b.vy, b.vx) + dt * 1.0;
+      var ang = Math.atan2(b.vy, b.vx) + bdt * 1.0;
       b.vx = Math.cos(ang) * r2; b.vy = Math.sin(ang) * r2;
     }
-    b.x += b.vx * dt; b.y += b.vy * dt;
-    b.life -= dt;
+    b.x += b.vx * bdt; b.y += b.vy * bdt;
+    b.life -= bdt;
 
     var bar = arena();
     if (b.life <= 0 ||
@@ -419,7 +438,20 @@ function update(dt) {
 
     // collision
     var dx = player.x - b.x, dy = player.y - b.y;
-    if (Math.sqrt(dx*dx + dy*dy) < (PLAYER_R*S + b.r) * 0.8) {
+    var dist = Math.sqrt(dx*dx + dy*dy);
+    // ── Close-call (iter#3): bullet whizzed past inner ring without hitting ──
+    var collideR = (PLAYER_R*S + b.r) * 0.8;
+    var nearR    = (PLAYER_R*S + b.r) * 1.85;
+    if (!b.closeCalled && dist < nearR && dist > collideR) {
+      b.closeCalled = true;
+      closeCallCount++;
+      // Visual: a quick spark ring + a streak in the bullet's color
+      spawnParticles(player.x, player.y, b.color || '#fff', 8);
+      spawnFloat((player.x + b.x)/2, (player.y + b.y)/2 - 6*S, '!', '#fff');
+      // Subtle micro slow-mo so the player feels the dodge
+      dilationTimer = 0.09; // ~90 ms
+    }
+    if (dist < collideR) {
       if (window._invincible) {
         // pass through harmlessly (screenshot mode)
         bullets.splice(i, 1);
@@ -471,6 +503,16 @@ function onRunEnded(survived) {
     spawnFloat(player.x, player.y - 24, (lang === 'ru' ? 'НОВЫЙ РЕКОРД!' : 'NEW BEST!'), '#FFD700');
     spawnParticles(player.x, player.y, '#FFD700', 24);
   }
+  // iter#3 — persist all-time best close-calls in a single run
+  try {
+    var prevBestCC = parseInt(localStorage.getItem('dodge_best_closecalls')||'0')||0;
+    if (closeCallCount > prevBestCC) {
+      localStorage.setItem('dodge_best_closecalls', String(closeCallCount));
+      bestCloseCalls = closeCallCount;
+    } else {
+      bestCloseCalls = prevBestCC;
+    }
+  } catch(e) {}
   // iter#2 — check skin unlocks based on seconds survived this run
   newlyUnlockedSkin = checkUnlocksAfterRun(elapsed);
   if (newlyUnlockedSkin) {
@@ -1028,11 +1070,11 @@ function frame(ts) {
   }
   if (gs === 'GAMEOVER') {
     drawOverlay(t('youDied'), t('survived')+' '+elapsed.toFixed(1)+'s', t('retry'),
-      function() { startRun(); }, t('score')+': '+score);
+      function() { startRun(); }, t('score')+': '+score+'   ·   '+t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):''));
   }
   if (gs === 'CLEARED') {
     drawOverlay(t('cleared'), t('score')+': '+score, t('retry'),
-      function() { startRun(); }, '');
+      function() { startRun(); }, t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):''));
   }
 
   requestAnimationFrame(frame);
@@ -1054,6 +1096,7 @@ function boot() {
     }
     todayBest = parseInt(localStorage.getItem('dodge_day_best')||'0')||0;
     allTimeBest = parseInt(localStorage.getItem('dodge_alltime_best')||'0')||0;
+    bestCloseCalls = parseInt(localStorage.getItem('dodge_best_closecalls')||'0')||0;
   } catch(e) {}
   loadSkinState();
   if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {

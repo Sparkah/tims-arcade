@@ -66,6 +66,10 @@ var STRINGS = {
     rank: 'Your rank',
     namePrompt: 'Name for the daily leaderboard:',
     you: 'YOU',
+    skin: 'DONUT',
+    locked: 'LOCKED',
+    unlockAt: 'Best ',
+    unlockedToast: 'NEW DONUT UNLOCKED!',
   },
   ru: {
     title: 'Чистая Уборка',
@@ -83,6 +87,10 @@ var STRINGS = {
     rank: 'Твоё место',
     namePrompt: 'Имя для таблицы лидеров:',
     you: 'ТЫ',
+    skin: 'ПОНЧИК',
+    locked: 'ЗАКРЫТО',
+    unlockAt: 'Рекорд ',
+    unlockedToast: 'НОВЫЙ ПОНЧИК ОТКРЫТ!',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -115,6 +123,62 @@ var bestPulse = 0;          // 0..1, pulse anim when HUD best updates live
 var BEST_KEY = 'clean_sweep_best';
 function saveBest() {
   try { localStorage.setItem(BEST_KEY, best); } catch(e) {}
+}
+
+// ── DONUT SKINS (iter#3: cosmetic unlocks tied to lifetime best) ─────────────
+// Tints the donut sprite via 'source-atop' composite — additive, no new art.
+// `tint:null` = default sprite passthrough. Selected skin persists in
+// localStorage; locked skins reveal as best score crosses thresholds.
+var SKIN_KEY      = 'clean_sweep_skin';
+var SKIN_SEEN_KEY = 'clean_sweep_skins_seen'; // CSV of skin ids the player has already been notified about
+var DONUT_SKINS = [
+  { id:'strawberry', name:'Strawberry', nameRu:'Клубника',  unlock:0,    tint:null,                 ring:'#FFB7C5' },
+  { id:'chocolate',  name:'Chocolate',  nameRu:'Шоколад',   unlock:100,  tint:'rgba(82,46,28,0.55)', ring:'#5C3317' },
+  { id:'matcha',     name:'Matcha',     nameRu:'Матча',     unlock:300,  tint:'rgba(120,180,80,0.55)', ring:'#7BB661' },
+  { id:'galaxy',     name:'Galaxy',     nameRu:'Космос',    unlock:800,  tint:'rgba(70,30,140,0.6)',   ring:'#7c3aed' },
+];
+var skinId = 'strawberry';
+var skinUnlockToast = 0;          // animation timer when a new tier unlocks mid-run
+var skinUnlockToastId = null;     // which skin to name in the toast
+var skinSeen = {};                // id -> true (avoid re-toasting)
+
+function loadSkinState() {
+  try {
+    skinId = localStorage.getItem(SKIN_KEY) || 'strawberry';
+    var seenCsv = localStorage.getItem(SKIN_SEEN_KEY) || '';
+    seenCsv.split(',').forEach(function(id){ if (id) skinSeen[id] = true; });
+  } catch(e) {}
+  // Strawberry is always considered seen (default tier)
+  skinSeen.strawberry = true;
+}
+function saveSkin() { try { localStorage.setItem(SKIN_KEY, skinId); } catch(e) {} }
+function markSkinSeen(id) {
+  skinSeen[id] = true;
+  try {
+    var ids = Object.keys(skinSeen).filter(function(k){ return skinSeen[k]; });
+    localStorage.setItem(SKIN_SEEN_KEY, ids.join(','));
+  } catch(e) {}
+}
+function getSkin(id) {
+  for (var i=0;i<DONUT_SKINS.length;i++) if (DONUT_SKINS[i].id===id) return DONUT_SKINS[i];
+  return DONUT_SKINS[0];
+}
+function isSkinUnlocked(skin) { return best >= skin.unlock; }
+// Detect newly-unlocked skins after a score increase. Returns the highest
+// newly-unlocked skin (so a single big jump shows the top tier, not a stack).
+function checkSkinUnlocks() {
+  var newest = null;
+  for (var i=0;i<DONUT_SKINS.length;i++) {
+    var s = DONUT_SKINS[i];
+    if (best >= s.unlock && !skinSeen[s.id]) {
+      newest = s;
+      markSkinSeen(s.id);
+    }
+  }
+  if (newest) {
+    skinUnlockToastId = newest.id;
+    skinUnlockToast = 1;
+  }
 }
 
 // ── LEADERBOARD (iter#2: shared daily top-10) ────────────────────────────────
@@ -304,6 +368,7 @@ function update(dt) {
   if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = 0; }
   if (shake > 0) shake = Math.max(0, shake - dt * 8);
   if (bestPulse > 0) bestPulse = Math.max(0, bestPulse - dt * 0.6);
+  if (skinUnlockToast > 0) skinUnlockToast = Math.max(0, skinUnlockToast - dt * 0.35);
 
   // movement
   var ax = 0, ay = 0;
@@ -345,6 +410,7 @@ function update(dt) {
         best = score;
         newBest = true;
         saveBest();
+        checkSkinUnlocks(); // iter#3: surface any cosmetic unlocks crossed live
       }
       spawnParticles(d.x, d.y, d.color, 5 + Math.ceil(d.typeR * 0.8));
       spawnParticles(d.x, d.y, d.shine, 3);
@@ -384,16 +450,38 @@ function drawDonut(x, y) {
   // Sprite path: AI render with built-in shadow + sprinkles.
   var spriteSize = (DR * 2) * S * 1.15; // slightly bigger than design radius (sprite has shadow padding)
   if (sprites.donut && sprites.donut.complete && sprites.donut.naturalWidth > 0) {
+    var skin = getSkin(skinId);
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(donut.angle * 0.25); // gentle rotation so it still feels alive
-    ctx.drawImage(sprites.donut, -spriteSize/2, -spriteSize/2, spriteSize, spriteSize);
+    if (skin.tint) {
+      // iter#3: tint the donut sprite in an offscreen scratch so the source-atop
+      // composite doesn't bleed onto the main canvas (tested via deep_playtest).
+      if (!_skinScratch) {
+        _skinScratch = document.createElement('canvas');
+        _skinScratchCtx = _skinScratch.getContext('2d');
+      }
+      var sw = Math.ceil(spriteSize), sh = Math.ceil(spriteSize);
+      if (_skinScratch.width !== sw || _skinScratch.height !== sh) {
+        _skinScratch.width = sw; _skinScratch.height = sh;
+      }
+      _skinScratchCtx.clearRect(0, 0, sw, sh);
+      _skinScratchCtx.drawImage(sprites.donut, 0, 0, sw, sh);
+      _skinScratchCtx.globalCompositeOperation = 'source-atop';
+      _skinScratchCtx.fillStyle = skin.tint;
+      _skinScratchCtx.fillRect(0, 0, sw, sh);
+      _skinScratchCtx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(_skinScratch, -sw/2, -sh/2, sw, sh);
+    } else {
+      ctx.drawImage(sprites.donut, -spriteSize/2, -spriteSize/2, spriteSize, spriteSize);
+    }
     ctx.restore();
     return;
   }
   // Fallback: original procedural donut
   drawDonutProcedural(x, y);
 }
+var _skinScratch = null, _skinScratchCtx = null;
 
 function drawDonutProcedural(x, y) {
   var r = DR * S, hole = DHOLE * S;
@@ -413,11 +501,11 @@ function drawDonutProcedural(x, y) {
   ctx.fill();
   ctx.shadowColor = 'transparent';
 
-  // pink icing ring
+  // icing ring (color comes from selected skin — iter#3)
   ctx.beginPath();
   ctx.arc(0, 0, r*0.88, 0, Math.PI*2);
   ctx.arc(0, 0, hole*1.15, 0, Math.PI*2, true);
-  ctx.fillStyle = '#FFB7C5';
+  ctx.fillStyle = (getSkin(skinId).ring) || '#FFB7C5';
   ctx.fill();
 
   // icing highlight
@@ -695,6 +783,102 @@ function drawNewBestBanner() {
   }
 }
 
+// ── DRAW SKIN SELECTOR (iter#3) ──────────────────────────────────────────────
+// Renders the cosmetic donut row on MENU + GAMEOVER. Tap to swap (only unlocked
+// rows are tappable). Locked rows show "BEST 100" hint. Adds button hits to
+// the existing buttons[] array so the existing checkButtons() handler picks
+// them up — no input rewrite needed.
+function drawSkinSelector(yCenter) {
+  var skinFs = clamp(11*S, 9, 14);
+  var labelFs = clamp(10*S, 8, 13);
+  var swatchR = clamp(20*S, 14, 26);
+  var gap = swatchR * 2.6;
+  var totalW = gap * (DONUT_SKINS.length - 1);
+  var startX = cx - totalW / 2;
+
+  ctx.font = 'bold '+skinFs+'px sans-serif';
+  ctx.fillStyle = '#888';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(t('skin'), cx, yCenter - swatchR - 8*S);
+
+  for (var i = 0; i < DONUT_SKINS.length; i++) {
+    var skin = DONUT_SKINS[i];
+    var sx = startX + i * gap;
+    var sy = yCenter;
+    var unlocked = isSkinUnlocked(skin);
+    var selected = (skin.id === skinId);
+
+    // outer ring (selection indicator)
+    if (selected && unlocked) {
+      ctx.beginPath(); ctx.arc(sx, sy, swatchR + 4*S, 0, Math.PI*2);
+      ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2.5*S; ctx.stroke();
+    }
+
+    // swatch (donut shape — outer ring + hole)
+    ctx.save();
+    ctx.globalAlpha = unlocked ? 1 : 0.35;
+    ctx.beginPath(); ctx.arc(sx, sy, swatchR, 0, Math.PI*2);
+    ctx.arc(sx, sy, swatchR*0.42, 0, Math.PI*2, true);
+    ctx.fillStyle = '#F5DEB3'; ctx.fill();
+    ctx.beginPath(); ctx.arc(sx, sy, swatchR*0.88, 0, Math.PI*2);
+    ctx.arc(sx, sy, swatchR*0.5, 0, Math.PI*2, true);
+    ctx.fillStyle = skin.ring;
+    ctx.fill();
+    ctx.restore();
+
+    // lock overlay
+    if (!unlocked) {
+      ctx.font = 'bold '+labelFs+'px sans-serif';
+      ctx.fillStyle = '#999';
+      ctx.fillText(t('unlockAt')+skin.unlock, sx, sy + swatchR + labelFs + 4*S);
+    } else {
+      ctx.font = labelFs+'px sans-serif';
+      ctx.fillStyle = selected ? '#FFD700' : '#aaa';
+      var dispName = (lang === 'ru' ? skin.nameRu : skin.name);
+      ctx.fillText(dispName, sx, sy + swatchR + labelFs + 4*S);
+    }
+
+    // hit area — only for unlocked
+    if (unlocked) {
+      (function(targetId){
+        buttons.push({
+          x: sx - swatchR, y: sy - swatchR, w: swatchR*2, h: swatchR*2,
+          fn: function() {
+            if (skinId !== targetId) { skinId = targetId; saveSkin(); }
+          }
+        });
+      })(skin.id);
+    }
+  }
+}
+
+function drawSkinUnlockToast() {
+  if (skinUnlockToast <= 0 || !skinUnlockToastId) return;
+  var skin = getSkin(skinUnlockToastId);
+  var alpha = Math.min(1, skinUnlockToast * 1.2);
+  var fs = clamp(15*S, 12, 20);
+  var nameFs = clamp(13*S, 10, 17);
+  var toastY = HUD_H * S + 30*S;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  // pill bg
+  ctx.font = 'bold '+fs+'px sans-serif';
+  var label = t('unlockedToast');
+  var dispName = (lang === 'ru' ? skin.nameRu : skin.name);
+  var w = Math.max(ctx.measureText(label).width, ctx.measureText(dispName).width) + 32*S;
+  rr(ctx, cx - w/2, toastY - fs, w, fs * 2.6, fs);
+  ctx.fillStyle = 'rgba(255,215,0,0.92)';
+  ctx.fill();
+  // label
+  ctx.fillStyle = '#3b2a00';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, cx, toastY);
+  ctx.font = 'bold '+nameFs+'px sans-serif';
+  ctx.fillText(dispName, cx, toastY + fs * 1.1);
+  ctx.restore();
+}
+
 // ── DRAW LEADERBOARD (iter#2) ────────────────────────────────────────────────
 // Renders the cached top-N below the game-over button. Highlights current
 // player's row. Skips silently when offline / list empty.
@@ -789,6 +973,8 @@ function frame(ts) {
   if (gs === 'MENU') {
     ctx.fillStyle = '#0a0a12'; ctx.fillRect(0,0,W,H);
     drawOverlay(t('title'), t('sub'), t('play'), function() { score=0; startLevel(1); });
+    // iter#3: cosmetic donut picker below the BEST: line
+    drawSkinSelector(cy + 20*S + clamp(52*S, 40, 66) + 80*S);
   }
   if (gs === 'LEVELEND') {
     drawOverlay(t('complete'), t('score')+': '+score, t('next'),
@@ -800,6 +986,14 @@ function frame(ts) {
       function() { score=0; startLevel(1); });
     if (newBest) drawNewBestBanner();
     drawLeaderboard();
+    // iter#3: skin picker visible on game-over too — pairs naturally with the
+    // NEW BEST! moment when a fresh tier has just unlocked
+    drawSkinSelector(H - 80*S);
+  }
+
+  // iter#3: in-run toast when a new donut tier unlocks during play
+  if ((gs === 'PLAYING' || gs === 'LEVELEND') && skinUnlockToast > 0) {
+    drawSkinUnlockToast();
   }
 
   // mobile joystick hint (first 3 seconds of level 1)
@@ -850,6 +1044,23 @@ function boot() {
     var legacy = parseInt(localStorage.getItem('cs_best')||'0')||0;
     if (legacy > best) { best = legacy; saveBest(); }
   } catch(e) {}
+  loadSkinState(); // iter#3
+  // If lifetime best already crosses higher tiers, mark them seen on first
+  // boot so we don't dump multiple toasts on a returning player. checkSkinUnlocks
+  // would otherwise fire all of them on the next collect.
+  for (var __i=0;__i<DONUT_SKINS.length;__i++) {
+    var __s = DONUT_SKINS[__i];
+    if (best >= __s.unlock) skinSeen[__s.id] = true;
+  }
+  // Persist in case this was a brand-new install
+  try {
+    var __ids = Object.keys(skinSeen).filter(function(k){ return skinSeen[k]; });
+    localStorage.setItem(SKIN_SEEN_KEY, __ids.join(','));
+  } catch(e) {}
+  // Guard: if persisted skin is locked (e.g. localStorage tampering, best was
+  // reset), revert to strawberry rather than render a tinted donut the player
+  // hasn't earned.
+  if (!isSkinUnlocked(getSkin(skinId))) { skinId = 'strawberry'; saveSkin(); }
   loadSprites().then(function() {
     if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
       window.ysdk.features.LoadingAPI.ready();
@@ -874,6 +1085,10 @@ Object.defineProperty(window, 'combo',      { get: function(){ return combo; } }
 Object.defineProperty(window, 'newBest',    { get: function(){ return newBest; } });
 Object.defineProperty(window, 'myRank',     { get: function(){ return myRank; } });
 Object.defineProperty(window, 'lbCount',    { get: function(){ return leaderboard ? leaderboard.length : 0; } });
+Object.defineProperty(window, 'skinId',     { get: function(){ return skinId; } });
+Object.defineProperty(window, 'skinUnlockCount', { get: function(){
+  var n = 0; for (var i=0;i<DONUT_SKINS.length;i++) if (best >= DONUT_SKINS[i].unlock) n++; return n;
+} });
 
 (function() {
   if (typeof YaGames === 'undefined') { setTimeout(boot, 3000); return; }

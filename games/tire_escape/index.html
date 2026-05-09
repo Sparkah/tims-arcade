@@ -31,6 +31,10 @@ var STRINGS = {
     distance: 'DIST',
     bounce: 'BOUNCE',
     newbest: 'NEW BEST!',
+    leaderboard: "TODAY'S TOP",
+    rank: 'RANK',
+    you: 'you',
+    namePrompt: 'Name for the global leaderboard:',
   },
   ru: {
     title: 'Побег Шины',
@@ -41,6 +45,10 @@ var STRINGS = {
     distance: 'ДИСТ',
     bounce: 'ОТСКОК',
     newbest: 'НОВЫЙ РЕКОРД!',
+    leaderboard: 'ТОП ДНЯ',
+    rank: 'МЕСТО',
+    you: 'ты',
+    namePrompt: 'Имя для глобального лидерборда:',
   },
 };
 
@@ -98,6 +106,18 @@ var wasNewBest = false;
 // Pulse timer for live BEST HUD pip when current score crosses old best mid-run.
 var bestBeatPulse = 0;
 var bestBeatLatched = false;
+
+// Iter#2 (ladder2): shared daily leaderboard — gives a concrete external goal
+// beyond personal best. Player comments said "can't win/lose" — a top-10 board
+// + projected daily rank converts the endless run into a competitive target.
+// Pattern lifted from Games/21_dodge_run/.
+var playerName = '';
+var leaderboard = [];        // top-5 shown on game-over: [{name, score, ts}]
+var liveBoard = [];          // top-50 cached for live-rank computation during PLAYING
+var liveRank = null;         // projected daily rank vs liveBoard (recomputed ~4×/sec)
+var liveRankCheckTimer = 0;
+var myRank = null;           // your final rank after submit (shown on overlay)
+var lbFetched = false;       // suppress empty board flicker on first paint
 
 // ── HELPERS ──────────────────────────────────────────────────────────────
 function rand(a, b) { return a + Math.random() * (b - a); }
@@ -164,6 +184,11 @@ function startGame() {
   wasNewBest = false;
   bestBeatPulse = 0;
   bestBeatLatched = false;
+  // Iter#2: clear last-run rank state, keep cached liveBoard so live-rank works
+  // immediately on the new run rather than waiting for a refetch.
+  myRank = null;
+  liveRank = null;
+  liveRankCheckTimer = 0;
   buildBg();
   for (var i = 0; i < 8; i++) {
     spawnObstacle(spawnX);
@@ -184,7 +209,78 @@ function gameOver() {
     try { localStorage.setItem('tire_escape_best', best); } catch (e) {}
   }
   gs = 'GAMEOVER';
+  // Iter#2: submit score + refresh leaderboard so the gameover overlay shows
+  // top-5 (and your rank if you placed). Fire-and-forget — UI tolerates offline.
+  try { submitAndFetchLeaderboard(); } catch (e) {}
   try { GF.gameEnded(); } catch (e) {}
+}
+
+// ── LEADERBOARD (iter#2 ladder2) ─────────────────────────────────────────
+// Daily top-N via shared /api/scores endpoint. Same pattern as Daily Dodge.
+// Date key = today UTC (so all players share one board per UTC day).
+function getDayKey() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var day = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+function ensurePlayerName() {
+  if (playerName) return playerName;
+  try { playerName = localStorage.getItem('tire_escape_name') || ''; } catch (e) {}
+  if (!playerName) {
+    var entered = (window.prompt(GF.t('namePrompt'), 'Player') || '').trim().slice(0, 16);
+    if (entered) {
+      playerName = entered;
+      try { localStorage.setItem('tire_escape_name', playerName); } catch (e) {}
+    }
+  }
+  return playerName;
+}
+
+function fetchLeaderboard() {
+  var date = getDayKey();
+  return fetch('/api/scores?slug=tire_escape&date=' + date, { cache: 'no-store' })
+    .then(function(r) { return r.ok ? r.json() : { entries: [] }; })
+    .then(function(data) {
+      var all = (data && data.entries) || [];
+      leaderboard = all.slice(0, 5);
+      // sort desc for the live-rank computation in case the API returns unsorted
+      liveBoard = all.slice(0, 50).sort(function(a, b) { return b.score - a.score; });
+      lbFetched = true;
+    })
+    .catch(function() { /* offline-tolerant — overlay just hides the section */ });
+}
+
+function submitAndFetchLeaderboard() {
+  var name = ensurePlayerName();
+  var date = getDayKey();
+  var score = getDisplayScore();
+  if (!name || score <= 0) { fetchLeaderboard(); return; }
+  fetch('/api/scores', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ slug: 'tire_escape', date: date, name: name, score: score }),
+    keepalive: true,
+  })
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(data) {
+      if (data && data.rank) myRank = data.rank;
+      return fetchLeaderboard();
+    })
+    .catch(function() { fetchLeaderboard(); });
+}
+
+// Compute projected daily rank against cached liveBoard. Returns null if board empty.
+function computeLiveRank(myScore) {
+  if (!liveBoard || liveBoard.length === 0) return null;
+  if (myScore <= 0) return null;
+  var ahead = 0;
+  for (var i = 0; i < liveBoard.length; i++) {
+    if (liveBoard[i].score > myScore) ahead++; else break;
+  }
+  return ahead + 1;
 }
 
 window._jumpLevel = function(n) {
@@ -376,6 +472,15 @@ function update(dt) {
     GF.setShake(0.6);
   }
   if (bestBeatPulse > 0) bestBeatPulse = Math.max(0, bestBeatPulse - dt);
+
+  // Iter#2: recompute live daily rank ~4×/sec — cheap (just compares numbers
+  // against a pre-sorted in-memory cache). Gives the player instant "you'd be
+  // #N right now" feedback during the run.
+  liveRankCheckTimer -= dt;
+  if (liveRankCheckTimer <= 0) {
+    liveRankCheckTimer = 0.25;
+    liveRank = computeLiveRank(getDisplayScore());
+  }
 }
 
 // ── DRAW ─────────────────────────────────────────────────────────────────
@@ -419,7 +524,49 @@ function draw(ctx) {
       btnFn: startGame,
       bestText: GF.t('best') + ': ' + best,
     });
+    // Iter#2: top-5 daily leaderboard underneath the RETRY button. The overlay
+    // function doesn't know about the board, so we render it on top of the
+    // already-painted overlay. Skipped if board hasn't loaded or is empty.
+    if (lbFetched && leaderboard.length > 0) {
+      drawLeaderboardOverlay();
+    }
   }
+}
+
+// Iter#2 (ladder2): paints top-5 + your rank below the GAMEOVER overlay button.
+// Position math mirrors gf-lib drawOverlay() so rows sit just below `bestText`.
+function drawLeaderboardOverlay() {
+  var c = GF.ctx;
+  var W = GF.W, H = GF.H, S = GF.S, cx = W / 2, cy = H / 2;
+  var btnH = GF.clamp(52 * S, 40, 66);
+  var btnY = cy + 20 * S;
+  var lbY = btnY + btnH + 60 * S;          // below bestText (which is at btnY+btnH+28*S)
+  var lbFs = GF.clamp(14 * S, 11, 18);
+  var rowFs = GF.clamp(13 * S, 10, 16);
+  var rowH = GF.clamp(20 * S, 16, 24);
+
+  c.font = 'bold ' + lbFs + 'px sans-serif';
+  c.fillStyle = '#48c9b0';
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.fillText(GF.t('leaderboard') + (myRank ? ' — ' + GF.t('rank') + ': #' + myRank : ''), cx, lbY);
+
+  c.font = rowFs + 'px sans-serif';
+  for (var i = 0; i < leaderboard.length; i++) {
+    var entry = leaderboard[i];
+    var rowY = lbY + (i + 1) * rowH + 6 * S;
+    var isMe = entry.name === playerName;
+    c.fillStyle = isMe ? '#ffcf60' : '#aab';
+    c.textAlign = 'right';
+    c.fillText((i + 1) + '.', cx - 80 * S, rowY);
+    c.textAlign = 'left';
+    var displayName = (entry.name || '?').slice(0, 16) + (isMe ? ' (' + GF.t('you') + ')' : '');
+    c.fillText(displayName, cx - 70 * S, rowY);
+    c.textAlign = 'right';
+    c.fillStyle = isMe ? '#ffcf60' : '#9bf';
+    c.fillText(entry.score, cx + 110 * S, rowY);
+  }
+  c.textAlign = 'center';
 }
 
 function getDisplayScore() {
@@ -714,6 +861,21 @@ function drawHUD() {
     c.fillText(label, GF.W - 14 * GF.S, 14 * GF.S + fs * 1.15);
   }
 
+  // Iter#2 (ladder2): live projected daily rank pill — sits below BEST so the
+  // player can see "you'd be #3 right now" in real time. Only renders once we
+  // have a board cached and player has a positive score.
+  if (liveRank && getDisplayScore() > 0) {
+    var rankFs = fs * 0.72;
+    c.font = 'bold ' + rankFs + 'px sans-serif';
+    c.textAlign = 'right';
+    // top-3 glow so the chase moment lands
+    var top3 = liveRank <= 3;
+    c.fillStyle = top3 ? '#48c9b0' : '#7a8aa0';
+    var rankY = 14 * GF.S + fs * 1.15 + (best > 0 ? rankFs * 1.4 : 0);
+    var rankLabel = (top3 ? '★ ' : '') + '#' + liveRank + ' ' + GF.t('leaderboard');
+    c.fillText(rankLabel, GF.W - 14 * GF.S, rankY);
+  }
+
   if (combo > 0) {
     c.textAlign = 'center';
     var t = comboTimer / 1.5;
@@ -767,8 +929,12 @@ GF.init({
   saveKey: 'tire_escape',
   onReady: function() {
     try { best = parseInt(localStorage.getItem('tire_escape_best') || '0') || 0; } catch (e) {}
+    try { playerName = localStorage.getItem('tire_escape_name') || ''; } catch (e) {}
     buildBg();
     gs = 'MENU';
+    // Iter#2: prime the leaderboard so first-paint of game-over already has
+    // top-5 ready, and live-rank pill works on the very first run.
+    try { fetchLeaderboard(); } catch (e) {}
   },
   onUpdate: update,
   onDraw: draw,
@@ -793,7 +959,10 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     strikes:       typeof strikes       !== 'undefined' ? strikes       : null,
     best:          typeof best          !== 'undefined' ? best          : null,
     wasNewBest:    typeof wasNewBest    !== 'undefined' ? wasNewBest    : null,
-    bestBeatLatched: typeof bestBeatLatched !== 'undefined' ? bestBeatLatched : null
+    bestBeatLatched: typeof bestBeatLatched !== 'undefined' ? bestBeatLatched : null,
+    liveRank:      typeof liveRank      !== 'undefined' ? liveRank      : null,
+    myRank:        typeof myRank        !== 'undefined' ? myRank        : null,
+    lbFetched:     typeof lbFetched     !== 'undefined' ? lbFetched     : null
   };
 });
 })();

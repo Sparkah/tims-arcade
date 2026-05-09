@@ -1,0 +1,971 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Frost Crack</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1420; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ───────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Frost Crack',
+    sub:   'Encircle the gem with cracks before the ice shatters.',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT', again: 'PLAY AGAIN',
+    score: 'CRACKS', best: 'BEST', level: 'LEVEL',
+    cap: 'BUDGET', stress: 'MAX STRESS',
+    gameover: 'SHEET SHATTERED',
+    levelend: 'GEM FREED!',
+    won: 'LAKE CLEARED',
+    'tut_goal':     'Goal: crack the ice in a closed loop around the gem.',
+    'tut_controls': 'Controls: hover/tap an edge to highlight, click to crack.',
+    'tut_win':      'Win: encircle the gem so no path reaches the rim.',
+    'tut_lose':     'Lose: any tile reaches stress 4 OR you exceed 32 cracks.',
+    'tut_tip':      'Tip: red tiles are pre-stressed - 1 or 2 cracks left.',
+  },
+  ru: {
+    title: 'Ледяной Кол',
+    sub:   'Окружи кристалл трещинами, пока лёд не раскололся.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЕЕ', again: 'СНАЧАЛА',
+    score: 'ТРЕЩИН', best: 'РЕКОРД', level: 'УРОВЕНЬ',
+    cap: 'ЛИМИТ', stress: 'НАПРЯЖЕНИЕ',
+    gameover: 'ЛЁД РАСКОЛОЛСЯ',
+    levelend: 'КРИСТАЛЛ СВОБОДЕН!',
+    won: 'ОЗЕРО ОЧИЩЕНО',
+    'tut_goal':     'Цель: расколи лёд замкнутым кольцом вокруг кристалла.',
+    'tut_controls': 'Управление: наведи на ребро, нажми, чтобы расколоть.',
+    'tut_win':      'Победа: окружи кристалл, чтобы пути к краю не было.',
+    'tut_lose':     'Проигрыш: плитка дошла до напряжения 4 ИЛИ свыше 32 трещин.',
+    'tut_tip':      'Совет: красные плитки уже под напряжением.',
+  },
+};
+
+var SPRITE_NAMES = ['gem', 'frost'];
+
+// ── TUNABLES ───────────────────────────────────────────────────────────
+var GRID_SIZE = 8;
+var STRESS_LIMIT = 4;
+var MOVE_CAP = 32;
+var WIN_LEVEL = 5;
+var PRE_STRESS_BASE = 6;
+var PRE_STRESS_PER_LVL = 1;
+var GEM_RIM_OFFSET = 2;
+var TILE_PX_DESIGN = 56;
+var CRACK_PARTICLES = 14;
+var WIN_PARTICLES = 80;
+
+// ── GAME STATE ─────────────────────────────────────────────────────────
+var gs = 'MENU';                  // MENU | PLAYING | LEVELEND | GAMEOVER | WON
+var level = 1;
+var cracks = 0;                   // crack count this round (= score)
+var totalCracks = 0;              // across whole run (best tracking)
+var best = 0;                     // best totalCracks for full run (lower better)
+// stress[r][c] = 0..STRESS_LIMIT
+var stress = [];
+// edges: horizontal[GRID_SIZE+1][GRID_SIZE], vertical[GRID_SIZE][GRID_SIZE+1]
+// horizontal[r][c] = 1 means horizontal crack on row=r between rows r-1 and r,
+// covering tile column c. Top edges = r=0 (boundary), bottom edges = r=GRID_SIZE.
+var hEdges = [];
+var vEdges = [];
+var gem = { r: 0, c: 0 };
+var seed = 0;
+var rng = Math.random;
+var maxStress = 0;
+var lastShakeTriggered = false;
+var seededTiles = []; // for visual cue
+var winFlash = 0;
+var loseFlash = 0;
+var hover = { type: null, r: -1, c: -1 }; // type: 'h' or 'v'
+var pointer = { x: -1, y: -1, has: false };
+var showHelp = false;             // tutorial reopen overlay
+var helpBtn = null;               // {x,y,r}
+var langBtn = null;               // {x,y,w,h}
+
+// ── LAYOUT ─────────────────────────────────────────────────────────────
+function layout() {
+  var maxBoard = Math.min(GF.W * 0.86, GF.H * 0.74);
+  var ts = Math.floor(maxBoard / GRID_SIZE);
+  if (ts < 28) ts = 28;
+  var boardSize = ts * GRID_SIZE;
+  var ox = Math.floor(GF.cx - boardSize / 2);
+  var oy = Math.floor(GF.cy - boardSize / 2 + 14 * GF.S);
+  return { ts: ts, ox: ox, oy: oy, boardSize: boardSize };
+}
+
+// ── SEEDED RNG (mulberry32) ────────────────────────────────────────────
+function makeRng(s) {
+  return function() {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    var t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+function dailySeed() {
+  var d = new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth()+1) * 100 + d.getUTCDate();
+}
+
+// ── BOARD INIT ─────────────────────────────────────────────────────────
+function resetBoard(lvl) {
+  stress = [];
+  for (var r = 0; r < GRID_SIZE; r++) {
+    var row = [];
+    for (var c = 0; c < GRID_SIZE; c++) row.push(0);
+    stress.push(row);
+  }
+  hEdges = [];
+  for (var r2 = 0; r2 <= GRID_SIZE; r2++) {
+    var rowH = [];
+    for (var c2 = 0; c2 < GRID_SIZE; c2++) rowH.push(0);
+    hEdges.push(rowH);
+  }
+  vEdges = [];
+  for (var r3 = 0; r3 < GRID_SIZE; r3++) {
+    var rowV = [];
+    for (var c3 = 0; c3 <= GRID_SIZE; c3++) rowV.push(0);
+    vEdges.push(rowV);
+  }
+
+  // Gem placement: inset from rim
+  var inset = Math.max(1, GEM_RIM_OFFSET - Math.floor((lvl - 1) / 2));
+  var gx = inset + Math.floor(rng() * (GRID_SIZE - 2 * inset));
+  var gy = inset + Math.floor(rng() * (GRID_SIZE - 2 * inset));
+  gem.r = gy; gem.c = gx;
+
+  // Pre-stressed tiles
+  seededTiles = [];
+  var preCount = PRE_STRESS_BASE + (lvl - 1) * PRE_STRESS_PER_LVL;
+  var attempts = 0;
+  while (seededTiles.length < preCount && attempts < 200) {
+    attempts++;
+    var pr = Math.floor(rng() * GRID_SIZE);
+    var pc = Math.floor(rng() * GRID_SIZE);
+    if (pr === gem.r && pc === gem.c) continue;
+    if (Math.abs(pr - gem.r) <= 1 && Math.abs(pc - gem.c) <= 1) continue; // keep near-gem clear
+    if (stress[pr][pc] > 0) continue;
+    var v = 1 + Math.floor(rng() * 3); // 1..3
+    if (v > STRESS_LIMIT - 1) v = STRESS_LIMIT - 1;
+    stress[pr][pc] = v;
+    seededTiles.push({ r: pr, c: pc });
+  }
+
+  cracks = 0;
+  maxStress = 0;
+  lastShakeTriggered = false;
+  recomputeMaxStress();
+}
+
+function recomputeMaxStress() {
+  var m = 0;
+  for (var r = 0; r < GRID_SIZE; r++) for (var c = 0; c < GRID_SIZE; c++) {
+    if (stress[r][c] > m) m = stress[r][c];
+  }
+  maxStress = m;
+}
+
+// ── ENCIRCLEMENT CHECK ─────────────────────────────────────────────────
+// Flood-fill from the gem cell. Cells are connected via edges that are NOT cracked.
+// If the fill reaches the border, gem is NOT encircled. If fill is bounded entirely
+// inside the grid (no border-touching cells reached), gem IS encircled.
+function isEncircled() {
+  var visited = [];
+  for (var r = 0; r < GRID_SIZE; r++) {
+    var row = [];
+    for (var c = 0; c < GRID_SIZE; c++) row.push(false);
+    visited.push(row);
+  }
+  var stack = [{ r: gem.r, c: gem.c }];
+  visited[gem.r][gem.c] = true;
+  while (stack.length) {
+    var p = stack.pop();
+    var pr = p.r, pc = p.c;
+    // border check: if any neighbour is "outside" via uncracked rim edge → not encircled
+    // top
+    if (hEdges[pr][pc] === 0) {
+      if (pr === 0) return false;
+      if (!visited[pr-1][pc]) { visited[pr-1][pc] = true; stack.push({ r: pr-1, c: pc }); }
+    }
+    // bottom
+    if (hEdges[pr+1][pc] === 0) {
+      if (pr === GRID_SIZE - 1) return false;
+      if (!visited[pr+1][pc]) { visited[pr+1][pc] = true; stack.push({ r: pr+1, c: pc }); }
+    }
+    // left
+    if (vEdges[pr][pc] === 0) {
+      if (pc === 0) return false;
+      if (!visited[pr][pc-1]) { visited[pr][pc-1] = true; stack.push({ r: pr, c: pc-1 }); }
+    }
+    // right
+    if (vEdges[pr][pc+1] === 0) {
+      if (pc === GRID_SIZE - 1) return false;
+      if (!visited[pr][pc+1]) { visited[pr][pc+1] = true; stack.push({ r: pr, c: pc+1 }); }
+    }
+  }
+  return true; // never escaped
+}
+
+// ── CRACK FIRE ─────────────────────────────────────────────────────────
+function fireCrack(type, r, c) {
+  if (gs !== 'PLAYING') return;
+  if (type === 'h') {
+    if (hEdges[r][c]) return; // already cracked
+    hEdges[r][c] = 1;
+    // adjacent tiles: (r-1, c) above and (r, c) below
+    if (r - 1 >= 0) bumpStress(r - 1, c);
+    if (r < GRID_SIZE) bumpStress(r, c);
+  } else {
+    if (vEdges[r][c]) return;
+    vEdges[r][c] = 1;
+    if (c - 1 >= 0) bumpStress(r, c - 1);
+    if (c < GRID_SIZE) bumpStress(r, c);
+  }
+  cracks++;
+  totalCracks++;
+
+  // FX
+  var lay = layout();
+  var fx, fy;
+  if (type === 'h') { fx = lay.ox + (c + 0.5) * lay.ts; fy = lay.oy + r * lay.ts; }
+  else              { fx = lay.ox + c * lay.ts; fy = lay.oy + (r + 0.5) * lay.ts; }
+  GF.spawnParticles(fx, fy, '#dff5ff', CRACK_PARTICLES);
+  GF.setShake(maxStress >= STRESS_LIMIT - 1 ? 0.6 : 0.2);
+
+  // post-action checks
+  if (maxStress >= STRESS_LIMIT) {
+    triggerShatter();
+    return;
+  }
+  if (isEncircled()) {
+    triggerLevelEnd();
+    return;
+  }
+  if (cracks >= MOVE_CAP) {
+    triggerShatter(true);
+  }
+}
+
+function bumpStress(r, c) {
+  stress[r][c] = Math.min(STRESS_LIMIT, stress[r][c] + 1);
+  if (stress[r][c] > maxStress) maxStress = stress[r][c];
+}
+
+function triggerShatter(byCap) {
+  // big shake + particles across grid
+  GF.setShake(1.4);
+  var lay = layout();
+  for (var r = 0; r < GRID_SIZE; r++) {
+    for (var c = 0; c < GRID_SIZE; c++) {
+      if (stress[r][c] >= STRESS_LIMIT - 1 || (r + c) % 3 === 0) {
+        var x = lay.ox + (c + 0.5) * lay.ts;
+        var y = lay.oy + (r + 0.5) * lay.ts;
+        GF.spawnParticles(x, y, '#ff6b6b', 6);
+      }
+    }
+  }
+  loseFlash = 1;
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+}
+
+function triggerLevelEnd() {
+  var lay = layout();
+  var gx = lay.ox + (gem.c + 0.5) * lay.ts;
+  var gy = lay.oy + (gem.r + 0.5) * lay.ts;
+  GF.spawnParticles(gx, gy, '#ffd700', WIN_PARTICLES);
+  GF.spawnParticles(gx, gy, '#dff5ff', WIN_PARTICLES / 2);
+  GF.spawnFloat(gx, gy - 20 * GF.S, GF.t('levelend'), '#ffd700');
+  winFlash = 1;
+  if (level >= WIN_LEVEL) {
+    if (best === 0 || totalCracks < best) {
+      best = totalCracks;
+      try { localStorage.setItem('frost_crack_best', best); } catch (e) {}
+    }
+    gs = 'WON';
+  } else {
+    gs = 'LEVELEND';
+  }
+  GF.gameEnded();
+}
+
+// ── LIFECYCLE ─────────────────────────────────────────────────────────
+function startGame() {
+  level = 1;
+  totalCracks = 0;
+  seed = dailySeed() + Math.floor(Math.random() * 1000);
+  rng = makeRng(seed + level);
+  resetBoard(level);
+  showHelp = false;
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+
+function nextLevel() {
+  level++;
+  rng = makeRng(seed + level);
+  resetBoard(level);
+  showHelp = false;
+  gs = 'PLAYING';
+  winFlash = 0;
+  GF.gameStarted();
+}
+
+function retry() {
+  loseFlash = 0;
+  startGame();
+}
+
+// Screenshot helper — populated mid-game state at given level.
+// If called with n >= 99, drives directly to a terminal state so the
+// post-build-tester gate can verify reachability.
+window._jumpLevel = function(n) {
+  if (n && n >= 99) {
+    // Force a terminal state by maxing stress
+    level = 1;
+    totalCracks = 0;
+    seed = 20260509;
+    rng = makeRng(seed + level);
+    resetBoard(level);
+    maxStress = STRESS_LIMIT;
+    gs = 'PLAYING';
+    triggerShatter();
+    return;
+  }
+  level = (n && n > 0) ? n : 3;
+  if (level > WIN_LEVEL) level = WIN_LEVEL;
+  totalCracks = 0;
+  seed = 20260509;
+  rng = makeRng(seed + level);
+  resetBoard(level);
+  showHelp = false;
+  gs = 'PLAYING';
+  // Pre-fire some safe-ish cracks to make the board look busy.
+  // Pick edges that don't immediately shatter.
+  var attempts = 0;
+  while (cracks < 9 && attempts < 60) {
+    attempts++;
+    var t = rng() < 0.5 ? 'h' : 'v';
+    if (t === 'h') {
+      var r = Math.floor(rng() * (GRID_SIZE + 1));
+      var c = Math.floor(rng() * GRID_SIZE);
+      if (hEdges[r][c]) continue;
+      // skip if would shatter or encircle prematurely
+      var sBefore = maxStress;
+      var safe = true;
+      if (r - 1 >= 0 && stress[r-1][c] + 1 >= STRESS_LIMIT) safe = false;
+      if (r < GRID_SIZE && stress[r][c] + 1 >= STRESS_LIMIT) safe = false;
+      if (!safe) continue;
+      fireCrack('h', r, c);
+      if (gs !== 'PLAYING') { /* roll back if it ended early */
+        // restore by re-resetting and skip this attempt
+        rng = makeRng(seed + level);
+        resetBoard(level);
+        gs = 'PLAYING';
+      }
+    } else {
+      var rr = Math.floor(rng() * GRID_SIZE);
+      var cc = Math.floor(rng() * (GRID_SIZE + 1));
+      if (vEdges[rr][cc]) continue;
+      var safe2 = true;
+      if (cc - 1 >= 0 && stress[rr][cc-1] + 1 >= STRESS_LIMIT) safe2 = false;
+      if (cc < GRID_SIZE && stress[rr][cc] + 1 >= STRESS_LIMIT) safe2 = false;
+      if (!safe2) continue;
+      fireCrack('v', rr, cc);
+      if (gs !== 'PLAYING') {
+        rng = makeRng(seed + level);
+        resetBoard(level);
+        gs = 'PLAYING';
+      }
+    }
+  }
+};
+
+window._setupForScreenshot = function(n) {
+  window._jumpLevel(n || 3);
+};
+
+// ── INPUT / HOVER ─────────────────────────────────────────────────────
+function updateHover(x, y) {
+  var lay = layout();
+  hover.type = null; hover.r = -1; hover.c = -1;
+  var lx = x - lay.ox;
+  var ly = y - lay.oy;
+  if (lx < -lay.ts * 0.4 || ly < -lay.ts * 0.4) return;
+  if (lx > lay.boardSize + lay.ts * 0.4 || ly > lay.boardSize + lay.ts * 0.4) return;
+
+  // Find tile under cursor
+  var cTile = Math.floor(lx / lay.ts);
+  var rTile = Math.floor(ly / lay.ts);
+  cTile = Math.max(0, Math.min(GRID_SIZE - 1, cTile));
+  rTile = Math.max(0, Math.min(GRID_SIZE - 1, rTile));
+  var tx = lx - cTile * lay.ts;
+  var ty = ly - rTile * lay.ts;
+  // Compare distance to each of the 4 edges:
+  // top edge: y=0, distance = ty
+  // bottom edge: y=ts, distance = ts - ty
+  // left edge: x=0, distance = tx
+  // right edge: x=ts, distance = ts - tx
+  var dT = ty, dB = lay.ts - ty, dL = tx, dR = lay.ts - tx;
+  var minD = Math.min(dT, dB, dL, dR);
+  if (minD === dT)      { hover.type = 'h'; hover.r = rTile;   hover.c = cTile; }
+  else if (minD === dB) { hover.type = 'h'; hover.r = rTile+1; hover.c = cTile; }
+  else if (minD === dL) { hover.type = 'v'; hover.r = rTile;   hover.c = cTile; }
+  else                  { hover.type = 'v'; hover.r = rTile;   hover.c = cTile+1; }
+}
+
+function handleClick(x, y) {
+  // help button hit?
+  if (helpBtn && Math.hypot(x - helpBtn.x, y - helpBtn.y) <= helpBtn.r) {
+    showHelp = !showHelp;
+    return;
+  }
+  // language button?
+  if (langBtn && x >= langBtn.x && x <= langBtn.x + langBtn.w && y >= langBtn.y && y <= langBtn.y + langBtn.h) {
+    GF.lang = (GF.lang === 'en') ? 'ru' : 'en';
+    return;
+  }
+  if (showHelp) { showHelp = false; return; }
+  if (gs !== 'PLAYING') return;
+  updateHover(x, y);
+  if (hover.type) fireCrack(hover.type, hover.r, hover.c);
+}
+
+document.addEventListener('mousemove', function(e) {
+  pointer.x = e.clientX; pointer.y = e.clientY; pointer.has = true;
+  if (gs === 'PLAYING') updateHover(e.clientX, e.clientY);
+});
+document.addEventListener('mousedown', function(e) {
+  // Let GF's overlay button handler fire first via 'click' — but our edge clicks
+  // use mousedown for snappier feel. The overlay catches via canvas 'click' too.
+  if (gs === 'PLAYING' && !showHelp) {
+    handleClick(e.clientX, e.clientY);
+  } else {
+    handleClick(e.clientX, e.clientY);
+  }
+});
+document.addEventListener('touchstart', function(e) {
+  if (e.touches.length === 0) return;
+  var t = e.touches[0];
+  pointer.x = t.clientX; pointer.y = t.clientY; pointer.has = true;
+  updateHover(t.clientX, t.clientY);
+  handleClick(t.clientX, t.clientY);
+}, { passive: true });
+document.addEventListener('touchmove', function(e) {
+  if (e.touches.length === 0) return;
+  var t = e.touches[0];
+  pointer.x = t.clientX; pointer.y = t.clientY;
+  if (gs === 'PLAYING') updateHover(t.clientX, t.clientY);
+}, { passive: true });
+
+// ── UPDATE ─────────────────────────────────────────────────────────────
+function update(dt) {
+  if (winFlash > 0) winFlash = Math.max(0, winFlash - dt * 0.6);
+  if (loseFlash > 0) loseFlash = Math.max(0, loseFlash - dt * 0.6);
+}
+
+// ── DRAW ───────────────────────────────────────────────────────────────
+function draw(ctx) {
+  // Background — frosted lake gradient
+  var bg = ctx.createLinearGradient(0, 0, 0, GF.H);
+  bg.addColorStop(0, '#0a1730');
+  bg.addColorStop(1, '#04101e');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  // Subtle frost specks
+  ctx.fillStyle = 'rgba(220,240,255,0.04)';
+  for (var i = 0; i < 30; i++) {
+    var sx = (i * 137 + 23) % GF.W;
+    var sy = (i * 211 + 47) % GF.H;
+    ctx.beginPath(); ctx.arc(sx, sy, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+
+  drawBoard(ctx);
+  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'WON' || gs === 'GAMEOVER') {
+    drawHUD(ctx);
+  }
+
+  if (gs === 'MENU') drawMenuOverlay();
+  else if (gs === 'GAMEOVER') drawGameOverOverlay();
+  else if (gs === 'LEVELEND') drawLevelEndOverlay();
+  else if (gs === 'WON') drawWonOverlay();
+  else if (showHelp) drawHelpOverlay();
+}
+
+function drawBoard(ctx) {
+  var lay = layout();
+  var ts = lay.ts, ox = lay.ox, oy = lay.oy;
+
+  // Board frame glow
+  ctx.save();
+  ctx.shadowColor = 'rgba(120,200,255,0.35)';
+  ctx.shadowBlur = 30;
+  ctx.fillStyle = 'rgba(20,40,70,0.7)';
+  GF.rr(ctx, ox - 8, oy - 8, lay.boardSize + 16, lay.boardSize + 16, 14);
+  ctx.fill();
+  ctx.restore();
+
+  // Tiles
+  for (var r = 0; r < GRID_SIZE; r++) {
+    for (var c = 0; c < GRID_SIZE; c++) {
+      var x = ox + c * ts;
+      var y = oy + r * ts;
+      drawTile(ctx, x, y, ts, stress[r][c]);
+    }
+  }
+
+  // Gem
+  var gx = ox + (gem.c + 0.5) * ts;
+  var gy = oy + (gem.r + 0.5) * ts;
+  drawGem(ctx, gx, gy, ts);
+
+  // Edges (cracks)
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  // horizontal cracks
+  for (var rh = 0; rh <= GRID_SIZE; rh++) {
+    for (var ch = 0; ch < GRID_SIZE; ch++) {
+      if (hEdges[rh][ch]) drawCrackH(ctx, ox + ch * ts, oy + rh * ts, ts);
+    }
+  }
+  for (var rv = 0; rv < GRID_SIZE; rv++) {
+    for (var cv = 0; cv <= GRID_SIZE; cv++) {
+      if (vEdges[rv][cv]) drawCrackV(ctx, ox + cv * ts, oy + rv * ts, ts);
+    }
+  }
+
+  // Hover highlight
+  if (gs === 'PLAYING' && hover.type) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = Math.max(3, ts * 0.07);
+    ctx.shadowColor = '#7dd3fc'; ctx.shadowBlur = 12;
+    if (hover.type === 'h') {
+      var hx = ox + hover.c * ts;
+      var hy = oy + hover.r * ts;
+      ctx.beginPath();
+      ctx.moveTo(hx + ts * 0.1, hy);
+      ctx.lineTo(hx + ts * 0.9, hy);
+      ctx.stroke();
+    } else {
+      var vx = ox + hover.c * ts;
+      var vy = oy + hover.r * ts;
+      ctx.beginPath();
+      ctx.moveTo(vx, vy + ts * 0.1);
+      ctx.lineTo(vx, vy + ts * 0.9);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+function drawTile(ctx, x, y, ts, st) {
+  // Base frosted tile
+  var inset = 2;
+  ctx.fillStyle = '#cfe9ff';
+  // gradient depending on stress
+  var grad = ctx.createLinearGradient(x, y, x, y + ts);
+  if (st <= 0) {
+    grad.addColorStop(0, '#dff1ff');
+    grad.addColorStop(1, '#b5d6ee');
+  } else if (st === 1) {
+    grad.addColorStop(0, '#f5d6c0');
+    grad.addColorStop(1, '#d39a7d');
+  } else if (st === 2) {
+    grad.addColorStop(0, '#f0a98a');
+    grad.addColorStop(1, '#c46a4a');
+  } else {
+    grad.addColorStop(0, '#e87356');
+    grad.addColorStop(1, '#a83a22');
+  }
+  ctx.fillStyle = grad;
+  GF.rr(ctx, x + inset, y + inset, ts - inset * 2, ts - inset * 2, 6);
+  ctx.fill();
+
+  // Inner shine
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  GF.rr(ctx, x + inset + 4, y + inset + 4, ts - inset * 2 - 8, (ts - inset * 2 - 8) * 0.4, 4);
+  ctx.fill();
+
+  // Stress dots (top-right)
+  if (st > 0) {
+    for (var i = 0; i < st; i++) {
+      ctx.fillStyle = i < STRESS_LIMIT - 1 ? 'rgba(255,255,255,0.95)' : '#ff3b30';
+      ctx.beginPath();
+      ctx.arc(x + ts - 8 - i * 7, y + 8, 2.4, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+}
+
+function drawGem(ctx, cx, cy, ts) {
+  var s = ts * 0.42;
+  GF.drawSprite('gem', cx, cy, s * 1.7, function(c, x, y, sz) {
+    var r = sz / 2;
+    var grad = c.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+    grad.addColorStop(0, '#fff5b8');
+    grad.addColorStop(0.5, '#ffd84d');
+    grad.addColorStop(1, '#b07a18');
+    c.save();
+    c.shadowColor = 'rgba(255,210,80,0.85)';
+    c.shadowBlur = 18;
+    c.fillStyle = grad;
+    c.beginPath();
+    // diamond shape
+    c.moveTo(x, y - r);
+    c.lineTo(x + r, y);
+    c.lineTo(x, y + r);
+    c.lineTo(x - r, y);
+    c.closePath();
+    c.fill();
+    c.restore();
+    // inner highlight
+    c.fillStyle = 'rgba(255,255,255,0.55)';
+    c.beginPath();
+    c.moveTo(x, y - r * 0.5);
+    c.lineTo(x + r * 0.25, y - r * 0.1);
+    c.lineTo(x, y + r * 0.1);
+    c.lineTo(x - r * 0.25, y - r * 0.1);
+    c.closePath();
+    c.fill();
+  });
+}
+
+function drawCrackH(ctx, x, y, ts) {
+  ctx.save();
+  ctx.strokeStyle = '#0a0814';
+  ctx.lineWidth = Math.max(2, ts * 0.06);
+  ctx.beginPath();
+  // jagged horizontal crack
+  var segs = 5;
+  ctx.moveTo(x + 2, y);
+  for (var i = 1; i <= segs; i++) {
+    var px = x + (ts - 4) * (i / segs) + 2;
+    var py = y + (i % 2 === 0 ? -1.5 : 1.5);
+    ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawCrackV(ctx, x, y, ts) {
+  ctx.save();
+  ctx.strokeStyle = '#0a0814';
+  ctx.lineWidth = Math.max(2, ts * 0.06);
+  ctx.beginPath();
+  var segs = 5;
+  ctx.moveTo(x, y + 2);
+  for (var i = 1; i <= segs; i++) {
+    var py = y + (ts - 4) * (i / segs) + 2;
+    var px = x + (i % 2 === 0 ? -1.5 : 1.5);
+    ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHUD(ctx) {
+  var fs = GF.clamp(16 * GF.S, 12, 22);
+  var pad = 14 * GF.S;
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#dff1ff';
+  ctx.fillText(GF.t('level') + ' ' + level + ' / ' + WIN_LEVEL, pad, pad);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#dff1ff';
+  ctx.fillText(GF.t('score') + ': ' + cracks + ' / ' + MOVE_CAP, GF.W - pad, pad);
+
+  // Stress meter (centered)
+  var meterW = GF.clamp(220 * GF.S, 140, 320);
+  var meterH = GF.clamp(14 * GF.S, 10, 20);
+  var mx = GF.cx - meterW / 2;
+  var my = pad + 4;
+  ctx.fillStyle = 'rgba(20,40,70,0.7)';
+  GF.rr(ctx, mx, my, meterW, meterH, meterH / 2);
+  ctx.fill();
+  var pct = Math.min(1, maxStress / STRESS_LIMIT);
+  var fillW = Math.max(meterH, meterW * pct);
+  var grad = ctx.createLinearGradient(mx, my, mx + meterW, my);
+  grad.addColorStop(0, '#7dd3fc');
+  grad.addColorStop(0.6, '#fbbf24');
+  grad.addColorStop(1, '#ef4444');
+  ctx.fillStyle = grad;
+  GF.rr(ctx, mx, my, fillW, meterH, meterH / 2);
+  ctx.fill();
+  ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  ctx.fillStyle = '#0a0a14';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('stress') + ' ' + maxStress + ' / ' + STRESS_LIMIT, GF.cx, my + meterH / 2);
+
+  // Help button (bottom-right)
+  var hbR = GF.clamp(18 * GF.S, 14, 26);
+  var hbX = GF.W - pad - hbR;
+  var hbY = GF.H - pad - hbR;
+  helpBtn = { x: hbX, y: hbY, r: hbR };
+  ctx.fillStyle = 'rgba(125,211,252,0.25)';
+  ctx.beginPath(); ctx.arc(hbX, hbY, hbR, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#7dd3fc';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(hbX, hbY, hbR, 0, Math.PI*2); ctx.stroke();
+  ctx.fillStyle = '#dff1ff';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 28) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', hbX, hbY + 1);
+
+  // Lang toggle (bottom-left)
+  var lbW = GF.clamp(46 * GF.S, 36, 60);
+  var lbH = GF.clamp(28 * GF.S, 22, 38);
+  var lbX = pad;
+  var lbY = GF.H - pad - lbH;
+  langBtn = { x: lbX, y: lbY, w: lbW, h: lbH };
+  ctx.fillStyle = 'rgba(125,211,252,0.18)';
+  GF.rr(ctx, lbX, lbY, lbW, lbH, 6);
+  ctx.fill();
+  ctx.strokeStyle = '#7dd3fc';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = '#dff1ff';
+  ctx.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.fillText(GF.lang === 'en' ? 'EN' : 'РУ', lbX + lbW / 2, lbY + lbH / 2 + 1);
+}
+
+// ── OVERLAYS ───────────────────────────────────────────────────────────
+function drawTutorialBlock(ctx, baseY) {
+  var fs = GF.clamp(13 * GF.S, 10, 17);
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillStyle = '#dff1ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var lh = fs * 1.55;
+  for (var i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], GF.cx, baseY + i * lh);
+  }
+  return baseY + lines.length * lh;
+}
+
+function drawMenuOverlay() {
+  var ctx = GF.ctx;
+  ctx.fillStyle = 'rgba(8,16,32,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(36 * GF.S, 22, 56);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#dff1ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(125,211,252,0.6)'; ctx.shadowBlur = 30 * GF.S;
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 130 * GF.S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#9ab9d4';
+  ctx.fillText(GF.t('sub'), GF.cx, GF.cy - 95 * GF.S);
+
+  drawTutorialBlock(ctx, GF.cy - 70 * GF.S);
+
+  // PLAY button
+  drawCenterButton(ctx, GF.t('play'), GF.cy + 70 * GF.S, function() {
+    startGame();
+  });
+
+  if (best > 0) {
+    ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = '#557';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, GF.cy + 145 * GF.S);
+  }
+
+  // Lang toggle in menu (top-right)
+  drawLangToggleMenu(ctx);
+}
+
+function drawLevelEndOverlay() {
+  var ctx = GF.ctx;
+  ctx.fillStyle = 'rgba(8,16,32,0.85)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(34 * GF.S, 22, 50);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ffd84d'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(255,216,77,0.6)'; ctx.shadowBlur = 30 * GF.S;
+  ctx.fillText(GF.t('levelend'), GF.cx, GF.cy - 60 * GF.S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#dff1ff';
+  ctx.fillText(GF.t('level') + ' ' + level + ' / ' + WIN_LEVEL + ' • ' + GF.t('score') + ': ' + cracks, GF.cx, GF.cy - 20 * GF.S);
+
+  drawCenterButton(ctx, GF.t('next'), GF.cy + 30 * GF.S, function() { nextLevel(); });
+}
+
+function drawWonOverlay() {
+  var ctx = GF.ctx;
+  ctx.fillStyle = 'rgba(8,16,32,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(40 * GF.S, 26, 60);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ffd84d'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(255,216,77,0.7)'; ctx.shadowBlur = 36 * GF.S;
+  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 60 * GF.S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(15 * GF.S, 12, 20);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#dff1ff';
+  ctx.fillText(GF.t('score') + ': ' + totalCracks, GF.cx, GF.cy - 18 * GF.S);
+  if (best > 0) {
+    ctx.fillStyle = '#9ab9d4';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, GF.cy + 6 * GF.S);
+  }
+
+  drawCenterButton(ctx, GF.t('again'), GF.cy + 50 * GF.S, function() { retry(); });
+}
+
+function drawGameOverOverlay() {
+  var ctx = GF.ctx;
+  ctx.fillStyle = 'rgba(40,8,12,0.9)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(34 * GF.S, 22, 50);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ff6b6b'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(255,107,107,0.6)'; ctx.shadowBlur = 30 * GF.S;
+  ctx.fillText(GF.t('gameover'), GF.cx, GF.cy - 50 * GF.S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#dff1ff';
+  ctx.fillText(GF.t('level') + ' ' + level + ' • ' + GF.t('score') + ': ' + cracks, GF.cx, GF.cy - 12 * GF.S);
+
+  drawCenterButton(ctx, GF.t('retry'), GF.cy + 40 * GF.S, function() { retry(); });
+}
+
+function drawHelpOverlay() {
+  var ctx = GF.ctx;
+  ctx.fillStyle = 'rgba(8,16,32,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(28 * GF.S, 18, 40);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#dff1ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 110 * GF.S);
+  drawTutorialBlock(ctx, GF.cy - 70 * GF.S);
+  drawCenterButton(ctx, 'OK', GF.cy + 80 * GF.S, function() { showHelp = false; });
+}
+
+function drawCenterButton(ctx, label, by, fn) {
+  var btnW = GF.clamp(220 * GF.S, 160, 300);
+  var btnH = GF.clamp(48 * GF.S, 38, 60);
+  var bx = GF.cx - btnW / 2;
+  var grad = ctx.createLinearGradient(bx, by, bx, by + btnH);
+  grad.addColorStop(0, '#7dd3fc');
+  grad.addColorStop(1, '#0284c7');
+  GF.rr(ctx, bx, by, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillStyle = '#0a1730'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, GF.cx, by + btnH / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+  // Register click via direct hit-test in handleClick fallback
+  // We can't share gf-lib's button list easily; use a custom one-shot listener.
+  registerOneShot(bx, by, btnW, btnH, fn);
+}
+
+// ── ONE-SHOT BUTTON SYSTEM ─────────────────────────────────────────────
+var oneShots = [];
+function registerOneShot(x, y, w, h, fn) {
+  oneShots.push({ x: x, y: y, w: w, h: h, fn: fn });
+}
+function checkOneShots(x, y) {
+  for (var i = 0; i < oneShots.length; i++) {
+    var b = oneShots[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+      var fn = b.fn;
+      oneShots = [];
+      fn();
+      return true;
+    }
+  }
+  return false;
+}
+// Drain one-shots each frame (they get re-registered every draw)
+var drainOneShots = function() { oneShots = []; };
+
+// Intercept click for overlays
+document.addEventListener('click', function(e) {
+  // Check overlay buttons first
+  if (checkOneShots(e.clientX, e.clientY)) return;
+  // help / lang / play board click is handled in mousedown/touchstart already
+});
+
+function drawLangToggleMenu(ctx) {
+  var lbW = GF.clamp(54 * GF.S, 40, 70);
+  var lbH = GF.clamp(30 * GF.S, 22, 40);
+  var pad = 14 * GF.S;
+  var lbX = GF.W - pad - lbW;
+  var lbY = pad;
+  langBtn = { x: lbX, y: lbY, w: lbW, h: lbH };
+  ctx.fillStyle = 'rgba(125,211,252,0.18)';
+  GF.rr(ctx, lbX, lbY, lbW, lbH, 6);
+  ctx.fill();
+  ctx.strokeStyle = '#7dd3fc';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = '#dff1ff';
+  ctx.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.lang === 'en' ? 'EN' : 'РУ', lbX + lbW / 2, lbY + lbH / 2 + 1);
+}
+
+// ── EXPOSE STATE FOR POST-BUILD-TESTER ─────────────────────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs, level: level, score: cracks, totalCracks: totalCracks,
+    maxStress: maxStress, MOVE_CAP: MOVE_CAP, WIN_LEVEL: WIN_LEVEL,
+    STRESS_LIMIT: STRESS_LIMIT, GRID_SIZE: GRID_SIZE,
+  };
+});
+
+// ── BOOT ───────────────────────────────────────────────────────────────
+GF.init({
+  designW: 720,
+  designH: 720,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'frost_crack',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('frost_crack_best') || '0') || 0; } catch (e) {}
+    seed = dailySeed();
+    rng = makeRng(seed);
+    resetBoard(1);
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: function(ctx, dt) {
+    drainOneShots();
+    draw(ctx);
+  },
+});
+
+})();
+</script>
+</body>
+</html>
