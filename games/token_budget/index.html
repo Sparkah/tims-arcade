@@ -25,7 +25,7 @@ var STRINGS = {
   en: {
     title: 'Token Budget',
     sub:   'Route tasks. Mind the tokens.',
-    play: 'PLAY', retry: 'RETRY',
+    play: 'PLAY', retry: 'RETRY', gotit: 'GOT IT',
     score: 'SCORE', best: 'BEST',
     gameover: 'BUDGET DRAINED',
     win: 'BUDGET SAVED!',
@@ -33,11 +33,17 @@ var STRINGS = {
     nextwave: 'NEXT WAVE',
     cheap: 'haiku', expensive: 'opus',
     drag: 'Drag agents onto the grid',
+    'tut_goal': 'Goal: Clear 10 waves of tasks before your tokens run out.',
+    'tut_controls': 'Controls: Drag haiku (h) or opus (o) from the tray onto a hex. Tap a placed agent to remove it.',
+    'tut_win': 'Win: Survive all 10 waves - each task that exits the right edge counts.',
+    'tut_lose': 'Lose: Tokens hit zero. Stuck or unrouted tasks bleed 1 token/sec.',
+    'tut_tip': 'Tip: Cheap haiku (cost 1) only handles complexity 1-2. Use opus (cost 5) for big tasks.',
+    'hint_first': 'Drag an agent (h or o) from the bottom tray onto the grid.',
   },
   ru: {
     title: 'Бюджет Токенов',
     sub:   'Маршрутизируй задачи. Считай токены.',
-    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', gotit: 'ПОНЯТНО',
     score: 'ОЧКИ', best: 'РЕКОРД',
     gameover: 'БЮДЖЕТ ИСЧЕРПАН',
     win: 'БЮДЖЕТ СПАСЁН!',
@@ -45,6 +51,12 @@ var STRINGS = {
     nextwave: 'СЛЕД. ВОЛНА',
     cheap: 'хайку', expensive: 'опус',
     drag: 'Тащите агентов на поле',
+    'tut_goal': 'Цель: Пройди 10 волн задач, пока не кончились токены.',
+    'tut_controls': 'Управление: Тащи хайку (h) или опус (o) из лотка на гекс. Нажми на агента, чтобы убрать.',
+    'tut_win': 'Победа: Продержись все 10 волн - каждая задача, ушедшая за правый край, в зачёт.',
+    'tut_lose': 'Поражение: Токены упали до нуля. Застрявшие задачи тратят по 1 токену в секунду.',
+    'tut_tip': 'Совет: Хайку (цена 1) тянет только сложность 1-2. На крупные задачи ставь опус (цена 5).',
+    'hint_first': 'Перетащи агента (h или o) из нижнего лотка на сетку.',
   },
 };
 
@@ -66,7 +78,8 @@ var WAVE_BONUS_TOKENS        = 20;
 var STUCK_DECAY_PER_SEC      = 1;
 
 // ── STATE ────────────────────────────────────────────────────────────────
-var gs = 'MENU'; // MENU | PLAYING | GAMEOVER | WIN
+var gs = 'MENU'; // MENU | PLAYING | GAMEOVER | WIN | TUTORIAL_OVERLAY
+var prevState = 'MENU';
 var grid = [];   // grid[c][r] = null or { kind, cooldown, pulse }
 var tasks = [];
 var tokens = 0;
@@ -80,8 +93,11 @@ var inWave = false;
 var score = 0;
 var best = 0;
 var didEndCallback = false;
+var firstAgentPlaced = false; // hide HUD hint after first place
+var seenTutorial = false;     // localStorage flag — first-time vs returning
 
 var dragging = null;
+var overlayBtnRect = null;    // hit rect for tutorial / overlay CTA
 
 var L = { gridX: 0, gridY: 0, hex: 0, hudH: 0, trayY: 0, trayH: 0 };
 
@@ -151,9 +167,22 @@ function startGame() {
   score = 0;
   didEndCallback = false;
   dragging = null;
+  firstAgentPlaced = false;
   gs = 'PLAYING';
   try { GF.gameStarted(); } catch (_) {}
   startNextWave();
+}
+
+// ── TUTORIAL ─────────────────────────────────────────────────────────────
+function openTutorial() {
+  if (gs === 'TUTORIAL_OVERLAY') return;
+  prevState = gs;
+  gs = 'TUTORIAL_OVERLAY';
+}
+function dismissTutorial() {
+  try { localStorage.setItem('token_budget_seen_tutorial', '1'); } catch (e) {}
+  seenTutorial = true;
+  gs = (prevState && prevState !== 'TUTORIAL_OVERLAY') ? prevState : 'MENU';
 }
 
 function endGame(won) {
@@ -171,6 +200,15 @@ function endGame(won) {
 
 window._jumpLevel = function(n) {
   startGame();
+  // Runtime-gate convention: level >= 50 forces a terminal state for
+  // state-machine reachability checks.
+  if (typeof n === 'number' && n >= 50) {
+    spawnTask(5);
+    spawnTask(5);
+    tokens = 0;
+    endGame(false);
+    return;
+  }
   var preset = [
     ['cheap',     1, 1],
     ['cheap',     1, 3],
@@ -266,6 +304,7 @@ function placeAgentAt(kind, c, r, free) {
   grid[c][r] = { kind: kind, cooldown: 0, pulse: 0 };
   var p = hexCenter(c, r);
   GF.spawnParticles(p.x, p.y, def.color, 14);
+  firstAgentPlaced = true;
   return true;
 }
 
@@ -404,7 +443,27 @@ function trayLayout() {
 
 function pointInRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
 
+function helpButtonRect() {
+  var sz = GF.clamp(34 * GF.S, 26, 44);
+  var pad = GF.clamp(8 * GF.S, 6, 12);
+  return { x: GF.W - sz - pad, y: pad, w: sz, h: sz };
+}
+
 function onPointerDown(x, y) {
+  // Tutorial overlay swallows all clicks — tap anywhere (or CTA) dismisses
+  if (gs === 'TUTORIAL_OVERLAY') {
+    dismissTutorial();
+    return;
+  }
+  // Help button works on MENU and during PLAYING
+  if (gs === 'MENU' || gs === 'PLAYING') {
+    if (pointInRect(x, y, helpButtonRect())) { openTutorial(); return; }
+  }
+  // MENU's PLAY button (custom panel — gf-lib's buttons[] not used here)
+  if (gs === 'MENU' && overlayBtnRect && pointInRect(x, y, overlayBtnRect) && overlayBtnRect.fn) {
+    overlayBtnRect.fn();
+    return;
+  }
   if (gs !== 'PLAYING') return;
   var T = trayLayout();
   if (pointInRect(x, y, T.cheap)) {
@@ -482,23 +541,25 @@ function draw(ctx) {
   for (var gx = 0; gx <= GF.W; gx += step) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, GF.H); ctx.stroke(); }
   for (var gy = 0; gy <= GF.H; gy += step) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(GF.W, gy); ctx.stroke(); }
 
-  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WIN') {
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WIN' || gs === 'TUTORIAL_OVERLAY') {
     drawHexGrid(ctx);
     drawAgents(ctx);
     drawTasks(ctx);
     drawHUD(ctx);
     drawTray(ctx);
     if (dragging) drawDragGhost(ctx);
+    // Contextual hint until first agent placed
+    if (gs === 'PLAYING' && !firstAgentPlaced) drawFirstHint(ctx);
   }
 
   if (gs === 'MENU') {
-    GF.drawOverlay({
-      title: GF.t('title'),
-      sub: GF.t('sub'),
-      btnText: GF.t('play'),
-      btnFn: startGame,
-      bestText: best > 0 ? GF.t('best') + ': ' + best : null
-    });
+    // Tutorial panel doubles as MENU overlay — first-time AND returning
+    // players see Goal/Controls/Win/Lose/Tip. PLAY dismisses tutorial flag.
+    drawTutorialPanel(ctx, GF.t('play'), function() {
+      try { localStorage.setItem('token_budget_seen_tutorial', '1'); } catch (e) {}
+      seenTutorial = true;
+      startGame();
+    }, best > 0 ? GF.t('best') + ': ' + best : null);
   }
   if (gs === 'GAMEOVER') {
     GF.drawOverlay({
@@ -518,6 +579,175 @@ function draw(ctx) {
       bestText: GF.t('best') + ': ' + best
     });
   }
+  if (gs === 'TUTORIAL_OVERLAY') {
+    drawTutorialOverlay(ctx);
+  }
+  // Help button — always visible on MENU + PLAYING (drawn over HUD)
+  if (gs === 'MENU' || gs === 'PLAYING') {
+    drawHelpButton(ctx);
+  }
+}
+
+function drawHelpButton(ctx) {
+  var b = helpButtonRect();
+  ctx.fillStyle = 'rgba(20,24,44,0.85)';
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.h / 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(77,208,225,0.7)';
+  ctx.lineWidth = Math.max(1.2, 1.6 * GF.S);
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.h / 2);
+  ctx.stroke();
+  ctx.fillStyle = '#4dd0e1';
+  ctx.font = 'bold ' + Math.max(13, b.w * 0.55) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', b.x + b.w / 2, b.y + b.h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawFirstHint(ctx) {
+  var fs = GF.clamp(13 * GF.S, 11, 17);
+  var msg = GF.t('hint_first');
+  ctx.font = fs + 'px sans-serif';
+  var pad = 10 * GF.S;
+  var tw = ctx.measureText(msg).width;
+  var bw = tw + pad * 2;
+  var bh = fs + pad;
+  var bx = (GF.W - bw) / 2;
+  var by = L.trayY - bh - 8 * GF.S;
+  // pulse alpha
+  var pulse = 0.7 + 0.3 * Math.sin(performance.now() * 0.005);
+  ctx.fillStyle = 'rgba(77,208,225,' + (0.18 * pulse).toFixed(3) + ')';
+  GF.rr(ctx, bx, by, bw, bh, bh / 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(77,208,225,' + (0.7 * pulse).toFixed(3) + ')';
+  ctx.lineWidth = Math.max(1, 1.4 * GF.S);
+  GF.rr(ctx, bx, by, bw, bh, bh / 2);
+  ctx.stroke();
+  ctx.fillStyle = '#cfeaff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(msg, GF.W / 2, by + bh / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawTutorialOverlay(ctx) {
+  // Standalone tutorial overlay (opened from ? button mid-play).
+  // Backdrop drawn in addition to game so player sees "paused" state.
+  drawTutorialPanel(ctx, GF.t('gotit'), dismissTutorial, null);
+}
+
+function drawTutorialPanel(ctx, ctaText, ctaFn, footerText) {
+  var lines = [
+    GF.t('title'),
+    '',
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  // dim backdrop
+  ctx.fillStyle = 'rgba(8,10,22,0.9)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(26 * GF.S, 18, 38);
+  var subFs = GF.clamp(13 * GF.S, 11, 17);
+  var lineGap = 7 * GF.S;
+  var pad = 20 * GF.S;
+  var btnH = GF.clamp(46 * GF.S, 36, 56);
+  var btnW = GF.clamp(200 * GF.S, 140, 280);
+  var footH = footerText ? (GF.clamp(12 * GF.S, 10, 15) + 8 * GF.S) : 0;
+
+  var pw = Math.min(GF.W - 24, GF.clamp(560 * GF.S, 320, 600));
+  // first pass: wrap to count lines
+  ctx.font = subFs + 'px sans-serif';
+  var maxW = pw - pad * 2;
+  var bodyRows = 0;
+  for (var i = 1; i < lines.length; i++) {
+    if (!lines[i]) { bodyRows += 1; continue; }
+    var words = lines[i].split(' ');
+    var cur = '';
+    var rows = 1;
+    for (var w = 0; w < words.length; w++) {
+      var test = cur ? cur + ' ' + words[w] : words[w];
+      if (ctx.measureText(test).width > maxW && cur) { rows += 1; cur = words[w]; }
+      else { cur = test; }
+    }
+    bodyRows += rows;
+  }
+  var ph = pad + titleFs + lineGap + bodyRows * (subFs + lineGap) + pad + btnH + pad + footH;
+  var px = (GF.W - pw) / 2;
+  var py = Math.max(8 * GF.S, (GF.H - ph) / 2);
+
+  // panel
+  ctx.fillStyle = 'rgba(16,20,40,0.96)';
+  GF.rr(ctx, px, py, pw, ph, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(77,208,225,0.55)';
+  ctx.lineWidth = Math.max(1.5, 1.8 * GF.S);
+  GF.rr(ctx, px, py, pw, ph, 14);
+  ctx.stroke();
+
+  // title
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.shadowColor = 'rgba(77,208,225,0.5)';
+  ctx.shadowBlur = 18;
+  ctx.fillText(lines[0], GF.W / 2, py + pad);
+  ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+
+  // body (with wrap)
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#cfeaff';
+  ctx.textAlign = 'left';
+  var ty = py + pad + titleFs + lineGap;
+  var tx = px + pad;
+  for (var i2 = 1; i2 < lines.length; i2++) {
+    if (!lines[i2]) { ty += subFs + lineGap; continue; }
+    var words2 = lines[i2].split(' ');
+    var cur2 = '';
+    for (var w2 = 0; w2 < words2.length; w2++) {
+      var test2 = cur2 ? cur2 + ' ' + words2[w2] : words2[w2];
+      if (ctx.measureText(test2).width > maxW && cur2) {
+        ctx.fillText(cur2, tx, ty);
+        ty += subFs + lineGap;
+        cur2 = words2[w2];
+      } else {
+        cur2 = test2;
+      }
+    }
+    if (cur2) { ctx.fillText(cur2, tx, ty); ty += subFs + lineGap; }
+  }
+
+  // CTA button
+  var bx = (GF.W - btnW) / 2;
+  var by = py + ph - btnH - pad - footH;
+  var grad = ctx.createLinearGradient(bx, by, bx, by + btnH);
+  grad.addColorStop(0, '#2ecc71');
+  grad.addColorStop(1, '#27ae60');
+  ctx.fillStyle = grad;
+  GF.rr(ctx, bx, by, btnW, btnH, btnH / 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 20) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(ctaText, GF.W / 2, by + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  // optional footer (BEST: NN)
+  if (footerText) {
+    var fFs = GF.clamp(12 * GF.S, 10, 15);
+    ctx.font = fFs + 'px sans-serif';
+    ctx.fillStyle = '#7a8094';
+    ctx.textAlign = 'center';
+    ctx.fillText(footerText, GF.W / 2, by + btnH + 14 * GF.S);
+  }
+
+  overlayBtnRect = { x: bx, y: by, w: btnW, h: btnH, fn: ctaFn };
 }
 
 function drawHexGrid(ctx) {
@@ -756,6 +986,7 @@ GF.init({
   saveKey: 'token_budget',
   onReady: function() {
     try { best = parseInt(localStorage.getItem('token_budget_best') || '0') || 0; } catch (e) {}
+    try { seenTutorial = localStorage.getItem('token_budget_seen_tutorial') === '1'; } catch (e) {}
     computeLayout();
     gs = 'MENU';
   },

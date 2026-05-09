@@ -32,14 +32,17 @@ var STRINGS = {
     stamina: 'STAMINA', curses: 'CURSES', round: 'ROUND',
     light: 'LIGHT', medium: 'MEDIUM', heavy: 'HEAVY',
     mode: 'HAMMER',
-    'tut_goal': 'Goal: Strip every glowing rune-curse off the 8 sword segments.',
+    'tut_goal': 'Goal: Cleanse curses to earn GOLD and rise from Apprentice to Grandmaster Smith.',
     'tut_controls': 'Controls: Tap a segment to hammer it. Press 1 / 2 / 3 (or buttons) for Light / Medium / Heavy.',
-    'tut_win': 'Win: All curses cleared with at least one segment alive.',
+    'tut_win': 'Win: All curses cleared with at least one segment alive — earn gold + bonus by tier.',
     'tut_lose': 'Lose: A segment cracks past fragility 5 (shatters) OR stamina hits 0 with curses left.',
-    'tut_tip': 'Tip: Heavy clears 2 curses but adds fragility — Light is safe but pricey.',
+    'tut_tip': 'Tip: Heavy = 3g per curse but adds fragility. Light = 1g, safe. Cleaner runs = more gold.',
     staminaOut: 'Out of stamina!',
     shattered: 'Segment shattered!',
     cleansed: 'Curse removed!',
+    gold: 'GOLD', tier: 'RANK', nextRank: 'NEXT', clearBonus: 'CLEAR BONUS',
+    tier1: 'Apprentice', tier2: 'Journeyman', tier3: 'Smith', tier4: 'Master', tier5: 'Grandmaster',
+    promoted: 'PROMOTED',
   },
   ru: {
     title: 'Наследник Кузнеца',
@@ -50,14 +53,17 @@ var STRINGS = {
     stamina: 'СИЛЫ', curses: 'ПРОКЛЯТИЯ', round: 'РАУНД',
     light: 'ЛЁГКИЙ', medium: 'СРЕДНИЙ', heavy: 'ТЯЖЁЛЫЙ',
     mode: 'МОЛОТ',
-    'tut_goal': 'Цель: Снять все светящиеся руны-проклятия с 8 сегментов меча.',
+    'tut_goal': 'Цель: Снимай проклятия — копи ЗОЛОТО и пройди путь от Подмастерья до Великого Кузнеца.',
     'tut_controls': 'Управление: Тап по сегменту — удар. 1 / 2 / 3 (или кнопки) — Лёгкий / Средний / Тяжёлый.',
-    'tut_win': 'Победа: Все проклятия сняты, хотя бы один сегмент уцелел.',
+    'tut_win': 'Победа: Все проклятия сняты — золото + бонус ранга за чистый раунд.',
     'tut_lose': 'Проигрыш: Хрупкость > 5 (раскол) ИЛИ силы = 0 с проклятиями.',
-    'tut_tip': 'Совет: Тяжёлый снимает 2 проклятия, но добавляет хрупкость.',
+    'tut_tip': 'Совет: Тяжёлый = 3з за проклятие, но крошит. Лёгкий = 1з, безопасно. Чище раунд — больше золота.',
     staminaOut: 'Силы кончились!',
     shattered: 'Сегмент раскололся!',
     cleansed: 'Проклятие снято!',
+    gold: 'ЗОЛОТО', tier: 'РАНГ', nextRank: 'СЛЕД', clearBonus: 'БОНУС',
+    tier1: 'Подмастерье', tier2: 'Кузнец', tier3: 'Мастер', tier4: 'Магистр', tier5: 'Великий Кузнец',
+    promoted: 'НОВЫЙ РАНГ',
   },
 };
 
@@ -82,6 +88,23 @@ var START_FRAG_MAX  = 3;
 // Curse rune colours
 var RUNE_COLORS = ['#e85d75', '#7c5dff', '#5dbef5', '#f5c45d', '#5df58c', '#f08fd6'];
 
+// Gold awarded per cleansed curse, by hammer mode
+var GOLD_LIGHT = 1, GOLD_MEDIUM = 2, GOLD_HEAVY = 3;
+// Bonus gold for clearing a round (added to per-curse gold on win)
+var ROUND_CLEAR_BONUS = 8;
+// Mastery tier ladder — gold thresholds. Tier index = current tier.
+var TIER_THRESHOLDS = [0, 50, 150, 350, 700];   // 5 tiers, 1..5
+function tierLabel(t) { return GF.t('tier' + Math.max(1, Math.min(5, t))); }
+function currentTier(g) {
+  var t = 1;
+  for (var i = 0; i < TIER_THRESHOLDS.length; i++) if (g >= TIER_THRESHOLDS[i]) t = i + 1;
+  return t;
+}
+function nextTierThreshold(g) {
+  for (var i = 0; i < TIER_THRESHOLDS.length; i++) if (g < TIER_THRESHOLDS[i]) return TIER_THRESHOLDS[i];
+  return null; // grandmaster reached
+}
+
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WON | TUTORIAL_OVERLAY
 var prevGs = 'MENU';        // remembered when ? button reopens tutorial overlay
@@ -92,6 +115,9 @@ var hammerMode = 'medium';  // 'light' | 'medium' | 'heavy'
 var lastMessage = '';
 var lastMessageT = 0;
 var screenshotMode = false;
+var gold = 0;               // persistent meta-currency — earned per cleansed curse
+var goldThisRound = 0;      // session-only counter for round summary
+var displayedTier = 1;      // last shown tier — used to pop "PROMOTED" toast
 
 // Layout helpers (recomputed on draw)
 var anvilRect = null;
@@ -150,6 +176,7 @@ function startGame() {
   }
   stamina = STAMINA_MAX;
   hammerMode = 'medium';
+  goldThisRound = 0;
   buildSword();
   lastMessage = '';
   lastMessageT = 0;
@@ -170,8 +197,30 @@ function winRound() {
     best = round;
     try { localStorage.setItem('forge_heir_best', best); } catch (e) {}
   }
+  // Round-clear bonus gold (the "purpose" payoff for finishing a blade)
+  gold += ROUND_CLEAR_BONUS;
+  goldThisRound += ROUND_CLEAR_BONUS;
+  saveGold();
+  checkPromotion();
   gs = 'WON';
   GF.gameEnded && GF.gameEnded();
+}
+
+function saveGold() {
+  try { localStorage.setItem('forge_heir_gold', gold); } catch (e) {}
+}
+
+// If tier crossed, pop a promotion toast + sparks
+function checkPromotion() {
+  var t = currentTier(gold);
+  if (t > displayedTier) {
+    displayedTier = t;
+    lastMessage = GF.t('promoted') + ': ' + tierLabel(t);
+    lastMessageT = 2.0;
+    GF.spawnParticles(GF.cx, GF.H * 0.32, '#ffe27a', 40);
+    GF.spawnFloat(GF.cx, GF.H * 0.32 - 24, '+RANK', '#ffe27a');
+    GF.setShake(0.5);
+  }
 }
 
 // Screenshot helper — fast-forward into a busy game state.
@@ -293,6 +342,16 @@ function strikeSegment(seg) {
     }
   }
 
+  // Award gold per cleansed curse — depends on hammer mode
+  if (actuallyRemoved > 0) {
+    var perCurseGold = (hammerMode === 'light') ? GOLD_LIGHT : (hammerMode === 'medium') ? GOLD_MEDIUM : GOLD_HEAVY;
+    var earned = perCurseGold * actuallyRemoved;
+    gold += earned;
+    goldThisRound += earned;
+    saveGold();
+    checkPromotion();
+  }
+
   // Apply fragility
   if (hammerMode === 'heavy') {
     seg.fragility += HEAVY_FRAG_ADD;
@@ -364,8 +423,8 @@ function draw(ctx) {
   }
 
   if (gs === 'MENU') drawMenuOverlay();
-  if (gs === 'GAMEOVER') drawEndOverlay(GF.t('gameover'), GF.t('round') + ': ' + round, GF.t('retry'), startGame);
-  if (gs === 'WON') drawEndOverlay(GF.t('won'), GF.t('round') + ' ' + round + ' ✓', GF.t('retry'), startGame);
+  if (gs === 'GAMEOVER') drawEndOverlay(GF.t('gameover'), GF.t('round') + ': ' + round + '   ★ +' + goldThisRound + 'g', GF.t('retry'), startGame);
+  if (gs === 'WON') drawEndOverlay(GF.t('won'), GF.t('round') + ' ' + round + ' ✓   ★ +' + goldThisRound + 'g  (' + GF.t('clearBonus') + ' +' + ROUND_CLEAR_BONUS + ')', GF.t('retry'), startGame);
   if (gs === 'TUTORIAL_OVERLAY') drawTutorialOverlay();
 }
 
@@ -414,6 +473,56 @@ function drawTopHUD(ctx) {
   ctx.textAlign = 'center';
   ctx.fillStyle = (cTotal === 0) ? '#5df58c' : '#ff8e8e';
   ctx.fillText(GF.t('curses') + ': ' + cTotal, GF.cx, 14 * GF.S);
+
+  // Gold + Rank meta-progression strip — second row, full width
+  drawGoldStrip(ctx);
+}
+
+function drawGoldStrip(ctx) {
+  var sfs = GF.clamp(12 * GF.S, 9, 16);
+  var stripY = 64 * GF.S;            // sits below stamina bar
+  var pad = 14 * GF.S;
+  // Gold counter (left)
+  ctx.font = 'bold ' + sfs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#ffe27a';
+  ctx.fillText('★ ' + GF.t('gold') + ': ' + gold, pad, stripY);
+
+  // Tier label + next-rank progress (centre)
+  var tier = currentTier(gold);
+  var nextG = nextTierThreshold(gold);
+  var prevG = TIER_THRESHOLDS[tier - 1] || 0;
+  var label;
+  if (nextG === null) {
+    label = GF.t('tier') + ': ' + tierLabel(tier) + ' ✦ MAX';
+  } else {
+    label = GF.t('tier') + ': ' + tierLabel(tier) + '  →  ' + tierLabel(tier + 1) + ' (' + (nextG - gold) + 'g)';
+  }
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd9a8';
+  ctx.fillText(label, GF.cx, stripY);
+
+  // Mini progress bar under the centre label
+  var barW = GF.clamp(180 * GF.S, 120, 260);
+  var barH = 5 * GF.S;
+  var barX = GF.cx - barW / 2;
+  var barY = stripY + sfs + 4 * GF.S;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  GF.rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fill();
+  if (nextG !== null) {
+    var span = nextG - prevG;
+    var prog = (gold - prevG) / span;
+    prog = Math.max(0, Math.min(1, prog));
+    var grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+    grad.addColorStop(0, '#ffe27a'); grad.addColorStop(1, '#ff8a3e');
+    ctx.fillStyle = grad;
+    GF.rr(ctx, barX, barY, barW * prog, barH, barH / 2); ctx.fill();
+  } else {
+    // Maxed — gold-shimmer fill
+    ctx.fillStyle = '#ffe27a';
+    GF.rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fill();
+  }
 }
 
 function drawAnvilAndSword(ctx) {
@@ -815,12 +924,16 @@ function drawMenuOverlay() {
   ctx.textBaseline = 'middle';
   ctx.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
 
-  // Best
+  // Best + Gold + Rank — anchor the player's progress on menu
+  ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.fillStyle = '#caa78a';
+  ctx.textBaseline = 'alphabetic';
+  var tier = currentTier(gold);
+  var rankLine = '★ ' + gold + ' ' + GF.t('gold') + '   ·   ' + GF.t('tier') + ': ' + tierLabel(tier);
+  ctx.fillText(rankLine, GF.cx, btnY + btnH + 26 * GF.S);
   if (best > 1) {
-    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
     ctx.fillStyle = '#776';
-    ctx.textBaseline = 'alphabetic';
-    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 28 * GF.S);
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 46 * GF.S);
   }
 
   // Bind a button via the lib's button slot — register it on each frame
@@ -955,6 +1068,8 @@ GF.init({
   saveKey: 'forge_heir',
   onReady: function() {
     try { best = parseInt(localStorage.getItem('forge_heir_best') || '1') || 1; } catch (e) {}
+    try { gold = parseInt(localStorage.getItem('forge_heir_gold') || '0') || 0; } catch (e) {}
+    displayedTier = currentTier(gold);
     gs = 'MENU';
   },
   onUpdate: update,
@@ -971,6 +1086,10 @@ GF.exposeState(function() {
     segments: segments.length,
     hammerMode: hammerMode,
     best: best,
+    gold: gold,
+    goldThisRound: goldThisRound,
+    tier: currentTier(gold),
+    nextTierAt: nextTierThreshold(gold),
   };
 });
 

@@ -36,6 +36,14 @@ var STRINGS = {
     'tut_tip':      'Tip: Pings draw creatures closer. Refuel at glowing nodes.',
     tutTitle:     'How to play',
     closeBtn:     'GOT IT',
+    // Progressive (step-by-step) tutorial hints
+    'menu_hint':    'You are blind. Click anywhere to PING and reveal nearby creatures.',
+    'step_ping':    'Now PING again — find the bright EXIT tile.',
+    'step_battery': 'Watch your battery. Find charges (green dots) to refill.',
+    'step_creature':'Creatures hunt you. Stay quiet — fewer pings = safer.',
+    'win_explain':  'You stepped on the exit. Each level adds creatures and shrinks battery.',
+    'lose_caught':  'A creature reached you. Pings draw them closer — move quietly.',
+    'lose_drained': 'Battery ran dry before you found the exit. Grab green charge nodes next time.',
   },
   ru: {
     title: 'Эхолот в Тумане',
@@ -51,6 +59,14 @@ var STRINGS = {
     'tut_tip':      'Совет: Эхо привлекает существ. Заряжайся на узлах.',
     tutTitle:     'Как играть',
     closeBtn:     'ПОНЯТНО',
+    // Progressive (step-by-step) tutorial hints
+    'menu_hint':    'Ты слеп. Кликни в любое место — эхо покажет существ рядом.',
+    'step_ping':    'Кликни ещё раз — найди яркий тайл ВЫХОДА.',
+    'step_battery': 'Следи за батареей. Зелёные узлы — заряд.',
+    'step_creature':'Существа охотятся. Меньше эха — больше шансов.',
+    'win_explain':  'Ты встал на выход. Каждый уровень — больше существ и меньше заряда.',
+    'lose_caught':  'Существо догнало тебя. Эхо привлекает их — двигайся тихо.',
+    'lose_drained': 'Батарея села до выхода. Хватай зелёные узлы заряда.',
   },
 };
 
@@ -93,6 +109,38 @@ var creatures = [];              // {gx, gy, mx, my, lerp}
 var charges = [];                // {gx, gy, used}
 var pings = [];                  // {x, y, life, max, radius}
 var deathReason = '';            // 'caught' | 'drained'
+
+// ── PROGRESSIVE TUTORIAL ─────────────────────────────────────────────────
+// Step values:
+//   0 = MENU hint visible (pre-first-play)
+//   1 = PLAYING: hint "PING again — find EXIT" (until first ping)
+//   2 = After first ping: short auto-hide hint same copy (3s) then advance
+//   3 = Battery hint shown (triggered when battery hits 50%)
+//   4 = Creature hint shown (triggered when creature within 4 tiles)
+//   9 = All staged hints completed (no more transient hints — ? button still works)
+// Persisted across reloads via localStorage('echo_locator_tutorial_step').
+// Reset to 0 only on full game restart from MENU (startGame from MENU PLAY).
+var tutorialStep = 0;
+var transientHint = null;        // { textKey: string, expires: ms-timestamp }
+var lastBatteryRatio = 1;
+function saveTutorialStep() {
+  try { localStorage.setItem('echo_locator_tutorial_step', String(tutorialStep)); } catch (e) {}
+}
+function loadTutorialStep() {
+  try {
+    var v = parseInt(localStorage.getItem('echo_locator_tutorial_step') || '0', 10);
+    tutorialStep = isNaN(v) ? 0 : v;
+  } catch (e) { tutorialStep = 0; }
+}
+function showTransientHint(textKey, ms) {
+  transientHint = { textKey: textKey, expires: performance.now() + (ms || 3000) };
+}
+function advanceTutorial(target) {
+  if (tutorialStep < target) {
+    tutorialStep = target;
+    saveTutorialStep();
+  }
+}
 
 // ── LEVEL GEN ────────────────────────────────────────────────────────────
 function newGrid() {
@@ -190,6 +238,12 @@ function startLevel(lvl) {
 function startGame() {
   // First-time tutorial flag (informational; tutorial is on MENU anyway).
   try { localStorage.setItem('echo_locator_seen_tutorial', '1'); } catch (e) {}
+  // Reset progressive tutorial whenever the player taps PLAY from MENU —
+  // ensures returning players who forgot still see the staged hints.
+  tutorialStep = 1;
+  transientHint = null;
+  lastBatteryRatio = 1;
+  saveTutorialStep();
   startLevel(1);
 }
 
@@ -284,6 +338,14 @@ function emitPing(sx, sy) {
     radius: PING_RADIUS * view.tile });
   battery -= 1;
   GF.setShake(0.18);
+
+  // Progressive tutorial: first ping triggers the "ping again — find EXIT" hint
+  // for 3 seconds. Advance from step 1 to step 2, then once it expires we move
+  // to step 3 (battery hint pending its trigger).
+  if (tutorialStep === 1) {
+    advanceTutorial(2);
+    showTransientHint('step_ping', 3500);
+  }
 
   // Creatures step toward player when they hear a ping.
   for (var i = 0; i < creatures.length; i++) creatureStep(creatures[i]);
@@ -408,6 +470,28 @@ function update(dt) {
     if (d < minD) minD = d;
   }
   creature_dist = minD;
+
+  // Progressive tutorial triggers (only fire while gs === 'PLAYING').
+  if (gs === 'PLAYING') {
+    var ratio = battery / batteryCap;
+    // Step 3: battery dipped to 50% for the first time
+    if (tutorialStep <= 2 && lastBatteryRatio > 0.5 && ratio <= 0.5) {
+      advanceTutorial(3);
+      showTransientHint('step_battery', 4000);
+    }
+    lastBatteryRatio = ratio;
+    // Step 4: creature within 4 manhattan tiles for the first time
+    if (tutorialStep <= 3 && minD <= 4) {
+      advanceTutorial(4);
+      showTransientHint('step_creature', 4000);
+    }
+    // Expire transient hint
+    if (transientHint && performance.now() >= transientHint.expires) {
+      transientHint = null;
+      // Once any staged hint expires past step 4, move to "complete" state.
+      if (tutorialStep >= 4) advanceTutorial(9);
+    }
+  }
 }
 
 // ── DRAW ─────────────────────────────────────────────────────────────────
@@ -418,11 +502,42 @@ function draw(ctx) {
   if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WON') {
     drawWorld(ctx);
     drawHUD(ctx);
+    if (gs === 'PLAYING' && transientHint) drawTransientHint(ctx);
     if (gs === 'PLAYING' && showTutorial) drawTutorialOverlay(ctx);
   }
   if (gs === 'MENU')     drawMenuOverlay(ctx);
   if (gs === 'GAMEOVER') drawGameOverOverlay(ctx);
   if (gs === 'WON')      drawWonOverlay(ctx);
+}
+
+// Transient hint banner (PLAYING). Used by the progressive tutorial.
+// Renders a soft cyan pill at the top-center of the play area, just below
+// the battery HUD strip — out of the way but unmissable. Auto-fades over
+// the last 600ms of its lifetime.
+function drawTransientHint(ctx) {
+  if (!transientHint) return;
+  var msLeft = transientHint.expires - performance.now();
+  if (msLeft <= 0) return;
+  var fade = msLeft < 600 ? Math.max(0, msLeft / 600) : 1;
+  var fs = GF.clamp(15 * GF.S, 12, 19);
+  var txt = GF.t(transientHint.textKey);
+  ctx.save();
+  ctx.font = '600 ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  var padX = 18 * GF.S, padY = 10 * GF.S;
+  var w = ctx.measureText(txt).width + padX * 2;
+  var h = fs + padY * 2;
+  var x = GF.cx - w / 2;
+  var y = GF.clamp(60 * GF.S, 50, 90);
+  ctx.fillStyle = 'rgba(2,12,28,' + (0.85 * fade).toFixed(3) + ')';
+  GF.rr(ctx, x, y, w, h, h / 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(120,220,255,' + (0.55 * fade).toFixed(3) + ')';
+  ctx.lineWidth = 1.5;
+  GF.rr(ctx, x + 0.5, y + 0.5, w - 1, h - 1, h / 2); ctx.stroke();
+  ctx.fillStyle = 'rgba(207,232,255,' + fade.toFixed(3) + ')';
+  ctx.fillText(txt, GF.cx, y + h / 2);
+  ctx.restore();
 }
 
 function drawWorld(ctx) {
@@ -572,6 +687,28 @@ function pingLight(wx, wy) {
   return Math.min(1, best);
 }
 
+// Word-wrap helper (used for the step-by-step tutorial hints — keeps long
+// EN/RU sentences inside the menu/overlay width on narrow viewports).
+function wrapText(ctx, text, maxWidth, font) {
+  ctx.save();
+  if (font) ctx.font = font;
+  var words = String(text).split(' ');
+  var lines = [];
+  var line = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxWidth && line) {
+      lines.push(line);
+      line = words[i];
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  ctx.restore();
+  return lines;
+}
+
 // ── HUD ──────────────────────────────────────────────────────────────────
 function drawHUD(ctx) {
   hudBtns = [];
@@ -643,13 +780,18 @@ function drawMenuOverlay(ctx) {
   ctx.fillStyle = '#9ab';
   ctx.fillText(GF.t('sub'), GF.cx, GF.cy - 100 * GF.S);
 
-  // Tutorial copy block (ABOVE the play button — required)
-  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
-  ctx.font = lineFs + 'px sans-serif';
+  // Step-1 menu hint — single friendly sentence (the staged tutorial). Wraps
+  // long RU/EN strings so they don't overflow narrow viewports.
+  var hintLines = wrapText(ctx, GF.t('menu_hint'), GF.W * 0.78, 'bold ' + lineFs + 'px sans-serif');
+  ctx.font = 'bold ' + lineFs + 'px sans-serif';
   ctx.fillStyle = '#cfe8ff';
-  for (var i = 0; i < lines.length; i++) {
-    ctx.fillText(lines[i], GF.cx, GF.cy - 60 * GF.S + i * (lineFs + 6 * GF.S));
+  for (var i = 0; i < hintLines.length; i++) {
+    ctx.fillText(hintLines[i], GF.cx, GF.cy - 50 * GF.S + i * (lineFs + 4 * GF.S));
   }
+  // Smaller "?" hint reminder
+  ctx.font = (lineFs - 2) + 'px sans-serif';
+  ctx.fillStyle = '#7a96b0';
+  ctx.fillText(GF.t('tut_tip'), GF.cx, GF.cy - 50 * GF.S + hintLines.length * (lineFs + 4 * GF.S) + 10 * GF.S);
 
   // PLAY button
   var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(52 * GF.S, 40, 66);
@@ -726,8 +868,18 @@ function drawGameOverOverlay(ctx) {
   ctx.fillStyle = '#9ab';
   ctx.fillText(GF.t('level') + ' ' + level, GF.cx, GF.cy - 6 * GF.S);
 
+  // Explain WHY the player lost (progressive-tutorial fail-state copy).
+  var explainKey = deathReason === 'drained' ? 'lose_drained' : 'lose_caught';
+  var explainLines = wrapText(ctx, GF.t(explainKey), GF.W * 0.78, subFs + 'px sans-serif');
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#cfe8ff';
+  for (var ei = 0; ei < explainLines.length; ei++) {
+    ctx.fillText(explainLines[ei], GF.cx, GF.cy + 16 * GF.S + ei * (subFs + 4 * GF.S));
+  }
+
   var btnW = GF.clamp(220 * GF.S, 160, 300), btnH = GF.clamp(50 * GF.S, 40, 64);
-  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 24 * GF.S;
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 16 * GF.S + explainLines.length * (subFs + 4 * GF.S) + 18 * GF.S;
   var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
   grad.addColorStop(0, '#3ae28b'); grad.addColorStop(1, '#1f9d5d');
   GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.fillStyle = grad; ctx.fill();
@@ -766,8 +918,17 @@ function drawWonOverlay(ctx) {
   ctx.fillStyle = '#bcd';
   ctx.fillText(GF.t('level') + ' ' + level + ' ✓', GF.cx, GF.cy - 6 * GF.S);
 
+  // Explain WIN (progressive-tutorial closing copy — what comes next).
+  var winLines = wrapText(ctx, GF.t('win_explain'), GF.W * 0.78, subFs + 'px sans-serif');
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#fff3cf';
+  for (var wi = 0; wi < winLines.length; wi++) {
+    ctx.fillText(winLines[wi], GF.cx, GF.cy + 16 * GF.S + wi * (subFs + 4 * GF.S));
+  }
+
   var btnW = GF.clamp(220 * GF.S, 160, 300), btnH = GF.clamp(50 * GF.S, 40, 64);
-  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 24 * GF.S;
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 16 * GF.S + winLines.length * (subFs + 4 * GF.S) + 18 * GF.S;
   var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
   grad.addColorStop(0, '#ffd24a'); grad.addColorStop(1, '#cf9b1f');
   GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.fillStyle = grad; ctx.fill();
@@ -794,6 +955,10 @@ function _fireScreenshotPings() {
 window._setupForScreenshot = function(lvl) {
   startLevel(Math.max(1, (lvl | 0) || 1));
   _screenshotMode = true;
+  // Suppress progressive-tutorial banners during capture so the gameplay
+  // frame isn't covered by an instructional overlay.
+  transientHint = null;
+  tutorialStep = 9;
   // Pin a creature close so the silhouette pops in frame.
   if (creatures.length) {
     creatures[0].gx = player.gx + 3;
@@ -852,6 +1017,11 @@ GF.init({
   saveKey: 'echo_locator',
   onReady: function() {
     try { best = parseInt(localStorage.getItem('echo_locator_best') || '0') || 0; } catch (e) {}
+    loadTutorialStep();
+    // On boot we always show MENU; menu hint corresponds to step 0.
+    // We do NOT clobber a higher persisted step here — that way a returning
+    // player whose ping/battery/creature triggers already fired will still
+    // skip the redundant transient hints if they reload mid-run.
     gs = 'MENU';
   },
   onUpdate: update,

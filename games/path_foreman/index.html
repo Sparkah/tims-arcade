@@ -38,7 +38,11 @@ var STRINGS = {
     'tut_win': 'WIN: All 4 pairs connected — advance through 5 villages.',
     'tut_lose': 'LOSE: Stone budget runs out OR a path crosses another color.',
     'tut_tip': 'TIP: Hug the walls. Diagonals waste stones and trap later colors.',
+    'tut_stars': 'STARS: Save stones to earn 1-3 stars per village. Best path = fewest stones used.',
     close: 'CLOSE',
+    select_village: 'SELECT VILLAGE',
+    total_stars: 'STARS',
+    new_star: 'NEW BEST!',
   },
   ru: {
     title: 'Путевой Прораб',
@@ -56,7 +60,11 @@ var STRINGS = {
     'tut_win': 'ПОБЕДА: Все 4 пары соединены — пройди 5 деревень.',
     'tut_lose': 'ПРОИГРЫШ: Камни кончились ИЛИ дорожка пересекла другой цвет.',
     'tut_tip': 'СОВЕТ: Прижимайся к стенам. Диагонали тратят камни.',
+    'tut_stars': 'ЗВЁЗДЫ: Экономь камни — до 3 звёзд за деревню. Лучший путь = меньше камней.',
     close: 'ЗАКРЫТЬ',
+    select_village: 'ВЫБЕРИ ДЕРЕВНЮ',
+    total_stars: 'ЗВЁЗДЫ',
+    new_star: 'НОВЫЙ РЕКОРД!',
   },
 };
 
@@ -73,13 +81,49 @@ var HOUSE_COLORS = ['#ff5454', '#4dafff', '#5fd76a', '#ffd23f'];
 var HOUSE_DARK   = ['#992525', '#1f5d99', '#2c8a3a', '#a6831a'];
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
-var gs = 'MENU';      // MENU | PLAYING | LEVELEND | GAMEOVER | WON
+var gs = 'MENU';      // MENU | PLAYING | LEVELEND | GAMEOVER | WON | LEVELSELECT
 var level = 1;
 var stones_left = BUDGET;
 var pairs_connected = 0;
 var best = 0;
 var loseReason = 'gameover';  // 'gameover' | 'crossed'
 var showHelp = false;
+
+// star ratings: stars[level-1] = 0..3 (0 = unfinished)
+// 3 stars: stones_used <= 60% of BUDGET
+// 2 stars: stones_used <= 80% of BUDGET
+// 1 star: cleared the village at all
+var stars = [0, 0, 0, 0, 0];
+var newStarFlash = 0;       // timer for "NEW BEST!" flash on level end
+var lastEarnedStars = 0;    // stars earned this run
+var lastBestStars = 0;      // best stars previously held for this level
+
+function loadStars() {
+  try {
+    var raw = localStorage.getItem('path_foreman_stars');
+    if (!raw) return;
+    var parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length === TOTAL_LEVELS) {
+      for (var i = 0; i < TOTAL_LEVELS; i++) {
+        var v = parsed[i] | 0;
+        stars[i] = v < 0 ? 0 : v > 3 ? 3 : v;
+      }
+    }
+  } catch (e) {}
+}
+function saveStars() {
+  try { localStorage.setItem('path_foreman_stars', JSON.stringify(stars)); } catch (e) {}
+}
+function totalStars() {
+  var s = 0;
+  for (var i = 0; i < TOTAL_LEVELS; i++) s += stars[i];
+  return s;
+}
+function starsForRun(stonesUsed) {
+  if (stonesUsed <= Math.floor(BUDGET * 0.60)) return 3;
+  if (stonesUsed <= Math.floor(BUDGET * 0.80)) return 2;
+  return 1;
+}
 
 // grid: 2d array of cells, each = { color: -1 (empty) or 0..3, isHouse: bool, houseColor: 0..3 or -1 }
 var grid = [];
@@ -314,6 +358,16 @@ function finalizeDrag() {
   drag = null;
   if (pairs_connected >= NUM_PAIRS) {
     setTimeout(function() {
+      // Compute stars for this run
+      var used = BUDGET - stones_left;
+      var earned = starsForRun(used);
+      lastEarnedStars = earned;
+      lastBestStars = stars[level - 1] || 0;
+      if (earned > lastBestStars) {
+        stars[level - 1] = earned;
+        saveStars();
+        newStarFlash = 1.6;  // seconds
+      }
       if (level >= TOTAL_LEVELS) { gs = 'WIN'; GF.gameEnded(); }
       else { gs = 'LEVELEND'; GF.gameEnded(); }
     }, 300);
@@ -503,6 +557,10 @@ function helpBtnHit(x, y) {
 // ── UPDATE / DRAW ────────────────────────────────────────────────────────
 function update(dt) {
   if (gs === 'PLAYING') recomputeBoard();
+  if (newStarFlash > 0) {
+    newStarFlash -= (dt || 1 / 60);
+    if (newStarFlash < 0) newStarFlash = 0;
+  }
 }
 
 function draw(ctx) {
@@ -742,6 +800,11 @@ function drawHUD(ctx) {
   ctx.fillStyle = '#fff';
   ctx.fillText(GF.t('pairs') + ': ' + pairs_connected + '/' + NUM_PAIRS, GF.W - pad - 56 * GF.S, pad);
 
+  // Per-level stars under the level label
+  var miniStarR = GF.clamp(7 * GF.S, 5, 10);
+  var miniY = pad + fs + 8 * GF.S;
+  drawStarRow(ctx, pad + miniStarR * 3.5, miniY, miniStarR, stars[level - 1] || 0);
+
   // Help button
   var btnSize = 38 * GF.S;
   helpBtnRect.x = GF.W - btnSize - pad;
@@ -759,19 +822,59 @@ function drawHUD(ctx) {
   ctx.textBaseline = 'alphabetic';
 }
 
+// Draw a single star at (cx, cy) with radius r. filled=true gold, false grey.
+function drawStar(ctx, cx, cy, r, filled) {
+  ctx.save();
+  ctx.beginPath();
+  for (var i = 0; i < 10; i++) {
+    var ang = -Math.PI / 2 + i * Math.PI / 5;
+    var rad = (i % 2 === 0) ? r : r * 0.45;
+    var x = cx + Math.cos(ang) * rad;
+    var y = cy + Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  if (filled) {
+    var g = ctx.createRadialGradient(cx, cy - r * 0.2, r * 0.1, cx, cy, r);
+    g.addColorStop(0, '#fff5c2');
+    g.addColorStop(1, '#ffb000');
+    ctx.fillStyle = g;
+    ctx.fill();
+    ctx.strokeStyle = '#7a4a00';
+    ctx.lineWidth = Math.max(1, r * 0.10);
+    ctx.stroke();
+  } else {
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = Math.max(1, r * 0.08);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Draw a row of 3 stars, count = how many filled
+function drawStarRow(ctx, cx, cy, starR, count) {
+  var spacing = starR * 2.4;
+  var startX = cx - spacing;
+  for (var i = 0; i < 3; i++) {
+    drawStar(ctx, startX + i * spacing, cy, starR, i < count);
+  }
+}
+
 function drawMenu(ctx) {
   ctx.fillStyle = 'rgba(8,5,3,0.92)';
   ctx.fillRect(0, 0, GF.W, GF.H);
 
-  var titleFs = GF.clamp(40 * GF.S, 22, 60);
-  var lineFs = GF.clamp(15 * GF.S, 11, 20);
-  var subFs = GF.clamp(16 * GF.S, 12, 22);
-  var btnW = GF.clamp(240 * GF.S, 160, 320);
-  var btnH = GF.clamp(52 * GF.S, 40, 66);
-  var topY = GF.H * 0.10;
+  var titleFs = GF.clamp(36 * GF.S, 22, 56);
+  var lineFs = GF.clamp(13 * GF.S, 10, 18);
+  var subFs = GF.clamp(14 * GF.S, 11, 20);
+  var btnW = GF.clamp(220 * GF.S, 150, 300);
+  var btnH = GF.clamp(48 * GF.S, 38, 60);
+  var topY = GF.H * 0.05;
 
   ctx.shadowColor = 'rgba(255,210,63,0.35)';
-  ctx.shadowBlur = 30 * GF.S;
+  ctx.shadowBlur = 26 * GF.S;
   ctx.font = 'bold ' + titleFs + 'px sans-serif';
   ctx.fillStyle = '#fff';
   ctx.textAlign = 'center';
@@ -782,30 +885,99 @@ function drawMenu(ctx) {
 
   ctx.font = subFs + 'px sans-serif';
   ctx.fillStyle = '#c8b497';
-  ctx.fillText(GF.t('sub'), GF.cx, topY + titleFs + 8 * GF.S);
+  ctx.fillText(GF.t('sub'), GF.cx, topY + titleFs + 6 * GF.S);
 
-  var ty = topY + titleFs + 8 * GF.S + subFs + 22 * GF.S;
+  // Total stars summary
+  var totStarsY = topY + titleFs + 6 * GF.S + subFs + 14 * GF.S;
+  var ts = totalStars();
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 11, 20) + 'px sans-serif';
+  ctx.fillStyle = '#ffd23f';
+  ctx.fillText(GF.t('total_stars') + ': ' + ts + ' / ' + (TOTAL_LEVELS * 3), GF.cx, totStarsY);
+
+  // Compact tutorial — 3 lines instead of 5 to leave room for level-select
+  var ty = totStarsY + 24 * GF.S;
   ctx.font = 'bold ' + lineFs + 'px sans-serif';
   ctx.fillStyle = '#ffd23f';
   ctx.textAlign = 'left';
-  var tutorial = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var tutorial = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_stars')];
   var maxLineW = Math.min(GF.W - 60 * GF.S, 720 * GF.S);
   var lineX = GF.cx - maxLineW / 2;
   for (var i = 0; i < tutorial.length; i++) {
-    drawWrapped(ctx, tutorial[i], lineX, ty, maxLineW, lineFs * 1.35);
+    drawWrapped(ctx, tutorial[i], lineX, ty, maxLineW, lineFs * 1.3);
     var lines = wrapCount(ctx, tutorial[i], maxLineW);
-    ty += lines * lineFs * 1.35 + 6 * GF.S;
+    ty += lines * lineFs * 1.3 + 4 * GF.S;
   }
 
+  // Level-select grid: 5 villages laid out horizontally
+  ty += 14 * GF.S;
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('select_village'), GF.cx, ty);
+  ty += GF.clamp(20 * GF.S, 16, 26);
+
+  var villageBtnW = GF.clamp(90 * GF.S, 60, 120);
+  var villageBtnH = GF.clamp(86 * GF.S, 60, 110);
+  var villageGap = GF.clamp(10 * GF.S, 6, 14);
+  var totalGridW = villageBtnW * TOTAL_LEVELS + villageGap * (TOTAL_LEVELS - 1);
+  // Scale down if too wide
+  if (totalGridW > GF.W - 24 * GF.S) {
+    var scale = (GF.W - 24 * GF.S) / totalGridW;
+    villageBtnW *= scale; villageBtnH *= scale; villageGap *= scale;
+    totalGridW = villageBtnW * TOTAL_LEVELS + villageGap * (TOTAL_LEVELS - 1);
+  }
+  var gridX = GF.cx - totalGridW / 2;
+  for (var lvl = 1; lvl <= TOTAL_LEVELS; lvl++) {
+    var bx = gridX + (lvl - 1) * (villageBtnW + villageGap);
+    var by = ty;
+    var earnedStars = stars[lvl - 1] || 0;
+    // Card bg
+    var bgGrad = ctx.createLinearGradient(bx, by, bx, by + villageBtnH);
+    bgGrad.addColorStop(0, earnedStars > 0 ? '#5a4632' : '#3a2a1c');
+    bgGrad.addColorStop(1, earnedStars > 0 ? '#3a2a1c' : '#251810');
+    ctx.fillStyle = bgGrad;
+    GF.rr(ctx, bx, by, villageBtnW, villageBtnH, 8 * GF.S);
+    ctx.fill();
+    ctx.strokeStyle = earnedStars >= 3 ? '#ffd23f' : earnedStars > 0 ? '#7a6a55' : '#3a2a1c';
+    ctx.lineWidth = Math.max(1, 2 * GF.S);
+    GF.rr(ctx, bx, by, villageBtnW, villageBtnH, 8 * GF.S);
+    ctx.stroke();
+    // Level number
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(lvl), bx + villageBtnW / 2, by + 8 * GF.S);
+    // Stars row
+    var starR = villageBtnW * 0.13;
+    drawStarRow(ctx, bx + villageBtnW / 2, by + villageBtnH * 0.55, starR, earnedStars);
+    // Tap label
+    ctx.fillStyle = earnedStars > 0 ? '#5fd76a' : '#c8b497';
+    ctx.font = 'bold ' + GF.clamp(10 * GF.S, 8, 13) + 'px sans-serif';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(GF.t('play'), bx + villageBtnW / 2, by + villageBtnH - 8 * GF.S);
+    // Click target
+    (function(targetLevel) {
+      registerBtn(bx, by, villageBtnW, villageBtnH, function() { startLevel(targetLevel); });
+    })(lvl);
+  }
+  ty += villageBtnH + 16 * GF.S;
+
+  // Main PLAY button (resumes from village 1, or first unstarred)
+  var resumeLvl = 1;
+  for (var sl = 0; sl < TOTAL_LEVELS; sl++) {
+    if ((stars[sl] || 0) === 0) { resumeLvl = sl + 1; break; }
+    if (sl === TOTAL_LEVELS - 1) resumeLvl = 1;
+  }
   var btnX = GF.cx - btnW / 2;
-  var btnY = Math.min(ty + 12 * GF.S, GF.H - btnH - 30 * GF.S);
-  drawButton(ctx, btnX, btnY, btnW, btnH, GF.t('play'), function() { startGame(); });
+  var btnY = Math.min(ty, GF.H - btnH - 16 * GF.S);
+  drawButton(ctx, btnX, btnY, btnW, btnH, GF.t('play'), function() { startLevel(resumeLvl); });
 
   if (best > 0) {
-    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.font = GF.clamp(12 * GF.S, 9, 16) + 'px sans-serif';
     ctx.fillStyle = '#7a6a55';
     ctx.textAlign = 'center';
-    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 22 * GF.S);
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 16 * GF.S);
   }
 }
 
@@ -824,7 +996,7 @@ function drawHelpOverlay(ctx) {
   ctx.font = 'bold ' + lineFs + 'px sans-serif';
   ctx.fillStyle = '#ffd23f';
   ctx.textAlign = 'left';
-  var tut = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var tut = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_stars'), GF.t('tut_tip')];
   var maxLineW = Math.min(GF.W - 60 * GF.S, 720 * GF.S);
   var lineX = GF.cx - maxLineW / 2;
   for (var i = 0; i < tut.length; i++) {
@@ -917,21 +1089,40 @@ function drawGameOver(ctx) {
 function drawLevelEnd(ctx) {
   ctx.fillStyle = 'rgba(8,5,3,0.85)';
   ctx.fillRect(0, 0, GF.W, GF.H);
-  var titleFs = GF.clamp(40 * GF.S, 22, 60);
-  var subFs = GF.clamp(18 * GF.S, 13, 24);
+  var titleFs = GF.clamp(36 * GF.S, 20, 54);
+  var subFs = GF.clamp(17 * GF.S, 12, 22);
   var btnW = GF.clamp(240 * GF.S, 160, 320);
   var btnH = GF.clamp(50 * GF.S, 40, 66);
   ctx.font = 'bold ' + titleFs + 'px sans-serif';
   ctx.fillStyle = '#5fd76a';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(GF.t('levelend'), GF.cx, GF.cy - 60 * GF.S);
+  ctx.fillText(GF.t('levelend'), GF.cx, GF.cy - 110 * GF.S);
   ctx.font = subFs + 'px sans-serif';
   ctx.fillStyle = '#fff';
-  ctx.fillText(GF.t('level') + ' ' + level + '/' + TOTAL_LEVELS, GF.cx, GF.cy - 18 * GF.S);
+  ctx.fillText(GF.t('level') + ' ' + level + '/' + TOTAL_LEVELS, GF.cx, GF.cy - 70 * GF.S);
+
+  // Big star row showing earned stars
+  var starR = GF.clamp(28 * GF.S, 18, 40);
+  // pulse animation if newStarFlash > 0
+  var pulse = newStarFlash > 0 ? 1 + 0.12 * Math.sin(newStarFlash * 12) : 1;
+  ctx.save();
+  ctx.translate(GF.cx, GF.cy - 18 * GF.S);
+  ctx.scale(pulse, pulse);
+  drawStarRow(ctx, 0, 0, starR, lastEarnedStars);
+  ctx.restore();
+
+  // NEW BEST flash
+  if (newStarFlash > 0 && lastEarnedStars > lastBestStars) {
+    ctx.font = 'bold ' + GF.clamp(18 * GF.S, 13, 24) + 'px sans-serif';
+    ctx.fillStyle = '#ffd23f';
+    ctx.fillText(GF.t('new_star'), GF.cx, GF.cy + 30 * GF.S);
+  }
+
+  ctx.font = subFs + 'px sans-serif';
   ctx.fillStyle = '#ffd23f';
-  ctx.fillText('+' + stones_left + ' ' + GF.t('score'), GF.cx, GF.cy + 8 * GF.S);
-  drawButton(ctx, GF.cx - btnW / 2, GF.cy + 36 * GF.S, btnW, btnH, GF.t('next'), function() {
+  ctx.fillText('+' + stones_left + ' ' + GF.t('score'), GF.cx, GF.cy + 56 * GF.S);
+  drawButton(ctx, GF.cx - btnW / 2, GF.cy + 84 * GF.S, btnW, btnH, GF.t('next'), function() {
     var bonus = stones_left;
     if (level + bonus > best) { best = level + bonus; try { localStorage.setItem('path_foreman_best', best); } catch (e) {} }
     nextLevel();
@@ -942,19 +1133,37 @@ function drawLevelEnd(ctx) {
 function drawWon(ctx) {
   ctx.fillStyle = 'rgba(8,5,3,0.92)';
   ctx.fillRect(0, 0, GF.W, GF.H);
-  var titleFs = GF.clamp(48 * GF.S, 26, 70);
-  var subFs = GF.clamp(20 * GF.S, 14, 28);
+  var titleFs = GF.clamp(44 * GF.S, 24, 64);
+  var subFs = GF.clamp(18 * GF.S, 13, 24);
   var btnW = GF.clamp(240 * GF.S, 160, 320);
   var btnH = GF.clamp(52 * GF.S, 40, 66);
   ctx.font = 'bold ' + titleFs + 'px sans-serif';
   ctx.fillStyle = '#ffd23f';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 50 * GF.S);
+  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 100 * GF.S);
+
+  // Per-level stars row
+  var miniStarR = GF.clamp(10 * GF.S, 6, 14);
+  var rowSpacing = miniStarR * 8;
+  var rowsW = rowSpacing * TOTAL_LEVELS;
+  var rowStartX = GF.cx - rowsW / 2 + rowSpacing / 2;
+  for (var lv = 0; lv < TOTAL_LEVELS; lv++) {
+    var rx = rowStartX + lv * rowSpacing;
+    ctx.font = 'bold ' + GF.clamp(13 * GF.S, 9, 17) + 'px sans-serif';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(String(lv + 1), rx, GF.cy - 50 * GF.S);
+    drawStarRow(ctx, rx, GF.cy - 24 * GF.S, miniStarR, stars[lv] || 0);
+  }
+  // Total
+  ctx.font = 'bold ' + subFs + 'px sans-serif';
+  ctx.fillStyle = '#ffd23f';
+  ctx.fillText(GF.t('total_stars') + ': ' + totalStars() + ' / ' + (TOTAL_LEVELS * 3), GF.cx, GF.cy + 16 * GF.S);
   ctx.font = subFs + 'px sans-serif';
   ctx.fillStyle = '#fff';
-  ctx.fillText(GF.t('best') + ': ' + best, GF.cx, GF.cy + 8 * GF.S);
-  drawButton(ctx, GF.cx - btnW / 2, GF.cy + 40 * GF.S, btnW, btnH, GF.t('retry'), function() { startGame(); });
+  ctx.fillText(GF.t('best') + ': ' + best, GF.cx, GF.cy + 44 * GF.S);
+
+  drawButton(ctx, GF.cx - btnW / 2, GF.cy + 70 * GF.S, btnW, btnH, GF.t('retry'), function() { gs = 'MENU'; });
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -969,6 +1178,9 @@ GF.exposeState(function() {
     TOTAL_LEVELS: TOTAL_LEVELS,
     GRID_W: GRID_W,
     GRID_H: GRID_H,
+    stars: stars.slice(),
+    total_stars: totalStars(),
+    last_earned_stars: lastEarnedStars,
   };
 });
 
@@ -1041,6 +1253,7 @@ GF.init({
   saveKey: 'path_foreman',
   onReady: function() {
     try { best = parseInt(localStorage.getItem('path_foreman_best') || '0') || 0; } catch (e) {}
+    loadStars();
     gs = 'MENU';
   },
   onUpdate: update,
