@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Glacier Splitter</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #06121f; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── STRINGS ──────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Glacier Splitter',
+    sub:   'Crack ice to fill buyer orders',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT ROUND',
+    score: 'DELIVERED', best: 'BEST',
+    hammers: 'HAMMERS', round: 'ROUND', orders: 'ORDERS', lost: 'LOST',
+    gameover: 'OUT OF HAMMERS',
+    won: 'GLACIER CLEARED',
+    levelend: 'ROUND DELIVERED',
+    'tut_goal':     'Goal: split the iceberg into chunks that match the buyer orders on the right.',
+    'tut_controls': 'Controls: tap a glowing fault to split, then drag a chunk onto an order to deliver.',
+    'tut_win':      'Win: fill every order within +-2 kg before the hammer charges run out.',
+    'tut_lose':     'Lose: hammers reach 0 with orders unfilled, or 2 chunks drift off-screen.',
+    'tut_tip':      'Tip: long centre faults halve the mass cleanest. Save hammers for fine-tuning.',
+    no_match: 'WRONG WEIGHT',
+    delivered: 'DELIVERED',
+    drift: 'CHUNK LOST',
+    crack: 'CRACK!',
+    scrap: 'scrap',
+    kg: 'kg',
+  },
+  ru: {
+    title: 'Расколи Ледник',
+    sub:   'Колите лёд под заказ покупателей',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЬШЕ',
+    score: 'СДАНО', best: 'РЕКОРД',
+    hammers: 'УДАРОВ', round: 'РАУНД', orders: 'ЗАКАЗЫ', lost: 'УПЛЫЛО',
+    gameover: 'УДАРЫ КОНЧИЛИСЬ',
+    won: 'ЛЕДНИК РАЗОБРАН',
+    levelend: 'РАУНД СДАН',
+    'tut_goal':     'Цель: расколите айсберг на куски нужного веса для заказов справа.',
+    'tut_controls': 'Управление: тап по разлому колет лёд; перетащите кусок на заказ.',
+    'tut_win':      'Победа: закройте все заказы (плюс-минус 2 кг) до конца ударов.',
+    'tut_lose':     'Поражение: удары на нуле и заказы не сданы, ИЛИ 2 куска уплыли за экран.',
+    'tut_tip':      'Совет: центральный длинный разлом делит ровнее. Берегите молот.',
+    no_match: 'НЕ ПОДХОДИТ',
+    delivered: 'СДАНО',
+    drift: 'УПЛЫЛО',
+    crack: 'ХРУСТ!',
+    scrap: 'скол',
+    kg: 'кг',
+  },
+};
+
+var SPRITE_NAMES = []; // procedural drawing only
+
+// ── TUNABLES (mirrors DESIGN.md) ─────────────────────────────────────────
+var HAMMER_BUDGET = 12;
+var NUM_ORDERS = 3;
+var WEIGHT_TOLERANCE = 2;
+var ICEBERG_MASS = 80;
+var DRIFT_SPEED = 12;
+var MAX_LOST = 2;
+var MAX_ROUNDS = 4;
+var SCRAP_CHANCE = 0.18;
+var ORDER_MIN_KG = 6;
+var ORDER_MAX_KG = 30;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var round = 1;
+var hammers = HAMMER_BUDGET;
+var chunks_lost = 0;
+var score = 0, best = 0;
+var orders = [];          // [{ target, filled, deliveredKg, flash }]
+var orders_filled = 0;
+var chunks = [];          // [{ id, tileIds, vx, vy, kg, color, ofsX, ofsY, dragging, flashUntil, isScrap }]
+var nextChunkId = 1;
+var helpVisible = false;
+var hudButtons = [];
+var endButton = null;
+var dragChunk = null;
+var pointer = { x: 0, y: 0, down: false };
+var seaTime = 0;
+var msg = null;
+
+// Iceberg tiles (Voronoi cells). tile = { id, site, poly, area, neighbors:[{tileId, edge:[a,b]}], chunkId }
+var tiles = [];
+var KG_PER_PX = 0;
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+function rand(a, b) { return a + Math.random() * (b - a); }
+function pickColor(idx) {
+  var palette = ['#9fdcff', '#bfeaff', '#d6f1ff', '#a5e8ff', '#c5e4f5', '#bcd9ed'];
+  return palette[idx % palette.length];
+}
+
+function polyArea(pts) {
+  var a = 0;
+  for (var i = 0; i < pts.length; i++) {
+    var p = pts[i], q = pts[(i+1) % pts.length];
+    a += p[0] * q[1] - q[0] * p[1];
+  }
+  return Math.abs(a) * 0.5;
+}
+function polyCentroid(pts) {
+  var cx = 0, cy = 0, a = 0;
+  for (var i = 0; i < pts.length; i++) {
+    var p = pts[i], q = pts[(i+1) % pts.length];
+    var f = p[0] * q[1] - q[0] * p[1];
+    cx += (p[0] + q[0]) * f;
+    cy += (p[1] + q[1]) * f;
+    a += f;
+  }
+  if (Math.abs(a) < 1e-9) return [pts[0][0], pts[0][1]];
+  a *= 0.5;
+  return [cx / (6 * a), cy / (6 * a)];
+}
+function pointInPoly(x, y, pts) {
+  var inside = false;
+  for (var i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    var xi = pts[i][0], yi = pts[i][1];
+    var xj = pts[j][0], yj = pts[j][1];
+    var intersect = ((yi > y) !== (yj > y)) &&
+      (x < (xj - xi) * (y - yi) / ((yj - yi) || 1e-9) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+function distToSeg(px, py, ax, ay, bx, by) {
+  var dx = bx - ax, dy = by - ay;
+  var len2 = dx*dx + dy*dy;
+  if (len2 < 1e-9) {
+    var ddx = px - ax, ddy = py - ay;
+    return Math.sqrt(ddx*ddx + ddy*ddy);
+  }
+  var t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  var qx = ax + t * dx, qy = ay + t * dy;
+  var ex = px - qx, ey = py - qy;
+  return Math.sqrt(ex*ex + ey*ey);
+}
+
+// Convex hull (Andrew's monotone chain)
+function convexHull(points) {
+  if (points.length <= 1) return points.slice();
+  var pts = points.slice().sort(function(a, b) { return a[0] === b[0] ? a[1] - b[1] : a[0] - b[0]; });
+  var lower = [];
+  for (var i = 0; i < pts.length; i++) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pts[i]) <= 0) lower.pop();
+    lower.push(pts[i]);
+  }
+  var upper = [];
+  for (var j = pts.length - 1; j >= 0; j--) {
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[j]) <= 0) upper.pop();
+    upper.push(pts[j]);
+  }
+  upper.pop(); lower.pop();
+  return lower.concat(upper);
+}
+function cross(o, a, b) { return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]); }
+
+// ── ICEBERG GENERATION ───────────────────────────────────────────────────
+function generateIceberg() {
+  tiles = [];
+  chunks = [];
+  nextChunkId = 1;
+
+  var pad = 60 * GF.S;
+  var orderPanelW = panelWidth();
+  var W = GF.W - orderPanelW - pad * 2;
+  var H = GF.H - 100 * GF.S;
+  var cx = pad + W / 2;
+  var cy = 70 * GF.S + H / 2;
+  var rx = Math.min(W, 760 * GF.S) * 0.42;
+  var ry = Math.min(H, 540 * GF.S) * 0.42;
+
+  // Outline polygon (lobed)
+  var outline = [];
+  var nVerts = 28;
+  var lobePhase = Math.random() * Math.PI * 2;
+  for (var i = 0; i < nVerts; i++) {
+    var a = (i / nVerts) * Math.PI * 2;
+    var lobe = 0.85 + 0.18 * Math.sin(a * 3 + lobePhase) + 0.08 * Math.sin(a * 5 + lobePhase * 2);
+    outline.push([cx + Math.cos(a) * rx * lobe, cy + Math.sin(a) * ry * lobe]);
+  }
+
+  // Place Voronoi sites inside outline
+  var nSites = 14;
+  var sites = [];
+  var attempts = 0;
+  while (sites.length < nSites && attempts < 600) {
+    attempts++;
+    var x = cx + (Math.random() - 0.5) * rx * 1.6;
+    var y = cy + (Math.random() - 0.5) * ry * 1.6;
+    if (pointInPoly(x, y, outline)) {
+      var ok = true;
+      for (var s = 0; s < sites.length; s++) {
+        if (Math.hypot(x - sites[s][0], y - sites[s][1]) < 60 * GF.S) { ok = false; break; }
+      }
+      if (ok) sites.push([x, y]);
+    }
+  }
+  if (sites.length < 6) {
+    // fallback minimum
+    for (var ff = sites.length; ff < 8; ff++) {
+      sites.push([cx + Math.cos(ff) * rx * 0.5, cy + Math.sin(ff) * ry * 0.5]);
+    }
+  }
+
+  // Grid sample → assign each pixel to nearest site
+  var step = Math.max(6, Math.round(8 * GF.S));
+  var gx0 = cx - rx * 1.3, gx1 = cx + rx * 1.3;
+  var gy0 = cy - ry * 1.3, gy1 = cy + ry * 1.3;
+  var cols = Math.ceil((gx1 - gx0) / step) + 2;
+  var rows = Math.ceil((gy1 - gy0) / step) + 2;
+  var grid = new Int16Array(cols * rows);
+  for (var ig = 0; ig < grid.length; ig++) grid[ig] = -1;
+
+  for (var r = 0; r < rows; r++) {
+    var py = gy0 + r * step;
+    for (var c = 0; c < cols; c++) {
+      var px = gx0 + c * step;
+      if (!pointInPoly(px, py, outline)) continue;
+      var bestI = -1, bestD = Infinity;
+      for (var si = 0; si < sites.length; si++) {
+        var d = (px - sites[si][0]) * (px - sites[si][0]) + (py - sites[si][1]) * (py - sites[si][1]);
+        if (d < bestD) { bestD = d; bestI = si; }
+      }
+      grid[r * cols + c] = bestI;
+    }
+  }
+
+  // Build tiles via convex hull of pixels per site
+  for (var si2 = 0; si2 < sites.length; si2++) {
+    var pts = [];
+    for (var r2 = 0; r2 < rows; r2++) {
+      for (var c2 = 0; c2 < cols; c2++) {
+        if (grid[r2 * cols + c2] === si2) {
+          pts.push([gx0 + c2 * step, gy0 + r2 * step]);
+        }
+      }
+    }
+    if (pts.length < 4) continue;
+    var hull = convexHull(pts);
+    // Pull verts inside outline
+    var clipped = [];
+    var c0 = polyCentroid(hull);
+    for (var hi = 0; hi < hull.length; hi++) {
+      var hp = hull[hi];
+      if (!pointInPoly(hp[0], hp[1], outline)) {
+        var dx = hp[0] - c0[0], dy = hp[1] - c0[1];
+        var dl = Math.sqrt(dx*dx + dy*dy);
+        if (dl > 0) {
+          var ux = dx / dl, uy = dy / dl;
+          var walk = 0;
+          while (walk < dl && !pointInPoly(hp[0] - ux * walk, hp[1] - uy * walk, outline)) {
+            walk += 4 * GF.S;
+          }
+          hp = [hp[0] - ux * walk, hp[1] - uy * walk];
+        }
+      }
+      clipped.push(hp);
+    }
+    if (clipped.length < 3) continue;
+    var area = polyArea(clipped);
+    if (area < 200 * GF.S * GF.S) continue;
+    tiles.push({
+      id: tiles.length,
+      site: sites[si2],
+      poly: clipped,
+      area: area,
+      neighbors: [],
+      chunkId: 0,
+    });
+  }
+
+  // Compute neighbours (site-distance heuristic) → derive a fault edge
+  for (var ti = 0; ti < tiles.length; ti++) {
+    for (var tj = ti + 1; tj < tiles.length; tj++) {
+      var ta = tiles[ti], tb = tiles[tj];
+      var sd = Math.hypot(ta.site[0] - tb.site[0], ta.site[1] - tb.site[1]);
+      var avgR = Math.sqrt((ta.area + tb.area) / Math.PI) * 1.6;
+      if (sd > avgR) continue;
+      var mx = (ta.site[0] + tb.site[0]) / 2;
+      var my = (ta.site[1] + tb.site[1]) / 2;
+      var dx = tb.site[0] - ta.site[0], dy = tb.site[1] - ta.site[1];
+      var dl = Math.sqrt(dx*dx + dy*dy);
+      if (dl < 1e-6) continue;
+      var px = -dy / dl, py = dx / dl;
+      var elen = Math.min(Math.sqrt(ta.area), Math.sqrt(tb.area)) * 0.85;
+      var ax = mx - px * elen / 2, ay = my - py * elen / 2;
+      var bx = mx + px * elen / 2, by = my + py * elen / 2;
+      ta.neighbors.push({ tileId: tb.id, edge: [[ax, ay], [bx, by]] });
+      tb.neighbors.push({ tileId: ta.id, edge: [[ax, ay], [bx, by]] });
+    }
+  }
+
+  // Mass calibration
+  var totalArea = 0;
+  for (var ki = 0; ki < tiles.length; ki++) totalArea += tiles[ki].area;
+  KG_PER_PX = totalArea > 0 ? ICEBERG_MASS / totalArea : 0;
+
+  // Build single starting chunk
+  var allIds = [];
+  for (var ai = 0; ai < tiles.length; ai++) allIds.push(tiles[ai].id);
+  if (allIds.length) {
+    var c0c = makeChunk(allIds);
+    chunks.push(c0c);
+  }
+}
+
+// ── CHUNK MGMT ───────────────────────────────────────────────────────────
+function makeChunk(tileIds) {
+  var chunk = {
+    id: nextChunkId++,
+    tileIds: tileIds.slice(),
+    vx: (Math.random() - 0.5) * DRIFT_SPEED * 0.05 * GF.S,
+    vy: (Math.random() - 0.5) * DRIFT_SPEED * 0.05 * GF.S,
+    ofsX: 0, ofsY: 0,
+    dragging: false,
+    color: pickColor(nextChunkId),
+    flashUntil: 0,
+    dragOffX: 0, dragOffY: 0,
+    isScrap: false,
+  };
+  for (var i = 0; i < tileIds.length; i++) {
+    var t = tileById(tileIds[i]);
+    if (t) t.chunkId = chunk.id;
+  }
+  chunk.kg = chunkWeight(chunk);
+  return chunk;
+}
+function tileById(id) {
+  for (var i = 0; i < tiles.length; i++) if (tiles[i].id === id) return tiles[i];
+  return null;
+}
+function chunkWeight(c) {
+  var a = 0;
+  for (var i = 0; i < c.tileIds.length; i++) {
+    var t = tileById(c.tileIds[i]);
+    if (t) a += t.area;
+  }
+  return Math.max(1, Math.round(a * KG_PER_PX));
+}
+function chunkCentroid(c) {
+  var ax = 0, ay = 0, w = 0;
+  for (var i = 0; i < c.tileIds.length; i++) {
+    var t = tileById(c.tileIds[i]);
+    if (!t) continue;
+    var ctd = polyCentroid(t.poly);
+    ax += ctd[0] * t.area;
+    ay += ctd[1] * t.area;
+    w += t.area;
+  }
+  if (w < 1e-6) return [c.ofsX, c.ofsY];
+  return [ax / w + c.ofsX, ay / w + c.ofsY];
+}
+function chunkInternalEdges(c) {
+  var ids = {};
+  for (var i = 0; i < c.tileIds.length; i++) ids[c.tileIds[i]] = true;
+  var edges = [];
+  for (var ti = 0; ti < c.tileIds.length; ti++) {
+    var t = tileById(c.tileIds[ti]);
+    if (!t) continue;
+    for (var ni = 0; ni < t.neighbors.length; ni++) {
+      var nb = t.neighbors[ni];
+      if (ids[nb.tileId] && nb.tileId > t.id) {
+        edges.push({ a: t.id, b: nb.tileId, edge: nb.edge, chunkId: c.id });
+      }
+    }
+  }
+  return edges;
+}
+
+function splitChunk(chunk, tileAId, tileBId) {
+  var ids = {};
+  for (var i = 0; i < chunk.tileIds.length; i++) ids[chunk.tileIds[i]] = true;
+  var adj = {};
+  for (var ti = 0; ti < chunk.tileIds.length; ti++) {
+    var t = tileById(chunk.tileIds[ti]);
+    if (!t) continue;
+    var list = [];
+    for (var ni = 0; ni < t.neighbors.length; ni++) {
+      var nb = t.neighbors[ni];
+      if (!ids[nb.tileId]) continue;
+      if ((t.id === tileAId && nb.tileId === tileBId) ||
+          (t.id === tileBId && nb.tileId === tileAId)) continue;
+      list.push(nb.tileId);
+    }
+    adj[t.id] = list;
+  }
+  function bfs(start) {
+    var seen = {}; seen[start] = true;
+    var q = [start], out = [start];
+    while (q.length) {
+      var v = q.shift();
+      var nbs = adj[v] || [];
+      for (var i = 0; i < nbs.length; i++) {
+        if (!seen[nbs[i]]) { seen[nbs[i]] = true; out.push(nbs[i]); q.push(nbs[i]); }
+      }
+    }
+    return out;
+  }
+  var partA = bfs(tileAId);
+  var partB = bfs(tileBId);
+  var setA = {};
+  for (var ai = 0; ai < partA.length; ai++) setA[partA[ai]] = true;
+  var overlap = false;
+  for (var bi = 0; bi < partB.length; bi++) {
+    if (setA[partB[bi]]) { overlap = true; break; }
+  }
+  if (overlap || partA.length === 0 || partB.length === 0) {
+    chunk.flashUntil = performance.now() + 400;
+    return null;
+  }
+
+  var scrapTile = null;
+  if (Math.random() < SCRAP_CHANCE && partA.length > 1) {
+    scrapTile = partA.pop();
+  } else if (Math.random() < SCRAP_CHANCE && partB.length > 1) {
+    scrapTile = partB.pop();
+  }
+
+  var newChunks = [];
+  var bigger = partA.length >= partB.length ? partA : partB;
+  var smaller = partA.length >= partB.length ? partB : partA;
+
+  var origCentroid = chunkCentroid(chunk);
+
+  // Mutate this chunk → bigger
+  chunk.tileIds = bigger.slice();
+  for (var x = 0; x < bigger.length; x++) tileById(bigger[x]).chunkId = chunk.id;
+  chunk.kg = chunkWeight(chunk);
+  var c1 = chunkCentroid(chunk);
+  var dx = c1[0] - origCentroid[0], dy = c1[1] - origCentroid[1];
+  var dl = Math.sqrt(dx*dx + dy*dy) || 1;
+  chunk.vx += (dx / dl) * 30 * GF.S;
+  chunk.vy += (dy / dl) * 30 * GF.S;
+  chunk.flashUntil = performance.now() + 400;
+
+  var newC = makeChunk(smaller);
+  var c2 = chunkCentroid(newC);
+  var dx2 = c2[0] - origCentroid[0], dy2 = c2[1] - origCentroid[1];
+  var dl2 = Math.sqrt(dx2*dx2 + dy2*dy2) || 1;
+  newC.vx = (dx2 / dl2) * 30 * GF.S;
+  newC.vy = (dy2 / dl2) * 30 * GF.S;
+  newC.flashUntil = performance.now() + 400;
+  newChunks.push(newC);
+
+  if (scrapTile !== null) {
+    var scrapC = makeChunk([scrapTile]);
+    scrapC.vx = (Math.random() - 0.5) * 60 * GF.S;
+    scrapC.vy = (Math.random() - 0.5) * 60 * GF.S;
+    scrapC.isScrap = true;
+    newChunks.push(scrapC);
+  }
+  return newChunks;
+}
+
+// ── ORDERS ───────────────────────────────────────────────────────────────
+function generateOrders() {
+  orders = [];
+  orders_filled = 0;
+  var nOrders = Math.min(NUM_ORDERS + (round - 1), 5);
+  var targetTotal = ICEBERG_MASS * (0.55 + Math.random() * 0.15);
+  var remaining = targetTotal;
+  for (var i = 0; i < nOrders; i++) {
+    var slotsLeft = nOrders - i;
+    var avg = remaining / slotsLeft;
+    var lo = Math.max(ORDER_MIN_KG, avg * 0.55);
+    var hi = Math.min(ORDER_MAX_KG, avg * 1.45);
+    var w = Math.round(rand(lo, hi));
+    if (i === nOrders - 1) w = Math.max(ORDER_MIN_KG, Math.round(remaining));
+    w = Math.max(ORDER_MIN_KG, Math.min(ORDER_MAX_KG, w));
+    orders.push({ target: w, filled: false, deliveredKg: 0, flash: 0 });
+    remaining -= w;
+  }
+}
+
+// ── ROUND CONTROL ────────────────────────────────────────────────────────
+function startRound() {
+  hammers = HAMMER_BUDGET + Math.max(0, round - 1) * 2;
+  chunks_lost = 0;
+  generateIceberg();
+  generateOrders();
+  helpVisible = false;
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+function startGame() {
+  round = 1;
+  score = 0;
+  startRound();
+}
+function nextRound() {
+  if (round >= MAX_ROUNDS) {
+    gs = 'WON';
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem('glacier_splitter_best', best); } catch (e) {}
+    }
+    GF.gameEnded();
+    return;
+  }
+  round++;
+  startRound();
+}
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('glacier_splitter_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+}
+
+// Screenshot / playtest hook
+window._jumpLevel = function(n) {
+  // High values → drive into terminal state for runtime gate
+  if (n != null && n >= MAX_ROUNDS + 5) {
+    round = MAX_ROUNDS;
+    score = 99;
+    startRound();
+    hammers = 0;
+    gameOver();
+    return;
+  }
+  var r = Math.max(1, Math.min(MAX_ROUNDS, n || 2));
+  round = r;
+  score = 18 * (r - 1);
+  startRound();
+  // Pre-split a few times to show populated chunks
+  if (chunks.length) {
+    var c = chunks[0];
+    var splits = 4;
+    for (var i = 0; i < splits; i++) {
+      var es = chunkInternalEdges(c);
+      if (!es.length) break;
+      var e = es[Math.floor(Math.random() * es.length)];
+      var nc = splitChunk(c, e.a, e.b);
+      if (nc) for (var k = 0; k < nc.length; k++) chunks.push(nc[k]);
+    }
+  }
+  for (var ci = 1; ci < chunks.length; ci++) {
+    chunks[ci].ofsX += (Math.random() - 0.5) * 60 * GF.S;
+    chunks[ci].ofsY += (Math.random() - 0.5) * 40 * GF.S;
+  }
+  hammers = Math.max(3, HAMMER_BUDGET - 5);
+};
+window._setupForScreenshot = function(level) { window._jumpLevel(level || 2); };
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function panelWidth() { return Math.max(170, Math.min(240, 200 * GF.S)); }
+function panelX() { return GF.W - panelWidth(); }
+function orderRect(idx) {
+  var pw = panelWidth();
+  var px = panelX();
+  var headH = 70 * GF.S;
+  var n = Math.max(orders.length, 1);
+  var availH = GF.H - headH - 30 * GF.S;
+  var rowH = Math.min(availH / n, 110 * GF.S);
+  var rowGap = 8 * GF.S;
+  return {
+    x: px + 10 * GF.S,
+    y: headH + idx * (rowH + rowGap),
+    w: pw - 20 * GF.S,
+    h: rowH,
+  };
+}
+
+function handlePointerDown(x, y) {
+  pointer.x = x; pointer.y = y; pointer.down = true;
+
+  if (gs === 'MENU' && endButton) {
+    if (x >= endButton.x && x <= endButton.x + endButton.w &&
+        y >= endButton.y && y <= endButton.y + endButton.h) {
+      startGame();
+      return;
+    }
+  }
+  if (gs === 'GAMEOVER' && endButton) {
+    if (x >= endButton.x && x <= endButton.x + endButton.w &&
+        y >= endButton.y && y <= endButton.y + endButton.h) {
+      startGame();
+      return;
+    }
+  }
+  if (gs === 'WON' && endButton) {
+    if (x >= endButton.x && x <= endButton.x + endButton.w &&
+        y >= endButton.y && y <= endButton.y + endButton.h) {
+      startGame();
+      return;
+    }
+  }
+  if (gs === 'LEVELEND' && endButton) {
+    if (x >= endButton.x && x <= endButton.x + endButton.w &&
+        y >= endButton.y && y <= endButton.y + endButton.h) {
+      nextRound();
+      return;
+    }
+  }
+
+  if (gs !== 'PLAYING') return;
+
+  if (helpVisible) { helpVisible = false; return; }
+
+  for (var i = 0; i < hudButtons.length; i++) {
+    var b = hudButtons[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; }
+  }
+
+  // Try fault edge click
+  if (hammers > 0) {
+    var bestEdge = null, bestD = 18 * GF.S;
+    var bestChunk = null;
+    for (var ci = 0; ci < chunks.length; ci++) {
+      var c = chunks[ci];
+      if (c.tileIds.length < 2) continue;
+      var edges = chunkInternalEdges(c);
+      for (var ei = 0; ei < edges.length; ei++) {
+        var e = edges[ei];
+        var ax = e.edge[0][0] + c.ofsX, ay = e.edge[0][1] + c.ofsY;
+        var bx = e.edge[1][0] + c.ofsX, by = e.edge[1][1] + c.ofsY;
+        var d = distToSeg(x, y, ax, ay, bx, by);
+        if (d < bestD) { bestD = d; bestEdge = e; bestChunk = c; }
+      }
+    }
+    if (bestEdge && bestChunk) {
+      var newPieces = splitChunk(bestChunk, bestEdge.a, bestEdge.b);
+      hammers--;
+      var midx = (bestEdge.edge[0][0] + bestEdge.edge[1][0]) / 2 + bestChunk.ofsX;
+      var midy = (bestEdge.edge[0][1] + bestEdge.edge[1][1]) / 2 + bestChunk.ofsY;
+      GF.spawnParticles(midx, midy, '#e8f4ff', 22);
+      GF.spawnFloat(midx, midy - 18 * GF.S, GF.t('crack'), '#bdf');
+      GF.setShake(0.45);
+      if (newPieces) {
+        for (var ki = 0; ki < newPieces.length; ki++) chunks.push(newPieces[ki]);
+      }
+      return;
+    }
+  }
+
+  // Drag chunk
+  for (var ci2 = chunks.length - 1; ci2 >= 0; ci2--) {
+    var c2 = chunks[ci2];
+    if (chunkContainsPoint(c2, x, y)) {
+      dragChunk = c2;
+      c2.dragging = true;
+      var ctr = chunkCentroid(c2);
+      c2.dragOffX = x - ctr[0];
+      c2.dragOffY = y - ctr[1];
+      return;
+    }
+  }
+}
+
+function handlePointerMove(x, y) {
+  pointer.x = x; pointer.y = y;
+  if (dragChunk) {
+    var ctr = chunkCentroid(dragChunk);
+    var targetX = x - dragChunk.dragOffX;
+    var targetY = y - dragChunk.dragOffY;
+    dragChunk.ofsX += (targetX - ctr[0]);
+    dragChunk.ofsY += (targetY - ctr[1]);
+    dragChunk.vx = 0; dragChunk.vy = 0;
+  }
+}
+
+function handlePointerUp(x, y) {
+  pointer.down = false;
+  if (!dragChunk) return;
+  var c = dragChunk;
+  c.dragging = false;
+  for (var i = 0; i < orders.length; i++) {
+    if (orders[i].filled) continue;
+    var rct = orderRect(i);
+    if (x >= rct.x && x <= rct.x + rct.w && y >= rct.y && y <= rct.y + rct.h) {
+      attemptDeliver(c, i);
+      break;
+    }
+  }
+  c.vx *= 0.5; c.vy *= 0.5;
+  dragChunk = null;
+}
+
+function chunkContainsPoint(c, x, y) {
+  for (var i = 0; i < c.tileIds.length; i++) {
+    var t = tileById(c.tileIds[i]);
+    if (!t) continue;
+    var poly = [];
+    for (var j = 0; j < t.poly.length; j++) {
+      poly.push([t.poly[j][0] + c.ofsX, t.poly[j][1] + c.ofsY]);
+    }
+    if (pointInPoly(x, y, poly)) return true;
+  }
+  return false;
+}
+
+function attemptDeliver(c, orderIdx) {
+  var ord = orders[orderIdx];
+  var diff = Math.abs(c.kg - ord.target);
+  if (diff <= WEIGHT_TOLERANCE) {
+    ord.filled = true;
+    ord.deliveredKg = c.kg;
+    ord.flash = 1;
+    orders_filled++;
+    var pts = 10 + Math.max(0, 5 - diff) * 2;
+    score += pts;
+    var rct = orderRect(orderIdx);
+    GF.spawnParticles(rct.x + rct.w / 2, rct.y + rct.h / 2, '#5dffb0', 30);
+    GF.spawnFloat(rct.x + rct.w / 2, rct.y + 20 * GF.S, '+' + pts, '#5dffb0');
+    GF.setShake(0.3);
+    msg = { text: GF.t('delivered'), color: '#5dffb0', until: performance.now() + 900 };
+    var idx = chunks.indexOf(c);
+    if (idx >= 0) chunks.splice(idx, 1);
+    for (var i = 0; i < c.tileIds.length; i++) {
+      var t = tileById(c.tileIds[i]);
+      if (t) t.chunkId = -999;
+    }
+    if (orders_filled >= orders.length) {
+      gs = 'LEVELEND';
+      GF.gameEnded();
+    }
+  } else {
+    ord.flash = -1;
+    msg = { text: GF.t('no_match') + ' (' + c.kg + GF.t('kg') + ' / ' + ord.target + GF.t('kg') + ')', color: '#ff6b8a', until: performance.now() + 1100 };
+    var rct2 = orderRect(orderIdx);
+    GF.spawnParticles(rct2.x + rct2.w / 2, rct2.y + rct2.h / 2, '#ff6b8a', 18);
+    GF.setShake(0.2);
+    c.vx = -120 * GF.S;
+    c.vy = (Math.random() - 0.5) * 80 * GF.S;
+  }
+}
+
+GF.canvas.addEventListener('mousedown', function(e) {
+  e.preventDefault();
+  handlePointerDown(e.clientX, e.clientY);
+});
+GF.canvas.addEventListener('mousemove', function(e) {
+  if (e.buttons || pointer.down) handlePointerMove(e.clientX, e.clientY);
+  else { pointer.x = e.clientX; pointer.y = e.clientY; }
+});
+GF.canvas.addEventListener('mouseup', function(e) {
+  handlePointerUp(e.clientX, e.clientY);
+});
+GF.canvas.addEventListener('touchstart', function(e) {
+  if (!e.changedTouches.length) return;
+  e.preventDefault();
+  var t = e.changedTouches[0];
+  handlePointerDown(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function(e) {
+  if (!e.changedTouches.length) return;
+  e.preventDefault();
+  var t = e.changedTouches[0];
+  handlePointerMove(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchend', function(e) {
+  if (!e.changedTouches.length) return;
+  e.preventDefault();
+  var t = e.changedTouches[0];
+  handlePointerUp(t.clientX, t.clientY);
+}, { passive: false });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  seaTime += dt;
+  if (gs !== 'PLAYING') return;
+
+  for (var i = 0; i < chunks.length; i++) {
+    var c = chunks[i];
+    if (c === dragChunk) continue;
+    c.ofsX += c.vx * dt;
+    c.ofsY += c.vy * dt;
+    c.vx *= 0.99;
+    c.vy *= 0.99;
+    c.vx += (Math.random() - 0.5) * 4 * GF.S * dt;
+    c.vy += (Math.random() - 0.5) * 4 * GF.S * dt;
+    var sp = Math.hypot(c.vx, c.vy);
+    var maxSp = DRIFT_SPEED * GF.S * 1.5;
+    if (sp > maxSp) { c.vx = c.vx / sp * maxSp; c.vy = c.vy / sp * maxSp; }
+  }
+
+  // Lost-to-ocean
+  var leftBound = -120 * GF.S;
+  var topBound = -120 * GF.S;
+  var bottomBound = GF.H + 120 * GF.S;
+  for (var li = chunks.length - 1; li >= 0; li--) {
+    var cc = chunks[li];
+    var ctr = chunkCentroid(cc);
+    if (ctr[0] < leftBound || ctr[1] < topBound || ctr[1] > bottomBound) {
+      chunks_lost++;
+      GF.spawnFloat(GF.W * 0.2, GF.H * 0.5, GF.t('drift'), '#ff8aa0');
+      chunks.splice(li, 1);
+      if (chunks_lost >= MAX_LOST) { gameOver(); return; }
+    }
+  }
+
+  // Hammer-exhaustion loss check
+  if (hammers <= 0 && orders_filled < orders.length) {
+    var canStillWin = false;
+    for (var ci3 = 0; ci3 < chunks.length; ci3++) {
+      var ch = chunks[ci3];
+      for (var oi = 0; oi < orders.length; oi++) {
+        if (orders[oi].filled) continue;
+        if (Math.abs(ch.kg - orders[oi].target) <= WEIGHT_TOLERANCE) { canStillWin = true; break; }
+      }
+      if (canStillWin) break;
+    }
+    if (!canStillWin) gameOver();
+  }
+
+  if (msg && msg.until && performance.now() > msg.until) msg = null;
+
+  for (var oi2 = 0; oi2 < orders.length; oi2++) {
+    if (Math.abs(orders[oi2].flash) > 0.01) orders[oi2].flash *= 0.92;
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  drawSea(ctx);
+
+  if (gs === 'PLAYING' || gs === 'LEVELEND') {
+    drawChunks(ctx);
+    drawOrderPanel(ctx);
+    drawHUD(ctx);
+  }
+
+  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'LEVELEND') drawLevelEnd(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if (gs === 'WON') drawWon(ctx);
+
+  if (helpVisible) drawHelpOverlay(ctx);
+}
+
+function drawSea(ctx) {
+  var grad = ctx.createLinearGradient(0, 0, 0, GF.H);
+  grad.addColorStop(0, '#0d2742');
+  grad.addColorStop(0.5, '#0a3559');
+  grad.addColorStop(1, '#0a1a2c');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  ctx.strokeStyle = 'rgba(170,210,255,0.06)';
+  ctx.lineWidth = 1;
+  for (var i = 0; i < 12; i++) {
+    var y = (i / 12) * GF.H + Math.sin(seaTime * 0.7 + i) * 6 * GF.S;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    for (var x = 0; x <= GF.W; x += 40) {
+      ctx.lineTo(x, y + Math.sin(x * 0.02 + seaTime + i) * 3 * GF.S);
+    }
+    ctx.stroke();
+  }
+}
+
+function drawChunks(ctx) {
+  var now = performance.now();
+  // Shadows
+  for (var i = 0; i < chunks.length; i++) {
+    var c = chunks[i];
+    ctx.save();
+    ctx.translate(c.ofsX + 5 * GF.S, c.ofsY + 8 * GF.S);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    drawChunkShape(ctx, c);
+    ctx.restore();
+  }
+
+  // Bodies
+  for (var i2 = 0; i2 < chunks.length; i2++) {
+    var c2 = chunks[i2];
+    ctx.save();
+    ctx.translate(c2.ofsX, c2.ofsY);
+
+    for (var ti = 0; ti < c2.tileIds.length; ti++) {
+      var t = tileById(c2.tileIds[ti]);
+      if (!t) continue;
+      var p = t.poly;
+      ctx.beginPath();
+      ctx.moveTo(p[0][0], p[0][1]);
+      for (var j = 1; j < p.length; j++) ctx.lineTo(p[j][0], p[j][1]);
+      ctx.closePath();
+      var ctd = polyCentroid(p);
+      var grad = ctx.createLinearGradient(0, ctd[1] - 30 * GF.S, 0, ctd[1] + 30 * GF.S);
+      grad.addColorStop(0, '#e9f6ff');
+      grad.addColorStop(1, c2.color);
+      ctx.fillStyle = grad;
+      ctx.fill();
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(80,130,170,0.28)';
+      ctx.stroke();
+    }
+
+    // Outline (boundary trace = stroke each tile)
+    ctx.lineWidth = 2.5 * GF.S;
+    ctx.strokeStyle = c2.dragging ? '#ffcb5c' : (c2.flashUntil > now ? '#ffffff' : '#7fb8d8');
+    if (c2.flashUntil > now) {
+      ctx.shadowColor = '#fff'; ctx.shadowBlur = 18 * GF.S;
+    }
+    for (var ti2 = 0; ti2 < c2.tileIds.length; ti2++) {
+      var t2 = tileById(c2.tileIds[ti2]);
+      if (!t2) continue;
+      var p2 = t2.poly;
+      ctx.beginPath();
+      ctx.moveTo(p2[0][0], p2[0][1]);
+      for (var j2 = 1; j2 < p2.length; j2++) ctx.lineTo(p2[j2][0], p2[j2][1]);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // Internal fault edges (clickable, glowing)
+    if (gs === 'PLAYING' && c2.tileIds.length > 1) {
+      var edges = chunkInternalEdges(c2);
+      ctx.lineWidth = 2.5 * GF.S;
+      for (var ei = 0; ei < edges.length; ei++) {
+        var e = edges[ei];
+        var pulse = 0.5 + 0.5 * Math.sin(seaTime * 3 + ei);
+        ctx.strokeStyle = 'rgba(120,210,255,' + (0.5 + pulse * 0.4) + ')';
+        ctx.shadowColor = 'rgba(140,220,255,0.7)';
+        ctx.shadowBlur = 6 * GF.S * pulse;
+        ctx.beginPath();
+        ctx.moveTo(e.edge[0][0], e.edge[0][1]);
+        ctx.lineTo(e.edge[1][0], e.edge[1][1]);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    // Weight label at chunk centre (in chunk-local coords)
+    var localCtr = [0, 0];
+    var ww = 0;
+    for (var k = 0; k < c2.tileIds.length; k++) {
+      var tk = tileById(c2.tileIds[k]);
+      if (!tk) continue;
+      var ctk = polyCentroid(tk.poly);
+      localCtr[0] += ctk[0] * tk.area;
+      localCtr[1] += ctk[1] * tk.area;
+      ww += tk.area;
+    }
+    if (ww > 0) { localCtr[0] /= ww; localCtr[1] /= ww; }
+
+    var fs = GF.clamp(15 * GF.S, 11, 22);
+    ctx.font = 'bold ' + fs + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    var label = c2.kg + GF.t('kg');
+    ctx.fillStyle = 'rgba(8,18,28,0.78)';
+    var lw = ctx.measureText(label).width;
+    var lh = fs + 6;
+    GF.rr(ctx, localCtr[0] - lw / 2 - 8, localCtr[1] - lh / 2, lw + 16, lh, lh / 2);
+    ctx.fill();
+    ctx.fillStyle = '#e8f4ff';
+    ctx.fillText(label, localCtr[0], localCtr[1]);
+
+    ctx.restore();
+  }
+}
+
+function drawChunkShape(ctx, c) {
+  for (var ti = 0; ti < c.tileIds.length; ti++) {
+    var t = tileById(c.tileIds[ti]);
+    if (!t) continue;
+    var p = t.poly;
+    ctx.beginPath();
+    ctx.moveTo(p[0][0], p[0][1]);
+    for (var j = 1; j < p.length; j++) ctx.lineTo(p[j][0], p[j][1]);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawOrderPanel(ctx) {
+  var pw = panelWidth();
+  var px = panelX();
+
+  var grad = ctx.createLinearGradient(px, 0, px + pw, 0);
+  grad.addColorStop(0, 'rgba(8,18,30,0.4)');
+  grad.addColorStop(1, 'rgba(8,18,30,0.85)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(px, 0, pw, GF.H);
+  ctx.strokeStyle = 'rgba(140,200,240,0.3)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, GF.H); ctx.stroke();
+
+  var fs = GF.clamp(18 * GF.S, 13, 24);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#cfe7ff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('orders'), px + pw / 2, 30 * GF.S);
+
+  for (var i = 0; i < orders.length; i++) {
+    var ord = orders[i];
+    var rct = orderRect(i);
+    var bg = ord.filled ? 'rgba(60,180,120,0.45)' : 'rgba(50,90,130,0.55)';
+    if (ord.flash > 0.01) bg = 'rgba(80,255,176,0.7)';
+    if (ord.flash < -0.01) bg = 'rgba(255,90,120,0.7)';
+    GF.rr(ctx, rct.x, rct.y, rct.w, rct.h, 12 * GF.S);
+    ctx.fillStyle = bg;
+    ctx.fill();
+    ctx.lineWidth = 2 * GF.S;
+    ctx.strokeStyle = ord.filled ? '#5dffb0' : 'rgba(180,220,255,0.6)';
+    ctx.stroke();
+
+    var bigFs = GF.clamp(28 * GF.S, 18, 36);
+    ctx.font = 'bold ' + bigFs + 'px sans-serif';
+    ctx.fillStyle = ord.filled ? '#0c2818' : '#fff';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(ord.target + ' ' + GF.t('kg'), rct.x + rct.w / 2, rct.y + rct.h / 2 - 6 * GF.S);
+
+    var smallFs = GF.clamp(12 * GF.S, 10, 16);
+    ctx.font = smallFs + 'px sans-serif';
+    ctx.fillStyle = ord.filled ? '#0c2818' : 'rgba(220,235,255,0.7)';
+    if (ord.filled) {
+      ctx.fillText('+' + ord.deliveredKg + ' ' + GF.t('kg'), rct.x + rct.w / 2, rct.y + rct.h / 2 + bigFs * 0.5);
+    } else {
+      ctx.fillText('+-' + WEIGHT_TOLERANCE + ' ' + GF.t('kg'), rct.x + rct.w / 2, rct.y + rct.h / 2 + bigFs * 0.5);
+    }
+  }
+}
+
+function drawHUD(ctx) {
+  hudButtons = [];
+  var fs = GF.clamp(16 * GF.S, 12, 22);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = 'rgba(8,16,26,0.55)';
+  GF.rr(ctx, 8 * GF.S, 8 * GF.S, 220 * GF.S, 38 * GF.S, 10 * GF.S);
+  ctx.fill();
+  ctx.fillStyle = '#e8f4ff';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('hammers') + ': ' + hammers, 18 * GF.S, 27 * GF.S);
+
+  ctx.fillStyle = 'rgba(8,16,26,0.55)';
+  GF.rr(ctx, 8 * GF.S, 50 * GF.S, 220 * GF.S, 32 * GF.S, 10 * GF.S);
+  ctx.fill();
+  ctx.fillStyle = '#cfe7ff';
+  var smallFs = GF.clamp(13 * GF.S, 10, 18);
+  ctx.font = smallFs + 'px sans-serif';
+  ctx.fillText(GF.t('round') + ' ' + round + '/' + MAX_ROUNDS + '   ' + GF.t('lost') + ' ' + chunks_lost + '/' + MAX_LOST, 18 * GF.S, 66 * GF.S);
+
+  ctx.fillStyle = 'rgba(8,16,26,0.55)';
+  var sw = 150 * GF.S;
+  GF.rr(ctx, panelX() - sw - 20 * GF.S, 8 * GF.S, sw, 38 * GF.S, 10 * GF.S);
+  ctx.fill();
+  ctx.fillStyle = '#ffd86b';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(GF.t('score') + ': ' + score, panelX() - sw / 2 - 20 * GF.S, 27 * GF.S);
+
+  // Help button (?)
+  var btnSize = 36 * GF.S;
+  var btnX = panelX() - btnSize - 10 * GF.S;
+  var btnY = 56 * GF.S;
+  ctx.fillStyle = 'rgba(40,80,120,0.7)';
+  GF.rr(ctx, btnX, btnY, btnSize, btnSize, btnSize / 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(180,220,255,0.7)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', btnX + btnSize / 2, btnY + btnSize / 2);
+  hudButtons.push({ x: btnX, y: btnY, w: btnSize, h: btnSize, fn: function() { helpVisible = true; } });
+
+  if (msg) {
+    var mfs = GF.clamp(20 * GF.S, 14, 28);
+    ctx.font = 'bold ' + mfs + 'px sans-serif';
+    var mw = ctx.measureText(msg.text).width + 30 * GF.S;
+    var mx = (panelX() - mw) / 2;
+    var my = GF.H - 60 * GF.S;
+    ctx.fillStyle = 'rgba(8,18,28,0.78)';
+    GF.rr(ctx, mx, my, mw, 40 * GF.S, 12 * GF.S);
+    ctx.fill();
+    ctx.fillStyle = msg.color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(msg.text, mx + mw / 2, my + 20 * GF.S);
+  }
+}
+
+function drawMenu(ctx) {
+  ctx.fillStyle = 'rgba(6,18,32,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(46 * GF.S, 26, 64);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#cfe7ff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = '#7fc8ff'; ctx.shadowBlur = 24;
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 180 * GF.S);
+  ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(18 * GF.S, 12, 22);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#9fc8ee';
+  ctx.fillText(GF.t('sub'), GF.cx, GF.cy - 145 * GF.S);
+
+  drawTutorialLines(ctx, GF.cy - 105 * GF.S);
+
+  var btnW = GF.clamp(260 * GF.S, 180, 320);
+  var btnH = GF.clamp(56 * GF.S, 44, 72);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 110 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3bbfff'); grad.addColorStop(1, '#1a78c2');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+  endButton = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+  if (best > 0) {
+    ctx.font = GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+    ctx.fillStyle = '#9fc8ee';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 30 * GF.S);
+  }
+}
+
+function drawTutorialLines(ctx, startY) {
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var lineFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = lineFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#cfe7ff';
+  var lh = lineFs * 1.55;
+  var rowOffset = 0;
+  for (var i = 0; i < lines.length; i++) {
+    var maxW = GF.W * 0.88;
+    var wrapped = wrapText(ctx, lines[i], maxW);
+    for (var w = 0; w < wrapped.length; w++) {
+      ctx.fillText(wrapped[w], GF.cx, startY + rowOffset * lh);
+      rowOffset++;
+    }
+    rowOffset += 0.4;
+  }
+}
+
+function wrapText(ctx, text, maxW) {
+  var words = text.split(' ');
+  var lines = [];
+  var cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && cur) {
+      lines.push(cur);
+      cur = words[i];
+    } else {
+      cur = test;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function drawHelpOverlay(ctx) {
+  ctx.fillStyle = 'rgba(6,18,32,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(28 * GF.S, 20, 40);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#cfe7ff';
+  ctx.textAlign = 'center';
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 140 * GF.S);
+  drawTutorialLines(ctx, GF.cy - 90 * GF.S);
+  var fs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillStyle = '#9fc8ee';
+  ctx.fillText('tap to dismiss', GF.cx, GF.H - 30 * GF.S);
+}
+
+function drawLevelEnd(ctx) {
+  ctx.fillStyle = 'rgba(6,18,32,0.85)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(40 * GF.S, 24, 56);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#5dffb0';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = '#5dffb0'; ctx.shadowBlur = 24;
+  ctx.fillText(GF.t('levelend'), GF.cx, GF.cy - 60 * GF.S);
+  ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(18 * GF.S, 12, 22);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#cfe7ff';
+  ctx.fillText(GF.t('round') + ' ' + round + '/' + MAX_ROUNDS + ' • ' + GF.t('score') + ': ' + score, GF.cx, GF.cy - 20 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(54 * GF.S, 40, 70);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 30 * GF.S;
+  var label = round >= MAX_ROUNDS ? '✓' : GF.t('next');
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3bbfff'); grad.addColorStop(1, '#1a78c2');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, GF.cx, btnY + btnH / 2);
+  endButton = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawGameOver(ctx) {
+  ctx.fillStyle = 'rgba(20,8,12,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(40 * GF.S, 26, 56);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ff8aa0';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = '#ff8aa0'; ctx.shadowBlur = 22;
+  ctx.fillText(GF.t('gameover'), GF.cx, GF.cy - 50 * GF.S);
+  ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(18 * GF.S, 12, 22);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#dab';
+  ctx.fillText(GF.t('score') + ': ' + score + '   ' + GF.t('best') + ': ' + best, GF.cx, GF.cy - 10 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(54 * GF.S, 40, 70);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 30 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ff7e8b'); grad.addColorStop(1, '#a23a4a');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+  endButton = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawWon(ctx) {
+  ctx.fillStyle = 'rgba(8,30,40,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(44 * GF.S, 28, 60);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#5dffb0';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = '#5dffb0'; ctx.shadowBlur = 28;
+  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 60 * GF.S);
+  ctx.shadowBlur = 0;
+
+  var subFs = GF.clamp(20 * GF.S, 14, 26);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#cfe7ff';
+  ctx.fillText(GF.t('score') + ': ' + score + '   ' + GF.t('best') + ': ' + best, GF.cx, GF.cy - 20 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(54 * GF.S, 40, 70);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 30 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3bbfff'); grad.addColorStop(1, '#1a78c2');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+  endButton = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+// ── EXPOSE STATE FOR POST-BUILD-TESTER ───────────────────────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    round: round,
+    score: score,
+    hammers: hammers,
+    chunks_lost: chunks_lost,
+    orders: orders.length,
+    orders_filled: orders_filled,
+    chunks: chunks.length,
+  };
+});
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 960,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'glacier_splitter',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('glacier_splitter_best') || '0') || 0; } catch (e) {}
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

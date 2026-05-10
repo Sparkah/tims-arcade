@@ -57,6 +57,9 @@ var STRINGS = {
     unlockAt: 'Survive',
     unlocked: 'UNLOCKED!',
     closeCalls: 'CLOSE CALLS',
+    combo: 'COMBO',
+    bestCombo: 'BEST COMBO',
+    comboBonus: 'COMBO BONUS',
   },
   ru: {
     title: 'Увороты Дня',
@@ -77,6 +80,9 @@ var STRINGS = {
     unlockAt: 'Выживи',
     unlocked: 'ОТКРЫТ!',
     closeCalls: 'НА ВОЛОСОК',
+    combo: 'КОМБО',
+    bestCombo: 'ЛУЧШЕЕ КОМБО',
+    comboBonus: 'БОНУС КОМБО',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -157,6 +163,14 @@ var closeCallCount = 0;         // close calls accumulated this run
 var bestCloseCalls = 0;         // best close-calls in any single run (persisted)
 var timeDilation = 1;           // 1.0 normal, dips below on close call (micro slow-mo)
 var dilationTimer = 0;          // seconds remaining in dilation
+// iter#4 — Close-call combo meter (chain near-misses for score multiplier)
+var COMBO_WINDOW = 1.5;         // seconds between close calls to keep combo alive
+var comboCount = 0;             // current consecutive close-call streak
+var comboTimer = 0;             // seconds remaining before combo resets
+var comboBonus = 0;             // accumulated bonus score from combo multipliers
+var maxComboThisRun = 0;        // peak streak this run (reported on game-over)
+var bestComboEver = 0;          // best combo ever (persisted)
+var comboFlash = 0;             // 0..1 visual pulse on combo pill, decays
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
@@ -294,6 +308,7 @@ function startRun() {
   newlyUnlockedSkin = null;
   closeCallCount = 0;
   timeDilation = 1; dilationTimer = 0;
+  comboCount = 0; comboTimer = 0; comboBonus = 0; maxComboThisRun = 0; comboFlash = 0;
   gs = 'PLAYING';
   // Warm/refresh live-rank board in the background — non-blocking.
   fetchLeaderboard();
@@ -370,6 +385,13 @@ function update(dt) {
   // Apply dilation to bullet motion (player keeps full responsiveness)
   var bdt = dt * timeDilation;
 
+  // iter#4 — combo meter decay (chain expires after COMBO_WINDOW with no close call)
+  if (comboTimer > 0) {
+    comboTimer -= dt;
+    if (comboTimer <= 0) { comboCount = 0; comboTimer = 0; }
+  }
+  if (comboFlash > 0) comboFlash = Math.max(0, comboFlash - dt * 3);
+
   var now = performance.now() / 1000;
   elapsed = now - startTime;
   // Recompute projected daily rank ~4×/sec (cheap; just compares numbers)
@@ -378,7 +400,7 @@ function update(dt) {
     liveRank = computeLiveRank(Math.floor(elapsed * 10));
   }
   if (elapsed >= GAME_DURATION) {
-    score = Math.floor(elapsed * 10);
+    score = Math.floor(elapsed * 10) + Math.floor(comboBonus);
     onRunEnded(true);
     return;
   }
@@ -450,6 +472,21 @@ function update(dt) {
       spawnFloat((player.x + b.x)/2, (player.y + b.y)/2 - 6*S, '!', '#fff');
       // Subtle micro slow-mo so the player feels the dodge
       dilationTimer = 0.09; // ~90 ms
+
+      // iter#4 — close-call combo meter (chain near-misses for multiplier)
+      comboCount++;
+      comboTimer = COMBO_WINDOW;
+      comboFlash = 1;
+      if (comboCount > maxComboThisRun) maxComboThisRun = comboCount;
+      // Award bonus only from x2 onward — x1 is just the close call itself
+      if (comboCount >= 2) {
+        var mult = comboCount;
+        comboBonus += mult; // small per-tick bonus that scales with streak
+        if (comboCount === 2 || comboCount === 5 || comboCount === 10 || comboCount === 20) {
+          spawnFloat(player.x, player.y - 28*S, '×' + comboCount + '!', '#FFD700');
+          spawnParticles(player.x, player.y, '#FFD700', 10);
+        }
+      }
     }
     if (dist < collideR) {
       if (window._invincible) {
@@ -457,7 +494,7 @@ function update(dt) {
         bullets.splice(i, 1);
         continue;
       }
-      score = Math.floor(elapsed * 10);
+      score = Math.floor(elapsed * 10) + Math.floor(comboBonus);
       spawnParticles(player.x, player.y, '#fff', 30);
       spawnParticles(player.x, player.y, '#e74c3c', 18);
       screenShake = 1.0;
@@ -511,6 +548,16 @@ function onRunEnded(survived) {
       bestCloseCalls = closeCallCount;
     } else {
       bestCloseCalls = prevBestCC;
+    }
+  } catch(e) {}
+  // iter#4 — persist all-time best combo (peak streak in any single run)
+  try {
+    var prevBestCombo = parseInt(localStorage.getItem('dodge_best_combo')||'0')||0;
+    if (maxComboThisRun > prevBestCombo) {
+      localStorage.setItem('dodge_best_combo', String(maxComboThisRun));
+      bestComboEver = maxComboThisRun;
+    } else {
+      bestComboEver = prevBestCombo;
     }
   } catch(e) {}
   // iter#2 — check skin unlocks based on seconds survived this run
@@ -832,7 +879,7 @@ function drawHUD() {
   ctx.fillStyle = '#557'; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'right';
   ctx.fillText(t('score'), W-pad, bh*0.42);
   ctx.fillStyle = '#FFD700'; ctx.font = 'bold '+bigFs+'px sans-serif';
-  ctx.fillText(Math.floor(elapsed * 10), W-pad, fy);
+  ctx.fillText(Math.floor(elapsed * 10) + Math.floor(comboBonus), W-pad, fy);
 
   // bottom timer bar
   var tw = clamp(W*0.5, 200, 600), th = 6*S;
@@ -869,6 +916,45 @@ function drawHUD() {
     ctx.fillStyle = liveRank === 1 ? '#FFD700' : '#48c9b0';
     ctx.textAlign = 'right';
     ctx.fillText(pillTxt, px + pw - clamp(10*S, 8, 14), py + ph/2);
+    ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
+  }
+
+  // ── Combo pill (iter#4) — visible only while a streak is alive ──────────
+  // Sits on the right edge under the HUD, mirrors the live-rank pill on the
+  // left/center. Width pulses on each new close-call (comboFlash decays).
+  if (comboCount >= 2) {
+    var cFs = clamp(13*S, 11, 17);
+    var cLblFs = clamp(10*S, 8, 13);
+    ctx.font = 'bold ' + cFs + 'px sans-serif';
+    var valTxt = '×' + comboCount;
+    var cw = ctx.measureText(valTxt).width + clamp(58*S, 44, 76);
+    var ch = clamp(24*S, 20, 32);
+    var pulse = 1 + comboFlash * 0.12;
+    var cwp = cw * pulse, chp = ch * pulse;
+    var cxp = W - pad - cwp, cyp = bh + 6*S - (chp - ch)/2;
+    rr(ctx, cxp, cyp, cwp, chp, chp/2);
+    var hot = comboCount >= 5;
+    ctx.fillStyle = hot ? 'rgba(255,90,140,0.20)' : 'rgba(255,215,0,0.16)';
+    ctx.strokeStyle = hot ? 'rgba(255,90,140,0.7)' : 'rgba(255,215,0,0.6)';
+    ctx.lineWidth = 1.2*S;
+    ctx.fill(); ctx.stroke();
+    ctx.font = 'bold ' + cLblFs + 'px sans-serif';
+    ctx.fillStyle = '#776';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('combo'), cxp + clamp(10*S, 8, 14), cyp + chp/2);
+    ctx.font = 'bold ' + cFs + 'px sans-serif';
+    ctx.fillStyle = hot ? '#ff5a8c' : '#FFD700';
+    ctx.textAlign = 'right';
+    ctx.fillText(valTxt, cxp + cwp - clamp(10*S, 8, 14), cyp + chp/2);
+    // tiny depleting timer arc under the pill
+    var frac = clamp(comboTimer / COMBO_WINDOW, 0, 1);
+    var bw = cwp * 0.7, bh2 = 2.5*S;
+    var bx = cxp + (cwp - bw)/2, by = cyp + chp + 3*S;
+    rr(ctx, bx, by, bw, bh2, bh2/2);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fill();
+    rr(ctx, bx, by, bw * frac, bh2, bh2/2);
+    ctx.fillStyle = hot ? '#ff5a8c' : '#FFD700'; ctx.fill();
     ctx.textBaseline = 'alphabetic';
     ctx.textAlign = 'left';
   }
@@ -1069,12 +1155,18 @@ function frame(ts) {
     drawOverlay(t('title'), t('sub'), t('play'), function() { startRun(); }, t('sub2'));
   }
   if (gs === 'GAMEOVER') {
+    var comboLine = (maxComboThisRun >= 2)
+      ? ('   ·   '+t('combo')+' ×'+maxComboThisRun+(bestComboEver>0?(' (best ×'+bestComboEver+')'):''))
+      : '';
     drawOverlay(t('youDied'), t('survived')+' '+elapsed.toFixed(1)+'s', t('retry'),
-      function() { startRun(); }, t('score')+': '+score+'   ·   '+t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):''));
+      function() { startRun(); }, t('score')+': '+score+'   ·   '+t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):'')+comboLine);
   }
   if (gs === 'CLEARED') {
+    var comboLineC = (maxComboThisRun >= 2)
+      ? ('   ·   '+t('combo')+' ×'+maxComboThisRun+(bestComboEver>0?(' (best ×'+bestComboEver+')'):''))
+      : '';
     drawOverlay(t('cleared'), t('score')+': '+score, t('retry'),
-      function() { startRun(); }, t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):''));
+      function() { startRun(); }, t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):'')+comboLineC);
   }
 
   requestAnimationFrame(frame);
@@ -1097,6 +1189,7 @@ function boot() {
     todayBest = parseInt(localStorage.getItem('dodge_day_best')||'0')||0;
     allTimeBest = parseInt(localStorage.getItem('dodge_alltime_best')||'0')||0;
     bestCloseCalls = parseInt(localStorage.getItem('dodge_best_closecalls')||'0')||0;
+    bestComboEver = parseInt(localStorage.getItem('dodge_best_combo')||'0')||0;
   } catch(e) {}
   loadSkinState();
   if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
