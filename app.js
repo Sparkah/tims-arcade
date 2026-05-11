@@ -8,6 +8,35 @@ let activeTab = 'top';
 let activeGenre = 'all';
 let searchTerm = '';
 
+// ── Pagination ───────────────────────────────────────────────────────────
+// 30 cards per page. Current page is mirrored in ?page=N so it survives
+// reloads + browser back. Page resets to 1 whenever the user changes the
+// filter set (tab / genre / search), so it never leaves them on a page
+// number that's now empty.
+const PAGE_SIZE = 30;
+// First chunk paints synchronously with eager images + autoplay videos
+// (above-the-fold). Subsequent chunks paint one per idle frame, each with
+// lazy images + IntersectionObserver-hydrated videos — so a 30-card page
+// hands the user something in <16ms and finishes paint in ~5 idle frames.
+const CHUNK_SIZE = 6;
+let currentPage = readPageFromUrl();
+function readPageFromUrl() {
+  const n = parseInt(new URLSearchParams(location.search).get('page') || '1', 10);
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+function setPageInUrl(n) {
+  const url = new URL(location.href);
+  if (n <= 1) url.searchParams.delete('page');
+  else url.searchParams.set('page', String(n));
+  history.replaceState(null, '', url.toString());
+}
+function resetPage() {
+  if (currentPage !== 1) {
+    currentPage = 1;
+    setPageInUrl(1);
+  }
+}
+
 // Language detection — 6 supported: en (default), ru, es, pt, tr, ar.
 // Override via ?lang=<code> or localStorage.lang. navigator.language picks
 // the best match by 2-letter prefix; unknown languages fall through to en.
@@ -42,12 +71,13 @@ if (LANG === 'ar') document.documentElement.setAttribute('dir', 'rtl');
 function gameTitle(g) { return g[T.title] || g.title || ''; }
 function gameHook(g)  { return g[T.hook]  || g.hook  || ''; }
 
-const grid     = document.getElementById('grid');
-const empty    = document.getElementById('empty');
-const tabs     = document.getElementById('tabs');
-const genres   = document.getElementById('genres');
-const featured = document.getElementById('featured');
-const search   = document.getElementById('search');
+const grid       = document.getElementById('grid');
+const empty      = document.getElementById('empty');
+const tabs       = document.getElementById('tabs');
+const genres     = document.getElementById('genres');
+const featured   = document.getElementById('featured');
+const search     = document.getElementById('search');
+const pagination = document.getElementById('pagination');
 
 // ── Boot ──────────────────────────────────────────────────────────────────
 init();
@@ -134,6 +164,7 @@ function attachEvents() {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     btn.classList.add('active');
     activeTab = btn.dataset.tab;
+    resetPage();
     if (window.posthog) posthog.capture('tab_changed', { tab: activeTab });
     render();
   });
@@ -143,6 +174,7 @@ function attachEvents() {
     document.querySelectorAll('.genre').forEach(g => g.classList.remove('active'));
     btn.classList.add('active');
     activeGenre = btn.dataset.genre;
+    resetPage();
     if (window.posthog) posthog.capture('genre_filter_applied', { genre: activeGenre });
     render();
   });
@@ -154,7 +186,31 @@ function attachEvents() {
         if (window.posthog) posthog.capture('game_searched', { query_length: searchTerm.length });
       }, 600);
     }
+    resetPage();
     render();
+  });
+  if (pagination) {
+    pagination.addEventListener('click', (e) => {
+      const btn = e.target.closest('.pg-btn');
+      if (!btn || btn.disabled || btn.classList.contains('pg-gap')) return;
+      const p = parseInt(btn.dataset.page, 10);
+      if (!Number.isFinite(p) || p === currentPage) return;
+      currentPage = p;
+      setPageInUrl(p);
+      if (window.posthog) posthog.capture('gallery_page_changed', { page: p });
+      // Cards are positioned below the tabs, so scroll back to the top of
+      // the grid section instead of the page top — keeps tabs in view.
+      const top = grid.getBoundingClientRect().top + window.scrollY - 80;
+      window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+      render();
+    });
+  }
+  window.addEventListener('popstate', () => {
+    const next = readPageFromUrl();
+    if (next !== currentPage) {
+      currentPage = next;
+      render();
+    }
   });
 
   // Reset PostHog identity when user signs out.
@@ -233,63 +289,142 @@ function netScore(g) {
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────
+// Tracks the IntersectionObserver across renders so paginating away mid-paint
+// doesn't leak observers watching cards that no longer exist.
+let _lazyObserver = null;
+
 function render() {
   const featuredSlug = renderFeatured();
   let list = visible();
   if (featuredSlug) list = list.filter(g => g.slug !== featuredSlug);
+
+  // Clamp current page to the filtered list size — if a user lands on
+  // ?page=7 but only 2 pages exist, paginate them back to the last page
+  // instead of showing an empty grid.
+  const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  if (currentPage > totalPages) {
+    currentPage = totalPages;
+    setPageInUrl(currentPage);
+  }
+  const start = (currentPage - 1) * PAGE_SIZE;
+  const pageList = list.slice(start, start + PAGE_SIZE);
+
+  // Tear down any prior observer + clear the grid before repainting.
+  if (_lazyObserver) { _lazyObserver.disconnect(); _lazyObserver = null; }
   grid.innerHTML = '';
+
   if (list.length === 0) {
     empty.classList.remove('hidden');
     empty.innerHTML = emptyMessage();
+    renderPagination(0);
     return;
   }
   empty.classList.add('hidden');
 
-  // Two-pass paint:
-  //   1. First 4 cards render with EAGER images + video previews → visible
-  //      area is interactive immediately.
-  //   2. The rest paint in a single idle batch with LAZY native loading and
-  //      no inline video — videos hydrate per-card when scrolled into view.
-  // Without this, 17+ thumbs (~250KB each) all start downloading at once,
-  // causing the 1-2s hitching Tim observed.
-  const EAGER = 4;
-  const eagerSet = list.slice(0, EAGER);
-  const rest     = list.slice(EAGER);
-  for (let i = 0; i < eagerSet.length; i++) {
-    grid.appendChild(card(eagerSet[i], { eager: true, priority: i < 2 }));
+  // Progressive paint in CHUNK_SIZE batches:
+  //   - Chunk 0 renders synchronously, eager images + autoplay videos +
+  //     fetchpriority="high" on the first 2 thumbs → visible area is
+  //     interactive in <16ms.
+  //   - Subsequent chunks paint one per requestIdleCallback frame with
+  //     lazy images + video slots that hydrate per IntersectionObserver
+  //     when they scroll into view.
+  // Without this, the browser tries to fetch all 30 thumbs at once and
+  // the slow-network user sees a 1-2s blank grid even though the WebP
+  // savings dropped the total bytes 6×.
+  const first = pageList.slice(0, CHUNK_SIZE);
+  for (let i = 0; i < first.length; i++) {
+    grid.appendChild(card(first[i], { eager: true, priority: i < 2 }));
   }
-  if (rest.length === 0) return;
-  const paintRest = () => {
+  const rest = pageList.slice(CHUNK_SIZE);
+  paintChunks(rest, () => hydrateLazyVideos());
+  renderPagination(totalPages);
+}
+
+function paintChunks(rest, done) {
+  if (rest.length === 0) { done(); return; }
+  let cursor = 0;
+  const step = () => {
+    const slice = rest.slice(cursor, cursor + CHUNK_SIZE);
+    if (slice.length === 0) { done(); return; }
     const frag = document.createDocumentFragment();
-    for (const g of rest) frag.appendChild(card(g, { eager: false, priority: false }));
-    grid.appendChild(frag);
-    // Hydrate videos lazily as cards scroll into view.
-    if ('IntersectionObserver' in window) {
-      const obs = new IntersectionObserver((entries) => {
-        for (const ent of entries) {
-          if (!ent.isIntersecting) continue;
-          const slot = ent.target.querySelector('.card-video-slot[data-src]');
-          if (slot) {
-            const v = document.createElement('video');
-            v.className = 'card-video';
-            v.src = slot.dataset.src;
-            v.poster = slot.dataset.poster || '';
-            v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
-            v.preload = 'metadata';
-            v.setAttribute('aria-hidden', 'true');
-            slot.replaceWith(v);
-          }
-          obs.unobserve(ent.target);
-        }
-      }, { rootMargin: '160px 0px' });
-      grid.querySelectorAll('.card[data-lazy="1"]').forEach(c => obs.observe(c));
+    for (const g of slice) {
+      frag.appendChild(card(g, { eager: false, priority: false }));
     }
+    grid.appendChild(frag);
+    cursor += CHUNK_SIZE;
+    if (cursor < rest.length) schedule(step);
+    else done();
   };
-  if ('requestIdleCallback' in window) {
-    requestIdleCallback(paintRest, { timeout: 800 });
-  } else {
-    setTimeout(paintRest, 50);
+  schedule(step);
+}
+
+function schedule(fn) {
+  if ('requestIdleCallback' in window) requestIdleCallback(fn, { timeout: 200 });
+  else setTimeout(fn, 16);
+}
+
+function hydrateLazyVideos() {
+  if (!('IntersectionObserver' in window)) return;
+  _lazyObserver = new IntersectionObserver((entries) => {
+    for (const ent of entries) {
+      if (!ent.isIntersecting) continue;
+      const slot = ent.target.querySelector('.card-video-slot[data-src]');
+      if (slot) {
+        const v = document.createElement('video');
+        v.className = 'card-video';
+        v.src = slot.dataset.src;
+        v.poster = slot.dataset.poster || '';
+        v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
+        v.preload = 'metadata';
+        v.setAttribute('aria-hidden', 'true');
+        slot.replaceWith(v);
+      }
+      _lazyObserver.unobserve(ent.target);
+    }
+  }, { rootMargin: '160px 0px' });
+  grid.querySelectorAll('.card[data-lazy="1"]').forEach(c => _lazyObserver.observe(c));
+}
+
+function renderPagination(totalPages) {
+  if (!pagination) return;
+  if (totalPages <= 1) {
+    pagination.innerHTML = '';
+    pagination.classList.add('hidden');
+    return;
   }
+  pagination.classList.remove('hidden');
+  const parts = [];
+  const prevDisabled = currentPage === 1 ? 'disabled' : '';
+  const nextDisabled = currentPage === totalPages ? 'disabled' : '';
+  parts.push(`<button class="pg-btn pg-prev" data-page="${Math.max(1, currentPage - 1)}" ${prevDisabled} aria-label="Previous page">‹ Prev</button>`);
+  for (const p of pageWindow(currentPage, totalPages)) {
+    if (p === '…') {
+      parts.push(`<span class="pg-gap" aria-hidden="true">…</span>`);
+    } else {
+      const active = p === currentPage ? 'active' : '';
+      const ariaCurrent = p === currentPage ? 'aria-current="page"' : '';
+      parts.push(`<button class="pg-btn pg-num ${active}" data-page="${p}" ${ariaCurrent}>${p}</button>`);
+    }
+  }
+  parts.push(`<button class="pg-btn pg-next" data-page="${Math.min(totalPages, currentPage + 1)}" ${nextDisabled} aria-label="Next page">Next ›</button>`);
+  pagination.innerHTML = parts.join('');
+}
+
+// Compact page window: always include first/last + neighbors of current,
+// fill the rest with … gaps. e.g. 10 pages on page 5 → [1, …, 4, 5, 6, …, 10].
+// Returns a mix of numbers and '…' literals.
+function pageWindow(current, total) {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const keep = new Set([1, total, current, current - 1, current + 1]);
+  const sorted = [...keep].filter(p => p >= 1 && p <= total).sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const p of sorted) {
+    if (p - prev > 1) out.push('…');
+    out.push(p);
+    prev = p;
+  }
+  return out;
 }
 
 function engagementScore(g) {
@@ -302,9 +437,11 @@ function engagementScore(g) {
 }
 
 function renderFeatured() {
-  // Only show on the default top-rated tab with no filters/search applied.
-  // Returns the slug of the featured game so render() can dedupe it from
-  // the card grid below — otherwise the same game appears twice.
+  // Featured runs only on the default top-rated tab with no filters/search.
+  // The hero is painted only on page 1 (it's the headline above the grid),
+  // but we still compute the slug on pages 2+ so render() can dedupe it
+  // from the grid — otherwise the featured game would re-appear as a
+  // regular card on a later page.
   if (activeTab !== 'top' || activeGenre !== 'all' || searchTerm) {
     featured.classList.add('hidden');
     featured.innerHTML = '';
@@ -349,13 +486,27 @@ function renderFeatured() {
     }
   }
 
+  // Past page 1 the hero is hidden, but the slug we just picked still needs
+  // to flow back to render() so it gets removed from the grid slice on
+  // later pages too.
+  if (currentPage !== 1) {
+    featured.classList.add('hidden');
+    featured.innerHTML = '';
+    return game.slug;
+  }
+
   const c = counts[game.slug] || { likes: 0, dislikes: 0, plays: 0, seconds: 0 };
   const minutes = Math.round((c.seconds || 0) / 60);
   const playUrl = `/play.html?slug=${encodeURIComponent(game.slug)}`;
 
+  // image-set() lets the browser pick WebP when supported and fall back
+  // to PNG otherwise — same trick <picture> uses for the grid thumbs,
+  // but expressed as a CSS background since hero is a tinted block, not
+  // a content image.
+  const heroBg = `image-set(url('/thumbs/${game.slug}.webp?v=1') type('image/webp'), url('/thumbs/${game.slug}.png?v=1') type('image/png'))`;
   featured.innerHTML = `
     <article class="hero">
-      <div class="hero-thumb" style="background-image: url('/thumbs/${game.slug}.png?v=1')"></div>
+      <div class="hero-thumb" style="background-image: -webkit-${heroBg}; background-image: ${heroBg};"></div>
       <div class="hero-content">
         <div class="hero-badge">${topScore > 0 ? '🔥 Trending' : '✨ Featured'}</div>
         <h2 class="hero-title"></h2>
@@ -397,6 +548,15 @@ function thumbUrl(slug, variant) {
     : `/thumbs/${slug}.png?v=1`;
 }
 
+// Sibling WebP path. build_webp_thumbs.sh emits one .webp per .png in
+// Gallery/thumbs/, served via <picture><source type="image/webp"> with the
+// PNG as fallback for the ~3% of browsers that don't support WebP.
+function thumbWebpUrl(slug, variant) {
+  return variant > 1
+    ? `/thumbs/${slug}__v${variant}.webp?v=1`
+    : `/thumbs/${slug}.webp?v=1`;
+}
+
 function card(g, opts) {
   opts = opts || { eager: true, priority: false };
   const c = counts[g.slug] || { likes: 0, dislikes: 0, plays: 0 };
@@ -404,6 +564,7 @@ function card(g, opts) {
   const isRecent = g.addedDate && (Date.now() - new Date(g.addedDate).getTime() < 3 * 24 * 60 * 60 * 1000);
   const variant  = pickVariant(g.slug, g.thumbCount || 1);
   const thumb    = thumbUrl(g.slug, variant);
+  const thumbWebp = thumbWebpUrl(g.slug, variant);
   const playUrl  = `/play.html?slug=${encodeURIComponent(g.slug)}`;
 
   // Eager (above-the-fold) cards get the inline autoplay video right away.
@@ -423,13 +584,18 @@ function card(g, opts) {
 
   // Native lazy-loading + fetchpriority lets the browser sequence requests:
   // first 2 cards = high priority + eager fetch; next 2 = eager but normal;
-  // rest = lazy + low-priority background fetch.
+  // rest = lazy + low-priority background fetch. <picture> serves WebP
+  // (5-8× smaller than PNG) to every modern browser, with PNG fallback
+  // for the ~3% that don't support WebP.
   const imgLoading  = opts.eager ? 'eager' : 'lazy';
   const imgPriority = opts.priority ? 'high' : (opts.eager ? 'auto' : 'low');
   const imgDecoding = opts.eager ? 'sync' : 'async';
-  const imgTag = `<img class="card-thumb-img" src="${thumb}" alt=""
-                       loading="${imgLoading}" fetchpriority="${imgPriority}"
-                       decoding="${imgDecoding}">`;
+  const imgTag = `<picture>
+                    <source srcset="${thumbWebp}" type="image/webp">
+                    <img class="card-thumb-img" src="${thumb}" alt=""
+                         loading="${imgLoading}" fetchpriority="${imgPriority}"
+                         decoding="${imgDecoding}">
+                  </picture>`;
 
   const el = document.createElement('article');
   el.className = 'card';
