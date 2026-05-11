@@ -83,40 +83,33 @@ const pagination = document.getElementById('pagination');
 init();
 
 async function init() {
-  try {
-    const res = await fetch('/games.json', { cache: 'no-store' });
-    games = await res.json();
-  } catch (e) {
-    games = [];
-  }
-  // Try to load shared vote counts; fall back to 0/0 if API isn't deployed yet
-  try {
-    const r = await fetch('/api/counts', { cache: 'no-store' });
-    if (r.ok) counts = await r.json();
-  } catch (e) { /* ignore — works offline-style */ }
+  // Fire all four network calls in parallel so first paint can happen
+  // as soon as games.json lands instead of waiting for the sum of four
+  // sequential round-trips. On a 400 ms RTT this drops time-to-first-card
+  // from ~1.6 s of pure blocking to ~400 ms.
+  //
+  // Critical: games.json. The grid needs the catalogue to render at all.
+  // Secondary: counts (vote/play numbers + Top-tab sort) and trending
+  // (featured-game pick). The grid does its first paint with empty
+  // numbers, then a second render swaps in real counts + the correct
+  // featured game once both land. Cards' thumbs are HTTP-cached after
+  // first paint, so the second render is visually subtle, not a refetch.
+  // Independent: /api/me drives the sign-in pill — repaints when ready.
+  const gamesP    = fetch('/games.json', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : [])
+                      .catch(() => []);
+  const countsP   = fetch('/api/counts', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : {})
+                      .catch(() => ({}));
+  const trendingP = fetch('/api/trending', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : { games: {} })
+                      .catch(() => ({ games: {} }));
+  const meP       = fetch('/api/me', { cache: 'no-store', credentials: 'same-origin' })
+                      .then(r => r.ok ? r.json() : null)
+                      .catch(() => null);
 
-  // Today's trending signal (per-day seconds + comments). Used by the
-  // featured hero so the spotlight rotates daily instead of camping on
-  // the all-time leader.
-  try {
-    const r = await fetch('/api/trending', { cache: 'no-store' });
-    if (r.ok) {
-      const payload = await r.json();
-      todayScores = payload.games || {};
-    }
-  } catch (e) { todayScores = {}; }
-
-  // Read auth state — populates the sign-in pill + per-user vote map.
-  // When signed in, the user's votes come from server (no per-device drift).
-  try {
-    const r = await fetch('/api/me', { cache: 'no-store', credentials: 'same-origin' });
-    if (r.ok) me = await r.json();
-  } catch (e) { me = null; }
-  paintAuthPill();
-  // Identify signed-in user so PostHog links events to the person profile.
-  if (me && me.signed_in && window.posthog) {
-    posthog.identify(me.uid, { email: me.email });
-  }
+  // FIRST PAINT — block only on the catalogue.
+  games = await gamesP;
 
   // Header metadata: build = highest specimen number, date = today
   const hero = document.getElementById('hero');
@@ -130,6 +123,23 @@ async function init() {
   attachEvents();
   renderGenres();
   render();
+
+  // SECOND PAINT — vote counts + featured game. We wait for BOTH so the
+  // second render is the final state; a third render would just churn DOM.
+  Promise.all([countsP, trendingP]).then(([c, t]) => {
+    counts = c || {};
+    todayScores = (t && t.games) || {};
+    render();
+  });
+
+  // Auth pill — independent of the grid, paints whenever /api/me resolves.
+  meP.then(m => {
+    me = m;
+    paintAuthPill();
+    if (me && me.signed_in && window.posthog) {
+      posthog.identify(me.uid, { email: me.email });
+    }
+  });
 }
 
 // Helper — specimen number padded for display ("022")
