@@ -313,11 +313,23 @@ function renderFeatured() {
   const eligible = games.filter(g => g.published !== false);
   if (eligible.length < 2) { featured.classList.add('hidden'); return null; }
 
+  // Net-negative games never get featured. The today-score (seconds +
+  // comments × 60) doesn't penalise dislikes or sentiment, so a single
+  // complaint comment + downvote can launch a brand-new game to the top
+  // of "trending". Filter at the candidate pool so every tier respects it.
+  // Tim flagged a 1-dislike-1-comment game getting featured on 2026-05-11.
+  const netVote = (g) => {
+    const c = counts[g.slug] || {};
+    return (c.likes || 0) - (c.dislikes || 0);
+  };
+  const featurable = eligible.filter(g => netVote(g) >= 0);
+  if (featurable.length < 2) { featured.classList.add('hidden'); return null; }
+
   // Trending = top engagement TODAY (per-day seconds + comments × 60).
   // Falls through to all-time engagement if today's signal is empty (e.g.
   // first visitor of the day before any heartbeat lands), then to newest.
   const todayScore = (g) => (todayScores[g.slug] && todayScores[g.slug].score) || 0;
-  const sortedToday = eligible.slice().sort((a, b) => todayScore(b) - todayScore(a));
+  const sortedToday = featurable.slice().sort((a, b) => todayScore(b) - todayScore(a));
   const todayTop   = sortedToday[0];
   const todayBest  = todayTop ? todayScore(todayTop) : 0;
 
@@ -326,13 +338,13 @@ function renderFeatured() {
     game = todayTop;
     topScore = todayBest;
   } else {
-    const sortedAll = eligible.slice().sort((a, b) => engagementScore(b) - engagementScore(a));
+    const sortedAll = featurable.slice().sort((a, b) => engagementScore(b) - engagementScore(a));
     const allTop = sortedAll[0];
     if (allTop && engagementScore(allTop) > 0) {
       game = allTop;
       topScore = engagementScore(allTop);
     } else {
-      game = eligible.slice().sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0))[0];
+      game = featurable.slice().sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0))[0];
       topScore = 0;
     }
   }
