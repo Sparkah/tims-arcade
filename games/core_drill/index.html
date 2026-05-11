@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Core Drill</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function () {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Core Drill',
+    sub:   'Drill through soil to reveal today’s buried artefact',
+    play: 'PLAY', retry: 'RETRY',
+    won: 'ARTEFACT FOUND',
+    gameover: 'OUT OF CHARGES',
+    charges: 'CHARGES', reveal: 'REVEAL',
+    seed: 'SEED',
+    artefact: 'TODAY',
+    tut_title: 'How to play',
+    tut_goal: 'Goal: Reveal today’s buried artefact silhouette.',
+    tut_controls: 'Controls: Tap a tile to drill one chunk. Each drill costs one charge.',
+    tut_win: 'Win: Expose 80% of the artefact before charges run out.',
+    tut_lose: 'Lose: Drill charges hit zero with artefact still buried.',
+    tut_tip: 'Tip: Heavy dots = likely artefact. Light dots = empty soil.',
+    close: 'CLOSE',
+  },
+  ru: {
+    title: 'Бур Артефакта',
+    sub:   'Пробурите слои земли и откройте сегодняшний артефакт',
+    play: 'ИГРАТЬ', retry: 'СНОВА',
+    won: 'АРТЕФАКТ НАЙДЕН',
+    gameover: 'ЗАРЯДЫ КОНЧИЛИСЬ',
+    charges: 'ЗАРЯДЫ', reveal: 'ОТКРЫТО',
+    seed: 'СИД',
+    artefact: 'СЕГОДНЯ',
+    tut_title: 'Как играть',
+    tut_goal: 'Цель: Откопайте сегодняшний артефакт, пробуривая тайлы.',
+    tut_controls: 'Управление: Тапните тайл — бур снимает один слой. Каждый удар стоит 1 заряд.',
+    tut_win: 'Победа: Откройте 80% силуэта артефакта до того, как заряды кончатся.',
+    tut_lose: 'Поражение: Заряды на нуле, а артефакт ещё закопан.',
+    tut_tip: 'Совет: Тяжёлые точки = вероятно артефакт. Лёгкие = пустая земля.',
+    close: 'ЗАКРЫТЬ',
+  },
+};
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var GRID_W = 12;
+var GRID_H = 12;
+var LAYER_DEPTH = 3;
+var START_CHARGES = 40;
+var WIN_REVEAL_PCT = 80;
+var HEAVY_HINT_NOISE = 0.18;
+var DUST_PARTICLES = 14;
+
+// ── ARTEFACT BITMAPS (12×12 each, '#' = artefact cell) ───────────────────
+var ARTEFACT_SHAPES = {
+  axe: [
+    '...........#',
+    '..........##',
+    '.........###',
+    '........###.',
+    '.......###..',
+    '......###...',
+    '.....####...',
+    '....#####...',
+    '...####.....',
+    '..####......',
+    '.###........',
+    '###.........',
+  ],
+  urn: [
+    '...######...',
+    '..#......#..',
+    '.#........#.',
+    '.#........#.',
+    '#..........#',
+    '#..........#',
+    '#..........#',
+    '.#........#.',
+    '..#......#..',
+    '...#....#...',
+    '....####....',
+    '.....##.....',
+  ],
+  skull: [
+    '...######...',
+    '..#......#..',
+    '.#........#.',
+    '.#.##..##.#.',
+    '.#.##..##.#.',
+    '.#...##...#.',
+    '.#........#.',
+    '..#.####.#..',
+    '...#....#...',
+    '...######...',
+    '............',
+    '............',
+  ],
+  coin: [
+    '...######...',
+    '..#......#..',
+    '.#........#.',
+    '.#...##...#.',
+    '#...#..#...#',
+    '#..#....#..#',
+    '#..#....#..#',
+    '#...#..#...#',
+    '.#...##...#.',
+    '.#........#.',
+    '..#......#..',
+    '...######...',
+  ],
+};
+var ARTEFACT_NAMES = ['axe', 'urn', 'skull', 'coin'];
+var ARTEFACT_NAMES_RU = { axe: 'Топор', urn: 'Урна', skull: 'Череп', coin: 'Монета' };
+var ARTEFACT_NAMES_EN = { axe: 'Axe',   urn: 'Urn',  skull: 'Skull', coin: 'Coin' };
+
+// ── DAILY SEED + RNG ─────────────────────────────────────────────────────
+function dailySeedString() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var dd = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+function hashStr(s) {
+  var h = 1779033703 ^ s.length;
+  for (var i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return (h >>> 0);
+}
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    var t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var seedStr = '';
+var artefactKey = 'axe';
+var grid = [];
+var totalArtefactCells = 0;
+var revealedArtefactCells = 0;
+var drillCharges = START_CHARGES;
+var revealPct = 0;
+var pulseT = 0;
+var tutorialOpen = false;
+var lastDrill = null;
+
+// ── BUILD GRID FROM DAILY SEED ───────────────────────────────────────────
+function buildGrid() {
+  seedStr = dailySeedString();
+  var seed = hashStr(seedStr);
+  var rng = mulberry32(seed);
+  artefactKey = ARTEFACT_NAMES[Math.floor(rng() * ARTEFACT_NAMES.length)];
+  var bmp = ARTEFACT_SHAPES[artefactKey];
+
+  grid = new Array(GRID_W * GRID_H);
+  totalArtefactCells = 0;
+  for (var r = 0; r < GRID_H; r++) {
+    for (var c = 0; c < GRID_W; c++) {
+      var isArt = (bmp[r] && bmp[r][c] === '#');
+      if (isArt) totalArtefactCells++;
+      var trueBand = isArt ? 0.55 + rng() * 0.45 : rng() * 0.45;
+      var hint;
+      if (rng() < HEAVY_HINT_NOISE) {
+        hint = isArt ? rng() * 0.45 : 0.55 + rng() * 0.45;
+      } else {
+        hint = trueBand;
+      }
+      grid[r * GRID_W + c] = {
+        layers: LAYER_DEPTH,
+        artefact: isArt,
+        weightHint: hint,
+      };
+    }
+  }
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  buildGrid();
+  drillCharges = START_CHARGES;
+  revealedArtefactCells = 0;
+  revealPct = 0;
+  lastDrill = null;
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+function backToMenu() { gs = 'MENU'; }
+
+function recomputeRevealPct() {
+  revealPct = totalArtefactCells > 0
+    ? Math.round(revealedArtefactCells / totalArtefactCells * 100)
+    : 0;
+}
+
+function drillCell(r, c) {
+  if (gs !== 'PLAYING') return;
+  if (drillCharges <= 0) return;
+  var cell = grid[r * GRID_W + c];
+  if (!cell || cell.layers <= 0) return;
+  cell.layers--;
+  drillCharges--;
+  lastDrill = { r: r, c: c, t: performance.now() };
+  if (cell.layers === 0 && cell.artefact) {
+    revealedArtefactCells++;
+  }
+  var px = layout.gridX + (c + 0.5) * layout.cellSize;
+  var py = layout.gridY + (r + 0.5) * layout.cellSize;
+  GF.spawnParticles(px, py, cell.artefact ? '#f5d020' : '#a96d4f', DUST_PARTICLES);
+  recomputeRevealPct();
+  if (revealPct >= WIN_REVEAL_PCT) {
+    setTimeout(function () {
+      gs = 'WON';
+      GF.spawnParticles(GF.cx, GF.cy, '#f5d020', 48);
+      GF.gameEnded();
+    }, 320);
+    return;
+  }
+  if (drillCharges <= 0 && revealPct < WIN_REVEAL_PCT) {
+    setTimeout(function () {
+      gs = 'GAMEOVER';
+      GF.gameEnded();
+    }, 320);
+    return;
+  }
+}
+
+// ── SCREENSHOT HELPER ────────────────────────────────────────────────────
+window._jumpLevel = function (level) {
+  startGame();
+  var spent = 0;
+  var maxSpend = 22;
+  for (var r = 0; r < GRID_H && spent < maxSpend; r++) {
+    for (var c = 0; c < GRID_W && spent < maxSpend; c++) {
+      var cell = grid[r * GRID_W + c];
+      if (!cell || !cell.artefact) continue;
+      cell.layers = Math.max(0, cell.layers - 2);
+      if (cell.layers === 0) revealedArtefactCells++;
+      drillCharges--;
+      spent++;
+    }
+  }
+  var miss = 0;
+  for (var r2 = 0; r2 < GRID_H && miss < 6; r2++) {
+    for (var c2 = 0; c2 < GRID_W && miss < 6; c2++) {
+      var cell2 = grid[r2 * GRID_W + c2];
+      if (!cell2 || cell2.artefact) continue;
+      if (cell2.layers === LAYER_DEPTH) {
+        cell2.layers = 2;
+        drillCharges = Math.max(0, drillCharges - 1);
+        miss++;
+      }
+    }
+  }
+  recomputeRevealPct();
+};
+window._setupForScreenshot = window._jumpLevel;
+window._setLang = function (l) { GF.lang = l; };
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+var layout = {
+  gridX: 0, gridY: 0, cellSize: 0, gridSize: 0,
+  hudY: 0, helpBtn: null,
+  progressX: 0, progressY: 0, progressW: 0, progressH: 0,
+};
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  var pad = GF.clamp(12 * GF.S, 8, 18);
+  var topPad = GF.clamp(80 * GF.S, 50, 110);
+  var botPad = GF.clamp(80 * GF.S, 50, 110);
+  var avail = Math.min(W - pad * 2, H - topPad - botPad);
+  layout.cellSize = Math.floor(avail / GRID_W);
+  layout.gridSize = layout.cellSize * GRID_W;
+  layout.gridX = (W - layout.gridSize) / 2;
+  layout.gridY = topPad;
+  layout.progressX = layout.gridX;
+  layout.progressY = layout.gridY + layout.gridSize + GF.clamp(18 * GF.S, 10, 28);
+  layout.progressW = layout.gridSize;
+  layout.progressH = GF.clamp(20 * GF.S, 14, 28);
+  layout.hudY = GF.clamp(18 * GF.S, 12, 28);
+  layout.helpBtn = {
+    x: W - GF.clamp(54 * GF.S, 40, 64),
+    y: GF.clamp(14 * GF.S, 8, 22),
+    s: GF.clamp(36 * GF.S, 28, 48),
+  };
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function hitTestHUDHelp(x, y) {
+  var b = layout.helpBtn;
+  if (!b) return false;
+  return x >= b.x && x <= b.x + b.s && y >= b.y && y <= b.y + b.s;
+}
+function hitTestCell(x, y) {
+  var lx = x - layout.gridX;
+  var ly = y - layout.gridY;
+  if (lx < 0 || ly < 0) return null;
+  if (lx > layout.gridSize || ly > layout.gridSize) return null;
+  var c = Math.floor(lx / layout.cellSize);
+  var r = Math.floor(ly / layout.cellSize);
+  if (r < 0 || r >= GRID_H || c < 0 || c >= GRID_W) return null;
+  return { r: r, c: c };
+}
+function hitTestTutorialClose(x, y) {
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (GF.W - bw) / 2, by = GF.H * 0.78;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+function onClick(x, y) {
+  if (tutorialOpen) {
+    if (hitTestTutorialClose(x, y)) {
+      tutorialOpen = false;
+      try { localStorage.setItem('core_drill_seen_tutorial', '1'); } catch (e) {}
+    }
+    return;
+  }
+  if (gs === 'MENU') {
+    var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+    var bx = (GF.W - bw) / 2, by = GF.H * 0.74;
+    if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) startGame();
+    return;
+  }
+  if (gs === 'WON' || gs === 'GAMEOVER') {
+    var bw2 = GF.clamp(220 * GF.S, 160, 300), bh2 = GF.clamp(48 * GF.S, 38, 60);
+    var bx2 = (GF.W - bw2) / 2, by2 = GF.H * 0.66;
+    if (x >= bx2 && x <= bx2 + bw2 && y >= by2 && y <= by2 + bh2) backToMenu();
+    return;
+  }
+  if (hitTestHUDHelp(x, y)) { tutorialOpen = true; return; }
+  var rc = hitTestCell(x, y);
+  if (rc) drillCell(rc.r, rc.c);
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeLayout();
+  pulseT = (pulseT + dt * 1000) % 900;
+}
+
+// ── DRAW HELPERS ─────────────────────────────────────────────────────────
+function layerColor(layers) {
+  if (layers >= 3) return '#5a4a2c';
+  if (layers === 2) return '#7c5a3b';
+  if (layers === 1) return '#8a6b40';
+  return null;
+}
+function drawWeightDots(c, x, y, size, hint) {
+  var dots;
+  if (hint >= 0.75) dots = 4;
+  else if (hint >= 0.50) dots = 3;
+  else if (hint >= 0.25) dots = 2;
+  else dots = 1;
+  var rDot = size * 0.07;
+  c.globalAlpha = 0.65;
+  c.fillStyle = '#0a0a14';
+  var totalW = (dots * 2 - 1) * rDot * 2;
+  var startX = x + (size - totalW) / 2 + rDot;
+  var dy = y + size - rDot * 3;
+  for (var i = 0; i < dots; i++) {
+    c.beginPath();
+    c.arc(startX + i * rDot * 4, dy, rDot, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.globalAlpha = 1;
+}
+function drawArtefactGlint(c, x, y, size) {
+  c.save();
+  c.translate(x + size / 2, y + size / 2);
+  c.fillStyle = '#f5d020';
+  c.shadowColor = '#f5d020aa';
+  c.shadowBlur = size * 0.25;
+  c.beginPath();
+  c.arc(0, 0, size * 0.30, 0, Math.PI * 2);
+  c.fill();
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#fff7a8';
+  c.beginPath();
+  c.arc(-size * 0.10, -size * 0.10, size * 0.12, 0, Math.PI * 2);
+  c.fill();
+  c.restore();
+}
+function drawCell(c, r, col, x, y, size) {
+  var cell = grid[r * GRID_W + col];
+  if (!cell) return;
+  var pad = Math.max(1, size * 0.05);
+  var inner = size - pad * 2;
+  c.fillStyle = '#16161e';
+  c.fillRect(x, y, size, size);
+  var lc = layerColor(cell.layers);
+  if (lc) {
+    c.fillStyle = lc;
+    c.fillRect(x + pad, y + pad, inner, inner);
+    drawWeightDots(c, x + pad, y + pad, inner, cell.weightHint);
+  } else {
+    if (cell.artefact) {
+      drawArtefactGlint(c, x + pad, y + pad, inner);
+    } else {
+      c.fillStyle = '#22222a';
+      c.fillRect(x + pad, y + pad, inner, inner);
+      c.fillStyle = '#0a0a14';
+      c.beginPath();
+      c.arc(x + size / 2, y + size / 2, size * 0.10, 0, Math.PI * 2);
+      c.fill();
+    }
+  }
+  c.strokeStyle = '#0a0a14';
+  c.lineWidth = Math.max(1, size * 0.04);
+  c.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+  if (lastDrill && lastDrill.r === r && lastDrill.c === col) {
+    var age = (performance.now() - lastDrill.t) / 300;
+    if (age < 1) {
+      c.globalAlpha = (1 - age) * 0.7;
+      c.fillStyle = '#fff';
+      c.fillRect(x + pad, y + pad, inner, inner);
+      c.globalAlpha = 1;
+    }
+  }
+}
+function drawGrid(c) {
+  for (var r = 0; r < GRID_H; r++) {
+    for (var col = 0; col < GRID_W; col++) {
+      var x = layout.gridX + col * layout.cellSize;
+      var y = layout.gridY + r * layout.cellSize;
+      drawCell(c, r, col, x, y, layout.cellSize);
+    }
+  }
+}
+function drawProgressBar(c) {
+  GF.rr(c, layout.progressX, layout.progressY, layout.progressW, layout.progressH, layout.progressH / 2);
+  c.fillStyle = '#1a1a26'; c.fill();
+  c.strokeStyle = '#22222a'; c.lineWidth = 2; c.stroke();
+  var w = layout.progressW * Math.min(revealPct, 100) / 100;
+  if (w > 0) {
+    GF.rr(c, layout.progressX, layout.progressY, w, layout.progressH, layout.progressH / 2);
+    var g = c.createLinearGradient(layout.progressX, 0, layout.progressX + layout.progressW, 0);
+    g.addColorStop(0, '#7c5a3b'); g.addColorStop(1, '#f5d020');
+    c.fillStyle = g; c.fill();
+  }
+  var tickX = layout.progressX + layout.progressW * (WIN_REVEAL_PCT / 100);
+  c.strokeStyle = '#fff';
+  c.lineWidth = 2;
+  c.beginPath();
+  c.moveTo(tickX, layout.progressY - 4);
+  c.lineTo(tickX, layout.progressY + layout.progressH + 4);
+  c.stroke();
+  c.fillStyle = '#cfd8e0';
+  c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 18) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'bottom';
+  c.fillText(GF.t('reveal') + ' ' + revealPct + '%', layout.progressX, layout.progressY - 6);
+  c.textAlign = 'right';
+  c.fillText(WIN_REVEAL_PCT + '%', layout.progressX + layout.progressW, layout.progressY - 6);
+}
+function drawTopHUD(c) {
+  c.fillStyle = '#cfd8e0';
+  c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 18) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.fillText(GF.t('charges') + ': ' + drillCharges + ' / ' + START_CHARGES,
+    layout.gridX, layout.hudY);
+  c.textAlign = 'center';
+  c.fillStyle = '#9ab';
+  c.fillText(GF.t('artefact') + ' · ' + (GF.lang === 'ru' ? ARTEFACT_NAMES_RU[artefactKey] : ARTEFACT_NAMES_EN[artefactKey]) + '?',
+    GF.W / 2, layout.hudY);
+  c.textAlign = 'right';
+  c.fillStyle = '#557';
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px monospace';
+  c.fillText(GF.t('seed') + ' ' + seedStr,
+    layout.gridX + layout.gridSize - GF.clamp(50 * GF.S, 36, 60),
+    layout.hudY);
+}
+function drawHUDHelp(c) {
+  var b = layout.helpBtn;
+  if (!b) return;
+  GF.rr(c, b.x, b.y, b.s, b.s, b.s / 2);
+  c.fillStyle = '#1a1a26'; c.fill();
+  c.strokeStyle = '#4dd0e1'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', b.x + b.s / 2, b.y + b.s / 2);
+}
+function drawButton(c, x, y, w, h, label, primary) {
+  var r = h * 0.5;
+  GF.rr(c, x, y, w, h, r);
+  if (primary) {
+    var g = c.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#2ecc71'); g.addColorStop(1, '#27ae60');
+    c.fillStyle = g;
+  } else {
+    c.fillStyle = '#22222a';
+  }
+  c.fill();
+  c.strokeStyle = primary ? '#27ae60' : '#3a3a4a';
+  c.lineWidth = 2;
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(label, x + w / 2, y + h / 2);
+}
+function wrapText(c, text, x, y, maxW, lineH) {
+  var words = (text || '').split(' ');
+  var line = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      c.fillText(line, x, y);
+      line = words[i];
+      y += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) c.fillText(line, x, y);
+}
+function drawTutorialPanel(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, W, H);
+  var pw = Math.min(W - GF.clamp(28 * GF.S, 16, 36) * 2, 520 * GF.S);
+  var ph = Math.min(H - GF.clamp(40 * GF.S, 22, 64) * 2, 460 * GF.S);
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+  var rr = GF.clamp(18 * GF.S, 10, 24);
+  GF.rr(c, px, py, pw, ph, rr);
+  c.fillStyle = '#11111c'; c.fill();
+  c.strokeStyle = '#2a2a36'; c.lineWidth = 2; c.stroke();
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var pad = GF.clamp(22 * GF.S, 14, 32);
+  c.fillStyle = '#f5d020';
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.fillText(GF.t('tut_title'), px + pad, py + pad);
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  var ly = py + pad + GF.clamp(40 * GF.S, 26, 50);
+  var lh = GF.clamp(34 * GF.S, 22, 42);
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(c, lines[i], px + pad, ly + i * lh, pw - pad * 2, lh - 2);
+  }
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  drawButton(c, bx, by, bw, bh, GF.t('close'), true);
+}
+
+// ── MENU / END OVERLAYS ──────────────────────────────────────────────────
+function drawMenuOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, W, H);
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(245, 208, 32, 0.55)';
+  c.shadowBlur = 26 * GF.S;
+  c.font = 'bold ' + GF.clamp(42 * GF.S, 28, 64) + 'px sans-serif';
+  c.fillText(GF.t('title'), W / 2, H * 0.20);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, H * 0.26);
+
+  var seen = false;
+  try { seen = localStorage.getItem('core_drill_seen_tutorial') === '1'; } catch (e) {}
+  if (!seen) {
+    var py0 = H * 0.34;
+    c.fillStyle = '#cfd8e0';
+    c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+    c.textAlign = 'center';
+    var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+    var lh = GF.clamp(20 * GF.S, 14, 26);
+    for (var i = 0; i < ll.length; i++) {
+      c.fillText(ll[i], W / 2, py0 + i * lh);
+    }
+  } else {
+    c.fillStyle = '#6a7a8a';
+    c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+    c.textAlign = 'center';
+    c.fillText(GF.t('tut_goal'), W / 2, H * 0.40);
+    c.fillText('(' + GF.t('tut_tip') + ')', W / 2, H * 0.44);
+  }
+
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (W - bw) / 2, by = H * 0.74;
+  drawButton(c, bx, by, bw, bh, GF.t('play'), true);
+
+  c.textAlign = 'center';
+  c.fillStyle = '#557';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px monospace';
+  c.fillText(GF.t('seed') + ' · ' + dailySeedString(), W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
+}
+function drawEndOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.86)';
+  c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#fff';
+  var win = (gs === 'WON');
+  c.shadowColor = win ? 'rgba(245, 208, 32, 0.7)' : 'rgba(231, 76, 94, 0.55)';
+  c.shadowBlur = 28 * GF.S;
+  c.font = 'bold ' + GF.clamp(36 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(win ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.32);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.fillText(GF.t('reveal') + ': ' + revealPct + '%', W / 2, H * 0.42);
+  c.fillText(GF.t('charges') + ': ' + drillCharges + ' / ' + START_CHARGES, W / 2, H * 0.48);
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (W - bw) / 2, by = H * 0.66;
+  drawButton(c, bx, by, bw, bh, GF.t('retry'), true);
+}
+
+// ── MAIN DRAW ────────────────────────────────────────────────────────────
+function draw(c) {
+  if (gs === 'MENU') {
+    drawMenuOverlay(c);
+  } else {
+    c.fillStyle = '#0a0a14';
+    c.fillRect(0, 0, GF.W, GF.H);
+    drawTopHUD(c);
+    drawGrid(c);
+    drawProgressBar(c);
+    drawHUDHelp(c);
+    if (gs === 'WON' || gs === 'GAMEOVER') drawEndOverlay(c);
+  }
+  if (tutorialOpen) drawTutorialPanel(c);
+}
+
+// ── CLICK PIPELINE ───────────────────────────────────────────────────────
+GF.canvas.addEventListener('click', function (e) { onClick(e.clientX, e.clientY); });
+GF.canvas.addEventListener('touchend', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onClick(t.clientX, t.clientY);
+}, { passive: true });
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 1200,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'core_drill',
+  onReady: function () {
+    buildGrid();
+    recomputeLayout();
+    tutorialOpen = false;
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    drillCharges: drillCharges,
+    revealPct: revealPct,
+    revealedArtefactCells: revealedArtefactCells,
+    totalArtefactCells: totalArtefactCells,
+    artefactKey: artefactKey,
+    seedStr: seedStr,
+    GRID_W: GRID_W,
+    GRID_H: GRID_H,
+    LAYER_DEPTH: LAYER_DEPTH,
+    START_CHARGES: START_CHARGES,
+    WIN_REVEAL_PCT: WIN_REVEAL_PCT,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

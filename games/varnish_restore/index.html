@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Varnish Restore</title>
+  <script src="/sdk.js"></script>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1208; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; cursor: crosshair; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'VARNISH RESTORE',
+    sub:   'Daily painting restoration',
+    play: 'BEGIN',
+    retry: 'RETRY',
+    next: 'NEXT DAY',
+    score: 'COVERAGE',
+    best: 'BEST',
+    chips: 'CHIPS',
+    solvent: 'SOLVENT',
+    gameover: 'PAINTING RUINED',
+    win: 'RESTORED',
+    tut_goal: 'Goal: Rub the yellow varnish off the daily painting.',
+    tut_controls: 'Controls: Drag the cursor to rub. Release to rest.',
+    tut_win: 'Win: Reveal 90% of the painting.',
+    tut_lose: 'Lose: 5 paint chips ruin the work.',
+    tut_tip: 'Tip: Let solvent refill — dry scrubbing chips paint.',
+    daily: 'Daily seed',
+    chips_used: 'Chips used',
+  },
+  ru: {
+    title: 'РЕСТАВРАТОР',
+    sub:   'Дневная реставрация картины',
+    play: 'НАЧАТЬ',
+    retry: 'ЕЩЁ РАЗ',
+    next: 'НОВЫЙ ДЕНЬ',
+    score: 'ОЧИСТКА',
+    best: 'РЕКОРД',
+    chips: 'СКОЛЫ',
+    solvent: 'РАСТВ.',
+    gameover: 'КАРТИНА ИСПОРЧЕНА',
+    win: 'ВОССТАНОВЛЕНО',
+    tut_goal: 'Цель: Снять жёлтый лак с дневной картины.',
+    tut_controls: 'Управление: Тяните курсор — растирание. Отпустите — отдых.',
+    tut_win: 'Победа: Открыть 90% картины.',
+    tut_lose: 'Поражение: 5 сколов губят работу.',
+    tut_tip: 'Подсказка: Пусть растворитель восстановится — сухое трение крошит краску.',
+    daily: 'Дневная картина',
+    chips_used: 'Сколов',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var VARNISH_TILES_W = 16;
+var VARNISH_TILES_H = 12;
+var FRAGILITY_MAX = 3;
+var SOLVENT_MAX = 100;
+var SOLVENT_DRAIN_PER_PX = 0.12;
+var SOLVENT_REGEN_PER_SEC = 14;
+var CHIPS_MAX = 5;
+var WIN_COVERAGE_PCT = 90;
+var RUB_RADIUS_PX = 32;
+var WEAR_PER_RUB = 0.04;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | GAMEOVER | WIN
+var chips = 0;
+var solvent = SOLVENT_MAX;
+var varnishCoverage = 100;       // % varnish remaining (start 100)
+var bestChips = 99;              // lower = better, 99 = none recorded
+var showTut = true;              // tutorial visible on MENU
+var tutBtn = null;               // ? button hit-rect during PLAYING
+
+// Pointer drag state
+var ptrActive = false;
+var ptrX = 0, ptrY = 0;
+var ptrPrevX = 0, ptrPrevY = 0;
+
+// Painting layout (computed each resize)
+var paintRect = { x: 0, y: 0, w: 0, h: 0 };
+var tileW = 0, tileH = 0;
+
+// Painting masks: tiles store per-tile wear + fragility
+// varnishMask[ty][tx] = 0..1, 1=fully covered, 0=fully revealed
+// fragility[ty][tx]   = 0..FRAGILITY_MAX (hidden)
+// wear[ty][tx]        = accumulated rub damage
+// chipped[ty][tx]     = bool, set when a paint chip occurs
+var varnishMask = [];
+var fragility = [];
+var wear = [];
+var chipped = [];
+
+// Painting (procedural) seeded by today's date — what's UNDER the varnish.
+var dayRand = null;
+var painting = null;
+var daySeedStr = '';
+
+// Floating tip "+chip" pulse
+var chipPulse = 0;
+
+// ── RNG (Mulberry32, seedable) ───────────────────────────────────────────
+function mulberry32(seed) {
+  return function() {
+    seed = (seed + 0x6D2B79F5) | 0;
+    var t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function dailySeed() {
+  var d = new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+}
+
+function dailySeedStr() {
+  var d = new Date();
+  var m = (d.getUTCMonth() + 1);
+  var dd = d.getUTCDate();
+  return d.getUTCFullYear() + '-' + (m < 10 ? '0' + m : m) + '-' + (dd < 10 ? '0' + dd : dd);
+}
+
+// ── PAINTING (what's hidden under the varnish) ───────────────────────────
+function buildPainting(r) {
+  // Procedural daily painting using the seeded RNG.
+  // Variants: 4 templates picked by seed: 'meadow', 'harbor', 'desert', 'forest'
+  var templates = ['meadow', 'harbor', 'desert', 'forest'];
+  var tpl = templates[Math.floor(r() * templates.length)];
+
+  var skyTop, skyMid, ground1, ground2, accent, sunCol;
+  if (tpl === 'meadow') {
+    skyTop = '#7ab8d6'; skyMid = '#cfe6f0';
+    ground1 = '#4a7a3a'; ground2 = '#6fa14a';
+    accent = '#b85c2a'; sunCol = '#f6d36a';
+  } else if (tpl === 'harbor') {
+    skyTop = '#5a8db0'; skyMid = '#bdd9e0';
+    ground1 = '#3a5670'; ground2 = '#7a98a8';
+    accent = '#a83333'; sunCol = '#f0a04a';
+  } else if (tpl === 'desert') {
+    skyTop = '#d6a06a'; skyMid = '#f0d398';
+    ground1 = '#9c6a3a'; ground2 = '#c89464';
+    accent = '#6a4030'; sunCol = '#f8b840';
+  } else {
+    skyTop = '#3a6a5a'; skyMid = '#7aa898';
+    ground1 = '#2e4830'; ground2 = '#4a6a3e';
+    accent = '#8a5028'; sunCol = '#dca850';
+  }
+
+  // House/landmark properties
+  var hasHouse = r() > 0.3;
+  var houseX = 0.35 + r() * 0.3;       // normalized 0..1 within paintRect
+  var houseW = 0.10 + r() * 0.08;
+  var houseH = 0.12 + r() * 0.06;
+  var houseRoof = '#7a3320';
+  var houseBody = '#d4b078';
+
+  var hasTree = r() > 0.2;
+  var treeX = 0.15 + r() * 0.7;
+  var treeH = 0.12 + r() * 0.10;
+  var treeCol = ground1;
+
+  var hasSun = r() > 0.4;
+  var sunX = 0.15 + r() * 0.7;
+  var sunY = 0.12 + r() * 0.15;
+  var sunR = 0.04 + r() * 0.03;
+
+  var horizonY = 0.45 + r() * 0.15;
+
+  // Birds (small Vs)
+  var birds = [];
+  var nBirds = Math.floor(r() * 4);
+  for (var i = 0; i < nBirds; i++) {
+    birds.push({ x: 0.1 + r() * 0.8, y: 0.1 + r() * 0.3, s: 0.005 + r() * 0.01 });
+  }
+
+  return {
+    tpl: tpl, skyTop: skyTop, skyMid: skyMid,
+    ground1: ground1, ground2: ground2, accent: accent, sunCol: sunCol,
+    hasHouse: hasHouse, houseX: houseX, houseW: houseW, houseH: houseH,
+    houseRoof: houseRoof, houseBody: houseBody,
+    hasTree: hasTree, treeX: treeX, treeH: treeH, treeCol: treeCol,
+    hasSun: hasSun, sunX: sunX, sunY: sunY, sunR: sunR,
+    horizonY: horizonY,
+    birds: birds,
+  };
+}
+
+function drawPainting(c, p, rect) {
+  var x = rect.x, y = rect.y, w = rect.w, h = rect.h;
+  var horizonY = y + h * p.horizonY;
+
+  // Sky gradient
+  var skyGrad = c.createLinearGradient(x, y, x, horizonY);
+  skyGrad.addColorStop(0, p.skyTop);
+  skyGrad.addColorStop(1, p.skyMid);
+  c.fillStyle = skyGrad;
+  c.fillRect(x, y, w, horizonY - y);
+
+  // Ground gradient
+  var grGrad = c.createLinearGradient(x, horizonY, x, y + h);
+  grGrad.addColorStop(0, p.ground2);
+  grGrad.addColorStop(1, p.ground1);
+  c.fillStyle = grGrad;
+  c.fillRect(x, horizonY, w, y + h - horizonY);
+
+  // Sun
+  if (p.hasSun) {
+    var sx = x + w * p.sunX, sy = y + h * p.sunY, sr = Math.min(w, h) * p.sunR;
+    c.fillStyle = p.sunCol;
+    c.beginPath(); c.arc(sx, sy, sr, 0, Math.PI * 2); c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.25)';
+    c.beginPath(); c.arc(sx - sr * 0.25, sy - sr * 0.25, sr * 0.3, 0, Math.PI * 2); c.fill();
+  }
+
+  // Birds
+  for (var i = 0; i < p.birds.length; i++) {
+    var b = p.birds[i];
+    var bx = x + w * b.x, by = y + h * b.y, bs = w * b.s;
+    c.strokeStyle = '#3a3a3a'; c.lineWidth = Math.max(1, bs * 0.4);
+    c.beginPath();
+    c.moveTo(bx - bs, by);
+    c.lineTo(bx, by - bs * 0.5);
+    c.lineTo(bx + bs, by);
+    c.stroke();
+  }
+
+  // House
+  if (p.hasHouse) {
+    var hx = x + w * p.houseX;
+    var hy = horizonY - h * p.houseH;
+    var hw = w * p.houseW, hh = h * p.houseH;
+    // Body
+    c.fillStyle = p.houseBody;
+    c.fillRect(hx, hy, hw, hh);
+    // Roof (triangle)
+    c.fillStyle = p.houseRoof;
+    c.beginPath();
+    c.moveTo(hx - hw * 0.08, hy);
+    c.lineTo(hx + hw * 0.5, hy - hh * 0.55);
+    c.lineTo(hx + hw * 1.08, hy);
+    c.closePath();
+    c.fill();
+    // Window
+    c.fillStyle = p.accent;
+    c.fillRect(hx + hw * 0.25, hy + hh * 0.25, hw * 0.2, hh * 0.25);
+    // Door
+    c.fillStyle = p.houseRoof;
+    c.fillRect(hx + hw * 0.6, hy + hh * 0.45, hw * 0.18, hh * 0.55);
+  }
+
+  // Tree
+  if (p.hasTree) {
+    var tx = x + w * p.treeX;
+    var th = h * p.treeH;
+    var ty = horizonY;
+    // Trunk
+    c.fillStyle = '#5a3a1a';
+    c.fillRect(tx - w * 0.005, ty - th * 0.45, w * 0.01, th * 0.5);
+    // Foliage
+    c.fillStyle = p.treeCol;
+    c.beginPath(); c.arc(tx, ty - th * 0.6, th * 0.32, 0, Math.PI * 2); c.fill();
+    c.fillStyle = p.ground2;
+    c.beginPath(); c.arc(tx + th * 0.12, ty - th * 0.5, th * 0.22, 0, Math.PI * 2); c.fill();
+  }
+
+  // Frame highlight
+  c.strokeStyle = '#2a1808';
+  c.lineWidth = Math.max(2, w * 0.005);
+  c.strokeRect(x, y, w, h);
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function rebuildGrid() {
+  varnishMask = [];
+  fragility = [];
+  wear = [];
+  chipped = [];
+  for (var ty = 0; ty < VARNISH_TILES_H; ty++) {
+    var rowM = [], rowF = [], rowW = [], rowC = [];
+    for (var tx = 0; tx < VARNISH_TILES_W; tx++) {
+      rowM.push(1.0);
+      // Hidden fragility 0..FRAGILITY_MAX, biased by daily seed
+      rowF.push(Math.floor(dayRand() * (FRAGILITY_MAX + 1)));
+      rowW.push(0);
+      rowC.push(false);
+    }
+    varnishMask.push(rowM);
+    fragility.push(rowF);
+    wear.push(rowW);
+    chipped.push(rowC);
+  }
+}
+
+function startGame() {
+  chips = 0;
+  solvent = SOLVENT_MAX;
+  varnishCoverage = 100;
+  showTut = false;
+  // Re-seed each new round from the daily seed so the painting is identical.
+  dayRand = mulberry32(dailySeed());
+  painting = buildPainting(dayRand);
+  rebuildGrid();
+  daySeedStr = dailySeedStr();
+  try { localStorage.setItem('varnish_restore_seen_tutorial', '1'); } catch (e) {}
+  gs = 'PLAYING';
+  if (GF && GF.gameStarted) GF.gameStarted();
+}
+
+function endRound() {
+  if (chips < CHIPS_MAX && varnishCoverage <= (100 - WIN_COVERAGE_PCT)) {
+    gs = 'WIN';
+    // Best chips: lower is better
+    if (chips < bestChips) {
+      bestChips = chips;
+      try { localStorage.setItem('varnish_restore_best_chips', bestChips); } catch (e) {}
+    }
+  } else {
+    gs = 'GAMEOVER';
+  }
+  if (GF && GF.gameEnded) GF.gameEnded();
+}
+
+window._jumpLevel = function(n) {
+  // For screenshots: land on a busy mid-restoration state.
+  startGame();
+  // Apply partial erase: clear ~55% of varnish tiles, chip 1-2 tiles, half solvent.
+  for (var ty = 0; ty < VARNISH_TILES_H; ty++) {
+    for (var tx = 0; tx < VARNISH_TILES_W; tx++) {
+      // Erase varnish in an organic blob — center cluster mostly cleared,
+      // corners still covered. Produces a recognizable "in progress" look.
+      var cxn = (tx + 0.5) / VARNISH_TILES_W;
+      var cyn = (ty + 0.5) / VARNISH_TILES_H;
+      var d = Math.sqrt((cxn - 0.5) * (cxn - 0.5) + (cyn - 0.5) * (cyn - 0.5));
+      if (d < 0.45) {
+        varnishMask[ty][tx] = Math.max(0, d * 0.8 - 0.1);
+      } else if (d < 0.6) {
+        varnishMask[ty][tx] = 0.4;
+      }
+    }
+  }
+  chips = 2;
+  solvent = SOLVENT_MAX * 0.5;
+  recomputeCoverage();
+};
+
+window._setupForScreenshot = window._jumpLevel;
+
+function recomputeCoverage() {
+  var sum = 0, count = VARNISH_TILES_W * VARNISH_TILES_H;
+  for (var ty = 0; ty < VARNISH_TILES_H; ty++) {
+    for (var tx = 0; tx < VARNISH_TILES_W; tx++) {
+      sum += varnishMask[ty][tx];
+    }
+  }
+  varnishCoverage = (sum / count) * 100;
+}
+
+// ── RESIZE LAYOUT ────────────────────────────────────────────────────────
+function recomputeLayout() {
+  // Painting fills most of the screen with a small margin for HUD top & bottom.
+  var marginTop = Math.max(60, 80 * GF.S);
+  var marginBottom = Math.max(50, 60 * GF.S);
+  var marginX = Math.max(20, 40 * GF.S);
+  var availW = GF.W - marginX * 2;
+  var availH = GF.H - marginTop - marginBottom;
+  // Keep painting aspect 4:3
+  var targetAR = 4 / 3;
+  var w = availW, h = w / targetAR;
+  if (h > availH) { h = availH; w = h * targetAR; }
+  paintRect.x = (GF.W - w) / 2;
+  paintRect.y = marginTop;
+  paintRect.w = w;
+  paintRect.h = h;
+  tileW = w / VARNISH_TILES_W;
+  tileH = h / VARNISH_TILES_H;
+}
+
+// ── POINTER INPUT ────────────────────────────────────────────────────────
+function getPointer(e) {
+  if (e.touches && e.touches.length > 0) {
+    return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  }
+  return { x: e.clientX, y: e.clientY };
+}
+
+function pointerInPainting(x, y) {
+  return x >= paintRect.x && x <= paintRect.x + paintRect.w &&
+         y >= paintRect.y && y <= paintRect.y + paintRect.h;
+}
+
+function pointerInTutBtn(x, y) {
+  if (!tutBtn) return false;
+  return x >= tutBtn.x && x <= tutBtn.x + tutBtn.w &&
+         y >= tutBtn.y && y <= tutBtn.y + tutBtn.h;
+}
+
+function onPointerDown(e) {
+  if (e.preventDefault) e.preventDefault();
+  var p = getPointer(e);
+  if (gs === 'PLAYING' && pointerInTutBtn(p.x, p.y)) {
+    showTut = true;
+    return;
+  }
+  if (gs === 'PLAYING' && showTut) {
+    // Tap anywhere to dismiss reopened tutorial during PLAYING.
+    showTut = false;
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  ptrActive = true;
+  ptrX = ptrPrevX = p.x;
+  ptrY = ptrPrevY = p.y;
+}
+
+function onPointerMove(e) {
+  if (!ptrActive) return;
+  if (e.preventDefault) e.preventDefault();
+  var p = getPointer(e);
+  ptrPrevX = ptrX; ptrPrevY = ptrY;
+  ptrX = p.x; ptrY = p.y;
+}
+
+function onPointerUp(e) {
+  if (e.preventDefault) e.preventDefault();
+  ptrActive = false;
+}
+
+document.addEventListener('mousedown', onPointerDown);
+document.addEventListener('mousemove', onPointerMove);
+document.addEventListener('mouseup', onPointerUp);
+document.addEventListener('touchstart', onPointerDown, { passive: false });
+document.addEventListener('touchmove', onPointerMove, { passive: false });
+document.addEventListener('touchend', onPointerUp, { passive: false });
+document.addEventListener('touchcancel', onPointerUp, { passive: false });
+
+// ── RUB LOGIC ────────────────────────────────────────────────────────────
+function applyRub(x0, y0, x1, y1, dt) {
+  // x0,y0 -> x1,y1 is the segment swept this frame.
+  if (!pointerInPainting(x1, y1)) return;
+  var dx = x1 - x0, dy = y1 - y0;
+  var dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 0.5) dist = 0.5;
+
+  // Solvent drain proportional to stroke distance.
+  var drain = dist * SOLVENT_DRAIN_PER_PX;
+  var dry = solvent <= 0.1;
+  solvent = Math.max(0, solvent - drain);
+
+  // Affect tiles in a radius around the END point each frame.
+  var r = RUB_RADIUS_PX * GF.S;
+  var r2 = r * r;
+  for (var ty = 0; ty < VARNISH_TILES_H; ty++) {
+    for (var tx = 0; tx < VARNISH_TILES_W; tx++) {
+      var ttcx = paintRect.x + (tx + 0.5) * tileW;
+      var ttcy = paintRect.y + (ty + 0.5) * tileH;
+      var ddx = ttcx - x1, ddy = ttcy - y1;
+      var d2 = ddx * ddx + ddy * ddy;
+      if (d2 > r2) continue;
+      var falloff = 1 - Math.sqrt(d2) / r;     // 0..1
+      // Erase varnish proportionally — only if wet
+      if (!dry) {
+        var erase = (0.85 * falloff) * dt;     // per second
+        varnishMask[ty][tx] = Math.max(0, varnishMask[ty][tx] - erase);
+      }
+      // Accumulate wear; dry scrubbing wears 2x and at fragile tiles worse
+      var wearAdd = WEAR_PER_RUB * falloff * (dry ? 2.2 : 1.0);
+      // Wear only accrues meaningfully if there's still some varnish to grind through
+      // (preserves the feeling that once revealed, the paint is "safe")
+      if (varnishMask[ty][tx] > 0.05 || dry) {
+        wear[ty][tx] += wearAdd;
+      }
+      // Chip if wear exceeds fragility threshold (and not already chipped)
+      var fragThresh = (FRAGILITY_MAX - fragility[ty][tx]) * 0.6 + 0.4; // higher fragility -> lower thresh
+      if (!chipped[ty][tx] && wear[ty][tx] > fragThresh) {
+        chipped[ty][tx] = true;
+        chips++;
+        chipPulse = 1.0;
+        GF.setShake(0.45);
+        GF.spawnParticles(ttcx, ttcy, '#c8704a', 16);
+        GF.spawnFloat(ttcx, ttcy, 'CHIP!', '#ff6a4a');
+        if (chips >= CHIPS_MAX) {
+          // GAMEOVER if still ≥10% varnish left; else allow last-minute WIN check.
+          recomputeCoverage();
+          endRound();
+          return;
+        }
+      }
+    }
+  }
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  chipPulse = Math.max(0, chipPulse - dt * 2);
+
+  if (gs !== 'PLAYING') return;
+
+  if (ptrActive && !showTut) {
+    applyRub(ptrPrevX, ptrPrevY, ptrX, ptrY, dt);
+    ptrPrevX = ptrX; ptrPrevY = ptrY;
+  } else {
+    // Regen solvent when idle
+    solvent = Math.min(SOLVENT_MAX, solvent + SOLVENT_REGEN_PER_SEC * dt);
+  }
+
+  recomputeCoverage();
+
+  // Win check (during normal play)
+  if (varnishCoverage <= (100 - WIN_COVERAGE_PCT) && chips < CHIPS_MAX) {
+    endRound();
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawTutorial(c, x, y, w) {
+  // Render 5 tutorial lines centered horizontally, returns total height drawn.
+  var lineFs = GF.clamp(13 * GF.S, 10, 17);
+  c.font = lineFs + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'top';
+  c.fillStyle = '#bcd';
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var lh = lineFs * 1.4;
+  for (var i = 0; i < lines.length; i++) {
+    c.fillText(lines[i], x + w / 2, y + i * lh);
+  }
+  return lines.length * lh;
+}
+
+function drawMenuOverlay(c) {
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(36 * GF.S, 22, 56);
+  var subFs   = GF.clamp(15 * GF.S, 11, 20);
+
+  c.shadowColor = 'rgba(220,168,80,0.5)'; c.shadowBlur = 30 * GF.S;
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.fillStyle = '#f6d36a';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 180 * GF.S);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  c.font = subFs + 'px sans-serif';
+  c.fillStyle = '#9ab';
+  c.fillText(GF.t('sub'), GF.cx, GF.cy - 145 * GF.S);
+
+  // Tutorial block
+  var tutY = GF.cy - 115 * GF.S;
+  var tutW = Math.min(560 * GF.S, GF.W - 40);
+  var tutX = GF.cx - tutW / 2;
+  drawTutorial(c, tutX, tutY, tutW);
+
+  // Daily seed badge
+  var badgeY = GF.cy + 30 * GF.S;
+  c.font = GF.clamp(12 * GF.S, 9, 16) + 'px monospace';
+  c.fillStyle = '#48c9b0';
+  c.fillText(GF.t('daily') + ': ' + dailySeedStr(), GF.cx, badgeY);
+
+  // Best chips badge
+  if (bestChips < CHIPS_MAX) {
+    c.fillStyle = '#9ab';
+    c.fillText(GF.t('best') + ' ' + GF.t('chips_used') + ': ' + bestChips, GF.cx, badgeY + 20 * GF.S);
+  }
+
+  // PLAY button
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 80 * GF.S;
+  var grad = c.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#e0a86a'); grad.addColorStop(1, '#a8743a');
+  GF.rr(c, btnX, btnY, btnW, btnH, btnH / 2);
+  c.fillStyle = grad; c.fill();
+  c.font = 'bold ' + subFs + 'px sans-serif';
+  c.fillStyle = '#fff'; c.textBaseline = 'middle';
+  c.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+  c.textBaseline = 'alphabetic';
+  menuPlayBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+var menuPlayBtn = null;
+var endRetryBtn = null;
+
+function drawEndOverlay(c) {
+  c.fillStyle = 'rgba(8,4,2,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(38 * GF.S, 22, 56);
+  var subFs   = GF.clamp(15 * GF.S, 11, 20);
+
+  var titleCol = (gs === 'WIN') ? '#7ddc8a' : '#ff6a4a';
+  c.shadowColor = titleCol + 'a0'; c.shadowBlur = 30 * GF.S;
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.fillStyle = titleCol;
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillText(gs === 'WIN' ? GF.t('win') : GF.t('gameover'), GF.cx, GF.cy - 70 * GF.S);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  c.font = subFs + 'px sans-serif';
+  c.fillStyle = '#bcd';
+  c.fillText(GF.t('chips_used') + ': ' + chips + ' / ' + CHIPS_MAX, GF.cx, GF.cy - 30 * GF.S);
+  c.fillText(GF.t('score') + ': ' + Math.round(100 - varnishCoverage) + '%', GF.cx, GF.cy - 6 * GF.S);
+  if (bestChips < CHIPS_MAX) {
+    c.fillStyle = '#9ab';
+    c.fillText(GF.t('best') + ' ' + GF.t('chips_used') + ': ' + bestChips, GF.cx, GF.cy + 18 * GF.S);
+  }
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 50 * GF.S;
+  var grad = c.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#e0a86a'); grad.addColorStop(1, '#a8743a');
+  GF.rr(c, btnX, btnY, btnW, btnH, btnH / 2);
+  c.fillStyle = grad; c.fill();
+  c.font = 'bold ' + subFs + 'px sans-serif';
+  c.fillStyle = '#fff'; c.textBaseline = 'middle';
+  c.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+  c.textBaseline = 'alphabetic';
+  endRetryBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawVarnishTile(c, tx, ty) {
+  var mask = varnishMask[ty][tx];
+  if (mask <= 0.02) return;
+  var px = paintRect.x + tx * tileW;
+  var py = paintRect.y + ty * tileH;
+  // Semi-opaque yellow-amber varnish with slight texture.
+  // alpha = 0..0.85 depending on remaining mask
+  var alpha = 0.18 + mask * 0.68;
+  c.fillStyle = 'rgba(196,148,40,' + alpha.toFixed(3) + ')';
+  c.fillRect(px, py, tileW + 0.5, tileH + 0.5);
+  // Texture flecks: tiny darker dots when mostly covered
+  if (mask > 0.5) {
+    c.fillStyle = 'rgba(120,80,20,' + (mask * 0.3).toFixed(3) + ')';
+    c.fillRect(px + tileW * 0.2, py + tileH * 0.3, tileW * 0.12, tileH * 0.12);
+    c.fillRect(px + tileW * 0.6, py + tileH * 0.7, tileW * 0.10, tileH * 0.10);
+  }
+}
+
+function drawChipOverlay(c, tx, ty) {
+  if (!chipped[ty][tx]) return;
+  var px = paintRect.x + tx * tileW;
+  var py = paintRect.y + ty * tileH;
+  // Dark scuff: irregular shape across the tile.
+  c.fillStyle = 'rgba(40,20,10,0.55)';
+  c.beginPath();
+  c.moveTo(px + tileW * 0.2, py + tileH * 0.4);
+  c.lineTo(px + tileW * 0.55, py + tileH * 0.2);
+  c.lineTo(px + tileW * 0.85, py + tileH * 0.55);
+  c.lineTo(px + tileW * 0.7, py + tileH * 0.85);
+  c.lineTo(px + tileW * 0.3, py + tileH * 0.7);
+  c.closePath();
+  c.fill();
+  // White scratch hint
+  c.strokeStyle = 'rgba(255,240,210,0.4)';
+  c.lineWidth = 1.2;
+  c.beginPath();
+  c.moveTo(px + tileW * 0.3, py + tileH * 0.3);
+  c.lineTo(px + tileW * 0.7, py + tileH * 0.7);
+  c.stroke();
+}
+
+function drawCursor(c) {
+  if (!ptrActive || !pointerInPainting(ptrX, ptrY)) return;
+  var r = RUB_RADIUS_PX * GF.S;
+  c.strokeStyle = solvent > 1 ? 'rgba(255,255,255,0.7)' : 'rgba(255,80,80,0.8)';
+  c.lineWidth = 2;
+  c.beginPath();
+  c.arc(ptrX, ptrY, r, 0, Math.PI * 2);
+  c.stroke();
+  c.strokeStyle = solvent > 1 ? 'rgba(255,255,255,0.25)' : 'rgba(255,80,80,0.3)';
+  c.beginPath();
+  c.arc(ptrX, ptrY, r * 0.6, 0, Math.PI * 2);
+  c.stroke();
+}
+
+function drawHUD(c) {
+  var topY = Math.max(10, 14 * GF.S);
+  var sideX = Math.max(12, 16 * GF.S);
+  var fs = GF.clamp(15 * GF.S, 11, 20);
+
+  // Left: chips
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  c.fillStyle = chipPulse > 0 ? '#ff8a6a' : '#f0d098';
+  c.fillText(GF.t('chips') + ': ' + chips + '/' + CHIPS_MAX, sideX, topY);
+
+  // Right: coverage
+  var revealed = Math.max(0, 100 - varnishCoverage);
+  c.textAlign = 'right';
+  c.fillStyle = '#7ddc8a';
+  c.fillText(GF.t('score') + ': ' + revealed.toFixed(0) + '% / ' + WIN_COVERAGE_PCT + '%', GF.W - sideX, topY);
+
+  // Center top: daily seed
+  c.textAlign = 'center';
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px monospace';
+  c.fillStyle = '#48c9b0';
+  c.fillText(daySeedStr, GF.cx, topY + 2);
+
+  // Bottom: solvent meter
+  var barW = Math.min(360 * GF.S, GF.W * 0.5);
+  var barH = Math.max(12, 16 * GF.S);
+  var barX = GF.cx - barW / 2;
+  var barY = GF.H - barH - Math.max(20, 24 * GF.S);
+  c.fillStyle = 'rgba(0,0,0,0.45)';
+  GF.rr(c, barX - 2, barY - 2, barW + 4, barH + 4, (barH + 4) / 2);
+  c.fill();
+  c.fillStyle = '#1a1208';
+  GF.rr(c, barX, barY, barW, barH, barH / 2);
+  c.fill();
+  var fillW = Math.max(0, (solvent / SOLVENT_MAX) * barW);
+  if (fillW > 1) {
+    var gr = c.createLinearGradient(barX, barY, barX, barY + barH);
+    if (solvent > SOLVENT_MAX * 0.25) {
+      gr.addColorStop(0, '#7fd4f0'); gr.addColorStop(1, '#3a98c0');
+    } else {
+      gr.addColorStop(0, '#ff8a6a'); gr.addColorStop(1, '#c04030');
+    }
+    GF.rr(c, barX, barY, fillW, barH, barH / 2);
+    c.fillStyle = gr; c.fill();
+  }
+  c.font = 'bold ' + GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillStyle = '#fff';
+  c.fillText(GF.t('solvent') + ' ' + solvent.toFixed(0) + '/' + SOLVENT_MAX, GF.cx, barY + barH / 2);
+
+  // ? help button (top-right corner just below score)
+  var qSize = Math.max(28, 34 * GF.S);
+  var qX = GF.W - sideX - qSize;
+  var qY = topY + fs + 8;
+  tutBtn = { x: qX, y: qY, w: qSize, h: qSize };
+  c.fillStyle = 'rgba(255,255,255,0.12)';
+  GF.rr(c, qX, qY, qSize, qSize, qSize / 4);
+  c.fill();
+  c.strokeStyle = 'rgba(255,255,255,0.4)';
+  c.lineWidth = 1.5;
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText('?', qX + qSize / 2, qY + qSize / 2);
+  c.textBaseline = 'alphabetic';
+}
+
+function drawTutPanel(c) {
+  // Mini-panel popup over PLAYING when ? clicked.
+  var w = Math.min(560 * GF.S, GF.W - 40);
+  var h = Math.min(220 * GF.S, GF.H - 80);
+  var x = GF.cx - w / 2, y = GF.cy - h / 2;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  GF.rr(c, x, y, w, h, 12);
+  c.fill();
+  c.strokeStyle = 'rgba(255,255,255,0.2)';
+  c.lineWidth = 2;
+  c.stroke();
+  // Tutorial text centered
+  drawTutorial(c, x, y + 28 * GF.S, w);
+  // "tap to close" hint
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(12 * GF.S, 9, 14) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.fillText(GF.lang === 'ru' ? '(нажмите чтобы закрыть)' : '(tap to close)', GF.cx, y + h - 18 * GF.S);
+}
+
+function draw(c) {
+  // BG: dark wood-ish
+  c.fillStyle = '#1a1208';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'MENU') {
+    // Quick preview painting under varnish in MENU bg (decorative).
+    if (painting) {
+      drawPainting(c, painting, paintRect);
+      // Full varnish layer over preview
+      c.fillStyle = 'rgba(196,148,40,0.75)';
+      c.fillRect(paintRect.x, paintRect.y, paintRect.w, paintRect.h);
+    }
+    drawMenuOverlay(c);
+    return;
+  }
+
+  // PLAYING / WIN / GAMEOVER all show the painting + varnish state.
+  if (painting) {
+    drawPainting(c, painting, paintRect);
+  }
+
+  // Varnish + chip overlays
+  for (var ty = 0; ty < VARNISH_TILES_H; ty++) {
+    for (var tx = 0; tx < VARNISH_TILES_W; tx++) {
+      drawVarnishTile(c, tx, ty);
+      drawChipOverlay(c, tx, ty);
+    }
+  }
+
+  if (gs === 'PLAYING') {
+    drawCursor(c);
+    drawHUD(c);
+    if (showTut) drawTutPanel(c);
+    return;
+  }
+
+  if (gs === 'WIN' || gs === 'GAMEOVER') {
+    drawEndOverlay(c);
+  }
+}
+
+// Click handler for menu/end buttons.
+window.addEventListener('click', function(e) {
+  if (gs === 'MENU' && menuPlayBtn) {
+    if (e.clientX >= menuPlayBtn.x && e.clientX <= menuPlayBtn.x + menuPlayBtn.w &&
+        e.clientY >= menuPlayBtn.y && e.clientY <= menuPlayBtn.y + menuPlayBtn.h) {
+      startGame();
+    }
+  } else if ((gs === 'WIN' || gs === 'GAMEOVER') && endRetryBtn) {
+    if (e.clientX >= endRetryBtn.x && e.clientX <= endRetryBtn.x + endRetryBtn.w &&
+        e.clientY >= endRetryBtn.y && e.clientY <= endRetryBtn.y + endRetryBtn.h) {
+      startGame();
+    }
+  }
+});
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+window.addEventListener('resize', recomputeLayout);
+window.addEventListener('orientationchange', recomputeLayout);
+
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'varnish_restore',
+  onReady: function() {
+    try {
+      var b = parseInt(localStorage.getItem('varnish_restore_best_chips'));
+      if (!isNaN(b)) bestChips = b;
+      var seen = localStorage.getItem('varnish_restore_seen_tutorial');
+      showTut = !seen;
+    } catch (e) {}
+    dayRand = mulberry32(dailySeed());
+    painting = buildPainting(dayRand);
+    daySeedStr = dailySeedStr();
+    rebuildGrid();
+    recomputeLayout();
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    chips: chips,
+    solvent: solvent,
+    varnishCoverage: varnishCoverage,
+    bestChips: bestChips,
+    VARNISH_TILES_W: VARNISH_TILES_W,
+    VARNISH_TILES_H: VARNISH_TILES_H,
+    FRAGILITY_MAX: FRAGILITY_MAX,
+    SOLVENT_MAX: SOLVENT_MAX,
+    SOLVENT_DRAIN_PER_PX: SOLVENT_DRAIN_PER_PX,
+    SOLVENT_REGEN_PER_SEC: SOLVENT_REGEN_PER_SEC,
+    CHIPS_MAX: CHIPS_MAX,
+    WIN_COVERAGE_PCT: WIN_COVERAGE_PCT,
+    RUB_RADIUS_PX: RUB_RADIUS_PX,
+    WEAR_PER_RUB: WEAR_PER_RUB,
+    daySeed: dailySeed(),
+  };
+});
+
+})();
+</script>
+</body>
+</html>

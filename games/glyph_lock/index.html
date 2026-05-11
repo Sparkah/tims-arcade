@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Glyph Lock</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Glyph Lock',
+    sub:   'Decode the daily glyph phrase in 3 guesses',
+    play: 'PLAY', retry: 'PLAY AGAIN',
+    won: 'SOLVED',
+    gameover: 'OUT OF GUESSES',
+    submit: 'SUBMIT', clear: 'CLEAR',
+    guesses: 'GUESSES',
+    seed: 'SEED',
+    share: 'COPY SHARE',
+    tut_title: 'How to play',
+    tut_goal: 'Goal: Decode the daily 3-glyph phrase in 3 guesses.',
+    tut_controls: 'Controls: Tap glyph tiles to fill the row, tap SUBMIT to lock.',
+    tut_win: 'Win: All three slots turn green in one guess.',
+    tut_lose: 'Lose: Three wrong guesses without a match.',
+    tut_tip: 'Tip: Yellow = right glyph, wrong slot. Use elimination.',
+    close: 'CLOSE',
+    copied: 'Copied to clipboard',
+  },
+  ru: {
+    title: 'Глифокод',
+    sub:   'Разгадай фразу из трёх глифов за 3 попытки',
+    play: 'ИГРАТЬ', retry: 'СНОВА',
+    won: 'РАЗГАДАНО',
+    gameover: 'ПОПЫТКИ КОНЧИЛИСЬ',
+    submit: 'ОТПРАВИТЬ', clear: 'СБРОС',
+    guesses: 'ПОПЫТКИ',
+    seed: 'СИД',
+    share: 'СКОПИРОВАТЬ',
+    tut_title: 'Как играть',
+    tut_goal: 'Цель: Расшифруй сегодняшнюю фразу из 3 глифов за 3 попытки.',
+    tut_controls: 'Управление: Жми на плитки, заполняя ряд, потом жми ОТПРАВИТЬ.',
+    tut_win: 'Победа: Все три ячейки стали зелёными в одной попытке.',
+    tut_lose: 'Поражение: Три ошибочных попытки без совпадения.',
+    tut_tip: 'Совет: Жёлтый = верный глиф, не та ячейка. Исключай.',
+    close: 'ЗАКРЫТЬ',
+    copied: 'Скопировано',
+  },
+};
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var MAX_GUESSES    = 3;
+var TARGET_LEN     = 3;
+var PALETTE_SIZE   = 12;
+var DICT_SIZE      = 24;
+var TILE_REVEAL_MS = 380;
+var ROW_STAGGER_MS = 120;
+var PULSE_HINT_MS  = 900;
+var SHAKE_MS       = 420;
+
+// ── DICTIONARY (24 daily-seed phrases, 3-glyph each) ─────────────────────
+// Each phrase is a triple of glyph indices from the 12-glyph palette.
+var DICT = [
+  [0, 6, 8],  [3, 4, 7],  [1, 2, 5],  [9,10, 0],
+  [11, 5, 3], [4, 8, 6],  [7, 9, 1],  [2, 0,10],
+  [6, 11, 4],[5, 7, 2],   [8, 1, 9],  [10, 3, 6],
+  [0, 5, 11],[2, 6, 9],   [4, 0, 1],  [7, 3, 8],
+  [11,2, 4], [1, 6, 10],  [8, 5, 0],  [9, 4, 11],
+  [3, 7, 5], [10, 8, 2],  [6, 9, 7],  [5, 11, 1],
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | WON | GAMEOVER
+var target = [0, 0, 0];     // today's daily target
+var seedStr = '';           // YYYY-MM-DD form for share string
+var seedIdx = 0;            // dictionary index used today
+var guesses = [];           // array of {glyphs:[a,b,c], result:[c0,c1,c2], submitted, animMs}
+var activeRow = 0;
+var activeGuess = [-1, -1, -1];
+var guessesLeft = MAX_GUESSES;
+var matched = false;
+var shakeT = 0;
+var pulseT = 0;
+var tutorialOpen = false;
+
+// ── DAILY SEED (mulberry32 + hash of date) ───────────────────────────────
+function dailySeedString() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var dd = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+function hashStr(s) {
+  var h = 1779033703 ^ s.length;
+  for (var i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return (h >>> 0);
+}
+function pickDailyTarget() {
+  seedStr = dailySeedString();
+  seedIdx = hashStr(seedStr) % DICT_SIZE;
+  target = DICT[seedIdx].slice();
+}
+
+// ── GLYPH RENDERING (12 procedural pictograms) ───────────────────────────
+var GLYPH_COLORS = [
+  '#ffb347', // 0 sun
+  '#a96d4f', // 1 house
+  '#9d6cff', // 2 cat
+  '#3da16e', // 3 tree
+  '#e74c5e', // 4 heart
+  '#f5d020', // 5 star
+  '#cfd8e0', // 6 cloud
+  '#5fb4d9', // 7 fish
+  '#7b8aa8', // 8 mountain
+  '#d4a373', // 9 book
+  '#caa45d', //10 key
+  '#f0c419', //11 bolt
+];
+function drawGlyph(c, idx, x, y, r) {
+  // r = radius bounding box
+  c.save();
+  c.translate(x, y);
+  var col = GLYPH_COLORS[idx] || '#aaa';
+  c.fillStyle = col;
+  c.strokeStyle = '#0a0a14';
+  c.lineWidth = Math.max(1, r * 0.07);
+  switch (idx) {
+    case 0: // SUN — disc + rays
+      c.beginPath();
+      for (var i = 0; i < 8; i++) {
+        var a = i * Math.PI / 4;
+        c.moveTo(Math.cos(a) * r * 0.55, Math.sin(a) * r * 0.55);
+        c.lineTo(Math.cos(a) * r * 0.95, Math.sin(a) * r * 0.95);
+      }
+      c.lineWidth = Math.max(2, r * 0.16);
+      c.strokeStyle = col;
+      c.stroke();
+      c.lineWidth = Math.max(1, r * 0.07);
+      c.strokeStyle = '#0a0a14';
+      c.beginPath(); c.arc(0, 0, r * 0.50, 0, Math.PI * 2); c.fill(); c.stroke();
+      break;
+    case 1: // HOUSE — square + triangle roof
+      c.beginPath();
+      c.moveTo(-r * 0.6, -r * 0.15);
+      c.lineTo(0,        -r * 0.7);
+      c.lineTo(r * 0.6,  -r * 0.15);
+      c.closePath(); c.fill(); c.stroke();
+      c.beginPath();
+      c.rect(-r * 0.5, -r * 0.15, r, r * 0.85);
+      c.fillStyle = '#d4a373'; c.fill(); c.stroke();
+      c.fillStyle = '#3a3a4a';
+      c.fillRect(-r * 0.12, r * 0.2, r * 0.24, r * 0.5);
+      break;
+    case 2: // CAT — circle face + triangle ears + eyes
+      c.beginPath();
+      c.moveTo(-r * 0.55, -r * 0.25);
+      c.lineTo(-r * 0.32, -r * 0.78);
+      c.lineTo(-r * 0.05, -r * 0.35);
+      c.closePath(); c.fill();
+      c.beginPath();
+      c.moveTo(r * 0.55, -r * 0.25);
+      c.lineTo(r * 0.32, -r * 0.78);
+      c.lineTo(r * 0.05, -r * 0.35);
+      c.closePath(); c.fill();
+      c.beginPath(); c.arc(0, 0, r * 0.62, 0, Math.PI * 2); c.fill(); c.stroke();
+      c.fillStyle = '#0a0a14';
+      c.beginPath(); c.arc(-r * 0.22, -r * 0.05, r * 0.10, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc( r * 0.22, -r * 0.05, r * 0.10, 0, Math.PI * 2); c.fill();
+      c.beginPath();
+      c.moveTo(-r * 0.07, r * 0.16);
+      c.lineTo(r * 0.07,  r * 0.16);
+      c.lineTo(0,         r * 0.30);
+      c.closePath(); c.fill();
+      break;
+    case 3: // TREE — brown trunk + green canopy
+      c.fillStyle = '#7c5a3b';
+      c.fillRect(-r * 0.12, r * 0.10, r * 0.24, r * 0.55);
+      c.strokeRect(-r * 0.12, r * 0.10, r * 0.24, r * 0.55);
+      c.fillStyle = col;
+      c.beginPath(); c.arc(-r * 0.28, -r * 0.10, r * 0.45, 0, Math.PI * 2); c.fill(); c.stroke();
+      c.beginPath(); c.arc( r * 0.28, -r * 0.10, r * 0.45, 0, Math.PI * 2); c.fill(); c.stroke();
+      c.beginPath(); c.arc(0,         -r * 0.45, r * 0.45, 0, Math.PI * 2); c.fill(); c.stroke();
+      break;
+    case 4: // HEART — two arcs + triangle tip
+      c.beginPath();
+      c.moveTo(0, r * 0.7);
+      c.bezierCurveTo(r * 1.0, r * 0.15, r * 0.5, -r * 0.8, 0, -r * 0.15);
+      c.bezierCurveTo(-r * 0.5, -r * 0.8, -r * 1.0, r * 0.15, 0, r * 0.7);
+      c.closePath(); c.fill(); c.stroke();
+      break;
+    case 5: // STAR — 5-point
+      c.beginPath();
+      for (var k = 0; k < 10; k++) {
+        var aa = -Math.PI / 2 + k * Math.PI / 5;
+        var rr2 = (k % 2 === 0) ? r * 0.95 : r * 0.40;
+        var px = Math.cos(aa) * rr2;
+        var py = Math.sin(aa) * rr2;
+        if (k === 0) c.moveTo(px, py); else c.lineTo(px, py);
+      }
+      c.closePath(); c.fill(); c.stroke();
+      break;
+    case 6: // CLOUD — three overlapping circles
+      c.beginPath();
+      c.arc(-r * 0.40, r * 0.12, r * 0.40, 0, Math.PI * 2);
+      c.arc(0,         -r * 0.10, r * 0.48, 0, Math.PI * 2);
+      c.arc( r * 0.40, r * 0.12, r * 0.40, 0, Math.PI * 2);
+      c.arc(0,         r * 0.28, r * 0.36, 0, Math.PI * 2);
+      c.closePath();
+      c.fill(); c.stroke();
+      break;
+    case 7: // FISH — oval body + triangle tail
+      c.beginPath();
+      c.moveTo(r * 0.55,  -r * 0.30);
+      c.lineTo(r * 0.95,  0);
+      c.lineTo(r * 0.55,  r * 0.30);
+      c.closePath(); c.fill(); c.stroke();
+      c.beginPath();
+      c.ellipse(-r * 0.05, 0, r * 0.65, r * 0.40, 0, 0, Math.PI * 2);
+      c.fill(); c.stroke();
+      c.fillStyle = '#0a0a14';
+      c.beginPath(); c.arc(-r * 0.32, -r * 0.08, r * 0.07, 0, Math.PI * 2); c.fill();
+      break;
+    case 8: // MOUNTAIN — triangle + white tip
+      c.beginPath();
+      c.moveTo(-r * 0.85, r * 0.55);
+      c.lineTo(0,         -r * 0.75);
+      c.lineTo(r * 0.85,  r * 0.55);
+      c.closePath(); c.fill(); c.stroke();
+      c.fillStyle = '#f0f4f8';
+      c.beginPath();
+      c.moveTo(-r * 0.18, -r * 0.22);
+      c.lineTo(0,         -r * 0.75);
+      c.lineTo(r * 0.18,  -r * 0.22);
+      c.lineTo(r * 0.10,  -r * 0.12);
+      c.lineTo(0,         -r * 0.32);
+      c.lineTo(-r * 0.10, -r * 0.12);
+      c.closePath(); c.fill();
+      break;
+    case 9: // BOOK — rectangle + spine + lines
+      c.beginPath();
+      c.rect(-r * 0.7, -r * 0.5, r * 1.4, r);
+      c.fill(); c.stroke();
+      c.strokeStyle = '#4a3b27';
+      c.lineWidth = Math.max(1, r * 0.07);
+      c.beginPath();
+      c.moveTo(0, -r * 0.5); c.lineTo(0, r * 0.5);
+      c.stroke();
+      c.lineWidth = Math.max(1, r * 0.04);
+      c.beginPath();
+      c.moveTo(-r * 0.5, -r * 0.20); c.lineTo(-r * 0.15, -r * 0.20);
+      c.moveTo(-r * 0.5,  0);        c.lineTo(-r * 0.15, 0);
+      c.moveTo(-r * 0.5,  r * 0.20); c.lineTo(-r * 0.15, r * 0.20);
+      c.moveTo( r * 0.15, -r * 0.20); c.lineTo( r * 0.50, -r * 0.20);
+      c.moveTo( r * 0.15, 0);         c.lineTo( r * 0.50, 0);
+      c.moveTo( r * 0.15, r * 0.20);  c.lineTo( r * 0.50, r * 0.20);
+      c.stroke();
+      break;
+    case 10: // KEY — circle bow + rectangular shaft
+      c.beginPath();
+      c.arc(-r * 0.42, 0, r * 0.40, 0, Math.PI * 2);
+      c.fill(); c.stroke();
+      c.fillStyle = '#0a0a14';
+      c.beginPath();
+      c.arc(-r * 0.42, 0, r * 0.18, 0, Math.PI * 2);
+      c.fill();
+      c.fillStyle = col;
+      c.beginPath();
+      c.rect(-r * 0.05, -r * 0.13, r * 0.92, r * 0.26);
+      c.fill(); c.stroke();
+      c.beginPath();
+      c.rect( r * 0.60, r * 0.13, r * 0.10, r * 0.22);
+      c.rect( r * 0.78, r * 0.13, r * 0.08, r * 0.30);
+      c.fill(); c.stroke();
+      break;
+    case 11: // BOLT — yellow zigzag
+      c.beginPath();
+      c.moveTo(-r * 0.15, -r * 0.80);
+      c.lineTo( r * 0.45, -r * 0.10);
+      c.lineTo( r * 0.05, -r * 0.05);
+      c.lineTo( r * 0.30,  r * 0.80);
+      c.lineTo(-r * 0.40,  r * 0.10);
+      c.lineTo(-r * 0.05,  r * 0.05);
+      c.closePath(); c.fill(); c.stroke();
+      break;
+    default:
+      c.beginPath(); c.arc(0, 0, r * 0.6, 0, Math.PI * 2); c.fill(); c.stroke();
+  }
+  c.restore();
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function newGuess() {
+  return { glyphs: [-1, -1, -1], result: [0, 0, 0], submitted: false, animMs: 0 };
+}
+function startGame() {
+  pickDailyTarget();
+  guesses = [newGuess(), newGuess(), newGuess()];
+  activeRow = 0;
+  activeGuess = guesses[0].glyphs;
+  guessesLeft = MAX_GUESSES;
+  matched = false;
+  shakeT = 0;
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+function backToMenu() {
+  gs = 'MENU';
+}
+
+// Evaluate Wordle-style. Returns 3-long array of 0=miss, 1=near, 2=hit.
+function evaluate(guessRow, target) {
+  var n = TARGET_LEN;
+  var res = [0, 0, 0];
+  var tgt = target.slice();
+  // greens first
+  for (var i = 0; i < n; i++) {
+    if (guessRow[i] === tgt[i]) {
+      res[i] = 2;
+      tgt[i] = -1;
+    }
+  }
+  // yellows
+  for (var j = 0; j < n; j++) {
+    if (res[j] === 2) continue;
+    var k = tgt.indexOf(guessRow[j]);
+    if (k !== -1) {
+      res[j] = 1;
+      tgt[k] = -1;
+    }
+  }
+  return res;
+}
+
+function submitGuess() {
+  if (gs !== 'PLAYING') return;
+  var row = guesses[activeRow];
+  if (row.submitted) return;
+  // Must be fully filled
+  for (var i = 0; i < TARGET_LEN; i++) {
+    if (row.glyphs[i] < 0) {
+      shakeT = SHAKE_MS;
+      GF.setShake(0.8);
+      return;
+    }
+  }
+  row.result = evaluate(row.glyphs, target);
+  row.submitted = true;
+  row.animMs = 0;
+  // Check win
+  var allGreen = row.result[0] === 2 && row.result[1] === 2 && row.result[2] === 2;
+  if (allGreen) {
+    matched = true;
+    setTimeout(function () {
+      gs = 'WON';
+      GF.spawnParticles(GF.cx, GF.cy, '#2ecc71', 36);
+      GF.gameEnded();
+    }, TILE_REVEAL_MS * 3 + 200);
+    return;
+  }
+  guessesLeft--;
+  if (guessesLeft <= 0) {
+    setTimeout(function () {
+      gs = 'GAMEOVER';
+      GF.gameEnded();
+    }, TILE_REVEAL_MS * 3 + 200);
+    return;
+  }
+  // advance
+  activeRow++;
+  activeGuess = guesses[activeRow].glyphs;
+}
+
+function fillSlot(glyphIdx) {
+  if (gs !== 'PLAYING') return;
+  var row = guesses[activeRow];
+  if (row.submitted) return;
+  for (var i = 0; i < TARGET_LEN; i++) {
+    if (row.glyphs[i] < 0) { row.glyphs[i] = glyphIdx; return; }
+  }
+}
+function clearSlot(slotIdx) {
+  if (gs !== 'PLAYING') return;
+  var row = guesses[activeRow];
+  if (row.submitted) return;
+  if (slotIdx == null) {
+    for (var i = TARGET_LEN - 1; i >= 0; i--) {
+      if (row.glyphs[i] >= 0) { row.glyphs[i] = -1; return; }
+    }
+  } else {
+    if (row.glyphs[slotIdx] >= 0) row.glyphs[slotIdx] = -1;
+  }
+}
+
+// ── SCREENSHOT HELPER ────────────────────────────────────────────────────
+// Land on a populated mid-game state — 1 submitted guess with partial colors,
+// 1 active row partially filled, glyph palette visible.
+window._jumpLevel = function (level) {
+  startGame();
+  // first guess: evaluate one off-target sample to expose color coding
+  var sample = [
+    (target[0] + 4) % PALETTE_SIZE,
+    (target[1] + 0) % PALETTE_SIZE, // will be green
+    (target[2] + 7) % PALETTE_SIZE,
+  ];
+  // Ensure at least one yellow: copy target[0] into slot 2
+  sample[2] = target[0];
+  guesses[0].glyphs = sample;
+  guesses[0].result = evaluate(sample, target);
+  guesses[0].submitted = true;
+  guesses[0].animMs = TILE_REVEAL_MS * 3;
+  // fill row 1 partially
+  guesses[1].glyphs = [target[0], -1, -1];
+  guessesLeft = MAX_GUESSES - 1;
+  activeRow = 1;
+  activeGuess = guesses[1].glyphs;
+};
+window._setupForScreenshot = window._jumpLevel;
+window._setLang = function (l) { GF.lang = l; };
+
+// ── LAYOUT (computed per frame from GF.W/H) ──────────────────────────────
+var layout = {
+  boardX: 0, boardY: 0, boardW: 0, tileSize: 0, tileGap: 0,
+  rowH: 0,
+  paletteX: 0, paletteY: 0, paletteCols: 6, paletteRows: 2, paletteTile: 0, paletteGap: 0,
+  submitX: 0, submitY: 0, submitW: 0, submitH: 0,
+  clearX: 0, clearY: 0, clearW: 0, clearH: 0,
+  hudY: 0, helpBtn: null,
+};
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  var pad = GF.clamp(16 * GF.S, 10, 24);
+  var topPad = GF.clamp(60 * GF.S, 44, 90);
+  var boardW = Math.min(W - pad * 2, 520 * GF.S);
+  layout.boardX = (W - boardW) / 2;
+  layout.boardY = topPad;
+  layout.boardW = boardW;
+  layout.tileGap = GF.clamp(10 * GF.S, 4, 14);
+  layout.tileSize = (boardW - layout.tileGap * (TARGET_LEN - 1)) / TARGET_LEN;
+  if (layout.tileSize > 110 * GF.S) layout.tileSize = 110 * GF.S;
+  layout.rowH = layout.tileSize + layout.tileGap;
+
+  // Palette is below board; submit/clear below palette
+  var paletteW = Math.min(W - pad * 2, 520 * GF.S);
+  layout.paletteCols = 6;
+  layout.paletteRows = 2;
+  layout.paletteGap = GF.clamp(8 * GF.S, 4, 12);
+  layout.paletteTile = (paletteW - layout.paletteGap * (layout.paletteCols - 1)) / layout.paletteCols;
+  if (layout.paletteTile > 80 * GF.S) layout.paletteTile = 80 * GF.S;
+  layout.paletteX = (W - paletteW) / 2;
+  layout.paletteY = layout.boardY + layout.rowH * MAX_GUESSES + GF.clamp(24 * GF.S, 14, 32);
+
+  layout.submitH = GF.clamp(48 * GF.S, 38, 60);
+  layout.submitW = paletteW * 0.55;
+  layout.clearW  = paletteW * 0.40;
+  var btnY = layout.paletteY + (layout.paletteTile + layout.paletteGap) * layout.paletteRows + GF.clamp(18 * GF.S, 10, 26);
+  layout.clearX  = layout.paletteX;
+  layout.clearY  = btnY;
+  layout.clearH  = layout.submitH;
+  layout.submitX = layout.paletteX + paletteW - layout.submitW;
+  layout.submitY = btnY;
+
+  layout.hudY = GF.clamp(18 * GF.S, 12, 28);
+  layout.helpBtn = {
+    x: GF.W - GF.clamp(50 * GF.S, 38, 60),
+    y: GF.clamp(14 * GF.S, 8, 22),
+    s: GF.clamp(36 * GF.S, 28, 48),
+  };
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function hitTestTutorialClose(x, y) {
+  // close button bottom-center of tutorial panel
+  var W = GF.W, H = GF.H;
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+function hitTestHUDHelp(x, y) {
+  var b = layout.helpBtn;
+  if (!b) return false;
+  return x >= b.x && x <= b.x + b.s && y >= b.y && y <= b.y + b.s;
+}
+function hitTestPaletteTile(x, y) {
+  // returns glyph idx or -1
+  var lx = x - layout.paletteX;
+  var ly = y - layout.paletteY;
+  if (lx < 0 || ly < 0) return -1;
+  var step = layout.paletteTile + layout.paletteGap;
+  var col = Math.floor(lx / step);
+  var row = Math.floor(ly / step);
+  if (col < 0 || col >= layout.paletteCols) return -1;
+  if (row < 0 || row >= layout.paletteRows) return -1;
+  // verify hit inside the tile (not in gap)
+  var tx = layout.paletteX + col * step;
+  var ty = layout.paletteY + row * step;
+  if (x > tx + layout.paletteTile || y > ty + layout.paletteTile) return -1;
+  var idx = row * layout.paletteCols + col;
+  if (idx >= PALETTE_SIZE) return -1;
+  return idx;
+}
+function hitTestActiveSlot(x, y) {
+  if (activeRow < 0 || activeRow >= MAX_GUESSES) return -1;
+  var ry = layout.boardY + activeRow * layout.rowH;
+  if (y < ry || y > ry + layout.tileSize) return -1;
+  var lx = x - layout.boardX;
+  var step = layout.tileSize + layout.tileGap;
+  var col = Math.floor(lx / step);
+  if (col < 0 || col >= TARGET_LEN) return -1;
+  var tx = layout.boardX + col * step;
+  if (x > tx + layout.tileSize) return -1;
+  return col;
+}
+function hitTestButton(x, y, b) {
+  return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+}
+
+function onClick(x, y) {
+  if (tutorialOpen) {
+    if (hitTestTutorialClose(x, y)) {
+      tutorialOpen = false;
+      try { localStorage.setItem('glyph_lock_seen_tutorial', '1'); } catch (e) {}
+    }
+    return;
+  }
+  if (gs === 'MENU') {
+    // play button is drawn by drawMenuOverlay; check rect
+    var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+    var bx = (GF.W - bw) / 2, by = GF.H * 0.66;
+    if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
+      startGame();
+      return;
+    }
+    return;
+  }
+  if (gs === 'WON' || gs === 'GAMEOVER') {
+    // "play again" returns to menu; "share" copies share string
+    var bw2 = GF.clamp(220 * GF.S, 160, 300), bh2 = GF.clamp(48 * GF.S, 38, 60);
+    var bx2 = (GF.W - bw2) / 2;
+    var by2 = GF.H * 0.62;
+    if (x >= bx2 && x <= bx2 + bw2 && y >= by2 && y <= by2 + bh2) {
+      copyShareString();
+      return;
+    }
+    var bw3 = bw2, bh3 = bh2;
+    var bx3 = (GF.W - bw3) / 2;
+    var by3 = GF.H * 0.74;
+    if (x >= bx3 && x <= bx3 + bw3 && y >= by3 && y <= by3 + bh3) {
+      backToMenu();
+      return;
+    }
+    return;
+  }
+  // PLAYING
+  if (hitTestHUDHelp(x, y)) {
+    tutorialOpen = true;
+    return;
+  }
+  // Submit?
+  if (hitTestButton(x, y, { x: layout.submitX, y: layout.submitY, w: layout.submitW, h: layout.submitH })) {
+    submitGuess();
+    return;
+  }
+  // Clear?
+  if (hitTestButton(x, y, { x: layout.clearX, y: layout.clearY, w: layout.clearW, h: layout.clearH })) {
+    clearSlot();
+    return;
+  }
+  // Palette tap?
+  var gi = hitTestPaletteTile(x, y);
+  if (gi >= 0) { fillSlot(gi); return; }
+  // Active slot tap to clear?
+  var si = hitTestActiveSlot(x, y);
+  if (si >= 0) { clearSlot(si); return; }
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeLayout();
+  pulseT = (pulseT + dt * 1000) % PULSE_HINT_MS;
+  if (shakeT > 0) shakeT = Math.max(0, shakeT - dt * 1000);
+  // advance submitted-row animations
+  for (var i = 0; i < guesses.length; i++) {
+    var r = guesses[i];
+    if (r.submitted) r.animMs = Math.min(r.animMs + dt * 1000, TILE_REVEAL_MS * 3);
+  }
+}
+
+// ── DRAW HELPERS ─────────────────────────────────────────────────────────
+function colorForResult(state) {
+  if (state === 2) return '#2ecc71';
+  if (state === 1) return '#f5b941';
+  if (state === 0) return '#3a3a4a';
+  return '#1a1a26';
+}
+function drawTile(c, x, y, size, glyphIdx, state, revealed, pulse, isActive) {
+  // Background pill
+  var r = size * 0.16;
+  var bg = revealed ? colorForResult(state) : '#1a1a26';
+  GF.rr(c, x, y, size, size, r);
+  c.fillStyle = bg; c.fill();
+  // Border
+  c.lineWidth = Math.max(2, size * 0.05);
+  c.strokeStyle = isActive ? (pulse > 0.5 ? '#4dd0e1' : '#2a8a9a') : '#22222a';
+  c.stroke();
+  // Glyph
+  if (glyphIdx >= 0) {
+    drawGlyph(c, glyphIdx, x + size / 2, y + size / 2, size * 0.38);
+  }
+}
+function drawBoard(c) {
+  var W = GF.W;
+  // Header above board
+  c.fillStyle = '#9ab';
+  c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 18) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.fillText(GF.t('seed') + ' · ' + seedStr, layout.boardX, layout.boardY - GF.clamp(28 * GF.S, 18, 36));
+  c.textAlign = 'right';
+  c.fillText(GF.t('guesses') + ': ' + guessesLeft + ' / ' + MAX_GUESSES,
+    layout.boardX + layout.boardW,
+    layout.boardY - GF.clamp(28 * GF.S, 18, 36));
+
+  for (var row = 0; row < MAX_GUESSES; row++) {
+    var ry = layout.boardY + row * layout.rowH;
+    var g = guesses[row];
+    var pulse = (Math.sin(pulseT / PULSE_HINT_MS * Math.PI * 2) + 1) / 2;
+    var shakeX = (row === activeRow && shakeT > 0) ? Math.sin(shakeT * 0.12) * 4 * GF.S : 0;
+    for (var col = 0; col < TARGET_LEN; col++) {
+      var x = layout.boardX + col * (layout.tileSize + layout.tileGap) + shakeX;
+      var slotGlyph = g ? g.glyphs[col] : -1;
+      var slotResult = g ? g.result[col] : 0;
+      var revealed = false;
+      if (g && g.submitted) {
+        // staggered reveal
+        var threshold = (col + 1) * ROW_STAGGER_MS;
+        if (g.animMs >= threshold || (gs !== 'PLAYING')) revealed = true;
+      }
+      var isActive = (row === activeRow && gs === 'PLAYING' && g && !g.submitted);
+      drawTile(c, x, ry, layout.tileSize, slotGlyph, slotResult, revealed, pulse, isActive);
+    }
+  }
+}
+function drawPalette(c) {
+  for (var i = 0; i < PALETTE_SIZE; i++) {
+    var row = Math.floor(i / layout.paletteCols);
+    var col = i % layout.paletteCols;
+    var step = layout.paletteTile + layout.paletteGap;
+    var x = layout.paletteX + col * step;
+    var y = layout.paletteY + row * step;
+    var r = layout.paletteTile * 0.14;
+    GF.rr(c, x, y, layout.paletteTile, layout.paletteTile, r);
+    c.fillStyle = '#16161e'; c.fill();
+    c.strokeStyle = '#2a2a36'; c.lineWidth = Math.max(1, layout.paletteTile * 0.03);
+    c.stroke();
+    drawGlyph(c, i, x + layout.paletteTile / 2, y + layout.paletteTile / 2, layout.paletteTile * 0.34);
+  }
+}
+function drawButton(c, x, y, w, h, label, primary) {
+  var r = h * 0.5;
+  GF.rr(c, x, y, w, h, r);
+  if (primary) {
+    var g = c.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#2ecc71'); g.addColorStop(1, '#27ae60');
+    c.fillStyle = g;
+  } else {
+    c.fillStyle = '#22222a';
+  }
+  c.fill();
+  c.strokeStyle = primary ? '#27ae60' : '#3a3a4a';
+  c.lineWidth = 2;
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(label, x + w / 2, y + h / 2);
+}
+function drawHUD(c) {
+  var b = layout.helpBtn;
+  if (!b) return;
+  var r = b.s * 0.5;
+  GF.rr(c, b.x, b.y, b.s, b.s, r);
+  c.fillStyle = '#1a1a26';
+  c.fill();
+  c.strokeStyle = '#4dd0e1';
+  c.lineWidth = 2;
+  c.stroke();
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', b.x + b.s / 2, b.y + b.s / 2);
+}
+
+// ── TUTORIAL PANEL (MENU + ? button) ─────────────────────────────────────
+function drawTutorialPanel(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, W, H);
+  var pw = Math.min(W - GF.clamp(28 * GF.S, 16, 36) * 2, 520 * GF.S);
+  var ph = Math.min(H - GF.clamp(40 * GF.S, 22, 64) * 2, 460 * GF.S);
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+  var rr = GF.clamp(18 * GF.S, 10, 24);
+  GF.rr(c, px, py, pw, ph, rr);
+  c.fillStyle = '#11111c';
+  c.fill();
+  c.strokeStyle = '#2a2a36';
+  c.lineWidth = 2;
+  c.stroke();
+
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var pad = GF.clamp(22 * GF.S, 14, 32);
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.fillText(GF.t('tut_title'), px + pad, py + pad);
+
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  var ly = py + pad + GF.clamp(40 * GF.S, 26, 50);
+  var lh = GF.clamp(34 * GF.S, 22, 42);
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(c, lines[i], px + pad, ly + i * lh, pw - pad * 2, lh - 2);
+  }
+  // close button
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  drawButton(c, bx, by, bw, bh, GF.t('close'), true);
+}
+function wrapText(c, text, x, y, maxW, lineH) {
+  var words = (text || '').split(' ');
+  var line = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      c.fillText(line, x, y);
+      line = words[i];
+      y += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) c.fillText(line, x, y);
+}
+
+// ── MENU / END OVERLAYS ──────────────────────────────────────────────────
+function drawMenuOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, W, H);
+  // Title
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(77, 208, 225, 0.55)';
+  c.shadowBlur = 26 * GF.S;
+  c.font = 'bold ' + GF.clamp(42 * GF.S, 28, 64) + 'px sans-serif';
+  c.fillText(GF.t('title'), W / 2, H * 0.20);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, H * 0.26);
+
+  // mini tutorial preview (compact)
+  var seen = false;
+  try { seen = localStorage.getItem('glyph_lock_seen_tutorial') === '1'; } catch (e) {}
+  if (!seen) {
+    // full panel
+    var pw = Math.min(W - GF.clamp(28 * GF.S, 16, 36) * 2, 480 * GF.S);
+    var py0 = H * 0.30;
+    c.fillStyle = '#cfd8e0';
+    c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+    c.textAlign = 'center';
+    var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+    var lh = GF.clamp(20 * GF.S, 14, 26);
+    for (var i = 0; i < ll.length; i++) {
+      c.fillText(ll[i], W / 2, py0 + i * lh);
+    }
+  } else {
+    c.fillStyle = '#6a7a8a';
+    c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+    c.textAlign = 'center';
+    c.fillText(GF.t('tut_goal'), W / 2, H * 0.36);
+    c.fillText('(' + GF.t('tut_tip') + ')', W / 2, H * 0.40);
+  }
+
+  // play button
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (W - bw) / 2, by = H * 0.66;
+  drawButton(c, bx, by, bw, bh, GF.t('play'), true);
+
+  // seed
+  c.textAlign = 'center';
+  c.fillStyle = '#557';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px monospace';
+  c.fillText(GF.t('seed') + ' · ' + dailySeedString(), W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
+}
+function drawEndOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.86)';
+  c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#fff';
+  c.shadowColor = matched ? 'rgba(46, 204, 113, 0.7)' : 'rgba(231, 76, 94, 0.55)';
+  c.shadowBlur = 28 * GF.S;
+  c.font = 'bold ' + GF.clamp(36 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(matched ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.30);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  // share string preview
+  var s = shareString();
+  var lines = s.split('\n');
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(18 * GF.S, 14, 24) + 'px monospace';
+  var ly = H * 0.38;
+  var lh = GF.clamp(28 * GF.S, 18, 36);
+  for (var i = 0; i < lines.length; i++) {
+    c.fillText(lines[i], W / 2, ly + i * lh);
+  }
+
+  // copy share button
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (W - bw) / 2, by = H * 0.62;
+  drawButton(c, bx, by, bw, bh, GF.t('share'), true);
+  // play again button
+  var by2 = H * 0.74;
+  drawButton(c, bx, by2, bw, bh, GF.t('retry'), false);
+}
+
+// ── SHARE STRING ─────────────────────────────────────────────────────────
+function shareString() {
+  // 3 lines of 3 squares + header
+  var madeRows = guesses.filter(function (g) { return g.submitted; });
+  var rounds = madeRows.length;
+  var head = 'Glyph Lock ' + seedStr + ' ' + (matched ? rounds : 'X') + '/' + MAX_GUESSES;
+  var body = madeRows.map(function (g) {
+    return g.result.map(function (s) {
+      if (s === 2) return '🟩';
+      if (s === 1) return '🟨';
+      return '⬛';
+    }).join('');
+  }).join('\n');
+  return head + '\n' + body;
+}
+function copyShareString() {
+  var s = shareString();
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(s).catch(function () {});
+  }
+  GF.spawnFloat(GF.cx, GF.H * 0.60, GF.t('copied'), '#4dd0e1');
+}
+
+// ── MAIN DRAW ────────────────────────────────────────────────────────────
+function draw(c) {
+  if (gs === 'MENU') {
+    drawMenuOverlay(c);
+  } else {
+    c.fillStyle = '#0a0a14';
+    c.fillRect(0, 0, GF.W, GF.H);
+    drawBoard(c);
+    drawPalette(c);
+    drawButton(c, layout.clearX, layout.clearY, layout.clearW, layout.clearH, GF.t('clear'), false);
+    drawButton(c, layout.submitX, layout.submitY, layout.submitW, layout.submitH, GF.t('submit'), true);
+    drawHUD(c);
+    if (gs === 'WON' || gs === 'GAMEOVER') drawEndOverlay(c);
+  }
+  if (tutorialOpen) drawTutorialPanel(c);
+}
+
+// ── CLICK PIPELINE ───────────────────────────────────────────────────────
+GF.canvas.addEventListener('click', function (e) {
+  onClick(e.clientX, e.clientY);
+});
+GF.canvas.addEventListener('touchend', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onClick(t.clientX, t.clientY);
+}, { passive: true });
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 1200,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'glyph_lock',
+  onReady: function () {
+    pickDailyTarget();
+    recomputeLayout();
+    var seen = false;
+    try { seen = localStorage.getItem('glyph_lock_seen_tutorial') === '1'; } catch (e) {}
+    tutorialOpen = false;
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    guessesLeft: guessesLeft,
+    matched: matched,
+    activeRow: activeRow,
+    target: target,
+    seedIdx: seedIdx,
+    seedStr: seedStr,
+    MAX_GUESSES: MAX_GUESSES,
+    TARGET_LEN: TARGET_LEN,
+    PALETTE_SIZE: PALETTE_SIZE,
+    DICT_SIZE: DICT_SIZE,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
