@@ -16,27 +16,48 @@ if [[ ! -d "$HOOKS_DIR" ]]; then
   exit 1
 fi
 
-# pre-push: run yandex-presubmit/check.sh against every Gallery game folder.
-# Block push on hard violations (console.*, external CDNs, missing SDK).
+# pre-push: two-stage quality gate before CF Pages auto-deploys.
+#   Stage 1 — mechanical Yandex rejection-pattern check. BLOCKING.
+#   Stage 2 — 6-axis AI scorecard via Claude. BLOCKING — avg ≥ 5.0 (configurable).
+# Bypass either with `git push --no-verify` (use sparingly).
 cat > "$HOOKS_DIR/pre-push" <<'HOOK'
 #!/usr/bin/env bash
-# Pre-push: mechanical Yandex pre-submit checks against Gallery/games/N_*/.
-# Bypass with `git push --no-verify`.
+# Pre-push: two-stage gate before Cloudflare Pages auto-deploy.
+#   Stage 1: mechanical Yandex check  (Shared/skills/yandex-presubmit/check.sh --gallery)
+#   Stage 2: 6-axis AI scorecard      (Gallery/scripts/pre_push_review.sh)
+# Bypass entirely: `git push --no-verify`.
+# Tune stage 2: REVIEW_THRESHOLD=4.5 git push   (default 5.0 — strict)
 set -uo pipefail
+
 CHECKER="/Users/timmarkin/Desktop/Agents/Shared/skills/yandex-presubmit/check.sh"
-if [[ ! -x "$CHECKER" ]]; then
-  echo "pre-push: $CHECKER missing — skipping" >&2
-  exit 0
+if [[ -x "$CHECKER" ]]; then
+  if ! "$CHECKER" --gallery; then
+    echo "" >&2
+    echo "🚫 Push aborted by stage-1 Yandex pre-submit gate." >&2
+    echo "   Fix violations above OR re-push with --no-verify." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: $CHECKER missing — skipping stage 1" >&2
 fi
-if ! "$CHECKER" --gallery; then
-  echo ""
-  echo "🚫 Push aborted. Fix violations above or use --no-verify." >&2
-  exit 1
+
+REVIEW_SCRIPT="/Users/timmarkin/Desktop/Agents/Gallery/scripts/pre_push_review.sh"
+if [[ -x "$REVIEW_SCRIPT" ]]; then
+  if ! bash "$REVIEW_SCRIPT"; then
+    echo "" >&2
+    echo "🚫 Push aborted by stage-2 AI scorecard gate." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: $REVIEW_SCRIPT missing — skipping stage 2" >&2
 fi
+
 exit 0
 HOOK
 chmod +x "$HOOKS_DIR/pre-push"
 
 echo "✓ Installed Gallery pre-push hook → $HOOKS_DIR/pre-push"
-echo "  Tests every Gallery/games/N_*/index.html for hard Yandex rejections."
-echo "  Bypass: git push --no-verify"
+echo "  Stage 1: mechanical Yandex pre-submit gate (BLOCKING)"
+echo "  Stage 2: 6-axis AI scorecard via Claude    (BLOCKING — avg ≥ ${REVIEW_THRESHOLD:-5.0})"
+echo "  Bypass: git push --no-verify        (use sparingly)"
+echo "  Relax:  REVIEW_THRESHOLD=4.5 git push"
