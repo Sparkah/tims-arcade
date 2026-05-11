@@ -204,6 +204,11 @@ EOF
   printf '</channel>\n</rss>\n'
 } > "$GALLERY/rss.xml"
 
+# Inject content-hash version strings on <link>/<script> references so
+# returning visitors get fresh CSS/JS the moment we change them, instead of
+# the 4-hour CF Pages cache window. Idempotent — no-op when nothing changed.
+bash "$(dirname "$0")/cachebust_assets.sh"
+
 # Total file size summary
 TOTAL_SIZE=$(du -sh "$GALLERY" | awk '{print $1}')
 echo ""
