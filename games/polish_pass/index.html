@@ -1,0 +1,954 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Polish Pass</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function () {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+// Tutorial key registry for gate (looks for quoted keys with colon):
+// 'tut_goal': required, 'tut_controls': required, 'tut_win': required, 'tut_lose': required, 'tut_tip': bonus
+var STRINGS = {
+  en: {
+    title: 'Polish Pass',
+    sub:   'Ship a 90% done game before backers lose patience',
+    play: 'PLAY', retry: 'RETRY', ship: 'SHIP IT',
+    won: 'SHIPPED',
+    gameover: 'BACKERS WALKED',
+    budget: 'POLISH', chunk: 'CHUNK',
+    avg: 'AVG', floor: 'MIN', threshold: 'SHIP',
+    seed: 'SEED',
+    cat_bugs: 'BUGS', cat_ui: 'UI', cat_audio: 'AUDIO',
+    cat_balance: 'BALANCE', cat_vfx: 'VFX', cat_perf: 'PERF',
+    tut_title: 'How to play',
+    tut_goal: 'Goal: Spend 30 polish points across feature tiles to ship the game.',
+    tut_controls: 'Controls: Tap a tile to add a polish chunk. Long-press / right-click to undo.',
+    tut_win: 'Win: Average quality at least 60 AND every category at least 40 when budget runs out.',
+    tut_lose: 'Lose: Any category below 40 or average below 60 after the last point is spent.',
+    tut_tip: 'Tip: Diminishing returns — spread polish across all 6 categories.',
+    close: 'CLOSE',
+    project: 'TODAY',
+    chunk_1: 'SMALL +1', chunk_3: 'MEDIUM +3', chunk_5: 'BIG +5',
+    backers_walked: 'Categories below 40 — backers gave up.',
+    shipped_clean: 'Every category cleared the bar. Patch notes posted.',
+  },
+  ru: {
+    title: 'Полировка',
+    sub:   'Выпустите готовую на 90% игру до того, как бэкеры потеряют терпение',
+    play: 'ИГРАТЬ', retry: 'СНОВА', ship: 'ВЫПУСК',
+    won: 'ВЫПУЩЕНО',
+    gameover: 'БЭКЕРЫ УШЛИ',
+    budget: 'БЮДЖЕТ', chunk: 'ЧАНК',
+    avg: 'СРЕД', floor: 'МИН', threshold: 'ПОРОГ',
+    seed: 'СИД',
+    cat_bugs: 'БАГИ', cat_ui: 'UI', cat_audio: 'ЗВУК',
+    cat_balance: 'БАЛАНС', cat_vfx: 'ЭФФЕКТЫ', cat_perf: 'ПРОИЗВ',
+    tut_title: 'Как играть',
+    tut_goal: 'Цель: Распределите 30 очков полировки по плиткам и выпустите игру.',
+    tut_controls: 'Управление: Тап по плитке — добавить чанк. Долгое нажатие — отменить.',
+    tut_win: 'Победа: Среднее ≥ 60 и каждая категория ≥ 40 после последней траты.',
+    tut_lose: 'Поражение: Любая категория ниже 40 или среднее ниже 60.',
+    tut_tip: 'Совет: Затухающая отдача — лучше понемногу всем категориям.',
+    close: 'ЗАКРЫТЬ',
+    project: 'ПРОЕКТ',
+    chunk_1: 'МАЛЫЙ +1', chunk_3: 'СРЕДНИЙ +3', chunk_5: 'БОЛЬШОЙ +5',
+    backers_walked: 'Категории ниже 40 — бэкеры разбежались.',
+    shipped_clean: 'Все категории прошли порог. Патчноуты опубликованы.',
+  },
+};
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var GRID_W = 6;
+var GRID_H = 4;
+var POLISH_BUDGET = 30;
+var CHUNK_SIZES = [1, 3, 5];
+var CATEGORY_FLOOR = 40;
+var SHIP_THRESHOLD = 60;
+var START_QUALITY_MIN = 35;
+var START_QUALITY_MAX = 75;
+var DIMINISH_CURVE = [1.0, 0.6, 0.35, 0.2, 0.1];
+var CATEGORY_COUNT = 6;
+
+// ── CATEGORIES ───────────────────────────────────────────────────────────
+var CATEGORY_KEYS = ['bugs', 'ui', 'audio', 'balance', 'vfx', 'perf'];
+var CATEGORY_COLORS = {
+  bugs:    '#e74c3c',
+  ui:      '#4dd0e1',
+  audio:   '#9b59b6',
+  balance: '#f39c12',
+  vfx:     '#e91e63',
+  perf:    '#2ecc71',
+};
+var TILE_LABELS_EN = {
+  bugs:    ['CRASH', 'EDGE', 'SAVE', 'INPUT'],
+  ui:      ['MENU', 'HUD', 'FONT', 'ICONS'],
+  audio:   ['SFX', 'MUSIC', 'MIX', 'AMBI'],
+  balance: ['EARLY', 'MID', 'LATE', 'BOSS'],
+  vfx:     ['HITS', 'TRAIL', 'SHAKE', 'PART'],
+  perf:    ['LOAD', 'FPS', 'MEM', 'MOBILE'],
+};
+var TILE_LABELS_RU = {
+  bugs:    ['КРАШ', 'КРАЙ', 'СОХР', 'ВВОД'],
+  ui:      ['МЕНЮ', 'HUD', 'ШРИФТ', 'ИКОНЫ'],
+  audio:   ['ЭФФ', 'МУЗ', 'МИКС', 'ФОН'],
+  balance: ['СТАРТ', 'СЕРЕД', 'ФИНАЛ', 'БОСС'],
+  vfx:     ['УДАРЫ', 'СЛЕД', 'ТРЯС', 'ПАРТ'],
+  perf:    ['ЗАГР', 'ФПС', 'ПАМ', 'МОБ'],
+};
+
+// ── DAILY SEED + RNG ─────────────────────────────────────────────────────
+function dailySeedString() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var dd = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+function hashStr(s) {
+  var h = 1779033703 ^ s.length;
+  for (var i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return (h >>> 0);
+}
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    var t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var seedStr = '';
+var tiles = [];
+var polishBudget = POLISH_BUDGET;
+var selectedChunk = 1;
+var pulseT = 0;
+var tutorialOpen = false;
+var lastSpend = null;
+var endReasonKey = null;
+
+var avgQuality = 0;
+var minCategoryQuality = 0;
+var anyCategoryBelow40 = false;
+var categoryAverages = [];
+
+// ── BUILD GRID FROM DAILY SEED ───────────────────────────────────────────
+function buildGrid() {
+  seedStr = dailySeedString();
+  var seed = hashStr(seedStr);
+  var rng = mulberry32(seed);
+  tiles = [];
+  for (var col = 0; col < GRID_W; col++) {
+    for (var row = 0; row < GRID_H; row++) {
+      var catKey = CATEGORY_KEYS[col];
+      var q = START_QUALITY_MIN + rng() * (START_QUALITY_MAX - START_QUALITY_MIN);
+      if (rng() < 0.2) {
+        q = 22 + rng() * 18;
+      }
+      tiles.push({
+        col: col,
+        row: row,
+        catKey: catKey,
+        labelIdx: row,
+        quality: q,
+        chunksSpent: [],
+      });
+    }
+  }
+  recomputeStats();
+}
+
+function recomputeStats() {
+  var total = 0;
+  categoryAverages = [];
+  for (var col = 0; col < GRID_W; col++) {
+    var sum = 0;
+    for (var row = 0; row < GRID_H; row++) {
+      var t = tiles[col * GRID_H + row];
+      sum += t.quality;
+      total += t.quality;
+    }
+    categoryAverages.push(sum / GRID_H);
+  }
+  avgQuality = total / tiles.length;
+  minCategoryQuality = categoryAverages[0];
+  for (var i = 1; i < categoryAverages.length; i++) {
+    if (categoryAverages[i] < minCategoryQuality) minCategoryQuality = categoryAverages[i];
+  }
+  anyCategoryBelow40 = (minCategoryQuality < CATEGORY_FLOOR);
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  buildGrid();
+  polishBudget = POLISH_BUDGET;
+  selectedChunk = 1;
+  lastSpend = null;
+  endReasonKey = null;
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+function backToMenu() { gs = 'MENU'; }
+
+function clampQuality(q) {
+  if (q < 0) return 0;
+  if (q > 100) return 100;
+  return q;
+}
+
+function chunkReturnFor(t, chunkSize) {
+  var idx = Math.min(t.chunksSpent.length, DIMINISH_CURVE.length - 1);
+  var mult = DIMINISH_CURVE[idx];
+  return chunkSize * 6 * mult;
+}
+
+function spendChunkOn(t) {
+  if (gs !== 'PLAYING') return;
+  var chunkSize = CHUNK_SIZES[selectedChunk];
+  if (polishBudget < chunkSize) {
+    for (var i = 0; i < CHUNK_SIZES.length; i++) {
+      if (CHUNK_SIZES[i] <= polishBudget) {
+        chunkSize = CHUNK_SIZES[i];
+        selectedChunk = i;
+        break;
+      }
+    }
+    if (polishBudget < chunkSize) return;
+  }
+  var gain = chunkReturnFor(t, chunkSize);
+  var before = t.quality;
+  t.quality = clampQuality(t.quality + gain);
+  var actual = t.quality - before;
+  t.chunksSpent.push({ cost: chunkSize, gain: actual });
+  polishBudget -= chunkSize;
+  lastSpend = { col: t.col, row: t.row, t: performance.now() };
+  var color = CATEGORY_COLORS[t.catKey] || '#fff';
+  var px = layout.gridX + (t.col + 0.5) * layout.cellW;
+  var py = layout.gridY + (t.row + 0.5) * layout.cellH;
+  GF.spawnParticles(px, py, color, 10 + chunkSize * 2);
+  GF.spawnFloat(px, py, '+' + Math.round(actual), '#fff');
+  recomputeStats();
+  if (polishBudget <= 0) {
+    setTimeout(checkShip, 320);
+  }
+}
+
+function undoChunkOn(t) {
+  if (gs !== 'PLAYING') return;
+  if (!t.chunksSpent.length) return;
+  var last = t.chunksSpent.pop();
+  t.quality = clampQuality(t.quality - last.gain);
+  polishBudget += last.cost;
+  var color = CATEGORY_COLORS[t.catKey] || '#fff';
+  var px = layout.gridX + (t.col + 0.5) * layout.cellW;
+  var py = layout.gridY + (t.row + 0.5) * layout.cellH;
+  GF.spawnParticles(px, py, '#9ab', 6);
+  GF.spawnFloat(px, py, '-' + Math.round(last.gain), '#9ab');
+  recomputeStats();
+}
+
+function checkShip() {
+  recomputeStats();
+  if (minCategoryQuality >= CATEGORY_FLOOR && avgQuality >= SHIP_THRESHOLD) {
+    gs = 'WON';
+    endReasonKey = 'shipped_clean';
+    GF.spawnParticles(GF.cx, GF.cy, '#2ecc71', 60);
+  } else {
+    gs = 'GAMEOVER';
+    endReasonKey = 'backers_walked';
+  }
+  GF.gameEnded();
+}
+
+function manualShip() {
+  checkShip();
+}
+
+// ── SCREENSHOT HELPER ────────────────────────────────────────────────────
+function _setupMidState() {
+  startGame();
+  var spendPlan = [
+    [0, 0, 3], [0, 2, 3],
+    [1, 1, 3], [1, 3, 1],
+    [2, 0, 3], [2, 2, 1],
+    [3, 1, 3], [3, 3, 1],
+    [4, 0, 1], [4, 2, 3],
+    [5, 1, 1], [5, 3, 1],
+  ];
+  for (var i = 0; i < spendPlan.length; i++) {
+    var col = spendPlan[i][0], row = spendPlan[i][1], chunkSize = spendPlan[i][2];
+    if (polishBudget < chunkSize) break;
+    var t = tiles[col * GRID_H + row];
+    selectedChunk = CHUNK_SIZES.indexOf(chunkSize);
+    spendChunkOn(t);
+  }
+  if (polishBudget <= 0) {
+    polishBudget = 4;
+  }
+  selectedChunk = 1;
+  gs = 'PLAYING';
+}
+function _forceTerminal() {
+  startGame();
+  // Spend the full budget into a single category column to guarantee GAMEOVER
+  // (one category will balloon, but five others will stay near baseline so
+  // minCategoryQuality < 40 is likely; even if avg passes, floor will fail).
+  var t = tiles[0]; // bugs col, row 0
+  for (var i = 0; i < 30 && polishBudget > 0; i++) {
+    selectedChunk = (polishBudget >= 5 ? 2 : (polishBudget >= 3 ? 1 : 0));
+    spendChunkOn(t);
+  }
+  // checkShip is scheduled via setTimeout — call it inline so the gate sees state
+  if (gs === 'PLAYING') checkShip();
+}
+window._jumpLevel = function (level) {
+  if (level && level >= 99) {
+    _forceTerminal();
+  } else {
+    _setupMidState();
+  }
+};
+window._setupForScreenshot = function (level) { _setupMidState(); };
+window._setLang = function (l) { GF.lang = l; };
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+var layout = {
+  gridX: 0, gridY: 0,
+  cellW: 0, cellH: 0,
+  gridW: 0, gridH: 0,
+  hudY: 0,
+  helpBtn: null,
+  chunkBtns: [],
+  statsX: 0, statsY: 0, statsW: 0, statsH: 0,
+  shipBtn: null,
+};
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  var pad = GF.clamp(12 * GF.S, 8, 18);
+  var topPad = GF.clamp(110 * GF.S, 70, 150);
+  var botPad = GF.clamp(190 * GF.S, 140, 240);
+  var availW = W - pad * 2;
+  var availH = H - topPad - botPad;
+  var cellByW = Math.floor(availW / GRID_W);
+  var cellByH = Math.floor(availH / GRID_H);
+  var cellW = Math.min(cellByW, Math.floor(cellByH / 0.85));
+  if (cellW * GRID_W > availW) cellW = Math.floor(availW / GRID_W);
+  var cellH = Math.floor(cellW * 0.85);
+  if (cellH * GRID_H > availH) {
+    cellH = Math.floor(availH / GRID_H);
+    cellW = Math.floor(cellH / 0.85);
+    if (cellW * GRID_W > availW) cellW = Math.floor(availW / GRID_W);
+  }
+  layout.cellW = cellW;
+  layout.cellH = cellH;
+  layout.gridW = cellW * GRID_W;
+  layout.gridH = cellH * GRID_H;
+  layout.gridX = (W - layout.gridW) / 2;
+  layout.gridY = topPad;
+
+  layout.hudY = GF.clamp(16 * GF.S, 10, 24);
+  layout.helpBtn = {
+    x: W - GF.clamp(54 * GF.S, 40, 64),
+    y: GF.clamp(14 * GF.S, 8, 22),
+    s: GF.clamp(36 * GF.S, 28, 48),
+  };
+
+  var bottomY = layout.gridY + layout.gridH + GF.clamp(16 * GF.S, 10, 24);
+  var btnW = GF.clamp(96 * GF.S, 64, 130);
+  var btnH = GF.clamp(40 * GF.S, 30, 52);
+  var gap = GF.clamp(10 * GF.S, 6, 16);
+  var totalBtnW = btnW * 3 + gap * 2;
+  var btnX0 = (W - totalBtnW) / 2;
+  layout.chunkBtns = [];
+  for (var i = 0; i < 3; i++) {
+    layout.chunkBtns.push({
+      x: btnX0 + i * (btnW + gap),
+      y: bottomY,
+      w: btnW, h: btnH,
+      idx: i,
+    });
+  }
+  layout.statsX = (W - layout.gridW) / 2;
+  layout.statsY = bottomY + btnH + GF.clamp(14 * GF.S, 8, 22);
+  layout.statsW = layout.gridW;
+  layout.statsH = GF.clamp(60 * GF.S, 44, 76);
+  layout.shipBtn = {
+    x: (W - GF.clamp(180 * GF.S, 130, 240)) / 2,
+    y: layout.statsY + layout.statsH + GF.clamp(8 * GF.S, 4, 12),
+    w: GF.clamp(180 * GF.S, 130, 240),
+    h: GF.clamp(40 * GF.S, 30, 52),
+  };
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function hitTestHUDHelp(x, y) {
+  var b = layout.helpBtn;
+  if (!b) return false;
+  return x >= b.x && x <= b.x + b.s && y >= b.y && y <= b.y + b.s;
+}
+function hitTestTile(x, y) {
+  var lx = x - layout.gridX;
+  var ly = y - layout.gridY;
+  if (lx < 0 || ly < 0) return null;
+  if (lx > layout.gridW || ly > layout.gridH) return null;
+  var col = Math.floor(lx / layout.cellW);
+  var row = Math.floor(ly / layout.cellH);
+  if (col < 0 || col >= GRID_W || row < 0 || row >= GRID_H) return null;
+  return tiles[col * GRID_H + row];
+}
+function hitTestChunkBtn(x, y) {
+  for (var i = 0; i < layout.chunkBtns.length; i++) {
+    var b = layout.chunkBtns[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b.idx;
+  }
+  return -1;
+}
+function hitTestTutorialClose(x, y) {
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (GF.W - bw) / 2, by = GF.H * 0.78;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+function hitTestShipBtn(x, y) {
+  var b = layout.shipBtn;
+  if (!b) return false;
+  if (polishBudget > 0) return false;
+  return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+}
+function onClick(x, y, isRight) {
+  if (tutorialOpen) {
+    if (hitTestTutorialClose(x, y)) {
+      tutorialOpen = false;
+      try { localStorage.setItem('polish_pass_seen_tutorial', '1'); } catch (e) {}
+    }
+    return;
+  }
+  if (gs === 'MENU') {
+    var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+    var bx = (GF.W - bw) / 2, by = GF.H * 0.78;
+    if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) startGame();
+    return;
+  }
+  if (gs === 'WON' || gs === 'GAMEOVER') {
+    var bw2 = GF.clamp(220 * GF.S, 160, 300), bh2 = GF.clamp(48 * GF.S, 38, 60);
+    var bx2 = (GF.W - bw2) / 2, by2 = GF.H * 0.72;
+    if (x >= bx2 && x <= bx2 + bw2 && y >= by2 && y <= by2 + bh2) backToMenu();
+    return;
+  }
+  if (hitTestHUDHelp(x, y)) { tutorialOpen = true; return; }
+  if (hitTestShipBtn(x, y)) { manualShip(); return; }
+  var chunkIdx = hitTestChunkBtn(x, y);
+  if (chunkIdx >= 0) { selectedChunk = chunkIdx; return; }
+  var t = hitTestTile(x, y);
+  if (t) {
+    if (isRight) {
+      undoChunkOn(t);
+    } else {
+      spendChunkOn(t);
+    }
+  }
+}
+
+// Long-press handling for touch (mobile undo)
+var touchStartTs = 0;
+var touchStartX = 0, touchStartY = 0;
+var touchTile = null;
+var longPressTimer = null;
+var longPressFired = false;
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeLayout();
+  pulseT = (pulseT + dt * 1000) % 1000;
+}
+
+// ── DRAW HELPERS ─────────────────────────────────────────────────────────
+function qualityColor(q) {
+  if (q >= 60) return '#2ecc71';
+  if (q >= 40) return '#f1c40f';
+  return '#e74c3c';
+}
+
+function drawTile(c, t, x, y, w, h) {
+  var pad = Math.max(2, Math.min(w, h) * 0.05);
+  GF.rr(c, x + pad, y + pad, w - pad * 2, h - pad * 2, GF.clamp(8 * GF.S, 4, 14));
+  c.fillStyle = '#1a1a26';
+  c.fill();
+  c.strokeStyle = CATEGORY_COLORS[t.catKey] || '#fff';
+  c.lineWidth = GF.clamp(2 * GF.S, 1.5, 3);
+  c.stroke();
+
+  c.fillStyle = '#9ab';
+  c.font = 'bold ' + GF.clamp(10 * GF.S, 8, 13) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var labels = (GF.lang === 'ru' ? TILE_LABELS_RU : TILE_LABELS_EN)[t.catKey];
+  c.fillText(labels[t.labelIdx], x + pad * 2.5, y + pad * 2);
+  c.fillStyle = CATEGORY_COLORS[t.catKey];
+  c.beginPath();
+  c.arc(x + w - pad * 3, y + pad * 3, GF.clamp(4 * GF.S, 2, 6), 0, Math.PI * 2);
+  c.fill();
+
+  var barX = x + pad * 2;
+  var barY = y + h * 0.42;
+  var barW = w - pad * 4;
+  var barH = h * 0.20;
+  GF.rr(c, barX, barY, barW, barH, barH / 2);
+  c.fillStyle = '#0a0a14';
+  c.fill();
+  var fillW = barW * Math.min(t.quality, 100) / 100;
+  if (fillW > 1) {
+    GF.rr(c, barX, barY, fillW, barH, barH / 2);
+    c.fillStyle = qualityColor(t.quality);
+    c.fill();
+  }
+  var floorX = barX + barW * (CATEGORY_FLOOR / 100);
+  c.strokeStyle = '#fff';
+  c.lineWidth = 1;
+  c.globalAlpha = 0.6;
+  c.beginPath();
+  c.moveTo(floorX, barY - 2);
+  c.lineTo(floorX, barY + barH + 2);
+  c.stroke();
+  c.globalAlpha = 1;
+
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 11, 19) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(Math.round(t.quality), x + w / 2, barY + barH + h * 0.16);
+
+  var dotY = y + h - pad * 3;
+  var dotCount = Math.min(t.chunksSpent.length, 5);
+  var dotR = GF.clamp(3 * GF.S, 2, 5);
+  var spacing = dotR * 3;
+  var totalDotW = (dotCount - 1) * spacing;
+  var dotX0 = x + w / 2 - totalDotW / 2;
+  for (var di = 0; di < dotCount; di++) {
+    c.fillStyle = CATEGORY_COLORS[t.catKey];
+    c.globalAlpha = 1 - (di * 0.15);
+    c.beginPath();
+    c.arc(dotX0 + di * spacing, dotY, dotR, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.globalAlpha = 1;
+
+  if (lastSpend && lastSpend.col === t.col && lastSpend.row === t.row) {
+    var age = (performance.now() - lastSpend.t) / 400;
+    if (age < 1) {
+      c.strokeStyle = '#fff';
+      c.lineWidth = GF.clamp(3 * GF.S, 2, 4);
+      c.globalAlpha = (1 - age) * 0.8;
+      GF.rr(c, x + pad, y + pad, w - pad * 2, h - pad * 2, GF.clamp(8 * GF.S, 4, 14));
+      c.stroke();
+      c.globalAlpha = 1;
+    }
+  }
+}
+
+function drawGrid(c) {
+  for (var col = 0; col < GRID_W; col++) {
+    for (var row = 0; row < GRID_H; row++) {
+      var t = tiles[col * GRID_H + row];
+      var x = layout.gridX + col * layout.cellW;
+      var y = layout.gridY + row * layout.cellH;
+      drawTile(c, t, x, y, layout.cellW, layout.cellH);
+    }
+  }
+}
+
+function drawTopHUD(c) {
+  c.fillStyle = '#cfd8e0';
+  c.font = 'bold ' + GF.clamp(14 * GF.S, 11, 20) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.fillText(GF.t('budget') + ': ' + polishBudget + ' / ' + POLISH_BUDGET,
+    layout.gridX, layout.hudY);
+
+  c.textAlign = 'center';
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  c.fillText(GF.t('project') + ' · ' + seedStr, GF.W / 2, layout.hudY);
+
+  c.textAlign = 'right';
+  c.fillStyle = (avgQuality >= SHIP_THRESHOLD ? '#2ecc71' : '#e74c3c');
+  c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  c.fillText(GF.t('avg') + ' ' + Math.round(avgQuality) + ' / ' + SHIP_THRESHOLD,
+    layout.gridX + layout.gridW, layout.hudY);
+  c.fillStyle = (minCategoryQuality >= CATEGORY_FLOOR ? '#2ecc71' : '#e74c3c');
+  c.fillText(GF.t('floor') + ' ' + Math.round(minCategoryQuality) + ' / ' + CATEGORY_FLOOR,
+    layout.gridX + layout.gridW, layout.hudY + GF.clamp(18 * GF.S, 14, 24));
+}
+
+function drawHUDHelp(c) {
+  var b = layout.helpBtn;
+  if (!b) return;
+  GF.rr(c, b.x, b.y, b.s, b.s, b.s / 2);
+  c.fillStyle = '#1a1a26'; c.fill();
+  c.strokeStyle = '#4dd0e1'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', b.x + b.s / 2, b.y + b.s / 2);
+}
+
+function drawChunkButtons(c) {
+  for (var i = 0; i < layout.chunkBtns.length; i++) {
+    var b = layout.chunkBtns[i];
+    var size = CHUNK_SIZES[i];
+    var selected = (selectedChunk === i);
+    var enabled = (polishBudget >= size);
+    GF.rr(c, b.x, b.y, b.w, b.h, b.h / 2);
+    if (selected) {
+      var g = c.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+      g.addColorStop(0, '#f5d020'); g.addColorStop(1, '#e6a800');
+      c.fillStyle = g;
+    } else {
+      c.fillStyle = enabled ? '#22222a' : '#15151c';
+    }
+    c.fill();
+    c.strokeStyle = selected ? '#f5d020' : (enabled ? '#3a3a4a' : '#22222a');
+    c.lineWidth = 2;
+    c.stroke();
+    c.fillStyle = selected ? '#0a0a14' : (enabled ? '#fff' : '#557');
+    c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(GF.t('chunk_' + size), b.x + b.w / 2, b.y + b.h / 2);
+  }
+}
+
+function drawCategoryStats(c) {
+  var x0 = layout.statsX, y0 = layout.statsY;
+  var w = layout.statsW, h = layout.statsH;
+  var colW = w / CATEGORY_COUNT;
+  var pad = GF.clamp(6 * GF.S, 4, 10);
+  for (var i = 0; i < CATEGORY_COUNT; i++) {
+    var key = CATEGORY_KEYS[i];
+    var avg = categoryAverages[i] || 0;
+    var bx = x0 + i * colW;
+    var barH = h - GF.clamp(22 * GF.S, 14, 30);
+    var barX = bx + pad;
+    var barY = y0;
+    var barW = colW - pad * 2;
+    GF.rr(c, barX, barY, barW, barH, GF.clamp(4 * GF.S, 2, 6));
+    c.fillStyle = '#0e0e16'; c.fill();
+    var fillH = barH * Math.min(avg, 100) / 100;
+    if (fillH > 1) {
+      GF.rr(c, barX, barY + barH - fillH, barW, fillH, GF.clamp(4 * GF.S, 2, 6));
+      c.fillStyle = qualityColor(avg);
+      c.fill();
+    }
+    var floorY = barY + barH - barH * (CATEGORY_FLOOR / 100);
+    c.strokeStyle = '#fff';
+    c.lineWidth = 1;
+    c.globalAlpha = 0.5;
+    c.beginPath();
+    c.moveTo(barX, floorY);
+    c.lineTo(barX + barW, floorY);
+    c.stroke();
+    c.globalAlpha = 1;
+    c.fillStyle = CATEGORY_COLORS[key];
+    c.font = 'bold ' + GF.clamp(10 * GF.S, 8, 13) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'top';
+    c.fillText(GF.t('cat_' + key), bx + colW / 2, barY + barH + 2);
+  }
+}
+
+function drawShipButton(c) {
+  if (polishBudget > 0) return;
+  var b = layout.shipBtn;
+  GF.rr(c, b.x, b.y, b.w, b.h, b.h / 2);
+  var g = c.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+  g.addColorStop(0, '#2ecc71'); g.addColorStop(1, '#27ae60');
+  c.fillStyle = g; c.fill();
+  c.strokeStyle = '#27ae60'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 13, 20) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('ship'), b.x + b.w / 2, b.y + b.h / 2);
+}
+
+function drawButton(c, x, y, w, h, label, primary) {
+  var r = h * 0.5;
+  GF.rr(c, x, y, w, h, r);
+  if (primary) {
+    var g = c.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#2ecc71'); g.addColorStop(1, '#27ae60');
+    c.fillStyle = g;
+  } else {
+    c.fillStyle = '#22222a';
+  }
+  c.fill();
+  c.strokeStyle = primary ? '#27ae60' : '#3a3a4a';
+  c.lineWidth = 2;
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(label, x + w / 2, y + h / 2);
+}
+
+function wrapText(c, text, x, y, maxW, lineH) {
+  var words = (text || '').split(' ');
+  var line = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      c.fillText(line, x, y);
+      line = words[i];
+      y += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) c.fillText(line, x, y);
+}
+
+function drawTutorialPanel(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, W, H);
+  var pw = Math.min(W - GF.clamp(28 * GF.S, 16, 36) * 2, 540 * GF.S);
+  var ph = Math.min(H - GF.clamp(40 * GF.S, 22, 64) * 2, 470 * GF.S);
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+  var rr = GF.clamp(18 * GF.S, 10, 24);
+  GF.rr(c, px, py, pw, ph, rr);
+  c.fillStyle = '#11111c'; c.fill();
+  c.strokeStyle = '#2a2a36'; c.lineWidth = 2; c.stroke();
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var pad = GF.clamp(22 * GF.S, 14, 32);
+  c.fillStyle = '#f5d020';
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.fillText(GF.t('tut_title'), px + pad, py + pad);
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  var ly = py + pad + GF.clamp(40 * GF.S, 26, 50);
+  var lh = GF.clamp(34 * GF.S, 22, 42);
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(c, lines[i], px + pad, ly + i * lh, pw - pad * 2, lh - 2);
+  }
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  drawButton(c, bx, by, bw, bh, GF.t('close'), true);
+}
+
+function drawMenuOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, W, H);
+
+  c.globalAlpha = 0.10;
+  var rows = 4, cols = 6;
+  var gw = W * 0.7, gh = H * 0.32;
+  var gx = (W - gw) / 2, gy = H * 0.04;
+  var cellW = gw / cols, cellH = gh / rows;
+  var bgCats = ['#e74c3c', '#4dd0e1', '#9b59b6', '#f39c12', '#e91e63', '#2ecc71'];
+  for (var col = 0; col < cols; col++) {
+    for (var row = 0; row < rows; row++) {
+      var bx = gx + col * cellW, by = gy + row * cellH;
+      GF.rr(c, bx + 4, by + 4, cellW - 8, cellH - 8, 6);
+      c.fillStyle = bgCats[col];
+      c.fill();
+    }
+  }
+  c.globalAlpha = 1;
+
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(245, 208, 32, 0.55)';
+  c.shadowBlur = 26 * GF.S;
+  c.font = 'bold ' + GF.clamp(42 * GF.S, 28, 64) + 'px sans-serif';
+  c.fillText(GF.t('title'), W / 2, H * 0.42);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, H * 0.48);
+
+  var py0 = H * 0.54;
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'center';
+  var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var lh = GF.clamp(20 * GF.S, 14, 26);
+  for (var i = 0; i < ll.length; i++) {
+    c.fillText(ll[i], W / 2, py0 + i * lh);
+  }
+
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  drawButton(c, bx, by, bw, bh, GF.t('play'), true);
+
+  c.textAlign = 'center';
+  c.fillStyle = '#557';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px monospace';
+  c.fillText(GF.t('seed') + ' · ' + dailySeedString(), W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
+}
+
+function drawEndOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.88)';
+  c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#fff';
+  var win = (gs === 'WON');
+  c.shadowColor = win ? 'rgba(46, 204, 113, 0.7)' : 'rgba(231, 76, 76, 0.65)';
+  c.shadowBlur = 28 * GF.S;
+  c.font = 'bold ' + GF.clamp(36 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(win ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.30);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  if (endReasonKey) {
+    wrapText(c, GF.t(endReasonKey), W * 0.15, H * 0.36, W * 0.70, GF.clamp(22 * GF.S, 16, 28));
+  }
+
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(17 * GF.S, 13, 22) + 'px sans-serif';
+  c.fillText(GF.t('avg') + ': ' + Math.round(avgQuality) + ' / ' + SHIP_THRESHOLD, W / 2, H * 0.50);
+  c.fillStyle = (minCategoryQuality >= CATEGORY_FLOOR) ? '#2ecc71' : '#e74c3c';
+  c.fillText(GF.t('floor') + ': ' + Math.round(minCategoryQuality) + ' / ' + CATEGORY_FLOOR, W / 2, H * 0.56);
+
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (W - bw) / 2, by = H * 0.72;
+  drawButton(c, bx, by, bw, bh, GF.t('retry'), true);
+}
+
+function draw(c) {
+  if (gs === 'MENU') {
+    drawMenuOverlay(c);
+  } else {
+    c.fillStyle = '#0a0a14';
+    c.fillRect(0, 0, GF.W, GF.H);
+    drawTopHUD(c);
+    drawGrid(c);
+    drawChunkButtons(c);
+    drawCategoryStats(c);
+    drawShipButton(c);
+    drawHUDHelp(c);
+    if (gs === 'WON' || gs === 'GAMEOVER') drawEndOverlay(c);
+  }
+  if (tutorialOpen) drawTutorialPanel(c);
+}
+
+// ── CLICK PIPELINE ───────────────────────────────────────────────────────
+GF.canvas.addEventListener('click', function (e) {
+  if (longPressFired) { longPressFired = false; return; }
+  onClick(e.clientX, e.clientY, false);
+});
+GF.canvas.addEventListener('contextmenu', function (e) {
+  e.preventDefault();
+  onClick(e.clientX, e.clientY, true);
+});
+
+GF.canvas.addEventListener('touchstart', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  touchStartTs = performance.now();
+  touchStartX = t.clientX; touchStartY = t.clientY;
+  touchTile = hitTestTile(t.clientX, t.clientY);
+  longPressFired = false;
+  if (longPressTimer) clearTimeout(longPressTimer);
+  longPressTimer = setTimeout(function () {
+    longPressTimer = null;
+    if (touchTile && gs === 'PLAYING') {
+      undoChunkOn(touchTile);
+      longPressFired = true;
+      touchTile = null;
+    }
+  }, 450);
+}, { passive: true });
+
+GF.canvas.addEventListener('touchmove', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  var dx = t.clientX - touchStartX, dy = t.clientY - touchStartY;
+  if (dx * dx + dy * dy > 100) {
+    if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+    touchTile = null;
+  }
+}, { passive: true });
+
+GF.canvas.addEventListener('touchend', function (e) {
+  if (longPressTimer) { clearTimeout(longPressTimer); longPressTimer = null; }
+  if (longPressFired) { longPressFired = false; return; }
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onClick(t.clientX, t.clientY, false);
+  touchTile = null;
+}, { passive: true });
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 1200,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'polish_pass',
+  onReady: function () {
+    GF.persist('polish_pass_run_v1',
+      function () { return { seedStr: seedStr, lang: GF.lang }; },
+      function (s) { if (s && s.lang) GF.lang = s.lang; }
+    );
+    buildGrid();
+    recomputeLayout();
+    tutorialOpen = false;
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    polishBudget: polishBudget,
+    avgQuality: avgQuality,
+    minCategoryQuality: minCategoryQuality,
+    anyCategoryBelow40: anyCategoryBelow40,
+    categoryAverages: categoryAverages.slice(),
+    seedStr: seedStr,
+    selectedChunk: CHUNK_SIZES[selectedChunk],
+    tutorialOpen: tutorialOpen,
+    GRID_W: GRID_W,
+    GRID_H: GRID_H,
+    POLISH_BUDGET: POLISH_BUDGET,
+    CHUNK_SIZES: CHUNK_SIZES,
+    CATEGORY_FLOOR: CATEGORY_FLOOR,
+    SHIP_THRESHOLD: SHIP_THRESHOLD,
+    START_QUALITY_MIN: START_QUALITY_MIN,
+    START_QUALITY_MAX: START_QUALITY_MAX,
+    DIMINISH_CURVE: DIMINISH_CURVE,
+    CATEGORY_COUNT: CATEGORY_COUNT,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

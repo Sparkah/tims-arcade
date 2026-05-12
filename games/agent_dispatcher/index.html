@@ -1,0 +1,911 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Agent Dispatcher</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function () {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Agent Dispatcher',
+    sub:   'Route tasks to AI agents before the token budget burns out',
+    play: 'PLAY', retry: 'RETRY', close: 'CLOSE',
+    won: 'QUEUE CLEARED',
+    gameover: 'OUT OF TOKENS',
+    tokens: 'TOKENS', cleared: 'CLEARED', queue: 'QUEUE',
+    agent_haiku: 'Haiku', agent_sonnet: 'Sonnet', agent_opus: 'Opus', agent_human: 'Human',
+    cost: 'cost', busy: 'busy',
+    task: 'Task',
+    fail: 'FAIL +2',
+    'tut_title': 'How to play',
+    'tut_goal': 'Goal: Clear all 20 incoming tasks before your 50 tokens run out.',
+    'tut_controls': 'Controls: Drag a task card from the queue onto an agent slot.',
+    'tut_win': 'Win: All 20 tasks cleared with tokens still in the budget.',
+    'tut_lose': 'Lose: Tokens hit zero while tasks still wait in the queue.',
+    'tut_tip': 'Tip: Cheap agents fail on hard tasks and the task DOUBLES. Bigger card = harder. Human is free but locked 3 turns.',
+    seed: 'SEED',
+  },
+  ru: {
+    title: 'Диспетчер агентов',
+    sub:   'Направляйте задачи к ИИ-агентам, пока не сгорел бюджет токенов',
+    play: 'ИГРАТЬ', retry: 'СНОВА', close: 'ЗАКРЫТЬ',
+    won: 'ОЧЕРЕДЬ ПУСТА',
+    gameover: 'ТОКЕНЫ КОНЧИЛИСЬ',
+    tokens: 'ТОКЕНЫ', cleared: 'ЗАКРЫТО', queue: 'ОЧЕРЕДЬ',
+    agent_haiku: 'Хайку', agent_sonnet: 'Сонет', agent_opus: 'Опус', agent_human: 'Человек',
+    cost: 'цена', busy: 'занят',
+    task: 'Задача',
+    fail: 'СБОЙ +2',
+    'tut_title': 'Как играть',
+    'tut_goal': 'Цель: Закройте все 20 задач до того, как закончатся 50 токенов.',
+    'tut_controls': 'Управление: Перетащите карточку задачи на агента.',
+    'tut_win': 'Победа: Все 20 задач закрыты, токены ещё остались.',
+    'tut_lose': 'Поражение: Токены на нуле, а в очереди ещё задачи.',
+    'tut_tip': 'Совет: Дешёвый агент проваливает сложную задачу — она УДВАИВАЕТСЯ. Чем больше карточка, тем сложнее. Человек бесплатен, но занят 3 хода.',
+    seed: 'СИД',
+  },
+};
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var HAIKU_COST = 1;
+var SONNET_COST = 3;
+var OPUS_COST = 8;
+var HUMAN_COST = 0;
+var HUMAN_TURNS = 3;
+var HAIKU_MAX_DIFF = 2;
+var SONNET_MAX_DIFF = 4;
+var OPUS_MAX_DIFF = 5;
+var INITIAL_BUDGET = 50;
+var TOTAL_TASKS = 20;
+var QUEUE_DISPLAY = 5;
+var DIFFICULTY_HINT_NOISE = 0.18;
+
+// ── AGENTS ───────────────────────────────────────────────────────────────
+var AGENTS = [
+  { id: 'haiku',  cost: HAIKU_COST,  maxDiff: HAIKU_MAX_DIFF,  color: '#4dd0e1', accent: '#26c6da' },
+  { id: 'sonnet', cost: SONNET_COST, maxDiff: SONNET_MAX_DIFF, color: '#ab47bc', accent: '#8e24aa' },
+  { id: 'opus',   cost: OPUS_COST,   maxDiff: OPUS_MAX_DIFF,   color: '#ffb74d', accent: '#fb8c00' },
+  { id: 'human',  cost: HUMAN_COST,  maxDiff: 5,               color: '#81c784', accent: '#43a047' },
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var tokens = INITIAL_BUDGET;
+var tasksCleared = 0;
+var queue = [];
+var humanBusyTurns = 0;
+var taskIdSeq = 1;
+var seedStr = '';
+var seedNum = 1;
+var tutorialOpen = false;
+var lastResult = null;
+var slotFlashes = {};
+
+var drag = { active: false, taskId: null, x: 0, y: 0, sx: 0, sy: 0 };
+
+var layout = {};
+
+// ── SEED / RNG ───────────────────────────────────────────────────────────
+function todaySeedString() {
+  var d = new Date();
+  return '' + d.getFullYear() +
+         String(d.getMonth() + 1).padStart(2, '0') +
+         String(d.getDate()).padStart(2, '0');
+}
+function hashStr(s) {
+  var h = 2166136261 >>> 0;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619) >>> 0;
+  }
+  return h >>> 0;
+}
+function mulberry32(seed) {
+  var t = seed >>> 0;
+  return function () {
+    t = (t + 0x6D2B79F5) >>> 0;
+    var r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+var rand = Math.random;
+
+// ── QUEUE / TASKS ────────────────────────────────────────────────────────
+function makeTask(difficulty) {
+  var hint = difficulty;
+  if (rand() < DIFFICULTY_HINT_NOISE) {
+    hint += (rand() < 0.5 ? -1 : 1);
+    if (hint < 1) hint = 1;
+    if (hint > 5) hint = 5;
+  }
+  return {
+    id: taskIdSeq++,
+    difficulty: difficulty,
+    hint: hint,
+    spawnAt: performance.now(),
+  };
+}
+
+function buildInitialQueue() {
+  queue.length = 0;
+  taskIdSeq = 1;
+  var plan = [];
+  var i;
+  for (i = 0; i < 6; i++) plan.push(1);
+  for (i = 0; i < 5; i++) plan.push(2);
+  for (i = 0; i < 4; i++) plan.push(3);
+  for (i = 0; i < 3; i++) plan.push(4);
+  for (i = 0; i < 2; i++) plan.push(5);
+  for (var j = plan.length - 1; j > 0; j--) {
+    var k = Math.floor(rand() * (j + 1));
+    var tmp = plan[j]; plan[j] = plan[k]; plan[k] = tmp;
+  }
+  for (var n = 0; n < plan.length; n++) {
+    queue.push(makeTask(plan[n]));
+  }
+}
+
+// ── ROUTING ──────────────────────────────────────────────────────────────
+function routeTask(taskId, agentId) {
+  var idx = -1;
+  for (var i = 0; i < queue.length; i++) {
+    if (queue[i].id === taskId) { idx = i; break; }
+  }
+  if (idx < 0) return false;
+  var agent = null;
+  for (var a = 0; a < AGENTS.length; a++) if (AGENTS[a].id === agentId) agent = AGENTS[a];
+  if (!agent) return false;
+
+  if (agent.id === 'human' && humanBusyTurns > 0) {
+    GF.setShake(0.2);
+    return false;
+  }
+
+  tokens -= agent.cost;
+  var task = queue[idx];
+  queue.splice(idx, 1);
+  var success = task.difficulty <= agent.maxDiff;
+  var slot = layout.slots[agent.id];
+  if (success) {
+    tasksCleared++;
+    GF.spawnParticles(slot.cx, slot.cy, agent.color, 18);
+    GF.spawnFloat(slot.cx, slot.cy - 30 * GF.S, '-' + agent.cost, '#fff');
+    slotFlashes[agent.id] = { t: performance.now(), ok: true };
+    lastResult = { agentId: agent.id, success: true, t: performance.now() };
+    if (agent.id === 'human') humanBusyTurns = HUMAN_TURNS;
+  } else {
+    queue.push(makeTask(task.difficulty));
+    queue.push(makeTask(task.difficulty));
+    GF.spawnParticles(slot.cx, slot.cy, '#ff6e6e', 24);
+    GF.spawnFloat(slot.cx, slot.cy - 30 * GF.S, GF.t('fail'), '#ff6e6e');
+    GF.setShake(0.5);
+    slotFlashes[agent.id] = { t: performance.now(), ok: false };
+    lastResult = { agentId: agent.id, success: false, t: performance.now() };
+    if (agent.id === 'human') humanBusyTurns = HUMAN_TURNS;
+  }
+
+  if (agent.id !== 'human' && humanBusyTurns > 0) {
+    humanBusyTurns -= 1;
+    if (humanBusyTurns < 0) humanBusyTurns = 0;
+  }
+
+  if (tasksCleared >= TOTAL_TASKS) {
+    gs = 'WON';
+    try { GF.gameEnded(); } catch (e) {}
+  } else if (tokens <= 0 && queue.length > 0) {
+    tokens = 0;
+    gs = 'GAMEOVER';
+    try { GF.gameEnded(); } catch (e) {}
+  }
+
+  GF.saveRun();
+  return success;
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  seedStr = todaySeedString();
+  seedNum = hashStr(seedStr);
+  rand = mulberry32(seedNum);
+  tokens = INITIAL_BUDGET;
+  tasksCleared = 0;
+  humanBusyTurns = 0;
+  drag.active = false; drag.taskId = null;
+  lastResult = null;
+  slotFlashes = {};
+  buildInitialQueue();
+  tutorialOpen = false;
+  gs = 'PLAYING';
+  try { GF.gameStarted(); } catch (e) {}
+  GF.saveRun();
+}
+
+function backToMenu() {
+  gs = 'MENU';
+  GF.saveRun();
+}
+
+window._setupForScreenshot = function (level) {
+  startGame();
+  tokens = 32;
+  tasksCleared = 9;
+  queue.length = 0;
+  taskIdSeq = 100;
+  queue.push(makeTask(2));
+  queue.push(makeTask(4));
+  queue.push(makeTask(1));
+  queue.push(makeTask(5));
+  queue.push(makeTask(3));
+  queue.push(makeTask(2));
+  queue.push(makeTask(4));
+  slotFlashes['sonnet'] = { t: performance.now(), ok: true };
+};
+
+// take_screenshots.js and webapp_gate.js call _jumpLevel.
+//   level 1  → mid-game populated state for screenshots / playing check
+//   level 99 → terminal GAMEOVER state for the gate's terminal-state check
+window._jumpLevel = function (level) {
+  if (level === 99) {
+    startGame();
+    // Force GAMEOVER: queue still has tasks, tokens at zero
+    tokens = 0;
+    tasksCleared = 5;
+    // queue stays populated from startGame()
+    gs = 'GAMEOVER';
+    try { GF.gameEnded(); } catch (e) {}
+    GF.saveRun();
+    return;
+  }
+  window._setupForScreenshot(level || 1);
+};
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  var pad = GF.clamp(14 * GF.S, 10, 22);
+  layout.W = W; layout.H = H; layout.pad = pad;
+  layout.hudY = GF.clamp(14 * GF.S, 10, 22);
+  layout.hudH = GF.clamp(58 * GF.S, 44, 78);
+  layout.helpBtn = {
+    x: W - GF.clamp(54 * GF.S, 40, 64),
+    y: GF.clamp(12 * GF.S, 8, 20),
+    s: GF.clamp(36 * GF.S, 28, 48),
+  };
+  var boardTop = layout.hudY + layout.hudH + pad;
+  var boardBottom = H - pad;
+  var boardH = boardBottom - boardTop;
+  layout.boardTop = boardTop;
+  layout.boardBottom = boardBottom;
+
+  var colGap = pad;
+  var colW = (W - pad * 2 - colGap) / 2;
+  layout.queueCol = { x: pad, y: boardTop, w: colW, h: boardH };
+  layout.slotsCol = { x: pad + colW + colGap, y: boardTop, w: colW, h: boardH };
+
+  var qH = boardH;
+  var qInnerPad = GF.clamp(10 * GF.S, 6, 14);
+  var qDisplay = QUEUE_DISPLAY;
+  var cardH = (qH - qInnerPad * (qDisplay - 1)) / qDisplay;
+  cardH = Math.min(cardH, GF.clamp(78 * GF.S, 56, 100));
+  layout.cardH = cardH;
+  layout.cardPad = qInnerPad;
+  layout.cardW = colW;
+
+  var sH = boardH;
+  var sPad = GF.clamp(10 * GF.S, 6, 16);
+  var slotH = (sH - sPad * 3) / 4;
+  layout.slotH = slotH;
+  layout.slotPad = sPad;
+  layout.slotW = colW;
+  layout.slots = {};
+  for (var i = 0; i < AGENTS.length; i++) {
+    var a = AGENTS[i];
+    var sx = layout.slotsCol.x;
+    var sy = layout.slotsCol.y + i * (slotH + sPad);
+    layout.slots[a.id] = {
+      x: sx, y: sy, w: colW, h: slotH,
+      cx: sx + colW / 2, cy: sy + slotH / 2,
+      agent: a,
+    };
+  }
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function hitTestHelpBtn(x, y) {
+  var b = layout.helpBtn;
+  if (!b) return false;
+  return x >= b.x && x <= b.x + b.s && y >= b.y && y <= b.y + b.s;
+}
+function hitTestTutorialClose(x, y) {
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (GF.W - bw) / 2, by = GF.H * 0.82;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+function hitTestQueueCard(x, y) {
+  if (!layout.queueCol) return -1;
+  var col = layout.queueCol;
+  if (x < col.x || x > col.x + col.w) return -1;
+  if (y < col.y || y > col.y + col.h) return -1;
+  var i = Math.floor((y - col.y) / (layout.cardH + layout.cardPad));
+  if (i < 0 || i >= QUEUE_DISPLAY) return -1;
+  if (i >= queue.length) return -1;
+  var localY = (y - col.y) - i * (layout.cardH + layout.cardPad);
+  if (localY > layout.cardH) return -1;
+  return i;
+}
+function hitTestSlot(x, y) {
+  if (!layout.slots) return null;
+  for (var i = 0; i < AGENTS.length; i++) {
+    var s = layout.slots[AGENTS[i].id];
+    if (x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h) {
+      return AGENTS[i].id;
+    }
+  }
+  return null;
+}
+function hitTestEndButton(x, y) {
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (GF.W - bw) / 2, by = GF.H * 0.68;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+function hitTestPlayBtn(x, y) {
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (GF.W - bw) / 2, by = GF.H * 0.78;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+
+function getEventPos(e) {
+  if (e.touches && e.touches.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  if (e.changedTouches && e.changedTouches.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  return { x: e.clientX, y: e.clientY };
+}
+
+function onPointerDown(x, y) {
+  if (tutorialOpen) {
+    if (hitTestTutorialClose(x, y)) {
+      tutorialOpen = false;
+      try { localStorage.setItem('agent_dispatcher_seen_tutorial', '1'); } catch (e) {}
+    }
+    return;
+  }
+  if (gs === 'MENU') {
+    if (hitTestPlayBtn(x, y)) startGame();
+    return;
+  }
+  if (gs === 'WON' || gs === 'GAMEOVER') {
+    if (hitTestEndButton(x, y)) backToMenu();
+    return;
+  }
+  if (hitTestHelpBtn(x, y)) { tutorialOpen = true; return; }
+  var qi = hitTestQueueCard(x, y);
+  if (qi >= 0) {
+    drag.active = true;
+    drag.taskId = queue[qi].id;
+    drag.x = x; drag.y = y;
+    drag.sx = x; drag.sy = y;
+  }
+}
+function onPointerMove(x, y) {
+  if (drag.active) {
+    drag.x = x; drag.y = y;
+  }
+}
+function onPointerUp(x, y) {
+  if (!drag.active) return;
+  var slotId = hitTestSlot(x, y);
+  if (slotId) routeTask(drag.taskId, slotId);
+  drag.active = false;
+  drag.taskId = null;
+}
+
+GF.canvas.addEventListener('mousedown', function (e) {
+  var p = getEventPos(e);
+  onPointerDown(p.x, p.y);
+});
+GF.canvas.addEventListener('mousemove', function (e) {
+  var p = getEventPos(e);
+  onPointerMove(p.x, p.y);
+});
+GF.canvas.addEventListener('mouseup', function (e) {
+  var p = getEventPos(e);
+  onPointerUp(p.x, p.y);
+});
+GF.canvas.addEventListener('touchstart', function (e) {
+  e.preventDefault();
+  var p = getEventPos(e);
+  onPointerDown(p.x, p.y);
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function (e) {
+  e.preventDefault();
+  var p = getEventPos(e);
+  onPointerMove(p.x, p.y);
+}, { passive: false });
+GF.canvas.addEventListener('touchend', function (e) {
+  e.preventDefault();
+  var p = getEventPos(e);
+  onPointerUp(p.x, p.y);
+}, { passive: false });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeLayout();
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawBackground(c) {
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, GF.W, GF.H);
+  c.strokeStyle = 'rgba(77,208,225,0.05)';
+  c.lineWidth = 1;
+  var step = 40 * GF.S;
+  for (var gx = 0; gx <= GF.W; gx += step) {
+    c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, GF.H); c.stroke();
+  }
+  for (var gy = 0; gy <= GF.H; gy += step) {
+    c.beginPath(); c.moveTo(0, gy); c.lineTo(GF.W, gy); c.stroke();
+  }
+}
+
+function drawTopHUD(c) {
+  var pad = layout.pad;
+  c.fillStyle = '#11111c';
+  c.fillRect(0, 0, GF.W, layout.hudY + layout.hudH);
+  var barX = pad;
+  var barY = layout.hudY + GF.clamp(20 * GF.S, 14, 28);
+  var barW = GF.W * 0.42;
+  var barH = GF.clamp(20 * GF.S, 14, 28);
+  GF.rr(c, barX, barY, barW, barH, barH / 2);
+  c.fillStyle = '#1a1a26'; c.fill();
+  c.strokeStyle = '#2a2a36'; c.lineWidth = 2; c.stroke();
+  var pct = Math.max(0, Math.min(1, tokens / INITIAL_BUDGET));
+  if (pct > 0) {
+    var fw = barW * pct;
+    GF.rr(c, barX, barY, fw, barH, barH / 2);
+    var g = c.createLinearGradient(barX, 0, barX + barW, 0);
+    if (pct > 0.5) { g.addColorStop(0, '#43a047'); g.addColorStop(1, '#26c6da'); }
+    else if (pct > 0.25) { g.addColorStop(0, '#fbc02d'); g.addColorStop(1, '#fb8c00'); }
+    else { g.addColorStop(0, '#e53935'); g.addColorStop(1, '#ff7043'); }
+    c.fillStyle = g; c.fill();
+  }
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'middle';
+  c.fillText(GF.t('tokens') + ': ' + tokens + ' / ' + INITIAL_BUDGET, barX + 10, barY + barH / 2);
+
+  c.fillStyle = '#cfd8e0';
+  c.font = 'bold ' + GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'right'; c.textBaseline = 'middle';
+  c.fillText(GF.t('cleared') + ': ' + tasksCleared + ' / ' + TOTAL_TASKS,
+    GF.W - layout.helpBtn.s - pad - 6, barY + barH / 2);
+
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'middle';
+  c.fillText(GF.t('queue') + ': ' + queue.length, barX, barY + barH + GF.clamp(14 * GF.S, 10, 18));
+
+  var b = layout.helpBtn;
+  GF.rr(c, b.x, b.y, b.s, b.s, b.s / 2);
+  c.fillStyle = '#1a1a26'; c.fill();
+  c.strokeStyle = '#4dd0e1'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', b.x + b.s / 2, b.y + b.s / 2);
+}
+
+function difficultyColor(d) {
+  if (d <= 1) return '#4dd0e1';
+  if (d <= 2) return '#66bb6a';
+  if (d <= 3) return '#ffca28';
+  if (d <= 4) return '#fb8c00';
+  return '#e53935';
+}
+
+function drawTaskCard(c, x, y, w, h, task, dragging) {
+  var hint = task.hint;
+  var scale = 0.62 + hint * 0.075;
+  var ww = w * scale;
+  var hh = h * scale;
+  var cx = x + (w - ww) / 2;
+  var cy = y + (h - hh) / 2;
+
+  var col = difficultyColor(hint);
+  var r = GF.clamp(10 * GF.S, 6, 14);
+  GF.rr(c, cx, cy, ww, hh, r);
+  c.fillStyle = dragging ? '#1f1f30' : '#15151f'; c.fill();
+  c.strokeStyle = col; c.lineWidth = 2; c.stroke();
+
+  c.fillStyle = '#cfd8e0';
+  c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var ipad = GF.clamp(10 * GF.S, 6, 14);
+  c.fillText(GF.t('task') + ' #' + task.id, cx + ipad, cy + ipad);
+
+  var dots = hint;
+  var dr = GF.clamp(5 * GF.S, 3, 8);
+  var dx0 = cx + ipad;
+  var dy0 = cy + hh - ipad - dr;
+  for (var i = 0; i < dots; i++) {
+    c.beginPath();
+    c.arc(dx0 + i * dr * 4 + dr, dy0, dr, 0, Math.PI * 2);
+    c.fillStyle = col; c.fill();
+  }
+
+  c.fillStyle = col;
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  c.textAlign = 'right'; c.textBaseline = 'middle';
+  var blocks = '';
+  for (var b = 0; b < Math.min(hint, 3); b++) blocks += '▣';
+  c.fillText(blocks, cx + ww - ipad, cy + hh / 2);
+}
+
+function drawQueue(c) {
+  var col = layout.queueCol;
+  c.fillStyle = 'rgba(20,20,28,0.6)';
+  GF.rr(c, col.x - 4, col.y - 4, col.w + 8, col.h + 8, GF.clamp(12 * GF.S, 8, 18));
+  c.fill();
+
+  for (var i = 0; i < QUEUE_DISPLAY; i++) {
+    if (i >= queue.length) {
+      var ey = col.y + i * (layout.cardH + layout.cardPad);
+      GF.rr(c, col.x, ey, col.w, layout.cardH, GF.clamp(10 * GF.S, 6, 14));
+      c.fillStyle = 'rgba(40,40,55,0.25)'; c.fill();
+      continue;
+    }
+    var task = queue[i];
+    var x = col.x;
+    var y = col.y + i * (layout.cardH + layout.cardPad);
+    if (drag.active && drag.taskId === task.id) {
+      GF.rr(c, col.x, y, col.w, layout.cardH, GF.clamp(10 * GF.S, 6, 14));
+      c.fillStyle = 'rgba(40,40,55,0.15)'; c.fill();
+      continue;
+    }
+    drawTaskCard(c, x, y, col.w, layout.cardH, task, false);
+  }
+  if (queue.length > QUEUE_DISPLAY) {
+    c.fillStyle = '#9ab';
+    c.font = 'bold ' + GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    c.textAlign = 'right'; c.textBaseline = 'bottom';
+    c.fillText('+' + (queue.length - QUEUE_DISPLAY), col.x + col.w - 4, col.y + col.h - 4);
+  }
+}
+
+function drawSlot(c, agent) {
+  var s = layout.slots[agent.id];
+  var isHuman = agent.id === 'human';
+  var busy = isHuman && humanBusyTurns > 0;
+  var hover = drag.active && hitTestSlot(drag.x, drag.y) === agent.id;
+
+  var r = GF.clamp(12 * GF.S, 8, 18);
+  GF.rr(c, s.x, s.y, s.w, s.h, r);
+  c.fillStyle = busy ? '#1a1418' : '#15151f';
+  c.fill();
+  var sw = hover ? 4 : 2;
+  c.strokeStyle = busy ? '#5a4a3a' : agent.color;
+  c.lineWidth = sw;
+  c.stroke();
+
+  var fl = slotFlashes[agent.id];
+  if (fl) {
+    var age = (performance.now() - fl.t) / 500;
+    if (age < 1) {
+      c.globalAlpha = (1 - age) * 0.55;
+      GF.rr(c, s.x, s.y, s.w, s.h, r);
+      c.fillStyle = fl.ok ? agent.color : '#ff6e6e';
+      c.fill();
+      c.globalAlpha = 1;
+    }
+  }
+
+  var avR = Math.min(s.h, s.w) * 0.22;
+  var avX = s.x + GF.clamp(28 * GF.S, 20, 40);
+  var avY = s.y + s.h / 2;
+  c.beginPath();
+  c.arc(avX, avY, avR, 0, Math.PI * 2);
+  c.fillStyle = busy ? '#3a2a20' : agent.accent;
+  c.fill();
+  c.strokeStyle = '#0a0a14'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 28) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  var letter = agent.id === 'haiku' ? 'H' : agent.id === 'sonnet' ? 'S' : agent.id === 'opus' ? 'O' : '人';
+  c.fillText(letter, avX, avY);
+
+  c.fillStyle = busy ? '#7a6a5a' : '#fff';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.fillText(GF.t('agent_' + agent.id), avX + avR + GF.clamp(14 * GF.S, 10, 18),
+    s.y + GF.clamp(14 * GF.S, 10, 18));
+
+  c.fillStyle = busy ? '#6a5a4a' : '#9ab';
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.textBaseline = 'top';
+  var info;
+  if (agent.id === 'human') {
+    info = GF.t('cost') + ': 0  ⏱ ' + HUMAN_TURNS;
+  } else {
+    info = GF.t('cost') + ': ' + agent.cost + '  ≤ ' + agent.maxDiff;
+  }
+  c.fillText(info, avX + avR + GF.clamp(14 * GF.S, 10, 18),
+    s.y + GF.clamp(36 * GF.S, 26, 46));
+
+  var dr = GF.clamp(5 * GF.S, 3, 8);
+  var dx0 = avX + avR + GF.clamp(14 * GF.S, 10, 18);
+  var dy0 = s.y + s.h - GF.clamp(14 * GF.S, 10, 18) - dr;
+  for (var i = 1; i <= 5; i++) {
+    c.beginPath();
+    c.arc(dx0 + (i - 1) * dr * 4 + dr, dy0, dr, 0, Math.PI * 2);
+    if (i <= agent.maxDiff) {
+      c.fillStyle = busy ? '#5a4a3a' : agent.color;
+    } else {
+      c.fillStyle = '#2a2a36';
+    }
+    c.fill();
+  }
+
+  if (busy) {
+    c.fillStyle = '#fbc02d';
+    c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    c.textAlign = 'right'; c.textBaseline = 'top';
+    c.fillText(GF.t('busy') + ' ' + humanBusyTurns,
+      s.x + s.w - GF.clamp(14 * GF.S, 10, 18), s.y + GF.clamp(14 * GF.S, 10, 18));
+  }
+}
+
+function drawSlots(c) {
+  for (var i = 0; i < AGENTS.length; i++) drawSlot(c, AGENTS[i]);
+}
+
+function drawDraggedCard(c) {
+  if (!drag.active) return;
+  var task = null;
+  for (var i = 0; i < queue.length; i++) if (queue[i].id === drag.taskId) { task = queue[i]; break; }
+  if (!task) return;
+  var w = layout.cardW;
+  var h = layout.cardH;
+  var x = drag.x - w / 2;
+  var y = drag.y - h / 2;
+  c.globalAlpha = 0.92;
+  drawTaskCard(c, x, y, w, h, task, true);
+  c.globalAlpha = 1;
+}
+
+function wrapText(c, text, x, y, maxW, lineH) {
+  var words = (text || '').split(' ');
+  var line = '';
+  var lines = [];
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      lines.push(line);
+      line = words[i];
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  for (var j = 0; j < lines.length; j++) c.fillText(lines[j], x, y + j * lineH);
+  return lines.length * lineH;
+}
+
+function drawButton(c, x, y, w, h, label, primary) {
+  var r = h * 0.5;
+  GF.rr(c, x, y, w, h, r);
+  if (primary) {
+    var g = c.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#2ecc71'); g.addColorStop(1, '#27ae60');
+    c.fillStyle = g;
+  } else {
+    c.fillStyle = '#22222a';
+  }
+  c.fill();
+  c.strokeStyle = primary ? '#27ae60' : '#3a3a4a';
+  c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(label, x + w / 2, y + h / 2);
+}
+
+function drawTutorialPanel(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, W, H);
+  var pw = Math.min(W - GF.clamp(28 * GF.S, 16, 36) * 2, 560 * GF.S);
+  var ph = Math.min(H - GF.clamp(40 * GF.S, 22, 64) * 2, 480 * GF.S);
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+  var rr = GF.clamp(18 * GF.S, 10, 24);
+  GF.rr(c, px, py, pw, ph, rr);
+  c.fillStyle = '#11111c'; c.fill();
+  c.strokeStyle = '#2a2a36'; c.lineWidth = 2; c.stroke();
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var pad = GF.clamp(22 * GF.S, 14, 32);
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.fillText(GF.t('tut_title'), px + pad, py + pad);
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  var ly = py + pad + GF.clamp(42 * GF.S, 28, 52);
+  var lh = GF.clamp(24 * GF.S, 18, 30);
+  var maxLineW = pw - pad * 2;
+  for (var i = 0; i < lines.length; i++) {
+    var consumed = wrapText(c, lines[i], px + pad, ly, maxLineW, lh);
+    ly += consumed + GF.clamp(6 * GF.S, 4, 10);
+  }
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (W - bw) / 2, by = H * 0.82;
+  drawButton(c, bx, by, bw, bh, GF.t('close'), true);
+}
+
+function drawMenuOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, W, H);
+  c.strokeStyle = 'rgba(77,208,225,0.06)';
+  c.lineWidth = 1;
+  var step = 36 * GF.S;
+  for (var gx = 0; gx <= W; gx += step) { c.beginPath(); c.moveTo(gx, 0); c.lineTo(gx, H); c.stroke(); }
+  for (var gy = 0; gy <= H; gy += step) { c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke(); }
+
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(77, 208, 225, 0.55)';
+  c.shadowBlur = 26 * GF.S;
+  c.font = 'bold ' + GF.clamp(42 * GF.S, 28, 64) + 'px sans-serif';
+  c.fillText(GF.t('title'), W / 2, H * 0.18);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, H * 0.24);
+
+  var py0 = H * 0.32;
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'center';
+  var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var lh = GF.clamp(22 * GF.S, 16, 28);
+  for (var i = 0; i < ll.length; i++) {
+    var lineY = py0 + i * lh;
+    var txt = ll[i].length > 84 ? ll[i].slice(0, 82) + '…' : ll[i];
+    c.fillText(txt, W / 2, lineY);
+  }
+
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  drawButton(c, bx, by, bw, bh, GF.t('play'), true);
+
+  c.textAlign = 'center';
+  c.fillStyle = '#557';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px monospace';
+  c.fillText(GF.t('seed') + ' · ' + todaySeedString(), W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
+}
+
+function drawEndOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.86)';
+  c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#fff';
+  var win = (gs === 'WON');
+  c.shadowColor = win ? 'rgba(77, 208, 225, 0.7)' : 'rgba(231, 76, 94, 0.55)';
+  c.shadowBlur = 28 * GF.S;
+  c.font = 'bold ' + GF.clamp(36 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(win ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.34);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.fillText(GF.t('cleared') + ': ' + tasksCleared + ' / ' + TOTAL_TASKS, W / 2, H * 0.44);
+  c.fillText(GF.t('tokens') + ': ' + tokens + ' / ' + INITIAL_BUDGET, W / 2, H * 0.50);
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (W - bw) / 2, by = H * 0.68;
+  drawButton(c, bx, by, bw, bh, GF.t('retry'), true);
+}
+
+function draw(c) {
+  if (gs === 'MENU') {
+    drawMenuOverlay(c);
+  } else {
+    drawBackground(c);
+    drawTopHUD(c);
+    drawQueue(c);
+    drawSlots(c);
+    drawDraggedCard(c);
+    if (gs === 'WON' || gs === 'GAMEOVER') drawEndOverlay(c);
+  }
+  if (tutorialOpen) drawTutorialPanel(c);
+}
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'agent_dispatcher',
+  onReady: function () {
+    seedStr = todaySeedString();
+    seedNum = hashStr(seedStr);
+    rand = mulberry32(seedNum);
+    recomputeLayout();
+    GF.persist('agent_dispatcher_run_v1',
+      function () {
+        return {
+          gs: gs, tokens: tokens, tasksCleared: tasksCleared,
+          humanBusyTurns: humanBusyTurns,
+          queue: queue.map(function (q) { return [q.id, q.difficulty, q.hint]; }),
+          taskIdSeq: taskIdSeq,
+        };
+      },
+      function (s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        tokens = (typeof s.tokens === 'number') ? s.tokens : INITIAL_BUDGET;
+        tasksCleared = s.tasksCleared || 0;
+        humanBusyTurns = s.humanBusyTurns || 0;
+        if (Array.isArray(s.queue)) {
+          queue = s.queue.map(function (q) {
+            return { id: q[0], difficulty: q[1], hint: q[2], spawnAt: 0 };
+          });
+        }
+        taskIdSeq = s.taskIdSeq || (queue.length + 1);
+      }
+    );
+    if (gs === 'PLAYING' && queue.length === 0) gs = 'MENU';
+    tutorialOpen = false;
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    tokens: tokens,
+    tasksCleared: tasksCleared,
+    queueLen: queue.length,
+    humanBusyTurns: humanBusyTurns,
+    HAIKU_COST: HAIKU_COST,
+    SONNET_COST: SONNET_COST,
+    OPUS_COST: OPUS_COST,
+    HUMAN_COST: HUMAN_COST,
+    HUMAN_TURNS: HUMAN_TURNS,
+    HAIKU_MAX_DIFF: HAIKU_MAX_DIFF,
+    SONNET_MAX_DIFF: SONNET_MAX_DIFF,
+    OPUS_MAX_DIFF: OPUS_MAX_DIFF,
+    INITIAL_BUDGET: INITIAL_BUDGET,
+    TOTAL_TASKS: TOTAL_TASKS,
+    QUEUE_DISPLAY: QUEUE_DISPLAY,
+    DIFFICULTY_HINT_NOISE: DIFFICULTY_HINT_NOISE,
+    seedStr: seedStr,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
