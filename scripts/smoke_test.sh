@@ -25,7 +25,16 @@ for a in "$@"; do
 done
 
 ok=true
-fail() { echo "  ❌ $*"; ok=false; }
+# Track CRITICAL failures separately from NON-CRITICAL ones. Only critical
+# failures should trigger auto-rollback of the daily batch. /api/counts and
+# /posthog-init are CF Pages functions that flake during deploy
+# propagation — failing them does NOT mean the games are broken.
+# 2026-05-13 incident: /api/counts returned text/html for >60s post-deploy
+# (CF function propagation lag); the prior smoke test treated this as
+# critical and reverted the daily batch, breaking the Telegram post URLs.
+critical_ok=true
+fail() { echo "  ❌ $*"; ok=false; critical_ok=false; }
+fail_soft() { echo "  ⚠️  $*"; ok=false; }
 pass() { (( QUIET )) || echo "  ✅ $*"; }
 note() { (( QUIET )) || echo "  · $*"; }
 
@@ -72,7 +81,10 @@ done
 if [[ "$counts_ct" == application/json* ]]; then
   pass "/api/counts → application/json"
 else
-  fail "/api/counts → '$counts_ct' after 4 attempts (expected application/json)"
+  # NON-critical: CF Pages function flake, not a games problem.
+  # Auto-recovery would push a revert that breaks Telegram links for
+  # subscribers (2026-05-13 incident). Alert instead.
+  fail_soft "/api/counts → '$counts_ct' after 4 attempts (expected application/json) — CF function deploy may need more time; NOT triggering rollback"
 fi
 
 # 4. /posthog-init serves the real PostHog snippet, not the no-op stub
@@ -102,7 +114,11 @@ fi
 if $ok; then
   (( QUIET )) || echo "✅ All smoke tests passed"
   exit 0
+elif $critical_ok; then
+  # Non-critical failures only — log but don't trigger rollback.
+  echo "⚠️  Smoke test had NON-CRITICAL failures (CF function flake?) — games are fine; not rolling back"
+  exit 0
 else
-  echo "❌ Smoke test detected failures on $SITE"
+  echo "❌ Smoke test detected CRITICAL failures on $SITE"
   exit 1
 fi
