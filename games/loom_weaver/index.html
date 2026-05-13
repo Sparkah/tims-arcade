@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Loom Weaver</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #14100c; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function () {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Loom Weaver',
+    sub:   'Weave colored threads row by row to reveal today’s hidden tapestry',
+    play: 'PLAY', retry: 'RETRY',
+    won: 'TAPESTRY WOVEN',
+    gameover: 'BUDGET SPENT',
+    weft: 'WEFTS', match: 'MATCH',
+    seed: 'SEED',
+    lay: 'LAY WEFT',
+    color: 'COLOR', stencil: 'STENCIL',
+    target: 'TODAY’S TARGET',
+    tut_title: 'How to play',
+    tut_goal: 'Goal: Weave today’s hidden tapestry by stacking colored weft rows.',
+    tut_controls: 'Controls: Pick a color and a stencil, then tap LAY WEFT to add a row.',
+    tut_win: 'Win: Match 80% of the target tapestry within 12 wefts.',
+    tut_lose: 'Lose: Spend all 12 wefts with match below 80%.',
+    tut_tip: 'Tip: Later wefts cover earlier ones — hide mistakes under future rows.',
+    close: 'CLOSE',
+  },
+  ru: {
+    title: 'Ткач Станка',
+    sub:   'Сотки сегодняшний скрытый гобелен ряд за рядом',
+    play: 'ИГРАТЬ', retry: 'СНОВА',
+    won: 'ГОБЕЛЕН СОТКАН',
+    gameover: 'НИТИ КОНЧИЛИСЬ',
+    weft: 'НИТИ', match: 'СОВПАД',
+    seed: 'СИД',
+    lay: 'ВЫЛОЖИТЬ',
+    color: 'ЦВЕТ', stencil: 'ТРАФАРЕТ',
+    target: 'ЦЕЛЬ ДНЯ',
+    tut_title: 'Как играть',
+    tut_goal: 'Цель: Соткать сегодняшний скрытый гобелен, выкладывая ряды утка.',
+    tut_controls: 'Управление: Выбери цвет и трафарет, нажми ВЫЛОЖИТЬ для ряда.',
+    tut_win: 'Победа: Совпасть с целью на 80% за 12 нитей утка.',
+    tut_lose: 'Поражение: Все 12 нитей выложены, а совпадение ниже 80%.',
+    tut_tip: 'Совет: Поздние ряды прячут ранние — закрывай ошибки сверху.',
+    close: 'ЗАКРЫТЬ',
+  },
+};
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var WARP_THREADS = 10;
+var WEFT_BUDGET = 12;
+var COLOR_COUNT = 5;
+var STENCIL_COUNT = 4;
+var WIN_MATCH_PCT = 80;
+var TARGET_GHOST_ALPHA = 0.28;
+var STENCIL_OVER_RATIO = 0.55;
+var WEFT_LAY_ANIM_MS = 280;
+var PULSE_PERIOD_MS = 1100;
+
+// ── PALETTE ──────────────────────────────────────────────────────────────
+// Warm rich textile palette: madder, indigo, ochre, moss, ivory
+var PALETTE = [
+  '#c14a3a', // madder red
+  '#2c5f7f', // indigo blue
+  '#e0a04a', // ochre gold
+  '#5a7a3a', // moss green
+  '#ece0c0', // ivory cream
+];
+var LOOM_BG = '#3a2a1c';
+var LOOM_FRAME = '#5a3a22';
+
+// ── DAILY SEED + RNG ─────────────────────────────────────────────────────
+function dailySeedString() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var dd = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+function hashStr(s) {
+  var h = 1779033703 ^ s.length;
+  for (var i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return (h >>> 0);
+}
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    var t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var seedStr = '';
+var target = [];          // 120 ints (color index per cell)
+var stencils = [];        // STENCIL_COUNT arrays of WARP_THREADS booleans
+var wefts = [];           // laid wefts: { color: int, stencilIdx: int }
+var weftsUsed = 0;
+var activeColor = 0;
+var activeStencil = 0;
+var matchPct = 0;
+var pulseT = 0;
+var tutorialOpen = false;
+var lastLayT = 0;
+
+// ── BUILD DAILY PUZZLE ───────────────────────────────────────────────────
+function buildPuzzle() {
+  seedStr = dailySeedString();
+  var seed = hashStr(seedStr);
+  var rng = mulberry32(seed);
+
+  // Generate the target tapestry — 10x12 cells of palette colors with some
+  // smoothing so the target reads as a pattern, not noise.
+  var rawTarget = new Array(WARP_THREADS * WEFT_BUDGET);
+  // Seed each row with a "row base color" + occasional accent so the
+  // target reads as horizontal bands with small motifs.
+  for (var r = 0; r < WEFT_BUDGET; r++) {
+    var baseCol = Math.floor(rng() * COLOR_COUNT);
+    var accentCol = (baseCol + 1 + Math.floor(rng() * (COLOR_COUNT - 1))) % COLOR_COUNT;
+    for (var c = 0; c < WARP_THREADS; c++) {
+      var roll = rng();
+      var col;
+      if (roll < 0.62) col = baseCol;
+      else if (roll < 0.88) col = accentCol;
+      else col = Math.floor(rng() * COLOR_COUNT);
+      rawTarget[r * WARP_THREADS + c] = col;
+    }
+  }
+  target = rawTarget;
+
+  // Generate STENCIL_COUNT stencils — each is a WARP_THREADS-long over/under
+  // pattern. Patterns are chosen from a small library of recognisable shapes
+  // (alternating, blocks, edges, center) for clarity.
+  stencils = [];
+  var templates = [
+    // alternating
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(i % 2 === 0); return p; },
+    // blocks of 2
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(Math.floor(i / 2) % 2 === 0); return p; },
+    // centered (middle over)
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(i >= 3 && i <= 6); return p; },
+    // edges (sides over)
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(i <= 2 || i >= 7); return p; },
+    // left half
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(i < 5); return p; },
+    // right half
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(i >= 5); return p; },
+    // sparse — every 3rd
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(i % 3 === 0); return p; },
+    // dense — every 3rd off
+    function (rng2) { var p = []; for (var i = 0; i < WARP_THREADS; i++) p.push(i % 3 !== 0); return p; },
+  ];
+  var picked = [];
+  // pick STENCIL_COUNT distinct template indices via fisher-yates style
+  var pool = [];
+  for (var ti = 0; ti < templates.length; ti++) pool.push(ti);
+  for (var ji = pool.length - 1; ji > 0; ji--) {
+    var jj = Math.floor(rng() * (ji + 1));
+    var tmp = pool[ji]; pool[ji] = pool[jj]; pool[jj] = tmp;
+  }
+  for (var k = 0; k < STENCIL_COUNT; k++) {
+    var idx = pool[k];
+    stencils.push(templates[idx](rng));
+  }
+}
+
+// ── COMPOSITION (occlusion) ──────────────────────────────────────────────
+function visibleAt(r, c) {
+  // r is the canvas row, top of the loom is r=WEFT_BUDGET-1 (latest weft).
+  // Walk from r downward — at row rr, if wefts[rr] exists and its stencil
+  // has "over" at column c, return that color. Else continue to lower row.
+  // If no weft "over" at this column anywhere, the warp (a default thread
+  // color, ivory) shows through.
+  for (var rr = r; rr >= 0; rr--) {
+    var w = wefts[rr];
+    if (!w) continue;
+    if (stencils[w.stencilIdx][c]) return w.color;
+  }
+  return -1; // warp shows (no weft over here yet)
+}
+
+function recomputeMatch() {
+  var total = WARP_THREADS * WEFT_BUDGET;
+  var hits = 0;
+  for (var r = 0; r < WEFT_BUDGET; r++) {
+    for (var c = 0; c < WARP_THREADS; c++) {
+      var vis = visibleAt(r, c);
+      // If warp shows (-1), it never matches a target color (warp is bare,
+      // not a palette colour). So only positive matches count.
+      if (vis >= 0 && vis === target[r * WARP_THREADS + c]) hits++;
+    }
+  }
+  matchPct = Math.round(hits / total * 100);
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  buildPuzzle();
+  wefts = new Array(WEFT_BUDGET);
+  weftsUsed = 0;
+  activeColor = 0;
+  activeStencil = 0;
+  lastLayT = 0;
+  recomputeMatch();
+  gs = 'PLAYING';
+  GF.gameStarted();
+}
+function backToMenu() { gs = 'MENU'; }
+
+function layWeft() {
+  if (gs !== 'PLAYING') return;
+  if (weftsUsed >= WEFT_BUDGET) return;
+  wefts[weftsUsed] = { color: activeColor, stencilIdx: activeStencil };
+  weftsUsed++;
+  lastLayT = performance.now();
+  recomputeMatch();
+  GF.spawnParticles(layout.loomX + layout.loomW / 2, layout.loomY + (WEFT_BUDGET - weftsUsed) * layout.cellH + layout.cellH / 2, PALETTE[activeColor], 12);
+  if (weftsUsed >= WEFT_BUDGET) {
+    setTimeout(function () {
+      if (matchPct >= WIN_MATCH_PCT) {
+        gs = 'WON';
+        GF.spawnParticles(GF.cx, GF.cy, '#e0a04a', 48);
+      } else {
+        gs = 'GAMEOVER';
+      }
+      GF.gameEnded();
+    }, 360);
+  }
+}
+
+// ── SCREENSHOT HELPER ────────────────────────────────────────────────────
+window._jumpLevel = function (level) {
+  startGame();
+  // Lay 6-8 wefts using a mix of palette colours and stencils so the loom
+  // shows real weaving progress mid-game (≥70% gameplay shot).
+  var n = 7;
+  if (level && level >= 90) n = WEFT_BUDGET; // terminal
+  var rng = mulberry32(hashStr(seedStr + ':shot'));
+  for (var i = 0; i < n; i++) {
+    activeColor = Math.floor(rng() * COLOR_COUNT);
+    activeStencil = Math.floor(rng() * STENCIL_COUNT);
+    if (weftsUsed >= WEFT_BUDGET) break;
+    wefts[weftsUsed] = { color: activeColor, stencilIdx: activeStencil };
+    weftsUsed++;
+  }
+  recomputeMatch();
+  if (level && level >= 90 && weftsUsed >= WEFT_BUDGET) {
+    gs = matchPct >= WIN_MATCH_PCT ? 'WON' : 'GAMEOVER';
+  } else {
+    gs = 'PLAYING';
+    // Reset to a known active pair so HUD looks intentional
+    activeColor = 2;
+    activeStencil = 1;
+  }
+};
+window._setupForScreenshot = window._jumpLevel;
+window._setLang = function (l) { GF.lang = l; };
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+var layout = {
+  loomX: 0, loomY: 0, loomW: 0, loomH: 0,
+  cellW: 0, cellH: 0,
+  swatches: [], stencilCards: [],
+  layBtn: { x: 0, y: 0, w: 0, h: 0 },
+  helpBtn: { x: 0, y: 0, s: 0 },
+  hudY: 0,
+};
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  var landscape = W > H;
+  var pad = GF.clamp(10 * GF.S, 6, 14);
+
+  // Vertical HUD at top
+  layout.hudY = GF.clamp(14 * GF.S, 8, 22);
+
+  // Help button (top-right)
+  var hs = GF.clamp(34 * GF.S, 26, 44);
+  layout.helpBtn = { x: W - hs - pad * 1.5, y: pad * 1.2, s: hs };
+
+  // Loom occupies left ~62% of canvas, with side panel on right.
+  // On portrait, loom on top, panel below.
+  var topPad = GF.clamp(50 * GF.S, 36, 70);
+  var botPad = GF.clamp(20 * GF.S, 14, 30);
+
+  if (landscape) {
+    var panelW = GF.clamp(W * 0.32, 200, 360);
+    var availW = W - panelW - pad * 3;
+    var availH = H - topPad - botPad;
+    // Loom keeps 10:12 aspect (warp:weft)
+    var cw = availW / WARP_THREADS;
+    var ch = availH / WEFT_BUDGET;
+    var cs = Math.min(cw, ch);
+    layout.cellW = cs;
+    layout.cellH = cs;
+    layout.loomW = cs * WARP_THREADS;
+    layout.loomH = cs * WEFT_BUDGET;
+    layout.loomX = pad * 2;
+    layout.loomY = topPad + (availH - layout.loomH) / 2;
+
+    var panelX = layout.loomX + layout.loomW + pad * 2;
+    var panelY = topPad;
+    layoutPanel(panelX, panelY, panelW - pad, availH);
+  } else {
+    // portrait: loom on top, panel on bottom
+    var loomMaxH = H * 0.62 - topPad;
+    var loomMaxW = W - pad * 2;
+    var cw2 = loomMaxW / WARP_THREADS;
+    var ch2 = loomMaxH / WEFT_BUDGET;
+    var cs2 = Math.min(cw2, ch2);
+    layout.cellW = cs2;
+    layout.cellH = cs2;
+    layout.loomW = cs2 * WARP_THREADS;
+    layout.loomH = cs2 * WEFT_BUDGET;
+    layout.loomX = (W - layout.loomW) / 2;
+    layout.loomY = topPad;
+    var panelY2 = layout.loomY + layout.loomH + pad * 1.5;
+    var panelH2 = H - panelY2 - botPad;
+    layoutPanel(pad, panelY2, W - pad * 2, panelH2);
+  }
+}
+
+function layoutPanel(x, y, w, h) {
+  // Color swatches row, stencil cards row, LAY WEFT button.
+  var pad = GF.clamp(8 * GF.S, 4, 12);
+  // Allocate vertical space: swatches 22%, stencils 50%, button 28%
+  var swH = Math.min(h * 0.22, GF.clamp(64 * GF.S, 44, 84));
+  var btnH = Math.min(h * 0.20, GF.clamp(56 * GF.S, 40, 70));
+  var stH = h - swH - btnH - pad * 2;
+
+  // Swatches
+  layout.swatches = [];
+  var swSize = Math.min((w - pad * (COLOR_COUNT + 1)) / COLOR_COUNT, swH);
+  var swY = y + (swH - swSize) / 2;
+  var swStartX = x + (w - (swSize * COLOR_COUNT + pad * (COLOR_COUNT - 1))) / 2;
+  for (var i = 0; i < COLOR_COUNT; i++) {
+    layout.swatches.push({
+      x: swStartX + i * (swSize + pad),
+      y: swY,
+      s: swSize,
+    });
+  }
+
+  // Stencil cards (2x2 grid)
+  layout.stencilCards = [];
+  var stY = y + swH + pad;
+  var cols = STENCIL_COUNT >= 4 ? 2 : STENCIL_COUNT;
+  var rows = Math.ceil(STENCIL_COUNT / cols);
+  var cardW = (w - pad * (cols + 1)) / cols;
+  var cardH = (stH - pad * (rows - 1)) / rows;
+  for (var s = 0; s < STENCIL_COUNT; s++) {
+    var cr = Math.floor(s / cols);
+    var cc = s % cols;
+    layout.stencilCards.push({
+      x: x + pad + cc * (cardW + pad),
+      y: stY + cr * (cardH + pad),
+      w: cardW,
+      h: cardH,
+    });
+  }
+
+  // Lay button
+  layout.layBtn = {
+    x: x + pad,
+    y: y + swH + stH + pad * 2,
+    w: w - pad * 2,
+    h: btnH,
+  };
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function hitTestRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+function hitTestCircle(x, y, b) {
+  return x >= b.x && x <= b.x + b.s && y >= b.y && y <= b.y + b.s;
+}
+function hitTestTutorialClose(x, y) {
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (GF.W - bw) / 2, by = GF.H * 0.80;
+  return x >= bx && x <= bx + bw && y >= by && y <= by + bh;
+}
+function onClick(x, y) {
+  if (tutorialOpen) {
+    if (hitTestTutorialClose(x, y)) {
+      tutorialOpen = false;
+      try { localStorage.setItem('loom_weaver_seen_tutorial', '1'); } catch (e) {}
+    }
+    return;
+  }
+  if (gs === 'MENU') {
+    var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+    var bx = (GF.W - bw) / 2, by = GF.H * 0.78;
+    if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) startGame();
+    return;
+  }
+  if (gs === 'WON' || gs === 'GAMEOVER') {
+    var bw2 = GF.clamp(220 * GF.S, 160, 300), bh2 = GF.clamp(48 * GF.S, 38, 60);
+    var bx2 = (GF.W - bw2) / 2, by2 = GF.H * 0.66;
+    if (x >= bx2 && x <= bx2 + bw2 && y >= by2 && y <= by2 + bh2) backToMenu();
+    return;
+  }
+  // Help button
+  if (hitTestCircle(x, y, layout.helpBtn)) { tutorialOpen = true; return; }
+  // Lay button
+  if (hitTestRect(x, y, layout.layBtn)) { layWeft(); return; }
+  // Swatches
+  for (var i = 0; i < layout.swatches.length; i++) {
+    var sw = layout.swatches[i];
+    if (x >= sw.x && x <= sw.x + sw.s && y >= sw.y && y <= sw.y + sw.s) {
+      activeColor = i; return;
+    }
+  }
+  // Stencil cards
+  for (var k = 0; k < layout.stencilCards.length; k++) {
+    if (hitTestRect(x, y, layout.stencilCards[k])) { activeStencil = k; return; }
+  }
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeLayout();
+  pulseT = (pulseT + dt * 1000) % PULSE_PERIOD_MS;
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawLoomFrame(c) {
+  var fw = GF.clamp(10 * GF.S, 6, 16);
+  c.fillStyle = LOOM_FRAME;
+  // top + bottom beams
+  c.fillRect(layout.loomX - fw, layout.loomY - fw, layout.loomW + fw * 2, fw);
+  c.fillRect(layout.loomX - fw, layout.loomY + layout.loomH, layout.loomW + fw * 2, fw);
+  // side rails
+  c.fillRect(layout.loomX - fw, layout.loomY - fw, fw, layout.loomH + fw * 2);
+  c.fillRect(layout.loomX + layout.loomW, layout.loomY - fw, fw, layout.loomH + fw * 2);
+  // wood grain hint
+  c.strokeStyle = 'rgba(0,0,0,0.18)';
+  c.lineWidth = 1;
+  for (var i = 0; i < 3; i++) {
+    var gy = layout.loomY - fw + (i + 1) * fw / 4;
+    c.beginPath(); c.moveTo(layout.loomX - fw, gy); c.lineTo(layout.loomX + layout.loomW + fw, gy); c.stroke();
+  }
+}
+
+function drawTargetGhost(c) {
+  // Faint full-resolution preview of the target tapestry behind the loom
+  c.save();
+  c.globalAlpha = TARGET_GHOST_ALPHA;
+  for (var r = 0; r < WEFT_BUDGET; r++) {
+    for (var cc = 0; cc < WARP_THREADS; cc++) {
+      var col = target[r * WARP_THREADS + cc];
+      c.fillStyle = PALETTE[col];
+      // visual row r=0 at bottom of loom
+      var px = layout.loomX + cc * layout.cellW;
+      var py = layout.loomY + (WEFT_BUDGET - 1 - r) * layout.cellH;
+      c.fillRect(px, py, layout.cellW + 0.5, layout.cellH + 0.5);
+    }
+  }
+  c.restore();
+}
+
+function drawWarpThreads(c) {
+  // Vertical warp threads showing through where no weft "over" exists
+  var threadCol = '#e8d8b0';
+  c.fillStyle = threadCol;
+  var tw = Math.max(1, layout.cellW * 0.10);
+  for (var col = 0; col < WARP_THREADS; col++) {
+    var px = layout.loomX + col * layout.cellW + (layout.cellW - tw) / 2;
+    c.fillRect(px, layout.loomY, tw, layout.loomH);
+  }
+}
+
+function drawWovenCells(c) {
+  // For every cell, draw the visible color from occlusion. Show wefts only
+  // up to weftsUsed. Each weft row is rendered as a horizontal band.
+  for (var r = 0; r < WEFT_BUDGET; r++) {
+    for (var cc = 0; cc < WARP_THREADS; cc++) {
+      var vis = visibleAt(r, cc);
+      var px = layout.loomX + cc * layout.cellW;
+      var py = layout.loomY + (WEFT_BUDGET - 1 - r) * layout.cellH;
+      if (vis >= 0) {
+        c.fillStyle = PALETTE[vis];
+        c.fillRect(px, py, layout.cellW + 0.5, layout.cellH + 0.5);
+        // subtle weft horizontal striation
+        c.fillStyle = 'rgba(0,0,0,0.10)';
+        c.fillRect(px, py + layout.cellH * 0.45, layout.cellW + 0.5, Math.max(1, layout.cellH * 0.08));
+        c.fillStyle = 'rgba(255,255,255,0.08)';
+        c.fillRect(px, py + layout.cellH * 0.10, layout.cellW + 0.5, Math.max(1, layout.cellH * 0.06));
+      }
+    }
+  }
+}
+
+function drawNextWeftPreview(c) {
+  // Show a faint preview of where the next weft will land (top of stack)
+  if (weftsUsed >= WEFT_BUDGET) return;
+  var stencil = stencils[activeStencil];
+  var py = layout.loomY + (WEFT_BUDGET - 1 - weftsUsed) * layout.cellH;
+  var pulse = 0.45 + 0.25 * Math.sin(pulseT / PULSE_PERIOD_MS * Math.PI * 2);
+  c.save();
+  c.globalAlpha = pulse;
+  for (var cc = 0; cc < WARP_THREADS; cc++) {
+    if (!stencil[cc]) continue;
+    var px = layout.loomX + cc * layout.cellW;
+    c.fillStyle = PALETTE[activeColor];
+    c.fillRect(px, py, layout.cellW + 0.5, layout.cellH + 0.5);
+  }
+  c.restore();
+  // dashed indicator line
+  c.strokeStyle = 'rgba(255,255,255,0.55)';
+  c.lineWidth = 2;
+  c.setLineDash([6, 4]);
+  c.beginPath();
+  c.moveTo(layout.loomX, py);
+  c.lineTo(layout.loomX + layout.loomW, py);
+  c.stroke();
+  c.setLineDash([]);
+}
+
+function drawLoom(c) {
+  // background
+  c.fillStyle = LOOM_BG;
+  c.fillRect(layout.loomX - 4, layout.loomY - 4, layout.loomW + 8, layout.loomH + 8);
+  drawTargetGhost(c);
+  drawWarpThreads(c);
+  drawWovenCells(c);
+  drawNextWeftPreview(c);
+  drawLoomFrame(c);
+}
+
+function drawSwatch(c, sw, idx) {
+  var pad = sw.s * 0.12;
+  var size = sw.s - pad * 2;
+  c.fillStyle = PALETTE[idx];
+  GF.rr(c, sw.x + pad, sw.y + pad, size, size, size * 0.18);
+  c.fill();
+  // border
+  var active = (idx === activeColor);
+  c.lineWidth = active ? Math.max(3, sw.s * 0.07) : 2;
+  c.strokeStyle = active ? '#ffe98a' : 'rgba(0,0,0,0.45)';
+  c.stroke();
+  if (active) {
+    // pulse glow
+    var pulse = 0.5 + 0.5 * Math.sin(pulseT / PULSE_PERIOD_MS * Math.PI * 2);
+    c.save();
+    c.globalAlpha = 0.35 * pulse;
+    c.lineWidth = sw.s * 0.16;
+    c.strokeStyle = '#ffe98a';
+    c.stroke();
+    c.restore();
+  }
+}
+
+function drawStencilCard(c, card, idx) {
+  var active = (idx === activeStencil);
+  GF.rr(c, card.x, card.y, card.w, card.h, GF.clamp(8 * GF.S, 4, 12));
+  c.fillStyle = active ? '#2a2018' : '#1c160e';
+  c.fill();
+  c.strokeStyle = active ? '#ffe98a' : '#4a382a';
+  c.lineWidth = active ? Math.max(2, card.h * 0.04) : 1.5;
+  c.stroke();
+
+  // Render the 10-bit pattern as cells inside the card
+  var pad = Math.max(6, card.w * 0.10);
+  var innerW = card.w - pad * 2;
+  var innerH = card.h - pad * 2;
+  var cellW = innerW / WARP_THREADS;
+  var cellH = Math.min(cellW * 1.4, innerH);
+  var y = card.y + (card.h - cellH) / 2;
+  for (var i = 0; i < WARP_THREADS; i++) {
+    var px = card.x + pad + i * cellW;
+    var on = stencils[idx][i];
+    if (on) {
+      c.fillStyle = active ? PALETTE[activeColor] : '#e8d8b0';
+      c.fillRect(px + 1, y, cellW - 2, cellH);
+    } else {
+      c.fillStyle = '#3a2a1c';
+      c.fillRect(px + 1, y + cellH * 0.40, cellW - 2, cellH * 0.20);
+    }
+  }
+}
+
+function drawLayBtn(c) {
+  var b = layout.layBtn;
+  var canLay = (weftsUsed < WEFT_BUDGET);
+  var pulse = canLay ? (0.6 + 0.4 * Math.sin(pulseT / PULSE_PERIOD_MS * Math.PI * 2)) : 0;
+  GF.rr(c, b.x, b.y, b.w, b.h, b.h * 0.5);
+  var g = c.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+  if (canLay) {
+    g.addColorStop(0, '#e0a04a'); g.addColorStop(1, '#a3722c');
+  } else {
+    g.addColorStop(0, '#444'); g.addColorStop(1, '#222');
+  }
+  c.fillStyle = g; c.fill();
+  c.strokeStyle = canLay ? '#ffe98a' : '#555';
+  c.lineWidth = canLay ? 2 + pulse * 2 : 1;
+  c.stroke();
+  c.fillStyle = canLay ? '#fff' : '#aaa';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('lay'), b.x + b.w / 2, b.y + b.h / 2);
+}
+
+function drawTopHUD(c) {
+  c.fillStyle = '#e8d8b0';
+  c.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.fillText(GF.t('weft') + ': ' + weftsUsed + ' / ' + WEFT_BUDGET, layout.loomX, layout.hudY);
+
+  // match meter centered
+  c.textAlign = 'center';
+  c.fillStyle = (matchPct >= WIN_MATCH_PCT) ? '#9ae07a' : '#e8d8b0';
+  c.fillText(GF.t('match') + ': ' + matchPct + '%  / ' + WIN_MATCH_PCT + '%', GF.W / 2, layout.hudY);
+
+  c.textAlign = 'right';
+  c.fillStyle = '#8a7a5a';
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px monospace';
+  c.fillText(GF.t('seed') + ' ' + seedStr, GF.W - GF.clamp(54 * GF.S, 40, 64) - GF.clamp(14 * GF.S, 8, 22), layout.hudY + 2);
+}
+
+function drawHUDHelp(c) {
+  var b = layout.helpBtn;
+  GF.rr(c, b.x, b.y, b.s, b.s, b.s / 2);
+  c.fillStyle = '#1c160e'; c.fill();
+  c.strokeStyle = '#e0a04a'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#e0a04a';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', b.x + b.s / 2, b.y + b.s / 2);
+}
+
+function drawButton(c, x, y, w, h, label, primary) {
+  var r = h * 0.5;
+  GF.rr(c, x, y, w, h, r);
+  if (primary) {
+    var g = c.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#e0a04a'); g.addColorStop(1, '#a3722c');
+    c.fillStyle = g;
+  } else {
+    c.fillStyle = '#22222a';
+  }
+  c.fill();
+  c.strokeStyle = primary ? '#ffe98a' : '#3a3a4a';
+  c.lineWidth = 2;
+  c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(label, x + w / 2, y + h / 2);
+}
+
+function wrapText(c, text, x, y, maxW, lineH) {
+  var words = (text || '').split(' ');
+  var line = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      c.fillText(line, x, y);
+      line = words[i];
+      y += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) c.fillText(line, x, y);
+}
+
+function drawTutorialPanel(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(12,8,4,0.92)';
+  c.fillRect(0, 0, W, H);
+  var pw = Math.min(W - GF.clamp(28 * GF.S, 16, 36) * 2, 520 * GF.S);
+  var ph = Math.min(H - GF.clamp(40 * GF.S, 22, 64) * 2, 460 * GF.S);
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+  var rr = GF.clamp(18 * GF.S, 10, 24);
+  GF.rr(c, px, py, pw, ph, rr);
+  c.fillStyle = '#1c160e'; c.fill();
+  c.strokeStyle = '#4a382a'; c.lineWidth = 2; c.stroke();
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var pad = GF.clamp(22 * GF.S, 14, 32);
+  c.fillStyle = '#e0a04a';
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.fillText(GF.t('tut_title'), px + pad, py + pad);
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  c.fillStyle = '#e8d8b0';
+  c.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  var ly = py + pad + GF.clamp(40 * GF.S, 26, 50);
+  var lh = GF.clamp(34 * GF.S, 22, 42);
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(c, lines[i], px + pad, ly + i * lh, pw - pad * 2, lh - 2);
+  }
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (W - bw) / 2, by = H * 0.80;
+  drawButton(c, bx, by, bw, bh, GF.t('close'), true);
+}
+
+// ── MENU / END OVERLAYS ──────────────────────────────────────────────────
+function drawMenuOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = '#14100c';
+  c.fillRect(0, 0, W, H);
+
+  // small decorative woven strip behind title
+  var stripeH = GF.clamp(58 * GF.S, 36, 80);
+  var stripeY = H * 0.10;
+  for (var i = 0; i < WARP_THREADS; i++) {
+    c.fillStyle = PALETTE[i % COLOR_COUNT];
+    c.fillRect(W * 0.10 + i * (W * 0.08), stripeY, W * 0.07, stripeH);
+  }
+
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(224, 160, 74, 0.55)';
+  c.shadowBlur = 26 * GF.S;
+  c.font = 'bold ' + GF.clamp(40 * GF.S, 26, 60) + 'px sans-serif';
+  c.fillText(GF.t('title'), W / 2, H * 0.27);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#bca888';
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, H * 0.33);
+
+  var py0 = H * 0.40;
+  c.fillStyle = '#e8d8b0';
+  c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'center';
+  var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var lh = GF.clamp(20 * GF.S, 14, 26);
+  for (var i2 = 0; i2 < ll.length; i2++) {
+    c.fillText(ll[i2], W / 2, py0 + i2 * lh);
+  }
+
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  drawButton(c, bx, by, bw, bh, GF.t('play'), true);
+
+  c.textAlign = 'center';
+  c.fillStyle = '#5a4a32';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px monospace';
+  c.fillText(GF.t('seed') + ' · ' + dailySeedString(), W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
+}
+
+function drawEndOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(12,8,4,0.86)';
+  c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#fff';
+  var win = (gs === 'WON');
+  c.shadowColor = win ? 'rgba(224, 160, 74, 0.7)' : 'rgba(193, 74, 58, 0.55)';
+  c.shadowBlur = 28 * GF.S;
+  c.font = 'bold ' + GF.clamp(36 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(win ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.32);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#e8d8b0';
+  c.font = GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.fillText(GF.t('match') + ': ' + matchPct + '%', W / 2, H * 0.42);
+  c.fillText(GF.t('weft') + ': ' + weftsUsed + ' / ' + WEFT_BUDGET, W / 2, H * 0.48);
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (W - bw) / 2, by = H * 0.66;
+  drawButton(c, bx, by, bw, bh, GF.t('retry'), true);
+}
+
+// ── MAIN DRAW ────────────────────────────────────────────────────────────
+function draw(c) {
+  if (gs === 'MENU') {
+    drawMenuOverlay(c);
+  } else {
+    c.fillStyle = '#14100c';
+    c.fillRect(0, 0, GF.W, GF.H);
+    drawTopHUD(c);
+    drawLoom(c);
+    // panel area
+    for (var i = 0; i < layout.swatches.length; i++) drawSwatch(c, layout.swatches[i], i);
+    for (var k = 0; k < layout.stencilCards.length; k++) drawStencilCard(c, layout.stencilCards[k], k);
+    drawLayBtn(c);
+    drawHUDHelp(c);
+    if (gs === 'WON' || gs === 'GAMEOVER') drawEndOverlay(c);
+  }
+  if (tutorialOpen) drawTutorialPanel(c);
+}
+
+// ── CLICK PIPELINE ───────────────────────────────────────────────────────
+GF.canvas.addEventListener('click', function (e) { onClick(e.clientX, e.clientY); });
+GF.canvas.addEventListener('touchend', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onClick(t.clientX, t.clientY);
+}, { passive: true });
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 1280,
+  designH: 720,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'loom_weaver',
+  onReady: function () {
+    buildPuzzle();
+    wefts = new Array(WEFT_BUDGET);
+    weftsUsed = 0;
+    recomputeMatch();
+    recomputeLayout();
+    tutorialOpen = false;
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    weftsUsed: weftsUsed,
+    matchPct: matchPct,
+    activeColor: activeColor,
+    activeStencil: activeStencil,
+    seedStr: seedStr,
+    WARP_THREADS: WARP_THREADS,
+    WEFT_BUDGET: WEFT_BUDGET,
+    COLOR_COUNT: COLOR_COUNT,
+    STENCIL_COUNT: STENCIL_COUNT,
+    WIN_MATCH_PCT: WIN_MATCH_PCT,
+    TARGET_GHOST_ALPHA: TARGET_GHOST_ALPHA,
+    STENCIL_OVER_RATIO: STENCIL_OVER_RATIO,
+    WEFT_LAY_ANIM_MS: WEFT_LAY_ANIM_MS,
+    PULSE_PERIOD_MS: PULSE_PERIOD_MS,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
