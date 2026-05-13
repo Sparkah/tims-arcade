@@ -209,6 +209,23 @@ EOF
 # falling back to PNG. Idempotent — skips thumbs whose .webp is up to date.
 bash "$(dirname "$0")/build_webp_thumbs.sh"
 
+# Guard: every PNG thumb must have a WebP sibling. The gallery's <picture>
+# and image-set() pick the WebP source by type; when it's missing, Cloudflare
+# Pages serves index.html with HTTP 200 as SPA fallback, the browser fails to
+# decode it as WebP, and <picture> does NOT fall through to the <img> PNG —
+# the card and featured hero render as a broken image. (2026-05-13 incident.)
+missing_webp=()
+for png in "$OUT_THUMBS"/*.png; do
+  webp="${png%.png}.webp"
+  [[ -f "$webp" ]] || missing_webp+=("$(basename "$png")")
+done
+if (( ${#missing_webp[@]} > 0 )); then
+  echo "❌ Missing WebP siblings for ${#missing_webp[@]} thumb(s):"
+  printf '   - %s\n' "${missing_webp[@]}"
+  echo "   Run: bash Gallery/scripts/build_webp_thumbs.sh"
+  exit 1
+fi
+
 # Inject content-hash version strings on <link>/<script> references so
 # returning visitors get fresh CSS/JS the moment we change them, instead of
 # the 4-hour CF Pages cache window. Idempotent — no-op when nothing changed.
