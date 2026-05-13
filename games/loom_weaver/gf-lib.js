@@ -568,6 +568,193 @@ window.GF = {
   // persisted fields (level++, coin spend, gs change, etc.).
   persist: persist,
   saveRun: saveRun,
+
+  // ── Interactive tutorial system (added 2026-05-13 after subscriber
+  // complaints that text-only tutorials weren't clear enough) ──────────
+  //
+  // Usage in a game:
+  //   GF.tutorial.start([
+  //     { text: 'Tap the pendulum to freeze it.',
+  //       target: { x: 200, y: 300, r: 40 },
+  //       advance: 'click_target' },
+  //     { text: 'Now release to fire.', advance: 'click_any' },
+  //     { text: 'Clear all targets to win.', advance: 'auto', after: 2500 },
+  //   ], { storageKey: 'pendulum_sniper_tutorial_v1' });
+  //
+  // Game integration:
+  //   - update(dt) — call GF.tutorial.update(dt) at the start.
+  //     Gate the rest of update() on `if (GF.tutorial.active) return;`
+  //     so the world freezes between steps.
+  //   - render() — call GF.tutorial.draw(ctx) LAST so the overlay is on top.
+  //   - onPress(x, y) — call GF.tutorial.handleClick(x, y) FIRST.
+  //     If it returns true, return early (tutorial consumed the click).
+  //   - Help (?) button — call GF.tutorial.reopen() to re-run from step 1.
+  tutorial: (function () {
+    var pulseT = 0;
+    var state = {
+      active: false,
+      step: 0,
+      steps: [],
+      _autoTimer: 0,
+      _storageKey: 'game_tutorial_done',
+      _skipBtn: null,
+    };
+    function wrap(c, text, x, y, maxW, lineH) {
+      var words = String(text).split(/\s+/);
+      var lines = [], cur = '';
+      for (var i = 0; i < words.length; i++) {
+        var probe = cur ? cur + ' ' + words[i] : words[i];
+        if (c.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+        else { cur = probe; }
+      }
+      if (cur) lines.push(cur);
+      var startY = y - ((lines.length - 1) * lineH) / 2;
+      for (var j = 0; j < lines.length; j++) c.fillText(lines[j], x, startY + j * lineH);
+    }
+    state.start = function (steps, opts) {
+      opts = opts || {};
+      state._storageKey = opts.storageKey || (steps && steps[0] && steps[0]._key) || 'game_tutorial_done';
+      if (!opts.force) {
+        try { if (localStorage.getItem(state._storageKey)) { state.active = false; return false; } } catch (e) {}
+      }
+      state.active = true;
+      state.step = 0;
+      state.steps = steps || [];
+      state._autoTimer = 0;
+      // Click cooldown: ignore taps within 200 ms of starting so the
+      // gesture that started the game (menu PLAY press, etc.) cannot
+      // also be consumed as the advance for step 1.
+      state._startTs = Date.now();
+      return true;
+    };
+    state.next = function () {
+      var prev = state.steps[state.step];
+      if (prev && typeof prev.onAdvance === 'function') { try { prev.onAdvance(); } catch (e) {} }
+      state.step++;
+      state._autoTimer = 0;
+      if (state.step >= state.steps.length) {
+        state.active = false;
+        try { localStorage.setItem(state._storageKey, '1'); } catch (e) {}
+      }
+    };
+    state.reopen = function () {
+      if (!state.steps.length) return;
+      state.active = true;
+      state.step = 0;
+      state._autoTimer = 0;
+    };
+    state.update = function (dt) {
+      if (!state.active) return;
+      pulseT += dt;
+      var step = state.steps[state.step];
+      if (!step) return;
+      if (step.advance === 'auto') {
+        state._autoTimer += dt * 1000;
+        if (state._autoTimer >= (step.after || 1800)) state.next();
+      }
+    };
+    state.draw = function (c) {
+      if (!state.active) return;
+      var step = state.steps[state.step];
+      if (!step) return;
+      // Resolve target (may be a function returning {x,y,r} so games can
+      // point at moving things like a swinging pendulum)
+      var tg = typeof step.target === 'function' ? step.target() : step.target;
+      // Dim scrim
+      c.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      c.fillRect(0, 0, W, H);
+      // Pulse highlight
+      if (tg && typeof tg.x === 'number') {
+        var pulse = 0.5 + 0.5 * Math.sin(pulseT * 3.5);
+        var baseR = tg.r || 40;
+        var r = baseR + pulse * 12 * S;
+        c.save();
+        c.shadowColor = '#ffeb3b';
+        c.shadowBlur = 16;
+        c.strokeStyle = '#ffeb3b';
+        c.lineWidth = 3 + pulse * 1.5;
+        c.globalAlpha = 0.85;
+        c.beginPath();
+        c.arc(tg.x, tg.y, r, 0, Math.PI * 2);
+        c.stroke();
+        c.restore();
+        var tipY = tg.y - baseR - 14 * S;
+        var baseY = tipY - 26 * S;
+        c.fillStyle = '#ffeb3b';
+        c.beginPath();
+        c.moveTo(tg.x, tipY);
+        c.lineTo(tg.x - 12 * S, baseY);
+        c.lineTo(tg.x + 12 * S, baseY);
+        c.closePath();
+        c.fill();
+      }
+      // Bottom panel
+      var panelH = clamp(118 * S, 96, 150);
+      var panelY = H - panelH;
+      c.fillStyle = 'rgba(12, 16, 26, 0.96)';
+      c.fillRect(0, panelY, W, panelH);
+      c.fillStyle = '#ffeb3b';
+      c.fillRect(0, panelY, W, 3);
+      var fsSmall = clamp(12 * S, 10, 15) | 0;
+      c.fillStyle = '#9aa3b2';
+      c.font = fsSmall + 'px Inter, system-ui, sans-serif';
+      c.textAlign = 'left';
+      c.fillText('TUTORIAL  ' + (state.step + 1) + ' / ' + state.steps.length, 16, panelY + 22);
+      // Skip ✕
+      c.fillStyle = '#9bb';
+      c.textAlign = 'right';
+      var skipLabel = (lang === 'ru' ? 'пропустить ✕' : 'skip ✕');
+      c.fillText(skipLabel, W - 16, panelY + 22);
+      state._skipBtn = { x: W - 110, y: panelY + 4, w: 110, h: 30 };
+      // Instruction
+      c.fillStyle = '#fff';
+      c.textAlign = 'center';
+      var fs = clamp(17 * S, 13, 22) | 0;
+      c.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+      wrap(c, step.text, W / 2, panelY + panelH / 2 + 4, W - 60, fs + 6);
+      // Hint
+      var hintTxt = '';
+      if (step.advance === 'click_any') hintTxt = (lang === 'ru' ? '(нажмите в любом месте)' : '(tap anywhere to continue)');
+      else if (step.advance === 'auto') hintTxt = (lang === 'ru' ? '(продолжение автоматически…)' : '(continuing automatically…)');
+      if (hintTxt) {
+        c.fillStyle = '#aac';
+        c.font = fsSmall + 'px Inter, system-ui, sans-serif';
+        c.fillText(hintTxt, W / 2, panelY + panelH - 12);
+      }
+    };
+    state.handleClick = function (x, y) {
+      if (!state.active) return false;
+      // Cooldown after start (see start() comment) — swallow the click but
+      // don't advance, so the bubbled startGame click can't skip step 1.
+      if (state._startTs && Date.now() - state._startTs < 200) return true;
+      var step = state.steps[state.step];
+      if (!step) return false;
+      var b = state._skipBtn;
+      if (b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        state.active = false;
+        try { localStorage.setItem(state._storageKey, '1'); } catch (e) {}
+        return true;
+      }
+      if (step.advance === 'click_target') {
+        var tg = typeof step.target === 'function' ? step.target() : step.target;
+        if (tg && typeof tg.x === 'number') {
+          var dx = x - tg.x, dy = y - tg.y;
+          var hitR = (tg.r || 40) + 28 * S;
+          if (dx * dx + dy * dy <= hitR * hitR) {
+            state.next();
+            return true;
+          }
+        }
+        return true; // swallow misses too
+      }
+      if (step.advance === 'click_any') {
+        state.next();
+        return true;
+      }
+      return true; // 'auto' or unknown — swallow
+    };
+    return state;
+  })(),
 };
 
 // Screenshot helpers — exposed at window for external tooling (take_screenshots.js)
