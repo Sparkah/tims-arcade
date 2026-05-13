@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pendulum Sniper</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Pendulum Sniper',
+    sub:   'Hold to freeze the swing. Release to fire.',
+    play: 'PLAY', retry: 'PLAY AGAIN', menu: 'MENU',
+    won: 'ARENA CLEARED', gameover: 'OUT OF SHOTS',
+    score: 'TARGETS', best: 'BEST',
+    stops: 'STOPS', energy: 'ENERGY', targets: 'TARGETS',
+    bonus_apex: 'APEX BONUS',
+    hold_to_freeze: 'HOLD TO FREEZE',
+    fire: 'FIRE',
+    'tut_title': 'How to play',
+    'tut_goal': 'Goal: Destroy all 4 drifting targets before stops or energy run out.',
+    'tut_controls': 'Controls: HOLD to freeze the pendulum, RELEASE to fire along the frozen line.',
+    'tut_win': 'Win: Hit all 4 targets.',
+    'tut_lose': 'Lose: Out of stops or energy with targets still alive.',
+    'tut_tip': 'Tip: Short freezes near the swing apex earn energy back.',
+    close: 'GOT IT',
+  },
+  ru: {
+    title: 'Маятник-Снайпер',
+    sub:   'Удерживайте — заморозьте маятник. Отпустите — выстрел.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', menu: 'МЕНЮ',
+    won: 'АРЕНА ОЧИЩЕНА', gameover: 'ПАТРОНЫ КОНЧИЛИСЬ',
+    score: 'ЦЕЛИ', best: 'РЕКОРД',
+    stops: 'СТОПЫ', energy: 'ЭНЕРГИЯ', targets: 'ЦЕЛИ',
+    bonus_apex: 'БОНУС АПЕКС',
+    hold_to_freeze: 'УДЕРЖИВАЙТЕ',
+    fire: 'ВЫСТРЕЛ',
+    'tut_title': 'Как играть',
+    'tut_goal': 'Цель: Сбейте 4 движущиеся цели, пока есть остановки и энергия.',
+    'tut_controls': 'Управление: УДЕРЖИВАЙТЕ — заморозить маятник, ОТПУСТИТЕ — выстрел.',
+    'tut_win': 'Победа: Все 4 цели уничтожены.',
+    'tut_lose': 'Поражение: 0 остановок или 0 энергии, цели живы.',
+    'tut_tip': 'Совет: Короткие паузы у края дуги возвращают немного энергии.',
+    close: 'ПОНЯТНО',
+  },
+};
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var MAX_STOPS           = 3;
+var ENERGY_BUDGET       = 100;
+var ENERGY_RATE         = 60;     // energy/sec drained while frozen
+var TARGETS_PER_ROUND   = 4;
+var PENDULUM_LENGTH     = 0.42;   // fraction of screen height
+var PENDULUM_GRAVITY    = 1.8;    // swing acceleration scalar
+var TARGET_RADIUS       = 26;     // design units
+var TARGET_SPEED        = 110;    // base px/s
+var ARC_MOMENTUM_BONUS  = 8;      // refund on apex hit
+var STOP_RELEASE_DELAY  = 0.12;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WIN
+var phase = 'SWING';        // SWING | FROZEN | RECOIL
+var stops_left = 3;
+var energy = 100;
+var targets = [];
+var targets_hit = 0;
+var targets_alive = 4;
+var best = 0;
+var bestEnergy = 0;
+var tutorialOpen = false;
+var pendulum = {
+  pivotX: 0, pivotY: 0, length: 0,
+  angle: 0, angVel: 0,
+  frozen: false, freezeT: 0,
+  recoilT: 0,
+};
+var lastShot = null;
+var apexBonusFlash = 0;
+var animT = 0;
+var _ssMode = false;
+
+// ── PERSIST ──────────────────────────────────────────────────────────────
+function loadBest() {
+  try {
+    var v = parseInt(localStorage.getItem('pendulum_sniper_best') || '0');
+    if (!isNaN(v)) best = v;
+    var be = parseInt(localStorage.getItem('pendulum_sniper_best_energy') || '0');
+    if (!isNaN(be)) bestEnergy = be;
+  } catch (e) {}
+}
+function saveBest() {
+  try {
+    localStorage.setItem('pendulum_sniper_best', String(best));
+    localStorage.setItem('pendulum_sniper_best_energy', String(bestEnergy));
+  } catch (e) {}
+}
+
+// ── TARGETS ──────────────────────────────────────────────────────────────
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+function spawnTargets() {
+  targets = [];
+  var W = GF.W, H = GF.H;
+  var margin = 80 * GF.S;
+  var bandTop = H * 0.45;
+  var bandBot = H - margin;
+  var patterns = ['orbit', 'bounce', 'linear-h', 'linear-v'];
+  for (var i = 0; i < TARGETS_PER_ROUND; i++) {
+    var p = patterns[i];
+    var cx = rand(margin, W - margin);
+    var cy = rand(bandTop, bandBot);
+    var t = {
+      pattern: p,
+      x: cx, y: cy,
+      cx: cx, cy: cy,
+      r: TARGET_RADIUS * GF.S,
+      alive: true,
+      t: rand(0, Math.PI * 2),
+      orbitR: rand(60 * GF.S, 120 * GF.S),
+      orbitSpd: rand(0.6, 1.4) * (i % 2 === 0 ? 1 : -1),
+      vx: TARGET_SPEED * GF.S * (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.2),
+      vy: TARGET_SPEED * GF.S * (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.2),
+    };
+    if (p === 'linear-h') {
+      t.x = margin + 40 * GF.S; t.cx = t.x;
+      t.vx = TARGET_SPEED * GF.S * rand(0.7, 1.1); t.vy = 0;
+    } else if (p === 'linear-v') {
+      t.y = bandTop + 20 * GF.S; t.cy = t.y;
+      t.vx = 0; t.vy = TARGET_SPEED * GF.S * rand(0.7, 1.1);
+    }
+    targets.push(t);
+  }
+  targets_alive = TARGETS_PER_ROUND;
+}
+
+function updateTargets(dt) {
+  var W = GF.W, H = GF.H;
+  var margin = 80 * GF.S;
+  var bandTop = H * 0.42;
+  var bandBot = H - 40 * GF.S;
+  for (var i = 0; i < targets.length; i++) {
+    var t = targets[i];
+    if (!t.alive) continue;
+    if (t.pattern === 'orbit') {
+      t.t += t.orbitSpd * dt;
+      t.x = t.cx + Math.cos(t.t) * t.orbitR;
+      t.y = t.cy + Math.sin(t.t) * t.orbitR * 0.6;
+    } else if (t.pattern === 'bounce') {
+      t.x += t.vx * dt;
+      t.y += t.vy * dt;
+      if (t.x < margin) { t.x = margin; t.vx = Math.abs(t.vx); }
+      if (t.x > W - margin) { t.x = W - margin; t.vx = -Math.abs(t.vx); }
+      if (t.y < bandTop) { t.y = bandTop; t.vy = Math.abs(t.vy); }
+      if (t.y > bandBot) { t.y = bandBot; t.vy = -Math.abs(t.vy); }
+    } else if (t.pattern === 'linear-h') {
+      t.x += t.vx * dt;
+      if (t.x < margin) { t.x = margin; t.vx = Math.abs(t.vx); }
+      if (t.x > W - margin) { t.x = W - margin; t.vx = -Math.abs(t.vx); }
+    } else if (t.pattern === 'linear-v') {
+      t.y += t.vy * dt;
+      if (t.y < bandTop) { t.y = bandTop; t.vy = Math.abs(t.vy); }
+      if (t.y > bandBot) { t.y = bandBot; t.vy = -Math.abs(t.vy); }
+    }
+  }
+}
+
+// ── PENDULUM ─────────────────────────────────────────────────────────────
+function resetPendulum() {
+  pendulum.pivotX = GF.W * 0.5;
+  pendulum.pivotY = GF.H * 0.04;
+  pendulum.length = GF.H * PENDULUM_LENGTH;
+  pendulum.angle = 0.9;
+  pendulum.angVel = 0;
+  pendulum.frozen = false;
+  pendulum.freezeT = 0;
+  pendulum.recoilT = 0;
+}
+
+function updatePendulum(dt) {
+  if (phase === 'RECOIL') {
+    pendulum.recoilT -= dt;
+    if (pendulum.recoilT <= 0) phase = 'SWING';
+    return;
+  }
+  if (phase === 'FROZEN') {
+    pendulum.freezeT += dt;
+    energy -= ENERGY_RATE * dt;
+    if (energy <= 0) {
+      energy = 0;
+      fireShot(true);
+    }
+    return;
+  }
+  // SWING
+  var accel = -PENDULUM_GRAVITY * Math.sin(pendulum.angle);
+  pendulum.angVel += accel * dt;
+  pendulum.angVel *= 0.999;
+  pendulum.angle  += pendulum.angVel * dt;
+}
+
+function crosshairPos() {
+  var p = pendulum;
+  return {
+    x: p.pivotX + Math.sin(p.angle) * p.length,
+    y: p.pivotY + Math.cos(p.angle) * p.length,
+  };
+}
+
+function apexFactor() {
+  var av = Math.abs(pendulum.angVel);
+  return Math.max(0, 1 - av / 1.6);
+}
+
+// ── SHOT ─────────────────────────────────────────────────────────────────
+function fireShot(forced) {
+  var ch = crosshairPos();
+  var hitRadius = (TARGET_RADIUS + 12) * GF.S;
+  var hitAny = false;
+  var af = apexFactor();
+  for (var i = 0; i < targets.length; i++) {
+    var t = targets[i];
+    if (!t.alive) continue;
+    var dx = t.x - ch.x;
+    var dy = t.y - ch.y;
+    var d = Math.sqrt(dx*dx + dy*dy);
+    if (d <= hitRadius) {
+      t.alive = false;
+      targets_hit += 1;
+      targets_alive -= 1;
+      hitAny = true;
+      GF.spawnParticles(t.x, t.y, '#f5d020', 18);
+      GF.setShake(0.5);
+      if (af > 0.55) {
+        energy = Math.min(ENERGY_BUDGET, energy + ARC_MOMENTUM_BONUS);
+        apexBonusFlash = 1;
+        GF.spawnFloat(t.x, t.y - 26 * GF.S, '+' + ARC_MOMENTUM_BONUS + ' ' + GF.t('bonus_apex'), '#4dd0e1');
+      } else {
+        GF.spawnFloat(t.x, t.y - 26 * GF.S, '+1', '#f5d020');
+      }
+    }
+  }
+  lastShot = {
+    x1: pendulum.pivotX, y1: pendulum.pivotY,
+    x2: ch.x, y2: ch.y, life: 0.45,
+  };
+  var dir = pendulum.angle >= 0 ? -1 : 1;
+  pendulum.angVel = (pendulum.angVel * 0.4) + dir * 0.8;
+  pendulum.frozen = false;
+  stops_left -= 1;
+  pendulum.recoilT = STOP_RELEASE_DELAY;
+  phase = 'RECOIL';
+  if (!hitAny) GF.setShake(0.15);
+  if (targets_alive <= 0) {
+    gs = 'WIN';
+    if (targets_hit > best || (targets_hit === best && energy > bestEnergy)) {
+      best = targets_hit; bestEnergy = Math.floor(energy);
+      saveBest();
+    }
+    GF.gameEnded();
+    GF.spawnParticles(GF.cx, GF.cy, '#2ecc71', 30);
+    GF.saveRun && GF.saveRun();
+    return;
+  }
+  if ((stops_left <= 0 || energy <= 0) && targets_alive > 0) {
+    gs = 'GAMEOVER';
+    if (targets_hit > best) { best = targets_hit; bestEnergy = Math.floor(energy); saveBest(); }
+    GF.gameEnded();
+    GF.spawnParticles(GF.cx, GF.cy, '#e74c5e', 24);
+    GF.saveRun && GF.saveRun();
+    return;
+  }
+  GF.saveRun && GF.saveRun();
+}
+
+function tryFreeze() {
+  if (gs !== 'PLAYING') return;
+  if (phase !== 'SWING') return;
+  if (stops_left <= 0 || energy <= 0) return;
+  pendulum.frozen = true;
+  pendulum.freezeT = 0;
+  pendulum.angVel = 0;
+  phase = 'FROZEN';
+}
+
+function tryRelease() {
+  if (gs !== 'PLAYING') return;
+  if (phase !== 'FROZEN') return;
+  fireShot(false);
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function pointInRect(x, y, rx, ry, rw, rh) {
+  return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
+}
+var helpBtn = { x: 0, y: 0, s: 40 };
+function recomputeHelp() {
+  helpBtn.s = GF.clamp(36 * GF.S, 28, 48);
+  helpBtn.x = GF.W - helpBtn.s - GF.clamp(14 * GF.S, 8, 22);
+  helpBtn.y = GF.clamp(14 * GF.S, 8, 22);
+}
+function hitHelp(x, y) {
+  return pointInRect(x, y, helpBtn.x, helpBtn.y, helpBtn.s, helpBtn.s);
+}
+
+function onPress(x, y) {
+  if (tutorialOpen) {
+    var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+    var bx = (GF.W - bw) / 2, by = GF.H * 0.80;
+    if (pointInRect(x, y, bx, by, bw, bh)) {
+      tutorialOpen = false;
+      try { localStorage.setItem('pendulum_sniper_seen_tutorial', '1'); } catch (e) {}
+    }
+    return;
+  }
+  if (gs === 'MENU') {
+    var bwm = GF.clamp(240 * GF.S, 170, 320), bhm = GF.clamp(52 * GF.S, 40, 64);
+    var bxm = (GF.W - bwm) / 2, bym = GF.H * 0.78;
+    if (pointInRect(x, y, bxm, bym, bwm, bhm)) { startGame(); return; }
+    return;
+  }
+  if (gs === 'GAMEOVER' || gs === 'WIN') {
+    var bw2 = GF.clamp(220 * GF.S, 160, 300), bh2 = GF.clamp(48 * GF.S, 38, 60);
+    var bx2 = (GF.W - bw2) / 2;
+    var by2 = GF.H * 0.62;
+    if (pointInRect(x, y, bx2, by2, bw2, bh2)) { startGame(); return; }
+    var by3 = GF.H * 0.74;
+    if (pointInRect(x, y, bx2, by3, bw2, bh2)) { gs = 'MENU'; return; }
+    return;
+  }
+  if (hitHelp(x, y)) { tutorialOpen = true; return; }
+  tryFreeze();
+}
+
+function onRelease() {
+  if (gs !== 'PLAYING') return;
+  if (phase === 'FROZEN') tryRelease();
+}
+
+GF.canvas.addEventListener('mousedown', function(e) { onPress(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mouseup',   function()  { onRelease(); });
+GF.canvas.addEventListener('mouseleave',function()  { if (phase === 'FROZEN') tryRelease(); });
+GF.canvas.addEventListener('touchstart', function(e) {
+  if (e.changedTouches && e.changedTouches.length) {
+    var t = e.changedTouches[0]; onPress(t.clientX, t.clientY);
+  }
+}, { passive: true });
+GF.canvas.addEventListener('touchend',   function() { onRelease(); }, { passive: true });
+GF.canvas.addEventListener('touchcancel',function() { if (phase === 'FROZEN') tryRelease(); }, { passive: true });
+
+// Screenshot helper: ArrowRight in _ssMode advances a kill
+window.addEventListener('keydown', function(e) {
+  if (!_ssMode) return;
+  if (e.code === 'ArrowRight' && gs === 'PLAYING') {
+    for (var i = 0; i < targets.length; i++) {
+      if (targets[i].alive) {
+        targets[i].alive = false;
+        targets_hit += 1; targets_alive -= 1;
+        GF.spawnParticles(targets[i].x, targets[i].y, '#f5d020', 14);
+        break;
+      }
+    }
+    stops_left = Math.max(1, stops_left - 1);
+    energy = Math.max(20, energy - 18);
+  }
+});
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  stops_left = MAX_STOPS;
+  energy = ENERGY_BUDGET;
+  targets_hit = 0;
+  targets_alive = TARGETS_PER_ROUND;
+  resetPendulum();
+  spawnTargets();
+  phase = 'SWING';
+  gs = 'PLAYING';
+  tutorialOpen = false;
+  lastShot = null;
+  apexBonusFlash = 0;
+  GF.gameStarted();
+  GF.saveRun && GF.saveRun();
+}
+
+window._jumpLevel = function(n) {
+  _ssMode = true;
+  startGame();
+  if (n && n >= 99) {
+    for (var i = 0; i < targets.length; i++) {
+      if (targets[i].alive) { targets[i].alive = false; targets_hit += 1; }
+    }
+    targets_alive = 0;
+    gs = 'WIN';
+    return;
+  }
+  if (targets.length > 0 && targets[0].alive) {
+    targets[0].alive = false;
+    targets_hit = 1;
+    targets_alive = TARGETS_PER_ROUND - 1;
+  }
+  energy = 72; stops_left = 2;
+  pendulum.angle = 0.7; pendulum.angVel = -0.4;
+};
+window._setupForScreenshot = function(arg) {
+  _ssMode = true;
+  startGame();
+  if (arg === 'frozen') {
+    pendulum.angle = 0.55; pendulum.angVel = 0;
+    phase = 'FROZEN'; pendulum.frozen = true;
+    energy = 78; stops_left = 2;
+    return;
+  }
+  if (arg === 'midhit') {
+    targets[0].alive = false;
+    targets_hit = 1; targets_alive = TARGETS_PER_ROUND - 1;
+    energy = 68; stops_left = 2;
+    pendulum.angle = -0.4; pendulum.angVel = 1.2;
+    lastShot = { x1: pendulum.pivotX, y1: pendulum.pivotY,
+                 x2: targets[0].x, y2: targets[0].y, life: 0.35 };
+    return;
+  }
+  pendulum.angle = 0.3; pendulum.angVel = -1.1;
+};
+window._setLang = function(l) { GF.lang = l; };
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeHelp();
+  animT += dt;
+  if (apexBonusFlash > 0) apexBonusFlash -= dt;
+  if (lastShot) { lastShot.life -= dt; if (lastShot.life <= 0) lastShot = null; }
+  if (gs !== 'PLAYING') return;
+  updateTargets(dt);
+  updatePendulum(dt);
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawBackground(c) {
+  var W = GF.W, H = GF.H;
+  var grad = c.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#101622');
+  grad.addColorStop(0.55, '#0d1320');
+  grad.addColorStop(1, '#080a14');
+  c.fillStyle = grad; c.fillRect(0, 0, W, H);
+  // ceiling band
+  c.fillStyle = '#1a2030';
+  c.fillRect(0, 0, W, H * 0.07);
+  c.strokeStyle = '#2a3344'; c.lineWidth = 2;
+  c.beginPath(); c.moveTo(0, H * 0.07); c.lineTo(W, H * 0.07); c.stroke();
+  // rivets
+  c.fillStyle = '#3a4458';
+  var n = 14;
+  for (var i = 1; i < n; i++) {
+    var rx = (W / n) * i;
+    c.beginPath(); c.arc(rx, H * 0.035, 3 * GF.S, 0, Math.PI * 2); c.fill();
+  }
+  // floor band
+  c.fillStyle = '#0a0e18'; c.fillRect(0, H * 0.94, W, H * 0.06);
+  c.strokeStyle = '#1a2230';
+  c.beginPath(); c.moveTo(0, H * 0.94); c.lineTo(W, H * 0.94); c.stroke();
+  // arena grid
+  c.strokeStyle = 'rgba(80, 110, 160, 0.07)'; c.lineWidth = 1;
+  var gridStep = 60 * GF.S;
+  for (var gx = 0; gx <= W; gx += gridStep) {
+    c.beginPath(); c.moveTo(gx, H * 0.07); c.lineTo(gx, H * 0.94); c.stroke();
+  }
+  for (var gy = H * 0.07; gy <= H * 0.94; gy += gridStep) {
+    c.beginPath(); c.moveTo(0, gy); c.lineTo(W, gy); c.stroke();
+  }
+}
+
+function drawTarget(c, t) {
+  if (!t.alive) return;
+  var x = t.x, y = t.y, r = t.r;
+  var col, ringCol;
+  if (t.pattern === 'orbit')      { col = '#e74c5e'; ringCol = '#ffb0b8'; }
+  else if (t.pattern === 'bounce'){ col = '#f5b941'; ringCol = '#ffe2a0'; }
+  else if (t.pattern === 'linear-h') { col = '#4dd0e1'; ringCol = '#b0e8f0'; }
+  else                            { col = '#9b59ff'; ringCol = '#d0b4ff'; }
+  c.save();
+  c.shadowColor = col; c.shadowBlur = 18 * GF.S;
+  c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2);
+  c.fillStyle = col; c.fill();
+  c.restore();
+  c.strokeStyle = ringCol; c.lineWidth = 2;
+  c.beginPath(); c.arc(x, y, r * 0.78, 0, Math.PI * 2); c.stroke();
+  c.fillStyle = '#fff';
+  c.beginPath(); c.arc(x, y, r * 0.22, 0, Math.PI * 2); c.fill();
+  if (t.pattern === 'orbit') {
+    c.strokeStyle = 'rgba(255,255,255,0.10)'; c.lineWidth = 1;
+    c.beginPath();
+    c.ellipse(t.cx, t.cy, t.orbitR, t.orbitR * 0.6, 0, 0, Math.PI * 2);
+    c.stroke();
+  }
+}
+
+function drawPendulum(c) {
+  var p = pendulum;
+  var ch = crosshairPos();
+  c.fillStyle = '#3a4458';
+  c.beginPath(); c.arc(p.pivotX, p.pivotY, 10 * GF.S, 0, Math.PI * 2); c.fill();
+  c.strokeStyle = '#5a6478'; c.lineWidth = 2; c.stroke();
+  c.strokeStyle = phase === 'FROZEN' ? '#4dd0e1' : '#6c7a90';
+  c.lineWidth = phase === 'FROZEN' ? 2.5 : 1.5;
+  c.beginPath(); c.moveTo(p.pivotX, p.pivotY); c.lineTo(ch.x, ch.y); c.stroke();
+  drawCrosshair(c, ch.x, ch.y, phase === 'FROZEN');
+}
+
+function drawCrosshair(c, x, y, frozen) {
+  var R = 22 * GF.S;
+  var col = frozen ? '#4dd0e1' : '#f5d020';
+  c.save();
+  if (frozen) { c.shadowColor = '#4dd0e1'; c.shadowBlur = 18 * GF.S; }
+  c.strokeStyle = col; c.lineWidth = 2.5;
+  c.beginPath(); c.arc(x, y, R, 0, Math.PI * 2); c.stroke();
+  var inner = R * 0.45;
+  c.beginPath();
+  c.moveTo(x - R - 6 * GF.S, y); c.lineTo(x - inner, y);
+  c.moveTo(x + inner, y); c.lineTo(x + R + 6 * GF.S, y);
+  c.moveTo(x, y - R - 6 * GF.S); c.lineTo(x, y - inner);
+  c.moveTo(x, y + inner); c.lineTo(x, y + R + 6 * GF.S);
+  c.stroke();
+  c.fillStyle = col;
+  c.beginPath(); c.arc(x, y, 2.5 * GF.S, 0, Math.PI * 2); c.fill();
+  c.restore();
+  if (frozen) {
+    c.strokeStyle = 'rgba(77,208,225,0.4)'; c.lineWidth = 1;
+    c.setLineDash([4 * GF.S, 4 * GF.S]);
+    c.beginPath(); c.arc(x, y, R + 8 * GF.S, 0, Math.PI * 2); c.stroke();
+    c.setLineDash([]);
+  }
+}
+
+function drawShotTrace(c) {
+  if (!lastShot) return;
+  var a = Math.max(0, lastShot.life / 0.45);
+  c.save();
+  c.globalAlpha = a;
+  c.strokeStyle = '#f5d020';
+  c.lineWidth = 3 * GF.S * a;
+  c.shadowColor = '#f5d020'; c.shadowBlur = 18 * GF.S;
+  c.beginPath(); c.moveTo(lastShot.x1, lastShot.y1); c.lineTo(lastShot.x2, lastShot.y2); c.stroke();
+  c.restore();
+}
+
+function drawHUD(c) {
+  var W = GF.W, H = GF.H;
+  var pad = GF.clamp(14 * GF.S, 8, 22);
+  var fs = GF.clamp(14 * GF.S, 11, 18);
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  // STOPS
+  c.fillStyle = '#cfd8e0';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(GF.t('stops'), pad, pad);
+  var pipR = GF.clamp(8 * GF.S, 6, 11);
+  var pipY = pad + fs + 6 * GF.S;
+  for (var i = 0; i < MAX_STOPS; i++) {
+    var px = pad + pipR + i * (pipR * 2 + 6 * GF.S);
+    c.beginPath();
+    c.arc(px, pipY + pipR, pipR, 0, Math.PI * 2);
+    c.fillStyle = i < stops_left ? '#4dd0e1' : '#2a3344';
+    c.fill();
+    c.strokeStyle = '#5a6478'; c.lineWidth = 1; c.stroke();
+  }
+  // ENERGY bar
+  var barW = Math.min(W * 0.42, 360 * GF.S);
+  var barH = GF.clamp(14 * GF.S, 10, 18);
+  var bx = (W - barW) / 2;
+  var by = pad + 6 * GF.S;
+  c.fillStyle = '#cfd8e0';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textAlign = 'center';
+  c.fillText(GF.t('energy') + '  ' + Math.ceil(energy), W / 2, pad);
+  GF.rr(c, bx, by + fs + 6 * GF.S, barW, barH, barH / 2);
+  c.fillStyle = '#1a2030'; c.fill();
+  c.strokeStyle = '#3a4458'; c.lineWidth = 1; c.stroke();
+  var pct = Math.max(0, Math.min(1, energy / ENERGY_BUDGET));
+  var fillW = Math.max(barH, barW * pct);
+  GF.rr(c, bx, by + fs + 6 * GF.S, fillW, barH, barH / 2);
+  var ecol = energy > 50 ? '#2ecc71' : (energy > 25 ? '#f5b941' : '#e74c5e');
+  c.fillStyle = ecol; c.fill();
+  // TARGETS
+  c.textAlign = 'right'; c.textBaseline = 'top';
+  c.fillStyle = '#cfd8e0';
+  c.fillText(GF.t('targets') + '  ' + targets_hit + ' / ' + TARGETS_PER_ROUND,
+    helpBtn.x - 12 * GF.S, pad);
+  // help
+  var rr = helpBtn.s * 0.5;
+  GF.rr(c, helpBtn.x, helpBtn.y, helpBtn.s, helpBtn.s, rr);
+  c.fillStyle = '#1a1a26'; c.fill();
+  c.strokeStyle = '#4dd0e1'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', helpBtn.x + helpBtn.s / 2, helpBtn.y + helpBtn.s / 2);
+  // status
+  if (phase === 'FROZEN') {
+    c.textAlign = 'center'; c.textBaseline = 'top';
+    c.fillStyle = '#4dd0e1';
+    c.font = 'bold ' + GF.clamp(15 * GF.S, 11, 19) + 'px sans-serif';
+    c.fillText(GF.t('hold_to_freeze'), W / 2, H * 0.10);
+  } else if (phase === 'SWING' && gs === 'PLAYING') {
+    c.textAlign = 'center'; c.textBaseline = 'top';
+    c.fillStyle = '#9ab';
+    c.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    c.fillText(GF.t('sub'), W / 2, H * 0.10);
+  }
+  if (apexBonusFlash > 0) {
+    var aa = Math.min(1, apexBonusFlash);
+    c.save();
+    c.globalAlpha = aa;
+    c.fillStyle = '#4dd0e1';
+    c.font = 'bold ' + GF.clamp(22 * GF.S, 14, 30) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(GF.t('bonus_apex'), W / 2, H * 0.18);
+    c.restore();
+  }
+}
+
+function wrapText(c, text, x, y, maxW, lineH) {
+  var words = (text || '').split(' ');
+  var line = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (c.measureText(test).width > maxW && line) {
+      c.fillText(line, x, y); line = words[i]; y += lineH;
+    } else { line = test; }
+  }
+  if (line) c.fillText(line, x, y);
+  return y;
+}
+
+function drawMenu(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, W, H);
+  var grad = c.createRadialGradient(W / 2, H * 0.18, 10, W / 2, H * 0.18, H * 0.6);
+  grad.addColorStop(0, 'rgba(77,208,225,0.18)');
+  grad.addColorStop(1, 'rgba(77,208,225,0)');
+  c.fillStyle = grad; c.fillRect(0, 0, W, H);
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(77, 208, 225, 0.55)';
+  c.shadowBlur = 26 * GF.S;
+  c.font = 'bold ' + GF.clamp(42 * GF.S, 26, 64) + 'px sans-serif';
+  c.fillText(GF.t('title'), W / 2, H * 0.18);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, H * 0.24);
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'left';
+  var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var leftEdge = W * 0.10;
+  var boxW = W * 0.80;
+  var lh = GF.clamp(22 * GF.S, 16, 28);
+  var yy = H * 0.32;
+  for (var i = 0; i < ll.length; i++) {
+    yy = wrapText(c, ll[i], leftEdge, yy, boxW, lh - 2) + lh;
+  }
+  c.textAlign = 'center';
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  GF.rr(c, bx, by, bw, bh, bh / 2);
+  var pg = c.createLinearGradient(bx, by, bx, by + bh);
+  pg.addColorStop(0, '#2ecc71'); pg.addColorStop(1, '#27ae60');
+  c.fillStyle = pg; c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('play'), bx + bw / 2, by + bh / 2);
+  if (best > 0) {
+    c.fillStyle = '#557';
+    c.font = GF.clamp(12 * GF.S, 10, 16) + 'px monospace';
+    c.textBaseline = 'alphabetic';
+    c.fillText(GF.t('best') + ': ' + best + ' / ' + TARGETS_PER_ROUND +
+      (bestEnergy > 0 ? '  ·  ' + GF.t('energy') + ' ' + bestEnergy : ''),
+      W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
+  }
+}
+
+function drawEndOverlay(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.86)';
+  c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#fff';
+  var winCol = gs === 'WIN' ? 'rgba(46, 204, 113, 0.7)' : 'rgba(231, 76, 94, 0.55)';
+  c.shadowColor = winCol; c.shadowBlur = 28 * GF.S;
+  c.font = 'bold ' + GF.clamp(38 * GF.S, 22, 60) + 'px sans-serif';
+  c.fillText(gs === 'WIN' ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.28);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  c.fillText(GF.t('score') + ': ' + targets_hit + ' / ' + TARGETS_PER_ROUND, W / 2, H * 0.40);
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(15 * GF.S, 11, 19) + 'px sans-serif';
+  c.fillText(GF.t('energy') + ': ' + Math.ceil(energy) + '  ·  ' + GF.t('stops') + ': ' + stops_left, W / 2, H * 0.46);
+  if (best > 0) {
+    c.fillStyle = '#557';
+    c.font = GF.clamp(13 * GF.S, 11, 18) + 'px monospace';
+    c.fillText(GF.t('best') + ': ' + best + ' / ' + TARGETS_PER_ROUND, W / 2, H * 0.52);
+  }
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (W - bw) / 2;
+  var by = H * 0.62;
+  GF.rr(c, bx, by, bw, bh, bh / 2);
+  var pg = c.createLinearGradient(bx, by, bx, by + bh);
+  pg.addColorStop(0, '#2ecc71'); pg.addColorStop(1, '#27ae60');
+  c.fillStyle = pg; c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('retry'), bx + bw / 2, by + bh / 2);
+  var by2 = H * 0.74;
+  GF.rr(c, bx, by2, bw, bh, bh / 2);
+  c.fillStyle = '#22222a'; c.fill();
+  c.strokeStyle = '#3a3a4a'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#cfd8e0';
+  c.fillText(GF.t('menu'), bx + bw / 2, by2 + bh / 2);
+}
+
+function drawTutorialPanel(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,8,18,0.94)';
+  c.fillRect(0, 0, W, H);
+  var pw = Math.min(W - GF.clamp(28 * GF.S, 16, 36) * 2, 540 * GF.S);
+  var ph = Math.min(H - GF.clamp(40 * GF.S, 22, 64) * 2, 460 * GF.S);
+  var px = (W - pw) / 2, py = (H - ph) / 2;
+  var rrr = GF.clamp(18 * GF.S, 10, 24);
+  GF.rr(c, px, py, pw, ph, rrr);
+  c.fillStyle = '#11111c'; c.fill();
+  c.strokeStyle = '#2a2a36'; c.lineWidth = 2; c.stroke();
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  var pad = GF.clamp(22 * GF.S, 14, 32);
+  c.fillStyle = '#4dd0e1';
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.fillText(GF.t('tut_title'), px + pad, py + pad);
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  c.fillStyle = '#cfd8e0';
+  c.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  var ly = py + pad + GF.clamp(40 * GF.S, 26, 50);
+  var lh = GF.clamp(34 * GF.S, 22, 42);
+  for (var i = 0; i < lines.length; i++) {
+    ly = wrapText(c, lines[i], px + pad, ly, pw - pad * 2, lh - 4) + lh;
+  }
+  var bw = GF.clamp(180 * GF.S, 130, 240), bh = GF.clamp(46 * GF.S, 36, 56);
+  var bx = (W - bw) / 2, by = H * 0.80;
+  GF.rr(c, bx, by, bw, bh, bh / 2);
+  var pg = c.createLinearGradient(bx, by, bx, by + bh);
+  pg.addColorStop(0, '#2ecc71'); pg.addColorStop(1, '#27ae60');
+  c.fillStyle = pg; c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('close'), bx + bw / 2, by + bh / 2);
+}
+
+function draw(c) {
+  if (gs === 'MENU') {
+    drawMenu(c);
+    if (tutorialOpen) drawTutorialPanel(c);
+    return;
+  }
+  drawBackground(c);
+  for (var i = 0; i < targets.length; i++) drawTarget(c, targets[i]);
+  drawShotTrace(c);
+  drawPendulum(c);
+  drawHUD(c);
+  if (phase === 'FROZEN') {
+    c.fillStyle = 'rgba(77,208,225,0.06)';
+    c.fillRect(0, 0, GF.W, GF.H);
+  }
+  if (gs === 'GAMEOVER' || gs === 'WIN') drawEndOverlay(c);
+  if (tutorialOpen) drawTutorialPanel(c);
+}
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 900,
+  designH: 600,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'pendulum_sniper',
+  onReady: function() {
+    loadBest();
+    resetPendulum();
+    GF.persist('pendulum_sniper_run_v1',
+      function() {
+        return {
+          gs: gs, phase: phase,
+          stops_left: stops_left, energy: energy,
+          targets_hit: targets_hit, targets_alive: targets_alive,
+          targets: targets.map(function(t) {
+            return { pattern: t.pattern, x: t.x, y: t.y, cx: t.cx, cy: t.cy,
+              r: t.r, alive: t.alive, t: t.t, orbitR: t.orbitR,
+              orbitSpd: t.orbitSpd, vx: t.vx, vy: t.vy };
+          }),
+          pAngle: pendulum.angle, pAngVel: pendulum.angVel,
+        };
+      },
+      function(s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        phase = s.phase || 'SWING';
+        stops_left = (typeof s.stops_left === 'number') ? s.stops_left : MAX_STOPS;
+        energy = (typeof s.energy === 'number') ? s.energy : ENERGY_BUDGET;
+        targets_hit = s.targets_hit || 0;
+        targets_alive = (typeof s.targets_alive === 'number') ? s.targets_alive : TARGETS_PER_ROUND;
+        if (Array.isArray(s.targets) && s.targets.length) {
+          targets = s.targets.map(function(t) { return Object.assign({}, t); });
+        }
+        if (typeof s.pAngle === 'number') pendulum.angle = s.pAngle;
+        if (typeof s.pAngVel === 'number') pendulum.angVel = s.pAngVel;
+      }
+    );
+    if (gs === 'PLAYING' && phase === 'FROZEN') phase = 'SWING';
+    if (gs === 'PLAYING' && (!targets || !targets.length)) gs = 'MENU';
+    tutorialOpen = false;
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    phase: phase,
+    stops_left: stops_left,
+    energy: energy,
+    targets_hit: targets_hit,
+    targets_alive: targets_alive,
+    pendulum_angle: pendulum.angle,
+    pendulum_angVel: pendulum.angVel,
+    MAX_STOPS: MAX_STOPS,
+    ENERGY_BUDGET: ENERGY_BUDGET,
+    ENERGY_RATE: ENERGY_RATE,
+    TARGETS_PER_ROUND: TARGETS_PER_ROUND,
+    PENDULUM_LENGTH: PENDULUM_LENGTH,
+    PENDULUM_GRAVITY: PENDULUM_GRAVITY,
+    TARGET_RADIUS: TARGET_RADIUS,
+    TARGET_SPEED: TARGET_SPEED,
+    ARC_MOMENTUM_BONUS: ARC_MOMENTUM_BONUS,
+    STOP_RELEASE_DELAY: STOP_RELEASE_DELAY,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
