@@ -77,6 +77,19 @@ var STRINGS = {
     bombReady: 'TAP / SPACE',
     bombsUsed: 'BOMBS',
     bestBombs: 'BEST BOMBS',
+    revive: 'EXTRA LIFE',
+    reviveSubtitle: 'Watch a short ad to continue',
+    shareBrand: "TIM'S GAME LAB",
+    shareTitle: 'DAILY DODGE',
+    shareSurvived: 'I survived',
+    shareSeed: 'Day seed {seed} · everyone races the same pattern',
+    shareRanked: 'Ranked #{rank} on today’s seed',
+    shareCta:     'Beat me at game-factory.tech',
+    tut_goal:     'Goal: Survive today’s shared 60-second projectile stream and climb the daily leaderboard.',
+    tut_controls: 'Controls: Arrow keys / WASD on desktop; drag anywhere on mobile to steer (offset joystick).',
+    tut_win:      'Win: Live through all 60 seconds to clear the daily seed and unlock Endless.',
+    tut_lose:     'Lose: Touch any projectile and the run ends — watch a short ad once per run for an extra life.',
+    tut_tip:      'Tip: Dodging close (close-call) builds a combo — at ×10 you can detonate a bomb to clear every active bullet.',
   },
   ru: {
     title: 'Увороты Дня',
@@ -118,6 +131,19 @@ var STRINGS = {
     bombReady: 'НАЖМИ / ПРОБЕЛ',
     bombsUsed: 'БОМБЫ',
     bestBombs: 'ЛУЧШИЕ БОМБЫ',
+    revive: 'ДОП. ЖИЗНЬ',
+    reviveSubtitle: 'Посмотри короткую рекламу, чтобы продолжить',
+    shareBrand: 'ИГРОВАЯ ЛАБА ТИМА',
+    shareTitle: 'УВОРОТЫ ДНЯ',
+    shareSurvived: 'Я выжил',
+    shareSeed: 'Сид дня {seed} · все играют один и тот же поток',
+    shareRanked: 'Место #{rank} в сегодняшнем сиде',
+    shareCta:     'Обгони меня на game-factory.tech',
+    tut_goal:     'Цель: Выживи сегодняшние общие 60 секунд снарядов и поднимись в таблице лидеров.',
+    tut_controls: 'Управление: Стрелки/WASD на ПК; тащи в любом месте на мобиле (смещённый джойстик).',
+    tut_win:      'Победа: Продержись все 60 секунд, чтобы пройти сид дня и открыть Бесконечный режим.',
+    tut_lose:     'Поражение: Касание любого снаряда — конец забега. Можно посмотреть короткую рекламу для доп. жизни (раз за забег).',
+    tut_tip:      'Подсказка: Касания «на волосок» копят комбо — на ×10 можно взорвать бомбу и убрать все активные снаряды.',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -232,6 +258,14 @@ var bestBombs = 0;              // most bombs in any single run (persisted)
 var bombFlash = 0;              // 0..1 white-flash overlay decay after a detonation
 var bombHintPulse = 0;          // 0..1 oscillator, drives "READY" pill pulse when armed
 var bombBtnRect = null;         // last drawn bomb-button rect (for tap hit-test)
+
+// ── iter#9: Yandex ads (rewarded revive + throttled interstitial) ───────────
+var INTERSTITIAL_GAP_MS = 3 * 60 * 1000;  // Yandex 4.1: ≥3min between fullscreen ads
+var lastInterstitialMs = -INTERSTITIAL_GAP_MS;  // allow first one after a single retry
+var reviveUsed = false;         // one rewarded revive per run
+var reviveLoading = false;      // disables the EXTRA LIFE button while ad loads
+var invulnUntil = 0;            // seconds; honour in collision check
+var reviveBtnRect = null;       // last drawn revive-button rect (for tap hit-test)
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
@@ -405,12 +439,68 @@ function startRun(mode) {
   comboCount = 0; comboTimer = 0; comboBonus = 0; maxComboThisRun = 0; comboFlash = 0;
   // iter#8 — reset bomb state for the new run
   bombsUsed = 0; bombFlash = 0; bombHintPulse = 0; bombBtnRect = null;
+  // iter#9 — reset revive state; new run gets a fresh extra life
+  reviveUsed = false; reviveLoading = false; invulnUntil = 0; reviveBtnRect = null;
   // iter#5 — Bump the streak on the first run of the day (any mode).
   updateStreakOnPlay();
   gs = 'PLAYING';
   // Warm/refresh live-rank board in the background — non-blocking.
   fetchLeaderboard();
 }
+// iter#9 — Yandex SDK ad helpers. No-op fallbacks when SDK absent so the
+// gallery iframe + local dev still work. All ad triggers are user-click
+// (Yandex rule 4.4) and interstitials are throttled to ≥3min (rule 4.1).
+function showInterstitial(onDone) {
+  var now = performance.now();
+  if (now - lastInterstitialMs < INTERSTITIAL_GAP_MS) { onDone && onDone(); return; }
+  if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showFullscreenAdv) {
+    onDone && onDone(); return;
+  }
+  lastInterstitialMs = now;
+  try {
+    window.ysdk.adv.showFullscreenAdv({
+      callbacks: {
+        onClose: function() { onDone && onDone(); },
+        onError: function() { onDone && onDone(); },
+      },
+    });
+  } catch(e) { onDone && onDone(); }
+}
+function showRewardedRevive() {
+  if (reviveUsed || reviveLoading) return;
+  reviveLoading = true;
+  if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) {
+    // No SDK (gallery preview / local dev) — grant the revive immediately so
+    // the feature stays exercisable. In Yandex prod the real ad gates it.
+    reviveLoading = false; doRevive(); return;
+  }
+  var rewarded = false;
+  try {
+    window.ysdk.adv.showRewardedVideo({
+      callbacks: {
+        onRewarded: function() { rewarded = true; },
+        onClose:    function() {
+          reviveLoading = false;
+          if (rewarded) doRevive();
+        },
+        onError:    function() { reviveLoading = false; },
+      },
+    });
+  } catch(e) { reviveLoading = false; }
+}
+function doRevive() {
+  reviveUsed = true;
+  // Recentre, clear active bullets, grant 3s of bullet pass-through.
+  var ar = arena();
+  player.x = ar.x + ar.w/2; player.y = ar.y + ar.h/2;
+  player.vx = 0; player.vy = 0;
+  bullets = [];
+  spawnParticles(player.x, player.y, '#FFD700', 36);
+  spawnFloat(player.x, player.y - 16*S, t('revive'), '#FFD700');
+  invulnUntil = (performance.now() / 1000) + 3.0;
+  gs = 'PLAYING';
+}
+
 // Promote a survived DAILY run into an ENDLESS continuation without resetting
 // the player to centre. Keeps their position, particles, combo etc; the
 // pre-rolled spawner pool drains naturally, then procedural takes over.
@@ -714,6 +804,12 @@ function update(dt) {
         bullets.splice(i, 1);
         continue;
       }
+      // iter#9 — ad-revive grants 3s of bullet pass-through after rewarded ad
+      var nowSec = performance.now() / 1000;
+      if (invulnUntil > nowSec) {
+        bullets.splice(i, 1);
+        continue;
+      }
       score = Math.floor(elapsed * 10) + Math.floor(comboBonus);
       spawnParticles(player.x, player.y, '#fff', 30);
       spawnParticles(player.x, player.y, '#e74c3c', 18);
@@ -902,14 +998,14 @@ function generateShareCardBlob() {
     x.font = 'bold 24px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif';
     x.textBaseline = 'top';
     x.textAlign = 'left';
-    x.fillText("TIM'S GAME LAB", 60, 60);
+    x.fillText(t('shareBrand'), 60, 60);
 
     // Game title
     x.fillStyle = '#fff';
     x.font = 'bold 88px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif';
     x.shadowColor = 'rgba(77,208,225,0.6)';
     x.shadowBlur = 30;
-    x.fillText('DAILY DODGE', 60, 160);
+    x.fillText(t('shareTitle'), 60, 160);
     x.shadowColor = 'transparent'; x.shadowBlur = 0;
 
     // Score (prominent)
@@ -923,27 +1019,27 @@ function generateShareCardBlob() {
     x.fillStyle = '#9ab';
     x.font = '24px -apple-system, BlinkMacSystemFont, sans-serif';
     x.textBaseline = 'bottom';
-    x.fillText('I survived', 60, 280);
+    x.fillText(t('shareSurvived'), 60, 280);
 
     // Rank if available
     x.textBaseline = 'top';
     if (myRank) {
       x.fillStyle = '#48c9b0';
       x.font = 'bold 36px -apple-system, BlinkMacSystemFont, sans-serif';
-      x.fillText('🏆 Ranked #' + myRank + " on today's seed", 60, 440);
+      x.fillText('🏆 ' + t('shareRanked').replace('{rank}', myRank), 60, 440);
     }
 
     // Day seed
     x.fillStyle = '#5a5a72';
     x.font = '20px monospace';
-    x.fillText('Day seed ' + seed + ' · everyone races the same pattern', 60, myRank ? 490 : 460);
+    x.fillText(t('shareSeed').replace('{seed}', seed), 60, myRank ? 490 : 460);
 
     // URL bottom-right
     x.fillStyle = '#4dd0e1';
     x.font = 'bold 28px -apple-system, BlinkMacSystemFont, sans-serif';
     x.textAlign = 'right';
     x.textBaseline = 'bottom';
-    x.fillText('Beat me at game-factory.tech', 1140, 570);
+    x.fillText(t('shareCta'), 1140, 570);
 
     // Bottom hairline
     x.strokeStyle = 'rgba(77,208,225,0.4)';
@@ -1565,8 +1661,27 @@ function frame(ts) {
       ? ('   ·   '+t('bombsUsed')+': '+bombsUsed+(bestBombs>bombsUsed?(' (best '+bestBombs+')'):''))
       : '';
     var modeTag = runMode === 'ENDLESS' ? ('['+t('endless')+'] ') : '';
+    // iter#9 — RETRY click also shows a throttled interstitial (Yandex 4.1).
     drawOverlay(modeTag + t('youDied'), t('survived')+' '+elapsed.toFixed(1)+t('sec'), t('retry'),
-      function() { startRun(runMode); }, t('score')+': '+score+'   ·   '+t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):'')+comboLine+bombLine);
+      function() { showInterstitial(function() { startRun(runMode); }); }, t('score')+': '+score+'   ·   '+t('closeCalls')+': '+closeCallCount+(bestCloseCalls>0?(' (best '+bestCloseCalls+')'):'')+comboLine+bombLine);
+
+    // iter#9 — EXTRA LIFE (rewarded ad). One revive per run; user-click only.
+    if (!reviveUsed) {
+      var rW = clamp(280*S, 200, 360), rH = clamp(46*S, 36, 56);
+      var rX = cx - rW/2;
+      var rY = H - rH - 18*S;
+      reviveBtnRect = { x: rX, y: rY, w: rW, h: rH };
+      rr(ctx, rX, rY, rW, rH, rH/2);
+      var gradR = ctx.createLinearGradient(rX, rY, rX, rY+rH);
+      gradR.addColorStop(0, '#FFD700'); gradR.addColorStop(1, '#8a6a00');
+      ctx.fillStyle = gradR; ctx.fill();
+      ctx.font = 'bold ' + clamp(15*S, 12, 19) + 'px sans-serif';
+      ctx.fillStyle = '#1a1a2e';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('📺  ' + t('revive'), cx, rY + rH/2);
+      ctx.textBaseline = 'alphabetic';
+      buttons.push({ x: rX, y: rY, w: rW, h: rH, fn: showRewardedRevive });
+    }
   }
   if (gs === 'CLEARED') {
     var comboLineC = (maxComboThisRun >= 2)
