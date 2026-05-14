@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Difficulty Curve</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0c1018; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function () {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Difficulty Curve',
+    sub:   'Tune 20 tower-defense waves to ride the hidden fun curve',
+    play: 'PLAY', retry: 'PLAY AGAIN',
+    won: 'CURVE SHIPPED',
+    gameover: 'PLAYTEST FAILED',
+    budget: 'CLICKS', score: 'SCORE', wave: 'WAVE',
+    seed: 'SEED',
+    submit: 'SUBMIT',
+    tut_title: 'How to play',
+    tut_goal: 'Goal: Tune all 20 tower-defense waves to ride the hidden fun curve.',
+    tut_controls: 'Controls: Drag each wave bar up or down. Each grab costs 1 click.',
+    tut_win: 'Win: Land 40% of bars inside the target band within 30 clicks.',
+    tut_lose: 'Lose: Budget hits 0 before 20 waves placed OR final score under 40%.',
+    tut_tip: 'Tip: The band reveals around bars you adjust. Probe early, commit late.',
+    tut_step1: 'Each bar is one wave. Bar height = wave difficulty (0 to 100).',
+    tut_step2: 'Grab a bar and drag up or down. Each grab costs 1 click.',
+    tut_step3: 'A target band hides behind the bars. Bars near it glow green.',
+    tut_step4: 'Tap SUBMIT when ready or when you run out of clicks. 40% in band wins.',
+    close: 'CLOSE',
+  },
+  ru: {
+    title: 'Кривая Сложности',
+    sub:   'Настрой 20 волн обороны под скрытую кривую веселья',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    won: 'КРИВАЯ ОТПРАВЛЕНА',
+    gameover: 'ПЛЕЙТЕСТ ПРОВАЛЕН',
+    budget: 'КЛИКИ', score: 'СЧЁТ', wave: 'ВОЛНА',
+    seed: 'СИД',
+    submit: 'ОТПРАВИТЬ',
+    tut_title: 'Как играть',
+    tut_goal: 'Цель: Настрой 20 волн обороны под скрытую кривую веселья.',
+    tut_controls: 'Управление: Тяни столбик волны вверх или вниз. Каждый хват — 1 клик.',
+    tut_win: 'Победа: 40% столбиков внутри полосы за 30 кликов.',
+    tut_lose: 'Поражение: Бюджет ноль до 20 волн ИЛИ итоговый счёт ниже 40%.',
+    tut_tip: 'Совет: Полоса видна возле тронутых столбиков. Щупай рано, фиксируй поздно.',
+    tut_step1: 'Каждый столбик — одна волна. Высота — сложность (от 0 до 100).',
+    tut_step2: 'Хватай столбик и тяни вверх или вниз. Каждый хват — 1 клик.',
+    tut_step3: 'За столбиками спрятана полоса цели. Близкие столбики светятся зелёным.',
+    tut_step4: 'Нажми ОТПРАВИТЬ когда готов или когда кончатся клики. 40% в полосе — победа.',
+    close: 'ЗАКРЫТЬ',
+  },
+};
+
+// ── TUNABLES (per DESIGN.md) ─────────────────────────────────────────────
+var TOTAL_WAVES = 20;
+var BUDGET_START = 30;
+var BAND_HALF_HEIGHT = 14;
+var MIN_SCORE_PCT = 40;
+var DIFFICULTY_MIN = 0;
+var DIFFICULTY_MAX = 100;
+var WAVE_DEFAULT_Y = 50;
+var BAND_REVEAL_RADIUS = 1;
+var BAR_SNAP_STEP = 5;
+var PULSE_PERIOD_MS = 1100;
+
+// ── PALETTE ──────────────────────────────────────────────────────────────
+// Dashboard / dev-tool aesthetic: deep navy, neon cyan accent, lime band hits.
+var BG_TOP = '#0c1018';
+var BG_BOT = '#141a26';
+var GRID_LINE = '#1d2638';
+var GRID_LINE_BOLD = '#26334b';
+var BAR_DEFAULT = '#3a86c4';
+var BAR_DEFAULT_TOP = '#69b0e8';
+var BAR_TOUCHED = '#4dd0e1';
+var BAR_TOUCHED_TOP = '#84e9f4';
+var BAR_IN_BAND = '#9ae07a';
+var BAR_IN_BAND_TOP = '#c2f0a8';
+var BAR_DRAG = '#ffd166';
+var BAND_FILL = 'rgba(154, 224, 122, 0.32)';
+var BAND_FILL_DIM = 'rgba(154, 224, 122, 0.10)';
+var BAND_STROKE = 'rgba(154, 224, 122, 0.85)';
+var ACCENT = '#4dd0e1';
+
+// ── DAILY SEED + RNG ─────────────────────────────────────────────────────
+function dailySeedString() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var dd = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+function hashStr(s) {
+  var h = 1779033703 ^ s.length;
+  for (var i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return (h >>> 0);
+}
+function mulberry32(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    var t = seed;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var seedStr = '';
+var idealCurve = [];           // length TOTAL_WAVES of values 0..100
+var waveY = [];                // current placed difficulty for each wave bar
+var waveTouched = [];          // bool — has player adjusted this bar?
+var budget = BUDGET_START;
+var wavesPlaced = 0;           // count of touched waves
+var score = 0;                 // 0..100 (% in band)
+var pulseT = 0;
+var bestForSeed = 0;
+
+// Drag state
+var dragBar = -1;              // index of bar currently being dragged
+var dragGrabbedThisTouch = false;  // ensures budget consumed once per grab
+var lastPlacedT = 0;
+
+// ── BUILD DAILY PUZZLE ───────────────────────────────────────────────────
+function buildPuzzle() {
+  seedStr = dailySeedString();
+  var seed = hashStr(seedStr);
+  var rng = mulberry32(seed);
+
+  // Generate ideal curve as a blend of a few low-frequency sinusoids so it
+  // reads as a plausible difficulty curve (rising, falling, peaks) rather
+  // than noise. Three random waves with different phases + amplitudes.
+  var a1 = 18 + rng() * 22;     // 18..40
+  var a2 = 8 + rng() * 16;      // 8..24
+  var a3 = 4 + rng() * 10;      // 4..14
+  var ph1 = rng() * Math.PI * 2;
+  var ph2 = rng() * Math.PI * 2;
+  var ph3 = rng() * Math.PI * 2;
+  var base = 38 + rng() * 18;   // 38..56
+  var slope = (rng() - 0.3) * 22;  // mild rise/fall over the run
+  idealCurve = new Array(TOTAL_WAVES);
+  for (var i = 0; i < TOTAL_WAVES; i++) {
+    var t = i / (TOTAL_WAVES - 1);  // 0..1
+    var v = base + slope * t
+          + a1 * Math.sin(2 * Math.PI * 0.5 * t + ph1)   // half-cycle
+          + a2 * Math.sin(2 * Math.PI * 1.4 * t + ph2)
+          + a3 * Math.sin(2 * Math.PI * 2.7 * t + ph3);
+    if (v < DIFFICULTY_MIN + 6) v = DIFFICULTY_MIN + 6;
+    if (v > DIFFICULTY_MAX - 6) v = DIFFICULTY_MAX - 6;
+    idealCurve[i] = v;
+  }
+}
+
+function loadBestForSeed() {
+  try {
+    var raw = localStorage.getItem('difficulty_curve_best_' + seedStr);
+    bestForSeed = raw ? (parseInt(raw, 10) || 0) : 0;
+  } catch (e) { bestForSeed = 0; }
+}
+function saveBestForSeed() {
+  try {
+    if (score > bestForSeed) {
+      bestForSeed = score;
+      localStorage.setItem('difficulty_curve_best_' + seedStr, String(bestForSeed));
+    }
+  } catch (e) {}
+}
+
+// ── SCORING ──────────────────────────────────────────────────────────────
+function isInBand(idx) {
+  if (!waveTouched[idx]) return false;
+  return Math.abs(waveY[idx] - idealCurve[idx]) <= BAND_HALF_HEIGHT;
+}
+function recomputeScore() {
+  var hits = 0;
+  for (var i = 0; i < TOTAL_WAVES; i++) {
+    if (isInBand(i)) hits++;
+  }
+  score = Math.round(hits / TOTAL_WAVES * 100);
+}
+
+// Did this index appear close to a placed neighbor (reveals the band)?
+function bandRevealedAt(idx) {
+  if (waveTouched[idx]) return true;
+  for (var d = 1; d <= BAND_REVEAL_RADIUS; d++) {
+    if (idx - d >= 0 && waveTouched[idx - d]) return true;
+    if (idx + d < TOTAL_WAVES && waveTouched[idx + d]) return true;
+  }
+  return false;
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function firstBarTutorialTarget() {
+  if (!layout.bars || !layout.bars[0]) return null;
+  var b = layout.bars[0];
+  return { x: b.x + b.w / 2, y: b.y + b.h / 2, r: Math.max(b.w, b.h * 0.4) };
+}
+function submitBtnTutorialTarget() {
+  if (!layout.submitBtn) return null;
+  var b = layout.submitBtn;
+  return { x: b.x + b.w / 2, y: b.y + b.h / 2, r: Math.max(b.w, b.h) * 0.6 };
+}
+function buildTutorialSteps() {
+  return [
+    { text: GF.t('tut_step1'), target: firstBarTutorialTarget,  advance: 'click_any' },
+    { text: GF.t('tut_step2'), target: firstBarTutorialTarget,  advance: 'click_any' },
+    { text: GF.t('tut_step3'), target: firstBarTutorialTarget,  advance: 'click_any' },
+    { text: GF.t('tut_step4'), target: submitBtnTutorialTarget, advance: 'click_any' },
+  ];
+}
+function reopenTutorial() {
+  GF.tutorial.start(buildTutorialSteps(), { storageKey: 'difficulty_curve_tutorial_v1', force: true });
+}
+
+function resetRound() {
+  buildPuzzle();
+  loadBestForSeed();
+  waveY = new Array(TOTAL_WAVES);
+  waveTouched = new Array(TOTAL_WAVES);
+  for (var i = 0; i < TOTAL_WAVES; i++) {
+    waveY[i] = WAVE_DEFAULT_Y;
+    waveTouched[i] = false;
+  }
+  budget = BUDGET_START;
+  wavesPlaced = 0;
+  score = 0;
+  dragBar = -1;
+  dragGrabbedThisTouch = false;
+}
+
+function startGame() {
+  resetRound();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  recomputeLayout();
+  GF.tutorial.start(buildTutorialSteps(), { storageKey: 'difficulty_curve_tutorial_v1' });
+  GF.saveRun();
+}
+
+function backToMenu() { gs = 'MENU'; GF.saveRun(); }
+
+function finishGame() {
+  recomputeScore();
+  saveBestForSeed();
+  if (wavesPlaced >= TOTAL_WAVES && score >= MIN_SCORE_PCT) {
+    gs = 'WON';
+    GF.spawnParticles(GF.cx, GF.cy, '#9ae07a', 48);
+  } else {
+    gs = 'GAMEOVER';
+  }
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+function submitRun() {
+  if (gs !== 'PLAYING') return;
+  finishGame();
+}
+
+// ── SCREENSHOT HELPER ────────────────────────────────────────────────────
+window._jumpLevel = function (level) {
+  resetRound();
+  gs = 'PLAYING';
+  // Place ~12 bars near the ideal curve for a vivid mid-round screenshot.
+  var rng = mulberry32(hashStr(seedStr + ':shot:' + (level || 1)));
+  var n = 12;
+  if (level && level >= 90) n = TOTAL_WAVES; // terminal-state shots
+  for (var i = 0; i < n; i++) {
+    // mostly close to ideal, with a couple of misses for visual variety
+    var jitter = (rng() - 0.5) * 30;
+    var y = idealCurve[i] + jitter;
+    if (y < DIFFICULTY_MIN) y = DIFFICULTY_MIN;
+    if (y > DIFFICULTY_MAX) y = DIFFICULTY_MAX;
+    // snap to step
+    y = Math.round(y / BAR_SNAP_STEP) * BAR_SNAP_STEP;
+    waveY[i] = y;
+    waveTouched[i] = true;
+    wavesPlaced++;
+    budget--;
+  }
+  recomputeScore();
+  if (level && level >= 90 && wavesPlaced >= TOTAL_WAVES) {
+    gs = score >= MIN_SCORE_PCT ? 'WON' : 'GAMEOVER';
+  }
+};
+window._setupForScreenshot = window._jumpLevel;
+window._setLang = function (l) { GF.lang = l; };
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+var layout = {
+  graphX: 0, graphY: 0, graphW: 0, graphH: 0,
+  barGap: 0, barW: 0,
+  bars: [],                  // [{x, y, w, h, cx, cyTop, cyBottom, idx}]
+  hudY: 0,
+  helpBtn: { x: 0, y: 0, s: 0 },
+  submitBtn: { x: 0, y: 0, w: 0, h: 0 },
+};
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  var pad = GF.clamp(12 * GF.S, 8, 18);
+
+  layout.hudY = GF.clamp(14 * GF.S, 8, 22);
+  var hudH = GF.clamp(56 * GF.S, 40, 80);
+
+  // Reserve bottom strip for submit button.
+  var submitH = GF.clamp(56 * GF.S, 42, 70);
+  var submitMargin = GF.clamp(18 * GF.S, 12, 26);
+
+  // Graph area
+  layout.graphX = pad + GF.clamp(36 * GF.S, 26, 50);  // leave room for y-axis labels
+  layout.graphY = hudH + pad;
+  layout.graphW = W - layout.graphX - pad;
+  layout.graphH = H - layout.graphY - submitH - submitMargin - pad - GF.clamp(28 * GF.S, 20, 36);  // x-axis labels under graph
+
+  // Bars
+  layout.bars = [];
+  layout.barGap = Math.max(2, layout.graphW * 0.012);
+  layout.barW = (layout.graphW - layout.barGap * (TOTAL_WAVES + 1)) / TOTAL_WAVES;
+  for (var i = 0; i < TOTAL_WAVES; i++) {
+    var bx = layout.graphX + layout.barGap + i * (layout.barW + layout.barGap);
+    var by = layout.graphY;
+    layout.bars.push({
+      x: bx, y: by,
+      w: layout.barW, h: layout.graphH,
+      idx: i,
+    });
+  }
+
+  // Submit button (bottom center, wide)
+  var btnW = GF.clamp(280 * GF.S, 180, 380);
+  layout.submitBtn = {
+    x: (W - btnW) / 2,
+    y: H - pad - submitH,
+    w: btnW,
+    h: submitH,
+  };
+
+  // Help button (top-right)
+  var hs = GF.clamp(34 * GF.S, 26, 44);
+  layout.helpBtn = { x: W - hs - pad, y: pad, s: hs };
+}
+
+function difficultyToY(diff) {
+  // 0 at bottom, 100 at top
+  var frac = (diff - DIFFICULTY_MIN) / (DIFFICULTY_MAX - DIFFICULTY_MIN);
+  return layout.graphY + layout.graphH - frac * layout.graphH;
+}
+function yToDifficulty(py) {
+  var frac = 1 - (py - layout.graphY) / layout.graphH;
+  if (frac < 0) frac = 0;
+  if (frac > 1) frac = 1;
+  return DIFFICULTY_MIN + frac * (DIFFICULTY_MAX - DIFFICULTY_MIN);
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function hitTestRect(x, y, r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+function hitTestCircle(x, y, b) {
+  return x >= b.x && x <= b.x + b.s && y >= b.y && y <= b.y + b.s;
+}
+
+function findBarAt(px, py) {
+  // Generous hit: must be within graph y, and within the bar's x range.
+  for (var i = 0; i < layout.bars.length; i++) {
+    var b = layout.bars[i];
+    if (px >= b.x - layout.barGap / 2 && px <= b.x + b.w + layout.barGap / 2 &&
+        py >= b.y - 8 && py <= b.y + b.h + 8) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function onPress(px, py) {
+  if (GF.tutorial.handleClick(px, py)) return;
+  if (gs === 'MENU') {
+    var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+    var bx = (GF.W - bw) / 2, by = GF.H * 0.78;
+    if (px >= bx && px <= bx + bw && py >= by && py <= by + bh) startGame();
+    return;
+  }
+  if (gs === 'WON' || gs === 'GAMEOVER') {
+    var bw2 = GF.clamp(220 * GF.S, 160, 300), bh2 = GF.clamp(48 * GF.S, 38, 60);
+    var bx2 = (GF.W - bw2) / 2, by2 = GF.H * 0.74;
+    if (px >= bx2 && px <= bx2 + bw2 && py >= by2 && py <= by2 + bh2) { resetRound(); gs = 'PLAYING'; GF.gameStarted(); GF.saveRun(); }
+    return;
+  }
+  // PLAYING
+  if (hitTestCircle(px, py, layout.helpBtn)) { reopenTutorial(); return; }
+  if (hitTestRect(px, py, layout.submitBtn)) { submitRun(); return; }
+
+  // Try to grab a bar
+  var idx = findBarAt(px, py);
+  if (idx >= 0 && budget > 0) {
+    dragBar = idx;
+    dragGrabbedThisTouch = true;
+    // consume budget once per grab
+    budget--;
+    if (!waveTouched[idx]) {
+      waveTouched[idx] = true;
+      wavesPlaced++;
+    }
+    // immediately move to drag position
+    var newDiff = yToDifficulty(py);
+    newDiff = Math.round(newDiff / BAR_SNAP_STEP) * BAR_SNAP_STEP;
+    waveY[idx] = newDiff;
+    lastPlacedT = performance.now();
+    recomputeScore();
+    GF.saveRun();
+    // Check if budget just ran out (with unplaced waves remaining) → lose
+    if (budget <= 0 && wavesPlaced < TOTAL_WAVES) {
+      setTimeout(function () { if (gs === 'PLAYING') finishGame(); }, 320);
+    }
+  }
+}
+
+function onMove(px, py) {
+  if (gs !== 'PLAYING') return;
+  if (dragBar < 0) return;
+  var newDiff = yToDifficulty(py);
+  newDiff = Math.round(newDiff / BAR_SNAP_STEP) * BAR_SNAP_STEP;
+  waveY[dragBar] = newDiff;
+  recomputeScore();
+}
+
+function onRelease() {
+  if (dragBar >= 0) {
+    // Spawn a small confetti at the bar top if it landed in band
+    var b = layout.bars[dragBar];
+    if (b && isInBand(dragBar)) {
+      var barTopY = difficultyToY(waveY[dragBar]);
+      GF.spawnParticles(b.x + b.w / 2, barTopY, BAR_IN_BAND, 8);
+    }
+    GF.saveRun();
+  }
+  dragBar = -1;
+  dragGrabbedThisTouch = false;
+}
+
+// Mouse handlers
+GF.canvas.addEventListener('mousedown', function (e) { onPress(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mousemove', function (e) { if (dragBar >= 0) onMove(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mouseup',   function () { onRelease(); });
+GF.canvas.addEventListener('mouseleave',function () { onRelease(); });
+
+// Touch handlers (override the lib's default — we need fine-grained drag)
+GF.canvas.addEventListener('touchstart', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPress(t.clientX, t.clientY);
+}, { passive: true });
+GF.canvas.addEventListener('touchmove', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  if (dragBar >= 0) {
+    e.preventDefault();
+    onMove(t.clientX, t.clientY);
+  }
+}, { passive: false });
+GF.canvas.addEventListener('touchend', function () { onRelease(); }, { passive: true });
+GF.canvas.addEventListener('touchcancel', function () { onRelease(); }, { passive: true });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeLayout();
+  GF.tutorial.update(dt);
+  pulseT = (pulseT + dt * 1000) % PULSE_PERIOD_MS;
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawBackground(c) {
+  var g = c.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, BG_TOP);
+  g.addColorStop(1, BG_BOT);
+  c.fillStyle = g;
+  c.fillRect(0, 0, GF.W, GF.H);
+}
+
+function drawGridAndAxes(c) {
+  var gx = layout.graphX, gy = layout.graphY, gw = layout.graphW, gh = layout.graphH;
+  // Horizontal grid lines every 20 difficulty units
+  c.lineWidth = 1;
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px monospace';
+  c.fillStyle = '#5c6a82';
+  c.textAlign = 'right';
+  c.textBaseline = 'middle';
+  for (var d = 0; d <= 100; d += 20) {
+    var py = difficultyToY(d);
+    c.strokeStyle = (d === 0 || d === 100) ? GRID_LINE_BOLD : GRID_LINE;
+    c.beginPath(); c.moveTo(gx, py); c.lineTo(gx + gw, py); c.stroke();
+    c.fillText(String(d), gx - 6 * GF.S, py);
+  }
+  // Vertical grid faintly between every bar
+  c.strokeStyle = GRID_LINE;
+  for (var i = 0; i < TOTAL_WAVES; i++) {
+    var bx = layout.bars[i].x + layout.bars[i].w / 2;
+    c.beginPath(); c.moveTo(bx, gy); c.lineTo(bx, gy + gh); c.stroke();
+  }
+  // X-axis labels (every 5 waves)
+  c.fillStyle = '#5c6a82';
+  c.textAlign = 'center';
+  c.textBaseline = 'top';
+  for (var j = 0; j < TOTAL_WAVES; j++) {
+    if ((j + 1) % 5 === 0 || j === 0) {
+      c.fillText(String(j + 1), layout.bars[j].x + layout.bars[j].w / 2, gy + gh + 4 * GF.S);
+    }
+  }
+  // axis title
+  c.fillStyle = '#3f4a5e';
+  c.font = GF.clamp(10 * GF.S, 8, 13) + 'px monospace';
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  c.fillText(GF.t('wave') + ' #', gx, gy + gh + GF.clamp(18 * GF.S, 12, 22));
+}
+
+function drawBandSegment(c, idx, dimIfHidden) {
+  var b = layout.bars[idx];
+  var ideal = idealCurve[idx];
+  var topDiff = ideal + BAND_HALF_HEIGHT;
+  var botDiff = ideal - BAND_HALF_HEIGHT;
+  if (topDiff > DIFFICULTY_MAX) topDiff = DIFFICULTY_MAX;
+  if (botDiff < DIFFICULTY_MIN) botDiff = DIFFICULTY_MIN;
+  var pyTop = difficultyToY(topDiff);
+  var pyBot = difficultyToY(botDiff);
+  var revealed = bandRevealedAt(idx);
+  // segment span — expand into the gaps so adjacent segments touch
+  var segX = b.x - layout.barGap / 2;
+  var segW = b.w + layout.barGap;
+  c.fillStyle = revealed ? BAND_FILL : (dimIfHidden ? BAND_FILL_DIM : BAND_FILL);
+  c.fillRect(segX, pyTop, segW, pyBot - pyTop);
+}
+
+function drawBand(c) {
+  // Always draw a faint version everywhere so the player knows there IS a band;
+  // segments that are revealed render brighter.
+  for (var i = 0; i < TOTAL_WAVES; i++) {
+    drawBandSegment(c, i, true);
+  }
+  // Connect the revealed segments with a centre-line in green
+  c.strokeStyle = BAND_STROKE;
+  c.lineWidth = Math.max(1.5, 2 * GF.S);
+  c.setLineDash([4, 3]);
+  c.beginPath();
+  var started = false;
+  for (var j = 0; j < TOTAL_WAVES; j++) {
+    if (!bandRevealedAt(j)) { started = false; continue; }
+    var bx = layout.bars[j].x + layout.bars[j].w / 2;
+    var by = difficultyToY(idealCurve[j]);
+    if (!started) { c.moveTo(bx, by); started = true; }
+    else c.lineTo(bx, by);
+  }
+  c.stroke();
+  c.setLineDash([]);
+}
+
+function drawBar(c, idx) {
+  var b = layout.bars[idx];
+  var diff = waveY[idx];
+  var topY = difficultyToY(diff);
+  var bottomY = layout.graphY + layout.graphH;
+  var touched = waveTouched[idx];
+  var inBand = isInBand(idx);
+  var isDragging = (dragBar === idx);
+
+  // Bar fill
+  var fillBot, fillTop;
+  if (isDragging) { fillBot = BAR_DRAG; fillTop = '#ffe7a3'; }
+  else if (inBand) { fillBot = BAR_IN_BAND; fillTop = BAR_IN_BAND_TOP; }
+  else if (touched) { fillBot = BAR_TOUCHED; fillTop = BAR_TOUCHED_TOP; }
+  else { fillBot = BAR_DEFAULT; fillTop = BAR_DEFAULT_TOP; }
+
+  var grad = c.createLinearGradient(0, topY, 0, bottomY);
+  grad.addColorStop(0, fillTop);
+  grad.addColorStop(1, fillBot);
+  c.fillStyle = grad;
+  c.fillRect(b.x, topY, b.w, bottomY - topY);
+
+  // Top cap (lighter strip)
+  c.fillStyle = 'rgba(255,255,255,0.18)';
+  c.fillRect(b.x, topY, b.w, Math.max(2, b.h * 0.012));
+
+  // Outline
+  if (isDragging) {
+    c.strokeStyle = '#ffd166';
+    c.lineWidth = 2;
+    c.strokeRect(b.x, topY, b.w, bottomY - topY);
+  } else if (touched) {
+    c.strokeStyle = 'rgba(255,255,255,0.18)';
+    c.lineWidth = 1;
+    c.strokeRect(b.x, topY, b.w, bottomY - topY);
+  }
+
+  // Grab handle pip — only on un-touched bars, to invite the first click
+  if (!touched && !isDragging) {
+    var pulse = 0.55 + 0.45 * Math.sin(pulseT / PULSE_PERIOD_MS * Math.PI * 2);
+    c.save();
+    c.globalAlpha = pulse;
+    c.fillStyle = '#fff';
+    var pipW = b.w * 0.55;
+    var pipH = Math.max(2, b.h * 0.008);
+    c.fillRect(b.x + (b.w - pipW) / 2, topY + 4, pipW, pipH);
+    c.fillRect(b.x + (b.w - pipW) / 2, topY + 4 + pipH * 2, pipW, pipH);
+    c.restore();
+  }
+}
+
+function drawBars(c) {
+  for (var i = 0; i < TOTAL_WAVES; i++) drawBar(c, i);
+}
+
+function drawTopHUD(c) {
+  var W = GF.W;
+  var pad = GF.clamp(14 * GF.S, 8, 22);
+  // backdrop
+  c.fillStyle = 'rgba(8, 11, 18, 0.6)';
+  c.fillRect(0, 0, W, GF.clamp(54 * GF.S, 40, 76));
+
+  c.fillStyle = '#cfd9ea';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 11, 20) + 'px sans-serif';
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  var line1 = GF.t('budget') + ': ' + budget + ' / ' + BUDGET_START;
+  c.fillText(line1, pad, layout.hudY);
+
+  c.textAlign = 'center';
+  // score colored: green if at/over target, gold otherwise
+  c.fillStyle = (score >= MIN_SCORE_PCT) ? BAR_IN_BAND : '#ffd166';
+  c.fillText(GF.t('score') + ': ' + score + '%  / ' + MIN_SCORE_PCT + '%', W / 2, layout.hudY);
+
+  c.textAlign = 'right';
+  c.fillStyle = '#cfd9ea';
+  c.fillText(GF.t('wave') + ': ' + wavesPlaced + ' / ' + TOTAL_WAVES, W - pad - GF.clamp(50 * GF.S, 36, 60), layout.hudY);
+
+  // seed line under
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px monospace';
+  c.fillStyle = '#5c6a82';
+  c.textAlign = 'left';
+  c.fillText(GF.t('seed') + ' ' + seedStr, pad, layout.hudY + GF.clamp(22 * GF.S, 16, 28));
+}
+
+function drawHUDHelp(c) {
+  var b = layout.helpBtn;
+  GF.rr(c, b.x, b.y, b.s, b.s, b.s / 2);
+  c.fillStyle = '#13192a'; c.fill();
+  c.strokeStyle = ACCENT; c.lineWidth = 2; c.stroke();
+  c.fillStyle = ACCENT;
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 16, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', b.x + b.s / 2, b.y + b.s / 2);
+}
+
+function drawButton(c, x, y, w, h, label, primary, enabled) {
+  if (enabled === undefined) enabled = true;
+  var r = h * 0.5;
+  GF.rr(c, x, y, w, h, r);
+  var g;
+  if (primary && enabled) {
+    g = c.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#4dd0e1'); g.addColorStop(1, '#2a8e9a');
+    c.fillStyle = g;
+  } else if (enabled) {
+    c.fillStyle = '#22293a';
+  } else {
+    c.fillStyle = '#1a1e2a';
+  }
+  c.fill();
+  c.strokeStyle = enabled ? (primary ? '#84e9f4' : '#3a4458') : '#2a3142';
+  c.lineWidth = 2;
+  c.stroke();
+  c.fillStyle = enabled ? '#fff' : '#586278';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(label, x + w / 2, y + h / 2);
+}
+
+function drawSubmitBtn(c) {
+  var b = layout.submitBtn;
+  var enabled = (wavesPlaced > 0);
+  drawButton(c, b.x, b.y, b.w, b.h, GF.t('submit'), true, enabled);
+}
+
+// ── MENU / END OVERLAYS ──────────────────────────────────────────────────
+function drawMenuOverlay(c) {
+  var W = GF.W, H = GF.H;
+  drawBackground(c);
+
+  // Decorative curve at the top
+  c.strokeStyle = ACCENT;
+  c.lineWidth = 2;
+  c.globalAlpha = 0.45;
+  c.beginPath();
+  for (var i = 0; i <= 100; i++) {
+    var t = i / 100;
+    var px = W * 0.10 + (W * 0.80) * t;
+    var py = H * 0.18 - 20 * Math.sin(t * Math.PI * 2.2) - 8 * Math.sin(t * Math.PI * 5.5);
+    if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+  }
+  c.stroke();
+  c.globalAlpha = 1;
+
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(77, 208, 225, 0.6)';
+  c.shadowBlur = 26 * GF.S;
+  c.font = 'bold ' + GF.clamp(42 * GF.S, 26, 64) + 'px sans-serif';
+  c.fillText(GF.t('title'), W / 2, H * 0.28);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.fillStyle = '#9eb4cf';
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, H * 0.34);
+
+  var py0 = H * 0.42;
+  c.fillStyle = '#cfd9ea';
+  c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'center';
+  var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var lh = GF.clamp(20 * GF.S, 14, 26);
+  for (var i2 = 0; i2 < ll.length; i2++) {
+    c.fillText(ll[i2], W / 2, py0 + i2 * lh);
+  }
+
+  var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
+  var bx = (W - bw) / 2, by = H * 0.78;
+  drawButton(c, bx, by, bw, bh, GF.t('play'), true);
+
+  c.textAlign = 'center';
+  c.fillStyle = '#3f4a5e';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px monospace';
+  c.fillText(GF.t('seed') + ' · ' + dailySeedString(), W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
+}
+
+function drawEndOverlay(c) {
+  var W = GF.W, H = GF.H;
+  drawBackground(c);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  var win = (gs === 'WON');
+  c.shadowColor = win ? 'rgba(154,224,122,0.7)' : 'rgba(255,209,102,0.5)';
+  c.shadowBlur = 28 * GF.S;
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(36 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(win ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.30);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  c.fillStyle = '#cfd9ea';
+  c.font = GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.fillText(GF.t('score') + ': ' + score + '%', W / 2, H * 0.42);
+  c.fillText(GF.t('wave') + ': ' + wavesPlaced + ' / ' + TOTAL_WAVES, W / 2, H * 0.48);
+  c.fillText(GF.t('budget') + ': ' + budget + ' / ' + BUDGET_START, W / 2, H * 0.54);
+  if (bestForSeed > 0) {
+    c.fillStyle = '#7e8aa4';
+    c.font = GF.clamp(14 * GF.S, 11, 17) + 'px sans-serif';
+    c.fillText('BEST · ' + bestForSeed + '%', W / 2, H * 0.60);
+  }
+
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = (W - bw) / 2, by = H * 0.74;
+  drawButton(c, bx, by, bw, bh, GF.t('retry'), true);
+}
+
+// ── MAIN DRAW ────────────────────────────────────────────────────────────
+function draw(c) {
+  if (gs === 'MENU') {
+    drawMenuOverlay(c);
+  } else if (gs === 'WON' || gs === 'GAMEOVER') {
+    drawEndOverlay(c);
+  } else {
+    drawBackground(c);
+    drawGridAndAxes(c);
+    drawBand(c);
+    drawBars(c);
+    drawTopHUD(c);
+    drawSubmitBtn(c);
+    drawHUDHelp(c);
+  }
+  GF.tutorial.draw(c);
+}
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 1280,
+  designH: 720,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'difficulty_curve',
+  onReady: function () {
+    buildPuzzle();
+    loadBestForSeed();
+    waveY = new Array(TOTAL_WAVES);
+    waveTouched = new Array(TOTAL_WAVES);
+    for (var i = 0; i < TOTAL_WAVES; i++) { waveY[i] = WAVE_DEFAULT_Y; waveTouched[i] = false; }
+    budget = BUDGET_START;
+    wavesPlaced = 0;
+    score = 0;
+    recomputeLayout();
+    // ── Yandex 1.9: persist mid-run state ──
+    GF.persist('difficulty_curve_run_v1',
+      function () {
+        return {
+          gs: gs, seedStr: seedStr,
+          waveY: waveY.slice(), waveTouched: waveTouched.slice(),
+          budget: budget, wavesPlaced: wavesPlaced, score: score,
+        };
+      },
+      function (s) {
+        if (!s) return;
+        // Only restore if same daily seed
+        if (s.seedStr !== seedStr) return;
+        if (Array.isArray(s.waveY) && s.waveY.length === TOTAL_WAVES) waveY = s.waveY.slice();
+        if (Array.isArray(s.waveTouched) && s.waveTouched.length === TOTAL_WAVES) waveTouched = s.waveTouched.slice();
+        if (typeof s.budget === 'number') budget = s.budget;
+        if (typeof s.wavesPlaced === 'number') wavesPlaced = s.wavesPlaced;
+        if (typeof s.score === 'number') score = s.score;
+        if (s.gs === 'PLAYING') gs = 'PLAYING';
+      }
+    );
+    if (gs === 'PLAYING') {
+      // Mid-run restore — keep playing.
+    } else {
+      gs = 'MENU';
+    }
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    budget: budget,
+    wavesPlaced: wavesPlaced,
+    score: score,
+    seedStr: seedStr,
+    TOTAL_WAVES: TOTAL_WAVES,
+    BUDGET_START: BUDGET_START,
+    BAND_HALF_HEIGHT: BAND_HALF_HEIGHT,
+    MIN_SCORE_PCT: MIN_SCORE_PCT,
+    DIFFICULTY_MIN: DIFFICULTY_MIN,
+    DIFFICULTY_MAX: DIFFICULTY_MAX,
+    WAVE_DEFAULT_Y: WAVE_DEFAULT_Y,
+    BAND_REVEAL_RADIUS: BAND_REVEAL_RADIUS,
+    BAR_SNAP_STEP: BAR_SNAP_STEP,
+    PULSE_PERIOD_MS: PULSE_PERIOD_MS,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

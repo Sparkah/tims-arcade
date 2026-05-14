@@ -72,6 +72,10 @@ var STRINGS = {
     unlockedToast: 'NEW DONUT UNLOCKED!',
     daySeed: 'Daily seed',
     sameLayout: 'Same layout for everyone today',
+    streak: 'STREAK',
+    streakDays: 'day streak',
+    streakDaysPl: 'day streak',
+    comeBack: 'Come back tomorrow to keep it!',
   },
   ru: {
     title: 'Чистая Уборка',
@@ -95,6 +99,10 @@ var STRINGS = {
     unlockedToast: 'НОВЫЙ ПОНЧИК ОТКРЫТ!',
     daySeed: 'Сид дня',
     sameLayout: 'У всех сегодня одинаковая раскладка',
+    streak: 'СЕРИЯ',
+    streakDays: 'дн. подряд',
+    streakDaysPl: 'дн. подряд',
+    comeBack: 'Возвращайся завтра, чтобы продлить!',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -223,6 +231,52 @@ function getDaySeed() {
 }
 var daySeed = 0;        // YYYYMMDD numeric — fixed for the whole calendar day
 var levelRng = Math.random; // replaced per startLevel() with mulberry32(daySeed * 100 + level)
+
+// ── DAILY STREAK (iter#5: come-back-tomorrow loop on top of daily seed) ──────
+// Tracks consecutive UTC-day visits. Increments when last-played-date is
+// exactly yesterday, resets to 1 when the gap is >1 day, no-ops on same-day
+// re-launches. Surfaced as a small flame pill above the daily-seed badge so
+// players can SEE the streak they're protecting tomorrow.
+var STREAK_KEY      = 'clean_sweep_streak';      // integer count
+var STREAK_DATE_KEY = 'clean_sweep_streak_date'; // YYYY-MM-DD of last visit
+var STREAK_BEST_KEY = 'clean_sweep_streak_best'; // lifetime longest streak
+var streak = 0, streakBest = 0;
+var streakBumped = false; // true if this session is the one that incremented (drives a one-time flash)
+
+function dayKeyToDate(key) {
+  // YYYY-MM-DD -> ms epoch (UTC midnight). Safe for both '2026-05-14' and bad input.
+  var parts = String(key).split('-');
+  if (parts.length !== 3) return NaN;
+  return Date.UTC(parseInt(parts[0],10), parseInt(parts[1],10)-1, parseInt(parts[2],10));
+}
+function loadStreak() {
+  try {
+    streak = parseInt(localStorage.getItem(STREAK_KEY) || '0') || 0;
+    streakBest = parseInt(localStorage.getItem(STREAK_BEST_KEY) || '0') || 0;
+    var lastKey = localStorage.getItem(STREAK_DATE_KEY) || '';
+    var today = getDayKey();
+    if (lastKey === today) {
+      // same UTC day — leave as-is, no flash
+      return;
+    }
+    var lastMs = dayKeyToDate(lastKey);
+    var todayMs = dayKeyToDate(today);
+    if (isNaN(lastMs) || isNaN(todayMs)) {
+      // first ever launch (or corrupted key) — start a streak today
+      streak = 1;
+    } else {
+      var gapDays = Math.round((todayMs - lastMs) / 86400000);
+      if (gapDays === 1)      streak = streak + 1;   // consecutive — extend
+      else if (gapDays > 1)   streak = 1;            // gap — restart at today
+      else                    streak = Math.max(streak, 1); // clock skew / future date — clamp
+    }
+    streakBumped = true;
+    if (streak > streakBest) streakBest = streak;
+    localStorage.setItem(STREAK_KEY, String(streak));
+    localStorage.setItem(STREAK_BEST_KEY, String(streakBest));
+    localStorage.setItem(STREAK_DATE_KEY, today);
+  } catch(e) {}
+}
 
 function ensurePlayerName() {
   if (playerName) return playerName;
@@ -849,6 +903,43 @@ function drawDaySeedBadge() {
   ctx.restore();
 }
 
+// ── DRAW STREAK PILL (iter#5) ────────────────────────────────────────────────
+// Small flame-orange pill above the day-seed badge. Shows current streak count
+// + "come back tomorrow" sub-line. Pulses on first frame of the visit that
+// incremented the streak. No-op when streak is 0 (defensive).
+var _streakAnim = 0;
+function drawStreakPill() {
+  if (streak <= 0) return;
+  _streakAnim += 0.06;
+  var pulse = streakBumped ? (1 + Math.sin(_streakAnim * 4) * 0.07) : 1;
+  var fs = clamp(11*S, 9, 14) * pulse;
+  ctx.save();
+  ctx.font = 'bold '+fs+'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  // flame icon + count
+  var label = '🔥 ' + streak + ' ' + t('streakDays');
+  var padX = 12*S, padY = 5*S;
+  var w = ctx.measureText(label).width + padX*2;
+  var h = fs + padY*2;
+  var bx = cx - w/2;
+  var by = cy - 170*S; // sits above the daily-seed badge (which is at cy - 130*S)
+  // pill bg — flame orange, slightly stronger when bumped
+  ctx.fillStyle = streakBumped ? 'rgba(255,140,50,0.32)' : 'rgba(255,140,50,0.18)';
+  rr(ctx, bx, by, w, h, h/2);
+  ctx.fill();
+  ctx.fillStyle = '#ff944d';
+  ctx.fillText(label, cx, by + h - padY - 1*S);
+  // sub-line only on first visit of the day (don't shout at returning players)
+  if (streakBumped) {
+    var subFs = clamp(10*S, 8, 13);
+    ctx.font = subFs+'px sans-serif';
+    ctx.fillStyle = '#888';
+    ctx.fillText(t('comeBack'), cx, by + h + subFs + 4*S);
+  }
+  ctx.restore();
+}
+
 // ── DRAW SKIN SELECTOR (iter#3) ──────────────────────────────────────────────
 // Renders the cosmetic donut row on MENU + GAMEOVER. Tap to swap (only unlocked
 // rows are tappable). Locked rows show "BEST 100" hint. Adds button hits to
@@ -1039,6 +1130,8 @@ function frame(ts) {
   if (gs === 'MENU') {
     ctx.fillStyle = '#0a0a12'; ctx.fillRect(0,0,W,H);
     drawOverlay(t('title'), t('sub'), t('play'), function() { score=0; startLevel(1); });
+    // iter#5: streak pill above the day-seed badge
+    drawStreakPill();
     // iter#4: daily-seed badge above the title
     drawDaySeedBadge();
     // iter#3: cosmetic donut picker below the BEST: line
@@ -1052,6 +1145,8 @@ function frame(ts) {
     // (best is already live-tracked during play; saveBest also runs on each new high)
     drawOverlay(t('gameover'), t('score')+': '+score, t('retry'),
       function() { score=0; startLevel(1); });
+    // iter#5: streak pill above the day-seed badge
+    drawStreakPill();
     // iter#4: daily-seed badge so players know their leaderboard rank is on
     // today's shared layout, not a random one
     drawDaySeedBadge();
@@ -1116,6 +1211,7 @@ function boot() {
     if (legacy > best) { best = legacy; saveBest(); }
   } catch(e) {}
   loadSkinState(); // iter#3
+  loadStreak();    // iter#5
   // If lifetime best already crosses higher tiers, mark them seen on first
   // boot so we don't dump multiple toasts on a returning player. checkSkinUnlocks
   // would otherwise fire all of them on the next collect.
@@ -1161,6 +1257,8 @@ Object.defineProperty(window, 'skinUnlockCount', { get: function(){
   var n = 0; for (var i=0;i<DONUT_SKINS.length;i++) if (best >= DONUT_SKINS[i].unlock) n++; return n;
 } });
 Object.defineProperty(window, 'daySeed',    { get: function(){ return daySeed; } });
+Object.defineProperty(window, 'streak',     { get: function(){ return streak; } });
+Object.defineProperty(window, 'streakBest', { get: function(){ return streakBest; } });
 
 (function() {
   if (typeof YaGames === 'undefined') { setTimeout(boot, 3000); return; }
