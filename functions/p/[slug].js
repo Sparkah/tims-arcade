@@ -1,13 +1,13 @@
 // GET /p/<slug>
 //
-// Per-game share landing page. Renders proper Open Graph + Twitter Card meta
-// tags so when the URL is shared on Twitter/Telegram/Slack/Discord/Facebook,
-// the link unfurls with the game's title, hook, and thumbnail.
+// Per-game share + landing page. Renders proper Open Graph + Twitter Card
+// meta tags so when the URL is shared on Twitter/Telegram/Slack/Discord/
+// Facebook, the link unfurls with the game's title, hook, and thumbnail.
 //
-// Crawlers see the OG tags. Humans see a brief "loading…" splash then get
-// auto-redirected to /play.html?slug=X via meta refresh. The redirect is
-// instant on browsers, but we keep it visible for a moment so direct visitors
-// understand they're entering the game (and so the URL is screenshotable).
+// Visitors see a card with cover + title + hook + a Play button that takes
+// them to /play.html?slug=X. We previously meta-refreshed straight into the
+// game, but that made Google index it as "Page with redirect" and skip the
+// /p/<slug> URLs entirely — defeating the sitemap. One extra click is fine.
 //
 // Why a Pages Function and not a static file:
 //   The OG image and description must reflect the specific game. Generating
@@ -85,9 +85,6 @@ export async function onRequest({ params, env, request }) {
 <meta name="twitter:description" content="${escapeHtml(ogHook)}">
 <meta name="twitter:image" content="${img}">
 
-<!-- Redirect humans into the game after the meta is parsed -->
-<meta http-equiv="refresh" content="0; url=${playUrl}">
-
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 html,body{background:#0a0a14;color:#e7e7ee;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;height:100%;display:flex;align-items:center;justify-content:center;text-align:center}
@@ -112,7 +109,7 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
     <p><strong>${lang === 'ru' ? titleEn : titleRu}</strong></p>
     <p>${escapeHtml(lang === 'ru' ? hookEn : hookRu)}</p>
   </div>
-  <small>${lang === 'ru' ? 'Загружается…' : 'Loading the game…'} <a href="/" style="color:#8a8aa0">${lang === 'ru' ? 'все игры' : 'browse all games'}</a></small>
+  <small><a href="/" style="color:#8a8aa0">${lang === 'ru' ? '← все игры' : '← browse all games'}</a></small>
 </div>
 </body>
 </html>`;
