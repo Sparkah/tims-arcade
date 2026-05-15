@@ -4,6 +4,8 @@ let counts = {};  // from /api/counts (cumulative all-time)
 let todayScores = {}; // from /api/trending — { slug: {seconds, comments, score} }
 let myVotes = JSON.parse(localStorage.getItem('myVotes') || '{}');
 let me = null;    // { signed_in, email, uid, exp_ts } from /api/me
+let metaState = null;           // { tokens, lifetime, streak, ... } from /api/me/meta
+let todaysFeaturedSlug = null;  // slug of today's Featured Challenge (banner only — corner badge TBD)
 let activeTab = 'top';
 let activeGenre = 'all';
 let searchTerm = '';
@@ -165,8 +167,6 @@ async function init() {
   });
 }
 
-let metaState = null;
-let todaysFeaturedSlug = null;
 
 function paintMetaPill(m) {
   const pill   = document.getElementById('meta-pill');
@@ -305,7 +305,9 @@ function attachEvents() {
   if (boardBtn) boardBtn.addEventListener('click', openLeaderboard);
   if (closeBtn) closeBtn.addEventListener('click', closeLeaderboard);
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeLeaderboard();
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('lb-panel');
+    if (panel && panel.classList.contains('visible')) closeLeaderboard();
   });
 
   tabs.addEventListener('click', (e) => {
