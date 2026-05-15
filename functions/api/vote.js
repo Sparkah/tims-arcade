@@ -18,6 +18,7 @@
 //   - signed-in users effectively can't multi-vote on any single slug
 
 import { readSession } from './_session.js';
+import { parseCookie } from '../_lib/cookie.js';
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -100,17 +101,6 @@ export async function onRequestPost({ request, env }) {
   return new Response(JSON.stringify({ ...cur, myVote }), {
     headers: { 'content-type': 'application/json' },
   });
-}
-
-function parseCookie(headerVal, name) {
-  if (!headerVal) return null;
-  const parts = headerVal.split(/;\s*/);
-  for (const p of parts) {
-    const eq = p.indexOf('=');
-    if (eq < 0) continue;
-    if (p.slice(0, eq) === name) return p.slice(eq + 1);
-  }
-  return null;
 }
 
 function jsonError(msg, status) {

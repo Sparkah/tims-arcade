@@ -33,16 +33,7 @@ function daysBetween(a, b) {
   return Math.round((Date.parse(b + 'T00:00:00Z') - Date.parse(a + 'T00:00:00Z')) / 86400000);
 }
 
-function parseCookie(headerVal, name) {
-  if (!headerVal) return null;
-  const parts = headerVal.split(/;\s*/);
-  for (const p of parts) {
-    const eq = p.indexOf('=');
-    if (eq < 0) continue;
-    if (p.slice(0, eq) === name) return p.slice(eq + 1);
-  }
-  return null;
-}
+import { parseCookie } from '../../_lib/cookie.js';
 
 function emptyMeta() {
   return { tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [] };

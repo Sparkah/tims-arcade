@@ -20,6 +20,13 @@
 // Anti-abuse: 90 heartbeats / IP / hour. A single tab produces ~30/hour, so
 // this allows for shared connections (NAT) while blocking obvious bots.
 
+import { parseCookie } from '../_lib/cookie.js';
+
+// NOTE on the read-modify-write race: heartbeat / vote / feedback / me-meta
+// all do a non-atomic update on the `meta:<uid>` key. Concurrent requests
+// for the same uid can lose token credits (typical race window ~50ms).
+// Acceptable for a casual gallery; tokens are recoverable on next play.
+
 export async function onRequestPost({ request, env }) {
   let body;
   try { body = await request.json(); }
@@ -65,17 +72,6 @@ export async function onRequestPost({ request, env }) {
   }
 
   return new Response(null, { status: 204 });
-}
-
-function parseCookie(headerVal, name) {
-  if (!headerVal) return null;
-  const parts = headerVal.split(/;\s*/);
-  for (const p of parts) {
-    const eq = p.indexOf('=');
-    if (eq < 0) continue;
-    if (p.slice(0, eq) === name) return p.slice(eq + 1);
-  }
-  return null;
 }
 
 async function creditTokens(env, uid, amount) {

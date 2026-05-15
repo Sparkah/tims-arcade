@@ -39,25 +39,9 @@ export async function onRequestPost({ request, env }) {
     await env.VOTES.put(key, JSON.stringify(cur));
   }
 
-  // Meta-layer: credit +5 tokens for an upvote (encourages players to
-  // surface what they actually like). Once per (uid, slug) so spam-likers
-  // don't farm. Downvotes/neutral do not earn — fair signal still gets
-  // counted in the vote tally above.
-  if (vote === 'like') {
-    const uid = parseCookie(request.headers.get('Cookie') || '', 'uid');
-    if (uid) {
-      const earnedKey = `liked-earned:${uid}:${slug}`;
-      const alreadyEarned = await env.VOTES.get(earnedKey);
-      if (!alreadyEarned) {
-        await env.VOTES.put(earnedKey, '1', { expirationTtl: 60 * 60 * 24 * 365 });
-        const raw = await env.VOTES.get(`meta:${uid}`, 'json');
-        const m = raw || { tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [] };
-        m.tokens   = (m.tokens   || 0) + 5;
-        m.lifetime = (m.lifetime || 0) + 5;
-        await env.VOTES.put(`meta:${uid}`, JSON.stringify(m));
-      }
-    }
-  }
+  // Note: the +5 like-bonus is granted by /api/vote, NOT here. That's the
+  // single source of truth for the token economy — /api/feedback only
+  // updates the vote tally and stores the comment.
 
   // Comment storage (skipped if empty AND no image)
   if (comment || imageId) {
@@ -75,15 +59,4 @@ function jsonError(msg, status) {
     status,
     headers: { 'content-type': 'application/json' },
   });
-}
-
-function parseCookie(headerVal, name) {
-  if (!headerVal) return null;
-  const parts = headerVal.split(/;\s*/);
-  for (const p of parts) {
-    const eq = p.indexOf('=');
-    if (eq < 0) continue;
-    if (p.slice(0, eq) === name) return p.slice(eq + 1);
-  }
-  return null;
 }

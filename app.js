@@ -232,17 +232,35 @@ async function openLeaderboard() {
     return;
   }
   const myUid = (window.IDENTITY && window.IDENTITY.uid) || '';
-  body.innerHTML = data.players.map((p, i) => {
+  // Build rows with DOM nodes instead of innerHTML so uid (cookie-controlled)
+  // can never inject markup, even though we also slice it to 6 chars below.
+  body.innerHTML = '';
+  data.players.forEach((p, i) => {
     const rank = (i + 1).toString().padStart(2, '0');
     const isMe = p.uid === myUid;
-    const name = p.uid.slice(0, 6) + (isMe ? ' (you)' : '');
-    const streak = p.streak > 1 ? `<span class="lb-streak">🔥${p.streak}</span>` : '';
-    return `<div class="lb-row${isMe ? ' me' : ''}">
-      <span class="lb-rank">#${rank}</span>
-      <span class="lb-name">${name}</span>
-      <span class="lb-score">🪙 ${p.lifetime}${streak}</span>
-    </div>`;
-  }).join('');
+    const safeUid = String(p.uid || '').replace(/[^a-z0-9-]/gi, '').slice(0, 6);
+    const row = document.createElement('div');
+    row.className = 'lb-row' + (isMe ? ' me' : '');
+    const rkEl = document.createElement('span');
+    rkEl.className = 'lb-rank';
+    rkEl.textContent = '#' + rank;
+    const nmEl = document.createElement('span');
+    nmEl.className = 'lb-name';
+    nmEl.textContent = safeUid + (isMe ? ' (you)' : '');
+    const scEl = document.createElement('span');
+    scEl.className = 'lb-score';
+    scEl.textContent = '🪙 ' + (p.lifetime | 0);
+    if (p.streak > 1) {
+      const stEl = document.createElement('span');
+      stEl.className = 'lb-streak';
+      stEl.textContent = '🔥' + (p.streak | 0);
+      scEl.appendChild(stEl);
+    }
+    row.appendChild(rkEl);
+    row.appendChild(nmEl);
+    row.appendChild(scEl);
+    body.appendChild(row);
+  });
 }
 
 function closeLeaderboard() {
