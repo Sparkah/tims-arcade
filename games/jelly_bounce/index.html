@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Jelly Bounce</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1d2e; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Jelly Bounce',
+    sub:   'Slingshot a ball into squishy jellies — clear the field in 5 shots',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT LEVEL',
+    score: 'SCORE', best: 'BEST',
+    shots: 'SHOTS', level: 'LEVEL', cleared: 'CLEARED',
+    gameover: 'OUT OF SHOTS',
+    won: 'ALL CLEAR',
+    level_won: 'LEVEL CLEAR',
+    tut_goal:     'Goal: clear every jelly on each level before your shot budget runs out.',
+    tut_controls: 'Controls: drag back from the launcher to aim + set power. Release to fire.',
+    tut_win:      'Win: clear all 8 levels (~40 jellies total).',
+    tut_lose:     'Lose: run out of shots with jellies remaining.',
+    tut_tip:      'Tip: ricochets count — one well-aimed shot can pop 3+ jellies in a bounce chain.',
+    help: '?',
+  },
+  ru: {
+    title: 'Желе-Рикошет',
+    sub:   'Стреляй из рогатки по упругим желейкам — очисти поле за 5 выстрелов',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'СЛЕД. УРОВЕНЬ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    shots: 'ВЫСТРЕЛЫ', level: 'УРОВЕНЬ', cleared: 'ОЧИЩЕНО',
+    gameover: 'ВЫСТРЕЛЫ ЗАКОНЧИЛИСЬ',
+    won: 'ПОЛНАЯ ЗАЧИСТКА',
+    level_won: 'УРОВЕНЬ ПРОЙДЕН',
+    tut_goal:     'Цель: убери все желейки на уровне, пока не кончились снаряды.',
+    tut_controls: 'Управление: оттяни рогатку назад, прицелься и силу набери. Отпусти — выстрел.',
+    tut_win:      'Победа: пройди все 8 уровней (~40 желеек).',
+    tut_lose:     'Поражение: снаряды кончились, желейки остались.',
+    tut_tip:      'Совет: рикошеты считаются — меткий бросок лопнет 3+ желейки за раз.',
+    help: '?',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (match DESIGN.md) ───────────────────────────────────────────
+var MAX_SHOTS         = 5;
+var LEVEL_COUNT       = 8;
+var BALL_RADIUS       = 14;
+var BALL_RESTING_VY   = 30;
+var BALL_REST_TIME    = 0.6;
+var GRAVITY           = 1100;
+var DRAG_AIR          = 0.005;
+var WALL_BOUNCE       = 0.78;
+var JELLY_BOUNCE      = 0.88;
+var SQUISH_DURATION   = 0.45;
+var POP_PARTICLES     = 18;
+var LAUNCH_MAX_POWER  = 1300;
+var LAUNCH_MIN_POWER  = 240;
+var DRAG_MAX_PX       = 160;
+
+// ── PALETTE ──────────────────────────────────────────────────────────────
+var BG_TOP = '#1a1d2e';
+var BG_BOT = '#252944';
+var INK = '#f0e8ff';
+var INK_SOFT = '#a0a0c0';
+var LAUNCHER_COL = '#c8a87a';
+var BAND_COL = '#7a5a4a';
+var BALL_COL = '#ffd23f';
+var BALL_RIM = '#cf9f1a';
+var JELLY_TONES = [
+  { fill: '#f4b6c6', rim: '#c48595' }, // pink
+  { fill: '#a8dadc', rim: '#6daaad' }, // mint
+  { fill: '#9ab8e8', rim: '#6e87b5' }, // sky
+  { fill: '#f4c79a', rim: '#c89460' }, // peach
+  { fill: '#c8a8e8', rim: '#9077b8' }, // lavender
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';   // MENU | PLAYING | LEVEL_WON | GAMEOVER | WON
+var level = 1;
+var levelsCleared = 0;
+var shotsLeft = MAX_SHOTS;
+var score = 0;
+var best = 0;
+var dailySeed = 0;
+var showHelp = false;
+
+var ball = null;       // { x, y, vx, vy, active, restT }
+var jellies = [];      // { x, y, r, tone, hp, maxHp, squishX, squishY, squishDecay }
+var particles = [];    // { x, y, vx, vy, r, life, maxLife, col }
+var aiming = false;
+var aimStartX = 0, aimStartY = 0;
+var aimEndX = 0, aimEndY = 0;
+var lastShotPops = 0;
+var floatMsg = null;   // { text, x, y, t, col }
+
+// HUD rects (recomputed each draw)
+var hudHelpRect = null;
+var menuPlayRect = null;
+var endActionRect = null;
+
+// ── DAILY SEED ───────────────────────────────────────────────────────────
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function computeDailySeed() {
+  var d = new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  level = 1;
+  levelsCleared = 0;
+  score = 0;
+  loadLevel();
+}
+function loadLevel() {
+  shotsLeft = MAX_SHOTS;
+  jellies = generateJellies(level);
+  resetBall();
+  particles.length = 0;
+  floatMsg = null;
+  showHelp = false;
+  aiming = false;
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function resetBall() {
+  var launcher = launcherPos();
+  ball = {
+    x: launcher.x, y: launcher.y,
+    vx: 0, vy: 0,
+    active: false,         // true while in flight
+    restT: 0,
+  };
+}
+function generateJellies(lv) {
+  var prng = mulberry32(dailySeed + lv * 31);
+  var pad = GF.W * 0.08;
+  var topY = GF.H * 0.18;
+  var botY = GF.H * 0.62;
+  var availW = GF.W - pad * 2;
+  var availH = botY - topY;
+  // Jelly count + HP mix scales with level
+  var count = 5 + Math.min(8, lv);          // 6..13
+  var hpMax = Math.min(3, 1 + Math.floor(lv / 3)); // 1..3
+  var arr = [];
+  var attempts = 0;
+  while (arr.length < count && attempts < 200) {
+    attempts++;
+    var r = 22 + prng() * 14;     // 22..36 px
+    var x = pad + r + prng() * (availW - r * 2);
+    var y = topY + r + prng() * (availH - r * 2);
+    // Reject overlapping
+    var collides = false;
+    for (var i = 0; i < arr.length; i++) {
+      var dx = arr[i].x - x, dy = arr[i].y - y;
+      var minD = arr[i].r + r + 6;
+      if (dx * dx + dy * dy < minD * minD) { collides = true; break; }
+    }
+    if (collides) continue;
+    var hp = 1 + Math.floor(prng() * hpMax);
+    arr.push({
+      x: x, y: y, r: r,
+      tone: JELLY_TONES[Math.floor(prng() * JELLY_TONES.length)],
+      hp: hp, maxHp: hp,
+      squishX: 0, squishY: 0, squishDecay: 0,
+      wobble: prng() * Math.PI * 2,
+      wobbleSpeed: 1.5 + prng() * 1.2,
+    });
+  }
+  return arr;
+}
+function launcherPos() {
+  return { x: GF.W * 0.5, y: GF.H * 0.85 };
+}
+function remainingJellies() {
+  var n = 0;
+  for (var i = 0; i < jellies.length; i++) if (jellies[i].hp > 0) n++;
+  return n;
+}
+function levelWon() {
+  levelsCleared++;
+  if (level >= LEVEL_COUNT) {
+    gs = 'WON';
+    if (levelsCleared > best) { best = levelsCleared; try { localStorage.setItem('jelly_bounce_best', best); } catch (e) {} }
+    GF.gameEnded();
+  } else {
+    gs = 'LEVEL_WON';
+  }
+  GF.saveRun();
+}
+function gameOver() {
+  if (levelsCleared > best) { best = levelsCleared; try { localStorage.setItem('jelly_bounce_best', best); } catch (e) {} }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+  GF.saveRun();
+}
+function nextLevel() {
+  level++;
+  loadLevel();
+}
+
+// Screenshot escape hatch — mid-level state with the ball in flight + some jellies popped.
+window._jumpLevel = function (lv) {
+  startGame();
+  level = Math.max(2, Math.min(LEVEL_COUNT, lv || 3));
+  loadLevel();
+  shotsLeft = 3;
+  score = 250 * (level - 1);
+  // Pop ~1/3 of jellies
+  var toPop = Math.floor(jellies.length / 3);
+  for (var i = 0; i < toPop; i++) jellies[i].hp = 0;
+  // Spawn particles for visual fizz
+  for (var p = 0; p < 18; p++) {
+    particles.push({
+      x: GF.W * (0.2 + Math.random() * 0.6),
+      y: GF.H * (0.2 + Math.random() * 0.4),
+      vx: (Math.random() - 0.5) * 200,
+      vy: -Math.random() * 200,
+      r: 3 + Math.random() * 4,
+      life: 0.5 + Math.random() * 0.5,
+      maxLife: 1.0,
+      col: JELLY_TONES[Math.floor(Math.random() * JELLY_TONES.length)].fill,
+    });
+  }
+  // Place ball in flight
+  ball.x = GF.W * 0.3;
+  ball.y = GF.H * 0.45;
+  ball.vx = 400; ball.vy = -100;
+  ball.active = true;
+};
+window._setupForScreenshot = window._jumpLevel;
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function onPointerDown(x, y) {
+  if (hudHelpRect && hitRect(hudHelpRect, x, y)) { showHelp = !showHelp; return; }
+  if (showHelp) { showHelp = false; return; }
+  if (gs === 'MENU') {
+    if (menuPlayRect && hitRect(menuPlayRect, x, y)) startGame();
+    return;
+  }
+  if (gs === 'GAMEOVER' || gs === 'WON') {
+    if (endActionRect && hitRect(endActionRect, x, y)) startGame();
+    return;
+  }
+  if (gs === 'LEVEL_WON') {
+    if (endActionRect && hitRect(endActionRect, x, y)) nextLevel();
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  if (ball.active) return;       // can't aim while ball is flying
+  // Allow any pointer to start an aim — the launcher position is the anchor.
+  aiming = true;
+  aimStartX = x; aimStartY = y;
+  aimEndX = x; aimEndY = y;
+}
+function onPointerMove(x, y) {
+  if (!aiming) return;
+  aimEndX = x; aimEndY = y;
+}
+function onPointerUp() {
+  if (!aiming) return;
+  aiming = false;
+  fireBall();
+}
+function hitRect(r, x, y) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+
+GF.canvas.addEventListener('mousedown', function (e) { onPointerDown(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mousemove', function (e) { onPointerMove(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mouseup',   function () { onPointerUp(); });
+GF.canvas.addEventListener('mouseleave',function () { onPointerUp(); });
+GF.canvas.addEventListener('touchstart', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPointerDown(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPointerMove(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchend',    function () { onPointerUp(); }, { passive: false });
+GF.canvas.addEventListener('touchcancel', function () { onPointerUp(); }, { passive: false });
+
+document.addEventListener('keydown', function (e) {
+  if (e.code === 'Space') {
+    if (gs === 'MENU') { startGame(); e.preventDefault(); }
+    else if (gs === 'LEVEL_WON') { nextLevel(); e.preventDefault(); }
+    else if (gs === 'GAMEOVER' || gs === 'WON') { startGame(); e.preventDefault(); }
+  }
+  if (e.code === 'KeyH' || e.code === 'Slash') showHelp = !showHelp;
+});
+
+function fireBall() {
+  if (ball.active || shotsLeft <= 0) return;
+  var launcher = launcherPos();
+  var dx = launcher.x - aimEndX;
+  var dy = launcher.y - aimEndY;
+  var pull = Math.sqrt(dx * dx + dy * dy);
+  if (pull < 14) return;       // too short — don't waste a shot
+  var pullN = Math.min(1, pull / DRAG_MAX_PX);
+  var power = LAUNCH_MIN_POWER + pullN * (LAUNCH_MAX_POWER - LAUNCH_MIN_POWER);
+  var nx = dx / pull, ny = dy / pull;
+  ball.x = launcher.x;
+  ball.y = launcher.y;
+  ball.vx = nx * power;
+  ball.vy = ny * power;
+  ball.active = true;
+  ball.restT = 0;
+  shotsLeft--;
+  lastShotPops = 0;
+  GF.setShake(0.4);
+}
+
+// ── PHYSICS ──────────────────────────────────────────────────────────────
+function updateBall(dt) {
+  if (!ball.active) return;
+  // Sub-step to avoid tunnelling at high velocity
+  var speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+  var steps = Math.min(8, Math.max(1, Math.ceil(speed * dt / 8)));
+  var sdt = dt / steps;
+  for (var s = 0; s < steps; s++) {
+    // Integrate
+    ball.vy += GRAVITY * sdt;
+    ball.vx *= (1 - DRAG_AIR);
+    ball.x += ball.vx * sdt;
+    ball.y += ball.vy * sdt;
+    // Wall bounces (left, right, top)
+    if (ball.x - BALL_RADIUS < 0) {
+      ball.x = BALL_RADIUS; ball.vx = -ball.vx * WALL_BOUNCE;
+    } else if (ball.x + BALL_RADIUS > GF.W) {
+      ball.x = GF.W - BALL_RADIUS; ball.vx = -ball.vx * WALL_BOUNCE;
+    }
+    if (ball.y - BALL_RADIUS < 0) {
+      ball.y = BALL_RADIUS; ball.vy = -ball.vy * WALL_BOUNCE;
+    }
+    // Jelly collisions
+    for (var i = 0; i < jellies.length; i++) {
+      var j = jellies[i];
+      if (j.hp <= 0) continue;
+      var jdx = ball.x - j.x;
+      var jdy = ball.y - j.y;
+      var minD = BALL_RADIUS + j.r;
+      var d2 = jdx * jdx + jdy * jdy;
+      if (d2 > minD * minD) continue;
+      var d = Math.sqrt(d2) || 0.001;
+      var nx = jdx / d, ny = jdy / d;
+      // Push ball out of overlap
+      ball.x = j.x + nx * minD;
+      ball.y = j.y + ny * minD;
+      // Reflect velocity
+      var vDotN = ball.vx * nx + ball.vy * ny;
+      ball.vx = (ball.vx - 2 * vDotN * nx) * JELLY_BOUNCE;
+      ball.vy = (ball.vy - 2 * vDotN * ny) * JELLY_BOUNCE;
+      // Squish jelly along impact axis (away from impact)
+      var impactStrength = Math.min(1, speed / 700);
+      j.squishX = -nx * 0.35 * impactStrength;
+      j.squishY = -ny * 0.35 * impactStrength;
+      j.squishDecay = SQUISH_DURATION;
+      // Damage
+      j.hp--;
+      if (j.hp <= 0) {
+        score += 10 * j.maxHp;
+        lastShotPops++;
+        emitPopParticles(j);
+        if (lastShotPops >= 2) {
+          floatMsg = { text: '×' + lastShotPops + ' CHAIN!', x: j.x, y: j.y - 28, t: 1.2, col: '#ffd23f' };
+          score += lastShotPops * 5;
+        }
+      } else {
+        emitHitParticles(j);
+      }
+      GF.setShake(0.25);
+    }
+    // Below floor → shot ends
+    if (ball.y - BALL_RADIUS > GF.H) {
+      finishShot();
+      return;
+    }
+    // Resting check: low velocity + on a wall/floor-ish state
+    var vMag = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+    if (vMag < BALL_RESTING_VY) {
+      ball.restT += sdt;
+      if (ball.restT >= BALL_REST_TIME) { finishShot(); return; }
+    } else {
+      ball.restT = 0;
+    }
+  }
+}
+
+function finishShot() {
+  ball.active = false;
+  resetBall();
+  // Check win/lose AFTER the ball has settled
+  if (remainingJellies() === 0) {
+    levelWon();
+  } else if (shotsLeft <= 0) {
+    gameOver();
+  }
+}
+
+function updateJellies(dt) {
+  for (var i = 0; i < jellies.length; i++) {
+    var j = jellies[i];
+    j.wobble += j.wobbleSpeed * dt;
+    if (j.squishDecay > 0) {
+      j.squishDecay -= dt;
+      var frac = Math.max(0, j.squishDecay / SQUISH_DURATION);
+      var factor = frac * frac * (3 - 2 * frac);  // smooth decay
+      j.squishX *= factor / Math.max(0.001, Math.max(factor, frac));  // gentle decay
+    } else {
+      j.squishX = 0;
+      j.squishY = 0;
+    }
+  }
+}
+
+function updateParticles(dt) {
+  for (var i = particles.length - 1; i >= 0; i--) {
+    var p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 400 * dt;
+    p.vx *= 0.97;
+    p.life -= dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+  if (floatMsg) {
+    floatMsg.t -= dt;
+    floatMsg.y -= 30 * dt;
+    if (floatMsg.t <= 0) floatMsg = null;
+  }
+}
+
+function emitPopParticles(j) {
+  for (var i = 0; i < POP_PARTICLES; i++) {
+    var ang = (i / POP_PARTICLES) * Math.PI * 2 + Math.random() * 0.3;
+    var sp = 120 + Math.random() * 180;
+    particles.push({
+      x: j.x, y: j.y,
+      vx: Math.cos(ang) * sp,
+      vy: Math.sin(ang) * sp,
+      r: 2.5 + Math.random() * 3,
+      life: 0.5 + Math.random() * 0.4,
+      maxLife: 0.9,
+      col: j.tone.fill,
+    });
+  }
+}
+function emitHitParticles(j) {
+  for (var i = 0; i < 6; i++) {
+    var ang = Math.random() * Math.PI * 2;
+    var sp = 60 + Math.random() * 90;
+    particles.push({
+      x: j.x, y: j.y,
+      vx: Math.cos(ang) * sp,
+      vy: Math.sin(ang) * sp,
+      r: 1.5 + Math.random() * 2,
+      life: 0.3 + Math.random() * 0.3,
+      maxLife: 0.6,
+      col: j.tone.fill,
+    });
+  }
+}
+
+// ── UPDATE / DRAW ────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs === 'PLAYING') {
+    updateBall(dt);
+    updateJellies(dt);
+  }
+  updateParticles(dt);
+}
+
+function draw(c) {
+  drawBackground(c);
+  if (gs !== 'MENU') {
+    drawJellies(c);
+    drawLauncher(c);
+    if (gs === 'PLAYING' && aiming) drawAimGuide(c);
+    drawBall(c);
+    drawParticles(c);
+    drawHUD(c);
+    drawFloatMsg(c);
+  } else {
+    drawMenu(c);
+  }
+  if (gs === 'GAMEOVER')  drawEndOverlay(c, GF.t('gameover'), GF.t('retry'));
+  if (gs === 'WON')       drawEndOverlay(c, GF.t('won'),      GF.t('retry'));
+  if (gs === 'LEVEL_WON') drawEndOverlay(c, GF.t('level_won'), GF.t('next'));
+  if (showHelp) drawHelpPanel(c);
+}
+
+function drawBackground(c) {
+  var g = c.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, BG_TOP); g.addColorStop(1, BG_BOT);
+  c.fillStyle = g;
+  c.fillRect(0, 0, GF.W, GF.H);
+  // Floor line
+  c.strokeStyle = 'rgba(160,160,192,0.18)';
+  c.lineWidth = 1;
+  c.beginPath();
+  var fl = GF.H * 0.78;
+  c.moveTo(0, fl); c.lineTo(GF.W, fl); c.stroke();
+}
+
+function drawJellies(c) {
+  for (var i = 0; i < jellies.length; i++) {
+    var j = jellies[i];
+    if (j.hp <= 0) continue;
+    var wob = Math.sin(j.wobble) * 0.04;
+    var sx = 1 + j.squishX + wob;
+    var sy = 1 + j.squishY - wob;
+    c.save();
+    c.translate(j.x, j.y);
+    c.scale(sx, sy);
+    // Outer glow
+    c.shadowColor = j.tone.fill;
+    c.shadowBlur = 16;
+    c.fillStyle = j.tone.fill;
+    c.beginPath();
+    c.arc(0, 0, j.r, 0, Math.PI * 2);
+    c.fill();
+    c.shadowBlur = 0;
+    // Inner rim
+    c.strokeStyle = j.tone.rim;
+    c.lineWidth = 2;
+    c.beginPath();
+    c.arc(0, 0, j.r - 1, 0, Math.PI * 2);
+    c.stroke();
+    // HP rings
+    for (var k = 1; k < j.hp; k++) {
+      c.strokeStyle = 'rgba(255,255,255,0.4)';
+      c.lineWidth = 1.5;
+      c.beginPath();
+      c.arc(0, 0, j.r * (0.45 + k * 0.18), 0, Math.PI * 2);
+      c.stroke();
+    }
+    // Highlight
+    c.fillStyle = 'rgba(255,255,255,0.4)';
+    c.beginPath();
+    c.ellipse(-j.r * 0.35, -j.r * 0.35, j.r * 0.25, j.r * 0.15, -Math.PI / 4, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+  }
+}
+
+function drawLauncher(c) {
+  var p = launcherPos();
+  // Wood post
+  c.fillStyle = LAUNCHER_COL;
+  c.fillRect(p.x - 4, p.y, 8, GF.H - p.y);
+  // Fork prongs
+  c.strokeStyle = LAUNCHER_COL;
+  c.lineWidth = 6;
+  c.lineCap = 'round';
+  c.beginPath();
+  c.moveTo(p.x, p.y);
+  c.lineTo(p.x - 18, p.y - 26);
+  c.moveTo(p.x, p.y);
+  c.lineTo(p.x + 18, p.y - 26);
+  c.stroke();
+  // Bands
+  if (!ball.active) {
+    c.strokeStyle = BAND_COL;
+    c.lineWidth = 3;
+    var bx = aiming ? ball.x : p.x;
+    var by = aiming ? ball.y : p.y;
+    c.beginPath();
+    c.moveTo(p.x - 18, p.y - 26);
+    c.lineTo(bx - BALL_RADIUS * 0.6, by);
+    c.moveTo(p.x + 18, p.y - 26);
+    c.lineTo(bx + BALL_RADIUS * 0.6, by);
+    c.stroke();
+  }
+}
+
+function drawBall(c) {
+  // While aiming, the ball sits at the pulled position (launcher minus aim delta)
+  if (aiming && !ball.active) {
+    var p = launcherPos();
+    var dx = p.x - aimEndX, dy = p.y - aimEndY;
+    var pull = Math.sqrt(dx * dx + dy * dy);
+    var clamped = Math.min(pull, DRAG_MAX_PX);
+    if (pull > 0) {
+      ball.x = p.x - (dx / pull) * clamped;
+      ball.y = p.y - (dy / pull) * clamped;
+    } else {
+      ball.x = p.x; ball.y = p.y;
+    }
+  } else if (!ball.active) {
+    var lp = launcherPos();
+    ball.x = lp.x; ball.y = lp.y;
+  }
+  c.fillStyle = BALL_COL;
+  c.shadowColor = BALL_RIM;
+  c.shadowBlur = 10;
+  c.beginPath();
+  c.arc(ball.x, ball.y, BALL_RADIUS, 0, Math.PI * 2);
+  c.fill();
+  c.shadowBlur = 0;
+  c.fillStyle = 'rgba(255,255,255,0.5)';
+  c.beginPath();
+  c.arc(ball.x - 4, ball.y - 4, BALL_RADIUS * 0.35, 0, Math.PI * 2);
+  c.fill();
+}
+
+function drawAimGuide(c) {
+  var p = launcherPos();
+  var dx = p.x - aimEndX, dy = p.y - aimEndY;
+  var pull = Math.sqrt(dx * dx + dy * dy);
+  if (pull < 14) return;
+  // Predict initial velocity vector + draw a dotted trajectory preview
+  var pullN = Math.min(1, pull / DRAG_MAX_PX);
+  var power = LAUNCH_MIN_POWER + pullN * (LAUNCH_MAX_POWER - LAUNCH_MIN_POWER);
+  var nx = dx / pull, ny = dy / pull;
+  var vx = nx * power, vy = ny * power;
+  c.fillStyle = 'rgba(255,210,63,0.4)';
+  var x = p.x, y = p.y;
+  for (var t = 0; t < 30; t++) {
+    var st = t * 0.04;
+    var px = x + vx * st;
+    var py = y + vy * st + 0.5 * GRAVITY * st * st;
+    if (px < 0 || px > GF.W || py > GF.H) break;
+    c.beginPath();
+    c.arc(px, py, 3 - t * 0.07, 0, Math.PI * 2);
+    c.fill();
+  }
+}
+
+function drawParticles(c) {
+  for (var i = 0; i < particles.length; i++) {
+    var p = particles[i];
+    var a = p.life / p.maxLife;
+    c.globalAlpha = Math.max(0, a);
+    c.fillStyle = p.col;
+    c.beginPath();
+    c.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.globalAlpha = 1;
+}
+
+function drawFloatMsg(c) {
+  if (!floatMsg) return;
+  c.save();
+  c.globalAlpha = Math.min(1, floatMsg.t);
+  c.fillStyle = floatMsg.col;
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.fillText(floatMsg.text, floatMsg.x, floatMsg.y);
+  c.restore();
+}
+
+function drawHUD(c) {
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillStyle = INK;
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  var pad = 14 * GF.S;
+  c.fillText(GF.t('level') + ' ' + level + '/' + LEVEL_COUNT, pad, pad);
+  c.textAlign = 'center';
+  // Shots remaining as ball icons
+  var sy = pad + fs * 0.5;
+  var iconR = 8 * GF.S;
+  var gap = 6 * GF.S;
+  var totalW = MAX_SHOTS * (iconR * 2 + gap) - gap;
+  var sx = GF.W / 2 - totalW / 2;
+  for (var i = 0; i < MAX_SHOTS; i++) {
+    var x = sx + i * (iconR * 2 + gap) + iconR;
+    c.fillStyle = i < shotsLeft ? BALL_COL : 'rgba(255,210,63,0.18)';
+    c.beginPath();
+    c.arc(x, sy, iconR, 0, Math.PI * 2);
+    c.fill();
+  }
+  c.fillStyle = INK_SOFT;
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.fillText(GF.t('shots'), GF.W / 2, sy + iconR + 6 * GF.S);
+
+  // Score top-left under level
+  c.textAlign = 'left';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  c.fillStyle = INK_SOFT;
+  c.fillText(GF.t('score') + ': ' + score, pad, pad + fs + 4 * GF.S);
+
+  // Help button (top-right)
+  var hSize = GF.clamp(34 * GF.S, 28, 44);
+  var hx = GF.W - pad - hSize;
+  var hy = pad - 6 * GF.S;
+  c.fillStyle = 'rgba(255,255,255,0.10)';
+  GF.rr(c, hx, hy, hSize, hSize, hSize * 0.3); c.fill();
+  c.strokeStyle = INK_SOFT;
+  c.lineWidth = 1.5;
+  GF.rr(c, hx + 0.5, hy + 0.5, hSize - 1, hSize - 1, hSize * 0.3); c.stroke();
+  c.fillStyle = INK;
+  c.font = 'bold ' + Math.floor(hSize * 0.55) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('help'), hx + hSize / 2, hy + hSize / 2 + 1);
+  hudHelpRect = { x: hx, y: hy, w: hSize, h: hSize };
+
+  // Remaining jellies bottom-left
+  c.textAlign = 'left';
+  c.textBaseline = 'bottom';
+  c.fillStyle = INK_SOFT;
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  c.fillText(GF.t('cleared') + ': ' + (jellies.length - remainingJellies()) + '/' + jellies.length, pad, GF.H - pad);
+}
+
+function drawMenu(c) {
+  var fs = GF.clamp(56 * GF.S, 28, 72);
+  c.fillStyle = INK;
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 140 * GF.S);
+  c.fillStyle = INK_SOFT;
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), GF.cx, GF.cy - 108 * GF.S);
+
+  var tutFs = GF.clamp(13 * GF.S, 11, 17);
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  var startY = GF.cy - 70 * GF.S;
+  c.font = tutFs + 'px sans-serif';
+  c.fillStyle = INK;
+  for (var i = 0; i < keys.length; i++) {
+    c.fillText(GF.t(keys[i]), GF.cx, startY + i * (tutFs * 1.45));
+  }
+
+  var bw = GF.clamp(240 * GF.S, 160, 320);
+  var bh = GF.clamp(54 * GF.S, 40, 66);
+  var bx = GF.cx - bw / 2;
+  var by = GF.cy + 90 * GF.S;
+  c.fillStyle = BALL_COL;
+  GF.rr(c, bx, by, bw, bh, bh / 2); c.fill();
+  c.fillStyle = '#222';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('play'), GF.cx, by + bh / 2);
+  c.textBaseline = 'alphabetic';
+  menuPlayRect = { x: bx, y: by, w: bw, h: bh };
+
+  if (best > 0) {
+    c.fillStyle = INK_SOFT;
+    c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    c.fillText(GF.t('best') + ': ' + best + '/' + LEVEL_COUNT, GF.cx, by + bh + 28 * GF.S);
+  }
+}
+
+function drawEndOverlay(c, title, actionLabel) {
+  c.fillStyle = 'rgba(10,12,28,0.78)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  c.fillStyle = INK;
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + GF.clamp(38 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(title, GF.cx, GF.cy - 70 * GF.S);
+  c.font = GF.clamp(16 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillStyle = INK_SOFT;
+  c.fillText(GF.t('level') + ' ' + level + '/' + LEVEL_COUNT + ' · ' + GF.t('score') + ': ' + score, GF.cx, GF.cy - 30 * GF.S);
+
+  var bw = GF.clamp(220 * GF.S, 160, 280);
+  var bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = GF.cx - bw / 2;
+  var by = GF.cy + 30 * GF.S;
+  c.fillStyle = BALL_COL;
+  GF.rr(c, bx, by, bw, bh, bh / 2); c.fill();
+  c.fillStyle = '#222';
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 20) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(actionLabel, GF.cx, by + bh / 2);
+  c.textBaseline = 'alphabetic';
+  endActionRect = { x: bx, y: by, w: bw, h: bh };
+}
+
+function drawHelpPanel(c) {
+  c.fillStyle = 'rgba(10,12,28,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  c.fillStyle = INK;
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + GF.clamp(28 * GF.S, 18, 38) + 'px sans-serif';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 120 * GF.S);
+  c.font = fs + 'px sans-serif';
+  c.fillStyle = INK;
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  for (var i = 0; i < keys.length; i++) {
+    c.fillText(GF.t(keys[i]), GF.cx, GF.cy - 70 * GF.S + i * (fs * 1.5));
+  }
+  c.fillStyle = INK_SOFT;
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.fillText('tap to close', GF.cx, GF.cy + 100 * GF.S);
+}
+
+// ── EXPOSE STATE ─────────────────────────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    level: level,
+    levelsCleared: levelsCleared,
+    shotsLeft: shotsLeft,
+    score: score,
+    remainingJellies: remainingJellies(),
+    totalJellies: jellies.length,
+    MAX_SHOTS: MAX_SHOTS,
+    LEVEL_COUNT: LEVEL_COUNT,
+  };
+});
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'jelly_bounce',
+  onReady: function () {
+    dailySeed = computeDailySeed();
+    try { best = parseInt(localStorage.getItem('jelly_bounce_best') || '0') || 0; } catch (e) {}
+    GF.persist('jelly_bounce_run_v1',
+      function () {
+        return {
+          gs: gs, level: level, levelsCleared: levelsCleared,
+          shotsLeft: shotsLeft, score: score,
+        };
+      },
+      function (s) {
+        if (!s) return;
+        // Safe-entry: never resume mid-PLAYING. Bounce to MENU so the player
+        // doesn't lose a shot to a reload mid-aim.
+        gs = 'MENU';
+      }
+    );
+    if (gs === 'PLAYING' || gs === 'MENU') gs = 'MENU';
+    resetBall();
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>
