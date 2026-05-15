@@ -157,13 +157,13 @@ async function init() {
     showMetaWelcomePops(m);
   });
 
-  // Featured Challenge banner — fills in once /api/featured lands, then the
-  // grid render uses todaysFeaturedSlug to draw the corner badge.
+  // Featured Challenge — /api/featured returns today's 2× tokens slug. We
+  // store it so renderFeatured() can swap the hero badge from generic
+  // "🔥 Trending" to "⭐ FEATURED TODAY · 2× TOKENS" when the slugs match.
   featuredP.then(f => {
     if (!f || !f.slug) return;
     todaysFeaturedSlug = f.slug;
-    paintFeaturedBanner(f);
-    render();   // re-paint card grid so the FEATURED badge surfaces
+    render();
   });
 }
 
@@ -202,17 +202,6 @@ function showMetaWelcomePops(m) {
       if (window.posthog) posthog.capture('streak_milestone', { day: ms.day, bonus: ms.bonus });
     }
   }
-}
-
-function paintFeaturedBanner(f) {
-  const banner = document.getElementById('featured-banner');
-  const title  = document.getElementById('featured-banner-title');
-  if (!banner || !f || !f.slug) return;
-  const game = games.find(g => g.slug === f.slug);
-  if (!game) return;
-  banner.href = '/p/' + f.slug;
-  if (title) title.textContent = (game.title || f.slug);
-  banner.hidden = false;
 }
 
 async function openLeaderboard() {
@@ -668,11 +657,20 @@ function renderFeatured() {
   // but expressed as a CSS background since hero is a tinted block, not
   // a content image.
   const heroBg = `image-set(url('/thumbs/${game.slug}.webp?v=1') type('image/webp'), url('/thumbs/${game.slug}.png?v=1') type('image/png'))`;
+  // Badge: if today's daily-featured slug (2× tokens) matches the hero
+  // pick, surface the FEATURED TODAY marker right here instead of running
+  // a duplicate banner up top. Otherwise fall back to the generic
+  // trending / featured pill.
+  const isFeaturedToday = todaysFeaturedSlug && todaysFeaturedSlug === game.slug;
+  const badgeText = isFeaturedToday
+    ? '⭐ FEATURED TODAY · 2× TOKENS'
+    : (topScore > 0 ? '🔥 Trending' : '✨ Featured');
+  const badgeClass = isFeaturedToday ? 'hero-badge hero-badge-featured' : 'hero-badge';
   featured.innerHTML = `
     <article class="hero">
       <div class="hero-thumb" style="background-image: -webkit-${heroBg}; background-image: ${heroBg};"></div>
       <div class="hero-content">
-        <div class="hero-badge">${topScore > 0 ? '🔥 Trending' : '✨ Featured'}</div>
+        <div class="${badgeClass}">${badgeText}</div>
         <h2 class="hero-title"></h2>
         <p class="hero-hook"></p>
         <div class="hero-stats">
