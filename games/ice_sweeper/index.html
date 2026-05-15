@@ -44,6 +44,13 @@ var STRINGS = {
     level: 'LEVEL', time: 'TIME', clean: 'CLEAN', score: 'SCORE', best: 'BEST',
     complete: 'LAKE CLEARED!', gameover: "TIME'S UP!",
     chain: 'CHAIN', bonus: 'TIME BONUS',
+    extraTime:    '+15s EXTRA TIME',
+    secAbbr:      's',
+    tut_goal:     'Goal: Pilot the icebreaker over dirty ice tiles to crack and clear the lake within the time limit.',
+    tut_controls: 'Controls: Arrow keys / WASD on desktop; drag anywhere on mobile to steer the icebreaker.',
+    tut_win:      'Win: Hit the level\'s clean percentage before TIME runs out — clear all 10 lakes for a perfect run.',
+    tut_lose:     'Lose: TIME hits 0 with the clean percentage below the target.',
+    tut_tip:      'Tip: Run the same tile multiple times to crack → chunk → clear. Chains within 1.5s build a CHAIN multiplier.',
   },
   ru: {
     title: 'Ледокол', sub: 'Разбей грязный лёд — очисти озеро!',
@@ -51,6 +58,13 @@ var STRINGS = {
     level: 'УРОВЕНЬ', time: 'ВРЕМЯ', clean: 'ЧИСТО', score: 'ОЧКИ', best: 'РЕКОРД',
     complete: 'ОЗЕРО ОЧИЩЕНО!', gameover: 'ВРЕМЯ ВЫШЛО!',
     chain: 'ЦЕПЬ', bonus: 'БОНУС',
+    extraTime:    '+15с ДОП. ВРЕМЯ',
+    secAbbr:      'с',
+    tut_goal:     'Цель: Веди ледокол по грязным плиткам льда, чтобы расколоть и очистить озеро до окончания времени.',
+    tut_controls: 'Управление: Стрелки/WASD на ПК; тащи в любом месте на мобиле, чтобы рулить ледоколом.',
+    tut_win:      'Победа: Достигни нормы чистоты до окончания времени — пройди все 10 озёр для идеального забега.',
+    tut_lose:     'Поражение: ВРЕМЯ кончилось, а уборка ниже нормы.',
+    tut_tip:      'Подсказка: Проезжай по одной плитке несколько раз: трещина → откол → чисто. Цепи в течение 1.5с дают множитель ЦЕПЬ.',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -144,6 +158,8 @@ function startLevel(lvl) {
   particles = []; floats = []; buttons = [];
   chain = 0; chainTimer = 0; shake = 0;
   cleared = 0;
+  // iter#1: reset the rewarded-ad slot each level
+  extraTimeUsed = false; extraTimeLoading = false;
   timeLeft = Math.max(45, 100 - (lvl - 1) * 7);
 
   // grid grows with level — adapt aspect ratio to viewport so the playfield fills the screen
@@ -204,7 +220,71 @@ function startLevel(lvl) {
   gs = 'PLAYING';
 }
 
-window._jumpLevel = function(n) { score = 0; startLevel(n); };
+window._jumpLevel = function(n) {
+  // n=99 = harness "drop me into GAMEOVER" (yandex-testing adapter compat).
+  if (n === 99) { gs = 'GAMEOVER'; timeLeft = 0; return; }
+  score = 0;
+  startLevel(n);
+};
+
+// Expose game state for the post-build-tester / yandex-testing harness.
+window.__gfState = function () {
+  try {
+    return {
+      gs: gs,
+      level: level,
+      score: score,
+      best: best,
+      timeLeft: timeLeft,
+      chain: (typeof chain !== 'undefined') ? chain : 0,
+    };
+  } catch (e) { return { __error: String(e) }; }
+};
+
+// ── iter#1: Yandex ads (rewarded "Extra Time" + throttled interstitial) ─────
+// All triggers are user-click only (Yandex 4.4); interstitial throttled to
+// ≥3min between fullscreen ads (Yandex 4.1). When the SDK isn't present
+// (gallery preview / local dev) helpers no-op for interstitial and grant
+// the revive immediately for rewarded — keeps the feature exercisable.
+var INTERSTITIAL_GAP_MS = 3 * 60 * 1000;
+var lastInterstitialMs = -INTERSTITIAL_GAP_MS;
+var extraTimeUsed = false;     // one "+15s" revive per level
+var extraTimeLoading = false;  // disables button during ad load
+var EXTRA_TIME_SEC = 15;
+
+function showInterstitial(onDone) {
+  var now = performance.now();
+  if (now - lastInterstitialMs < INTERSTITIAL_GAP_MS) { onDone && onDone(); return; }
+  if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showFullscreenAdv) { onDone && onDone(); return; }
+  lastInterstitialMs = now;
+  try {
+    window.ysdk.adv.showFullscreenAdv({
+      callbacks: { onClose: function(){ onDone && onDone(); }, onError: function(){ onDone && onDone(); } },
+    });
+  } catch(e) { onDone && onDone(); }
+}
+function showRewardedExtraTime() {
+  if (extraTimeUsed || extraTimeLoading) return;
+  extraTimeLoading = true;
+  if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) {
+    extraTimeLoading = false; grantExtraTime(); return;
+  }
+  var rewarded = false;
+  try {
+    window.ysdk.adv.showRewardedVideo({
+      callbacks: {
+        onRewarded: function() { rewarded = true; },
+        onClose:    function() { extraTimeLoading = false; if (rewarded) grantExtraTime(); },
+        onError:    function() { extraTimeLoading = false; },
+      },
+    });
+  } catch(e) { extraTimeLoading = false; }
+}
+function grantExtraTime() {
+  extraTimeUsed = true;
+  timeLeft = EXTRA_TIME_SEC;
+  gs = 'PLAYING';
+}
 
 // ── GRID HELPERS ────────────────────────────────────────────────────────────
 function gridOrigin() {
@@ -556,7 +636,7 @@ function drawHUD() {
   ctx.fillStyle = tc; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'center';
   ctx.fillText(t('time'), tx, bh*0.42);
   ctx.font = 'bold '+bigFs+'px sans-serif';
-  ctx.fillText(Math.ceil(timeLeft)+'s', tx, fy);
+  ctx.fillText(Math.ceil(timeLeft)+t('secAbbr'), tx, fy);
 
   // chain badge
   if (chain > 1 && chainTimer > 0) {
@@ -665,8 +745,31 @@ function frame(ts) {
       best = score;
       try { localStorage.setItem('ice_best', best); } catch(e) {}
     }
+    // iter#1: RETRY routes through throttled interstitial (Yandex 4.1)
     drawOverlay(t('gameover'), t('score')+': '+score, t('retry'),
-      function() { score=0; startLevel(level); });
+      function() { showInterstitial(function() { score=0; startLevel(level); }); });
+
+    // iter#1: EXTRA TIME (rewarded ad). One revive per level; user-click only.
+    if (!extraTimeUsed) {
+      var _btnW = clamp(240*S, 160, 320), _btnH = clamp(52*S, 40, 66);
+      var _btnY = cy + 26*S;
+      var rW = _btnW, rH = clamp(42*S, 34, 54);
+      var rX = cx - rW/2;
+      var rY = _btnY + _btnH + 14*S;
+      rr(ctx, rX, rY, rW, rH, rH/2);
+      var gradR = ctx.createLinearGradient(rX, rY, rX, rY+rH);
+      gradR.addColorStop(0, '#FFD700'); gradR.addColorStop(1, '#8a6a00');
+      ctx.fillStyle = gradR; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+      ctx.lineWidth = 1.4 * S;
+      ctx.stroke();
+      ctx.font = 'bold ' + clamp(14*S, 11, 18) + 'px sans-serif';
+      ctx.fillStyle = '#1a1a2e';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('📺  ' + t('extraTime'), cx, rY + rH/2);
+      ctx.textBaseline = 'alphabetic';
+      buttons.push({ x: rX, y: rY, w: rW, h: rH, fn: showRewardedExtraTime });
+    }
   }
 
   requestAnimationFrame(frame);

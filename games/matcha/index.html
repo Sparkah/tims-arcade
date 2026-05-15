@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Matcha</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #f7f1e3; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3) ─────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Matcha',
+    sub:   'Whisk the bowl until the foam reaches the green zone',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT BOWL',
+    pour: 'POUR',
+    strokes: 'STROKES', foam: 'FOAM', target: 'TARGET',
+    round: 'BOWL', best: 'BEST',
+    gameover: 'NOT CEREMONY GRADE',
+    won: 'CEREMONY COMPLETE',
+    round_won: 'BOWL READY',
+    tut_goal:     'Goal: whisk the matcha until the foam reaches the green target zone.',
+    tut_controls: 'Controls: drag across the bowl in a back-and-forth M shape. Tap POUR (or press Space) when ready.',
+    tut_win:      'Win: foam ≥ 80% within 60 strokes. 5 bowls of rising difficulty = full ceremony.',
+    tut_lose:     'Lose: run out of strokes with foam below target.',
+    tut_tip:      'Tip: steady M-strokes at moderate speed build foam fastest — fast circles are wasteful.',
+    help: '?',
+  },
+  ru: {
+    title: 'Маття',
+    sub:   'Венчи чашу, пока пенка не достигнет зелёной зоны',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'СЛЕД. ЧАША',
+    pour: 'НАЛЕЙ',
+    strokes: 'ХОДЫ', foam: 'ПЕНКА', target: 'ЦЕЛЬ',
+    round: 'ЧАША', best: 'РЕКОРД',
+    gameover: 'НЕ ДОТЯНУЛ',
+    won: 'ЦЕРЕМОНИЯ ОКОНЧЕНА',
+    round_won: 'ЧАША ГОТОВА',
+    tut_goal:     'Цель: венчи маття, пока пенка не достигнет зелёной зоны.',
+    tut_controls: 'Управление: тяни по чаше зигзагом, формой буквы М. Нажми НАЛЕЙ или пробел, когда готов.',
+    tut_win:      'Победа: пенка ≥ 80% за 60 ходов. 5 чаш = вся церемония.',
+    tut_lose:     'Поражение: ходы кончились, а пенка ниже цели.',
+    tut_tip:      'Совет: ровные М-движения средней скорости лучше быстрых кругов.',
+    help: '?',
+  },
+};
+
+var SPRITE_NAMES = []; // pure procedural — no AI sprites
+
+// ── TUNABLES (must match DESIGN.md) ──────────────────────────────────────
+var MAX_STROKES         = 60;
+var TARGET_FOAM_PCT     = 80;
+var BOWL_RADIUS_FRAC    = 0.32;
+var MIN_STROKE_LEN_PX   = 12;
+var GOOD_STROKE_SPEED   = 800;
+var SPEED_TOLERANCE     = 400;
+var FOAM_PER_GOOD       = 1.8;
+var FOAM_PER_AVERAGE    = 0.8;
+var ROUND_COUNT         = 5;
+
+// ── COLORS ────────────────────────────────────────────────────────────────
+var COL_BG       = '#f7f1e3';
+var COL_INK      = '#3a3328';
+var COL_INK_SOFT = '#6b624f';
+var COL_BOWL     = '#cbb89b';
+var COL_BOWL_RIM = '#a08b6c';
+var COL_FOAM     = '#9bb87a';
+var COL_FOAM_HI  = '#cfe0a4';
+var COL_TARGET   = '#5d7d3f';
+var COL_CHASEN   = '#7a8c66';
+var COL_BLOSSOM  = '#f4b6c6';
+var COL_BLOSSOM2 = '#f8d2db';
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | ROUND_WON | WON
+var foamPct = 0;
+var strokesUsed = 0;
+var strokesLeft = MAX_STROKES;
+var round = 1;
+var roundsCleared = 0;
+var bestRound = 0;
+var currentTarget = TARGET_FOAM_PCT;
+var dailySeed = 0;
+var showHelp = false;
+
+// Whisk drag state — the chasen follows the pointer; we score strokes on
+// pointer-up so a continuous drag is one stroke regardless of length.
+var dragging = false;
+var dragPath = [];          // [{x, y, t}, ...]
+var dragStartT = 0;
+var lastPointerX = 0, lastPointerY = 0;
+
+// Particles for cherry-blossom emission on good strokes (separate from gf-lib
+// so we can keep them slow + soft, matching the zen aesthetic)
+var blossoms = [];
+
+// Bowl rim pulse (animates when foam in target zone) and stroke-feedback float
+var rimPulse = 0;
+var lastStrokeQuality = '';   // 'good'|'ok'|'weak' — shown briefly on stroke end
+var lastStrokeFloatT = 0;
+
+// HUD button rects (recomputed each draw so the click hit-test matches)
+var hudHelpRect = null;
+var pourBtnRect = null;
+var menuPlayRect = null;
+var endActionRect = null;
+
+// ── DAILY SEED ───────────────────────────────────────────────────────────
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function computeDailySeed() {
+  var d = new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+}
+function targetFoamFor(roundN) {
+  // Round 1 starts at 80, ramps to 92 by round 5. Daily seed shifts +/-3.
+  var base = TARGET_FOAM_PCT + (roundN - 1) * 3;
+  var prng = mulberry32(dailySeed + roundN);
+  var shift = Math.floor((prng() - 0.5) * 6);
+  return Math.max(70, Math.min(95, base + shift));
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  round = 1;
+  roundsCleared = 0;
+  startRound();
+}
+function startRound() {
+  foamPct = 0;
+  strokesUsed = 0;
+  strokesLeft = MAX_STROKES;
+  currentTarget = targetFoamFor(round);
+  dragging = false;
+  dragPath = [];
+  blossoms.length = 0;
+  rimPulse = 0;
+  lastStrokeQuality = '';
+  lastStrokeFloatT = 0;
+  showHelp = false;
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function roundWon() {
+  roundsCleared++;
+  if (round >= ROUND_COUNT) {
+    gs = 'WON';
+    if (roundsCleared > bestRound) {
+      bestRound = roundsCleared;
+      try { localStorage.setItem('matcha_best', bestRound); } catch (e) {}
+    }
+    GF.gameEnded();
+  } else {
+    gs = 'ROUND_WON';
+  }
+  GF.saveRun();
+}
+function gameOver() {
+  if (roundsCleared > bestRound) {
+    bestRound = roundsCleared;
+    try { localStorage.setItem('matcha_best', bestRound); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+  GF.saveRun();
+}
+function nextRound() {
+  round++;
+  startRound();
+}
+
+// Screenshot escape hatch — fast-forward to a populated mid-round state.
+window._jumpLevel = function (lv) {
+  startGame();
+  round = Math.max(1, Math.min(ROUND_COUNT, lv || 2));
+  startRound();
+  foamPct = 60;
+  strokesUsed = 25;
+  strokesLeft = MAX_STROKES - 25;
+  // Emit some idle blossoms so the screenshot has motion
+  for (var i = 0; i < 12; i++) {
+    blossoms.push({
+      x: Math.random() * GF.W,
+      y: Math.random() * GF.H * 0.7,
+      vx: (Math.random() - 0.5) * 30,
+      vy: 20 + Math.random() * 30,
+      r: 4 + Math.random() * 5,
+      life: 2 + Math.random() * 2,
+      maxLife: 4,
+      tone: Math.random() < 0.5 ? COL_BLOSSOM : COL_BLOSSOM2,
+      rot: Math.random() * Math.PI,
+      vrot: (Math.random() - 0.5) * 1.5,
+    });
+  }
+};
+window._setupForScreenshot = window._jumpLevel;
+
+// ── BOWL GEOMETRY ─────────────────────────────────────────────────────────
+function bowlMetrics() {
+  var minDim = Math.min(GF.W, GF.H);
+  var r = minDim * BOWL_RADIUS_FRAC;
+  var cx = GF.W * 0.5;
+  // Push bowl slightly above centre so the HUD + meter strip have room
+  var cy = GF.H * 0.55;
+  return { cx: cx, cy: cy, r: r };
+}
+function isInsideBowl(x, y) {
+  var m = bowlMetrics();
+  var dx = x - m.cx, dy = y - m.cy;
+  return (dx * dx + dy * dy) <= m.r * m.r * 0.95;
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────────────
+function onPointerDown(x, y) {
+  // Help button — clickable in any state
+  if (hudHelpRect && hitRect(hudHelpRect, x, y)) {
+    showHelp = !showHelp;
+    return;
+  }
+  if (showHelp) { showHelp = false; return; }
+  if (gs === 'MENU') {
+    if (menuPlayRect && hitRect(menuPlayRect, x, y)) startGame();
+    return;
+  }
+  if (gs === 'GAMEOVER') {
+    if (endActionRect && hitRect(endActionRect, x, y)) startGame();
+    return;
+  }
+  if (gs === 'WON') {
+    if (endActionRect && hitRect(endActionRect, x, y)) startGame();
+    return;
+  }
+  if (gs === 'ROUND_WON') {
+    if (endActionRect && hitRect(endActionRect, x, y)) nextRound();
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  // POUR button — declares "I'm done", finalises the bowl
+  if (pourBtnRect && hitRect(pourBtnRect, x, y)) {
+    finalisePour();
+    return;
+  }
+  if (!isInsideBowl(x, y)) return;
+  dragging = true;
+  dragPath = [{ x: x, y: y, t: performance.now() }];
+  dragStartT = performance.now();
+  lastPointerX = x; lastPointerY = y;
+}
+function onPointerMove(x, y) {
+  if (!dragging) return;
+  if (gs !== 'PLAYING') return;
+  // Sample at ~60Hz max; throttle to avoid path spam
+  var now = performance.now();
+  var prev = dragPath[dragPath.length - 1];
+  if (now - prev.t < 12) return;
+  dragPath.push({ x: x, y: y, t: now });
+  lastPointerX = x; lastPointerY = y;
+}
+function onPointerUp() {
+  if (!dragging) return;
+  dragging = false;
+  if (gs !== 'PLAYING') return;
+  scoreStroke();
+  dragPath = [];
+}
+function hitRect(r, x, y) {
+  return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+GF.canvas.addEventListener('mousedown', function (e) { onPointerDown(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mousemove', function (e) { onPointerMove(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mouseup',   function () { onPointerUp(); });
+GF.canvas.addEventListener('mouseleave',function () { onPointerUp(); });
+GF.canvas.addEventListener('touchstart', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPointerDown(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPointerMove(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchend',    function () { onPointerUp(); }, { passive: false });
+GF.canvas.addEventListener('touchcancel', function () { onPointerUp(); }, { passive: false });
+
+document.addEventListener('keydown', function (e) {
+  if (e.code === 'Space') {
+    if (gs === 'PLAYING') { finalisePour(); e.preventDefault(); }
+    else if (gs === 'MENU') { startGame(); e.preventDefault(); }
+    else if (gs === 'ROUND_WON') { nextRound(); e.preventDefault(); }
+    else if (gs === 'GAMEOVER' || gs === 'WON') { startGame(); e.preventDefault(); }
+  }
+  if (e.code === 'KeyH' || e.code === 'Slash') { showHelp = !showHelp; }
+});
+
+// ── STROKE SCORING ───────────────────────────────────────────────────────
+function scoreStroke() {
+  if (dragPath.length < 2) return;
+  // Path length
+  var len = 0;
+  for (var i = 1; i < dragPath.length; i++) {
+    var dx = dragPath[i].x - dragPath[i-1].x;
+    var dy = dragPath[i].y - dragPath[i-1].y;
+    len += Math.sqrt(dx*dx + dy*dy);
+  }
+  if (len < MIN_STROKE_LEN_PX) return;
+  strokesUsed++;
+  strokesLeft = Math.max(0, MAX_STROKES - strokesUsed);
+
+  // Duration + average speed
+  var dur = Math.max(50, (dragPath[dragPath.length-1].t - dragPath[0].t)) / 1000;
+  var speed = len / dur;
+  var speedDelta = Math.abs(speed - GOOD_STROKE_SPEED);
+  var speedScore = Math.max(0, 1 - speedDelta / SPEED_TOLERANCE);
+
+  // Direction reversal score — count X-direction changes; M-shape = many flips
+  var flips = 0;
+  var lastDx = 0;
+  for (var j = 1; j < dragPath.length; j++) {
+    var dxj = dragPath[j].x - dragPath[j-1].x;
+    if (lastDx !== 0 && Math.sign(dxj) !== 0 && Math.sign(dxj) !== Math.sign(lastDx)) {
+      flips++;
+    }
+    if (Math.sign(dxj) !== 0) lastDx = dxj;
+  }
+  // Optimal is ~3-6 flips on a single stroke (the "M" zigzag)
+  var flipScore = flips >= 3 && flips <= 8 ? 1
+                : flips >= 2 ? 0.6
+                : flips === 1 ? 0.3
+                : 0.1; // 0 flips = straight drag = stir
+
+  // Length score — longer strokes (within the bowl) get more credit
+  var bowl = bowlMetrics();
+  var lenScore = Math.min(1, len / (bowl.r * 2.0));
+
+  // Combine — speed is the dominant factor at 0.5, flips at 0.35, length at 0.15
+  var quality = speedScore * 0.5 + flipScore * 0.35 + lenScore * 0.15;
+
+  var gain;
+  if (quality > 0.65) { gain = FOAM_PER_GOOD; lastStrokeQuality = 'good'; emitBlossoms(8); }
+  else if (quality > 0.3) { gain = FOAM_PER_AVERAGE; lastStrokeQuality = 'ok'; emitBlossoms(3); }
+  else { gain = FOAM_PER_AVERAGE * 0.3; lastStrokeQuality = 'weak'; }
+
+  foamPct = Math.min(100, foamPct + gain);
+  lastStrokeFloatT = 1.0;
+
+  // After every stroke, check terminal states
+  if (foamPct >= currentTarget && strokesLeft >= 0) {
+    // Don't auto-end here — let the player tap POUR to confirm. The rim
+    // pulses in target zone so they know they can stop.
+  }
+  if (strokesLeft <= 0) {
+    if (foamPct >= currentTarget) roundWon();
+    else gameOver();
+  }
+}
+
+function finalisePour() {
+  // POUR button: only valid in target zone or after exhausting strokes
+  if (foamPct >= currentTarget) {
+    roundWon();
+  } else {
+    // Soft refuse — float a hint, don't penalise
+    lastStrokeQuality = 'weak';
+    lastStrokeFloatT = 1.0;
+  }
+}
+
+function emitBlossoms(n) {
+  var bowl = bowlMetrics();
+  for (var i = 0; i < n; i++) {
+    var ang = Math.random() * Math.PI * 2;
+    var rad = bowl.r * (0.4 + Math.random() * 0.5);
+    blossoms.push({
+      x: bowl.cx + Math.cos(ang) * rad,
+      y: bowl.cy + Math.sin(ang) * rad,
+      vx: (Math.random() - 0.5) * 60,
+      vy: -20 - Math.random() * 40,
+      r: 3 + Math.random() * 5,
+      life: 2 + Math.random() * 1.5,
+      maxLife: 3.5,
+      tone: Math.random() < 0.5 ? COL_BLOSSOM : COL_BLOSSOM2,
+      rot: Math.random() * Math.PI,
+      vrot: (Math.random() - 0.5) * 1.5,
+    });
+  }
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (foamPct >= currentTarget && gs === 'PLAYING') {
+    rimPulse = Math.min(1, rimPulse + dt * 2);
+  } else {
+    rimPulse = Math.max(0, rimPulse - dt * 1.5);
+  }
+  // Blossom integration (independent of game state — keeps drift on menu too)
+  for (var i = blossoms.length - 1; i >= 0; i--) {
+    var b = blossoms[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.vy += 50 * dt;                    // gentle gravity
+    b.vx *= 0.99;
+    b.rot += b.vrot * dt;
+    b.life -= dt;
+    if (b.life <= 0 || b.y > GF.H + 30) blossoms.splice(i, 1);
+  }
+  // On idle MENU, drift a slow blossom for atmosphere
+  if (gs === 'MENU' && blossoms.length < 6 && Math.random() < 0.02) {
+    blossoms.push({
+      x: Math.random() * GF.W,
+      y: -10,
+      vx: (Math.random() - 0.5) * 20,
+      vy: 25 + Math.random() * 15,
+      r: 4 + Math.random() * 4,
+      life: 6, maxLife: 6,
+      tone: Math.random() < 0.5 ? COL_BLOSSOM : COL_BLOSSOM2,
+      rot: Math.random() * Math.PI,
+      vrot: (Math.random() - 0.5) * 1,
+    });
+  }
+  lastStrokeFloatT = Math.max(0, lastStrokeFloatT - dt * 1.2);
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(c) {
+  // Background fill (cream)
+  c.fillStyle = COL_BG;
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs !== 'MENU') {
+    drawBowl(c);
+    drawWhisk(c);
+    drawBlossoms(c);
+    drawHUD(c);
+    if (gs === 'PLAYING') drawStrokeFeedback(c);
+  } else {
+    drawBlossoms(c);
+    drawMenu(c);
+  }
+
+  if (gs === 'GAMEOVER')  drawEndOverlay(c, GF.t('gameover'), GF.t('retry'));
+  if (gs === 'WON')       drawEndOverlay(c, GF.t('won'),      GF.t('retry'));
+  if (gs === 'ROUND_WON') drawEndOverlay(c, GF.t('round_won'), GF.t('next'));
+
+  if (showHelp) drawHelpPanel(c);
+}
+
+function drawBowl(c) {
+  var b = bowlMetrics();
+
+  // Outer shadow
+  c.save();
+  c.globalAlpha = 0.18;
+  c.fillStyle = COL_INK;
+  c.beginPath();
+  c.ellipse(b.cx, b.cy + b.r * 0.95, b.r * 1.05, b.r * 0.22, 0, 0, Math.PI * 2);
+  c.fill();
+  c.restore();
+
+  // Bowl outer (ceramic body)
+  c.fillStyle = COL_BOWL;
+  c.beginPath();
+  c.arc(b.cx, b.cy, b.r * 1.02, 0, Math.PI * 2);
+  c.fill();
+
+  // Bowl rim ring (pulses in target zone)
+  var rimW = Math.max(3, b.r * 0.06);
+  var rimAlpha = 0.85 + Math.sin(performance.now() / 350) * 0.10 * rimPulse;
+  c.strokeStyle = rimPulse > 0.2 ? COL_TARGET : COL_BOWL_RIM;
+  c.lineWidth = rimW * (1 + rimPulse * 0.4);
+  c.globalAlpha = rimAlpha;
+  c.beginPath();
+  c.arc(b.cx, b.cy, b.r * 1.02 - rimW / 2, 0, Math.PI * 2);
+  c.stroke();
+  c.globalAlpha = 1;
+
+  // Inner liquid base (matcha green at low foam, brighter as foam climbs)
+  c.fillStyle = COL_FOAM;
+  c.beginPath();
+  c.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
+  c.fill();
+
+  // Foam coverage — render as soft radial blobs that grow with foamPct.
+  // Visual model: 8 blob centres jittered around the bowl; each grows
+  // its radius proportional to foamPct. At 100% they overlap completely.
+  var prng = mulberry32(dailySeed * 17 + round);
+  var blobCount = 9;
+  c.save();
+  c.beginPath();
+  c.arc(b.cx, b.cy, b.r * 0.985, 0, Math.PI * 2);
+  c.clip();
+  for (var bi = 0; bi < blobCount; bi++) {
+    var ang = (bi / blobCount) * Math.PI * 2 + prng() * 0.6;
+    var rad = b.r * 0.45 * (0.6 + prng() * 0.6);
+    var px = b.cx + Math.cos(ang) * rad;
+    var py = b.cy + Math.sin(ang) * rad;
+    var blobR = (b.r * 0.28) * (foamPct / 100) + b.r * 0.05;
+    var g = c.createRadialGradient(px, py, 0, px, py, blobR);
+    g.addColorStop(0,   COL_FOAM_HI);
+    g.addColorStop(0.6, COL_FOAM_HI);
+    g.addColorStop(1,   'rgba(207,224,164,0)');
+    c.fillStyle = g;
+    c.fillRect(px - blobR, py - blobR, blobR * 2, blobR * 2);
+  }
+  // Central foam ring once we cross the target
+  if (foamPct >= currentTarget) {
+    c.strokeStyle = 'rgba(255,255,255,0.55)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.arc(b.cx, b.cy, b.r * 0.75, 0, Math.PI * 2);
+    c.stroke();
+  }
+  c.restore();
+}
+
+function drawWhisk(c) {
+  // Chasen: a vertical handle + flared bristles. Position follows the
+  // pointer when dragging; otherwise rests beside the bowl.
+  var b = bowlMetrics();
+  var x, y;
+  if (dragging) { x = lastPointerX; y = lastPointerY; }
+  else { x = b.cx + b.r * 1.2; y = b.cy - b.r * 0.8; }
+  var s = b.r * 0.45;
+
+  c.save();
+  c.translate(x, y);
+  // Handle
+  c.strokeStyle = COL_CHASEN;
+  c.lineWidth = Math.max(3, s * 0.08);
+  c.lineCap = 'round';
+  c.beginPath();
+  c.moveTo(0, -s * 0.9);
+  c.lineTo(0, 0);
+  c.stroke();
+  // Bristles flare
+  c.lineWidth = Math.max(1.5, s * 0.04);
+  c.strokeStyle = '#cdd6b2';
+  for (var i = -4; i <= 4; i++) {
+    var ang = i / 4 * 0.55;
+    c.beginPath();
+    c.moveTo(0, 0);
+    c.lineTo(Math.sin(ang) * s * 0.35, s * 0.55 * Math.cos(ang));
+    c.stroke();
+  }
+  // Central tip
+  c.fillStyle = COL_CHASEN;
+  c.beginPath();
+  c.arc(0, 0, s * 0.08, 0, Math.PI * 2);
+  c.fill();
+  c.restore();
+
+  // Draw the live drag path while moving — a faint ghost trail showing the M shape
+  if (dragging && dragPath.length > 1) {
+    c.save();
+    c.strokeStyle = 'rgba(122,140,102,0.4)';
+    c.lineWidth = 3;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.beginPath();
+    c.moveTo(dragPath[0].x, dragPath[0].y);
+    for (var k = 1; k < dragPath.length; k++) c.lineTo(dragPath[k].x, dragPath[k].y);
+    c.stroke();
+    c.restore();
+  }
+}
+
+function drawBlossoms(c) {
+  for (var i = 0; i < blossoms.length; i++) {
+    var b = blossoms[i];
+    var a = Math.min(1, b.life / b.maxLife);
+    c.save();
+    c.globalAlpha = a;
+    c.translate(b.x, b.y);
+    c.rotate(b.rot);
+    c.fillStyle = b.tone;
+    c.beginPath();
+    // 5-petal-ish small blob
+    for (var p = 0; p < 5; p++) {
+      var pa = (p / 5) * Math.PI * 2;
+      c.ellipse(Math.cos(pa) * b.r * 0.6, Math.sin(pa) * b.r * 0.6, b.r * 0.55, b.r * 0.35, pa, 0, Math.PI * 2);
+    }
+    c.fill();
+    c.restore();
+  }
+}
+
+function drawHUD(c) {
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillStyle = COL_INK;
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  var pad = 14 * GF.S;
+  // Round (top-left)
+  c.fillText(GF.t('round') + ' ' + round + '/' + ROUND_COUNT, pad, pad);
+  // Strokes left (top-center)
+  c.textAlign = 'center';
+  c.fillText(GF.t('strokes') + ' ' + strokesLeft + '/' + MAX_STROKES, GF.W / 2, pad);
+  // Help button (top-right)
+  var hSize = GF.clamp(34 * GF.S, 28, 44);
+  var hx = GF.W - pad - hSize;
+  var hy = pad - 6 * GF.S;
+  c.fillStyle = '#e7dcc4';
+  GF.rr(c, hx, hy, hSize, hSize, hSize * 0.3); c.fill();
+  c.strokeStyle = COL_INK_SOFT;
+  c.lineWidth = 1.5;
+  GF.rr(c, hx + 0.5, hy + 0.5, hSize - 1, hSize - 1, hSize * 0.3); c.stroke();
+  c.fillStyle = COL_INK;
+  c.font = 'bold ' + Math.floor(hSize * 0.55) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('help'), hx + hSize / 2, hy + hSize / 2 + 1);
+  hudHelpRect = { x: hx, y: hy, w: hSize, h: hSize };
+
+  // Foam meter — horizontal hex-pip strip below the bowl
+  drawFoamMeter(c);
+  drawPourButton(c);
+}
+
+function drawFoamMeter(c) {
+  var bowl = bowlMetrics();
+  var pips = 10;
+  var pipGap = 6 * GF.S;
+  var pipW = (bowl.r * 1.7) / pips - pipGap;
+  pipW = Math.max(14 * GF.S, pipW);
+  var totalW = (pipW + pipGap) * pips - pipGap;
+  var sx = bowl.cx - totalW / 2;
+  var sy = bowl.cy + bowl.r + 30 * GF.S;
+  var pipH = 16 * GF.S;
+  var filledTo = (foamPct / 100) * pips;
+  var targetPip = (currentTarget / 100) * pips;
+  for (var i = 0; i < pips; i++) {
+    var pipX = sx + i * (pipW + pipGap);
+    var inTarget = (i + 0.5) >= targetPip - 0.5 && (i + 0.5) <= targetPip + 0.5;
+    var filled = i < filledTo;
+    if (filled) {
+      c.fillStyle = i >= Math.floor(targetPip) ? COL_TARGET : COL_FOAM;
+    } else {
+      c.fillStyle = '#e6dcc2';
+    }
+    GF.rr(c, pipX, sy, pipW, pipH, pipH * 0.4); c.fill();
+    if (inTarget) {
+      c.strokeStyle = COL_TARGET;
+      c.lineWidth = 2;
+      GF.rr(c, pipX + 0.5, sy + 0.5, pipW - 1, pipH - 1, pipH * 0.4); c.stroke();
+    }
+  }
+  // Numerical readout above meter
+  c.fillStyle = COL_INK_SOFT;
+  c.font = 'bold ' + GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'bottom';
+  c.fillText(GF.t('foam') + ' ' + Math.floor(foamPct) + '% / ' + currentTarget + '%', bowl.cx, sy - 6 * GF.S);
+}
+
+function drawPourButton(c) {
+  var bowl = bowlMetrics();
+  var bw = GF.clamp(180 * GF.S, 130, 240);
+  var bh = GF.clamp(44 * GF.S, 36, 56);
+  var bx = bowl.cx - bw / 2;
+  var by = GF.H - bh - 22 * GF.S;
+  var enabled = foamPct >= currentTarget;
+  c.fillStyle = enabled ? COL_TARGET : '#cfc2a3';
+  GF.rr(c, bx, by, bw, bh, bh / 2); c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 20) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('pour'), bx + bw / 2, by + bh / 2);
+  pourBtnRect = { x: bx, y: by, w: bw, h: bh };
+}
+
+function drawStrokeFeedback(c) {
+  if (lastStrokeFloatT <= 0 || !lastStrokeQuality) return;
+  var msg = lastStrokeQuality === 'good' ? '+' + FOAM_PER_GOOD.toFixed(1) + '%'
+          : lastStrokeQuality === 'ok'   ? '+' + FOAM_PER_AVERAGE.toFixed(1) + '%'
+          : '·';
+  var col = lastStrokeQuality === 'good' ? COL_TARGET
+          : lastStrokeQuality === 'ok'   ? COL_FOAM
+          : COL_INK_SOFT;
+  var bowl = bowlMetrics();
+  c.save();
+  c.globalAlpha = lastStrokeFloatT;
+  c.fillStyle = col;
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 30) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.fillText(msg, bowl.cx, bowl.cy - bowl.r * 0.5 + (1 - lastStrokeFloatT) * -40 * GF.S);
+  c.restore();
+}
+
+function drawMenu(c) {
+  var fs = GF.clamp(56 * GF.S, 28, 72);
+  c.fillStyle = COL_INK;
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 140 * GF.S);
+  c.fillStyle = COL_INK_SOFT;
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), GF.cx, GF.cy - 105 * GF.S);
+
+  // Tutorial lines under sub
+  var tutFs = GF.clamp(13 * GF.S, 11, 17);
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  var startY = GF.cy - 70 * GF.S;
+  c.font = tutFs + 'px sans-serif';
+  c.fillStyle = COL_INK;
+  for (var i = 0; i < keys.length; i++) {
+    c.fillText(GF.t(keys[i]), GF.cx, startY + i * (tutFs * 1.45));
+  }
+
+  // PLAY button
+  var bw = GF.clamp(240 * GF.S, 160, 320);
+  var bh = GF.clamp(54 * GF.S, 40, 66);
+  var bx = GF.cx - bw / 2;
+  var by = GF.cy + 90 * GF.S;
+  c.fillStyle = COL_TARGET;
+  GF.rr(c, bx, by, bw, bh, bh / 2); c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('play'), GF.cx, by + bh / 2);
+  c.textBaseline = 'alphabetic';
+  menuPlayRect = { x: bx, y: by, w: bw, h: bh };
+
+  if (bestRound > 0) {
+    c.fillStyle = COL_INK_SOFT;
+    c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    c.fillText(GF.t('best') + ': ' + bestRound + '/' + ROUND_COUNT, GF.cx, by + bh + 28 * GF.S);
+  }
+}
+
+function drawEndOverlay(c, title, actionLabel) {
+  c.fillStyle = 'rgba(60,50,40,0.55)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + GF.clamp(38 * GF.S, 22, 56) + 'px sans-serif';
+  c.fillText(title, GF.cx, GF.cy - 60 * GF.S);
+  c.font = GF.clamp(16 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillStyle = '#f0e8d2';
+  c.fillText(GF.t('round') + ' ' + round + '/' + ROUND_COUNT + ' · ' + GF.t('foam') + ' ' + Math.floor(foamPct) + '%', GF.cx, GF.cy - 20 * GF.S);
+
+  // Action button
+  var bw = GF.clamp(220 * GF.S, 160, 280);
+  var bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = GF.cx - bw / 2;
+  var by = GF.cy + 30 * GF.S;
+  c.fillStyle = COL_TARGET;
+  GF.rr(c, bx, by, bw, bh, bh / 2); c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 20) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(actionLabel, GF.cx, by + bh / 2);
+  c.textBaseline = 'alphabetic';
+  endActionRect = { x: bx, y: by, w: bw, h: bh };
+}
+
+function drawHelpPanel(c) {
+  c.fillStyle = 'rgba(60,50,40,0.85)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + GF.clamp(28 * GF.S, 18, 38) + 'px sans-serif';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 120 * GF.S);
+  c.font = fs + 'px sans-serif';
+  c.fillStyle = '#f0e8d2';
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  for (var i = 0; i < keys.length; i++) {
+    c.fillText(GF.t(keys[i]), GF.cx, GF.cy - 70 * GF.S + i * (fs * 1.5));
+  }
+  c.fillStyle = '#cdd6b2';
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.fillText('tap to close', GF.cx, GF.cy + 100 * GF.S);
+}
+
+// ── EXPOSE STATE for the runtime gate ────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    foamPct: foamPct,
+    strokesUsed: strokesUsed,
+    strokesLeft: strokesLeft,
+    round: round,
+    roundsCleared: roundsCleared,
+    currentTarget: currentTarget,
+    MAX_STROKES: MAX_STROKES,
+    TARGET_FOAM_PCT: TARGET_FOAM_PCT,
+    ROUND_COUNT: ROUND_COUNT,
+  };
+});
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'matcha',
+  onReady: function () {
+    dailySeed = computeDailySeed();
+    try { bestRound = parseInt(localStorage.getItem('matcha_best') || '0') || 0; } catch (e) {}
+    GF.persist('matcha_run_v1',
+      function () {
+        return {
+          gs: gs, round: round, roundsCleared: roundsCleared,
+          foamPct: foamPct, strokesUsed: strokesUsed, strokesLeft: strokesLeft,
+          currentTarget: currentTarget,
+        };
+      },
+      function (s) {
+        if (!s) return;
+        // Safe-entry: never resume in PLAYING — bounce to MENU so the player
+        // doesn't lose a stroke to a reload mid-drag.
+        gs = 'MENU';
+      }
+    );
+    if (gs === 'PLAYING' || gs === 'MENU') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>
