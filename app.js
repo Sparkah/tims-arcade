@@ -159,7 +159,10 @@ function paintAuthPill() {
     if (initial) initial.textContent = (me.email[0] || '?').toUpperCase();
     if (emailEl) emailEl.textContent = ' · ' + me.email.split('@')[0];
   } else {
-    link.style.display = 'inline-flex';
+    // Sign-in CTA hidden from gallery home (Tim 2026-05-15) — accounts work
+    // but we're not promoting them yet. Keep the signed-in pill so anyone
+    // already logged in can still see who they are + sign out.
+    link.style.display = 'none';
     user.style.display = 'none';
   }
 }

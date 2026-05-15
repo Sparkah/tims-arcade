@@ -88,7 +88,7 @@ export async function onRequestGet({ request, env }) {
         const id = rest.slice(lastColon + 1);
         const data = await env.VOTES.get(k.name, 'json');
         if (!data) continue;
-        comments.push({ slug, id, vote: data.vote, comment: data.comment, ts: data.ts });
+        comments.push({ slug, id, vote: data.vote, comment: data.comment, ts: data.ts, ...(data.imageId ? { imageId: data.imageId } : {}) });
       }
       cursor = list.list_complete ? null : list.cursor;
     } while (cursor);

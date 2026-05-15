@@ -18,9 +18,11 @@ export async function onRequestPost({ request, env }) {
   const slug    = String(body.slug || '');
   const vote    = String(body.vote || '');
   const comment = String(body.comment || '').slice(0, 500).trim();
+  const imageId = String(body.imageId || '').slice(0, 32).trim();
 
   if (!/^[a-z0-9_-]{1,40}$/i.test(slug))                return jsonError('bad_slug', 400);
-  if (!['like','dislike','neutral'].includes(vote))     return jsonError('bad_vote', 400);
+  if (!['like','dislike','neutral','empty'].includes(vote)) return jsonError('bad_vote', 400);
+  if (imageId && !/^[a-z0-9]{4,32}$/.test(imageId))     return jsonError('bad_image_id', 400);
 
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `fbrate:${ip}:${Math.floor(Date.now() / 60000)}`;
@@ -37,11 +39,11 @@ export async function onRequestPost({ request, env }) {
     await env.VOTES.put(key, JSON.stringify(cur));
   }
 
-  // Comment storage (skipped if empty)
-  if (comment) {
+  // Comment storage (skipped if empty AND no image)
+  if (comment || imageId) {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const ckey = `comment:${slug}:${id}`;
-    const payload = JSON.stringify({ vote, comment, ts: Date.now() });
+    const payload = JSON.stringify({ vote, comment, ts: Date.now(), ...(imageId ? { imageId } : {}) });
     await env.VOTES.put(ckey, payload);
   }
 

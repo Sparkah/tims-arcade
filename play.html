@@ -386,6 +386,18 @@
         <button id="rate-down" class="rate-thumb down">👎</button>
       </div>
       <textarea id="rate-comment" placeholder="One thing that worked / didn't work? (optional)" rows="2"></textarea>
+      <div id="rate-img-zone" class="rate-img-zone" tabindex="0">
+        <input type="file" id="rate-img-file" accept="image/png,image/jpeg,image/webp" hidden>
+        <div class="rate-img-empty">
+          <span class="rate-img-icon">📎</span>
+          <span class="rate-img-text">Drop / paste a screenshot, or <a href="#" id="rate-img-pick">pick a file</a></span>
+        </div>
+        <div class="rate-img-preview" hidden>
+          <img id="rate-img-thumb" alt="Attached screenshot">
+          <button type="button" id="rate-img-clear" class="rate-img-clear" title="Remove">×</button>
+          <span id="rate-img-status" class="rate-img-status"></span>
+        </div>
+      </div>
       <div class="rate-actions">
         <button id="rate-skip" class="rate-skip">Skip</button>
         <button id="rate-send" class="rate-send">Send</button>
@@ -473,6 +485,57 @@
     }
     #rate-comment:focus { border-color: var(--accent); }
     html[data-theme="brutalist"] #rate-comment { border-width: 2px; border-radius: 0; }
+    .rate-img-zone {
+      border: 1px dashed var(--rule);
+      border-radius: var(--radius);
+      padding: 10px;
+      margin-bottom: 10px;
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      font-family: var(--font-body);
+    }
+    html[data-theme="brutalist"] .rate-img-zone { border-width: 2px; border-radius: 0; }
+    .rate-img-zone:hover, .rate-img-zone.dragover {
+      border-color: var(--accent);
+      background: var(--rule-soft);
+    }
+    .rate-img-empty {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 12px;
+      color: var(--ink-muted);
+    }
+    .rate-img-icon { font-size: 16px; }
+    .rate-img-text a { color: var(--accent); text-decoration: underline; }
+    .rate-img-preview {
+      position: relative;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .rate-img-preview img {
+      max-width: 80px;
+      max-height: 60px;
+      border-radius: 4px;
+      border: 1px solid var(--rule);
+      object-fit: cover;
+    }
+    .rate-img-clear {
+      background: var(--bg);
+      border: 1px solid var(--rule);
+      color: var(--ink-muted);
+      width: 24px; height: 24px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0;
+    }
+    .rate-img-clear:hover { color: var(--warn); border-color: var(--warn); }
+    .rate-img-status {
+      font-size: 11px;
+      color: var(--ink-muted);
+      font-family: var(--font-mono);
+    }
+    .rate-img-status.error { color: var(--warn); }
     .rate-actions { display: flex; gap: 8px; justify-content: flex-end; }
     .rate-skip {
       padding: 8px 14px;
@@ -1000,10 +1063,20 @@
       const downBtn    = document.getElementById('rate-down');
       const sendBtn    = document.getElementById('rate-send');
       const commentEl  = document.getElementById('rate-comment');
+      const imgZone    = document.getElementById('rate-img-zone');
+      const imgFile    = document.getElementById('rate-img-file');
+      const imgPick    = document.getElementById('rate-img-pick');
+      const imgEmpty   = imgZone.querySelector('.rate-img-empty');
+      const imgPreview = imgZone.querySelector('.rate-img-preview');
+      const imgThumb   = document.getElementById('rate-img-thumb');
+      const imgClear   = document.getElementById('rate-img-clear');
+      const imgStatus  = document.getElementById('rate-img-status');
       let selectedVote = null;   // 'like' | 'dislike' | null — committed only on Send
+      let attachedImage = null;  // { mime, dataUrl, blob } once resized
+      let attachedImageId = null; // set after successful upload
 
       function refreshReady() {
-        const ready = !!selectedVote || commentEl.value.trim().length > 0;
+        const ready = !!selectedVote || commentEl.value.trim().length > 0 || !!attachedImage;
         sendBtn.classList.toggle('ready', ready);
       }
       function setVote(v) {
@@ -1016,9 +1089,20 @@
       async function send() {
         const comment = commentEl.value.trim().slice(0, 500);
         const vote    = selectedVote || 'empty';   // explicit "I saw it, sending blank"
-        if (window.posthog) posthog.capture('game_feedback_submitted', { slug, vote, has_comment: comment.length > 0 });
+
+        // If an image was picked but not uploaded yet, await the upload
+        // before posting feedback. We can't use sendBeacon here because
+        // the upload + linked feedback POST needs to complete in order;
+        // worst case the user closed the tab before we got here, in which
+        // case the unload-time fallback below handles it.
+        if (attachedImage && !attachedImageId) {
+          try { await uploadAttachedImage(); } catch (e) { /* leave attachedImageId null */ }
+        }
+        const imageId = attachedImageId || '';
+
+        if (window.posthog) posthog.capture('game_feedback_submitted', { slug, vote, has_comment: comment.length > 0, has_image: !!imageId });
         try {
-          const body = JSON.stringify({ slug, vote, comment });
+          const body = JSON.stringify({ slug, vote, comment, imageId });
           if (navigator.sendBeacon) {
             navigator.sendBeacon('/api/feedback', new Blob([body], { type: 'application/json' }));
           } else {
@@ -1031,6 +1115,123 @@
         localStorage.setItem('myVotes', JSON.stringify(myVotesNow));
         close(); go();
       }
+
+      // ─── Image attach: drop / paste / pick → resize → preview → upload ───
+
+      const MAX_DIM = 1024;          // px, longer edge
+      const TARGET_QUALITY = 0.82;   // webp quality
+
+      function showImgError(msg) {
+        imgStatus.textContent = msg;
+        imgStatus.classList.add('error');
+      }
+      function showImgInfo(msg) {
+        imgStatus.textContent = msg;
+        imgStatus.classList.remove('error');
+      }
+
+      function clearImage() {
+        attachedImage = null;
+        attachedImageId = null;
+        imgFile.value = '';
+        imgThumb.src = '';
+        imgPreview.hidden = true;
+        imgEmpty.hidden = false;
+        imgStatus.textContent = '';
+        imgStatus.classList.remove('error');
+        refreshReady();
+      }
+
+      async function attachFromBlob(blob) {
+        if (!blob) return;
+        if (!/^image\/(png|jpe?g|webp|gif)$/i.test(blob.type)) {
+          showImgError('Not an image');
+          return;
+        }
+        if (blob.size > 12_000_000) {
+          showImgError('Too big (>12MB before resize)');
+          return;
+        }
+        showImgInfo('Resizing…');
+        try {
+          const resized = await resizeImage(blob);
+          attachedImage = resized;
+          attachedImageId = null;
+          imgThumb.src = resized.dataUrl;
+          imgEmpty.hidden = true;
+          imgPreview.hidden = false;
+          showImgInfo(`Ready · ${(resized.bytes / 1024).toFixed(0)} KB`);
+          refreshReady();
+        } catch (e) {
+          showImgError('Resize failed');
+        }
+      }
+
+      async function resizeImage(blob) {
+        const bitmap = await createImageBitmap(blob);
+        const scale = Math.min(1, MAX_DIM / Math.max(bitmap.width, bitmap.height));
+        const w = Math.round(bitmap.width * scale);
+        const h = Math.round(bitmap.height * scale);
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+        // Prefer webp; fall back to jpeg if browser doesn't support webp encode.
+        const supportsWebp = c.toDataURL('image/webp').startsWith('data:image/webp');
+        const mime = supportsWebp ? 'image/webp' : 'image/jpeg';
+        const dataUrl = c.toDataURL(mime, TARGET_QUALITY);
+        const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+        const bytes = Math.floor(b64.length * 3 / 4);
+        return { mime, dataUrl, b64, bytes };
+      }
+
+      async function uploadAttachedImage() {
+        if (!attachedImage) return;
+        showImgInfo('Uploading…');
+        const body = JSON.stringify({ slug, mime: attachedImage.mime, data: attachedImage.b64 });
+        const r = await fetch('/api/feedback-image', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body,
+        });
+        if (!r.ok) { showImgError('Upload failed'); throw new Error('upload'); }
+        const out = await r.json();
+        attachedImageId = out.id;
+        showImgInfo('Attached ✓');
+      }
+
+      imgPick.addEventListener('click', e => { e.preventDefault(); imgFile.click(); });
+      imgZone.addEventListener('click', e => {
+        if (e.target.closest('.rate-img-preview')) return;
+        if (imgPreview.hidden) imgFile.click();
+      });
+      imgFile.addEventListener('change', () => {
+        const f = imgFile.files && imgFile.files[0];
+        if (f) attachFromBlob(f);
+      });
+      imgClear.addEventListener('click', e => { e.stopPropagation(); clearImage(); });
+
+      imgZone.addEventListener('dragover', e => { e.preventDefault(); imgZone.classList.add('dragover'); });
+      imgZone.addEventListener('dragleave', () => imgZone.classList.remove('dragover'));
+      imgZone.addEventListener('drop', e => {
+        e.preventDefault();
+        imgZone.classList.remove('dragover');
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) attachFromBlob(f);
+      });
+
+      // Paste handler — works while textarea OR drop zone is focused, plus
+      // a window-level handler when the overlay is open.
+      function handlePaste(e) {
+        if (overlay.style.display !== 'flex') return;
+        const items = (e.clipboardData || {}).items || [];
+        for (const it of items) {
+          if (it.kind === 'file' && /^image\//.test(it.type)) {
+            const f = it.getAsFile();
+            if (f) { e.preventDefault(); attachFromBlob(f); break; }
+          }
+        }
+      }
+      window.addEventListener('paste', handlePaste);
 
       upBtn.addEventListener('click',   () => setVote('like'));
       downBtn.addEventListener('click', () => setVote('dislike'));
