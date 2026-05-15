@@ -50,5 +50,39 @@ export async function onRequestPost({ request, env }) {
   const day = parseInt(await env.VOTES.get(dayKey)) || 0;
   await env.VOTES.put(dayKey, String(day + seconds), { expirationTtl: 60 * 24 * 60 * 60 });
 
+  // Credit meta-layer tokens: 1 token per full minute of play. Featured
+  // Challenge of the day awards 2× — we look up the featured slug from
+  // KV; if it's missing (early in the day before rotation lands) just
+  // award the base rate.
+  const uid = parseCookie(request.headers.get('Cookie') || '', 'uid');
+  if (uid) {
+    let minutes = Math.floor(seconds / 60);
+    if (minutes > 0) {
+      const featured = await env.VOTES.get(`featured:${dateUtc}`);
+      if (featured === slug) minutes *= 2;
+      await creditTokens(env, uid, minutes);
+    }
+  }
+
   return new Response(null, { status: 204 });
+}
+
+function parseCookie(headerVal, name) {
+  if (!headerVal) return null;
+  const parts = headerVal.split(/;\s*/);
+  for (const p of parts) {
+    const eq = p.indexOf('=');
+    if (eq < 0) continue;
+    if (p.slice(0, eq) === name) return p.slice(eq + 1);
+  }
+  return null;
+}
+
+async function creditTokens(env, uid, amount) {
+  if (!uid || !amount || amount <= 0) return;
+  const raw = await env.VOTES.get(`meta:${uid}`, 'json');
+  const m = raw || { tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [] };
+  m.tokens   = (m.tokens   || 0) + amount;
+  m.lifetime = (m.lifetime || 0) + amount;
+  await env.VOTES.put(`meta:${uid}`, JSON.stringify(m));
 }

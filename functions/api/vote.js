@@ -78,9 +78,39 @@ export async function onRequestPost({ request, env }) {
   cur.dislikes = Math.max(0, (cur.dislikes | 0) + dd);
   await env.VOTES.put(key, JSON.stringify(cur));
 
+  // Meta-layer: credit +5 tokens the FIRST time a uid up-votes a slug.
+  // We use the uid cookie (anonymous) here, not session.uid, so anon
+  // players also earn — matches the /api/feedback behaviour.
+  if (dl > 0) {
+    const uid = parseCookie(request.headers.get('Cookie') || '', 'uid');
+    if (uid) {
+      const earnedKey = `liked-earned:${uid}:${slug}`;
+      const already = await env.VOTES.get(earnedKey);
+      if (!already) {
+        await env.VOTES.put(earnedKey, '1', { expirationTtl: 60 * 60 * 24 * 365 });
+        const raw = await env.VOTES.get(`meta:${uid}`, 'json');
+        const m = raw || { tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [] };
+        m.tokens   = (m.tokens   || 0) + 5;
+        m.lifetime = (m.lifetime || 0) + 5;
+        await env.VOTES.put(`meta:${uid}`, JSON.stringify(m));
+      }
+    }
+  }
+
   return new Response(JSON.stringify({ ...cur, myVote }), {
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function parseCookie(headerVal, name) {
+  if (!headerVal) return null;
+  const parts = headerVal.split(/;\s*/);
+  for (const p of parts) {
+    const eq = p.indexOf('=');
+    if (eq < 0) continue;
+    if (p.slice(0, eq) === name) return p.slice(eq + 1);
+  }
+  return null;
 }
 
 function jsonError(msg, status) {

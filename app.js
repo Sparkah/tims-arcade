@@ -107,6 +107,12 @@ async function init() {
   const meP       = fetch('/api/me', { cache: 'no-store', credentials: 'same-origin' })
                       .then(r => r.ok ? r.json() : null)
                       .catch(() => null);
+  const metaP     = fetch('/api/me/meta', { cache: 'no-store', credentials: 'same-origin' })
+                      .then(r => r.ok ? r.json() : null)
+                      .catch(() => null);
+  const featuredP = fetch('/api/featured', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : null)
+                      .catch(() => null);
 
   // FIRST PAINT — block only on the catalogue.
   games = await gamesP;
@@ -140,6 +146,110 @@ async function init() {
       posthog.identify(me.uid, { email: me.email });
     }
   });
+
+  // Meta-layer pill (tokens + streak). Repaints as soon as /api/me/meta lands.
+  metaP.then(m => {
+    if (!m) return;
+    metaState = m;
+    paintMetaPill(m);
+    showMetaWelcomePops(m);
+  });
+
+  // Featured Challenge banner — fills in once /api/featured lands, then the
+  // grid render uses todaysFeaturedSlug to draw the corner badge.
+  featuredP.then(f => {
+    if (!f || !f.slug) return;
+    todaysFeaturedSlug = f.slug;
+    paintFeaturedBanner(f);
+    render();   // re-paint card grid so the FEATURED badge surfaces
+  });
+}
+
+let metaState = null;
+let todaysFeaturedSlug = null;
+
+function paintMetaPill(m) {
+  const pill   = document.getElementById('meta-pill');
+  const tokens = document.getElementById('meta-pill-tokens');
+  const streak = document.getElementById('meta-pill-streak');
+  if (!pill) return;
+  if (tokens) tokens.textContent = '🪙 ' + (m.tokens | 0);
+  if (streak) {
+    const s = m.streak | 0;
+    if (s > 1) {
+      streak.hidden = false;
+      streak.textContent = '🔥 ' + s;
+    } else {
+      streak.hidden = true;
+    }
+  }
+  pill.hidden = false;
+}
+
+function showMetaWelcomePops(m) {
+  // Pop the daily-login and any milestone bonuses with a tiny floater.
+  if (!m.newlyGranted) return;
+  const pill = document.getElementById('meta-pill-tokens');
+  if (!pill) return;
+  if (m.newlyGranted.login) {
+    pill.classList.add('pop');
+    setTimeout(() => pill.classList.remove('pop'), 700);
+  }
+  if (m.newlyGranted.milestones && m.newlyGranted.milestones.length) {
+    for (const ms of m.newlyGranted.milestones) {
+      // Lightweight toast — reuse the gallery's posthog capture so the
+      // event is searchable, then just log a console-friendly mark.
+      if (window.posthog) posthog.capture('streak_milestone', { day: ms.day, bonus: ms.bonus });
+    }
+  }
+}
+
+function paintFeaturedBanner(f) {
+  const banner = document.getElementById('featured-banner');
+  const title  = document.getElementById('featured-banner-title');
+  if (!banner || !f || !f.slug) return;
+  const game = games.find(g => g.slug === f.slug);
+  if (!game) return;
+  banner.href = '/p/' + f.slug;
+  if (title) title.textContent = (game.title || f.slug);
+  banner.hidden = false;
+}
+
+async function openLeaderboard() {
+  const panel = document.getElementById('lb-panel');
+  const body  = document.getElementById('lb-body');
+  if (!panel || !body) return;
+  panel.classList.add('visible');
+  panel.setAttribute('aria-hidden', 'false');
+  body.innerHTML = '<div class="lb-empty">Loading top players…</div>';
+  let data;
+  try {
+    const r = await fetch('/api/leaderboard?limit=30', { cache: 'no-store' });
+    data = r.ok ? await r.json() : null;
+  } catch (_) { /* swallow */ }
+  if (!data || !data.players || !data.players.length) {
+    body.innerHTML = '<div class="lb-empty">No players yet. Play a game to start earning tokens.</div>';
+    return;
+  }
+  const myUid = (window.IDENTITY && window.IDENTITY.uid) || '';
+  body.innerHTML = data.players.map((p, i) => {
+    const rank = (i + 1).toString().padStart(2, '0');
+    const isMe = p.uid === myUid;
+    const name = p.uid.slice(0, 6) + (isMe ? ' (you)' : '');
+    const streak = p.streak > 1 ? `<span class="lb-streak">🔥${p.streak}</span>` : '';
+    return `<div class="lb-row${isMe ? ' me' : ''}">
+      <span class="lb-rank">#${rank}</span>
+      <span class="lb-name">${name}</span>
+      <span class="lb-score">🪙 ${p.lifetime}${streak}</span>
+    </div>`;
+  }).join('');
+}
+
+function closeLeaderboard() {
+  const panel = document.getElementById('lb-panel');
+  if (!panel) return;
+  panel.classList.remove('visible');
+  panel.setAttribute('aria-hidden', 'true');
 }
 
 // Helper — specimen number padded for display ("022")
@@ -171,6 +281,15 @@ function paintAuthPill() {
 let _searchDebounce = null;
 
 function attachEvents() {
+  // Meta-layer: leaderboard drawer toggle.
+  const boardBtn = document.getElementById('meta-pill-board');
+  const closeBtn = document.getElementById('lb-close');
+  if (boardBtn) boardBtn.addEventListener('click', openLeaderboard);
+  if (closeBtn) closeBtn.addEventListener('click', closeLeaderboard);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeLeaderboard();
+  });
+
   tabs.addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');
     if (!btn) return;
@@ -854,8 +973,31 @@ async function vote(slug, action, cardEl) {
         localStorage.setItem('myVotes', JSON.stringify(myVotes));
       }
       refreshCard(cardEl, slug);
+      // If the user just up-voted for the first time on this slug, refetch
+      // their meta state so the token pill updates instantly. The +5 grant
+      // is one-shot per (uid, slug) — repeat votes don't earn — but a stale
+      // pill never under-shows reality.
+      if (next === 'like') refreshMetaPill();
     }
   } catch (e) { /* offline-tolerant */ }
+}
+
+async function refreshMetaPill() {
+  try {
+    const r = await fetch('/api/me/meta', { cache: 'no-store', credentials: 'same-origin' });
+    if (!r.ok) return;
+    const m = await r.json();
+    const before = metaState ? (metaState.tokens | 0) : 0;
+    metaState = m;
+    paintMetaPill(m);
+    if ((m.tokens | 0) > before) {
+      const pill = document.getElementById('meta-pill-tokens');
+      if (pill) {
+        pill.classList.add('pop');
+        setTimeout(() => pill.classList.remove('pop'), 700);
+      }
+    }
+  } catch (_) { /* tolerate */ }
 }
 
 function refreshCard(el, slug) {
