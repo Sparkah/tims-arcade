@@ -231,14 +231,15 @@ async function openLeaderboard() {
     body.innerHTML = '<div class="lb-empty">No players yet. Play a game to start earning tokens.</div>';
     return;
   }
-  const myUid = (window.IDENTITY && window.IDENTITY.uid) || '';
-  // Build rows with DOM nodes instead of innerHTML so uid (cookie-controlled)
-  // can never inject markup, even though we also slice it to 6 chars below.
+  // Server returns shortHash(uid); compute the same hash locally so we can
+  // highlight "you" on the board without ever sending the raw uid back.
+  const myUidRaw = (window.IDENTITY && window.IDENTITY.uid) || '';
+  const myHash = shortHashLocal(myUidRaw);
   body.innerHTML = '';
   data.players.forEach((p, i) => {
     const rank = (i + 1).toString().padStart(2, '0');
-    const isMe = p.uid === myUid;
-    const safeUid = String(p.uid || '').replace(/[^a-z0-9-]/gi, '').slice(0, 6);
+    const isMe = p.uid === myHash;
+    const safeUid = String(p.uid || '').replace(/[^a-z0-9-]/gi, '').slice(0, 8);
     const row = document.createElement('div');
     row.className = 'lb-row' + (isMe ? ' me' : '');
     const rkEl = document.createElement('span');
@@ -268,6 +269,17 @@ function closeLeaderboard() {
   if (!panel) return;
   panel.classList.remove('visible');
   panel.setAttribute('aria-hidden', 'true');
+}
+
+// Mirror of leaderboard.js shortHash — keep these two in sync.
+function shortHashLocal(s) {
+  s = String(s || '');
+  let h = 0x811c9dc5 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return ('00000000' + h.toString(16)).slice(-8);
 }
 
 // Helper — specimen number padded for display ("022")

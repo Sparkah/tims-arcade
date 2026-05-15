@@ -58,7 +58,10 @@ export async function onRequestGet({ request, env }) {
       const lifetime = raw.lifetime | 0;
       if (lifetime <= 0) continue;
       players.push({
-        uid,
+        // Don't expose the raw uid cookie value — return a short hash so
+        // an attacker can't correlate it back to the cookie a player carries
+        // between sessions. The full uid stays in KV (`meta:<uid>`) only.
+        uid: shortHash(uid),
         lifetime,
         tokens: raw.tokens | 0,
         streak: raw.streak | 0,
@@ -87,4 +90,17 @@ export async function onRequestGet({ request, env }) {
   }), {
     headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=60' },
   });
+}
+
+// 8-char hex hash of the uid — non-reversible, collision-resistant enough
+// for display labels. We use FNV-1a over the uid bytes; cheap, no crypto
+// subtle async dance, and the result is stable per uid so a player sees
+// the same handle each visit (lets them recognise themselves on the board).
+function shortHash(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return ('00000000' + h.toString(16)).slice(-8);
 }
