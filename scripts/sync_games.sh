@@ -79,13 +79,17 @@ for ((i = 0; i < COUNT; i++)); do
     [[ -f "$GAME_DIR/$journal" ]] && cp "$GAME_DIR/$journal" "$OUT_GAMES/$SLUG/$journal"
   done
 
-  # Copy thumbnail. Two layouts supported:
-  #   1. Flat:        yandex_promo/desktop_en_1.png
-  #   2. Per-language: yandex_promo/en/desktop_1.png  (used by 10_running_away)
+  # Copy thumbnail. Layouts supported (in order of preference):
+  #   1. Flat gameplay screenshots:     yandex_promo/desktop_en_1.png
+  #   2. Per-language gameplay screens: yandex_promo/en/desktop_1.png  (10_running_away)
+  #   3. Cover art fallback:            yandex_promo/cover_800x470.png
+  #      (used for games that have cover but no screenshots yet — better
+  #       than the broken-image glyph that shipped 2026-05-15)
   THUMB=""
   for cand in \
     desktop_en_1.png desktop_ru_1.png mobile_en_1.png \
-    en/desktop_1.png ru/desktop_1.png en/mobile_1.png; do
+    en/desktop_1.png ru/desktop_1.png en/mobile_1.png \
+    cover_800x470.png en/cover_800x470.png ru/cover_800x470.png; do
     if [[ -f "$GAME_DIR/yandex_promo/$cand" ]]; then THUMB="$GAME_DIR/yandex_promo/$cand"; break; fi
   done
   if [[ -n "$THUMB" ]]; then
