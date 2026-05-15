@@ -21,11 +21,7 @@
 // this allows for shared connections (NAT) while blocking obvious bots.
 
 import { parseCookie } from '../_lib/cookie.js';
-
-// NOTE on the read-modify-write race: heartbeat / vote / feedback / me-meta
-// all do a non-atomic update on the `meta:<uid>` key. Concurrent requests
-// for the same uid can lose token credits (typical race window ~50ms).
-// Acceptable for a casual gallery; tokens are recoverable on next play.
+import { creditTokens } from '../_lib/meta.js';
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -72,13 +68,4 @@ export async function onRequestPost({ request, env }) {
   }
 
   return new Response(null, { status: 204 });
-}
-
-async function creditTokens(env, uid, amount) {
-  if (!uid || !amount || amount <= 0) return;
-  const raw = await env.VOTES.get(`meta:${uid}`, 'json');
-  const m = raw || { tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [] };
-  m.tokens   = (m.tokens   || 0) + amount;
-  m.lifetime = (m.lifetime || 0) + amount;
-  await env.VOTES.put(`meta:${uid}`, JSON.stringify(m));
 }

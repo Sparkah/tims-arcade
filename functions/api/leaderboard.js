@@ -31,7 +31,21 @@ export async function onRequestGet({ request, env }) {
     });
   }
 
-  // Cold scan: list meta:* keys, fetch each, sort by lifetime
+  // Cold scan path — expensive (1k+ KV reads). Cache miss is rate-limited
+  // per IP so an attacker can't bust the 5-min cache to force repeated
+  // scans. 5 cold-scans/IP/hour is plenty for normal users; the warm cache
+  // path is uncapped.
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  const rateKey = `lbrate:${ip}:${Math.floor(Date.now() / 3600000)}`;
+  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
+  if (rate >= 5) {
+    return new Response(JSON.stringify({ players: [], total: 0, error: 'rate_limit' }), {
+      status: 429,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 7200 });
+
   const players = [];
   let cursor;
   let scanned = 0;

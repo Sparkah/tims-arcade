@@ -19,6 +19,7 @@
 
 import { readSession } from './_session.js';
 import { parseCookie } from '../_lib/cookie.js';
+import { grantOnce } from '../_lib/meta.js';
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -80,22 +81,11 @@ export async function onRequestPost({ request, env }) {
   await env.VOTES.put(key, JSON.stringify(cur));
 
   // Meta-layer: credit +5 tokens the FIRST time a uid up-votes a slug.
-  // We use the uid cookie (anonymous) here, not session.uid, so anon
-  // players also earn — matches the /api/feedback behaviour.
+  // Anonymous uid (cookie) so even non-signed-in players earn. Single
+  // source of truth for the like-bonus — /api/feedback does NOT grant.
   if (dl > 0) {
     const uid = parseCookie(request.headers.get('Cookie') || '', 'uid');
-    if (uid) {
-      const earnedKey = `liked-earned:${uid}:${slug}`;
-      const already = await env.VOTES.get(earnedKey);
-      if (!already) {
-        await env.VOTES.put(earnedKey, '1', { expirationTtl: 60 * 60 * 24 * 365 });
-        const raw = await env.VOTES.get(`meta:${uid}`, 'json');
-        const m = raw || { tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [] };
-        m.tokens   = (m.tokens   || 0) + 5;
-        m.lifetime = (m.lifetime || 0) + 5;
-        await env.VOTES.put(`meta:${uid}`, JSON.stringify(m));
-      }
-    }
+    if (uid) await grantOnce(env, uid, `liked-earned:${uid}:${slug}`, 5);
   }
 
   return new Response(JSON.stringify({ ...cur, myVote }), {

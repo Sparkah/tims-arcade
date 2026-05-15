@@ -34,32 +34,7 @@ function daysBetween(a, b) {
 }
 
 import { parseCookie } from '../../_lib/cookie.js';
-
-function emptyMeta() {
-  return { tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [] };
-}
-
-export async function readMeta(env, uid) {
-  if (!uid) return emptyMeta();
-  const raw = await env.VOTES.get(`meta:${uid}`, 'json');
-  if (!raw) return emptyMeta();
-  // Backfill any missing keys for forward-compat.
-  const m = emptyMeta();
-  return Object.assign(m, raw);
-}
-
-export async function writeMeta(env, uid, meta) {
-  if (!uid) return;
-  await env.VOTES.put(`meta:${uid}`, JSON.stringify(meta));
-}
-
-export async function creditTokens(env, uid, amount) {
-  if (!uid || !amount || amount <= 0) return;
-  const m = await readMeta(env, uid);
-  m.tokens   += amount;
-  m.lifetime += amount;
-  await writeMeta(env, uid, m);
-}
+import { readMeta, writeMeta, emptyMeta } from '../../_lib/meta.js';
 
 export async function onRequestGet({ request, env }) {
   const uid = parseCookie(request.headers.get('Cookie') || '', 'uid');
