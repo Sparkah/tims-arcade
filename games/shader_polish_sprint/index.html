@@ -1,0 +1,993 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Shader Polish Sprint</title>
+  <script src="/sdk.js"></script>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'SHADER POLISH SPRINT',
+    sub:   'Stack VFX layers to match the FEEL target',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT', lock: 'LOCK', cont: 'CONTINUE',
+    score: 'SCORE', best: 'BEST',
+    level: 'LEVEL', budget: 'BUDGET', feel: 'FEEL', target: 'TARGET',
+    gameover: 'OUT OF BUDGET', won: 'POLISHED!',
+    overprod: 'OVERPRODUCED',
+    perfect: 'PERFECT!', good: 'GOOD', miss: 'OFF TARGET',
+    cost: 'COST',
+    layer_bloom: 'BLOOM', layer_chroma: 'CHROMATIC', layer_grain: 'GRAIN',
+    layer_scan: 'SCANLINE', layer_vign: 'VIGNETTE', layer_dither: 'DITHER',
+    drag_hint: 'Drag onto canvas',
+    tut_goal:     'Goal: drag VFX layers onto the prototype to match the green FEEL zone.',
+    tut_controls: 'Controls: drag a layer tile onto the canvas, then tap LOCK.',
+    tut_win:      'Win: lock 8 levels in target before polish budget hits zero.',
+    tut_lose:     'Lose: budget runs out before all 8 levels are locked.',
+    tut_tip:      'Tip: stacking 5+ layers triggers OVERPRODUCED — score halves.',
+  },
+  ru: {
+    title: 'ШЕЙДЕРНЫЙ ПОЛИШИНГ',
+    sub:   'Складывай VFX-слои до зелёной зоны FEEL',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЕЕ', lock: 'ЗАФИКС.', cont: 'ДАЛЕЕ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    level: 'УРОВЕНЬ', budget: 'БЮДЖЕТ', feel: 'FEEL', target: 'ЦЕЛЬ',
+    gameover: 'БЮДЖЕТ ИСЧЕРПАН', won: 'ОТПОЛИРОВАНО!',
+    overprod: 'ПЕРЕБОР',
+    perfect: 'ИДЕАЛ!', good: 'ХОРОШО', miss: 'МИМО',
+    cost: 'ЦЕНА',
+    layer_bloom: 'СВЕЧЕНИЕ', layer_chroma: 'ХРОМАТИКА', layer_grain: 'ЗЕРНО',
+    layer_scan: 'СКАНЛАЙН', layer_vign: 'ВИНЬЕТКА', layer_dither: 'ДИЗЕР',
+    drag_hint: 'Перетащи на холст',
+    tut_goal:     'Цель: перетащи VFX-слои на прототип, чтобы FEEL попал в зелёную зону.',
+    tut_controls: 'Управление: перетащи плитку слоя на холст, затем нажми ЗАФИКС.',
+    tut_win:      'Победа: зафиксируй 8 уровней в цели до того, как бюджет станет нулём.',
+    tut_lose:     'Проигрыш: бюджет кончился раньше всех 8 уровней.',
+    tut_tip:      'Подсказка: 5+ слоёв = ПЕРЕБОР, очки урезаются вдвое.',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES ────────────────────────────────────────────────────────────
+var START_BUDGET = 10;
+var LEVEL_TOTAL = 8;
+var LAYER_COUNT = 6;
+var OVERPROD_THRESHOLD = 5;
+var OVERPROD_MULT = 2.0;
+var PERFECT_TOLERANCE = 8;
+var GOOD_TOLERANCE = 18;
+var DUMMY_HOP_PERIOD = 1.2;
+
+var LAYER_IDS = ['bloom','chroma','grain','scan','vign','dither'];
+var LAYER_COSTS = [1, 2, 3, 1, 2, 3];
+var LAYER_FEEL = [22, 18, -6, -10, 12, 8];
+var LAYER_COLORS = ['#ffd166','#ef476f','#a78bfa','#06d6a0','#118ab2','#fb8500'];
+
+// ── GAME STATE ──────────────────────────────────────────────────────────
+var gs = 'MENU';
+var score = 0, best = 0;
+var levelIdx = 0;
+var polishBudget = START_BUDGET;
+var activeLayers = [false,false,false,false,false,false];
+var targetFeels = [];
+var seedVal = 0;
+var levelOutcome = null;
+var levelOutcomeT = 0;
+var lockedDistances = [];
+var tutorialOpen = false;
+
+var dummy = {
+  cubeX: 0, cubeY: 0, vy: 0, onGround: true, hopT: 0,
+  pegs: [],
+  ground: 0,
+  cubeBaseX: 0,
+};
+
+var drag = { active: false, layerIdx: -1, x: 0, y: 0, ox: 0, oy: 0 };
+
+function getLayout() {
+  var W = GF.W, H = GF.H;
+  var railFrac = 0.30;
+  if (W < 560) railFrac = 0.38;
+  var railW = Math.floor(W * railFrac);
+  var canvasW = W - railW;
+  var pad = Math.max(8, Math.floor(12 * GF.S));
+  var hudH = Math.max(48, Math.floor(56 * GF.S));
+  var canvasInner = {
+    x: pad, y: hudH + pad,
+    w: canvasW - pad * 2,
+    h: H - hudH - pad * 2,
+  };
+  var railX = canvasW;
+  var rail = { x: railX, y: hudH, w: railW, h: H - hudH };
+  var cols = (railW > 220 * GF.S) ? 2 : 1;
+  var rows = Math.ceil(LAYER_COUNT / cols);
+  var lockH = Math.max(48, Math.floor(60 * GF.S));
+  var availH = rail.h - lockH - pad * 2;
+  var tilePad = Math.max(6, Math.floor(8 * GF.S));
+  var tileW = Math.floor((rail.w - pad * 2 - tilePad * (cols - 1)) / cols);
+  var tileH = Math.floor((availH - tilePad * (rows - 1)) / rows);
+  if (tileH < 56) tileH = 56;
+  var tiles = [];
+  for (var i = 0; i < LAYER_COUNT; i++) {
+    var col = i % cols, row = Math.floor(i / cols);
+    tiles.push({
+      x: railX + pad + col * (tileW + tilePad),
+      y: rail.y + pad + row * (tileH + tilePad),
+      w: tileW, h: tileH,
+      idx: i,
+    });
+  }
+  var lockBtn = {
+    x: railX + pad,
+    y: rail.y + rail.h - lockH - pad,
+    w: rail.w - pad * 2,
+    h: lockH,
+  };
+  return { hudH: hudH, canvasInner: canvasInner, rail: rail, tiles: tiles, lockBtn: lockBtn, railW: railW };
+}
+
+function rngFromSeed(s) {
+  return function() {
+    s |= 0; s = (s + 0x6D2B79F5) | 0;
+    var t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = t + Math.imul(t ^ (t >>> 7), 61 | t) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildTargets() {
+  var d = new Date();
+  seedVal = d.getUTCFullYear() * 10000 + (d.getUTCMonth()+1) * 100 + d.getUTCDate();
+  var r = rngFromSeed(seedVal);
+  targetFeels = [];
+  for (var i = 0; i < LEVEL_TOTAL; i++) {
+    targetFeels.push(Math.round(15 + r() * 60));
+  }
+}
+
+// ── DUMMY GAME ──────────────────────────────────────────────────────────
+function initDummy() {
+  var ca = getLayout().canvasInner;
+  dummy.ground = ca.y + ca.h - 20 * GF.S;
+  dummy.cubeBaseX = ca.x + ca.w * 0.30;
+  dummy.cubeX = dummy.cubeBaseX;
+  dummy.cubeY = dummy.ground;
+  dummy.vy = 0; dummy.onGround = true; dummy.hopT = 0;
+  dummy.pegs = [
+    { x: ca.x + ca.w * 0.55, w: 14 * GF.S, h: 28 * GF.S },
+    { x: ca.x + ca.w * 0.75, w: 14 * GF.S, h: 40 * GF.S },
+    { x: ca.x + ca.w * 0.92, w: 14 * GF.S, h: 22 * GF.S },
+  ];
+}
+function updateDummy(dt) {
+  dummy.hopT += dt;
+  if (dummy.hopT >= DUMMY_HOP_PERIOD && dummy.onGround) {
+    dummy.vy = -7.5 * GF.S; dummy.onGround = false; dummy.hopT = 0;
+  }
+  if (!dummy.onGround) {
+    dummy.vy += 0.35 * GF.S;
+    dummy.cubeY += dummy.vy;
+    if (dummy.cubeY >= dummy.ground) { dummy.cubeY = dummy.ground; dummy.vy = 0; dummy.onGround = true; }
+  }
+  var ca = getLayout().canvasInner;
+  for (var i = 0; i < dummy.pegs.length; i++) {
+    dummy.pegs[i].x -= 1.1 * GF.S;
+    if (dummy.pegs[i].x + dummy.pegs[i].w < ca.x) {
+      dummy.pegs[i].x = ca.x + ca.w + (40 + Math.random() * 80) * GF.S;
+      dummy.pegs[i].h = (20 + Math.random() * 24) * GF.S;
+    }
+  }
+}
+
+// ── FEEL CALCULATION ────────────────────────────────────────────────────
+function calcFeel() {
+  var f = 28;
+  for (var i = 0; i < LAYER_COUNT; i++) {
+    if (activeLayers[i]) f += LAYER_FEEL[i];
+  }
+  return Math.max(0, Math.min(100, f));
+}
+function activeCount() {
+  var n = 0;
+  for (var i = 0; i < LAYER_COUNT; i++) if (activeLayers[i]) n++;
+  return n;
+}
+function isOverproduced() { return activeCount() >= OVERPROD_THRESHOLD; }
+function totalCost() {
+  var c = 0;
+  for (var i = 0; i < LAYER_COUNT; i++) if (activeLayers[i]) c += LAYER_COSTS[i];
+  return c;
+}
+
+// ── GAME LIFECYCLE ──────────────────────────────────────────────────────
+function startGame() {
+  score = 0;
+  levelIdx = 0;
+  polishBudget = START_BUDGET;
+  activeLayers = [false,false,false,false,false,false];
+  lockedDistances = [];
+  levelOutcome = null; levelOutcomeT = 0;
+  buildTargets();
+  initDummy();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function lockLevel() {
+  if (gs !== 'PLAYING') return;
+  var feel = calcFeel();
+  var tgt = targetFeels[levelIdx];
+  var dist = Math.abs(feel - tgt);
+  if (isOverproduced()) dist *= OVERPROD_MULT;
+  lockedDistances.push(Math.round(dist));
+  var gained = 0;
+  if (dist <= PERFECT_TOLERANCE) { levelOutcome = 'perfect'; gained = 100; GF.spawnFloat(GF.cx, GF.cy, GF.t('perfect'), '#ffeb3b'); GF.setShake(0.5); }
+  else if (dist <= GOOD_TOLERANCE) { levelOutcome = 'good'; gained = 50; GF.spawnFloat(GF.cx, GF.cy, GF.t('good'), '#06d6a0'); }
+  else { levelOutcome = 'miss'; gained = Math.max(5, 30 - Math.round(dist)); GF.spawnFloat(GF.cx, GF.cy, GF.t('miss'), '#ef476f'); GF.setShake(0.3); }
+  score += gained;
+  polishBudget -= totalCost();
+  levelOutcomeT = 1.2;
+  activeLayers = [false,false,false,false,false,false];
+  if (polishBudget <= 0 && levelIdx + 1 < LEVEL_TOTAL) {
+    gs = 'GAMEOVER';
+    if (score > best) { best = score; try { localStorage.setItem('shader_polish_best', best); } catch(e){} }
+    GF.gameEnded();
+    GF.saveRun();
+    return;
+  }
+  levelIdx++;
+  if (levelIdx >= LEVEL_TOTAL) {
+    gs = 'WON';
+    score += polishBudget * 25;
+    if (score > best) { best = score; try { localStorage.setItem('shader_polish_best', best); } catch(e){} }
+    GF.gameEnded();
+    GF.saveRun();
+    return;
+  }
+  GF.saveRun();
+}
+
+window._jumpLevel = function(n) {
+  startGame();
+  if (typeof n === 'number') {
+    if (n >= 99) {
+      polishBudget = 0; levelIdx = 1; gs = 'GAMEOVER';
+      if (score > best) { best = score; try { localStorage.setItem('shader_polish_best', best); } catch(e){} }
+      return;
+    }
+    levelIdx = Math.min(LEVEL_TOTAL - 1, Math.max(1, n - 1));
+    polishBudget = Math.max(2, START_BUDGET - levelIdx);
+    score = 70 * levelIdx;
+    // Stack 4 layers so the dummy-game preview is visibly polished but not overproduced
+    activeLayers = [true,true,false,true,true,false];
+  }
+};
+
+window._setupForScreenshot = function(n) {
+  window._jumpLevel(n || 3);
+  // 4 active layers — visible VFX without overproduced warning
+  activeLayers = [true,true,false,true,true,false];
+};
+
+// ── INPUT ───────────────────────────────────────────────────────────────
+function pointerDown(x, y) {
+  if (tutorialOpen) { tutorialOpen = false; return; }
+  if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') {
+    var b = GF._menuBtn;
+    if (b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+      startGame();
+    }
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  var L = getLayout();
+  var hb = helpBtnRect(L);
+  if (x >= hb.x && x <= hb.x + hb.w && y >= hb.y && y <= hb.y + hb.h) {
+    tutorialOpen = true; return;
+  }
+  var lb = L.lockBtn;
+  if (x >= lb.x && x <= lb.x + lb.w && y >= lb.y && y <= lb.y + lb.h) {
+    lockLevel(); return;
+  }
+  for (var i = 0; i < L.tiles.length; i++) {
+    var t = L.tiles[i];
+    if (x >= t.x && x <= t.x + t.w && y >= t.y && y <= t.y + t.h) {
+      drag.active = true;
+      drag.layerIdx = i;
+      drag.x = x; drag.y = y;
+      drag.ox = t.x + t.w/2; drag.oy = t.y + t.h/2;
+      return;
+    }
+  }
+  var ca = L.canvasInner;
+  if (x >= ca.x && x <= ca.x + ca.w && y >= ca.y && y <= ca.y + ca.h) {
+    for (var j = LAYER_COUNT - 1; j >= 0; j--) {
+      if (activeLayers[j]) {
+        activeLayers[j] = false;
+        GF.spawnFloat(x, y, '-' + GF.t('layer_' + LAYER_IDS[j]), '#aab');
+        break;
+      }
+    }
+  }
+}
+function pointerMove(x, y) {
+  if (!drag.active) return;
+  drag.x = x; drag.y = y;
+}
+function pointerUp(x, y) {
+  if (!drag.active) return;
+  var L = getLayout();
+  var ca = L.canvasInner;
+  if (x >= ca.x && x <= ca.x + ca.w && y >= ca.y && y <= ca.y + ca.h) {
+    var idx = drag.layerIdx;
+    if (!activeLayers[idx]) {
+      activeLayers[idx] = true;
+      GF.spawnParticles(x, y, LAYER_COLORS[idx], 8);
+      GF.spawnFloat(x, y, '+' + GF.t('layer_' + LAYER_IDS[idx]), LAYER_COLORS[idx]);
+    }
+  }
+  drag.active = false;
+  drag.layerIdx = -1;
+}
+
+function helpBtnRect(L) {
+  var s = Math.max(28, 36 * GF.S);
+  return { x: 8 * GF.S, y: 8 * GF.S, w: s, h: s };
+}
+
+var _canvas = document.getElementById('c');
+_canvas.addEventListener('mousedown', function(e) { pointerDown(e.clientX, e.clientY); });
+_canvas.addEventListener('mousemove', function(e) { pointerMove(e.clientX, e.clientY); });
+_canvas.addEventListener('mouseup', function(e) { pointerUp(e.clientX, e.clientY); });
+_canvas.addEventListener('touchstart', function(e) {
+  if (e.changedTouches.length) {
+    var t = e.changedTouches[0];
+    pointerDown(t.clientX, t.clientY);
+  }
+}, { passive: false });
+_canvas.addEventListener('touchmove', function(e) {
+  if (e.changedTouches.length) {
+    var t = e.changedTouches[0];
+    pointerMove(t.clientX, t.clientY);
+  }
+}, { passive: false });
+_canvas.addEventListener('touchend', function(e) {
+  if (e.changedTouches.length) {
+    var t = e.changedTouches[0];
+    pointerUp(t.clientX, t.clientY);
+  }
+}, { passive: false });
+
+// ── UPDATE ──────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs === 'PLAYING') {
+    updateDummy(dt);
+    if (levelOutcomeT > 0) levelOutcomeT -= dt;
+  }
+}
+
+// ── DRAW HELPERS ────────────────────────────────────────────────────────
+function drawDummyScene(c, ca) {
+  var g = c.createLinearGradient(ca.x, ca.y, ca.x, ca.y + ca.h);
+  g.addColorStop(0, '#0e1330');
+  g.addColorStop(0.6, '#1a0e2a');
+  g.addColorStop(1, '#2a1640');
+  c.fillStyle = g;
+  c.fillRect(ca.x, ca.y, ca.w, ca.h);
+
+  // Stars / background dots (deterministic by position)
+  c.fillStyle = '#3a3060';
+  for (var sx = 30; sx < ca.w; sx += 60) {
+    for (var sy = 50; sy < ca.h - 40; sy += 70) {
+      var px = ca.x + sx + ((sy * 7) % 30);
+      var py = ca.y + sy + ((sx * 11) % 20);
+      c.fillRect(px, py, 2 * GF.S, 2 * GF.S);
+    }
+  }
+  // Mountain silhouette in the background
+  c.fillStyle = '#1d1438';
+  c.beginPath();
+  c.moveTo(ca.x, dummy.ground + 4 * GF.S);
+  var segs = 6;
+  for (var i = 0; i <= segs; i++) {
+    var px2 = ca.x + (ca.w * i / segs);
+    var py2 = dummy.ground - (15 + ((i * 53) % 40)) * GF.S;
+    c.lineTo(px2, py2);
+  }
+  c.lineTo(ca.x + ca.w, dummy.ground + 4 * GF.S);
+  c.closePath();
+  c.fill();
+
+  c.fillStyle = '#231a3a';
+  c.fillRect(ca.x, dummy.ground + 4 * GF.S, ca.w, ca.y + ca.h - (dummy.ground + 4 * GF.S));
+  c.strokeStyle = '#4a3a72';
+  c.lineWidth = 2;
+  c.beginPath();
+  c.moveTo(ca.x, dummy.ground + 4 * GF.S);
+  c.lineTo(ca.x + ca.w, dummy.ground + 4 * GF.S);
+  c.stroke();
+  for (var i = 0; i < dummy.pegs.length; i++) {
+    var p = dummy.pegs[i];
+    c.fillStyle = '#4a3a72';
+    c.fillRect(p.x, dummy.ground + 4 * GF.S - p.h, p.w, p.h);
+    c.fillStyle = '#7b5cd6';
+    c.fillRect(p.x, dummy.ground + 4 * GF.S - p.h, p.w, 4 * GF.S);
+  }
+  var cs = 28 * GF.S;
+  c.fillStyle = '#e0c0ff';
+  c.fillRect(dummy.cubeX - cs/2, dummy.cubeY - cs, cs, cs);
+  c.fillStyle = '#8e6dd6';
+  c.fillRect(dummy.cubeX - cs/2, dummy.cubeY - cs, cs, 4 * GF.S);
+  c.fillStyle = '#1a0e2a';
+  c.fillRect(dummy.cubeX - cs/3, dummy.cubeY - cs * 0.7, cs/8, cs/8);
+  c.fillRect(dummy.cubeX + cs/5, dummy.cubeY - cs * 0.7, cs/8, cs/8);
+}
+
+function applyVfx(c, ca) {
+  c.save();
+  c.beginPath();
+  c.rect(ca.x, ca.y, ca.w, ca.h);
+  c.clip();
+
+  if (activeLayers[0]) {
+    c.globalCompositeOperation = 'lighter';
+    var bg = c.createRadialGradient(dummy.cubeX, dummy.cubeY - 14 * GF.S, 4, dummy.cubeX, dummy.cubeY - 14 * GF.S, 90 * GF.S);
+    bg.addColorStop(0, 'rgba(255,230,180,0.55)');
+    bg.addColorStop(1, 'rgba(255,230,180,0)');
+    c.fillStyle = bg;
+    c.fillRect(ca.x, ca.y, ca.w, ca.h);
+    c.globalCompositeOperation = 'source-over';
+  }
+
+  if (activeLayers[1]) {
+    c.globalCompositeOperation = 'screen';
+    c.globalAlpha = 0.32;
+    c.fillStyle = '#ff3a6a';
+    c.fillRect(dummy.cubeX - 18 * GF.S, dummy.cubeY - 24 * GF.S, 6 * GF.S, 24 * GF.S);
+    c.fillStyle = '#33d4ff';
+    c.fillRect(dummy.cubeX + 12 * GF.S, dummy.cubeY - 24 * GF.S, 6 * GF.S, 24 * GF.S);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+  }
+
+  if (activeLayers[2]) {
+    c.globalAlpha = 0.18;
+    var grainCount = Math.floor((ca.w * ca.h) / 800);
+    if (grainCount > 300) grainCount = 300;
+    for (var i = 0; i < grainCount; i++) {
+      var nx = ca.x + (Math.random() * ca.w);
+      var ny = ca.y + (Math.random() * ca.h);
+      c.fillStyle = (Math.random() < 0.5) ? '#fff' : '#000';
+      c.fillRect(nx, ny, 1.5 * GF.S, 1.5 * GF.S);
+    }
+    c.globalAlpha = 1;
+  }
+
+  if (activeLayers[3]) {
+    c.globalAlpha = 0.22;
+    c.fillStyle = '#000';
+    var stride = Math.max(2, 4 * GF.S);
+    for (var y = ca.y; y < ca.y + ca.h; y += stride) {
+      c.fillRect(ca.x, y, ca.w, 1.5);
+    }
+    c.globalAlpha = 1;
+  }
+
+  if (activeLayers[4]) {
+    var vg = c.createRadialGradient(ca.x + ca.w/2, ca.y + ca.h/2, Math.min(ca.w, ca.h) * 0.30,
+                                    ca.x + ca.w/2, ca.y + ca.h/2, Math.max(ca.w, ca.h) * 0.70);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,0,0.65)');
+    c.fillStyle = vg;
+    c.fillRect(ca.x, ca.y, ca.w, ca.h);
+  }
+
+  if (activeLayers[5]) {
+    c.globalAlpha = 0.12;
+    c.fillStyle = '#fff';
+    var d = Math.max(2, 3 * GF.S);
+    for (var dy = ca.y; dy < ca.y + ca.h; dy += d * 2) {
+      for (var dx = ca.x; dx < ca.x + ca.w; dx += d * 2) {
+        c.fillRect(dx, dy, d, d);
+        c.fillRect(dx + d, dy + d, d, d);
+      }
+    }
+    c.globalAlpha = 1;
+  }
+
+  c.restore();
+
+  c.strokeStyle = isOverproduced() ? '#ff3a6a' : '#3a3a5a';
+  c.lineWidth = 2;
+  c.strokeRect(ca.x, ca.y, ca.w, ca.h);
+}
+
+function drawHUD(c) {
+  var W = GF.W;
+  var L = getLayout();
+  var hudH = L.hudH;
+  c.fillStyle = '#0c0c1c';
+  c.fillRect(0, 0, W, hudH);
+  c.fillStyle = '#2a2a40';
+  c.fillRect(0, hudH - 1, W, 1);
+
+  var fs = GF.clamp(15 * GF.S, 11, 19) | 0;
+  c.textBaseline = 'middle';
+  c.textAlign = 'left';
+
+  var hb = helpBtnRect(L);
+  c.fillStyle = '#2a2a44';
+  GF.rr(c, hb.x, hb.y, hb.w, hb.h, 6);
+  c.fill();
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText('?', hb.x + hb.w/2, hb.y + hb.h/2 + 1);
+  c.textAlign = 'left';
+
+  var lx = hb.x + hb.w + 14 * GF.S;
+  c.fillStyle = '#9ab';
+  c.font = (fs - 1) + 'px sans-serif';
+  c.fillText(GF.t('level'), lx, hudH/2 - fs * 0.6);
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText((levelIdx + 1) + '/' + LEVEL_TOTAL, lx, hudH/2 + fs * 0.4);
+
+  lx += 88 * GF.S;
+  c.fillStyle = '#9ab';
+  c.font = (fs - 1) + 'px sans-serif';
+  c.fillText(GF.t('budget'), lx, hudH/2 - fs * 0.6);
+  c.fillStyle = polishBudget <= 3 ? '#ef476f' : '#ffd166';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(polishBudget + '', lx, hudH/2 + fs * 0.4);
+
+  lx += 88 * GF.S;
+  c.fillStyle = '#9ab';
+  c.font = (fs - 1) + 'px sans-serif';
+  c.fillText(GF.t('score'), lx, hudH/2 - fs * 0.6);
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(score + '', lx, hudH/2 + fs * 0.4);
+
+  c.textBaseline = 'alphabetic';
+}
+
+function drawFeelMeter(c) {
+  var L = getLayout();
+  var ca = L.canvasInner;
+  var mw = ca.w * 0.7;
+  var mh = Math.max(18, 22 * GF.S);
+  var mx = ca.x + (ca.w - mw) / 2;
+  var my = ca.y + 8 * GF.S;
+
+  var feel = calcFeel();
+  var target = targetFeels[levelIdx] || 50;
+
+  c.fillStyle = 'rgba(0,0,0,0.45)';
+  GF.rr(c, mx, my, mw, mh, mh/2);
+  c.fill();
+  var tCenter = mx + (target / 100) * mw;
+  var bandW = (GOOD_TOLERANCE / 100) * mw * 2;
+  c.fillStyle = 'rgba(46,204,113,0.40)';
+  c.fillRect(tCenter - bandW/2, my, bandW, mh);
+  var pBandW = (PERFECT_TOLERANCE / 100) * mw * 2;
+  c.fillStyle = 'rgba(255,235,59,0.55)';
+  c.fillRect(tCenter - pBandW/2, my, pBandW, mh);
+  var fx = mx + (feel / 100) * mw;
+  c.fillStyle = isOverproduced() ? '#ef476f' : '#fff';
+  c.fillRect(fx - 2, my - 4 * GF.S, 4, mh + 8 * GF.S);
+
+  var fs = GF.clamp(11 * GF.S, 9, 14) | 0;
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  c.fillText(GF.t('feel') + ': ' + Math.round(feel), mx, my + mh + 4);
+  c.textAlign = 'right';
+  c.fillText(GF.t('target') + ': ' + target, mx + mw, my + mh + 4);
+  c.textAlign = 'left';
+  c.textBaseline = 'alphabetic';
+
+  if (isOverproduced()) {
+    var bw = 130 * GF.S;
+    var bx = ca.x + ca.w - bw - 6 * GF.S;
+    var by = ca.y + ca.h - 32 * GF.S;
+    c.fillStyle = '#ef476f';
+    GF.rr(c, bx, by, bw, 26 * GF.S, 6);
+    c.fill();
+    c.fillStyle = '#fff';
+    c.textAlign = 'center';
+    c.font = 'bold ' + (fs+1) + 'px sans-serif';
+    c.fillText(GF.t('overprod'), bx + bw/2, by + 18 * GF.S);
+    c.textAlign = 'left';
+  }
+}
+
+function drawRail(c) {
+  var L = getLayout();
+  var r = L.rail;
+  c.fillStyle = '#0e0e1e';
+  c.fillRect(r.x, r.y, r.w, r.h);
+  c.strokeStyle = '#2a2a40';
+  c.lineWidth = 1;
+  c.beginPath();
+  c.moveTo(r.x, r.y); c.lineTo(r.x, r.y + r.h);
+  c.stroke();
+
+  for (var i = 0; i < L.tiles.length; i++) {
+    drawTile(c, L.tiles[i], i, (drag.active && drag.layerIdx === i));
+  }
+  drawLockBtn(c, L.lockBtn);
+}
+
+function drawTile(c, t, i, dragging) {
+  var active = activeLayers[i];
+  var col = LAYER_COLORS[i];
+  c.save();
+  if (dragging) c.globalAlpha = 0.35;
+  var gr = c.createLinearGradient(t.x, t.y, t.x, t.y + t.h);
+  gr.addColorStop(0, active ? '#22324a' : '#161624');
+  gr.addColorStop(1, active ? '#0e1a2a' : '#0c0c1a');
+  c.fillStyle = gr;
+  GF.rr(c, t.x, t.y, t.w, t.h, 8);
+  c.fill();
+  c.strokeStyle = active ? col : '#2a2a40';
+  c.lineWidth = active ? 2 : 1;
+  c.stroke();
+
+  c.fillStyle = col;
+  c.fillRect(t.x, t.y, t.w, 4 * GF.S);
+
+  drawLayerIcon(c, i, t.x + t.w/2, t.y + t.h * 0.45, Math.min(t.w, t.h) * 0.5);
+
+  var fs = GF.clamp(12 * GF.S, 10, 14) | 0;
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'top';
+  c.fillText(GF.t('layer_' + LAYER_IDS[i]), t.x + t.w/2, t.y + t.h - fs * 1.9);
+
+  var fsc = GF.clamp(10 * GF.S, 9, 12) | 0;
+  c.font = fsc + 'px sans-serif';
+  c.fillStyle = '#9ab';
+  c.fillText(GF.t('cost') + ': ' + LAYER_COSTS[i], t.x + t.w/2, t.y + t.h - fs * 0.7);
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+  c.restore();
+
+  if (active) {
+    c.fillStyle = col;
+    c.beginPath();
+    c.arc(t.x + t.w - 12 * GF.S, t.y + 14 * GF.S, 7 * GF.S, 0, Math.PI * 2);
+    c.fill();
+    c.fillStyle = '#0a0a14';
+    c.font = 'bold ' + (10 * GF.S) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText('+', t.x + t.w - 12 * GF.S, t.y + 14 * GF.S + 1);
+    c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+  }
+}
+
+function drawLayerIcon(c, i, cxv, cyv, s) {
+  var col = LAYER_COLORS[i];
+  c.save();
+  if (i === 0) {
+    var g = c.createRadialGradient(cxv, cyv, 0, cxv, cyv, s/2);
+    g.addColorStop(0, col);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    c.fillStyle = g;
+    c.fillRect(cxv - s/2, cyv - s/2, s, s);
+  } else if (i === 1) {
+    c.fillStyle = '#ff3a6a'; c.fillRect(cxv - s/4 - 4, cyv - s/4, s/2, s/2);
+    c.fillStyle = '#33d4ff'; c.fillRect(cxv - s/4 + 4, cyv - s/4, s/2, s/2);
+    c.globalAlpha = 0.6;
+    c.fillStyle = '#fff';     c.fillRect(cxv - s/4, cyv - s/4, s/2, s/2);
+    c.globalAlpha = 1;
+  } else if (i === 2) {
+    c.fillStyle = col;
+    for (var k = 0; k < 12; k++) {
+      c.fillRect(cxv - s/2 + (k * 7) % s, cyv - s/2 + Math.floor((k * 7) / s) * 4, 2, 2);
+    }
+  } else if (i === 3) {
+    c.fillStyle = col;
+    for (var y = -s/2; y < s/2; y += 4) c.fillRect(cxv - s/2, cyv + y, s, 1.5);
+  } else if (i === 4) {
+    var vg = c.createRadialGradient(cxv, cyv, 0, cxv, cyv, s/2);
+    vg.addColorStop(0, 'rgba(255,255,255,0.0)');
+    vg.addColorStop(0.7, 'rgba(255,255,255,0.0)');
+    vg.addColorStop(1, col);
+    c.fillStyle = vg;
+    c.fillRect(cxv - s/2, cyv - s/2, s, s);
+  } else if (i === 5) {
+    c.fillStyle = col;
+    for (var dy2 = -s/2; dy2 < s/2; dy2 += 4) {
+      for (var dx2 = -s/2; dx2 < s/2; dx2 += 4) {
+        if (((dx2/4 + dy2/4) | 0) % 2 === 0) c.fillRect(cxv + dx2, cyv + dy2, 2, 2);
+      }
+    }
+  }
+  c.restore();
+}
+
+function drawLockBtn(c, b) {
+  var feel = calcFeel();
+  var target = targetFeels[levelIdx] || 50;
+  var d = Math.abs(feel - target);
+  if (isOverproduced()) d *= OVERPROD_MULT;
+  var color = '#ef476f';
+  if (d <= PERFECT_TOLERANCE) color = '#ffeb3b';
+  else if (d <= GOOD_TOLERANCE) color = '#06d6a0';
+
+  var gr = c.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+  gr.addColorStop(0, color);
+  gr.addColorStop(1, 'rgba(0,0,0,0.4)');
+  c.fillStyle = gr;
+  GF.rr(c, b.x, b.y, b.w, b.h, 10);
+  c.fill();
+  c.strokeStyle = '#fff';
+  c.lineWidth = 2;
+  c.stroke();
+  c.fillStyle = '#0a0a14';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  var fs = GF.clamp(20 * GF.S, 14, 26) | 0;
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(GF.t('lock'), b.x + b.w/2, b.y + b.h/2);
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+}
+
+function drawDrag(c) {
+  if (!drag.active) return;
+  var idx = drag.layerIdx;
+  var col = LAYER_COLORS[idx];
+  var s = 60 * GF.S;
+  c.save();
+  c.globalAlpha = 0.9;
+  var gr = c.createLinearGradient(drag.x, drag.y - s/2, drag.x, drag.y + s/2);
+  gr.addColorStop(0, '#22324a');
+  gr.addColorStop(1, '#0e1a2a');
+  c.fillStyle = gr;
+  GF.rr(c, drag.x - s/2, drag.y - s/2, s, s, 10);
+  c.fill();
+  c.strokeStyle = col;
+  c.lineWidth = 2;
+  c.stroke();
+  drawLayerIcon(c, idx, drag.x, drag.y, s * 0.6);
+  c.restore();
+}
+
+function drawTutorialOverlay(c) {
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var fs = GF.clamp(16 * GF.S, 12, 22) | 0;
+  var titleFs = GF.clamp(28 * GF.S, 20, 36) | 0;
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 130 * GF.S);
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  c.font = fs + 'px sans-serif';
+  for (var i = 0; i < lines.length; i++) {
+    c.fillStyle = (i === 4) ? '#9ab' : '#fff';
+    c.fillText(lines[i], GF.cx, GF.cy - 60 * GF.S + i * (fs + 10));
+  }
+  c.fillStyle = '#6a6';
+  c.font = (fs - 2) + 'px sans-serif';
+  var dismissMsg = (GF.lang === 'ru') ? 'нажмите чтобы закрыть' : 'tap to dismiss';
+  c.fillText(dismissMsg, GF.cx, GF.cy + 140 * GF.S);
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+}
+
+function drawMenuOverlay() {
+  var c = GF.ctx;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(34 * GF.S, 22, 50) | 0;
+  var subFs = GF.clamp(14 * GF.S, 11, 18) | 0;
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.shadowColor = 'rgba(46,204,113,0.5)';
+  c.shadowBlur = 30 * GF.S;
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 170 * GF.S);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  c.font = subFs + 'px sans-serif';
+  c.fillStyle = '#9ab';
+  c.fillText(GF.t('sub'), GF.cx, GF.cy - 130 * GF.S);
+
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var fs = GF.clamp(15 * GF.S, 11, 19) | 0;
+  c.font = fs + 'px sans-serif';
+  for (var i = 0; i < lines.length; i++) {
+    c.fillStyle = (i === 4) ? '#9ab' : '#fff';
+    c.fillText(lines[i], GF.cx, GF.cy - 80 * GF.S + i * (fs + 8));
+  }
+
+  var btnW = GF.clamp(240 * GF.S, 180, 320);
+  var btnH = GF.clamp(54 * GF.S, 44, 66);
+  var bx = GF.cx - btnW/2, by = GF.cy + 60 * GF.S;
+  var gr = c.createLinearGradient(bx, by, bx, by + btnH);
+  gr.addColorStop(0, '#2ecc71');
+  gr.addColorStop(1, '#27ae60');
+  GF.rr(c, bx, by, btnW, btnH, btnH/2);
+  c.fillStyle = gr;
+  c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.fillText(GF.t('play'), GF.cx, by + btnH/2 + 1);
+
+  if (best > 0) {
+    c.fillStyle = '#557';
+    c.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    c.fillText(GF.t('best') + ': ' + best, GF.cx, by + btnH + 32 * GF.S);
+  }
+
+  GF._menuBtn = { x: bx, y: by, w: btnW, h: btnH };
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+}
+
+function drawGameOver() {
+  var c = GF.ctx;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(36 * GF.S, 22, 56) | 0;
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.fillStyle = (gs === 'WON') ? '#2ecc71' : '#ef476f';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(gs === 'WON' ? GF.t('won') : GF.t('gameover'), GF.cx, GF.cy - 80 * GF.S);
+
+  var fs = GF.clamp(18 * GF.S, 14, 24) | 0;
+  c.font = fs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  c.fillText(GF.t('score') + ': ' + score, GF.cx, GF.cy - 30 * GF.S);
+  c.fillStyle = '#9ab';
+  c.font = (fs - 2) + 'px sans-serif';
+  c.fillText(GF.t('level') + ': ' + Math.min(levelIdx, LEVEL_TOTAL) + '/' + LEVEL_TOTAL, GF.cx, GF.cy);
+
+  var btnW = GF.clamp(240 * GF.S, 180, 320);
+  var btnH = GF.clamp(54 * GF.S, 44, 66);
+  var bx = GF.cx - btnW/2, by = GF.cy + 40 * GF.S;
+  var gr = c.createLinearGradient(bx, by, bx, by + btnH);
+  gr.addColorStop(0, '#2ecc71');
+  gr.addColorStop(1, '#27ae60');
+  GF.rr(c, bx, by, btnW, btnH, btnH/2);
+  c.fillStyle = gr;
+  c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.fillText(GF.t('retry'), GF.cx, by + btnH/2 + 1);
+
+  if (best > 0) {
+    c.fillStyle = '#557';
+    c.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    c.fillText(GF.t('best') + ': ' + best, GF.cx, by + btnH + 32 * GF.S);
+  }
+
+  GF._menuBtn = { x: bx, y: by, w: btnW, h: btnH };
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+}
+
+_canvas.addEventListener('click', function(e) {
+  if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') {
+    var b = GF._menuBtn;
+    if (b && e.clientX >= b.x && e.clientX <= b.x + b.w && e.clientY >= b.y && e.clientY <= b.y + b.h) {
+      startGame();
+    }
+  }
+});
+
+// ── DRAW ────────────────────────────────────────────────────────────────
+function draw(c) {
+  c.fillStyle = '#0a0a14';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING') {
+    var L = getLayout();
+    var ca = L.canvasInner;
+    drawHUD(c);
+    drawDummyScene(c, ca);
+    applyVfx(c, ca);
+    drawFeelMeter(c);
+    drawRail(c);
+    drawDrag(c);
+    if (tutorialOpen) drawTutorialOverlay(c);
+  } else if (gs === 'MENU') {
+    drawMenuOverlay();
+  } else if (gs === 'GAMEOVER' || gs === 'WON') {
+    var L2 = getLayout();
+    drawDummyScene(c, L2.canvasInner);
+    applyVfx(c, L2.canvasInner);
+    drawGameOver();
+  }
+}
+
+// ── BOOT ────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 900,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'shader_polish_sprint',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('shader_polish_best') || '0') || 0; } catch (e) {}
+    buildTargets();
+    initDummy();
+    GF.persist('shader_polish_run_v1',
+      function() { return { gs: gs, score: score, levelIdx: levelIdx, polishBudget: polishBudget, best: best, seedVal: seedVal }; },
+      function(s) {
+        if (!s) return;
+        score = s.score || 0;
+        levelIdx = s.levelIdx || 0;
+        polishBudget = s.polishBudget != null ? s.polishBudget : START_BUDGET;
+        best = Math.max(best, s.best || 0);
+        gs = 'MENU';
+      }
+    );
+    if (gs === 'PLAYING') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE (must be SYNC, not inside onReady) ──
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    score: score,
+    level: levelIdx + 1,
+    levelIdx: levelIdx,
+    polishBudget: polishBudget,
+    feel: calcFeel(),
+    target: targetFeels[levelIdx] || 0,
+    activeLayers: activeLayers.slice(),
+    overproduced: isOverproduced(),
+    best: best,
+    START_BUDGET: START_BUDGET,
+    LEVEL_TOTAL: LEVEL_TOTAL,
+    LAYER_COUNT: LAYER_COUNT,
+    OVERPROD_THRESHOLD: OVERPROD_THRESHOLD,
+    PERFECT_TOLERANCE: PERFECT_TOLERANCE,
+    GOOD_TOLERANCE: GOOD_TOLERANCE,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

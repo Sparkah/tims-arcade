@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Cargo Chain Junction</title>
+  <script src="/sdk.js"></script>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3) ─────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Cargo Chain Junction',
+    sub:   'Route colored wagons. One flip per turn.',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST',
+    sidings: 'SIDINGS',
+    turn: 'TURN',
+    combo: 'COMBO',
+    end_turn: 'END TURN',
+    flip_used: 'FLIP USED',
+    flip_ready: 'FLIP READY',
+    gameover: 'GAME OVER',
+    tut_goal:    'Goal: Route colored wagons into matching colored depots.',
+    tut_controls:'Controls: Tap a junction to flip its switch. Tap END TURN to advance.',
+    tut_win:     'Win: Endless - chase a high score. Correct route gives points + combo.',
+    tut_lose:    'Lose: Wrong depot blows up a wagon AND destroys one of your 3 sidings.',
+    tut_tip:     'Tip: Plan two turns ahead - wagons keep coming while you flip.',
+  },
+  ru: {
+    title: 'Узел Грузопотока',
+    sub:   'Направляй цветные вагоны. Один переход за ход.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    sidings: 'ПУТИ',
+    turn: 'ХОД',
+    combo: 'КОМБО',
+    end_turn: 'СЛЕД. ХОД',
+    flip_used: 'ХОД ИСПОЛЬЗОВАН',
+    flip_ready: 'МОЖНО ПЕРЕКЛЮЧИТЬ',
+    gameover: 'ИГРА ОКОНЧЕНА',
+    tut_goal:    'Цель: направляй цветные вагоны в депо того же цвета.',
+    tut_controls:'Управление: Тап по стрелке - переключить путь. Тап СЛЕД. ХОД - ход.',
+    tut_win:     'Победа: бесконечный режим. Правильный путь = очки + комбо.',
+    tut_lose:    'Поражение: неверный путь = вагон взрывается и теряется один из 3 путей.',
+    tut_tip:     'Совет: планируй на два хода вперёд - вагоны не ждут.',
+  },
+};
+
+var SPRITE_NAMES = []; // no AI sprites — procedural top-down rail art
+
+// ── TUNABLES (must match DESIGN.md) ──────────────────────────────────────
+var BOARD_COLS = 8;
+var BOARD_ROWS = 10;
+var NUM_DEPOTS = 5;
+var START_SIDINGS = 3;
+var FLIPS_PER_TURN = 1;
+var WAGONS_PER_TURN_START = 1;
+var WAGONS_PER_TURN_MAX = 3;
+var ESCALATE_EVERY_TURNS = 8;
+var SCORE_PER_WAGON = 10;
+var COMBO_BONUS_MULT = 2;
+
+// ── PALETTE (depot colors, also wagon colors) ────────────────────────────
+var PALETTE = [
+  { name: 'red',    hex: '#e74c3c', glow: 'rgba(231,76,60,0.5)'  },
+  { name: 'yellow', hex: '#f1c40f', glow: 'rgba(241,196,15,0.5)' },
+  { name: 'green',  hex: '#2ecc71', glow: 'rgba(46,204,113,0.5)' },
+  { name: 'blue',   hex: '#3498db', glow: 'rgba(52,152,219,0.5)' },
+  { name: 'purple', hex: '#9b59b6', glow: 'rgba(155,89,182,0.5)' },
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';        // MENU | PLAYING | GAMEOVER
+var score = 0, best = 0, combo = 0, sidings = START_SIDINGS;
+var turn = 0;
+var flipsLeft = FLIPS_PER_TURN;
+var wagonsPerTurn = WAGONS_PER_TURN_START;
+var wagons = [];        // each: { x, y, color, alive, exploding, expT, tx, ty, fromX, fromY, animT }
+var junctions = [];     // each: { col, row, dir: 'L'|'R', recently: animT }
+var depots = [];        // each: { col, row, color, side: 'south'|'east'|'west', flashT }
+var spawnLanes = [2, 4, 5];   // columns where wagons spawn
+var helpOverlay = false;
+var seedDate = '';
+var prng = mulberry32(0);
+
+// ── BOARD GEOMETRY ───────────────────────────────────────────────────────
+// Layout: top-down rail board. Y grows downward (north=row 0, south=row 9).
+// Junctions sit at fixed crossroads. Each junction routes a southbound wagon
+// to its LEFT or RIGHT diagonal track on the next turn step.
+function buildBoard() {
+  junctions.length = 0;
+  // Place junctions at rows 2, 4, 6 across columns 1..6 (3 rows x 3 cols = 9).
+  var jcols = [1, 3, 5];
+  var jrows = [2, 4, 6];
+  for (var ri = 0; ri < jrows.length; ri++) {
+    for (var ci = 0; ci < jcols.length; ci++) {
+      junctions.push({
+        col: jcols[ci],
+        row: jrows[ri],
+        dir: (ri + ci) % 2 === 0 ? 'L' : 'R',
+        recently: 0,
+      });
+    }
+  }
+  depots.length = 0;
+  // 5 colored depots along the bottom + sides of board.
+  // Bottom (south) edge: columns 0, 2, 4, 6, with 1 on east side.
+  // Use BOARD_ROWS-1 for south row.
+  var depotPositions = [
+    { col: 0, row: BOARD_ROWS - 1, side: 'south' },
+    { col: 2, row: BOARD_ROWS - 1, side: 'south' },
+    { col: 4, row: BOARD_ROWS - 1, side: 'south' },
+    { col: 6, row: BOARD_ROWS - 1, side: 'south' },
+    { col: 7, row: BOARD_ROWS - 3, side: 'east'  },
+  ];
+  for (var i = 0; i < NUM_DEPOTS; i++) {
+    var d = depotPositions[i];
+    depots.push({ col: d.col, row: d.row, color: i, side: d.side, flashT: 0 });
+  }
+}
+
+// ── RANDOM (daily seed) ──────────────────────────────────────────────────
+function mulberry32(seed) {
+  var s = seed >>> 0;
+  return function () {
+    s |= 0; s = s + 0x6D2B79F5 | 0;
+    var t = Math.imul(s ^ s >>> 15, 1 | s);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function dailySeed() {
+  var d = new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+}
+function chooseColor() { return Math.floor(prng() * NUM_DEPOTS); }
+function chooseLane()  { return spawnLanes[Math.floor(prng() * spawnLanes.length)]; }
+
+// ── GEOMETRY HELPERS ─────────────────────────────────────────────────────
+function boardMetrics() {
+  var pad = 16 * GF.S;
+  var hudH = 70 * GF.S;
+  var btnH = 70 * GF.S;
+  var availW = GF.W - pad * 2;
+  var availH = GF.H - hudH - btnH - pad * 2;
+  // Use separate tileW / tileH so the board fills both landscape and portrait
+  // viewports without huge black bars. Wagons / depots are circle-ish in their
+  // largest dimension, so allow ~1.4x stretching before clamping.
+  var tileW = availW / BOARD_COLS;
+  var tileH = availH / BOARD_ROWS;
+  var ratio = tileW / tileH;
+  if (ratio > 1.6) tileW = tileH * 1.6;
+  else if (ratio < 0.62) tileH = tileW / 0.62;
+  var w = tileW * BOARD_COLS;
+  var h = tileH * BOARD_ROWS;
+  var ox = (GF.W - w) / 2;
+  var oy = hudH + (GF.H - hudH - btnH - h) / 2;
+  // Use the smaller dimension as the "size" baseline for circle radii etc.
+  var tile = Math.min(tileW, tileH);
+  return { tile: tile, tileW: tileW, tileH: tileH, ox: ox, oy: oy, w: w, h: h, hudH: hudH, btnH: btnH, pad: pad };
+}
+function colRowToXY(col, row, m) {
+  return { x: m.ox + (col + 0.5) * m.tileW, y: m.oy + (row + 0.5) * m.tileH };
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  score = 0;
+  combo = 0;
+  sidings = START_SIDINGS;
+  turn = 0;
+  flipsLeft = FLIPS_PER_TURN;
+  wagonsPerTurn = WAGONS_PER_TURN_START;
+  wagons.length = 0;
+  buildBoard();
+  // Deterministic-but-fresh PRNG: daily seed mixes session count so retries
+  // don't replay identical wagon orders within the day.
+  seedDate = String(dailySeed());
+  prng = mulberry32(dailySeed() ^ Math.floor(Math.random() * 1000));
+  helpOverlay = false;
+  spawnWagons();
+  gs = 'PLAYING';
+  if (GF.gameStarted) GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('cargo_chain_junction_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  if (GF.gameEnded) GF.gameEnded();
+  GF.saveRun();
+}
+
+// ── TURN LOOP ────────────────────────────────────────────────────────────
+function spawnWagons() {
+  var n = Math.min(wagonsPerTurn, WAGONS_PER_TURN_MAX);
+  for (var i = 0; i < n; i++) {
+    var col = chooseLane();
+    // Avoid stacking two new wagons at the same north-spawn cell.
+    var attempts = 0;
+    while (attempts < 5 && wagons.some(function (w) { return w.alive && w.col === col && w.row === 0; })) {
+      col = chooseLane();
+      attempts++;
+    }
+    wagons.push({
+      col: col, row: 0,
+      tx: col, ty: 0,
+      fromCol: col, fromRow: 0,
+      animT: 1,         // 0..1 — 1 means already at target
+      color: chooseColor(),
+      alive: true, exploding: false, expT: 0,
+      delivered: false,
+    });
+  }
+}
+
+function endTurn() {
+  if (gs !== 'PLAYING') return;
+  // Step each wagon forward by 1 according to junction state.
+  for (var i = 0; i < wagons.length; i++) {
+    var w = wagons[i];
+    if (!w.alive || w.exploding || w.delivered) continue;
+    var nextCol = w.col;
+    var nextRow = w.row + 1;
+    // If standing on a junction, apply switch.
+    var j = junctionAt(w.col, w.row);
+    if (j) {
+      nextCol = w.col + (j.dir === 'L' ? -1 : 1);
+      nextRow = w.row + 1;
+    }
+    // Clamp to board.
+    nextCol = Math.max(0, Math.min(BOARD_COLS - 1, nextCol));
+    nextRow = Math.min(BOARD_ROWS - 1, nextRow);
+    w.fromCol = w.col; w.fromRow = w.row;
+    w.col = nextCol; w.row = nextRow;
+    w.tx = nextCol; w.ty = nextRow;
+    w.animT = 0;     // begin interpolation
+    // If this cell is a depot, resolve.
+    var d = depotAt(nextCol, nextRow);
+    if (d) {
+      resolveDelivery(w, d);
+    } else if (nextRow >= BOARD_ROWS - 1) {
+      // Fell off the south edge — treat as miss (wrong depot).
+      explodeWagon(w);
+    }
+  }
+  // Reset junction recent-flash
+  for (var k = 0; k < junctions.length; k++) junctions[k].recently = 0;
+  turn++;
+  flipsLeft = FLIPS_PER_TURN;
+  // Escalate spawn rate every ESCALATE_EVERY_TURNS turns.
+  if (turn % ESCALATE_EVERY_TURNS === 0 && wagonsPerTurn < WAGONS_PER_TURN_MAX) {
+    wagonsPerTurn++;
+  }
+  // Spawn fresh wagons for the next turn.
+  spawnWagons();
+  // Cleanup dead wagons over time (handled in update by anim).
+  if (sidings <= 0) {
+    gameOver();
+    return;
+  }
+  GF.saveRun();
+}
+
+function resolveDelivery(w, depot) {
+  if (depot.color === w.color) {
+    var bonus = combo * COMBO_BONUS_MULT;
+    score += SCORE_PER_WAGON + bonus;
+    combo++;
+    w.delivered = true;
+    w.alive = false;
+    depot.flashT = 1;
+    var m = boardMetrics();
+    var p = colRowToXY(depot.col, depot.row, m);
+    GF.spawnParticles(p.x, p.y, PALETTE[depot.color].hex, 14);
+    GF.spawnFloat(p.x, p.y - 10 * GF.S, '+' + (SCORE_PER_WAGON + bonus), '#ffeb3b');
+  } else {
+    explodeWagon(w);
+    depot.flashT = 1;
+  }
+}
+
+function explodeWagon(w) {
+  w.exploding = true;
+  w.expT = 0;
+  w.alive = false;
+  combo = 0;
+  sidings = Math.max(0, sidings - 1);
+  var m = boardMetrics();
+  var p = colRowToXY(w.col, w.row, m);
+  GF.spawnParticles(p.x, p.y, PALETTE[w.color].hex, 24);
+  GF.spawnParticles(p.x, p.y, '#ffffff', 12);
+  GF.setShake(0.8);
+  GF.spawnFloat(p.x, p.y - 14 * GF.S, '-1', '#ff6b6b');
+}
+
+function junctionAt(col, row) {
+  for (var i = 0; i < junctions.length; i++) {
+    if (junctions[i].col === col && junctions[i].row === row) return junctions[i];
+  }
+  return null;
+}
+function depotAt(col, row) {
+  for (var i = 0; i < depots.length; i++) {
+    if (depots[i].col === col && depots[i].row === row) return depots[i];
+  }
+  return null;
+}
+
+// ── INPUT (taps) ─────────────────────────────────────────────────────────
+function onTap(x, y) {
+  if (gs !== 'PLAYING') return;
+  if (helpOverlay) { helpOverlay = false; return; }
+  var m = boardMetrics();
+  // Help (?) button — top-right of HUD area.
+  var hbR = 18 * GF.S;
+  var hbX = GF.W - 28 * GF.S, hbY = m.hudH / 2;
+  if ((x - hbX) * (x - hbX) + (y - hbY) * (y - hbY) <= hbR * hbR) {
+    helpOverlay = true;
+    return;
+  }
+  // END TURN button — bottom of screen.
+  var btnW = Math.min(280 * GF.S, GF.W * 0.7);
+  var btnH = m.btnH * 0.7;
+  var btnX = (GF.W - btnW) / 2;
+  var btnY = GF.H - m.btnH * 0.85;
+  if (x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH) {
+    endTurn();
+    return;
+  }
+  // Junction taps — generous hit radius for fingers.
+  var hitR = m.tile * 0.5;
+  for (var i = 0; i < junctions.length; i++) {
+    var j = junctions[i];
+    var p = colRowToXY(j.col, j.row, m);
+    if ((x - p.x) * (x - p.x) + (y - p.y) * (y - p.y) <= hitR * hitR) {
+      if (flipsLeft > 0) {
+        j.dir = j.dir === 'L' ? 'R' : 'L';
+        j.recently = 1;
+        flipsLeft--;
+        GF.setShake(0.15);
+        GF.spawnParticles(p.x, p.y, '#4dd0e1', 6);
+        GF.saveRun();
+      } else {
+        GF.spawnFloat(p.x, p.y - 14 * GF.S, GF.t('flip_used'), '#ff9b6b');
+      }
+      return;
+    }
+  }
+}
+
+// canvas-level pointer listeners (in addition to GF.buttons used by overlay).
+var canvas = document.getElementById('c');
+canvas.addEventListener('pointerdown', function (e) {
+  e.preventDefault();
+  onTap(e.clientX, e.clientY);
+}, { passive: false });
+document.addEventListener('keydown', function (e) {
+  if (e.code === 'Space' && gs === 'PLAYING') {
+    e.preventDefault();
+    endTurn();
+  }
+});
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawBoard(ctx, m) {
+  // Backdrop panel
+  ctx.fillStyle = '#10141d';
+  GF.rr(ctx, m.ox - 8 * GF.S, m.oy - 8 * GF.S, m.w + 16 * GF.S, m.h + 16 * GF.S, 14 * GF.S);
+  ctx.fill();
+  // Grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  for (var r = 0; r <= BOARD_ROWS; r++) {
+    ctx.beginPath();
+    ctx.moveTo(m.ox, m.oy + r * m.tileH);
+    ctx.lineTo(m.ox + m.w, m.oy + r * m.tileH);
+    ctx.stroke();
+  }
+  for (var c = 0; c <= BOARD_COLS; c++) {
+    ctx.beginPath();
+    ctx.moveTo(m.ox + c * m.tileW, m.oy);
+    ctx.lineTo(m.ox + c * m.tileW, m.oy + m.h);
+    ctx.stroke();
+  }
+  // Tracks — vertical mainlines.
+  ctx.strokeStyle = '#3a3a4a';
+  ctx.lineWidth = Math.max(3, m.tile * 0.08);
+  for (var sl = 0; sl < BOARD_COLS; sl++) {
+    var top = colRowToXY(sl, 0, m);
+    var bottom = colRowToXY(sl, BOARD_ROWS - 1, m);
+    ctx.beginPath();
+    ctx.moveTo(top.x, top.y);
+    ctx.lineTo(bottom.x, bottom.y);
+    ctx.stroke();
+  }
+  // Track ties (decorative crossbars)
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (var ti = 0; ti < BOARD_COLS; ti++) {
+    for (var tj = 0; tj < BOARD_ROWS; tj += 2) {
+      var pt = colRowToXY(ti, tj, m);
+      ctx.beginPath();
+      ctx.moveTo(pt.x - m.tileW * 0.35, pt.y);
+      ctx.lineTo(pt.x + m.tileW * 0.35, pt.y);
+      ctx.stroke();
+    }
+  }
+}
+
+function drawJunctions(ctx, m) {
+  for (var i = 0; i < junctions.length; i++) {
+    var j = junctions[i];
+    var p = colRowToXY(j.col, j.row, m);
+    var size = m.tile * 0.42;
+    // Halo (highlight when player has a flip available)
+    var halo = (flipsLeft > 0 && gs === 'PLAYING') ? 0.55 + 0.25 * Math.sin(Date.now() / 280) : 0.25;
+    ctx.fillStyle = 'rgba(77,208,225,' + halo.toFixed(2) + ')';
+    ctx.beginPath(); ctx.arc(p.x, p.y, size * 1.1, 0, Math.PI * 2); ctx.fill();
+    // Body
+    ctx.fillStyle = '#1a2330';
+    ctx.beginPath(); ctx.arc(p.x, p.y, size, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#4dd0e1'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(p.x, p.y, size, 0, Math.PI * 2); ctx.stroke();
+    // Arrow showing direction
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    var dir = j.dir === 'L' ? -1 : 1;
+    // Arrow points down-left or down-right
+    ctx.strokeStyle = '#ffeb3b';
+    ctx.lineWidth = Math.max(3, m.tile * 0.07);
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, -size * 0.45);
+    ctx.lineTo(dir * size * 0.5, size * 0.45);
+    ctx.stroke();
+    // Arrowhead
+    ctx.beginPath();
+    ctx.moveTo(dir * size * 0.5, size * 0.45);
+    ctx.lineTo(dir * size * 0.5 - dir * size * 0.32, size * 0.45 - size * 0.05);
+    ctx.moveTo(dir * size * 0.5, size * 0.45);
+    ctx.lineTo(dir * size * 0.5 - dir * size * 0.05, size * 0.45 - size * 0.32);
+    ctx.stroke();
+    ctx.restore();
+    // Recent-flip flash
+    if (j.recently > 0) {
+      ctx.strokeStyle = 'rgba(255,255,255,' + j.recently.toFixed(2) + ')';
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(p.x, p.y, size + 6 * GF.S * (1 - j.recently), 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+}
+
+function drawDepots(ctx, m) {
+  for (var i = 0; i < depots.length; i++) {
+    var d = depots[i];
+    var p = colRowToXY(d.col, d.row, m);
+    var color = PALETTE[d.color];
+    var size = m.tile * 0.78;
+    // Glow if recently flashed
+    if (d.flashT > 0) {
+      ctx.fillStyle = color.glow;
+      ctx.beginPath(); ctx.arc(p.x, p.y, size * (1 + d.flashT * 0.4), 0, Math.PI * 2); ctx.fill();
+    }
+    // Depot body — rectangle with colored top
+    ctx.fillStyle = '#0a0e16';
+    ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size);
+    ctx.fillStyle = color.hex;
+    ctx.fillRect(p.x - size / 2, p.y - size / 2, size, size * 0.4);
+    // Door
+    ctx.fillStyle = '#222';
+    ctx.fillRect(p.x - size * 0.25, p.y - size * 0.05, size * 0.5, size * 0.45);
+    // Roof bolts
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.arc(p.x - size * 0.35, p.y - size * 0.32, 2 * GF.S, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x + size * 0.35, p.y - size * 0.32, 2 * GF.S, 0, Math.PI * 2); ctx.fill();
+    // Outline
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1;
+    ctx.strokeRect(p.x - size / 2, p.y - size / 2, size, size);
+  }
+}
+
+function drawWagons(ctx, m) {
+  for (var i = 0; i < wagons.length; i++) {
+    var w = wagons[i];
+    if (!w.alive && !w.exploding) continue;
+    var fp = colRowToXY(w.fromCol, w.fromRow, m);
+    var tp = colRowToXY(w.col, w.row, m);
+    var ease = w.animT >= 1 ? 1 : 1 - Math.pow(1 - w.animT, 3);
+    var x = fp.x + (tp.x - fp.x) * ease;
+    var y = fp.y + (tp.y - fp.y) * ease;
+    var color = PALETTE[w.color];
+    var size = m.tile * 0.55;
+    if (w.exploding) {
+      var s = 1 - w.expT;
+      if (s <= 0) continue;
+      ctx.globalAlpha = s;
+      ctx.fillStyle = '#ff6b6b';
+      ctx.beginPath(); ctx.arc(x, y, size * (1 + w.expT * 0.8), 0, Math.PI * 2); ctx.fill();
+      ctx.globalAlpha = 1;
+      continue;
+    }
+    // Wagon body (rounded rect)
+    ctx.fillStyle = color.hex;
+    GF.rr(ctx, x - size / 2, y - size * 0.35, size, size * 0.7, 4 * GF.S);
+    ctx.fill();
+    // Top bar
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(x - size / 2, y - size * 0.35, size, size * 0.18);
+    // Wheels
+    ctx.fillStyle = '#1a1a22';
+    ctx.beginPath(); ctx.arc(x - size * 0.28, y + size * 0.32, size * 0.12, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + size * 0.28, y + size * 0.32, size * 0.12, 0, Math.PI * 2); ctx.fill();
+    // Highlight
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1;
+    GF.rr(ctx, x - size / 2, y - size * 0.35, size, size * 0.7, 4 * GF.S);
+    ctx.stroke();
+  }
+}
+
+function drawHUD(ctx, m) {
+  var fs = GF.clamp(15 * GF.S, 11, 20);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  // Background bar
+  ctx.fillStyle = 'rgba(16,20,29,0.85)';
+  ctx.fillRect(0, 0, GF.W, m.hudH);
+  ctx.strokeStyle = 'rgba(77,208,225,0.3)';
+  ctx.beginPath(); ctx.moveTo(0, m.hudH); ctx.lineTo(GF.W, m.hudH); ctx.stroke();
+  var midY = m.hudH / 2;
+  // Score left
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('score') + ': ' + score, 14 * GF.S, midY - fs * 0.55);
+  ctx.fillStyle = '#9ab';
+  ctx.font = (fs * 0.78) + 'px sans-serif';
+  ctx.fillText(GF.t('turn') + ' ' + turn, 14 * GF.S, midY + fs * 0.65);
+  // Sidings (lives) center
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#ffeb3b';
+  ctx.textAlign = 'center';
+  var sidingsTxt = GF.t('sidings') + ': ';
+  ctx.fillText(sidingsTxt, GF.cx - 22 * GF.S, midY);
+  // Heart icons
+  for (var si = 0; si < START_SIDINGS; si++) {
+    var hx = GF.cx + (12 + si * 22) * GF.S;
+    var hy = midY;
+    var on = si < sidings;
+    ctx.fillStyle = on ? '#e74c3c' : '#3a3a4a';
+    drawHeart(ctx, hx, hy, 9 * GF.S);
+  }
+  // Combo / flip right
+  ctx.fillStyle = combo > 0 ? '#2ecc71' : '#557';
+  ctx.textAlign = 'right';
+  ctx.fillText(GF.t('combo') + ' x' + combo, GF.W - 60 * GF.S, midY - fs * 0.55);
+  ctx.fillStyle = flipsLeft > 0 ? '#4dd0e1' : '#777';
+  ctx.font = (fs * 0.78) + 'px sans-serif';
+  ctx.fillText(flipsLeft > 0 ? GF.t('flip_ready') : GF.t('flip_used'), GF.W - 60 * GF.S, midY + fs * 0.65);
+  // Help (?) button
+  var hbR = 18 * GF.S;
+  var hbX = GF.W - 28 * GF.S, hbY = midY;
+  ctx.fillStyle = '#1a2330';
+  ctx.beginPath(); ctx.arc(hbX, hbY, hbR, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#4dd0e1'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(hbX, hbY, hbR, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold ' + (fs * 1.1) + 'px sans-serif';
+  ctx.fillText('?', hbX, hbY + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawHeart(ctx, x, y, r) {
+  ctx.beginPath();
+  ctx.moveTo(x, y + r * 0.4);
+  ctx.bezierCurveTo(x - r * 1.3, y - r * 0.5, x - r * 0.6, y - r * 1.2, x, y - r * 0.3);
+  ctx.bezierCurveTo(x + r * 0.6, y - r * 1.2, x + r * 1.3, y - r * 0.5, x, y + r * 0.4);
+  ctx.fill();
+}
+
+function drawEndTurnButton(ctx, m) {
+  var btnW = Math.min(280 * GF.S, GF.W * 0.7);
+  var btnH = m.btnH * 0.7;
+  var btnX = (GF.W - btnW) / 2;
+  var btnY = GF.H - m.btnH * 0.85;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('end_turn'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawHelpOverlay(ctx) {
+  ctx.fillStyle = 'rgba(8,10,16,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  var fs = GF.clamp(17 * GF.S, 12, 22);
+  ctx.font = 'bold ' + (fs * 1.4) + 'px sans-serif';
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - fs * 7);
+  ctx.font = fs + 'px sans-serif';
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(ctx, lines[i], GF.cx, GF.cy - fs * 4 + i * fs * 2.3, GF.W * 0.85, fs * 1.2);
+  }
+  ctx.fillStyle = '#4dd0e1';
+  ctx.font = (fs * 0.9) + 'px sans-serif';
+  ctx.fillText('— tap to close —', GF.cx, GF.cy + fs * 7);
+}
+
+function wrapText(ctx, text, cx, cy, maxW, lineH) {
+  var words = String(text).split(/\s+/);
+  var lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  var startY = cy - ((lines.length - 1) * lineH) / 2;
+  for (var j = 0; j < lines.length; j++) ctx.fillText(lines[j], cx, startY + j * lineH);
+}
+
+function drawMenuOverlay() {
+  var ctx = GF.ctx;
+  ctx.fillStyle = 'rgba(8,10,16,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var fs = GF.clamp(16 * GF.S, 11, 21);
+  // Title
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold ' + GF.clamp(38 * GF.S, 22, 56) + 'px sans-serif';
+  ctx.shadowColor = 'rgba(77,208,225,0.45)';
+  ctx.shadowBlur = 30 * GF.S;
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - fs * 9);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  // Subtitle
+  ctx.fillStyle = '#9ab';
+  ctx.font = (fs * 1.05) + 'px sans-serif';
+  ctx.fillText(GF.t('sub'), GF.cx, GF.cy - fs * 7);
+  // Tutorial lines
+  ctx.fillStyle = '#dde';
+  ctx.font = fs + 'px sans-serif';
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(ctx, lines[i], GF.cx, GF.cy - fs * 4.6 + i * fs * 2.0, GF.W * 0.85, fs * 1.2);
+  }
+  // PLAY button
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(54 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + fs * 6;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(gs === 'GAMEOVER' ? GF.t('retry') : GF.t('play'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+  // Best
+  if (best > 0) {
+    ctx.fillStyle = '#557';
+    ctx.font = GF.clamp(14 * GF.S, 10, 18) + 'px sans-serif';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + fs * 2);
+  }
+  // Score on game over
+  if (gs === 'GAMEOVER') {
+    ctx.fillStyle = '#ffeb3b';
+    ctx.font = 'bold ' + GF.clamp(22 * GF.S, 14, 28) + 'px sans-serif';
+    ctx.fillText(GF.t('score') + ': ' + score, GF.cx, btnY - fs * 1.5);
+  }
+  // Hit target — single big button.
+  _menuBtnHit = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+var _menuBtnHit = null;
+
+// Hook menu/gameover clicks via canvas pointerdown (already wired above).
+canvas.addEventListener('pointerdown', function (e) {
+  if (gs === 'MENU' || gs === 'GAMEOVER') {
+    if (_menuBtnHit) {
+      var x = e.clientX, y = e.clientY;
+      if (x >= _menuBtnHit.x && x <= _menuBtnHit.x + _menuBtnHit.w &&
+          y >= _menuBtnHit.y && y <= _menuBtnHit.y + _menuBtnHit.h) {
+        startGame();
+      }
+    }
+  }
+}, { passive: false });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+  // Animate wagons
+  for (var i = 0; i < wagons.length; i++) {
+    var w = wagons[i];
+    if (w.exploding) {
+      w.expT = Math.min(1, w.expT + dt * 2.4);
+      continue;
+    }
+    if (w.animT < 1) w.animT = Math.min(1, w.animT + dt * 4);
+  }
+  // Cull dead wagons whose explosion is done
+  for (var j = wagons.length - 1; j >= 0; j--) {
+    if (wagons[j].exploding && wagons[j].expT >= 1) wagons.splice(j, 1);
+    else if (wagons[j].delivered && wagons[j].animT >= 1) wagons.splice(j, 1);
+  }
+  // Junction recent-flip decay
+  for (var k = 0; k < junctions.length; k++) {
+    if (junctions[k].recently > 0) junctions[k].recently = Math.max(0, junctions[k].recently - dt * 2);
+  }
+  // Depot flash decay
+  for (var d = 0; d < depots.length; d++) {
+    if (depots[d].flashT > 0) depots[d].flashT = Math.max(0, depots[d].flashT - dt * 2);
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var m = boardMetrics();
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawBoard(ctx, m);
+    drawDepots(ctx, m);
+    drawJunctions(ctx, m);
+    drawWagons(ctx, m);
+  }
+  if (gs === 'PLAYING') {
+    drawHUD(ctx, m);
+    drawEndTurnButton(ctx, m);
+    if (helpOverlay) drawHelpOverlay(ctx);
+  }
+  if (gs === 'MENU' || gs === 'GAMEOVER') {
+    drawMenuOverlay();
+  }
+}
+
+// ── SCREENSHOT / GATE HELPERS ────────────────────────────────────────────
+window._jumpLevel = function (n) {
+  startGame();
+  if (typeof n !== 'number') n = 1;
+  if (n >= 99) {
+    // Force GAMEOVER
+    sidings = 0;
+    score = 240;
+    gameOver();
+    return;
+  }
+  // Populate board so screenshots show dense action.
+  // Advance several phantom turns to escalate spawn rate and place wagons mid-board.
+  for (var t = 0; t < Math.min(n, 6); t++) {
+    // Step existing wagons forward without scoring/depot interaction
+    for (var i = 0; i < wagons.length; i++) {
+      var w = wagons[i];
+      if (!w.alive) continue;
+      var j = junctionAt(w.col, w.row);
+      var nc = w.col + (j ? (j.dir === 'L' ? -1 : 1) : 0);
+      var nr = Math.min(BOARD_ROWS - 2, w.row + 1);
+      w.fromCol = w.col; w.fromRow = w.row;
+      w.col = Math.max(0, Math.min(BOARD_COLS - 1, nc));
+      w.row = nr;
+      w.animT = 1;
+    }
+    spawnWagons();
+    if (t > 1) wagonsPerTurn = Math.min(WAGONS_PER_TURN_MAX, wagonsPerTurn + 1);
+  }
+  score = 80 + n * 30;
+  combo = Math.min(6, 1 + n);
+  turn = n * 3;
+  flipsLeft = FLIPS_PER_TURN;
+};
+window._setupForScreenshot = window._jumpLevel;
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'cargo_chain_junction',
+  onReady: function () {
+    try { best = parseInt(localStorage.getItem('cargo_chain_junction_best') || '0') || 0; } catch (e) {}
+    // Yandex 1.9 — run progress must persist across reload.
+    GF.persist('cargo_chain_junction_run_v1',
+      function () {
+        return {
+          gs: gs, score: score, combo: combo, sidings: sidings,
+          turn: turn, flipsLeft: flipsLeft, wagonsPerTurn: wagonsPerTurn,
+          wagons: wagons.map(function (w) {
+            return { col: w.col, row: w.row, color: w.color, alive: w.alive };
+          }),
+          junctions: junctions.map(function (j) {
+            return { col: j.col, row: j.row, dir: j.dir };
+          }),
+          depots: depots.map(function (d) {
+            return { col: d.col, row: d.row, color: d.color, side: d.side };
+          }),
+        };
+      },
+      function (s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        score = s.score || 0;
+        combo = s.combo || 0;
+        sidings = s.sidings != null ? s.sidings : START_SIDINGS;
+        turn = s.turn || 0;
+        flipsLeft = s.flipsLeft != null ? s.flipsLeft : FLIPS_PER_TURN;
+        wagonsPerTurn = s.wagonsPerTurn || WAGONS_PER_TURN_START;
+        if (s.junctions && s.junctions.length) {
+          junctions = s.junctions.map(function (j) {
+            return { col: j.col, row: j.row, dir: j.dir, recently: 0 };
+          });
+        } else { buildBoard(); }
+        if (s.depots && s.depots.length === NUM_DEPOTS) {
+          depots = s.depots.map(function (d) {
+            return { col: d.col, row: d.row, color: d.color, side: d.side, flashT: 0 };
+          });
+        }
+        if (s.wagons) {
+          wagons = s.wagons.map(function (w) {
+            return {
+              col: w.col, row: w.row, tx: w.col, ty: w.row,
+              fromCol: w.col, fromRow: w.row, animT: 1,
+              color: w.color, alive: w.alive,
+              exploding: false, expT: 0, delivered: false,
+            };
+          });
+        }
+      });
+    // Safe boot — if we landed in PLAYING with empty board, fall back to MENU
+    if (gs === 'PLAYING' && (!junctions.length || !depots.length)) gs = 'MENU';
+    if (!junctions.length) buildBoard();
+    if (gs === 'PLAYING') {
+      // Re-arm PRNG so subsequent spawns are reproducible-ish.
+      prng = mulberry32(dailySeed() ^ turn);
+    }
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Expose state for runtime gate.
+GF.exposeState(function () {
+  return {
+    gs: gs, score: score, best: best,
+    sidings: sidings, turn: turn,
+    combo: combo, flipsLeft: flipsLeft,
+    wagons: wagons.length, junctions: junctions.length, depots: depots.length,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

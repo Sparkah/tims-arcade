@@ -43,6 +43,14 @@ var STRINGS = {
     skinLockedAt: 'BEST',
     skinUnlocked: 'SKIN UNLOCKED!',
     coins: 'COINS',
+    ach_label: 'GOALS',
+    ach_unlocked: 'GOAL UNLOCKED!',
+    ach_firstBounce: 'First Bounce',
+    ach_bouncer: 'Chain x10',
+    ach_centurion: 'Run 1000m',
+    ach_coiner: 'Collect 100 coins',
+    ach_persistent: 'Play 10 runs',
+    ach_survivor: 'Survive 60s',
   },
   ru: {
     title: 'Побег Шины',
@@ -65,6 +73,14 @@ var STRINGS = {
     skinLockedAt: 'РЕКОРД',
     skinUnlocked: 'НОВАЯ ШИНА!',
     coins: 'МОНЕТ',
+    ach_label: 'ЦЕЛИ',
+    ach_unlocked: 'ЦЕЛЬ ВЫПОЛНЕНА!',
+    ach_firstBounce: 'Первый отскок',
+    ach_bouncer: 'Серия x10',
+    ach_centurion: 'Пробег 1000м',
+    ach_coiner: 'Собери 100 монет',
+    ach_persistent: 'Сыграй 10 раз',
+    ach_survivor: 'Продержись 60с',
   },
 };
 
@@ -175,6 +191,27 @@ var COIN_RADIUS = 14;            // design-space px
 var COIN_VALUE = 50;             // score added per pickup
 var COIN_COMBO_EXTEND = 0.5;     // seconds added to comboTimer on pickup (keeps chain alive)
 
+// Iter#6 (free-choice): achievement / milestone layer. Six lifetime goals tied
+// to dimensions the existing systems don't directly reward — combo size,
+// survival time, distance, cumulative coins, sheer playtime. Persistent via
+// localStorage, fires a toast on first unlock, surfaces an X/6 badge on MENU
+// + GAMEOVER. Pure additive meta — no impact on physics, cop AI, or scoring.
+var ACHIEVEMENTS = [
+  { id: 'firstBounce', nameKey: 'ach_firstBounce', emoji: '🟢' },
+  { id: 'bouncer',     nameKey: 'ach_bouncer',     emoji: '🔁' },
+  { id: 'centurion',   nameKey: 'ach_centurion',   emoji: '🏁' },
+  { id: 'coiner',      nameKey: 'ach_coiner',      emoji: '🪙' },
+  { id: 'persistent',  nameKey: 'ach_persistent',  emoji: '🔄' },
+  { id: 'survivor',    nameKey: 'ach_survivor',    emoji: '⏱' },
+];
+var achUnlocked = {};            // id -> true (persisted)
+var lifetimeCoins = 0;           // persisted across runs
+var lifetimeRuns = 0;            // persisted across runs (counted at gameOver)
+var maxComboRun = 0;             // per-run, tracked in update
+var achToast = 0;                // seconds remaining for "GOAL UNLOCKED" badge
+var achToastId = null;           // which achievement to celebrate
+var achPendingQueue = [];        // newly unlocked this gameOver — shown sequentially
+
 // ── HELPERS ──────────────────────────────────────────────────────────────
 function rand(a, b) { return a + Math.random() * (b - a); }
 function randi(a, b) { return Math.floor(rand(a, b)); }
@@ -258,6 +295,8 @@ function startGame() {
   coins = [];
   coinSpawnX = 600;
   coinsCollectedRun = 0;
+  // Iter#6: reset per-run combo peak tracker.
+  maxComboRun = 0;
   copX = -260;
   copPanic = 0;
   elapsedSec = 0;
@@ -292,6 +331,10 @@ function gameOver() {
   // Iter#4: after best is updated, check if a new skin tier just unlocked.
   // Toast is rendered on top of the GAMEOVER overlay (below leaderboard).
   checkSkinUnlock();
+  // Iter#6: bump lifetime-runs counter, then check achievement thresholds.
+  lifetimeRuns += 1;
+  try { localStorage.setItem('tire_escape_lifetime_runs', String(lifetimeRuns)); } catch (e) {}
+  checkAchievements();
   gs = 'GAMEOVER';
   // Iter#2: submit score + refresh leaderboard so the gameover overlay shows
   // top-5 (and your rank if you placed). Fire-and-forget — UI tolerates offline.
@@ -391,6 +434,39 @@ function checkSkinUnlock() {
   try { localStorage.setItem('tire_escape_unlocked_top', lastUnlockedSkinId); } catch (e) {}
 }
 
+// Iter#6: called at gameOver after stats settle. Checks each achievement's
+// threshold against this run + lifetime totals; any newly unlocked id gets
+// pushed onto achPendingQueue and the toast cycles through them.
+function checkAchievements() {
+  var unlockedThisRun = [];
+  function tryUnlock(id, ok) {
+    if (ok && !achUnlocked[id]) {
+      achUnlocked[id] = true;
+      unlockedThisRun.push(id);
+    }
+  }
+  tryUnlock('firstBounce', maxComboRun >= 1);
+  tryUnlock('bouncer',     maxComboRun >= 10);
+  tryUnlock('centurion',   distance >= 1000);
+  tryUnlock('coiner',      lifetimeCoins >= 100);
+  tryUnlock('persistent',  lifetimeRuns >= 10);
+  tryUnlock('survivor',    elapsedSec >= 60);
+  if (unlockedThisRun.length > 0) {
+    try { localStorage.setItem('tire_escape_ach', JSON.stringify(achUnlocked)); } catch (e) {}
+    achPendingQueue = unlockedThisRun.slice();
+    achToastId = achPendingQueue.shift();
+    achToast = 4.0;
+  }
+}
+
+function countUnlockedAch() {
+  var n = 0;
+  for (var i = 0; i < ACHIEVEMENTS.length; i++) {
+    if (achUnlocked[ACHIEVEMENTS[i].id]) n++;
+  }
+  return n;
+}
+
 // Compute projected daily rank against cached liveBoard. Returns null if board empty.
 function computeLiveRank(myScore) {
   if (!liveBoard || liveBoard.length === 0) return null;
@@ -471,6 +547,14 @@ function update(dt) {
   // fades on its own without needing the player to start a run.
   if (gs !== 'PLAYING') {
     if (skinUnlockToast > 0) skinUnlockToast = Math.max(0, skinUnlockToast - (dt || 0.016));
+    // Iter#6: tick achievement toast; chain into queued unlocks when one fades.
+    if (achToast > 0) {
+      achToast = Math.max(0, achToast - (dt || 0.016));
+      if (achToast === 0 && achPendingQueue.length > 0) {
+        achToastId = achPendingQueue.shift();
+        achToast = 4.0;
+      }
+    }
     kickQueued = false;
     return;
   }
@@ -544,6 +628,9 @@ function update(dt) {
       coin.taken = true;
       bonusScore += COIN_VALUE;
       coinsCollectedRun += 1;
+      // Iter#6: lifetime coin counter feeds the "coiner" achievement.
+      lifetimeCoins += 1;
+      try { localStorage.setItem('tire_escape_lifetime_coins', String(lifetimeCoins)); } catch (e) {}
       // Coins keep your bounce combo alive without inflating the multiplier —
       // they're a chain-saver, not a chain-spammer.
       if (combo > 0 && comboTimer > 0) comboTimer = Math.min(1.5, comboTimer + COIN_COMBO_EXTEND);
@@ -582,6 +669,8 @@ function update(dt) {
         ob.hit = true;
         combo += 1;
         comboTimer = 1.5;
+        // Iter#6: track peak combo of this run for the "bouncer" achievement.
+        if (combo > maxComboRun) maxComboRun = combo;
         bounceFlash = 0.4;
         // Decaying pushback: 65 at start → 22 by ~3000m. Stops rhythmic-bouncer
         // infinite-run exploit; rewards still scale via combo points.
@@ -691,6 +780,9 @@ function draw(ctx) {
     });
     // Iter#4 (ladder3): skin selector strip below the PLAY button.
     drawSkinSelector();
+    // Iter#6: lifetime-goals progress strip pinned to bottom-left.
+    drawAchBadge();
+    if (achToast > 0 && achToastId) drawAchToast();
   }
   if (gs === 'GAMEOVER') {
     GF.drawOverlay({
@@ -712,6 +804,10 @@ function draw(ctx) {
     if (skinUnlockToast > 0 && skinUnlockToastId) {
       drawSkinUnlockToast();
     }
+    // Iter#6: lifetime-goals progress strip + "GOAL UNLOCKED" toast (offset
+    // below skin toast so both can coexist when a run unlocks both).
+    drawAchBadge();
+    if (achToast > 0 && achToastId) drawAchToast();
   }
 }
 
@@ -884,6 +980,68 @@ function drawSkinUnlockToast() {
   c.fillStyle = 'rgba(255,207,96,' + alpha + ')';
   c.fillText('✨ ' + GF.t(sk.nameKey) + ' ' + GF.t('skinUnlocked'),
              W / 2, GF.clamp(48 * S, 32, 70));
+}
+
+// Iter#6: small progress strip rendered on MENU + GAMEOVER. Shows "🏆 N/6"
+// plus six tiny dots (filled if unlocked, hollow if not). Position pinned to
+// bottom of canvas so it doesn't fight the existing leaderboard / skin UI.
+function drawAchBadge() {
+  var c = GF.ctx;
+  var W = GF.W, H = GF.H, S = GF.S;
+  var n = countUnlockedAch();
+  var total = ACHIEVEMENTS.length;
+  var fs = GF.clamp(12 * S, 9, 16);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textAlign = 'left';
+  c.textBaseline = 'alphabetic';
+  var label = '🏆 ' + GF.t('ach_label') + ' ' + n + '/' + total;
+  var pad = GF.clamp(10 * S, 6, 14);
+  var y = H - pad;
+  c.fillStyle = 'rgba(255,255,255,0.85)';
+  c.fillText(label, pad, y);
+  var labelW = c.measureText(label).width;
+  // Dots
+  var dotR = GF.clamp(4 * S, 3, 6);
+  var dotGap = GF.clamp(12 * S, 8, 16);
+  var dx = pad + labelW + dotGap;
+  for (var i = 0; i < total; i++) {
+    var ach = ACHIEVEMENTS[i];
+    var done = !!achUnlocked[ach.id];
+    c.beginPath();
+    c.arc(dx, y - dotR, dotR, 0, Math.PI * 2);
+    if (done) {
+      c.fillStyle = '#ffcf60';
+      c.fill();
+    } else {
+      c.strokeStyle = 'rgba(255,255,255,0.55)';
+      c.lineWidth = 1.5;
+      c.stroke();
+    }
+    dx += dotR * 2 + GF.clamp(6 * S, 4, 9);
+  }
+}
+
+// Iter#6: "GOAL UNLOCKED" toast — same visual language as drawSkinUnlockToast
+// but offset down so the two can coexist without overlap when a run unlocks
+// both a skin and an achievement.
+function drawAchToast() {
+  if (!achToastId) return;
+  var ach = null;
+  for (var i = 0; i < ACHIEVEMENTS.length; i++) {
+    if (ACHIEVEMENTS[i].id === achToastId) { ach = ACHIEVEMENTS[i]; break; }
+  }
+  if (!ach) return;
+  var c = GF.ctx;
+  var W = GF.W, S = GF.S;
+  var fs = GF.clamp(18 * S, 13, 24);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  var alpha = GF.clamp(achToast / 1.0, 0, 1);
+  c.fillStyle = 'rgba(255,225,120,' + alpha + ')';
+  // Offset below skin toast (which sits at 48*S). 78*S gives clean separation.
+  c.fillText(ach.emoji + ' ' + GF.t(ach.nameKey) + ' — ' + GF.t('ach_unlocked'),
+             W / 2, GF.clamp(78 * S, 56, 100));
 }
 
 // Canvas click for skin slots (separate from gf-lib's button system, which is
@@ -1389,6 +1547,13 @@ GF.init({
     try {
       lastUnlockedSkinId = localStorage.getItem('tire_escape_unlocked_top') || highestUnlockedSkinId();
     } catch (e) { lastUnlockedSkinId = highestUnlockedSkinId(); }
+    // Iter#6: restore achievements + lifetime counters.
+    try {
+      var rawAch = localStorage.getItem('tire_escape_ach');
+      if (rawAch) achUnlocked = JSON.parse(rawAch) || {};
+    } catch (e) { achUnlocked = {}; }
+    try { lifetimeCoins = parseInt(localStorage.getItem('tire_escape_lifetime_coins') || '0') || 0; } catch (e) {}
+    try { lifetimeRuns  = parseInt(localStorage.getItem('tire_escape_lifetime_runs')  || '0') || 0; } catch (e) {}
     buildBg();
     gs = 'MENU';
     // Iter#2: prime the leaderboard so first-paint of game-over already has
@@ -1425,7 +1590,11 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     selectedSkin:  typeof selectedSkin  !== 'undefined' ? selectedSkin  : null,
     skinUnlockToastId: typeof skinUnlockToastId !== 'undefined' ? skinUnlockToastId : null,
     coinsCollectedRun: typeof coinsCollectedRun !== 'undefined' ? coinsCollectedRun : null,
-    coinsActive:   typeof coins !== 'undefined' && coins ? coins.length : null
+    coinsActive:   typeof coins !== 'undefined' && coins ? coins.length : null,
+    achCount:      typeof achUnlocked !== 'undefined' ? (function(){var n=0;for(var k in achUnlocked){if(achUnlocked[k])n++;}return n;})() : null,
+    lifetimeCoins: typeof lifetimeCoins !== 'undefined' ? lifetimeCoins : null,
+    lifetimeRuns:  typeof lifetimeRuns  !== 'undefined' ? lifetimeRuns  : null,
+    maxComboRun:   typeof maxComboRun   !== 'undefined' ? maxComboRun   : null
   };
 });
 })();

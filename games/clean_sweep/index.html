@@ -76,6 +76,13 @@ var STRINGS = {
     streakDays: 'day streak',
     streakDaysPl: 'day streak',
     comeBack: 'Come back tomorrow to keep it!',
+    badges: 'BADGES',
+    badgeUnlocked: 'BADGE UNLOCKED!',
+    badgeFirstSweep: 'First sweep',
+    badgeCombo5: 'Combo x5',
+    badgeCombo10: 'Combo x10',
+    badgeLevel3: 'Reach level 3',
+    badgeLevel5: 'Reach level 5',
   },
   ru: {
     title: 'Чистая Уборка',
@@ -103,6 +110,13 @@ var STRINGS = {
     streakDays: 'дн. подряд',
     streakDaysPl: 'дн. подряд',
     comeBack: 'Возвращайся завтра, чтобы продлить!',
+    badges: 'ЗНАЧКИ',
+    badgeUnlocked: 'ЗНАЧОК ПОЛУЧЕН!',
+    badgeFirstSweep: 'Первая уборка',
+    badgeCombo5: 'Комбо x5',
+    badgeCombo10: 'Комбо x10',
+    badgeLevel3: 'Уровень 3',
+    badgeLevel5: 'Уровень 5',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -278,6 +292,58 @@ function loadStreak() {
   } catch(e) {}
 }
 
+// ── ACHIEVEMENTS (iter#6: bite-sized milestone badges) ───────────────────────
+// Five additive milestones that sit ORTHOGONAL to best/leaderboard/skins/seed/
+// streak. Persisted via a single CSV localStorage key so a wipe of the run-state
+// keys doesn't blow up the badge row. Unlock checks are non-destructive (idempotent),
+// run inline at the relevant gameplay event, and surface a one-time toast on the
+// frame they fire. The badge row renders on MENU + GAMEOVER under existing UI.
+var ACH_KEY = 'clean_sweep_achievements'; // CSV of unlocked ids
+var ACHIEVEMENTS = [
+  { id:'first_sweep', icon:'🧹', tKey:'badgeFirstSweep' },
+  { id:'combo_5',     icon:'🔥', tKey:'badgeCombo5'     },
+  { id:'combo_10',    icon:'⚡', tKey:'badgeCombo10'    },
+  { id:'level_3',     icon:'🎯', tKey:'badgeLevel3'     },
+  { id:'level_5',     icon:'👑', tKey:'badgeLevel5'     },
+];
+var achUnlocked = {};                 // id -> true
+var achToastQueue = [];               // [{id, life}] — pops one toast at a time
+var achToastActive = null;            // {id, life} currently animating (life 0..1)
+
+function loadAchievements() {
+  try {
+    var csv = localStorage.getItem(ACH_KEY) || '';
+    csv.split(',').forEach(function(id){ if (id) achUnlocked[id] = true; });
+  } catch(e) {}
+}
+function saveAchievements() {
+  try {
+    var ids = Object.keys(achUnlocked).filter(function(k){ return achUnlocked[k]; });
+    localStorage.setItem(ACH_KEY, ids.join(','));
+  } catch(e) {}
+}
+function unlockAch(id) {
+  if (achUnlocked[id]) return;
+  achUnlocked[id] = true;
+  saveAchievements();
+  achToastQueue.push({ id: id, life: 1 });
+}
+// Checks fired from gameplay hooks. Cheap; safe to call every collect/levelstart.
+function checkAchievementsOnCollect() {
+  unlockAch('first_sweep');
+  if (combo >= 5)  unlockAch('combo_5');
+  if (combo >= 10) unlockAch('combo_10');
+}
+function checkAchievementsOnLevel(lvl) {
+  if (lvl >= 3) unlockAch('level_3');
+  if (lvl >= 5) unlockAch('level_5');
+}
+function achUnlockedCount() {
+  var n = 0;
+  for (var i=0;i<ACHIEVEMENTS.length;i++) if (achUnlocked[ACHIEVEMENTS[i].id]) n++;
+  return n;
+}
+
 function ensurePlayerName() {
   if (playerName) return playerName;
   try { playerName = localStorage.getItem(NAME_KEY) || ''; } catch(e) {}
@@ -442,6 +508,8 @@ function startLevel(lvl) {
     }
   }
   totalDebris = debrisList.length;
+  // iter#6: badge checks tied to depth reached
+  checkAchievementsOnLevel(lvl);
   gs = 'PLAYING';
   try{parent.postMessage({type:'gf:gameStarted'},'*')}catch(_){};
 }
@@ -458,6 +526,12 @@ function update(dt) {
   if (shake > 0) shake = Math.max(0, shake - dt * 8);
   if (bestPulse > 0) bestPulse = Math.max(0, bestPulse - dt * 0.6);
   if (skinUnlockToast > 0) skinUnlockToast = Math.max(0, skinUnlockToast - dt * 0.35);
+  // iter#6: drive achievement toast queue (one at a time, ~2.5s each)
+  if (!achToastActive && achToastQueue.length > 0) achToastActive = achToastQueue.shift();
+  if (achToastActive) {
+    achToastActive.life -= dt * 0.4;
+    if (achToastActive.life <= 0) achToastActive = null;
+  }
 
   // movement
   var ax = 0, ay = 0;
@@ -505,6 +579,8 @@ function update(dt) {
       spawnParticles(d.x, d.y, d.shine, 3);
       if (combo > 1) spawnFloat(d.x, d.y - 20*S, 'x'+combo+' +'+pts, '#FFD700');
       else           spawnFloat(d.x, d.y - 14*S, '+'+pts, '#eee');
+      // iter#6: badge checks tied to collect / combo
+      checkAchievementsOnCollect();
       if (d.typeR >= 19) shake = 0.25;
       debrisList.splice(i, 1);
       removed++;
@@ -940,6 +1016,104 @@ function drawStreakPill() {
   ctx.restore();
 }
 
+// ── DRAW ACHIEVEMENT ROW (iter#6) ────────────────────────────────────────────
+// Compact 5-icon row drawn at a given vertical centre. Unlocked badges glow,
+// locked ones are dimmed + monochrome. Pure display — no input wiring (badges
+// are passive milestone markers, tapping them shouldn't do anything).
+function drawAchievementRow(yCenter) {
+  var iconFs = clamp(20*S, 14, 26);
+  var labelFs = clamp(10*S, 8, 13);
+  var slotW = iconFs * 2.2;
+  var totalW = slotW * (ACHIEVEMENTS.length - 1);
+  var startX = cx - totalW / 2;
+
+  // header label "BADGES  3/5"
+  ctx.save();
+  ctx.font = 'bold '+labelFs+'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#888';
+  ctx.fillText(t('badges') + '  ' + achUnlockedCount() + '/' + ACHIEVEMENTS.length,
+               cx, yCenter - iconFs - 4*S);
+
+  for (var i = 0; i < ACHIEVEMENTS.length; i++) {
+    var a = ACHIEVEMENTS[i];
+    var unlocked = !!achUnlocked[a.id];
+    var bx = startX + i * slotW;
+    ctx.font = iconFs + 'px sans-serif';
+    ctx.textBaseline = 'middle';
+    if (unlocked) {
+      ctx.globalAlpha = 1;
+      // subtle warm glow halo behind earned icon
+      ctx.shadowColor = 'rgba(255,200,80,0.55)';
+      ctx.shadowBlur = 12*S;
+      ctx.fillStyle = '#ffd57a';
+      ctx.fillText(a.icon, bx, yCenter);
+      ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    } else {
+      ctx.globalAlpha = 0.32;
+      ctx.fillStyle = '#888';
+      ctx.fillText(a.icon, bx, yCenter);
+      ctx.globalAlpha = 1;
+    }
+  }
+  ctx.restore();
+}
+
+// ── DRAW ACHIEVEMENT TOAST (iter#6) ──────────────────────────────────────────
+// In-run popup on the frame an unlock fires. Sits high on the screen so it
+// doesn't collide with the day-seed/streak pills on the menus, or the score HUD.
+function drawAchievementToast() {
+  if (!achToastActive) return;
+  var ach = null;
+  for (var i=0;i<ACHIEVEMENTS.length;i++) if (ACHIEVEMENTS[i].id === achToastActive.id) ach = ACHIEVEMENTS[i];
+  if (!ach) return;
+  var life = achToastActive.life;
+  var alpha = life < 0.15 ? life / 0.15 : 1;
+  var fs = clamp(13*S, 10, 17);
+  var iconFs = clamp(20*S, 14, 26);
+  var headFs = clamp(11*S, 9, 14);
+  var label = t(ach.tKey);
+  var heading = t('badgeUnlocked');
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.font = 'bold '+fs+'px sans-serif';
+  var w1 = ctx.measureText(label).width;
+  ctx.font = 'bold '+headFs+'px sans-serif';
+  var w2 = ctx.measureText(heading).width;
+  var w = Math.max(w1, w2) + iconFs + 28*S;
+  var h = iconFs + fs + 22*S;
+  var bx = cx - w/2, by = HUD_H * S + 10*S;
+  // warm glow pill
+  ctx.shadowColor = 'rgba(255,200,80,0.55)';
+  ctx.shadowBlur = 20*S;
+  ctx.fillStyle = 'rgba(20,16,8,0.92)';
+  rr(ctx, bx, by, w, h, h/2);
+  ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  // border accent
+  ctx.strokeStyle = '#ffd57a';
+  ctx.lineWidth = 2*S;
+  rr(ctx, bx, by, w, h, h/2);
+  ctx.stroke();
+  // icon
+  ctx.font = iconFs+'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd57a';
+  ctx.fillText(ach.icon, bx + 14*S, by + h/2);
+  // heading + label
+  ctx.textAlign = 'left';
+  ctx.font = 'bold '+headFs+'px sans-serif';
+  ctx.fillStyle = '#ffd57a';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(heading, bx + 14*S + iconFs + 10*S, by + headFs + 4*S);
+  ctx.font = 'bold '+fs+'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(label, bx + 14*S + iconFs + 10*S, by + h - 7*S);
+  ctx.restore();
+}
+
 // ── DRAW SKIN SELECTOR (iter#3) ──────────────────────────────────────────────
 // Renders the cosmetic donut row on MENU + GAMEOVER. Tap to swap (only unlocked
 // rows are tappable). Locked rows show "BEST 100" hint. Adds button hits to
@@ -1136,6 +1310,8 @@ function frame(ts) {
     drawDaySeedBadge();
     // iter#3: cosmetic donut picker below the BEST: line
     drawSkinSelector(cy + 20*S + clamp(52*S, 40, 66) + 80*S);
+    // iter#6: achievement badge row near the bottom of the menu
+    drawAchievementRow(H - 36*S);
   }
   if (gs === 'LEVELEND') {
     drawOverlay(t('complete'), t('score')+': '+score, t('next'),
@@ -1155,11 +1331,19 @@ function frame(ts) {
     // iter#3: skin picker visible on game-over too — pairs naturally with the
     // NEW BEST! moment when a fresh tier has just unlocked
     drawSkinSelector(H - 80*S);
+    // iter#6: achievement badge row at the very bottom of game-over (under skins)
+    drawAchievementRow(H - 26*S);
   }
 
   // iter#3: in-run toast when a new donut tier unlocks during play
   if ((gs === 'PLAYING' || gs === 'LEVELEND') && skinUnlockToast > 0) {
     drawSkinUnlockToast();
+  }
+  // iter#6: in-run toast when an achievement unlocks (any state, sits high so
+  // it doesn't fight the score HUD or the gameover overlay; off-by-default
+  // for MENU so first-load isn't noisy)
+  if (gs !== 'MENU' && achToastActive) {
+    drawAchievementToast();
   }
 
   // mobile joystick hint (first 3 seconds of level 1)
@@ -1210,8 +1394,9 @@ function boot() {
     var legacy = parseInt(localStorage.getItem('cs_best')||'0')||0;
     if (legacy > best) { best = legacy; saveBest(); }
   } catch(e) {}
-  loadSkinState(); // iter#3
-  loadStreak();    // iter#5
+  loadSkinState();      // iter#3
+  loadStreak();         // iter#5
+  loadAchievements();   // iter#6
   // If lifetime best already crosses higher tiers, mark them seen on first
   // boot so we don't dump multiple toasts on a returning player. checkSkinUnlocks
   // would otherwise fire all of them on the next collect.
@@ -1259,6 +1444,9 @@ Object.defineProperty(window, 'skinUnlockCount', { get: function(){
 Object.defineProperty(window, 'daySeed',    { get: function(){ return daySeed; } });
 Object.defineProperty(window, 'streak',     { get: function(){ return streak; } });
 Object.defineProperty(window, 'streakBest', { get: function(){ return streakBest; } });
+// iter#6: badge tracker — playtest can verify unlock-on-collect / unlock-on-level
+Object.defineProperty(window, 'achUnlockedCount', { get: function(){ return achUnlockedCount(); } });
+Object.defineProperty(window, 'achTotal',         { get: function(){ return ACHIEVEMENTS.length; } });
 
 (function() {
   if (typeof YaGames === 'undefined') { setTimeout(boot, 3000); return; }
