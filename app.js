@@ -656,7 +656,7 @@ function renderFeatured() {
   // to PNG otherwise — same trick <picture> uses for the grid thumbs,
   // but expressed as a CSS background since hero is a tinted block, not
   // a content image.
-  const heroBg = `image-set(url('/thumbs/${game.slug}.webp?v=1') type('image/webp'), url('/thumbs/${game.slug}.png?v=1') type('image/png'))`;
+  const heroBg = `image-set(url('/thumbs/${game.slug}.webp?v=2') type('image/webp'), url('/thumbs/${game.slug}.png?v=2') type('image/png'))`;
   // Badge: if today's daily-featured slug (2× tokens) matches the hero
   // pick, surface the FEATURED TODAY marker right here instead of running
   // a duplicate banner up top. Otherwise fall back to the generic
@@ -706,8 +706,8 @@ function pickVariant(slug, thumbCount) {
 
 function thumbUrl(slug, variant) {
   return variant > 1
-    ? `/thumbs/${slug}__v${variant}.png?v=1`
-    : `/thumbs/${slug}.png?v=1`;
+    ? `/thumbs/${slug}__v${variant}.png?v=2`
+    : `/thumbs/${slug}.png?v=2`;
 }
 
 // Sibling WebP path. build_webp_thumbs.sh emits one .webp per .png in
@@ -715,8 +715,8 @@ function thumbUrl(slug, variant) {
 // PNG as fallback for the ~3% of browsers that don't support WebP.
 function thumbWebpUrl(slug, variant) {
   return variant > 1
-    ? `/thumbs/${slug}__v${variant}.webp?v=1`
-    : `/thumbs/${slug}.webp?v=1`;
+    ? `/thumbs/${slug}__v${variant}.webp?v=2`
+    : `/thumbs/${slug}.webp?v=2`;
 }
 
 function card(g, opts) {
