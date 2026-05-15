@@ -16,7 +16,6 @@
 
 export async function onRequestGet({ request, env }) {
   const today = new Date().toISOString().slice(0, 10);
-  const todayStart = Date.parse(today + 'T00:00:00Z');
 
   // Fast path: cached pick from earlier today
   const cacheKey = `featured:${today}`;
@@ -27,55 +26,28 @@ export async function onRequestGet({ request, env }) {
     });
   }
 
-  const games = {};
-
-  // Pass 1: today's seconds per slug
-  let cursor;
-  do {
-    const list = await env.VOTES.list({ prefix: 'daily:', cursor, limit: 1000 });
-    for (const k of list.keys) {
-      const rest = k.name.slice('daily:'.length);
-      const lastColon = rest.lastIndexOf(':');
-      if (lastColon < 1) continue;
-      const date = rest.slice(lastColon + 1);
-      if (date !== today) continue;
-      const slug = rest.slice(0, lastColon);
-      const seconds = parseInt(await env.VOTES.get(k.name)) || 0;
-      if (!games[slug]) games[slug] = { seconds: 0, comments: 0, score: 0 };
-      games[slug].seconds = seconds;
-    }
-    cursor = list.list_complete ? null : list.cursor;
-  } while (cursor);
-
-  // Pass 2: today's comments per slug
-  cursor = undefined;
-  do {
-    const list = await env.VOTES.list({ prefix: 'comment:', cursor, limit: 1000 });
-    for (const k of list.keys) {
-      const v = await env.VOTES.get(k.name, 'json');
-      if (!v || !v.ts || v.ts < todayStart) continue;
-      const rest = k.name.slice('comment:'.length);
-      const sep = rest.indexOf(':');
-      if (sep < 1) continue;
-      const slug = rest.slice(0, sep);
-      if (!games[slug]) games[slug] = { seconds: 0, comments: 0, score: 0 };
-      games[slug].comments = (games[slug].comments || 0) + 1;
-    }
-    cursor = list.list_complete ? null : list.cursor;
-  } while (cursor);
-
-  // Composite score + pick top
+  // Cold path: reuse the engagement aggregate /api/trending already builds
+  // (same daily:* + comment:* scan, edge-cached 30s) instead of duplicating
+  // the KV scan here. One fetch, pick top by score.
+  const hostname = new URL(request.url).hostname;
   let best = null;
-  let bestScore = 0;
-  for (const slug of Object.keys(games)) {
-    const g = games[slug];
-    g.score = (g.seconds || 0) + (g.comments || 0) * 60;
-    if (g.score > bestScore) { bestScore = g.score; best = slug; }
-  }
+  try {
+    const r = await fetch(`https://${hostname}/api/trending`, { cf: { cacheTtl: 30 } });
+    if (r.ok) {
+      const j = await r.json();
+      const slugs = j && j.games ? Object.keys(j.games) : [];
+      let bestScore = 0;
+      for (const slug of slugs) {
+        const s = (j.games[slug] && j.games[slug].score) || 0;
+        if (s > bestScore) { bestScore = s; best = slug; }
+      }
+    }
+  } catch (_) { /* fall through to fallback */ }
 
-  // Fallback: if no signal today (early morning, first visitor), pick a
-  // deterministic-by-date slug from games.json so the badge still has
-  // SOMETHING to show. Once a heartbeat lands, the slug rotates.
+  // Fallback: no engagement signal today (early morning, first visitor).
+  // Pick a deterministic-by-date slug from games.json so the badge still
+  // has SOMETHING. Once a heartbeat lands, /api/trending will outrank it
+  // on the next cache miss.
   if (!best) {
     best = await pickFallbackSlug(request, today);
   }
