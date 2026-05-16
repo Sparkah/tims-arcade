@@ -1,0 +1,1066 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Token Throttle</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── STRINGS ─────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Token Throttle',
+    sub:   'Dispatch tasks to the right AI tier — burn your budget and you ship nothing',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SHIPPED', best: 'BEST',
+    gameover: 'BUDGET BURNED',
+    budget: 'BUDGET', wallet: 'TOKENS',
+    queue: 'QUEUE',
+    rework: 'REWORK',
+    shipped_label: 'SHIPPED',
+    rename: 'RENAME VAR',
+    refactor: 'REFACTOR',
+    designdoc: 'DESIGN DOC',
+    unittest: 'UNIT TEST',
+    haiku_name: 'HAIKU', haiku_tag: 'cheap — simple only',
+    sonnet_name: 'SONNET', sonnet_tag: 'mid — handles most',
+    opus_name: 'OPUS', opus_tag: 'pricey — never fails',
+    tap_task: 'Tap a task, then tap an agent',
+    rework_pop: '+1 COMP',
+    rejected: 'REJECTED',
+    'tut_goal':     'Goal: Ship as many tasks as you can before your token budget runs out.',
+    'tut_controls': 'Controls: Tap a task card in the queue, then tap one of three AI agents to dispatch it.',
+    'tut_win':      'Win: Endless score-attack — beat your best shipped count.',
+    'tut_lose':     'Lose: Budget drops below the cheapest agents per-task cost.',
+    'tut_tip':      'Tip: Haiku fails on complexity 4+, Sonnet fails on 5+, Opus never fails. Failed dispatches loop the task back with complexity +1 — keep mis-routing and a task becomes un-shippable.',
+  },
+  ru: {
+    title: 'Бюджет Токенов',
+    sub:   'Раздавай задачи нужному ИИ-агенту — спалишь бюджет и ничего не отгрузишь',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОТГРУЖЕНО', best: 'РЕКОРД',
+    gameover: 'БЮДЖЕТ СГОРЕЛ',
+    budget: 'БЮДЖЕТ', wallet: 'ТОКЕНЫ',
+    queue: 'ОЧЕРЕДЬ',
+    rework: 'ДОРАБОТКА',
+    shipped_label: 'ОТГРУЖЕНО',
+    rename: 'ПЕРЕИМЕНОВАТЬ',
+    refactor: 'РЕФАКТОР',
+    designdoc: 'ДИЗАЙН-ДОК',
+    unittest: 'ЮНИТ-ТЕСТ',
+    haiku_name: 'HAIKU', haiku_tag: 'дёшево — только простое',
+    sonnet_name: 'SONNET', sonnet_tag: 'середина — почти всё',
+    opus_name: 'OPUS', opus_tag: 'дорого — не падает',
+    tap_task: 'Нажми задачу, затем агента',
+    rework_pop: '+1 СЛОЖ',
+    rejected: 'ОТКАЗ',
+    tut_goal:     'Цель: Отправь как можно больше задач, пока не сгорел бюджет токенов.',
+    tut_controls: 'Управление: Нажми на карту задачи в очереди, затем нажми на одного из трёх ИИ-агентов.',
+    tut_win:      'Победа: Бесконечный режим — побей свой рекорд по отгруженным задачам.',
+    tut_lose:     'Проигрыш: Бюджет падает ниже стоимости самого дешёвого агента.',
+    tut_tip:      'Совет: Haiku падает на сложности 4+, Sonnet на 5+, Opus всегда справится. Провал возвращает задачу в очередь со сложностью +1 — повторяй ошибку и задача станет неотгружаемой.',
+  },
+};
+
+var SPRITE_NAMES = []; // procedural
+
+// ── TUNABLES ────────────────────────────────────────────────────────────
+var MAX_BUDGET       = 60;
+var HAIKU_COST       = 1;
+var SONNET_COST      = 3;
+var OPUS_COST        = 8;
+var CHEAPEST_COST    = 1;
+var HAIKU_MAX_COMP   = 3;
+var SONNET_MAX_COMP  = 4;
+var OPUS_MAX_COMP    = 99;
+var MAX_COMPLEXITY   = 7;
+var QUEUE_SIZE       = 5;
+var SPAWN_INTERVAL_MS = 1100;
+var REWORK_PENALTY   = 1;
+var DISPATCH_ANIM_MS = 380;
+
+// ── GAME STATE ──────────────────────────────────────────────────────────
+var gs = 'MENU';        // MENU | PLAYING | GAMEOVER
+var score = 0, best = 0;
+var budget = MAX_BUDGET;
+var queue = [];          // up to QUEUE_SIZE tasks
+var agents = [];         // 3 agents (haiku, sonnet, opus)
+var dispatches = [];     // active dispatch animations
+var shippedFx = [];      // recent shipped indicators on right column
+var nextTaskId = 1;
+var selectedTaskId = null;
+var showTutorialOverlay = false;
+var spawnTimer = 0;
+
+// task types — pure visual variety; gameplay distinguishes by complexity
+var TASK_TYPES = [
+  { key: 'rename',    glyphLines: 1 },
+  { key: 'refactor',  glyphLines: 3 },
+  { key: 'designdoc', glyphLines: 4 },
+  { key: 'unittest',  glyphLines: 2 },
+];
+
+// agent specs (rebuilt by buildAgents on resize)
+function buildAgents() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var colW = Math.min(W * 0.32, 320 * S);
+  var slotH = Math.min((H - 130 * S) / 3, 150 * S);
+  var startX = W * 0.5 - colW / 2;
+  var startY = 110 * S;
+  agents = [
+    { id:'haiku',  nameKey:'haiku_name',  tagKey:'haiku_tag',  cost:HAIKU_COST,  maxComp:HAIKU_MAX_COMP,  x:startX, y:startY,                w:colW, h:slotH - 10*S, col:'#2ecc71', pulseT:0, pulseCol:'#2ecc71' },
+    { id:'sonnet', nameKey:'sonnet_name', tagKey:'sonnet_tag', cost:SONNET_COST, maxComp:SONNET_MAX_COMP, x:startX, y:startY + slotH,        w:colW, h:slotH - 10*S, col:'#3498db', pulseT:0, pulseCol:'#3498db' },
+    { id:'opus',   nameKey:'opus_name',   tagKey:'opus_tag',   cost:OPUS_COST,   maxComp:OPUS_MAX_COMP,   x:startX, y:startY + slotH * 2,    w:colW, h:slotH - 10*S, col:'#9b59b6', pulseT:0, pulseCol:'#9b59b6' },
+  ];
+}
+
+// ── LIFECYCLE ───────────────────────────────────────────────────────────
+function startGame() {
+  score = 0;
+  budget = MAX_BUDGET;
+  queue = [];
+  dispatches = [];
+  shippedFx = [];
+  selectedTaskId = null;
+  spawnTimer = 0;
+  buildAgents();
+  // pre-fill queue with 3 tasks
+  for (var i = 0; i < 3; i++) spawnTask();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('token_throttle_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// Screenshot escape hatch — lands in busy mid-game state.
+window._setupForScreenshot = function(level) {
+  startGame();
+  var n = 5;
+  queue = [];
+  // varied complexity load to look busy
+  var comps = [2, 5, 1, 4, 3];
+  for (var i = 0; i < n; i++) {
+    var t = buildTask(comps[i % comps.length]);
+    queue.push(t);
+  }
+  // simulate a few in-flight dispatches and shipped pops
+  budget = 38;
+  score = 7 + (level || 3) * 2;
+  // active dispatch from haiku → busy look
+  if (agents.length >= 1) {
+    var task = buildTask(2);
+    dispatches.push({
+      task: task,
+      agent: agents[0],
+      x: agents[0].x + agents[0].w/2,
+      y: agents[0].y + agents[0].h/2,
+      tx: GF.W * 0.85,
+      ty: agents[0].y + agents[0].h/2,
+      t: 0.3,
+      result: 'ship'
+    });
+  }
+  shippedFx.push({ x: GF.W * 0.85, y: 200 * GF.S, life: 0.9, label: '+1' });
+  shippedFx.push({ x: GF.W * 0.85, y: 250 * GF.S, life: 0.6, label: '+1' });
+};
+window._jumpLevel = function(n) { window._setupForScreenshot(n || 3); };
+
+// ── TASKS ───────────────────────────────────────────────────────────────
+function buildTask(forcedComp) {
+  var comp;
+  if (forcedComp !== undefined && forcedComp !== null) {
+    comp = forcedComp;
+  } else {
+    // weighted: 1-2 common, 3-4 mid, 5 rare
+    var r = Math.random();
+    if (r < 0.30) comp = 1;
+    else if (r < 0.55) comp = 2;
+    else if (r < 0.78) comp = 3;
+    else if (r < 0.93) comp = 4;
+    else comp = 5;
+  }
+  var type = TASK_TYPES[Math.floor(Math.random() * TASK_TYPES.length)];
+  return {
+    id: nextTaskId++,
+    type: type,
+    comp: comp,
+    reworked: 0,
+    spawnT: 0,
+  };
+}
+
+function spawnTask() {
+  if (queue.length >= QUEUE_SIZE) return false;
+  queue.push(buildTask());
+  return true;
+}
+
+function getSelectedTask() {
+  if (selectedTaskId == null) return null;
+  for (var i = 0; i < queue.length; i++) {
+    if (queue[i].id === selectedTaskId) return queue[i];
+  }
+  return null;
+}
+
+function removeTaskFromQueue(taskId) {
+  for (var i = 0; i < queue.length; i++) {
+    if (queue[i].id === taskId) { queue.splice(i, 1); return true; }
+  }
+  return false;
+}
+
+// Dispatch: try to route task → agent. Sets up an animation; result resolves on landing.
+function dispatchTask(task, agent) {
+  if (budget < agent.cost) {
+    // can't afford this agent — flash and bail (no animation)
+    agent.pulseT = 0.4;
+    agent.pulseCol = '#ff5e5e';
+    GF.setShake(0.2);
+    return;
+  }
+  budget -= agent.cost;
+  removeTaskFromQueue(task.id);
+  selectedTaskId = null;
+
+  var success = task.comp <= agent.maxComp;
+  var dispatch = {
+    task: task,
+    agent: agent,
+    x: agent.x - 20 * GF.S,
+    y: agent.y + agent.h / 2,
+    tx: agent.x + agent.w / 2,
+    ty: agent.y + agent.h / 2,
+    t: 0,
+    duration: DISPATCH_ANIM_MS / 1000,
+    phase: 'travel',  // travel → landed → outcome
+    result: success ? 'ship' : 'rework',
+  };
+  dispatches.push(dispatch);
+  agent.pulseT = 0.45;
+  agent.pulseCol = success ? agent.col : '#ff5e5e';
+  GF.saveRun();
+}
+
+function resolveDispatch(d) {
+  if (d.result === 'ship') {
+    score++;
+    shippedFx.push({ x: d.tx + 80 * GF.S, y: d.ty, life: 1.1, label: '+1' });
+    GF.spawnParticles(d.tx, d.ty, '#7df9ff', 16);
+    GF.setShake(0.18);
+  } else {
+    // rework: bump complexity, push back into queue
+    var t = d.task;
+    t.comp += REWORK_PENALTY;
+    t.reworked++;
+    if (t.comp > MAX_COMPLEXITY) {
+      // un-shippable — drop the task entirely, deeper hit
+      budget = Math.max(0, budget - REWORK_PENALTY);
+      GF.spawnParticles(d.tx, d.ty, '#ff5e5e', 24);
+      shippedFx.push({ x: d.tx + 80 * GF.S, y: d.ty, life: 1.2, label: GF.t('rejected'), col:'#ff5e5e' });
+      GF.setShake(0.4);
+    } else if (queue.length < QUEUE_SIZE) {
+      queue.push(t);
+      GF.spawnFloat(d.agent.x + d.agent.w/2, d.agent.y + d.agent.h/2 - 20 * GF.S, GF.t('rework_pop'), '#ff8866');
+      GF.spawnParticles(d.tx, d.ty, '#ff8866', 14);
+      GF.setShake(0.3);
+    } else {
+      // queue full → rejected
+      shippedFx.push({ x: d.tx + 80 * GF.S, y: d.ty, life: 1.2, label: GF.t('rejected'), col:'#ff5e5e' });
+      GF.spawnParticles(d.tx, d.ty, '#ff5e5e', 18);
+      GF.setShake(0.35);
+    }
+  }
+  checkLose();
+  GF.saveRun();
+}
+
+function checkLose() {
+  if (budget < CHEAPEST_COST && queue.length + dispatches.length > 0) {
+    gameOver();
+  } else if (budget < CHEAPEST_COST && queue.length === 0) {
+    // edge: if you literally exhausted with empty queue → also lose
+    gameOver();
+  }
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────
+function findTaskAt(x, y) {
+  var bounds = queueBounds();
+  for (var i = 0; i < queue.length; i++) {
+    var t = queue[i];
+    var pos = taskPos(i, bounds);
+    if (x >= pos.x && x <= pos.x + pos.w && y >= pos.y && y <= pos.y + pos.h) {
+      return t;
+    }
+  }
+  return null;
+}
+
+function findAgentAt(x, y) {
+  for (var i = 0; i < agents.length; i++) {
+    var a = agents[i];
+    if (x >= a.x && x <= a.x + a.w && y >= a.y && y <= a.y + a.h) return a;
+  }
+  return null;
+}
+
+function helpBtnBounds() {
+  var S = GF.S, W = GF.W;
+  var r = Math.max(22 * S, 18);
+  return { x: W - 16*S - r*2, y: 12*S, w: r*2, h: r*2, r: r };
+}
+function helpHit(x, y) {
+  var b = helpBtnBounds();
+  return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+}
+
+function handleDown(x, y) {
+  if (showTutorialOverlay) { showTutorialOverlay = false; return; }
+  if (gs === 'MENU' || gs === 'GAMEOVER') {
+    if (menuBtn && x >= menuBtn.x && x <= menuBtn.x + menuBtn.w && y >= menuBtn.y && y <= menuBtn.y + menuBtn.h) {
+      startGame();
+    }
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  if (helpHit(x, y)) { showTutorialOverlay = true; return; }
+
+  // First — task pick
+  var t = findTaskAt(x, y);
+  if (t) {
+    if (selectedTaskId === t.id) {
+      selectedTaskId = null; // toggle off
+    } else {
+      selectedTaskId = t.id;
+    }
+    return;
+  }
+  // Then — agent dispatch (only if a task is selected)
+  var a = findAgentAt(x, y);
+  if (a) {
+    var sel = getSelectedTask();
+    if (sel) {
+      dispatchTask(sel, a);
+    } else {
+      // nudge — flash the hint
+      a.pulseT = 0.3;
+      a.pulseCol = '#7df9ff';
+    }
+    return;
+  }
+  // Tapped empty space — deselect
+  selectedTaskId = null;
+}
+
+// ── UPDATE ─────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+
+  // Spawn ticker
+  spawnTimer += dt * 1000;
+  if (spawnTimer >= SPAWN_INTERVAL_MS) {
+    spawnTimer = 0;
+    spawnTask();
+  }
+
+  // Animate queue spawn-in
+  for (var i = 0; i < queue.length; i++) {
+    if (queue[i].spawnT < 1) queue[i].spawnT = Math.min(1, queue[i].spawnT + dt * 3.0);
+  }
+
+  // Dispatch animations
+  for (var d = dispatches.length - 1; d >= 0; d--) {
+    var dp = dispatches[d];
+    dp.t += dt;
+    var k = Math.min(1, dp.t / (dp.duration || (DISPATCH_ANIM_MS/1000)));
+    // travel halfway, land, then resolve
+    if (k >= 1 && dp.phase !== 'done') {
+      dp.phase = 'done';
+      resolveDispatch(dp);
+      dispatches.splice(d, 1);
+    }
+  }
+
+  // Agent pulse decay
+  for (var ai = 0; ai < agents.length; ai++) {
+    if (agents[ai].pulseT > 0) agents[ai].pulseT = Math.max(0, agents[ai].pulseT - dt);
+  }
+  // shippedFx decay
+  for (var sf = shippedFx.length - 1; sf >= 0; sf--) {
+    shippedFx[sf].life -= dt;
+    shippedFx[sf].y -= 12 * GF.S * dt;
+    if (shippedFx[sf].life <= 0) shippedFx.splice(sf, 1);
+  }
+
+  // Idle starvation: if queue empty AND no dispatches AND budget < cheapest, lose
+  if (queue.length === 0 && dispatches.length === 0 && budget < CHEAPEST_COST) {
+    gameOver();
+  }
+}
+
+// ── LAYOUT ─────────────────────────────────────────────────────────────
+function queueBounds() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var colW = Math.min(W * 0.22, 200 * S);
+  var top = 110 * S;
+  var bot = H - 24 * S;
+  return { x: 16 * S, y: top, w: colW, h: bot - top };
+}
+
+function taskPos(idx, bounds) {
+  var S = GF.S;
+  var cardH = Math.min(72 * S, (bounds.h - 6 * S * (QUEUE_SIZE - 1)) / QUEUE_SIZE);
+  return {
+    x: bounds.x,
+    y: bounds.y + idx * (cardH + 6 * S),
+    w: bounds.w,
+    h: cardH,
+  };
+}
+
+function shippedColumnX() {
+  var W = GF.W, S = GF.S;
+  return W - Math.min(W * 0.22, 200 * S) - 16 * S;
+}
+
+// ── DRAW ───────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var W = GF.W, H = GF.H;
+  var bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0d1424');
+  bg.addColorStop(0.55, '#0a0e1a');
+  bg.addColorStop(1, '#070912');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawQueue(ctx);
+    drawAgents(ctx);
+    drawShippedColumn(ctx);
+    drawDispatches(ctx);
+    drawHUD(ctx);
+    drawHelpButton(ctx);
+  }
+
+  if (gs === 'MENU') {
+    drawMenu(ctx);
+  } else if (gs === 'GAMEOVER') {
+    drawGameOver(ctx);
+  }
+
+  if (showTutorialOverlay && gs === 'PLAYING') {
+    drawTutorialPanel(ctx);
+  }
+}
+
+function drawQueue(ctx) {
+  var S = GF.S;
+  var bounds = queueBounds();
+
+  // column backdrop
+  ctx.fillStyle = 'rgba(20, 28, 50, 0.55)';
+  GF.rr(ctx, bounds.x - 8*S, bounds.y - 8*S, bounds.w + 16*S, bounds.h + 16*S, 12*S);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(125,249,255,0.18)';
+  ctx.lineWidth = 1.5 * S;
+  GF.rr(ctx, bounds.x - 8*S, bounds.y - 8*S, bounds.w + 16*S, bounds.h + 16*S, 12*S);
+  ctx.stroke();
+
+  var headFs = GF.clamp(12 * S, 9, 16);
+  ctx.fillStyle = '#7df9ff';
+  ctx.font = 'bold ' + headFs + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(GF.t('queue'), bounds.x, bounds.y - 12*S);
+
+  for (var i = 0; i < queue.length; i++) {
+    var t = queue[i];
+    var pos = taskPos(i, bounds);
+    drawTaskCard(ctx, t, pos.x, pos.y, pos.w, pos.h, t.id === selectedTaskId);
+  }
+}
+
+function drawTaskCard(ctx, t, x, y, w, h, selected) {
+  var S = GF.S;
+  var sp = t.spawnT;
+  var alpha = Math.min(1, sp);
+  var scale = 0.92 + sp * 0.08;
+  var cx = x + w/2, cy = y + h/2;
+  var dw = w * scale, dh = h * scale;
+  var dx = cx - dw/2, dy = cy - dh/2;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  var grad = ctx.createLinearGradient(dx, dy, dx, dy + dh);
+  grad.addColorStop(0, '#f5f7fb');
+  grad.addColorStop(1, '#cdd3e2');
+  ctx.fillStyle = grad;
+  GF.rr(ctx, dx, dy, dw, dh, 10*S);
+  ctx.fill();
+
+  // complexity-tinted left bar
+  var compCol = complexityColor(t.comp);
+  ctx.fillStyle = compCol;
+  GF.rr(ctx, dx + 4*S, dy + 4*S, 5*S, dh - 8*S, 2*S);
+  ctx.fill();
+
+  if (selected) {
+    ctx.strokeStyle = '#7df9ff';
+    ctx.lineWidth = 3 * S;
+    GF.rr(ctx, dx - 2*S, dy - 2*S, dw + 4*S, dh + 4*S, 12*S);
+    ctx.stroke();
+  }
+  if (t.reworked > 0) {
+    // small rework chip
+    var chipW = 28 * S, chipH = 14 * S;
+    ctx.fillStyle = 'rgba(255, 140, 80, 0.85)';
+    GF.rr(ctx, dx + dw - chipW - 6*S, dy + 6*S, chipW, chipH, chipH/2);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + GF.clamp(9 * S, 8, 12) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('R' + t.reworked, dx + dw - chipW/2 - 6*S, dy + 6*S + chipH/2);
+  }
+
+  // task type label
+  ctx.fillStyle = '#2a3550';
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t(t.type.key), dx + 14*S, dy + 8*S);
+
+  // glyph rows (procedural code-look lines)
+  ctx.fillStyle = 'rgba(40,55,90,0.55)';
+  var lines = t.type.glyphLines;
+  var lineY = dy + 26 * S;
+  var lh = 3.5 * S;
+  for (var i = 0; i < lines; i++) {
+    var lw = (0.55 + 0.15 * ((i + t.id) % 3)) * (dw - 26 * S);
+    ctx.fillRect(dx + 14 * S, lineY + i * 7 * S, lw, lh);
+  }
+
+  // complexity dots row
+  var dotY = dy + dh - 12 * S;
+  var dotX = dx + 14 * S;
+  var maxDots = 5;
+  for (var dI = 0; dI < maxDots; dI++) {
+    var filled = dI < Math.min(t.comp, maxDots);
+    ctx.beginPath();
+    ctx.arc(dotX + dI * 10 * S, dotY, 3 * S, 0, Math.PI * 2);
+    ctx.fillStyle = filled ? compCol : 'rgba(80,90,110,0.5)';
+    ctx.fill();
+  }
+  if (t.comp > maxDots) {
+    ctx.fillStyle = compCol;
+    ctx.font = 'bold ' + GF.clamp(9 * S, 8, 12) + 'px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('+' + (t.comp - maxDots), dotX + maxDots * 10 * S + 2 * S, dotY);
+  }
+
+  ctx.restore();
+}
+
+function complexityColor(c) {
+  if (c <= 2) return '#48c9b0';
+  if (c <= 4) return '#f5b041';
+  return '#ec7063';
+}
+
+function drawAgents(ctx) {
+  var S = GF.S;
+  for (var i = 0; i < agents.length; i++) {
+    var a = agents[i];
+    var pulse = a.pulseT;
+    var grad = ctx.createLinearGradient(a.x, a.y, a.x, a.y + a.h);
+    grad.addColorStop(0, hexShade(a.col, -0.4));
+    grad.addColorStop(1, hexShade(a.col, -0.7));
+    ctx.fillStyle = grad;
+    GF.rr(ctx, a.x, a.y, a.w, a.h, 14*S);
+    ctx.fill();
+
+    var borderCol = pulse > 0 ? blendCol(a.col, a.pulseCol, Math.min(1, pulse / 0.45)) : hexShade(a.col, -0.1);
+    ctx.strokeStyle = borderCol;
+    ctx.lineWidth = (2 + pulse * 5) * S;
+    GF.rr(ctx, a.x, a.y, a.w, a.h, 14*S);
+    ctx.stroke();
+
+    // highlight when a task is selected and this agent can be tapped
+    var sel = getSelectedTask();
+    if (sel) {
+      ctx.fillStyle = 'rgba(255,255,255,0.06)';
+      GF.rr(ctx, a.x, a.y, a.w, a.h, 14*S);
+      ctx.fill();
+    }
+
+    var nameFs = GF.clamp(22 * S, 16, 30);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + nameFs + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(GF.t(a.nameKey), a.x + a.w/2, a.y + 10*S);
+
+    var tagFs = GF.clamp(11 * S, 9, 15);
+    ctx.fillStyle = 'rgba(255,255,255,0.78)';
+    ctx.font = tagFs + 'px sans-serif';
+    ctx.fillText(GF.t(a.tagKey), a.x + a.w/2, a.y + 10*S + nameFs + 4*S);
+
+    // cost chip
+    var chipFs = GF.clamp(11 * S, 9, 14);
+    var chipW = 80 * S, chipH = 22 * S;
+    var chipX = a.x + a.w - chipW - 10 * S;
+    var chipY = a.y + a.h - chipH - 10 * S;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    GF.rr(ctx, chipX, chipY, chipW, chipH, chipH/2);
+    ctx.fill();
+    ctx.fillStyle = '#7df9ff';
+    ctx.font = 'bold ' + chipFs + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('- ' + a.cost + ' tk', chipX + chipW/2, chipY + chipH/2);
+
+    // max-comp dots
+    drawAgentCapDots(ctx, a);
+  }
+}
+
+function drawAgentCapDots(ctx, a) {
+  var S = GF.S;
+  var startX = a.x + 12 * S;
+  var dotY = a.y + a.h - 14 * S;
+  // show up to 5 capability dots based on maxComp
+  var maxDots = 5;
+  for (var i = 0; i < maxDots; i++) {
+    var canDo = (i + 1) <= a.maxComp;
+    ctx.beginPath();
+    ctx.arc(startX + i * 11 * S, dotY, 3.5 * S, 0, Math.PI * 2);
+    ctx.fillStyle = canDo ? complexityColor(i + 1) : 'rgba(80,90,110,0.6)';
+    ctx.fill();
+  }
+}
+
+function drawShippedColumn(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var colW = Math.min(W * 0.22, 200 * S);
+  var x = W - colW - 16 * S;
+  var top = 110 * S;
+  var bot = H - 24 * S;
+
+  ctx.fillStyle = 'rgba(20, 40, 30, 0.45)';
+  GF.rr(ctx, x - 8*S, top - 8*S, colW + 16*S, bot - top + 16*S, 12*S);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(125,255,180,0.18)';
+  ctx.lineWidth = 1.5 * S;
+  GF.rr(ctx, x - 8*S, top - 8*S, colW + 16*S, bot - top + 16*S, 12*S);
+  ctx.stroke();
+
+  ctx.fillStyle = '#7dffb6';
+  ctx.font = 'bold ' + GF.clamp(12 * S, 9, 16) + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(GF.t('shipped_label'), x, top - 12*S);
+
+  // big count
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(48 * S, 28, 64) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(String(score), x + colW/2, (top + bot)/2);
+
+  // recent +1 floats
+  for (var i = 0; i < shippedFx.length; i++) {
+    var f = shippedFx[i];
+    ctx.globalAlpha = Math.max(0, f.life);
+    ctx.fillStyle = f.col || '#7dffb6';
+    ctx.font = 'bold ' + GF.clamp(18 * S, 14, 24) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(f.label, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawDispatches(ctx) {
+  var S = GF.S;
+  for (var i = 0; i < dispatches.length; i++) {
+    var d = dispatches[i];
+    var k = Math.min(1, d.t / d.duration);
+    var ease = 1 - Math.pow(1 - k, 2);
+    var px = d.x + (d.tx - d.x) * ease;
+    var py = d.y + (d.ty - d.y) * ease;
+    var sz = 36 * S;
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.rotate(k * Math.PI * 0.4);
+    var grad = ctx.createLinearGradient(-sz/2, -sz/2, sz/2, sz/2);
+    grad.addColorStop(0, '#fff');
+    grad.addColorStop(1, complexityColor(d.task.comp));
+    ctx.fillStyle = grad;
+    GF.rr(ctx, -sz/2, -sz/2, sz, sz, 6*S);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawHUD(ctx) {
+  var W = GF.W, S = GF.S;
+  var hudH = 96 * S;
+  var hudGrad = ctx.createLinearGradient(0, 0, 0, hudH);
+  hudGrad.addColorStop(0, 'rgba(8,12,24,0.92)');
+  hudGrad.addColorStop(1, 'rgba(8,12,24,0)');
+  ctx.fillStyle = hudGrad;
+  ctx.fillRect(0, 0, W, hudH);
+
+  // SCORE
+  var fs = GF.clamp(14 * S, 11, 18);
+  ctx.fillStyle = '#9ab';
+  ctx.font = fs + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('score'), 16*S, 12*S);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(24 * S, 18, 32) + 'px sans-serif';
+  ctx.fillText(String(score), 16*S, 12*S + fs + 2*S);
+
+  // BUDGET bar
+  var bx = 16 * S;
+  var by = 64 * S;
+  var bw = W - 32 * S;
+  var bh = 14 * S;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  GF.rr(ctx, bx, by, bw, bh, bh/2);
+  ctx.fill();
+  var pct = Math.max(0, Math.min(1, budget / MAX_BUDGET));
+  var barCol = pct > 0.5 ? '#48c9b0' : pct > 0.2 ? '#f5b041' : '#ff5e5e';
+  ctx.fillStyle = barCol;
+  GF.rr(ctx, bx, by, Math.max(2*S, bw * pct), bh, bh/2);
+  ctx.fill();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(GF.t('budget') + ': ' + Math.max(0, Math.round(budget)) + ' / ' + MAX_BUDGET + ' ' + GF.t('wallet').toLowerCase(), bx + 2*S, by - 2*S);
+
+  // hint chip
+  if (selectedTaskId == null && gs === 'PLAYING') {
+    var hintFs = GF.clamp(11 * S, 9, 14);
+    ctx.font = 'bold ' + hintFs + 'px sans-serif';
+    ctx.fillStyle = 'rgba(125, 249, 255, 0.55)';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(GF.t('tap_task'), W/2, 12*S);
+  }
+}
+
+function drawHelpButton(ctx) {
+  var b = helpBtnBounds();
+  var S = GF.S;
+  ctx.fillStyle = 'rgba(20, 30, 50, 0.7)';
+  ctx.beginPath();
+  ctx.arc(b.x + b.r, b.y + b.r, b.r, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(125, 249, 255, 0.55)';
+  ctx.lineWidth = 2 * S;
+  ctx.stroke();
+  ctx.fillStyle = '#7df9ff';
+  ctx.font = 'bold ' + GF.clamp(20 * S, 16, 26) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', b.x + b.r, b.y + b.r);
+}
+
+// ── TUTORIAL PANEL ─────────────────────────────────────────────────────
+function drawTutorialPanel(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(5, 8, 18, 0.88)';
+  ctx.fillRect(0, 0, W, H);
+  var pw = Math.min(W - 40*S, 540*S);
+  var ph = Math.min(H - 60*S, 380*S);
+  var px = (W - pw)/2, py = (H - ph)/2;
+  ctx.fillStyle = '#10162a';
+  GF.rr(ctx, px, py, pw, ph, 16*S);
+  ctx.fill();
+  ctx.strokeStyle = '#7df9ff';
+  ctx.lineWidth = 2 * S;
+  GF.rr(ctx, px, py, pw, ph, 16*S);
+  ctx.stroke();
+  drawTutorialLines(ctx, px, py, pw, ph);
+  ctx.fillStyle = '#7df9ff';
+  ctx.font = 'bold ' + GF.clamp(13 * S, 10, 16) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(GF.lang === 'ru' ? 'НАЖМИ ЧТОБЫ ЗАКРЫТЬ' : 'TAP TO CLOSE', W/2, py + ph - 14*S);
+}
+
+function drawTutorialLines(ctx, px, py, pw, ph) {
+  var S = GF.S;
+  var titleFs = GF.clamp(20 * S, 16, 28);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('title'), px + pw/2, py + 18*S);
+  var fs = GF.clamp(13 * S, 10, 17);
+  ctx.font = fs + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#d0d8e8';
+  var startY = py + 18*S + titleFs + 16*S;
+  var lineH = fs + 8*S;
+  var keys = ['tut_goal','tut_controls','tut_win','tut_lose','tut_tip'];
+  var lineYCur = startY;
+  for (var i = 0; i < keys.length; i++) {
+    lineYCur = wrapText(ctx, GF.t(keys[i]), px + 22*S, lineYCur, pw - 44*S, lineH);
+    lineYCur += 6*S;
+  }
+}
+
+function wrapText(ctx, text, x, y, maxW, lineH) {
+  var words = String(text).split(/\s+/);
+  var cur = '', lineY = y;
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) {
+      ctx.fillText(cur, x, lineY);
+      lineY += lineH;
+      cur = words[i];
+    } else {
+      cur = probe;
+    }
+  }
+  if (cur) { ctx.fillText(cur, x, lineY); lineY += lineH; }
+  return lineY;
+}
+
+// ── MENU / GAMEOVER ────────────────────────────────────────────────────
+var menuBtn = null;
+
+function drawMenu(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(5, 8, 18, 0.92)';
+  ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(38 * S, 22, 56);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(125,249,255,0.5)';
+  ctx.shadowBlur = 24 * S;
+  ctx.fillText(GF.t('title'), W/2, H * 0.16 + titleFs);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#9ab';
+  var subFs = GF.clamp(14 * S, 11, 18);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillText(GF.t('sub'), W/2, H * 0.16 + titleFs + subFs + 8*S);
+
+  var tutY = H * 0.30 + titleFs;
+  var fs = GF.clamp(13 * S, 10, 17);
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillStyle = '#d0d8e8';
+  ctx.textAlign = 'left';
+  var keys = ['tut_goal','tut_controls','tut_win','tut_lose','tut_tip'];
+  var leftX = Math.max(40 * S, W/2 - 250 * S);
+  var rightW = Math.min(500 * S, W - 80 * S);
+  var lineYCur = tutY;
+  for (var i = 0; i < keys.length; i++) {
+    lineYCur = wrapText(ctx, GF.t(keys[i]), leftX, lineYCur, rightW, fs + 4*S);
+    lineYCur += 8*S;
+  }
+
+  var btnW = GF.clamp(240 * S, 180, 320), btnH = GF.clamp(54 * S, 44, 70);
+  var btnX = W/2 - btnW/2, btnY = Math.min(H * 0.82, lineYCur + 20*S);
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#7df9ff'); grad.addColorStop(1, '#3aa8c8');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + GF.clamp(18 * S, 14, 24) + 'px sans-serif';
+  ctx.fillStyle = '#0a0e1a';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), W/2, btnY + btnH/2);
+  menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+  if (best > 0) {
+    ctx.fillStyle = '#557';
+    ctx.font = GF.clamp(12 * S, 9, 16) + 'px sans-serif';
+    ctx.fillText(GF.t('best') + ': ' + best, W/2, btnY + btnH + 22*S);
+  }
+}
+
+function drawGameOver(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,8,18,0.86)';
+  ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(36 * S, 22, 56);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(255,94,94,0.6)';
+  ctx.shadowBlur = 24 * S;
+  ctx.fillText(GF.t('gameover'), W/2, H/2 - 40*S);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#9ab';
+  ctx.font = GF.clamp(16 * S, 12, 20) + 'px sans-serif';
+  ctx.fillText(GF.t('score') + ': ' + score, W/2, H/2);
+  ctx.fillStyle = '#557';
+  ctx.font = GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+  ctx.fillText(GF.t('best') + ': ' + best, W/2, H/2 + 22*S);
+  var btnW = GF.clamp(240 * S, 180, 320), btnH = GF.clamp(54 * S, 44, 70);
+  var btnX = W/2 - btnW/2, btnY = H/2 + 50*S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#7df9ff');
+  grad.addColorStop(1, '#3aa8c8');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + GF.clamp(18 * S, 14, 24) + 'px sans-serif';
+  ctx.fillStyle = '#0a0e1a';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('retry'), W/2, btnY + btnH/2);
+  menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+// ── COLOUR HELPERS ─────────────────────────────────────────────────────
+function hexShade(hex, pct) {
+  var c = hex.replace('#','');
+  var r = parseInt(c.substr(0,2), 16);
+  var g = parseInt(c.substr(2,2), 16);
+  var b = parseInt(c.substr(4,2), 16);
+  function adj(v) { return Math.max(0, Math.min(255, Math.round(v + 255 * pct))); }
+  return 'rgb(' + adj(r) + ',' + adj(g) + ',' + adj(b) + ')';
+}
+function blendCol(a, b, t) {
+  function parse(h) {
+    var c = h.replace('#','');
+    return [parseInt(c.substr(0,2),16), parseInt(c.substr(2,2),16), parseInt(c.substr(4,2),16)];
+  }
+  var aa = parse(a), bb = parse(b);
+  var r = Math.round(aa[0] + (bb[0]-aa[0])*t);
+  var g = Math.round(aa[1] + (bb[1]-aa[1])*t);
+  var bl = Math.round(aa[2] + (bb[2]-aa[2])*t);
+  return 'rgb(' + r + ',' + g + ',' + bl + ')';
+}
+
+// ── POINTER WIRING ─────────────────────────────────────────────────────
+var _c = GF.canvas;
+function evXY(e) {
+  if (e.touches && e.touches.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  if (e.changedTouches && e.changedTouches.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  return { x: e.clientX, y: e.clientY };
+}
+_c.addEventListener('mousedown', function(e) { var p = evXY(e); handleDown(p.x, p.y); });
+_c.addEventListener('touchstart', function(e) {
+  if (e.touches.length === 0) return;
+  e.preventDefault();
+  var p = evXY(e);
+  handleDown(p.x, p.y);
+}, { passive: false });
+_c.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
+
+// keyboard shortcut (laptop friendly): 1/2/3 dispatches selected task to haiku/sonnet/opus
+document.addEventListener('keydown', function(e) {
+  if (gs !== 'PLAYING') return;
+  var idx = -1;
+  if (e.code === 'Digit1' || e.code === 'Numpad1') idx = 0;
+  else if (e.code === 'Digit2' || e.code === 'Numpad2') idx = 1;
+  else if (e.code === 'Digit3' || e.code === 'Numpad3') idx = 2;
+  if (idx < 0) return;
+  e.preventDefault();
+  var sel = getSelectedTask();
+  if (!sel) {
+    // auto-pick first queue task
+    if (queue.length > 0) sel = queue[0];
+  }
+  if (sel && agents[idx]) dispatchTask(sel, agents[idx]);
+});
+
+// ── BOOT ───────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'token_throttle',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('token_throttle_best') || '0') || 0; } catch (e) {}
+    try {
+      if (!localStorage.getItem('token_throttle_seen_tutorial')) {
+        localStorage.setItem('token_throttle_seen_tutorial', '1');
+      }
+    } catch (e) {}
+    GF.persist('token_throttle_run_v1',
+      function() {
+        return { gs: gs, score: score, budget: budget };
+      },
+      function(s) {
+        if (!s) return;
+        gs = 'MENU';
+        score = s.score || 0;
+      }
+    );
+    if (gs === 'PLAYING' || gs === 'MENU') gs = 'MENU';
+    buildAgents();
+    window.addEventListener('resize', buildAgents);
+    window.addEventListener('orientationchange', buildAgents);
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ────────────────────────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs, score: score, best: best,
+    budget: budget,
+    queueCount: queue.length,
+    dispatchesCount: dispatches.length,
+    selectedTaskId: selectedTaskId,
+    MAX_BUDGET: MAX_BUDGET,
+    HAIKU_COST: HAIKU_COST, SONNET_COST: SONNET_COST, OPUS_COST: OPUS_COST,
+    CHEAPEST_COST: CHEAPEST_COST,
+    HAIKU_MAX_COMP: HAIKU_MAX_COMP, SONNET_MAX_COMP: SONNET_MAX_COMP, OPUS_MAX_COMP: OPUS_MAX_COMP,
+    MAX_COMPLEXITY: MAX_COMPLEXITY,
+    QUEUE_SIZE: QUEUE_SIZE,
+    SPAWN_INTERVAL_MS: SPAWN_INTERVAL_MS,
+    REWORK_PENALTY: REWORK_PENALTY,
+  };
+});
+
+// ── YANDEX MUST-HAVES — DON'T REMOVE ────────────────────────────────────
+// 1. All UI text routes through GF.t() / STRINGS (both EN & RU).
+// 2. Run state persisted via GF.persist().
+// 3. Fullscreen-exit resize handled by gf-lib + buildAgents re-layout.
+// 4. Ads are user-click only (none currently fired).
+
+})();
+</script>
+</body>
+</html>

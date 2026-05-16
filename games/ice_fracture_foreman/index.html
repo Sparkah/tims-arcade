@@ -1,0 +1,1187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Ice Fracture Foreman</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #08111c; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Ice Fracture Foreman',
+    sub: 'Crack the frozen lake to corral fish — keep cracks away from your hut',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT ROUND',
+    score: 'Caught', best: 'Best',
+    round: 'Round', target: 'Target', budget: 'Crack',
+    gameover: 'CRACKED HUT',
+    won: 'LAKE MASTERED',
+    round_won: 'ROUND CLEAR',
+    tut_goal:     'Goal: corral fish into the pen by cracking ice tiles.',
+    tut_controls: 'Controls: tap any intact ice hex — cracks spread 3-5 tiles toward the nearest stress point.',
+    tut_win:      'Win: trap target fish in the wooden pen (top-left). Survive 4 rounds.',
+    tut_lose:     'Lose: a crack reaches your hut at the centre of the lake.',
+    tut_tip:      'Tip: cracks block fish — herd them with corridors instead of shattering everything.',
+    help: '?',
+    tap_continue: 'Tap to continue',
+    daily_seed: 'Daily seed',
+    no_budget: 'No crack budget left',
+  },
+  ru: {
+    title: 'Бригадир Льда',
+    sub: 'Расколи замёрзшее озеро и загони рыбу — не пускай трещины к избе',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'СЛЕД. РАУНД',
+    score: 'Поймано', best: 'Рекорд',
+    round: 'Раунд', target: 'Цель', budget: 'Трещины',
+    gameover: 'ИЗБА РАСКОЛОТА',
+    won: 'ОЗЕРО ПОКОРЕНО',
+    round_won: 'РАУНД ПРОЙДЕН',
+    tut_goal:     'Загоните рыбу в загон, раскалывая лёд касаниями.',
+    tut_controls: 'Касание по льду — трещина пойдёт к ближайшей точке напряжения (3-5 шестигранников).',
+    tut_win:      'Поймайте цель рыб в деревянный загон (вверху слева). Пройдите 4 раунда.',
+    tut_lose:     'Трещина достигла вашей избы в центре озера.',
+    tut_tip:      'Трещины — стены. Стройте коридоры, а не крошите всё озеро.',
+    help: '?',
+    tap_continue: 'Нажми, чтобы продолжить',
+    daily_seed: 'Сегодня',
+    no_budget: 'Бюджет трещин кончился',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (match DESIGN.md) ───────────────────────────────────────────
+var BOARD_HEX_COLS = 13;
+var BOARD_HEX_ROWS = 11;
+var FISH_COUNT_PER_ROUND = 6;
+var FISH_SWIM_SPEED = 0.45;
+var PEN_RADIUS_HEX = 2;
+var ROUND_TARGET_FISH = 3;
+var ROUND_TARGET_INCREMENT = 1;
+var ROUND_TARGET_ROUNDS = 4;
+var CRACK_BUDGET_BASE = 28;
+var CRACK_BUDGET_DECREMENT = 2;
+var CRACK_FISSURE_MIN = 3;
+var CRACK_FISSURE_MAX = 5;
+var STRESS_POINT_COUNT = 4;
+
+// ── PALETTE ──────────────────────────────────────────────────────────────
+var COL_BG_TOP = '#0a1426';
+var COL_BG_BOT = '#0f2238';
+var COL_ICE_FILL = '#bfe2f5';
+var COL_ICE_RIM  = '#7faec9';
+var COL_ICE_DEEP = '#9ec8df';
+var COL_CRACK = '#1a2b3d';
+var COL_CRACK_EDGE = '#e8f4ff';
+var COL_PEN_WOOD = '#7d4f2a';
+var COL_PEN_FILL = '#a87146';
+var COL_HUT = '#a0522d';
+var COL_HUT_ROOF = '#3a2418';
+var COL_STRESS = '#ffd24d';
+var COL_STRESS_GLOW = '#ffb84d';
+var COL_FISH = '#1f3a52';
+var COL_FISH_PEN = '#ffd24d';
+var COL_INK = '#e8f4ff';
+var COL_INK_SOFT = '#7d9bb0';
+
+// ── HEX MATH (pointy-top, offset-row "odd-r") ────────────────────────────
+// Axial helpers + pixel-to-hex conversion.
+var HEX_SIZE = 26;             // recomputed per-resize
+
+function hexWidth()  { return Math.sqrt(3) * HEX_SIZE; }
+function hexHeight() { return 2 * HEX_SIZE; }
+
+function hexToPx(col, row) {
+  var w = hexWidth();
+  var h = hexHeight() * 0.75;
+  var offset = (row % 2) === 1 ? w * 0.5 : 0;
+  return { x: col * w + offset + w * 0.5, y: row * h + HEX_SIZE };
+}
+
+function pxToHex(px, py) {
+  // Brute-force nearest-cell scan (board is small; clean for screen mapping)
+  var best = null, bestD = 1e9;
+  for (var r = 0; r < BOARD_HEX_ROWS; r++) {
+    for (var c = 0; c < BOARD_HEX_COLS; c++) {
+      var p = hexToPx(c, r);
+      var dx = p.x - px, dy = p.y - py;
+      var d2 = dx*dx + dy*dy;
+      if (d2 < bestD) { bestD = d2; best = { col: c, row: r }; }
+    }
+  }
+  // Reject if outside one hex radius
+  if (best && bestD > HEX_SIZE * HEX_SIZE * 1.1) return null;
+  return best;
+}
+
+// Hex neighbours for odd-r offset coords
+function hexNeighbours(col, row) {
+  var even = (row % 2) === 0;
+  var deltas = even
+    ? [[+1,0],[-1,0],[0,-1],[-1,-1],[0,+1],[-1,+1]]
+    : [[+1,0],[-1,0],[+1,-1],[0,-1],[+1,+1],[0,+1]];
+  var out = [];
+  for (var i = 0; i < deltas.length; i++) {
+    var nc = col + deltas[i][0], nr = row + deltas[i][1];
+    if (nc < 0 || nr < 0 || nc >= BOARD_HEX_COLS || nr >= BOARD_HEX_ROWS) continue;
+    out.push({ col: nc, row: nr });
+  }
+  return out;
+}
+
+function hexDistOffset(ac, ar, bc, br) {
+  // Convert odd-r → cube and use cube distance
+  function toCube(c, r) {
+    var x = c - (r - (r & 1)) / 2;
+    var z = r;
+    var y = -x - z;
+    return { x: x, y: y, z: z };
+  }
+  var a = toCube(ac, ar), b = toCube(bc, br);
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.z - b.z));
+}
+
+// ── DAILY SEED (stress-point layout deterministic by UTC day) ────────────
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function computeDailySeed() {
+  var d = new Date();
+  return d.getUTCFullYear() * 10000 + (d.getUTCMonth() + 1) * 100 + d.getUTCDate();
+}
+
+// ── BOARD GEOMETRY ───────────────────────────────────────────────────────
+function boardOriginAndScale() {
+  // Centre + scale the static-sized board into the viewport while keeping
+  // a small HUD margin on top.
+  var pad = 12;
+  var topPad = 70;
+  var rawW = BOARD_HEX_COLS * Math.sqrt(3) * HEX_SIZE + Math.sqrt(3) * HEX_SIZE * 0.5;
+  var rawH = (BOARD_HEX_ROWS - 1) * 1.5 * HEX_SIZE + 2 * HEX_SIZE;
+  var availW = GF.W - pad * 2;
+  var availH = GF.H - topPad - pad;
+  var scale = Math.min(availW / rawW, availH / rawH);
+  var offX = (GF.W - rawW * scale) * 0.5;
+  var offY = topPad + (availH - rawH * scale) * 0.5;
+  return { offX: offX, offY: offY, scale: scale };
+}
+
+function hexToScreen(col, row) {
+  var g = boardOriginAndScale();
+  var p = hexToPx(col, row);
+  return { x: g.offX + p.x * g.scale, y: g.offY + p.y * g.scale, scale: g.scale };
+}
+
+function screenToHex(sx, sy) {
+  var g = boardOriginAndScale();
+  var px = (sx - g.offX) / g.scale;
+  var py = (sy - g.offY) / g.scale;
+  return pxToHex(px, py);
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';   // MENU | PLAYING | ROUNDWIN | GAMEOVER | WON
+var round = 1;
+var score = 0;             // total fish caught across rounds (cumulative)
+var fishInPen = 0;         // current round
+var best = 0;
+var dailySeed = 0;
+var showHelp = false;
+var crackBudgetLeft = CRACK_BUDGET_BASE;
+var hudHelpRect = null;
+var menuPlayRect = null;
+var endActionRect = null;
+
+// Board structures
+var board = null;          // 2D [rows][cols] of { state: 'intact'|'cracking'|'cracked', crackT: 0..1 }
+var fish = [];             // { col, row, dirCol, dirRow, swimT, inPen }
+var stressPoints = [];     // [{col, row}]
+var hutCol = 0, hutRow = 0;
+var penTiles = [];         // [{col, row}] (pen footprint, top-left)
+var floatMsg = null;       // { text, x, y, t, col }
+
+// Crack propagation queue — chains a multi-tile fissure over a few frames
+// for a satisfying "rip" animation.
+var propagateQueue = [];   // [{ col, row, atMs }]
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  round = 1;
+  score = 0;
+  fishInPen = 0;
+  loadRound();
+}
+
+function targetForRound(r) {
+  return ROUND_TARGET_FISH + (r - 1) * ROUND_TARGET_INCREMENT;
+}
+
+function budgetForRound(r) {
+  return Math.max(14, CRACK_BUDGET_BASE - (r - 1) * CRACK_BUDGET_DECREMENT);
+}
+
+function loadRound() {
+  crackBudgetLeft = budgetForRound(round);
+  fishInPen = 0;
+  showHelp = false;
+  floatMsg = null;
+  propagateQueue.length = 0;
+  buildBoard();
+  placePenAndHut();
+  placeStressPoints();
+  spawnFish();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function buildBoard() {
+  board = [];
+  for (var r = 0; r < BOARD_HEX_ROWS; r++) {
+    var row = [];
+    for (var c = 0; c < BOARD_HEX_COLS; c++) {
+      row.push({ state: 'intact', crackT: 0 });
+    }
+    board.push(row);
+  }
+}
+
+function placePenAndHut() {
+  // Hut in the centre
+  hutCol = (BOARD_HEX_COLS / 2) | 0;
+  hutRow = (BOARD_HEX_ROWS / 2) | 0;
+  // Pen: top-left cluster — 7 connected hexes (1 anchor + 6 neighbours)
+  penTiles = [];
+  var anchor = { col: 1, row: 1 };
+  penTiles.push(anchor);
+  var nb = hexNeighbours(anchor.col, anchor.row);
+  for (var i = 0; i < nb.length; i++) penTiles.push(nb[i]);
+}
+
+function placeStressPoints() {
+  var prng = mulberry32(dailySeed + round * 137);
+  stressPoints = [];
+  var attempts = 0;
+  while (stressPoints.length < STRESS_POINT_COUNT && attempts < 200) {
+    attempts++;
+    var c = 1 + Math.floor(prng() * (BOARD_HEX_COLS - 2));
+    var r = 1 + Math.floor(prng() * (BOARD_HEX_ROWS - 2));
+    // Don't seed on hut or pen — would make taps near them lethal
+    if (c === hutCol && r === hutRow) continue;
+    if (isPen(c, r)) continue;
+    // Spread out from prior stress points
+    var tooClose = false;
+    for (var k = 0; k < stressPoints.length; k++) {
+      if (hexDistOffset(c, r, stressPoints[k].col, stressPoints[k].row) < 3) {
+        tooClose = true; break;
+      }
+    }
+    if (tooClose) continue;
+    stressPoints.push({ col: c, row: r });
+  }
+  // Fallback if we couldn't fit them all
+  while (stressPoints.length < STRESS_POINT_COUNT) {
+    stressPoints.push({
+      col: 2 + (stressPoints.length * 3) % (BOARD_HEX_COLS - 3),
+      row: 2 + (stressPoints.length * 2) % (BOARD_HEX_ROWS - 3),
+    });
+  }
+}
+
+function spawnFish() {
+  fish = [];
+  var prng = mulberry32(dailySeed + round * 91 + 7);
+  var attempts = 0;
+  while (fish.length < FISH_COUNT_PER_ROUND && attempts < 500) {
+    attempts++;
+    var c = Math.floor(prng() * BOARD_HEX_COLS);
+    var r = Math.floor(prng() * BOARD_HEX_ROWS);
+    // Don't drop on hut, pen, or stress points; keep some distance from pen.
+    if (c === hutCol && r === hutRow) continue;
+    if (isPen(c, r)) continue;
+    if (hexDistOffset(c, r, 1, 1) < 3) continue;
+    if (board[r][c].state !== 'intact') continue;
+    // Random initial swim direction (one of 6 neighbours)
+    var nb = hexNeighbours(c, r);
+    var dir = nb[Math.floor(prng() * nb.length)] || { col: c, row: r };
+    fish.push({
+      col: c, row: r,
+      // Pixel-space interp positions for smooth motion
+      px: 0, py: 0,
+      tx: 0, ty: 0,
+      swimT: prng(),       // 0..1 across one hex move
+      swimSpeed: FISH_SWIM_SPEED + prng() * 0.25,
+      dirCol: dir.col, dirRow: dir.row,
+      inPen: false,
+      lostInVoid: false,
+    });
+  }
+  // Initialise pixel positions
+  for (var i = 0; i < fish.length; i++) {
+    var f = fish[i];
+    var p = hexToScreen(f.col, f.row);
+    f.px = p.x; f.py = p.y;
+    f.tx = p.x; f.ty = p.y;
+  }
+}
+
+function isPen(c, r) {
+  for (var i = 0; i < penTiles.length; i++) {
+    if (penTiles[i].col === c && penTiles[i].row === r) return true;
+  }
+  return false;
+}
+
+function isStress(c, r) {
+  for (var i = 0; i < stressPoints.length; i++) {
+    if (stressPoints[i].col === c && stressPoints[i].row === r) return true;
+  }
+  return false;
+}
+
+function isHutFootprint(c, r) {
+  if (c === hutCol && r === hutRow) return true;
+  var nb = hexNeighbours(hutCol, hutRow);
+  for (var i = 0; i < nb.length; i++) {
+    if (nb[i].col === c && nb[i].row === r) return true;
+  }
+  return false;
+}
+
+// ── CRACKS ───────────────────────────────────────────────────────────────
+function onTapHex(col, row) {
+  if (gs !== 'PLAYING') return;
+  if (col < 0 || row < 0 || col >= BOARD_HEX_COLS || row >= BOARD_HEX_ROWS) return;
+  if (board[row][col].state !== 'intact') return;
+  if (isPen(col, row)) return;
+  if (crackBudgetLeft <= 0) {
+    floatMsg = { text: GF.t('no_budget'), x: GF.W / 2, y: GF.H * 0.4, t: 1.4, col: '#ffd24d' };
+    return;
+  }
+
+  // Build the fissure path: greedy walk toward the nearest stress point.
+  var target = nearestStressPoint(col, row);
+  if (!target) target = { col: hutCol, row: hutRow };
+
+  var path = [];
+  var cur = { col: col, row: row };
+  var pickedFissureLen = CRACK_FISSURE_MIN +
+    Math.floor(Math.random() * (CRACK_FISSURE_MAX - CRACK_FISSURE_MIN + 1));
+  // Random jitter so two taps at the same tile produce different paths.
+  var seen = {};
+  seen[col + ',' + row] = true;
+  path.push(cur);
+  while (path.length < pickedFissureLen && crackBudgetLeft - path.length >= 0) {
+    var step = stepToward(cur, target, seen);
+    if (!step) break;
+    path.push(step);
+    seen[step.col + ',' + step.row] = true;
+    cur = step;
+  }
+
+  // Commit path: schedule each tile to crack over the next ~ms
+  var perTileMs = 70;
+  var now = performance.now();
+  for (var i = 0; i < path.length; i++) {
+    propagateQueue.push({ col: path[i].col, row: path[i].row, atMs: now + i * perTileMs });
+  }
+  // Spend the budget immediately (predictable UX)
+  crackBudgetLeft -= path.length;
+  if (crackBudgetLeft < 0) crackBudgetLeft = 0;
+  score += 0;
+  GF.setShake(0.25);
+  GF.saveRun();
+}
+
+function nearestStressPoint(c, r) {
+  var best = null, bestD = 1e9;
+  for (var i = 0; i < stressPoints.length; i++) {
+    var sp = stressPoints[i];
+    // Don't aim at consumed stress points (those buried under cracks)
+    if (board[sp.row][sp.col].state === 'cracked') continue;
+    var d = hexDistOffset(c, r, sp.col, sp.row);
+    if (d < bestD) { bestD = d; best = sp; }
+  }
+  return best;
+}
+
+function stepToward(cur, target, seen) {
+  // Pick the neighbour minimising distance to target, with light jitter.
+  var nb = hexNeighbours(cur.col, cur.row);
+  // Shuffle so ties resolve randomly (lightning-bolt feel)
+  for (var i = nb.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = nb[i]; nb[i] = nb[j]; nb[j] = tmp;
+  }
+  var best = null, bestD = 1e9;
+  for (var k = 0; k < nb.length; k++) {
+    var n = nb[k];
+    if (seen[n.col + ',' + n.row]) continue;
+    if (isPen(n.col, n.row)) continue;        // pen walls block cracks
+    if (board[n.row][n.col].state === 'cracked') continue;
+    var d = hexDistOffset(n.col, n.row, target.col, target.row);
+    // Slight random tax to add variety
+    d += Math.random() * 0.6;
+    if (d < bestD) { bestD = d; best = n; }
+  }
+  return best;
+}
+
+function commitCrack(col, row) {
+  if (col < 0 || row < 0 || col >= BOARD_HEX_COLS || row >= BOARD_HEX_ROWS) return;
+  var cell = board[row][col];
+  if (cell.state === 'cracked') return;
+  cell.state = 'cracked';
+  cell.crackT = 0;     // animation timer
+  // If we just cracked a hut tile, lose
+  if (isHutFootprint(col, row)) {
+    triggerGameOver();
+    return;
+  }
+  // If a fish was here, it falls into the void
+  for (var i = 0; i < fish.length; i++) {
+    var f = fish[i];
+    if (f.col === col && f.row === row && !f.inPen && !f.lostInVoid) {
+      f.lostInVoid = true;
+    }
+  }
+  GF.setShake(0.15);
+}
+
+// ── FISH AI ──────────────────────────────────────────────────────────────
+function updateFish(dt) {
+  for (var i = 0; i < fish.length; i++) {
+    var f = fish[i];
+    if (f.inPen || f.lostInVoid) continue;
+
+    f.swimT += dt * f.swimSpeed;
+    // Move pixel position toward target
+    var pull = Math.min(1, dt * 4);
+    f.px += (f.tx - f.px) * pull;
+    f.py += (f.ty - f.py) * pull;
+
+    if (f.swimT >= 1) {
+      // Arrived at the next hex — commit the move, choose the next step.
+      f.swimT = 0;
+      f.col = f.dirCol;
+      f.row = f.dirRow;
+      // Snap exactly to the new hex centre so floating-error doesn't drift
+      var np = hexToScreen(f.col, f.row);
+      f.px = np.x; f.py = np.y;
+      // Pen check
+      if (isPen(f.col, f.row)) {
+        f.inPen = true;
+        fishInPen++;
+        score++;
+        floatMsg = { text: '+1', x: np.x, y: np.y - 18, t: 1.2, col: COL_FISH_PEN };
+        GF.spawnParticles(np.x, np.y, COL_FISH_PEN, 12);
+        GF.saveRun();
+        if (fishInPen >= targetForRound(round)) {
+          triggerRoundWin();
+        }
+        continue;
+      }
+      // Choose next neighbour, preferring those toward the pen so fish drift
+      // into corrals when they can. Cracked tiles and the hut block them.
+      var nb = hexNeighbours(f.col, f.row);
+      var candidates = [];
+      for (var k = 0; k < nb.length; k++) {
+        var n = nb[k];
+        if (board[n.row][n.col].state === 'cracked') continue;
+        if (n.col === hutCol && n.row === hutRow) continue;
+        candidates.push(n);
+      }
+      if (candidates.length === 0) {
+        // Trapped on a single tile — stays put (will get caught by tap)
+        f.dirCol = f.col; f.dirRow = f.row;
+      } else {
+        // Bias toward pen ~40% of the time, otherwise random.
+        var penPull = Math.random();
+        var pick;
+        if (penPull < 0.4) {
+          var bestN = candidates[0];
+          var bestD = hexDistOffset(bestN.col, bestN.row, 1, 1);
+          for (var m = 1; m < candidates.length; m++) {
+            var dd = hexDistOffset(candidates[m].col, candidates[m].row, 1, 1);
+            if (dd < bestD) { bestD = dd; bestN = candidates[m]; }
+          }
+          pick = bestN;
+        } else {
+          pick = candidates[Math.floor(Math.random() * candidates.length)];
+        }
+        f.dirCol = pick.col; f.dirRow = pick.row;
+      }
+      var tp = hexToScreen(f.dirCol, f.dirRow);
+      f.tx = tp.x; f.ty = tp.y;
+    } else {
+      // Set target along the way (in case viewport resized)
+      var tpr = hexToScreen(f.dirCol, f.dirRow);
+      f.tx = tpr.x; f.ty = tpr.y;
+    }
+  }
+}
+
+// ── ROUND / GAME ENDINGS ─────────────────────────────────────────────────
+function triggerRoundWin() {
+  if (round >= ROUND_TARGET_ROUNDS) {
+    gs = 'WON';
+    persistBest();
+    GF.gameEnded();
+  } else {
+    gs = 'ROUNDWIN';
+    GF.gameEnded();
+  }
+  GF.saveRun();
+}
+
+function triggerGameOver() {
+  persistBest();
+  gs = 'GAMEOVER';
+  GF.setShake(0.9);
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+function persistBest() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('ice_fracture_foreman_best', best); } catch (e) {}
+  }
+}
+
+function nextRound() {
+  round++;
+  loadRound();
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function onPointerDown(x, y) {
+  if (hudHelpRect && hitRect(hudHelpRect, x, y)) { showHelp = !showHelp; return; }
+  if (showHelp) { showHelp = false; return; }
+
+  if (gs === 'MENU') {
+    if (menuPlayRect && hitRect(menuPlayRect, x, y)) {
+      try { localStorage.setItem('ice_fracture_foreman_seen_tutorial', '1'); } catch (e) {}
+      startGame();
+    }
+    return;
+  }
+  if (gs === 'ROUNDWIN') {
+    if (endActionRect && hitRect(endActionRect, x, y)) nextRound();
+    return;
+  }
+  if (gs === 'GAMEOVER' || gs === 'WON') {
+    if (endActionRect && hitRect(endActionRect, x, y)) startGame();
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  var h = screenToHex(x, y);
+  if (h) onTapHex(h.col, h.row);
+}
+
+function hitRect(r, x, y) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+
+GF.canvas.addEventListener('mousedown', function (e) { onPointerDown(e.clientX, e.clientY); });
+GF.canvas.addEventListener('touchstart', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPointerDown(t.clientX, t.clientY);
+}, { passive: false });
+
+document.addEventListener('keydown', function (e) {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    if (gs === 'MENU') { startGame(); e.preventDefault(); }
+    else if (gs === 'ROUNDWIN') { nextRound(); e.preventDefault(); }
+    else if (gs === 'GAMEOVER' || gs === 'WON') { startGame(); e.preventDefault(); }
+  }
+  if (e.code === 'KeyH' || e.code === 'Slash') showHelp = !showHelp;
+});
+
+// ── UPDATE / DRAW ────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+  // Process the propagation queue
+  if (propagateQueue.length) {
+    var now = performance.now();
+    while (propagateQueue.length && propagateQueue[0].atMs <= now) {
+      var step = propagateQueue.shift();
+      commitCrack(step.col, step.row);
+      if (gs !== 'PLAYING') break;
+    }
+  }
+  // Animate cracked-tile fill-in
+  for (var r = 0; r < BOARD_HEX_ROWS; r++) {
+    for (var c = 0; c < BOARD_HEX_COLS; c++) {
+      var cell = board[r][c];
+      if (cell.state === 'cracked' && cell.crackT < 1) {
+        cell.crackT = Math.min(1, cell.crackT + dt * 4);
+      }
+    }
+  }
+  if (gs === 'PLAYING') updateFish(dt);
+
+  // Floating text
+  if (floatMsg) {
+    floatMsg.t -= dt;
+    floatMsg.y -= 30 * dt;
+    if (floatMsg.t <= 0) floatMsg = null;
+  }
+
+  // Stall check: if budget empty AND not enough fish in pen yet
+  // AND no fish can still move into pen, gameover.
+  if (crackBudgetLeft <= 0 && propagateQueue.length === 0) {
+    // Allow fish swim time first — only fail if not enough left alive
+    var alive = 0;
+    for (var i = 0; i < fish.length; i++) {
+      if (!fish[i].inPen && !fish[i].lostInVoid) alive++;
+    }
+    var still_possible = fishInPen + alive >= targetForRound(round);
+    if (!still_possible) {
+      // Game over — can't reach target this round
+      triggerGameOver();
+    }
+  }
+}
+
+function draw(c) {
+  drawBackground(c);
+  drawLake(c);
+  drawStressPoints(c);
+  drawPen(c);
+  drawHut(c);
+  drawFish(c);
+  if (gs === 'PLAYING') drawHUD(c);
+  if (gs === 'MENU') drawMenu(c);
+  if (gs === 'ROUNDWIN') drawEndOverlay(c, GF.t('round_won'),
+    GF.t('score') + ': ' + fishInPen + ' / ' + targetForRound(round), GF.t('next'));
+  if (gs === 'GAMEOVER') drawEndOverlay(c, GF.t('gameover'),
+    GF.t('round') + ' ' + round + ' · ' + GF.t('score') + ': ' + score, GF.t('retry'));
+  if (gs === 'WON') drawEndOverlay(c, GF.t('won'),
+    GF.t('score') + ': ' + score, GF.t('retry'));
+  if (gs !== 'MENU') drawHelpButton(c);
+  drawFloatMsg(c);
+  if (showHelp) drawHelpPanel(c);
+}
+
+function drawBackground(c) {
+  var g = c.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, COL_BG_TOP); g.addColorStop(1, COL_BG_BOT);
+  c.fillStyle = g; c.fillRect(0, 0, GF.W, GF.H);
+  // Faint snow drifts
+  c.fillStyle = 'rgba(220,235,250,0.04)';
+  for (var i = 0; i < 6; i++) {
+    var bx = (i / 6) * GF.W + (i % 2) * 60;
+    c.beginPath();
+    c.ellipse(bx, GF.H * 0.95, GF.W * 0.18, 22, 0, 0, Math.PI * 2);
+    c.fill();
+  }
+}
+
+function hexPath(c, cx, cy, size) {
+  c.beginPath();
+  // pointy-top hex: vertices at 30° increments starting at -90°
+  for (var i = 0; i < 6; i++) {
+    var ang = (Math.PI / 3) * i - Math.PI / 2;
+    var x = cx + size * Math.cos(ang);
+    var y = cy + size * Math.sin(ang);
+    if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+  }
+  c.closePath();
+}
+
+function drawLake(c) {
+  var g = boardOriginAndScale();
+  var hexSize = HEX_SIZE * g.scale;
+  for (var r = 0; r < BOARD_HEX_ROWS; r++) {
+    for (var col = 0; col < BOARD_HEX_COLS; col++) {
+      var p = hexToScreen(col, r);
+      var cell = board[r][col];
+      if (cell.state === 'cracked') {
+        // Dark cracked tile with white jagged edges
+        var t = cell.crackT;
+        c.fillStyle = COL_CRACK;
+        hexPath(c, p.x, p.y, hexSize - 0.5);
+        c.fill();
+        // Jagged inner edges
+        c.strokeStyle = 'rgba(232,244,255,' + (0.4 + 0.5 * t) + ')';
+        c.lineWidth = 1.5;
+        c.beginPath();
+        for (var k = 0; k < 3; k++) {
+          var a0 = Math.random() * Math.PI * 2;
+          var a1 = a0 + (Math.PI / 3 + Math.random() * 0.4);
+          var rA = (hexSize * (0.2 + Math.random() * 0.4));
+          var rB = (hexSize * (0.5 + Math.random() * 0.4));
+          c.moveTo(p.x + Math.cos(a0) * rA, p.y + Math.sin(a0) * rA);
+          c.lineTo(p.x + Math.cos(a1) * rB, p.y + Math.sin(a1) * rB);
+        }
+        c.stroke();
+      } else {
+        // Intact ice — pale gradient hex
+        var grad = c.createRadialGradient(p.x - hexSize * 0.3, p.y - hexSize * 0.3, hexSize * 0.2,
+                                          p.x, p.y, hexSize);
+        grad.addColorStop(0, COL_ICE_FILL);
+        grad.addColorStop(1, COL_ICE_DEEP);
+        c.fillStyle = grad;
+        hexPath(c, p.x, p.y, hexSize - 0.5);
+        c.fill();
+        c.strokeStyle = COL_ICE_RIM;
+        c.lineWidth = 1;
+        c.stroke();
+      }
+    }
+  }
+}
+
+function drawStressPoints(c) {
+  var g = boardOriginAndScale();
+  var sz = HEX_SIZE * g.scale;
+  var pulse = 0.5 + 0.5 * Math.sin(performance.now() * 0.005);
+  for (var i = 0; i < stressPoints.length; i++) {
+    var sp = stressPoints[i];
+    if (board[sp.row][sp.col].state === 'cracked') continue;
+    var p = hexToScreen(sp.col, sp.row);
+    c.save();
+    c.shadowColor = COL_STRESS_GLOW;
+    c.shadowBlur = 12 + pulse * 8;
+    c.fillStyle = COL_STRESS;
+    c.beginPath();
+    c.arc(p.x, p.y, sz * 0.28, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+    // Small dark fissure cross
+    c.strokeStyle = '#7a4a00';
+    c.lineWidth = 1.5;
+    c.beginPath();
+    c.moveTo(p.x - sz * 0.15, p.y); c.lineTo(p.x + sz * 0.15, p.y);
+    c.moveTo(p.x, p.y - sz * 0.15); c.lineTo(p.x, p.y + sz * 0.15);
+    c.stroke();
+  }
+}
+
+function drawPen(c) {
+  var g = boardOriginAndScale();
+  var sz = HEX_SIZE * g.scale;
+  // Pen interior
+  for (var i = 0; i < penTiles.length; i++) {
+    var t = penTiles[i];
+    var p = hexToScreen(t.col, t.row);
+    c.fillStyle = COL_PEN_FILL;
+    hexPath(c, p.x, p.y, sz - 0.5);
+    c.fill();
+  }
+  // Pen outline — thick wooden border around the union
+  c.strokeStyle = COL_PEN_WOOD;
+  c.lineWidth = 3.5;
+  for (var j = 0; j < penTiles.length; j++) {
+    var tt = penTiles[j];
+    var pp = hexToScreen(tt.col, tt.row);
+    hexPath(c, pp.x, pp.y, sz - 0.5);
+    c.stroke();
+  }
+  // Label
+  var anchor = hexToScreen(1, 1);
+  c.fillStyle = COL_INK;
+  c.font = 'bold ' + Math.floor(sz * 0.45) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText('▼', anchor.x, anchor.y);
+}
+
+function drawHut(c) {
+  var g = boardOriginAndScale();
+  var sz = HEX_SIZE * g.scale;
+  var p = hexToScreen(hutCol, hutRow);
+  // Footprint glow
+  var nb = hexNeighbours(hutCol, hutRow);
+  c.fillStyle = 'rgba(160,82,45,0.15)';
+  for (var i = 0; i < nb.length; i++) {
+    var np = hexToScreen(nb[i].col, nb[i].row);
+    hexPath(c, np.x, np.y, sz - 0.5);
+    c.fill();
+  }
+  // Hut body — drawn over centre hex
+  var wallH = sz * 0.7;
+  var wallW = sz * 1.2;
+  c.fillStyle = COL_HUT;
+  c.fillRect(p.x - wallW / 2, p.y - wallH / 2 + sz * 0.1, wallW, wallH);
+  // Roof
+  c.fillStyle = COL_HUT_ROOF;
+  c.beginPath();
+  c.moveTo(p.x - wallW / 2 - sz * 0.1, p.y - wallH / 2 + sz * 0.1);
+  c.lineTo(p.x + wallW / 2 + sz * 0.1, p.y - wallH / 2 + sz * 0.1);
+  c.lineTo(p.x, p.y - wallH * 0.95 + sz * 0.1);
+  c.closePath();
+  c.fill();
+  // Door
+  c.fillStyle = '#1f1208';
+  c.fillRect(p.x - sz * 0.12, p.y - sz * 0.05, sz * 0.24, sz * 0.42);
+  // Window glow
+  c.fillStyle = '#ffd54a';
+  c.fillRect(p.x + sz * 0.25, p.y - sz * 0.2, sz * 0.18, sz * 0.18);
+}
+
+function drawFish(c) {
+  var g = boardOriginAndScale();
+  var sz = HEX_SIZE * g.scale;
+  for (var i = 0; i < fish.length; i++) {
+    var f = fish[i];
+    if (f.lostInVoid) continue;
+    var color = f.inPen ? COL_FISH_PEN : COL_FISH;
+    c.save();
+    c.translate(f.px, f.py);
+    // Fish-like silhouette: ellipse body + triangle tail
+    // Through-ice fish are translucent; in-pen fish are bright
+    c.globalAlpha = f.inPen ? 1.0 : 0.78;
+    c.fillStyle = color;
+    c.beginPath();
+    c.ellipse(0, 0, sz * 0.32, sz * 0.18, 0, 0, Math.PI * 2);
+    c.fill();
+    c.beginPath();
+    c.moveTo(-sz * 0.32, 0);
+    c.lineTo(-sz * 0.5, -sz * 0.16);
+    c.lineTo(-sz * 0.5, sz * 0.16);
+    c.closePath();
+    c.fill();
+    // Eye
+    c.globalAlpha = 1;
+    c.fillStyle = '#fff';
+    c.beginPath();
+    c.arc(sz * 0.18, -sz * 0.04, sz * 0.05, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+  }
+}
+
+function drawHUD(c) {
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  var pad = 12 * GF.S;
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textBaseline = 'top';
+
+  // Top-left: round + target
+  c.textAlign = 'left';
+  c.fillStyle = COL_INK;
+  c.fillText(GF.t('round') + ' ' + round + '/' + ROUND_TARGET_ROUNDS, pad, pad);
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  c.fillStyle = COL_INK_SOFT;
+  c.fillText(GF.t('score') + ': ' + fishInPen + ' / ' + targetForRound(round),
+             pad, pad + fs + 4 * GF.S);
+
+  // Top-centre: crack budget bar
+  var barW = GF.clamp(GF.W * 0.34, 160, 320);
+  var barH = GF.clamp(14 * GF.S, 10, 18);
+  var bx = (GF.W - barW) / 2;
+  var by = pad + 4 * GF.S;
+  c.fillStyle = 'rgba(255,255,255,0.10)';
+  GF.rr(c, bx, by, barW, barH, barH * 0.45); c.fill();
+  var ratio = crackBudgetLeft / budgetForRound(round);
+  var grad = c.createLinearGradient(bx, by, bx + barW, by);
+  grad.addColorStop(0, '#7ad8ff'); grad.addColorStop(1, '#3aa8d8');
+  c.fillStyle = grad;
+  GF.rr(c, bx, by, Math.max(0, barW * ratio), barH, barH * 0.45); c.fill();
+  c.fillStyle = COL_INK_SOFT;
+  c.textAlign = 'center';
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.fillText(GF.t('budget') + ': ' + crackBudgetLeft + ' / ' + budgetForRound(round),
+             bx + barW / 2, by + barH + 4 * GF.S);
+
+  // Best score top-right (under help button gutter)
+  c.textAlign = 'right';
+  c.fillStyle = COL_INK_SOFT;
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  if (best > 0) c.fillText(GF.t('best') + ': ' + best, GF.W - pad - 50 * GF.S, pad + 4 * GF.S);
+}
+
+function drawHelpButton(c) {
+  var pad = 12 * GF.S;
+  var hSize = GF.clamp(34 * GF.S, 28, 44);
+  var hx = GF.W - pad - hSize;
+  var hy = pad - 6 * GF.S;
+  c.fillStyle = 'rgba(255,255,255,0.10)';
+  GF.rr(c, hx, hy, hSize, hSize, hSize * 0.3); c.fill();
+  c.strokeStyle = COL_INK_SOFT;
+  c.lineWidth = 1.5;
+  GF.rr(c, hx + 0.5, hy + 0.5, hSize - 1, hSize - 1, hSize * 0.3); c.stroke();
+  c.fillStyle = COL_INK;
+  c.font = 'bold ' + Math.floor(hSize * 0.55) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('help'), hx + hSize / 2, hy + hSize / 2 + 1);
+  hudHelpRect = { x: hx, y: hy, w: hSize, h: hSize };
+}
+
+function drawMenu(c) {
+  c.fillStyle = 'rgba(8,17,28,0.78)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var fs = GF.clamp(46 * GF.S, 24, 60);
+  c.fillStyle = COL_INK;
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 150 * GF.S);
+  c.fillStyle = COL_INK_SOFT;
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), GF.cx, GF.cy - 118 * GF.S);
+
+  var tutFs = GF.clamp(13 * GF.S, 11, 17);
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  var startY = GF.cy - 80 * GF.S;
+  c.font = tutFs + 'px sans-serif';
+  c.fillStyle = COL_INK;
+  for (var i = 0; i < keys.length; i++) {
+    c.fillText(GF.t(keys[i]), GF.cx, startY + i * (tutFs * 1.55));
+  }
+
+  var bw = GF.clamp(240 * GF.S, 160, 320);
+  var bh = GF.clamp(54 * GF.S, 40, 66);
+  var bx = GF.cx - bw / 2;
+  var by = GF.cy + 100 * GF.S;
+  var grad = c.createLinearGradient(bx, by, bx, by + bh);
+  grad.addColorStop(0, '#7ad8ff'); grad.addColorStop(1, '#3aa8d8');
+  c.fillStyle = grad;
+  GF.rr(c, bx, by, bw, bh, bh / 2); c.fill();
+  c.fillStyle = '#0a1426';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('play'), GF.cx, by + bh / 2);
+  c.textBaseline = 'alphabetic';
+  menuPlayRect = { x: bx, y: by, w: bw, h: bh };
+
+  if (best > 0) {
+    c.fillStyle = COL_INK_SOFT;
+    c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    c.fillText(GF.t('best') + ': ' + best, GF.cx, by + bh + 30 * GF.S);
+  }
+}
+
+function drawEndOverlay(c, title, subline, actionLabel) {
+  c.fillStyle = 'rgba(8,17,28,0.82)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  c.fillStyle = COL_INK;
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + GF.clamp(36 * GF.S, 22, 52) + 'px sans-serif';
+  c.fillText(title, GF.cx, GF.cy - 60 * GF.S);
+  c.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillStyle = COL_INK_SOFT;
+  c.fillText(subline, GF.cx, GF.cy - 24 * GF.S);
+
+  var bw = GF.clamp(220 * GF.S, 160, 280);
+  var bh = GF.clamp(48 * GF.S, 38, 60);
+  var bx = GF.cx - bw / 2;
+  var by = GF.cy + 24 * GF.S;
+  var grad = c.createLinearGradient(bx, by, bx, by + bh);
+  grad.addColorStop(0, '#7ad8ff'); grad.addColorStop(1, '#3aa8d8');
+  c.fillStyle = grad;
+  GF.rr(c, bx, by, bw, bh, bh / 2); c.fill();
+  c.fillStyle = '#0a1426';
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 20) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(actionLabel, GF.cx, by + bh / 2);
+  c.textBaseline = 'alphabetic';
+  endActionRect = { x: bx, y: by, w: bw, h: bh };
+}
+
+function drawHelpPanel(c) {
+  c.fillStyle = 'rgba(8,17,28,0.94)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  c.fillStyle = COL_INK;
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.font = 'bold ' + GF.clamp(28 * GF.S, 18, 38) + 'px sans-serif';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 120 * GF.S);
+  c.font = fs + 'px sans-serif';
+  c.fillStyle = COL_INK;
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  for (var i = 0; i < keys.length; i++) {
+    c.fillText(GF.t(keys[i]), GF.cx, GF.cy - 70 * GF.S + i * (fs * 1.55));
+  }
+  c.fillStyle = COL_INK_SOFT;
+  c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.fillText(GF.t('tap_continue'), GF.cx, GF.cy + 110 * GF.S);
+}
+
+function drawFloatMsg(c) {
+  if (!floatMsg) return;
+  c.save();
+  c.globalAlpha = Math.min(1, floatMsg.t);
+  c.fillStyle = floatMsg.col;
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  c.textAlign = 'center';
+  c.fillText(floatMsg.text, floatMsg.x, floatMsg.y);
+  c.restore();
+}
+
+// ── SCREENSHOT ESCAPE HATCH ─────────────────────────────────────────────
+// Reaches a dense mid-game state so capture frames are ≥70% gameplay:
+// many cracked tiles fanning out from the centre, several fish on the
+// board, one already in the pen.
+window._jumpLevel = function (lv) {
+  // 99 → terminal state for runtime gate's terminal_state check.
+  if (lv && lv >= 99) {
+    startGame();
+    // Force a crack across the hut footprint
+    crackBudgetLeft = 50;
+    commitCrack(hutCol, hutRow);
+    if (gs !== 'GAMEOVER') triggerGameOver();
+    return;
+  }
+  startGame();
+  round = Math.max(2, Math.min(ROUND_TARGET_ROUNDS, lv || 2));
+  loadRound();
+  // Carve some illustrative cracks radiating from stress points but
+  // stopping short of the hut. ~30-35% of board cracked = readable but
+  // gameplay-dominant.
+  for (var i = 0; i < stressPoints.length; i++) {
+    var sp = stressPoints[i];
+    var path = [];
+    var cur = { col: sp.col, row: sp.row };
+    var seen = {}; seen[cur.col + ',' + cur.row] = true;
+    path.push(cur);
+    for (var k = 0; k < 6; k++) {
+      var nb = hexNeighbours(cur.col, cur.row);
+      var pick = null;
+      for (var n = 0; n < nb.length; n++) {
+        var cand = nb[n];
+        if (seen[cand.col + ',' + cand.row]) continue;
+        if (isHutFootprint(cand.col, cand.row)) continue;
+        if (isPen(cand.col, cand.row)) continue;
+        if (pick === null || Math.random() < 0.4) pick = cand;
+      }
+      if (!pick) break;
+      seen[pick.col + ',' + pick.row] = true;
+      path.push(pick);
+      cur = pick;
+    }
+    for (var p = 0; p < path.length; p++) {
+      var cc = board[path[p].row][path[p].col];
+      cc.state = 'cracked';
+      cc.crackT = 1;
+    }
+  }
+  // Park one fish inside the pen so the visual story reads:
+  // "you've caught one, herding the others."
+  if (fish.length > 0) {
+    fish[0].col = 1; fish[0].row = 1;
+    fish[0].inPen = true;
+    var pp = hexToScreen(1, 1);
+    fish[0].px = pp.x; fish[0].py = pp.y;
+    fish[0].tx = pp.x; fish[0].ty = pp.y;
+    fishInPen = 1;
+    score = 1;
+  }
+  // Spread the rest of the fish out across the live ice
+  var live = 1;
+  for (var fi = 1; fi < fish.length; fi++) {
+    var ff = fish[fi];
+    // walk to a random intact tile
+    for (var attempt = 0; attempt < 30; attempt++) {
+      var rc = 2 + Math.floor(Math.random() * (BOARD_HEX_COLS - 4));
+      var rr = 2 + Math.floor(Math.random() * (BOARD_HEX_ROWS - 4));
+      if (board[rr][rc].state === 'intact'
+          && !isPen(rc, rr)
+          && !(rc === hutCol && rr === hutRow)) {
+        ff.col = rc; ff.row = rr;
+        var fp = hexToScreen(rc, rr);
+        ff.px = fp.x; ff.py = fp.y;
+        ff.tx = fp.x; ff.ty = fp.y;
+        ff.inPen = false; ff.lostInVoid = false;
+        live++;
+        break;
+      }
+    }
+  }
+  crackBudgetLeft = Math.floor(budgetForRound(round) * 0.6);
+};
+window._setupForScreenshot = window._jumpLevel;
+
+// ── EXPOSE STATE ─────────────────────────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    round: round,
+    score: score,
+    fishInPen: fishInPen,
+    crackBudgetLeft: crackBudgetLeft,
+    targetThisRound: targetForRound(round),
+    budgetThisRound: budgetForRound(round),
+    fishAlive: fish.filter(function (f) { return !f.inPen && !f.lostInVoid; }).length,
+    stressPoints: stressPoints.length,
+    ROUND_TARGET_ROUNDS: ROUND_TARGET_ROUNDS,
+  };
+});
+
+// ── INIT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 900,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'ice_fracture_foreman',
+  onReady: function () {
+    dailySeed = computeDailySeed();
+    try { best = parseInt(localStorage.getItem('ice_fracture_foreman_best') || '0') || 0; } catch (e) {}
+    // Compute hex size based on viewport so the board roughly fills the screen.
+    recomputeHexSize();
+    window.addEventListener('resize', recomputeHexSize);
+    window.addEventListener('orientationchange', function () { setTimeout(recomputeHexSize, 80); });
+
+    // Build a starter board so the menu has something to render behind it.
+    buildBoard();
+    placePenAndHut();
+    placeStressPoints();
+    spawnFish();
+
+    GF.persist('ice_fracture_foreman_run_v1',
+      function () {
+        return { gs: gs, round: round, score: score, best: best };
+      },
+      function (s) {
+        if (!s) return;
+        // Safe-entry: never resume mid-PLAYING (Yandex 1.9 — bounce to MENU
+        // so the player doesn't lose a tap to a reload mid-fissure).
+        gs = 'MENU';
+        if (typeof s.best === 'number' && s.best > best) best = s.best;
+      }
+    );
+    if (gs === 'PLAYING' || gs === 'MENU') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+function recomputeHexSize() {
+  // Aim for ~13 cols across the viewport with a small HUD margin.
+  var marginX = 24;
+  var marginY = 90;
+  var availW = Math.max(200, window.innerWidth - marginX * 2);
+  var availH = Math.max(200, window.innerHeight - marginY);
+  var sizeByW = availW / (BOARD_HEX_COLS * Math.sqrt(3) + Math.sqrt(3) * 0.5);
+  var sizeByH = availH / ((BOARD_HEX_ROWS - 1) * 1.5 + 2);
+  HEX_SIZE = Math.max(14, Math.min(38, Math.floor(Math.min(sizeByW, sizeByH))));
+}
+
+})();
+</script>
+</body>
+</html>

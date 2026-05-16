@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Tiny Markov Dunge</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0e0a18; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Tiny Markov Dunge',
+    sub:   'A 200-byte room generator paints your dungeon — your only weapon is editing the seed.',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT',
+    score: 'ROOM', best: 'BEST',
+    ink: 'INK', seed: 'SEED', room: 'ROOM',
+    gameover: 'BOSS ADJACENT', won: 'DUNGEON CLEAR',
+    tut_goal:     'Goal: walk left to right across 6 painted rooms.',
+    tut_controls: 'Controls: WASD or drag to move. Tap a seed char to rewrite (1 ink).',
+    tut_win:      'Win: clear all 6 rooms. Each paints from your hex seed.',
+    tut_lose:     'Lose: ink reaches 0 and a boss tile spawns next to you.',
+    tut_tip:      'Tip: aa rolls walls, ff rolls enemies, cd is safe. Edit ONE char per room.',
+    help: '?',
+    edit_hint: 'TAP A SEED CHAR (1 INK)',
+    no_ink: 'OUT OF INK',
+    painting: 'PAINTING...',
+    cleared: 'CLEARED +1 INK',
+  },
+  ru: {
+    title: 'Маленькое Подземелье Маркова',
+    sub:   'Генератор в 200 байт рисует твоё подземелье — твоё оружие это правка сида.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЕЕ',
+    score: 'КОМНАТА', best: 'РЕКОРД',
+    ink: 'ЧЕРНИЛА', seed: 'СИД', room: 'КОМНАТА',
+    gameover: 'БОСС РЯДОМ', won: 'ПОДЗЕМЕЛЬЕ ЗАЧИЩЕНО',
+    tut_goal:     'Цель: пройди слева направо 6 нарисованных комнат.',
+    tut_controls: 'Управление: WASD или джойстик. Тапни символ сида чтобы переписать (1 чернил).',
+    tut_win:      'Победа: очисти все 6 комнат. Каждая рисуется из твоего hex-сида.',
+    tut_lose:     'Поражение: чернила = 0 и босс-тайл появляется рядом.',
+    tut_tip:      'Совет: aa = стены, ff = враги, cd безопасно. Меняй ОДИН символ за комнату.',
+    help: '?',
+    edit_hint: 'ТАПНИ СИМВОЛ (1 ЧЕРНИЛ)',
+    no_ink: 'ЧЕРНИЛА КОНЧИЛИСЬ',
+    painting: 'РИСУЕТСЯ...',
+    cleared: 'ОЧИЩЕНО +1 ЧЕРНИЛ',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (match DESIGN.md) ───────────────────────────────────────────
+var GRID_W          = 12;
+var GRID_H          = 12;
+var TILE_PX         = 36;
+var START_INK       = 4;
+var INK_PER_ROOM    = 1;
+var ROOMS_TO_WIN    = 6;
+var PAINT_INTERVAL  = 0.035;
+var PLAYER_SPEED    = 5.5;
+var SEED_LEN        = 6;
+var BOSS_PROB_BASE  = 0.04;
+var ENEMY_PROB_BASE = 0.18;
+
+// ── PALETTE ──────────────────────────────────────────────────────────────
+var BG_TOP = '#0e0a18';
+var BG_BOT = '#1a1228';
+var INK_CARD = '#1f1730';
+var INK_TEXT = '#e8e0ff';
+var INK_DIM = '#8c80a8';
+var TILE_FLOOR = '#3a3252';
+var TILE_FLOOR_DARK = '#2c2540';
+var TILE_WALL = '#5d4a8a';
+var TILE_WALL_DARK = '#3d2f5e';
+var TILE_ENEMY_FILL = '#e94560';
+var TILE_ENEMY_RIM = '#a92e42';
+var TILE_BOSS_FILL = '#ff2e63';
+var TILE_BOSS_RIM = '#7a0024';
+var TILE_GOAL = '#ffd23f';
+var PLAYER_FILL = '#6bd1ff';
+var PLAYER_RIM = '#2a85b8';
+var SEED_BG = '#241a3a';
+var SEED_HI = '#ffd23f';
+
+// ── MARKOV CHAIN (the ~80-byte rule table) ──────────────────────────────
+// Bigram lookup: previous-char + current-char → tile type.
+// '.' floor, '#' wall, 'E' enemy, 'B' boss
+// Compact rule string. Rule format: <pair><type>, joined.
+// 12 rules, plus a fallback default.
+var RULES = {
+  'aa': '#', 'ab': '#', 'bb': '#',
+  'cc': '.', 'cd': '.', 'dc': '.', 'dd': '.',
+  'ef': 'E', 'fe': 'E', 'ee': 'E', 'ff': 'E',
+  '00': '.', '11': '.', '12': '.', '21': '.',
+  '88': 'B', '99': 'B', '98': 'B', '89': 'B',
+  '7a': 'E', 'a7': 'E', 'b5': '#', '5b': '#',
+};
+// roughly 80 bytes for the compact rule core
+
+function tileFromBigram(prev, cur, rnd) {
+  var k = prev + cur;
+  if (RULES[k]) return RULES[k];
+  // Fallback weighting by char class
+  var v = parseInt(cur, 16) || 0;
+  if (rnd() < BOSS_PROB_BASE && v > 12) return 'B';
+  if (rnd() < ENEMY_PROB_BASE) return 'E';
+  if (v < 4) return '.';
+  if (v > 11) return '#';
+  return '.';
+}
+
+// Deterministic PRNG (mulberry32) seeded from hex string
+function seedHash(seed) {
+  var h = 2166136261;
+  for (var i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = a;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Build a tile grid from a 6-char hex seed.
+// Walks the seed string repeatedly using bigrams to generate columns.
+function buildRoom(seed, roomIdx) {
+  var grid = [];
+  for (var x = 0; x < GRID_W; x++) {
+    grid.push(new Array(GRID_H).fill('.'));
+  }
+  var rnd = mulberry32(seedHash(seed + ':' + roomIdx));
+  // Walk seed cycling for each column
+  for (var col = 0; col < GRID_W; col++) {
+    var iA = col % seed.length;
+    var iB = (col + 1) % seed.length;
+    var prev = seed.charAt(iA);
+    var cur  = seed.charAt(iB);
+    for (var row = 0; row < GRID_H; row++) {
+      // Border carve: keep top/bottom row open for traversal sometimes
+      // mix in row index by rotating
+      var bigA = seed.charAt((iA + row) % seed.length);
+      var bigB = seed.charAt((iB + row) % seed.length);
+      var t = tileFromBigram(bigA, bigB, rnd);
+      // Carve guaranteed corridor: middle 3 rows always have ≥30% floor
+      if (row >= GRID_H/2 - 2 && row <= GRID_H/2 + 1) {
+        if (rnd() < 0.55) t = '.';
+      }
+      // Difficulty scaling — more bosses by room
+      if (t !== 'B' && rnd() < (BOSS_PROB_BASE * (roomIdx + 1)) && row > 0 && row < GRID_H - 1 && col > 2) {
+        t = 'B';
+      }
+      grid[col][row] = t;
+    }
+  }
+  // Guarantee a floor on column 0 row mid for spawn
+  for (var r = 0; r < GRID_H; r++) grid[0][r] = grid[0][r] === '.' ? '.' : (r === Math.floor(GRID_H/2) ? '.' : grid[0][r]);
+  grid[0][Math.floor(GRID_H/2)] = '.';
+  // Guarantee a goal on column GRID_W-1 mid
+  grid[GRID_W - 1][Math.floor(GRID_H/2)] = '.';
+  // Carve a thin floor path so traversal is always possible (BFS-lite):
+  // simple Bresenham-ish from spawn to goal, replacing walls with floor.
+  carveFloorPath(grid);
+  return grid;
+}
+
+function carveFloorPath(grid) {
+  var x = 0, y = Math.floor(GRID_H / 2);
+  while (x < GRID_W - 1) {
+    grid[x][y] = (grid[x][y] === 'B' || grid[x][y] === '#') ? '.' : grid[x][y];
+    // randomly nudge y once per 3 columns
+    if (x % 3 === 1 && Math.random() < 0.4) {
+      if (y > 1 && Math.random() < 0.5) y--; else if (y < GRID_H - 2) y++;
+    }
+    x++;
+  }
+  grid[GRID_W - 1][y] = '.';
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';   // MENU | PAINTING | PLAYING | CLEARED | GAMEOVER | WIN
+var seed = '';
+var defaultDailySeed = '';
+var ink = START_INK;
+var roomsCleared = 0;
+var roomIdx = 0;
+var best = 0;
+var grid = null;
+var paintT = 0;
+var paintedCols = 0;
+var clearedT = 0;
+var player = { tx: 0, ty: 0, x: 0, y: 0 };  // tx/ty integer, x/y smooth
+var seedButtons = [];  // hit-test rects for top-of-screen seed chars
+var helpBtn = null;
+var lastTutorialKey = 'tiny_markov_dunge_seen_tutorial';
+
+function dailySeed() {
+  var n = Math.floor(Date.now() / 86400000);
+  var s = (n >>> 0).toString(16);
+  s = s.slice(-SEED_LEN);
+  while (s.length < SEED_LEN) s = '0' + s;
+  return s;
+}
+
+function paintIntervalDuration() { return PAINT_INTERVAL; }
+
+function startGame() {
+  ink = START_INK;
+  roomsCleared = 0;
+  roomIdx = 0;
+  seed = defaultDailySeed;
+  beginPaint();
+}
+
+function beginPaint() {
+  grid = buildRoom(seed, roomIdx);
+  paintedCols = 0;
+  paintT = 0;
+  // Place player at column 0, middle row (guaranteed floor)
+  player.tx = 0;
+  player.ty = Math.floor(GRID_H / 2);
+  player.x = player.tx;
+  player.y = player.ty;
+  gs = 'PAINTING';
+  GF.saveRun();
+  GF.gameStarted();
+}
+
+function onRoomCleared() {
+  roomsCleared++;
+  ink += INK_PER_ROOM;
+  if (roomsCleared >= ROOMS_TO_WIN) {
+    gs = 'WIN';
+    if (roomsCleared > best) {
+      best = roomsCleared;
+      try { localStorage.setItem('tiny_markov_dunge_best', best); } catch (e) {}
+    }
+    GF.saveRun();
+    GF.gameEnded();
+    return;
+  }
+  gs = 'CLEARED';
+  clearedT = 0;
+  GF.saveRun();
+}
+
+function nextRoom() {
+  roomIdx++;
+  beginPaint();
+}
+
+function gameOver() {
+  if (roomsCleared > best) {
+    best = roomsCleared;
+    try { localStorage.setItem('tiny_markov_dunge_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.saveRun();
+  GF.gameEnded();
+}
+
+// Screenshot/runtime-gate helper — jump straight into a populated mid-game state
+window._jumpLevel = function(n) {
+  if (typeof n !== 'number') n = 1;
+  if (n >= 99) {
+    // Force terminal state for runtime gate
+    if (gs === 'MENU') {
+      // Need to start game first then push into gameover
+      ink = 0;
+      roomsCleared = 2;
+      roomIdx = 2;
+      seed = defaultDailySeed;
+      grid = buildRoom(seed, roomIdx);
+      // Force-place a boss adjacent to player
+      player.tx = 1; player.ty = Math.floor(GRID_H/2);
+      player.x = player.tx; player.y = player.ty;
+      grid[player.tx + 1][player.ty] = 'B';
+      paintedCols = GRID_W;
+      gs = 'PLAYING';
+      // Step into death naturally
+      setTimeout(function() { gameOver(); }, 50);
+    } else {
+      gameOver();
+    }
+    return;
+  }
+  // Otherwise force into PLAYING with a populated room
+  ink = Math.max(2, ink);
+  roomsCleared = Math.min(n - 1, ROOMS_TO_WIN - 1);
+  roomIdx = roomsCleared;
+  seed = defaultDailySeed;
+  grid = buildRoom(seed, roomIdx);
+  paintedCols = GRID_W;  // fully painted
+  player.tx = Math.min(3, GRID_W - 2);
+  player.ty = Math.floor(GRID_H / 2);
+  player.x = player.tx;
+  player.y = player.ty;
+  gs = 'PLAYING';
+  GF.saveRun();
+};
+
+// ── INPUT — seed editing ─────────────────────────────────────────────────
+var pendingEditIdx = -1;
+function onCanvasTap(x, y) {
+  if (gs === 'PLAYING' || gs === 'PAINTING') {
+    // Help button
+    if (helpBtn && x >= helpBtn.x && x <= helpBtn.x + helpBtn.w && y >= helpBtn.y && y <= helpBtn.y + helpBtn.h) {
+      reopenTutorial();
+      return true;
+    }
+    // Seed character tap
+    for (var i = 0; i < seedButtons.length; i++) {
+      var b = seedButtons[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        if (ink > 0 && gs === 'PLAYING') {
+          // Cycle the char to next hex value (a->b, f->0, 9->a, etc.)
+          var c = seed.charAt(i);
+          var v = parseInt(c, 16);
+          v = (v + 1) % 16;
+          var nc = v.toString(16);
+          seed = seed.substring(0, i) + nc + seed.substring(i + 1);
+          ink--;
+          GF.spawnFloat(b.x + b.w/2, b.y, '-1', '#ffd23f');
+          GF.setShake(0.25);
+          GF.saveRun();
+        }
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Override default canvas click — we still need overlay buttons working
+GF.canvas.addEventListener('click', function(e) {
+  onCanvasTap(e.clientX, e.clientY);
+});
+GF.canvas.addEventListener('touchstart', function(e) {
+  if (!e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onCanvasTap(t.clientX, t.clientY);
+}, { passive: false });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs === 'PAINTING') {
+    paintT += dt;
+    while (paintT >= PAINT_INTERVAL && paintedCols < GRID_W) {
+      paintedCols++;
+      paintT -= PAINT_INTERVAL;
+    }
+    if (paintedCols >= GRID_W) {
+      // Done painting — check for boss-adjacent + out of ink
+      var adjBoss = false;
+      for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+          if (dx === 0 && dy === 0) continue;
+          var nx = player.tx + dx, ny = player.ty + dy;
+          if (nx < 0 || nx >= GRID_W || ny < 0 || ny >= GRID_H) continue;
+          if (grid[nx][ny] === 'B') { adjBoss = true; break; }
+        }
+        if (adjBoss) break;
+      }
+      if (adjBoss && ink <= 0) {
+        gameOver();
+        return;
+      }
+      gs = 'PLAYING';
+    }
+    return;
+  }
+  if (gs === 'CLEARED') {
+    clearedT += dt;
+    if (clearedT > 0.6) nextRoom();
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+
+  // Movement input — keyboard + touch joystick
+  var ax = 0, ay = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA']) ax -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) ax += 1;
+  if (GF.keys['ArrowUp']    || GF.keys['KeyW']) ay -= 1;
+  if (GF.keys['ArrowDown']  || GF.keys['KeyS']) ay += 1;
+  if (GF.touch.active) { ax += GF.touch.dx; ay += GF.touch.dy; }
+  var alen = Math.sqrt(ax*ax + ay*ay);
+  if (alen > 0) { ax /= alen; ay /= alen; }
+
+  // Smooth move + grid step
+  var step = PLAYER_SPEED * dt;
+  player.x += ax * step;
+  player.y += ay * step;
+
+  // Clamp to grid
+  if (player.x < 0) player.x = 0;
+  if (player.y < 0) player.y = 0;
+  if (player.x > GRID_W - 1) player.x = GRID_W - 1;
+  if (player.y > GRID_H - 1) player.y = GRID_H - 1;
+
+  // Resolve target tile
+  var ntx = Math.round(player.x), nty = Math.round(player.y);
+  if (ntx !== player.tx || nty !== player.ty) {
+    if (ntx >= 0 && ntx < GRID_W && nty >= 0 && nty < GRID_H) {
+      var t = grid[ntx][nty];
+      if (t === '#') {
+        // Wall — push back
+        player.x = player.tx;
+        player.y = player.ty;
+      } else {
+        player.tx = ntx;
+        player.ty = nty;
+        if (t === 'E') {
+          // Stepping on an enemy costs an ink
+          ink = Math.max(0, ink - 1);
+          GF.spawnFloat(GF.cx, GF.cy - 100, '-1 INK', '#e94560');
+          GF.setShake(0.4);
+          GF.spawnParticles(GF.cx, GF.cy, '#e94560', 14);
+          grid[ntx][nty] = '.';
+          if (ink <= 0) {
+            // Check immediate boss adjacency
+            var adj = false;
+            for (var ddx = -1; ddx <= 1 && !adj; ddx++) {
+              for (var ddy = -1; ddy <= 1 && !adj; ddy++) {
+                if (ddx === 0 && ddy === 0) continue;
+                var ax2 = player.tx + ddx, ay2 = player.ty + ddy;
+                if (ax2 < 0 || ax2 >= GRID_W || ay2 < 0 || ay2 >= GRID_H) continue;
+                if (grid[ax2][ay2] === 'B') adj = true;
+              }
+            }
+            if (adj) { gameOver(); return; }
+          }
+          GF.saveRun();
+        } else if (t === 'B') {
+          gameOver();
+          return;
+        }
+      }
+    }
+  }
+  // Check goal — reach right edge
+  if (player.tx >= GRID_W - 1) {
+    onRoomCleared();
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  // Background gradient
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, BG_TOP);
+  g.addColorStop(1, BG_BOT);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PAINTING' || gs === 'PLAYING' || gs === 'CLEARED') {
+    drawSeedBar(ctx);
+    drawRoom(ctx);
+    drawHUD(ctx);
+    drawHelpBtn(ctx);
+  }
+
+  if (gs === 'MENU') {
+    drawMenu(ctx);
+  } else if (gs === 'GAMEOVER') {
+    drawSeedBar(ctx);
+    drawRoom(ctx);
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('room') + ': ' + (roomsCleared + 1) + ' / ' + ROOMS_TO_WIN,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  } else if (gs === 'WIN') {
+    drawSeedBar(ctx);
+    drawRoom(ctx);
+    GF.drawOverlay({
+      title: GF.t('won'),
+      sub: GF.t('room') + ': ' + roomsCleared + ' / ' + ROOMS_TO_WIN,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+  }
+}
+
+function roomMetrics() {
+  // Fit grid into available area (below seed bar, above HUD)
+  var barH  = Math.max(60, Math.min(96, GF.H * 0.10));
+  var hudH  = Math.max(40, Math.min(64, GF.H * 0.07));
+  var avW   = GF.W - 24;
+  var avH   = GF.H - barH - hudH - 24;
+  var tile  = Math.floor(Math.min(avW / GRID_W, avH / GRID_H));
+  if (tile < 12) tile = 12;
+  var roomW = tile * GRID_W;
+  var roomH = tile * GRID_H;
+  var ox = (GF.W - roomW) / 2;
+  var oy = barH + 12 + (avH - roomH) / 2;
+  return { tile: tile, ox: ox, oy: oy, roomW: roomW, roomH: roomH, barH: barH, hudH: hudH };
+}
+
+function drawRoom(ctx) {
+  var m = roomMetrics();
+  // Backdrop card
+  ctx.fillStyle = INK_CARD;
+  GF.rr(ctx, m.ox - 8, m.oy - 8, m.roomW + 16, m.roomH + 16, 10);
+  ctx.fill();
+
+  for (var x = 0; x < GRID_W; x++) {
+    var visible = (gs === 'PAINTING') ? (x < paintedCols) : true;
+    if (!visible) continue;
+    for (var y = 0; y < GRID_H; y++) {
+      var t = grid[x][y];
+      var px = m.ox + x * m.tile;
+      var py = m.oy + y * m.tile;
+      drawTile(ctx, t, px, py, m.tile, x, y);
+    }
+  }
+
+  // Player
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WIN' || gs === 'CLEARED') {
+    var px = m.ox + player.x * m.tile + m.tile / 2;
+    var py = m.oy + player.y * m.tile + m.tile / 2;
+    var rad = m.tile * 0.35;
+    ctx.fillStyle = PLAYER_FILL;
+    ctx.beginPath(); ctx.arc(px, py, rad, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = PLAYER_RIM; ctx.lineWidth = Math.max(2, m.tile * 0.08);
+    ctx.stroke();
+    // Eye dot
+    ctx.fillStyle = '#0e0a18';
+    ctx.beginPath(); ctx.arc(px + rad * 0.3, py - rad * 0.2, rad * 0.18, 0, Math.PI*2); ctx.fill();
+  }
+
+  // Paint cursor (vertical bar where we are painting)
+  if (gs === 'PAINTING' && paintedCols < GRID_W) {
+    var cx = m.ox + paintedCols * m.tile;
+    ctx.fillStyle = 'rgba(255, 210, 63, 0.35)';
+    ctx.fillRect(cx, m.oy, 4, m.roomH);
+  }
+
+  // Painting label
+  if (gs === 'PAINTING') {
+    ctx.fillStyle = INK_DIM;
+    ctx.font = 'bold ' + Math.max(12, m.tile * 0.45) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(GF.t('painting'), m.ox + m.roomW / 2, m.oy + m.roomH + 6);
+  }
+  if (gs === 'CLEARED') {
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = 'bold ' + Math.max(14, m.tile * 0.55) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(GF.t('cleared'), m.ox + m.roomW / 2, m.oy + m.roomH / 2);
+  }
+}
+
+function drawTile(ctx, t, px, py, sz, gx, gy) {
+  var pad = Math.max(1, sz * 0.06);
+  if (t === '#') {
+    ctx.fillStyle = TILE_WALL_DARK;
+    ctx.fillRect(px, py, sz, sz);
+    ctx.fillStyle = TILE_WALL;
+    ctx.fillRect(px + pad, py + pad, sz - pad*2, sz - pad*2);
+    // brick line
+    ctx.strokeStyle = TILE_WALL_DARK; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px + sz/2, py + pad);
+    ctx.lineTo(px + sz/2, py + sz - pad);
+    ctx.stroke();
+  } else {
+    // floor
+    ctx.fillStyle = (gx + gy) % 2 === 0 ? TILE_FLOOR : TILE_FLOOR_DARK;
+    ctx.fillRect(px, py, sz, sz);
+    // goal column highlight
+    if (gx === GRID_W - 1) {
+      ctx.fillStyle = 'rgba(255, 210, 63, 0.15)';
+      ctx.fillRect(px, py, sz, sz);
+    }
+    if (t === 'E') {
+      // enemy: red diamond
+      var cx = px + sz/2, cy = py + sz/2;
+      ctx.fillStyle = TILE_ENEMY_FILL;
+      ctx.beginPath();
+      ctx.moveTo(cx, py + pad);
+      ctx.lineTo(px + sz - pad, cy);
+      ctx.lineTo(cx, py + sz - pad);
+      ctx.lineTo(px + pad, cy);
+      ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = TILE_ENEMY_RIM; ctx.lineWidth = 2; ctx.stroke();
+    } else if (t === 'B') {
+      // boss: big pink square w/ skull dot
+      var cx2 = px + sz/2, cy2 = py + sz/2;
+      ctx.fillStyle = TILE_BOSS_RIM;
+      ctx.fillRect(px + pad, py + pad, sz - pad*2, sz - pad*2);
+      ctx.fillStyle = TILE_BOSS_FILL;
+      ctx.fillRect(px + pad*2, py + pad*2, sz - pad*4, sz - pad*4);
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(cx2 - sz*0.15, cy2 - sz*0.1, sz*0.08, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(cx2 + sz*0.15, cy2 - sz*0.1, sz*0.08, 0, Math.PI*2); ctx.fill();
+    }
+  }
+}
+
+function drawSeedBar(ctx) {
+  var m = roomMetrics();
+  // Seed bar at top
+  var barY = 8;
+  var barH = m.barH - 16;
+  // background card
+  ctx.fillStyle = SEED_BG;
+  GF.rr(ctx, 12, barY, GF.W - 24, barH, 8);
+  ctx.fill();
+
+  // SEED label
+  ctx.fillStyle = INK_DIM;
+  ctx.font = 'bold ' + Math.max(10, barH * 0.22) + 'px Inter, monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('seed'), 24, barY + 8);
+
+  // Char boxes
+  seedButtons = [];
+  var availW = GF.W - 48;
+  var slotW = Math.min(availW / SEED_LEN - 8, barH * 1.4);
+  var slotH = barH - 26;
+  var totalW = slotW * SEED_LEN + 8 * (SEED_LEN - 1);
+  var startX = (GF.W - totalW) / 2;
+  var slotY = barY + 18;
+  for (var i = 0; i < SEED_LEN; i++) {
+    var sx = startX + i * (slotW + 8);
+    ctx.fillStyle = (ink > 0 && gs === 'PLAYING') ? '#3d2f5e' : '#241a3a';
+    GF.rr(ctx, sx, slotY, slotW, slotH, 6);
+    ctx.fill();
+    ctx.strokeStyle = (ink > 0 && gs === 'PLAYING') ? SEED_HI : '#3d2f5e';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = INK_TEXT;
+    ctx.font = 'bold ' + Math.max(14, slotH * 0.55) + 'px Inter, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(seed.charAt(i).toUpperCase(), sx + slotW / 2, slotY + slotH / 2);
+    seedButtons.push({ x: sx, y: slotY, w: slotW, h: slotH });
+  }
+
+  // Hint
+  ctx.fillStyle = (ink > 0 && gs === 'PLAYING') ? SEED_HI : INK_DIM;
+  ctx.font = 'bold ' + Math.max(9, barH * 0.18) + 'px Inter, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.fillText(ink > 0 ? GF.t('edit_hint') : GF.t('no_ink'), GF.W - 24, barY + 8);
+}
+
+function drawHUD(ctx) {
+  var m = roomMetrics();
+  var y = GF.H - m.hudH + 6;
+  var fs = Math.max(14, m.hudH * 0.42);
+
+  ctx.font = 'bold ' + fs + 'px Inter, sans-serif';
+  ctx.textBaseline = 'top';
+
+  // INK bar (left)
+  ctx.fillStyle = '#ffd23f';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('ink') + ': ' + ink, 18, y);
+
+  // Room (right)
+  ctx.fillStyle = INK_TEXT;
+  ctx.textAlign = 'right';
+  ctx.fillText(GF.t('room') + ': ' + (roomsCleared + 1) + '/' + ROOMS_TO_WIN, GF.W - 18, y);
+
+  // Best (center)
+  ctx.fillStyle = INK_DIM;
+  ctx.textAlign = 'center';
+  ctx.fillText(GF.t('best') + ': ' + best, GF.W / 2, y);
+}
+
+function drawHelpBtn(ctx) {
+  var sz = Math.max(28, Math.min(44, GF.H * 0.05));
+  var x = GF.W - sz - 14;
+  var y = 14;
+  helpBtn = { x: x, y: y, w: sz, h: sz };
+  ctx.fillStyle = 'rgba(255, 210, 63, 0.12)';
+  GF.rr(ctx, x, y, sz, sz, sz / 2);
+  ctx.fill();
+  ctx.strokeStyle = '#ffd23f';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold ' + (sz * 0.55) + 'px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', x + sz / 2, y + sz / 2);
+}
+
+function drawMenu(ctx) {
+  // Custom MENU with tutorial copy baked in
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var cx = GF.cx, cy = GF.cy;
+  var titleFs = GF.clamp(34 * GF.S, 22, 50);
+  var subFs   = GF.clamp(14 * GF.S, 11, 18);
+  var lineFs  = GF.clamp(13 * GF.S, 10, 16);
+  var btnW    = GF.clamp(240 * GF.S, 160, 320);
+  var btnH    = GF.clamp(52 * GF.S, 40, 64);
+
+  // Title
+  ctx.shadowColor = 'rgba(255,210,63,0.4)'; ctx.shadowBlur = 22 * GF.S;
+  ctx.fillStyle = '#ffd23f';
+  ctx.font = 'bold ' + titleFs + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('title'), cx, cy - 180 * GF.S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  // Subtitle (the hook)
+  ctx.fillStyle = INK_DIM;
+  ctx.font = subFs + 'px Inter, sans-serif';
+  wrapText(ctx, GF.t('sub'), cx, cy - 150 * GF.S, GF.W - 60, subFs * 1.3);
+
+  // Tutorial lines
+  var tut = [
+    { c: '#ffd23f', t: '◆ ' + GF.t('tut_goal') },
+    { c: '#a8dadc', t: '◆ ' + GF.t('tut_controls') },
+    { c: '#6bd1ff', t: '◆ ' + GF.t('tut_win') },
+    { c: '#e94560', t: '◆ ' + GF.t('tut_lose') },
+    { c: '#bcb0e0', t: '◆ ' + GF.t('tut_tip') },
+  ];
+  var ty = cy - 90 * GF.S;
+  ctx.font = lineFs + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  var maxLineW = Math.min(GF.W - 60, 520 * GF.S);
+  var lineX = cx - maxLineW / 2;
+  for (var i = 0; i < tut.length; i++) {
+    ctx.fillStyle = tut[i].c;
+    ty = wrapText(ctx, tut[i].t, lineX, ty, maxLineW, lineFs * 1.35, true) + lineFs * 0.4;
+  }
+
+  // PLAY button
+  var btnX = cx - btnW / 2;
+  var btnY = cy + 110 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ffd23f');
+  grad.addColorStop(1, '#e6a200');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + subFs + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#0e0a18';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  // Best line
+  if (best > 0) {
+    ctx.fillStyle = '#557';
+    ctx.font = GF.clamp(11 * GF.S, 9, 14) + 'px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(GF.t('best') + ': ' + best + ' / ' + ROOMS_TO_WIN, cx, btnY + btnH + 22 * GF.S);
+  }
+
+  // Register button hit-test via GF.drawOverlay-style buttons array
+  // We need to push a button so the canvas click reaches it. We bolt on a manual
+  // event check via the seed-bar handler is no good — we need MENU click sink.
+  registerMenuButton(btnX, btnY, btnW, btnH);
+}
+
+var _menuBtn = null;
+function registerMenuButton(x, y, w, h) {
+  _menuBtn = { x: x, y: y, w: w, h: h };
+}
+
+// MENU click handler — separate from canvas tap routing
+GF.canvas.addEventListener('click', function(e) {
+  if (gs !== 'MENU') return;
+  if (!_menuBtn) return;
+  if (e.clientX >= _menuBtn.x && e.clientX <= _menuBtn.x + _menuBtn.w &&
+      e.clientY >= _menuBtn.y && e.clientY <= _menuBtn.y + _menuBtn.h) {
+    try { localStorage.setItem(lastTutorialKey, '1'); } catch (_) {}
+    startGame();
+  }
+});
+GF.canvas.addEventListener('touchstart', function(e) {
+  if (gs !== 'MENU') return;
+  if (!_menuBtn) return;
+  if (!e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  if (t.clientX >= _menuBtn.x && t.clientX <= _menuBtn.x + _menuBtn.w &&
+      t.clientY >= _menuBtn.y && t.clientY <= _menuBtn.y + _menuBtn.h) {
+    try { localStorage.setItem(lastTutorialKey, '1'); } catch (_) {}
+    startGame();
+  }
+}, { passive: false });
+
+function reopenTutorial() {
+  // Pause: bounce back to MENU briefly. To keep state, just pause via a flag.
+  // Simpler: show the tutorial via a transient overlay state.
+  _tutorialFlash = true;
+  setTimeout(function() { _tutorialFlash = false; }, 4500);
+}
+
+var _tutorialFlash = false;
+
+function wrapText(ctx, text, x, y, maxW, lineH, leftAlign) {
+  var words = String(text).split(/\s+/);
+  var lines = [];
+  var cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else { cur = probe; }
+  }
+  if (cur) lines.push(cur);
+  for (var j = 0; j < lines.length; j++) {
+    ctx.fillText(lines[j], x, y + j * lineH);
+  }
+  return y + lines.length * lineH;
+}
+
+// Tutorial flash overlay (when ? clicked in-game)
+function drawTutorialFlash(ctx) {
+  if (!_tutorialFlash) return;
+  var panelW = Math.min(GF.W - 40, 520);
+  var panelH = Math.min(GF.H - 80, 260);
+  var x = (GF.W - panelW) / 2;
+  var y = (GF.H - panelH) / 2;
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  GF.rr(ctx, x, y, panelW, panelH, 12);
+  ctx.fill();
+  ctx.strokeStyle = '#ffd23f'; ctx.lineWidth = 2; ctx.stroke();
+  var lh = Math.max(14, panelH * 0.10);
+  var ty = y + 22;
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var cols = ['#ffd23f', '#a8dadc', '#6bd1ff', '#e94560', '#bcb0e0'];
+  ctx.font = Math.max(12, lh * 0.7) + 'px Inter, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  for (var i = 0; i < lines.length; i++) {
+    ctx.fillStyle = cols[i];
+    ty = wrapText(ctx, lines[i], x + 18, ty, panelW - 36, lh, true) + 4;
+  }
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 720,
+  designH: 1000,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'tiny_markov_dunge',
+  onReady: function() {
+    defaultDailySeed = dailySeed();
+    seed = defaultDailySeed;
+    try { best = parseInt(localStorage.getItem('tiny_markov_dunge_best') || '0') || 0; } catch (e) {}
+    GF.persist('tiny_markov_dunge_run_v1',
+      function() {
+        return {
+          gs: gs, seed: seed, ink: ink, roomsCleared: roomsCleared,
+          roomIdx: roomIdx, ptx: player.tx, pty: player.ty
+        };
+      },
+      function(s) {
+        if (!s) return;
+        seed = s.seed || defaultDailySeed;
+        ink = (typeof s.ink === 'number') ? s.ink : START_INK;
+        roomsCleared = s.roomsCleared || 0;
+        roomIdx = s.roomIdx || 0;
+        // Safe re-entry: always go back to MENU (Yandex 1.9 safe-screen rule)
+        gs = 'MENU';
+        if (s.gs === 'PLAYING' || s.gs === 'PAINTING') {
+          // Pre-build a room snapshot so the menu doesn't show stale empty grid
+          grid = buildRoom(seed, roomIdx);
+          paintedCols = GRID_W;
+          player.tx = (typeof s.ptx === 'number') ? s.ptx : 0;
+          player.ty = (typeof s.pty === 'number') ? s.pty : Math.floor(GRID_H/2);
+          player.x = player.tx; player.y = player.ty;
+        }
+      }
+    );
+    // Always boot at MENU
+    if (gs === 'PLAYING' || gs === 'PAINTING') gs = 'MENU';
+    if (!grid) {
+      grid = buildRoom(seed, 0);
+      paintedCols = GRID_W;
+      player.tx = 0; player.ty = Math.floor(GRID_H/2);
+      player.x = player.tx; player.y = player.ty;
+    }
+  },
+  onUpdate: update,
+  onDraw: function(ctx) {
+    draw(ctx);
+    drawTutorialFlash(ctx);
+  },
+});
+
+// ── EXPOSE STATE FOR RUNTIME GATE ────────────────────────────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    ink: ink,
+    seed: seed,
+    roomsCleared: roomsCleared,
+    roomIdx: roomIdx,
+    ptx: player.tx,
+    pty: player.ty,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

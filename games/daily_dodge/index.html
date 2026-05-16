@@ -103,6 +103,8 @@ var STRINGS = {
     ach_pyromaniac_name:  'PYROMANIAC',  ach_pyromaniac_desc:  'Detonate 3 bombs in one run',
     ach_endless_500_name: 'ENDLESS 500', ach_endless_500_desc: 'Score 500 in Endless mode',
     ach_week_streak_name: 'WEEK STREAK', ach_week_streak_desc: 'Play 7 days in a row',
+    soundOn:  'SOUND',
+    soundOff: 'MUTED',
   },
   ru: {
     title: 'Увороты Дня',
@@ -170,10 +172,131 @@ var STRINGS = {
     ach_pyromaniac_name:  'ПИРОМАН',   ach_pyromaniac_desc:  'Взорви 3 бомбы за забег',
     ach_endless_500_name: 'БЕСКОНЕЧНЫЙ 500', ach_endless_500_desc: 'Набери 500 очков в Бесконечном режиме',
     ach_week_streak_name: 'НЕДЕЛЬНАЯ СЕРИЯ', ach_week_streak_desc: 'Играй 7 дней подряд',
+    soundOn:  'ЗВУК',
+    soundOff: 'ТИХО',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
 window._setLang = function(l) { lang = (l === 'ru' ? 'ru' : 'en'); };
+
+// ── AUDIO (iter#11) ─────────────────────────────────────────────────────────
+// Procedural WebAudio SFX — no asset files (keeps zip size constant for
+// Yandex). Lazy-init AudioContext on first user gesture (autoplay policy).
+// Each call is a small chain of oscillators + envelopes so the close-call /
+// combo / bomb / death / achievement moments get tactile audio without
+// shipping samples. Mute toggle persists in `dodge_muted`; default = ON.
+// window._silent=true (screenshot tool) keeps the channel fully muted.
+var audioMuted = false;            // persisted player preference
+var _ac = null;                    // AudioContext (lazy)
+var _masterGain = null;            // master volume node
+function loadMutePref() {
+  try { audioMuted = localStorage.getItem('dodge_muted') === '1'; } catch(e) {}
+}
+function saveMutePref() {
+  try { localStorage.setItem('dodge_muted', audioMuted ? '1' : '0'); } catch(e) {}
+}
+function ensureAudio() {
+  if (window._silent) return null;
+  if (_ac) return _ac;
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    _ac = new AC();
+    _masterGain = _ac.createGain();
+    _masterGain.gain.value = 0.32;
+    _masterGain.connect(_ac.destination);
+  } catch(e) { _ac = null; }
+  return _ac;
+}
+function _audioResume() {
+  // Browsers suspend the context until a user gesture. Resume on click/touch.
+  if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch(e) {} }
+}
+function _beep(opts) {
+  // opts: { freq, freq2, type, dur, vol, sweepCurve }
+  if (audioMuted || window._silent) return;
+  var ac = ensureAudio();
+  if (!ac) return;
+  var now = ac.currentTime;
+  var dur = opts.dur || 0.12;
+  var osc = ac.createOscillator();
+  var g = ac.createGain();
+  osc.type = opts.type || 'sine';
+  osc.frequency.setValueAtTime(opts.freq, now);
+  if (opts.freq2 != null) {
+    if (opts.sweepCurve === 'exp') osc.frequency.exponentialRampToValueAtTime(opts.freq2, now + dur);
+    else osc.frequency.linearRampToValueAtTime(opts.freq2, now + dur);
+  }
+  var vol = opts.vol != null ? opts.vol : 0.5;
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(vol, now + 0.005);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  osc.connect(g); g.connect(_masterGain);
+  osc.start(now); osc.stop(now + dur + 0.02);
+}
+function _noise(opts) {
+  // White-noise burst through a band-pass; used for whoosh / explosion.
+  if (audioMuted || window._silent) return;
+  var ac = ensureAudio();
+  if (!ac) return;
+  var now = ac.currentTime;
+  var dur = opts.dur || 0.25;
+  var sr = ac.sampleRate;
+  var buf = ac.createBuffer(1, Math.floor(sr * dur), sr);
+  var data = buf.getChannelData(0);
+  for (var i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  var src = ac.createBufferSource();
+  src.buffer = buf;
+  var bp = ac.createBiquadFilter();
+  bp.type = opts.filter || 'bandpass';
+  bp.frequency.value = opts.freq || 600;
+  bp.Q.value = opts.q || 0.7;
+  var g = ac.createGain();
+  var vol = opts.vol != null ? opts.vol : 0.4;
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.exponentialRampToValueAtTime(vol, now + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  src.connect(bp); bp.connect(g); g.connect(_masterGain);
+  src.start(now); src.stop(now + dur + 0.02);
+}
+var Sfx = {
+  click:       function() { _beep({ freq:780, freq2:920, type:'triangle', dur:0.06, vol:0.35, sweepCurve:'exp' }); },
+  closeCall:   function() { _beep({ freq:1450, freq2:1820, type:'sine', dur:0.07, vol:0.28, sweepCurve:'exp' }); },
+  comboStep:   function(mult) {
+    var f = 520 + Math.min(mult, 20) * 55;
+    _beep({ freq:f, freq2:f * 1.5, type:'square', dur:0.10, vol:0.32, sweepCurve:'exp' });
+  },
+  bomb: function() {
+    _noise({ freq:380, q:0.5, dur:0.32, vol:0.55, filter:'lowpass' });
+    _beep({ freq:120, freq2:38, type:'sawtooth', dur:0.34, vol:0.45, sweepCurve:'exp' });
+  },
+  death: function() {
+    _beep({ freq:280, freq2:55, type:'sawtooth', dur:0.55, vol:0.55, sweepCurve:'exp' });
+    _noise({ freq:220, q:0.4, dur:0.5, vol:0.32, filter:'lowpass' });
+  },
+  revive: function() {
+    _beep({ freq:520, freq2:1040, type:'sine', dur:0.22, vol:0.42, sweepCurve:'exp' });
+    setTimeout(function(){ _beep({ freq:1040, freq2:1560, type:'sine', dur:0.18, vol:0.36, sweepCurve:'exp' }); }, 110);
+  },
+  unlock: function() {
+    // 3-note ascending arpeggio
+    _beep({ freq:660, type:'triangle', dur:0.12, vol:0.40 });
+    setTimeout(function(){ _beep({ freq:880,  type:'triangle', dur:0.12, vol:0.40 }); }, 90);
+    setTimeout(function(){ _beep({ freq:1175, type:'triangle', dur:0.18, vol:0.40 }); }, 180);
+  },
+  achievement: function() {
+    // Brighter 3-note chime — distinct from skin unlock so the layers feel separate
+    _beep({ freq:784, type:'sine', dur:0.12, vol:0.38 });
+    setTimeout(function(){ _beep({ freq:988,  type:'sine', dur:0.12, vol:0.38 }); }, 80);
+    setTimeout(function(){ _beep({ freq:1318, type:'sine', dur:0.24, vol:0.42 }); }, 160);
+  },
+  cleared: function() {
+    _beep({ freq:523, type:'triangle', dur:0.16, vol:0.42 });
+    setTimeout(function(){ _beep({ freq:659, type:'triangle', dur:0.16, vol:0.42 }); }, 130);
+    setTimeout(function(){ _beep({ freq:784, type:'triangle', dur:0.16, vol:0.42 }); }, 260);
+    setTimeout(function(){ _beep({ freq:1047,type:'triangle', dur:0.30, vol:0.46 }); }, 390);
+  },
+};
 
 // ── UTILS ───────────────────────────────────────────────────────────────────
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
@@ -349,6 +472,13 @@ var reviveUsed = false;         // one rewarded revive per run
 var reviveLoading = false;      // disables the EXTRA LIFE button while ad loads
 var invulnUntil = 0;            // seconds; honour in collision check
 var reviveBtnRect = null;       // last drawn revive-button rect (for tap hit-test)
+// iter#11 — mute pill hit rect (top-right of canvas, drawn every frame).
+var muteBtnRect = null;
+function toggleMute() {
+  audioMuted = !audioMuted;
+  saveMutePref();
+  if (!audioMuted) { ensureAudio(); _audioResume(); Sfx.click(); }
+}
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
@@ -371,10 +501,16 @@ var touch = { active: false, x: 0, y: 0, startX: 0, startY: 0, id: null };
 canvas.addEventListener('touchstart', function(e) {
   e.preventDefault();
   var t0 = e.changedTouches[0];
+  ensureAudio(); _audioResume();
+  // iter#11 — top-right mute pill hit-test (drawn every frame).
+  if (muteBtnRect && t0.clientX >= muteBtnRect.x && t0.clientX <= muteBtnRect.x + muteBtnRect.w &&
+      t0.clientY >= muteBtnRect.y && t0.clientY <= muteBtnRect.y + muteBtnRect.h) {
+    toggleMute(); return;
+  }
   // Hit-test buttons first (menu/retry) — don't start steering if we tapped a button.
   for (var i = 0; i < buttons.length; i++) {
     var b = buttons[i];
-    if (t0.clientX >= b.x && t0.clientX <= b.x+b.w && t0.clientY >= b.y && t0.clientY <= b.y+b.h) { b.fn(); return; }
+    if (t0.clientX >= b.x && t0.clientX <= b.x+b.w && t0.clientY >= b.y && t0.clientY <= b.y+b.h) { Sfx.click(); b.fn(); return; }
   }
   // iter#8 — tap on the armed BOMB pill detonates instead of starting steer.
   if (gs === 'PLAYING' && bombBtnRect && comboCount >= BOMB_THRESHOLD) {
@@ -403,9 +539,15 @@ canvas.addEventListener('touchend', function(e) {
   }
 }, { passive: false });
 canvas.addEventListener('click', function(e) {
+  ensureAudio(); _audioResume();
+  // iter#11 — top-right mute pill hit-test (drawn every frame).
+  if (muteBtnRect && e.clientX >= muteBtnRect.x && e.clientX <= muteBtnRect.x + muteBtnRect.w &&
+      e.clientY >= muteBtnRect.y && e.clientY <= muteBtnRect.y + muteBtnRect.h) {
+    toggleMute(); return;
+  }
   for (var i = 0; i < buttons.length; i++) {
     var b = buttons[i];
-    if (e.clientX >= b.x && e.clientX <= b.x+b.w && e.clientY >= b.y && e.clientY <= b.y+b.h) b.fn();
+    if (e.clientX >= b.x && e.clientX <= b.x+b.w && e.clientY >= b.y && e.clientY <= b.y+b.h) { Sfx.click(); b.fn(); }
   }
   // iter#8 — click on armed BOMB pill detonates (desktop alt-path to Space).
   if (gs === 'PLAYING' && bombBtnRect && comboCount >= BOMB_THRESHOLD) {
@@ -583,6 +725,8 @@ function doRevive() {
   spawnParticles(player.x, player.y, '#FFD700', 36);
   spawnFloat(player.x, player.y - 16*S, t('revive'), '#FFD700');
   invulnUntil = (performance.now() / 1000) + 3.0;
+  // iter#11 — uplifting two-note revive sting
+  Sfx.revive();
   gs = 'PLAYING';
 }
 
@@ -727,6 +871,8 @@ function detonateBomb() {
   spawnFloat(player.x, player.y - 32 * S, t('bomb') + ' +' + BOMB_SCORE_BONUS, '#fff');
   comboCount = 0; comboTimer = 0; comboFlash = 1;
   bombsUsed++;
+  // iter#11 — bomb whoosh + low-end thump
+  Sfx.bomb();
   return true;
 }
 
@@ -767,6 +913,8 @@ function update(dt) {
   // timer — survive as long as you can while difficulty climbs forever.
   if (runMode === 'DAILY' && elapsed >= GAME_DURATION) {
     score = Math.floor(elapsed * 10) + Math.floor(comboBonus);
+    // iter#11 — victory fanfare for surviving the full daily seed
+    Sfx.cleared();
     onRunEnded(true);
     return;
   }
@@ -865,6 +1013,8 @@ function update(dt) {
       // Visual: a quick spark ring + a streak in the bullet's color
       spawnParticles(player.x, player.y, b.color || '#fff', 8);
       spawnFloat((player.x + b.x)/2, (player.y + b.y)/2 - 6*S, '!', '#fff');
+      // iter#11 — audio ping on every close call
+      Sfx.closeCall();
       // Subtle micro slow-mo so the player feels the dodge
       dilationTimer = 0.09; // ~90 ms
 
@@ -880,6 +1030,8 @@ function update(dt) {
         if (comboCount === 2 || comboCount === 5 || comboCount === 10 || comboCount === 20) {
           spawnFloat(player.x, player.y - 28*S, '×' + comboCount + '!', '#FFD700');
           spawnParticles(player.x, player.y, '#FFD700', 10);
+          // iter#11 — milestone audio burst, pitch climbs with streak
+          Sfx.comboStep(comboCount);
         }
       }
     }
@@ -899,6 +1051,8 @@ function update(dt) {
       spawnParticles(player.x, player.y, '#fff', 30);
       spawnParticles(player.x, player.y, '#e74c3c', 18);
       screenShake = 1.0;
+      // iter#11 — death thud
+      Sfx.death();
       onRunEnded(false);
       return;
     }
@@ -993,6 +1147,8 @@ function onRunEnded(survived) {
   if (newlyUnlockedSkin) {
     spawnFloat(player.x, player.y - 8, skinDisplayName(newlyUnlockedSkin) + ' ' + t('unlocked'), newlyUnlockedSkin.glow);
     spawnParticles(player.x, player.y, newlyUnlockedSkin.glow, 28);
+    // iter#11 — ascending arpeggio for cosmetic milestone
+    Sfx.unlock();
     // auto-equip the freshly unlocked skin
     for (var k = 0; k < SKINS.length; k++) if (SKINS[k].id === newlyUnlockedSkin.id) { skinIdx = k; saveActiveSkin(); break; }
   }
@@ -1013,6 +1169,8 @@ function onRunEnded(survived) {
     spawnFloat(player.x, player.y - 44 - ai * 18, t(aEnt.key + '_name'), aEnt.color);
     spawnParticles(player.x, player.y, aEnt.color, 18);
   }
+  // iter#11 — single chime if any achievement landed (avoid stacked overlap)
+  if (newlyEarnedAch.length > 0) Sfx.achievement();
   gs = survived ? 'CLEARED' : 'GAMEOVER';
   try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}
   submitAndFetchLeaderboard();
@@ -1912,7 +2070,49 @@ function frame(ts) {
     }
   }
 
+  // iter#11 — mute pill (top-right, all states). Drawn last so it sits above
+  // every overlay/HUD. Hit-tested via muteBtnRect by the input handlers.
+  drawMuteButton();
+
   requestAnimationFrame(frame);
+}
+
+// iter#11 — top-right mute pill. Compact icon-only on PLAYING to stay clear
+// of the HUD; widens to icon + label on MENU/GAMEOVER/CLEARED so the player
+// can find it. Hit rect is screen-space (frame ctx.restore() has already
+// run before this is called).
+function drawMuteButton() {
+  var pad = clamp(10*S, 6, 16);
+  var compact = (gs === 'PLAYING');
+  var bH = clamp(compact ? 28*S : 30*S, compact ? 22 : 24, compact ? 36 : 40);
+  var label = audioMuted ? t('soundOff') : t('soundOn');
+  var glyph = audioMuted ? '🔇' : '🔊';
+  ctx.font = 'bold ' + clamp(12*S, 10, 15) + 'px sans-serif';
+  var labelW = compact ? 0 : ctx.measureText(label).width + 8*S;
+  var bW = clamp((compact ? 38 : 38 + labelW/S) * S, compact ? 30 : 70, compact ? 46 : 130);
+  var bX = W - pad - bW;
+  var bY = pad;
+  muteBtnRect = { x: bX, y: bY, w: bW, h: bH };
+  // pill bg
+  rr(ctx, bX, bY, bW, bH, bH/2);
+  ctx.fillStyle = audioMuted ? 'rgba(40,18,30,0.78)' : 'rgba(12,28,40,0.78)';
+  ctx.fill();
+  ctx.lineWidth = 1.2 * S;
+  ctx.strokeStyle = audioMuted ? 'rgba(255,90,140,0.55)' : 'rgba(77,208,225,0.55)';
+  ctx.stroke();
+  // glyph + (label, non-compact)
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = audioMuted ? '#ff8aa8' : '#9ee6f0';
+  ctx.font = 'bold ' + clamp(14*S, 11, 17) + 'px sans-serif';
+  if (compact) {
+    ctx.fillText(glyph, bX + bW/2, bY + bH/2 + 1);
+  } else {
+    ctx.fillText(glyph, bX + 14*S, bY + bH/2 + 1);
+    ctx.font = 'bold ' + clamp(12*S, 10, 15) + 'px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(label, bX + 26*S, bY + bH/2 + 1);
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
 }
 
 // ── BOOT ────────────────────────────────────────────────────────────────────
@@ -1940,6 +2140,7 @@ function boot() {
   loadStreak();
   loadSkinState();
   loadAchievements();
+  loadMutePref();
   if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
     window.ysdk.features.LoadingAPI.ready();
   }

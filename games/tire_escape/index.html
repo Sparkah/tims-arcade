@@ -51,6 +51,9 @@ var STRINGS = {
     ach_coiner: 'Collect 100 coins',
     ach_persistent: 'Play 10 runs',
     ach_survivor: 'Survive 60s',
+    combo_triple: 'TRIPLE!',
+    combo_fire:   'ON FIRE!',
+    combo_unstop: 'UNSTOPPABLE!',
   },
   ru: {
     title: 'Побег Шины',
@@ -81,6 +84,9 @@ var STRINGS = {
     ach_coiner: 'Собери 100 монет',
     ach_persistent: 'Сыграй 10 раз',
     ach_survivor: 'Продержись 60с',
+    combo_triple: 'ТРИПЛ!',
+    combo_fire:   'В ОГНЕ!',
+    combo_unstop: 'НЕОСТАНОВИМ!',
   },
 };
 
@@ -212,6 +218,38 @@ var achToast = 0;                // seconds remaining for "GOAL UNLOCKED" badge
 var achToastId = null;           // which achievement to celebrate
 var achPendingQueue = [];        // newly unlocked this gameOver — shown sequentially
 
+// Iter#7 (free-choice): combo milestone juice. Pure additive visual layer.
+// When combo crosses 3 / 5 / 10 we spawn radial speed lines around the tire,
+// a mega-text float, and a brief comboPulse ring. Goal is to give first-time
+// players a clear "wow this is fun" beat in the first 10-15 seconds — net
+// reception was 1👍 / 3👎 (5 plays) and the existing bounce feedback (small
+// particle puff + 4px ring) was too subtle to register as a reward.
+var speedLines = [];             // {x, y, ang, life, maxLife, len}
+var comboPulse = 0;              // 0..1 ring scale around tire on milestone hit
+var lastMilestoneCombo = 0;      // which milestone we last celebrated this run
+
+function spawnComboBurst(wx, wy, milestone) {
+  // 8 radial speed lines fanning outward — short-lived, additive, world-coord.
+  // World coords (not screen) so they scroll naturally with the tire/cameraX.
+  var N = 8;
+  for (var i = 0; i < N; i++) {
+    var ang = (i / N) * Math.PI * 2 + Math.random() * 0.2;
+    speedLines.push({
+      x: wx, y: wy,
+      ang: ang,
+      life: 0.45, maxLife: 0.45,
+      len: 28 + Math.random() * 16,
+    });
+  }
+  comboPulse = 1;
+  var key = milestone >= 10 ? 'combo_unstop' : (milestone >= 5 ? 'combo_fire' : 'combo_triple');
+  var col = milestone >= 10 ? '#ff6e9c' : (milestone >= 5 ? '#ff9a3c' : '#ffcf60');
+  // Bigger text via passing third arg — gf-lib spawnFloat accepts (x, y, text, color).
+  GF.spawnFloat(wx * GF.S, wy * GF.S - 56 * GF.S, GF.t(key), col);
+  GF.spawnParticles(wx * GF.S, wy * GF.S, col, 18);
+  GF.setShake(milestone >= 10 ? 1.0 : (milestone >= 5 ? 0.75 : 0.5));
+}
+
 // ── HELPERS ──────────────────────────────────────────────────────────────
 function rand(a, b) { return a + Math.random() * (b - a); }
 function randi(a, b) { return Math.floor(rand(a, b)); }
@@ -297,6 +335,10 @@ function startGame() {
   coinsCollectedRun = 0;
   // Iter#6: reset per-run combo peak tracker.
   maxComboRun = 0;
+  // Iter#7: reset combo-milestone juice state.
+  speedLines = [];
+  comboPulse = 0;
+  lastMilestoneCombo = 0;
   copX = -260;
   copPanic = 0;
   elapsedSec = 0;
@@ -685,14 +727,34 @@ function update(dt) {
         var col = combo >= 3 ? '#ffcf60' : '#fff';
         GF.spawnFloat(sxw, syw - 30 * GF.S, '+' + pts + (combo > 1 ? ' x' + combo : ''), col);
         if (combo >= 5) GF.setShake(0.5);
+        // Iter#7: combo milestone burst — fires once per threshold (3 / 5 / 10).
+        // Uses lastMilestoneCombo latch so re-crossing same tier doesn't re-spam.
+        var milestone = 0;
+        if (combo >= 10 && lastMilestoneCombo < 10) milestone = 10;
+        else if (combo >= 5 && lastMilestoneCombo < 5) milestone = 5;
+        else if (combo >= 3 && lastMilestoneCombo < 3) milestone = 3;
+        if (milestone > 0) {
+          lastMilestoneCombo = milestone;
+          spawnComboBurst(tire.x, tire.y, milestone);
+        }
       }
     }
   }
 
   if (comboTimer > 0) {
     comboTimer -= dt;
-    if (comboTimer <= 0) { combo = 0; comboTimer = 0; }
+    if (comboTimer <= 0) { combo = 0; comboTimer = 0; lastMilestoneCombo = 0; }
   }
+
+  // Iter#7: decay speedlines + comboPulse ring. Speedlines have their own life;
+  // pulse decays linearly so the ring on tire fades over ~0.5s.
+  if (speedLines.length > 0) {
+    for (var sl = speedLines.length - 1; sl >= 0; sl--) {
+      speedLines[sl].life -= dt;
+      if (speedLines[sl].life <= 0) speedLines.splice(sl, 1);
+    }
+  }
+  if (comboPulse > 0) comboPulse = Math.max(0, comboPulse - dt * 2);
 
   // Cops — base ratio escalates with distance (closure pressure builds even
   // for the skilled bouncer); failsafe accel after COP_FAILSAFE_AT_SEC kicks
@@ -762,7 +824,9 @@ function draw(ctx) {
     drawObstacles();
     drawCoins();
     drawCops();
+    drawSpeedLines();
     drawTire();
+    drawComboPulse();
     drawHUD();
     if (gs === 'PLAYING') drawCopPanicVignette();
   }
@@ -1337,6 +1401,63 @@ function drawCops() {
   c.globalAlpha = 1;
 }
 
+// Iter#7: radial speed lines spawned by combo-milestone bursts. World-coord,
+// scrolls with cameraX. Additive blend over the play scene; fades with `life`.
+function drawSpeedLines() {
+  if (!speedLines.length) return;
+  var c = GF.ctx;
+  c.save();
+  c.globalCompositeOperation = 'lighter';
+  for (var i = 0; i < speedLines.length; i++) {
+    var s = speedLines[i];
+    var t = s.life / s.maxLife;       // 1 → 0
+    var sx = (s.x - cameraX) * GF.S;
+    var sy = s.y * GF.S;
+    // Lines fly outward as life decays: start at radius=10, end at radius=10+len.
+    var grow = (1 - t) * s.len;
+    var r0 = (10 + grow) * GF.S;
+    var r1 = (10 + grow + 14) * GF.S;
+    var x0 = sx + Math.cos(s.ang) * r0;
+    var y0 = sy + Math.sin(s.ang) * r0;
+    var x1 = sx + Math.cos(s.ang) * r1;
+    var y1 = sy + Math.sin(s.ang) * r1;
+    c.strokeStyle = 'rgba(255,210,90,' + (t * 0.85) + ')';
+    c.lineWidth = 3 * GF.S * t;
+    c.lineCap = 'round';
+    c.beginPath();
+    c.moveTo(x0, y0);
+    c.lineTo(x1, y1);
+    c.stroke();
+  }
+  c.restore();
+}
+
+// Iter#7: expanding ring around the tire on combo milestones. Renders AFTER
+// drawTire so it sits on top. Pulse decays via update loop; this is just a
+// per-frame visualisation.
+function drawComboPulse() {
+  if (comboPulse <= 0) return;
+  var c = GF.ctx;
+  var x = (tire.x - cameraX) * GF.S;
+  var y = tire.y * GF.S;
+  var r = tire.r * GF.S;
+  // Two concentric rings, expanding as pulse decays from 1 → 0.
+  var grow = (1 - comboPulse) * 60 * GF.S;
+  c.save();
+  c.globalCompositeOperation = 'lighter';
+  c.strokeStyle = 'rgba(255,180,80,' + (comboPulse * 0.7) + ')';
+  c.lineWidth = 4 * GF.S * comboPulse;
+  c.beginPath();
+  c.arc(x, y, r + grow, 0, Math.PI * 2);
+  c.stroke();
+  c.strokeStyle = 'rgba(255,110,156,' + (comboPulse * 0.5) + ')';
+  c.lineWidth = 2 * GF.S * comboPulse;
+  c.beginPath();
+  c.arc(x, y, r + grow * 0.6, 0, Math.PI * 2);
+  c.stroke();
+  c.restore();
+}
+
 function drawTire() {
   var c = GF.ctx;
   var x = (tire.x - cameraX) * GF.S;
@@ -1594,7 +1715,10 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     achCount:      typeof achUnlocked !== 'undefined' ? (function(){var n=0;for(var k in achUnlocked){if(achUnlocked[k])n++;}return n;})() : null,
     lifetimeCoins: typeof lifetimeCoins !== 'undefined' ? lifetimeCoins : null,
     lifetimeRuns:  typeof lifetimeRuns  !== 'undefined' ? lifetimeRuns  : null,
-    maxComboRun:   typeof maxComboRun   !== 'undefined' ? maxComboRun   : null
+    maxComboRun:   typeof maxComboRun   !== 'undefined' ? maxComboRun   : null,
+    speedLinesActive: typeof speedLines !== 'undefined' && speedLines ? speedLines.length : null,
+    comboPulse:    typeof comboPulse    !== 'undefined' ? comboPulse    : null,
+    lastMilestoneCombo: typeof lastMilestoneCombo !== 'undefined' ? lastMilestoneCombo : null
   };
 });
 })();
