@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Reverse Tycoon</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1410; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// LOCALISED STRINGS
+var STRINGS = {
+  en: {
+    title: 'Reverse Tycoon',
+    sub: 'Demolish your cafe to pay the bank',
+    play: 'PLAY', retry: 'RETRY',
+    gameover: 'BANKRUPT',
+    won: 'DEBT PAID',
+    debt: 'Debt', turn: 'Turn', income: 'Income',
+    help: '?',
+    tut_goal:     'Goal: pay off 1500 coins of debt before turn 15 ends.',
+    tut_controls: 'Controls: tap any station to demolish it. Refund equals 60 percent of build cost and goes against debt.',
+    tut_win:      'Win: debt reaches zero within 15 turns.',
+    tut_lose:     'Lose: turn 15 ends with debt still positive.',
+    tut_tip:      'Tip: each demolish kills per-turn income forever and breaks adjacency bonuses. Sell cheap tiles with weak links first.',
+    tap_play:     'Tap a tile to demolish it (one per turn)',
+    turns_used:   'Turns used',
+    alive:        'Stations left',
+  },
+  ru: {
+    title: 'Антитайкун',
+    sub: 'Сноси кафе, чтобы платить банку',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    gameover: 'БАНКРОТ',
+    won: 'ДОЛГ ВЫПЛАЧЕН',
+    debt: 'Долг', turn: 'Ход', income: 'Доход',
+    help: '?',
+    tut_goal:     'Цель: выплатите 1500 монет долга до конца 15-го хода.',
+    tut_controls: 'Управление: нажмите на станцию, чтобы снести. Возврат 60 процентов стоимости идёт в долг.',
+    tut_win:      'Победа: долг достигает нуля за 15 ходов.',
+    tut_lose:     'Поражение: ход 15 заканчивается, а долг остался.',
+    tut_tip:      'Совет: каждый снос навсегда убивает доход и ломает бонусы соседства. Сначала сносите дешёвые тайлы со слабыми связями.',
+    tap_play:     'Жми на тайл, чтобы снести (один за ход)',
+    turns_used:   'Ходов потрачено',
+    alive:        'Станций осталось',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// TUNABLES (match DESIGN.md)
+var GRID_COLS = 8;
+var GRID_ROWS = 8;
+var START_DEBT = 1500;
+var MAX_TURNS = 15;
+var REFUND_PCT = 0.60;
+var SYNERGY_BONUS = 1;
+var TABLE_INCOME = 2;
+var GRILL_INCOME = 3;
+var ESPRESSO_INCOME = 5;
+var TABLE_COST = 40;
+var GRILL_COST = 80;
+var ESPRESSO_COST = 120;
+
+var T_EMPTY = 0, T_TABLE = 1, T_GRILL = 2, T_ESPRESSO = 3;
+var TYPE_COST = [0, TABLE_COST, GRILL_COST, ESPRESSO_COST];
+var TYPE_INCOME = [0, TABLE_INCOME, GRILL_INCOME, ESPRESSO_INCOME];
+
+// PALETTE
+var COL_BG_TOP = '#23180f';
+var COL_BG_BOT = '#3a2616';
+var COL_FLOOR_A = '#5a3d24';
+var COL_FLOOR_B = '#4c3320';
+var COL_FLOOR_RIM = '#2a1c10';
+var COL_DEAD = '#1a110a';
+var COL_DEAD_X = '#74543a';
+var COL_TABLE = '#e8c98a';
+var COL_TABLE_DK = '#8c6a36';
+var COL_GRILL = '#c0392b';
+var COL_GRILL_DK = '#6b1d13';
+var COL_ESPRESSO = '#5b6df5';
+var COL_ESPRESSO_DK = '#2b35a0';
+var COL_SYNERGY = '#ffe066';
+var COL_HUD = '#fff7e0';
+var COL_HUD_DIM = '#c9a878';
+var COL_DEBT = '#ff6b5e';
+var COL_GOOD = '#3ddc97';
+
+// GAME STATE
+var gs = 'MENU';
+var grid = [];
+var debt = START_DEBT;
+var turn = 1;
+var income = 0;
+var lastRefund = 0;
+var lastIncome = 0;
+var bestTurns = 99;
+var demolishingIdx = -1;
+var demolishAnim = 0;
+
+// Seeded RNG (deterministic per day)
+var _seed = 0;
+function rand() { _seed = (_seed * 9301 + 49297) % 233280; return _seed / 233280; }
+function seedFromDate() {
+  var d = new Date();
+  _seed = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+}
+function idx(c, r) { return r * GRID_COLS + c; }
+
+function buildGrid() {
+  seedFromDate();
+  grid = new Array(GRID_COLS * GRID_ROWS);
+  for (var i = 0; i < grid.length; i++) {
+    var roll = rand();
+    var t = T_EMPTY;
+    if (roll < 0.42) t = T_TABLE;
+    else if (roll < 0.66) t = T_GRILL;
+    else if (roll < 0.82) t = T_ESPRESSO;
+    grid[i] = { type: t, alive: t !== T_EMPTY };
+  }
+}
+
+function recomputeIncome() {
+  var sum = 0;
+  for (var r = 0; r < GRID_ROWS; r++) {
+    for (var c = 0; c < GRID_COLS; c++) {
+      var cell = grid[idx(c, r)];
+      if (!cell.alive) continue;
+      sum += TYPE_INCOME[cell.type];
+      if (c < GRID_COLS - 1) {
+        var right = grid[idx(c + 1, r)];
+        if (right.alive && right.type !== cell.type) sum += SYNERGY_BONUS;
+      }
+      if (r < GRID_ROWS - 1) {
+        var down = grid[idx(c, r + 1)];
+        if (down.alive && down.type !== cell.type) sum += SYNERGY_BONUS;
+      }
+    }
+  }
+  income = sum;
+}
+
+function countAlive() {
+  var n = 0;
+  for (var i = 0; i < grid.length; i++) if (grid[i].alive) n++;
+  return n;
+}
+
+// LIFECYCLE
+function startGame() {
+  buildGrid();
+  debt = START_DEBT;
+  turn = 1;
+  lastRefund = 0;
+  lastIncome = 0;
+  demolishingIdx = -1;
+  demolishAnim = 0;
+  recomputeIncome();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function endRunWin() {
+  if (turn < bestTurns) {
+    bestTurns = turn;
+    try { localStorage.setItem('reverse_tycoon_best', bestTurns); } catch (e) {}
+  }
+  gs = 'WIN';
+  GF.spawnParticles(GF.cx, GF.cy, COL_GOOD, 36);
+  GF.gameEnded();
+  GF.saveRun();
+}
+function endRunLose() {
+  gs = 'GAMEOVER';
+  GF.setShake(0.8);
+  GF.gameEnded();
+  GF.saveRun();
+}
+function demolishTile(i) {
+  if (gs !== 'PLAYING') return;
+  var cell = grid[i];
+  if (!cell || !cell.alive) return;
+  var refund = Math.round(TYPE_COST[cell.type] * REFUND_PCT);
+  debt -= refund;
+  lastRefund = refund;
+  cell.alive = false;
+  demolishingIdx = i;
+  demolishAnim = 1;
+  var size = tilePx();
+  var px = gridX(i % GRID_COLS) + size / 2;
+  var py = gridY(Math.floor(i / GRID_COLS)) + size / 2;
+  GF.spawnParticles(px, py, COL_DEAD_X, 14);
+  GF.spawnFloat(px, py - 12 * GF.S, '-' + refund, COL_GOOD);
+  GF.setShake(0.25);
+  recomputeIncome();
+  if (debt <= 0) { endRunWin(); return; }
+  lastIncome = income;
+  debt -= income;
+  if (income > 0) GF.spawnFloat(GF.cx, GF.cy + 80 * GF.S, '-' + income, '#ffd770');
+  if (debt <= 0) { endRunWin(); return; }
+  turn++;
+  if (turn > MAX_TURNS) { endRunLose(); return; }
+  GF.saveRun();
+}
+
+function reopenTutorial() { GF.tutorial.reopen(); }
+
+// GEOMETRY
+function tilePx() {
+  var hudTop = 88 * GF.S;
+  var hudBot = 64 * GF.S;
+  var availW = GF.W - 24 * GF.S;
+  var availH = GF.H - hudTop - hudBot;
+  return Math.min(availW / GRID_COLS, availH / GRID_ROWS);
+}
+function gridX(c) {
+  var size = tilePx();
+  var totalW = size * GRID_COLS;
+  return (GF.W - totalW) / 2 + c * size;
+}
+function gridY(r) {
+  var size = tilePx();
+  var totalH = size * GRID_ROWS;
+  var hudTop = 88 * GF.S;
+  return hudTop + ((GF.H - hudTop - 64 * GF.S) - totalH) / 2 + r * size;
+}
+
+// SCREENSHOT HOOK
+window._jumpLevel = function(n) {
+  startGame();
+  var demolishes = Math.max(1, n || 5);
+  for (var i = 0; i < demolishes && gs === 'PLAYING'; i++) {
+    var pickFrom = [];
+    for (var j = 0; j < grid.length; j++) {
+      if (grid[j].alive && grid[j].type === T_TABLE) pickFrom.push(j);
+    }
+    if (!pickFrom.length) break;
+    demolishTile(pickFrom[Math.floor(rand() * pickFrom.length)]);
+  }
+  GF.tutorial.active = false;
+};
+window._setupForScreenshot = function(level) {
+  try { localStorage.setItem('reverse_tycoon_seen_tutorial', '1'); } catch (e) {}
+  window._jumpLevel(level || 4);
+};
+
+// UPDATE
+function update(dt) {
+  GF.tutorial.update(dt);
+  if (gs !== 'PLAYING') return;
+  if (GF.tutorial.active) return;
+  if (demolishAnim > 0) demolishAnim = Math.max(0, demolishAnim - dt * 3);
+}
+
+// DRAW
+function draw(ctx) {
+  var bgGrad = ctx.createLinearGradient(0, 0, 0, GF.H);
+  bgGrad.addColorStop(0, COL_BG_TOP);
+  bgGrad.addColorStop(1, COL_BG_BOT);
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WIN') {
+    drawGrid(ctx);
+    drawSynergyLines(ctx);
+    drawHUD(ctx);
+    if (gs === 'PLAYING') drawHelpButton(ctx);
+  }
+
+  if (gs === 'MENU') drawMenu(ctx);
+  else if (gs === 'GAMEOVER') drawEndOverlay(ctx, GF.t('gameover'), GF.t('debt') + ': ' + Math.max(0, debt), COL_DEBT);
+  else if (gs === 'WIN') drawEndOverlay(ctx, GF.t('won'), GF.t('turns_used') + ': ' + turn, COL_GOOD);
+
+  GF.tutorial.draw(ctx);
+}
+
+function drawGrid(ctx) {
+  var size = tilePx();
+  for (var r = 0; r < GRID_ROWS; r++) {
+    for (var c = 0; c < GRID_COLS; c++) {
+      var x = gridX(c), y = gridY(r);
+      var cell = grid[idx(c, r)];
+      ctx.fillStyle = ((c + r) & 1) ? COL_FLOOR_A : COL_FLOOR_B;
+      ctx.fillRect(x, y, size, size);
+      ctx.strokeStyle = COL_FLOOR_RIM;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+      if (!cell.alive) {
+        if (cell.type !== T_EMPTY) {
+          ctx.fillStyle = COL_DEAD;
+          GF.rr(ctx, x + 4 * GF.S, y + 4 * GF.S, size - 8 * GF.S, size - 8 * GF.S, 4 * GF.S);
+          ctx.fill();
+          ctx.strokeStyle = COL_DEAD_X;
+          ctx.lineWidth = 2 * GF.S;
+          ctx.beginPath();
+          ctx.moveTo(x + 10 * GF.S, y + 10 * GF.S);
+          ctx.lineTo(x + size - 10 * GF.S, y + size - 10 * GF.S);
+          ctx.moveTo(x + size - 10 * GF.S, y + 10 * GF.S);
+          ctx.lineTo(x + 10 * GF.S, y + size - 10 * GF.S);
+          ctx.stroke();
+        }
+        continue;
+      }
+      drawStation(ctx, cell.type, x, y, size);
+    }
+  }
+  if (demolishingIdx >= 0 && demolishAnim > 0) {
+    var dc = demolishingIdx % GRID_COLS, dr = Math.floor(demolishingIdx / GRID_COLS);
+    var dx = gridX(dc), dy = gridY(dr), ds = tilePx();
+    ctx.save();
+    ctx.globalAlpha = demolishAnim;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3 * GF.S;
+    ctx.strokeRect(dx + 2, dy + 2, ds - 4, ds - 4);
+    ctx.restore();
+  }
+}
+
+function drawStation(ctx, type, x, y, size) {
+  var pad = 6 * GF.S;
+  var ix = x + pad, iy = y + pad, isz = size - pad * 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  GF.rr(ctx, ix + 2, iy + 4, isz, isz, 6 * GF.S);
+  ctx.fill();
+  if (type === T_TABLE) {
+    var grad = ctx.createLinearGradient(ix, iy, ix, iy + isz);
+    grad.addColorStop(0, COL_TABLE);
+    grad.addColorStop(1, COL_TABLE_DK);
+    ctx.fillStyle = grad;
+    GF.rr(ctx, ix, iy, isz, isz, 6 * GF.S);
+    ctx.fill();
+    ctx.fillStyle = '#fff7e0';
+    ctx.beginPath();
+    ctx.arc(ix + isz / 2, iy + isz / 2, isz * 0.28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#c0392b';
+    ctx.beginPath();
+    ctx.arc(ix + isz / 2, iy + isz / 2, isz * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (type === T_GRILL) {
+    var g2 = ctx.createLinearGradient(ix, iy, ix, iy + isz);
+    g2.addColorStop(0, COL_GRILL);
+    g2.addColorStop(1, COL_GRILL_DK);
+    ctx.fillStyle = g2;
+    GF.rr(ctx, ix, iy, isz, isz, 6 * GF.S);
+    ctx.fill();
+    ctx.strokeStyle = '#2a1006';
+    ctx.lineWidth = 2 * GF.S;
+    for (var k = 1; k < 4; k++) {
+      ctx.beginPath();
+      ctx.moveTo(ix + 4 * GF.S, iy + (isz * k / 4));
+      ctx.lineTo(ix + isz - 4 * GF.S, iy + (isz * k / 4));
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#ffd24d';
+    ctx.beginPath();
+    ctx.arc(ix + isz / 2, iy + isz * 0.3, isz * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (type === T_ESPRESSO) {
+    var g3 = ctx.createLinearGradient(ix, iy, ix, iy + isz);
+    g3.addColorStop(0, COL_ESPRESSO);
+    g3.addColorStop(1, COL_ESPRESSO_DK);
+    ctx.fillStyle = g3;
+    GF.rr(ctx, ix, iy, isz, isz, 6 * GF.S);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    GF.rr(ctx, ix + isz * 0.3, iy + isz * 0.4, isz * 0.4, isz * 0.35, 3 * GF.S);
+    ctx.fill();
+    ctx.fillStyle = '#4a2a18';
+    ctx.fillRect(ix + isz * 0.36, iy + isz * 0.46, isz * 0.28, isz * 0.18);
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 1.5 * GF.S;
+    ctx.beginPath();
+    ctx.moveTo(ix + isz * 0.45, iy + isz * 0.32);
+    ctx.quadraticCurveTo(ix + isz * 0.5, iy + isz * 0.2, ix + isz * 0.55, iy + isz * 0.32);
+    ctx.stroke();
+  }
+}
+
+function drawSynergyLines(ctx) {
+  var size = tilePx();
+  ctx.save();
+  ctx.strokeStyle = COL_SYNERGY;
+  ctx.lineWidth = Math.max(1.5, 2 * GF.S);
+  ctx.globalAlpha = 0.4;
+  for (var r = 0; r < GRID_ROWS; r++) {
+    for (var c = 0; c < GRID_COLS; c++) {
+      var cell = grid[idx(c, r)];
+      if (!cell.alive) continue;
+      if (c < GRID_COLS - 1) {
+        var right = grid[idx(c + 1, r)];
+        if (right.alive && right.type !== cell.type) {
+          var x = gridX(c) + size, y = gridY(r) + size / 2;
+          ctx.beginPath();
+          ctx.moveTo(x - 5 * GF.S, y);
+          ctx.lineTo(x + 5 * GF.S, y);
+          ctx.stroke();
+        }
+      }
+      if (r < GRID_ROWS - 1) {
+        var down = grid[idx(c, r + 1)];
+        if (down.alive && down.type !== cell.type) {
+          var x2 = gridX(c) + size / 2, y2 = gridY(r) + size;
+          ctx.beginPath();
+          ctx.moveTo(x2, y2 - 5 * GF.S);
+          ctx.lineTo(x2, y2 + 5 * GF.S);
+          ctx.stroke();
+        }
+      }
+    }
+  }
+  ctx.restore();
+}
+
+function drawHUD(ctx) {
+  var fs = GF.clamp(16 * GF.S, 12, 22);
+  var fsBig = GF.clamp(26 * GF.S, 18, 36);
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(10, 5, 2, 0.65)';
+  ctx.fillRect(0, 0, GF.W, 80 * GF.S);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(GF.t('debt'), 16 * GF.S, 10 * GF.S);
+  ctx.fillStyle = debt > 0 ? COL_DEBT : COL_GOOD;
+  ctx.font = 'bold ' + fsBig + 'px sans-serif';
+  ctx.fillText(Math.max(0, debt) + '', 16 * GF.S, 30 * GF.S);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(GF.t('turn'), GF.cx, 10 * GF.S);
+  ctx.fillStyle = COL_HUD;
+  ctx.font = 'bold ' + fsBig + 'px sans-serif';
+  ctx.fillText(turn + '/' + MAX_TURNS, GF.cx, 30 * GF.S);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(GF.t('income'), GF.W - 16 * GF.S, 10 * GF.S);
+  ctx.fillStyle = COL_HUD;
+  ctx.font = 'bold ' + fsBig + 'px sans-serif';
+  ctx.fillText('-' + income, GF.W - 16 * GF.S, 30 * GF.S);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.fillText(GF.t('tap_play'), GF.cx, GF.H - 28 * GF.S);
+}
+
+var _helpBtn = null;
+function drawHelpButton(ctx) {
+  var bw = 36 * GF.S, bh = 36 * GF.S;
+  var bx = GF.W - bw - 8 * GF.S, by = 80 * GF.S + 6 * GF.S;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  GF.rr(ctx, bx, by, bw, bh, 8 * GF.S);
+  ctx.fill();
+  ctx.strokeStyle = COL_HUD_DIM;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = COL_HUD;
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', bx + bw / 2, by + bh / 2);
+  _helpBtn = { x: bx, y: by, w: bw, h: bh };
+}
+
+var _playBtn = null;
+var _retryBtn = null;
+
+function drawMenu(ctx) {
+  ctx.fillStyle = 'rgba(10, 5, 2, 0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(38 * GF.S, 24, 56);
+  var fs = GF.clamp(14 * GF.S, 11, 19);
+  ctx.fillStyle = '#ffd770';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(255,150,80,0.6)'; ctx.shadowBlur = 24 * GF.S;
+  var titleY = Math.max(60 * GF.S, GF.cy - 200 * GF.S);
+  ctx.fillText(GF.t('title'), GF.cx, titleY);
+  ctx.shadowBlur = 0;
+  var lines = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillStyle = '#e8d6b8';
+  var lineY = titleY + 36 * GF.S;
+  var maxW = Math.min(GF.W - 40 * GF.S, 560 * GF.S);
+  for (var i = 0; i < lines.length; i++) {
+    var raw = GF.t(lines[i]);
+    var words = raw.split(' ');
+    var cur = '';
+    var rendered = [];
+    for (var w = 0; w < words.length; w++) {
+      var probe = cur ? cur + ' ' + words[w] : words[w];
+      if (ctx.measureText(probe).width > maxW && cur) { rendered.push(cur); cur = words[w]; }
+      else cur = probe;
+    }
+    if (cur) rendered.push(cur);
+    for (var ln = 0; ln < rendered.length; ln++) {
+      ctx.fillText(rendered[ln], GF.cx, lineY);
+      lineY += (fs + 4);
+    }
+    lineY += 4;
+  }
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(54 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = Math.min(lineY + 14 * GF.S, GF.H - btnH - 30 * GF.S);
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ffb84d');
+  grad.addColorStop(1, '#c06b1f');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#1a0f08';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+  _playBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawEndOverlay(ctx, title, subtitle, color) {
+  ctx.fillStyle = 'rgba(10, 5, 2, 0.88)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(48 * GF.S, 32, 70);
+  ctx.fillStyle = color;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = color; ctx.shadowBlur = 30 * GF.S;
+  ctx.fillText(title, GF.cx, GF.cy - 40 * GF.S);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#e8d6b8';
+  ctx.font = GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.fillText(subtitle, GF.cx, GF.cy + 4 * GF.S);
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  ctx.fillText(GF.t('alive') + ': ' + countAlive(), GF.cx, GF.cy + 36 * GF.S);
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(54 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 70 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ffb84d');
+  grad.addColorStop(1, '#c06b1f');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#1a0f08';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+  _retryBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+// INPUT
+function onTap(x, y) {
+  if (GF.tutorial.active) {
+    if (GF.tutorial.handleClick(x, y)) return;
+  }
+  if (gs === 'MENU') {
+    if (_playBtn && x >= _playBtn.x && x <= _playBtn.x + _playBtn.w && y >= _playBtn.y && y <= _playBtn.y + _playBtn.h) {
+      startGame();
+    }
+    return;
+  }
+  if (gs === 'GAMEOVER' || gs === 'WIN') {
+    if (_retryBtn && x >= _retryBtn.x && x <= _retryBtn.x + _retryBtn.w && y >= _retryBtn.y && y <= _retryBtn.y + _retryBtn.h) {
+      gs = 'MENU';
+    }
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  if (_helpBtn && x >= _helpBtn.x && x <= _helpBtn.x + _helpBtn.w && y >= _helpBtn.y && y <= _helpBtn.y + _helpBtn.h) {
+    reopenTutorial();
+    return;
+  }
+  var size = tilePx();
+  for (var r = 0; r < GRID_ROWS; r++) {
+    for (var c = 0; c < GRID_COLS; c++) {
+      var tx = gridX(c), ty = gridY(r);
+      if (x >= tx && x <= tx + size && y >= ty && y <= ty + size) {
+        var i = idx(c, r);
+        if (grid[i].alive) demolishTile(i);
+        return;
+      }
+    }
+  }
+}
+
+GF.canvas.addEventListener('pointerdown', function(e) {
+  var rect = GF.canvas.getBoundingClientRect();
+  onTap(e.clientX - rect.left, e.clientY - rect.top);
+});
+
+// Expose state immediately so the runtime gate can see it during the 3s SDK boot wait.
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    debt: debt,
+    turn: turn,
+    income: income,
+    alive: countAlive(),
+    MAX_TURNS: MAX_TURNS,
+    START_DEBT: START_DEBT,
+  };
+});
+
+// BOOT
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'reverse_tycoon',
+  onReady: function() {
+    try { bestTurns = parseInt(localStorage.getItem('reverse_tycoon_best') || '99') || 99; } catch (e) {}
+    GF.persist('reverse_tycoon_run_v1',
+      function() {
+        return { gs: gs, debt: debt, turn: turn, income: income,
+                 grid: grid.map(function(c){ return [c.type, c.alive ? 1 : 0]; }) };
+      },
+      function(s) {
+        if (!s || !s.grid) return;
+        gs = s.gs || 'MENU';
+        debt = s.debt || START_DEBT;
+        turn = s.turn || 1;
+        income = s.income || 0;
+        grid = s.grid.map(function(arr){ return { type: arr[0], alive: arr[1] === 1 }; });
+        if (grid.length !== GRID_COLS * GRID_ROWS) {
+          buildGrid();
+          gs = 'MENU';
+        }
+      }
+    );
+    if (grid.length === 0) buildGrid();
+    if (gs === 'PLAYING') gs = 'MENU';
+
+    GF.tutorial.start([
+      { text: GF.t('tut_goal') + ' ' + GF.t('tut_controls'), advance: 'click_any' },
+      { text: GF.t('tut_tip'), advance: 'click_any' },
+    ], { storageKey: 'reverse_tycoon_seen_tutorial' });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

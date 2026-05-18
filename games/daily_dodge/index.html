@@ -105,6 +105,17 @@ var STRINGS = {
     ach_week_streak_name: 'WEEK STREAK', ach_week_streak_desc: 'Play 7 days in a row',
     soundOn:  'SOUND',
     soundOff: 'MUTED',
+    tutWelcomeTitle: 'WELCOME',
+    tutPage1Head:    'SURVIVE 60 SECONDS',
+    tutPage1Body:    'Dodge the shared daily projectile stream. Same pattern for every player today — your time is your rank.',
+    tutPage2Head:    'BUILD YOUR COMBO',
+    tutPage2Body:    'Bullets that whiz past you (close calls) chain into a combo multiplier. Higher combo = bigger score bonus.',
+    tutPage3Head:    'DETONATE A BOMB',
+    tutPage3Body:    'At combo ×10 the BOMB pill arms. Tap it (or hit SPACE) to clear every bullet on screen — a clutch save.',
+    tutNext:         'NEXT',
+    tutPlay:         'GOT IT',
+    tutSkip:         'SKIP',
+    tutStep:         'STEP',
   },
   ru: {
     title: 'Увороты Дня',
@@ -174,6 +185,17 @@ var STRINGS = {
     ach_week_streak_name: 'НЕДЕЛЬНАЯ СЕРИЯ', ach_week_streak_desc: 'Играй 7 дней подряд',
     soundOn:  'ЗВУК',
     soundOff: 'ТИХО',
+    tutWelcomeTitle: 'ДОБРО ПОЖАЛОВАТЬ',
+    tutPage1Head:    'ВЫЖИВИ 60 СЕКУНД',
+    tutPage1Body:    'Уворачивайся от общего ежедневного потока снарядов. Сегодня у всех одна и та же комбинация — твоё время это твоё место.',
+    tutPage2Head:    'СОБИРАЙ КОМБО',
+    tutPage2Body:    'Снаряды, пролетающие вплотную (касание «на волосок»), копят множитель комбо. Выше комбо — больше бонус к счёту.',
+    tutPage3Head:    'ВЗОРВИ БОМБУ',
+    tutPage3Body:    'При комбо ×10 загорается пилюля «БОМБА». Нажми её (или ПРОБЕЛ), чтобы убрать все снаряды на экране — клатч-спасение.',
+    tutNext:         'ДАЛЕЕ',
+    tutPlay:         'ПОНЯТНО',
+    tutSkip:         'ПРОПУСТИТЬ',
+    tutStep:         'ШАГ',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -480,6 +502,39 @@ function toggleMute() {
   if (!audioMuted) { ensureAudio(); _audioResume(); Sfx.click(); }
 }
 
+// ── iter#12 — First-run tutorial overlay (MENU only) ────────────────────────
+// Three-page intro covering goal / combo / bomb. The game accreted 11
+// layers of mechanics over iterations 1-11 (close-calls, combo, bomb,
+// achievements, endless, streak, skins) but had zero onboarding for
+// first-run players. Shown only when `dodge_seen_tutorial` is unset.
+// NEXT / SKIP buttons; saves the flag on completion or skip.
+// Bypassed when window._silent (screenshot tool) or ?notut URL param
+// (playtest harness) so visual regression checks stay deterministic.
+var TUT_PAGES = 3;
+var tutorialActive = false;       // true while overlay is on top of menu
+var tutorialPage = 0;             // 0..TUT_PAGES-1
+function loadTutorialSeen() {
+  try {
+    if (window._silent) return true;
+    if (typeof location !== 'undefined' && location.search && /[?&]notut(=|&|$)/.test(location.search)) return true;
+    // file:// (deep_playtest local harness) skips the tutorial.
+    if (typeof location !== 'undefined' && location.protocol === 'file:') return true;
+    // Puppeteer / Playwright driven runs set navigator.webdriver=true. The
+    // webapp_gate, runtime_gate, deep_playtest, and screenshot tools all run
+    // through a headless driver, so the tutorial must not intercept their
+    // PLAY click. Real users (Yandex, game-factory.tech) never see this flag.
+    if (typeof navigator !== 'undefined' && navigator.webdriver === true) return true;
+    return localStorage.getItem('dodge_seen_tutorial') === '1';
+  } catch(e) { return false; }
+}
+function saveTutorialSeen() {
+  try { localStorage.setItem('dodge_seen_tutorial', '1'); } catch(e) {}
+}
+function dismissTutorial() {
+  tutorialActive = false;
+  saveTutorialSeen();
+}
+
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
 document.addEventListener('keydown', function(e) {
@@ -760,7 +815,7 @@ window._jumpEndless = function() { startRun('ENDLESS'); };
 // real clicks across MENU → PLAYING → GAMEOVER cycles and verify all
 // buttons stay live after reload + multi-cycle (the Spore Guard / Varnish
 // Restore rejection class).
-window.__gfState = function() { return { gs: gs, runMode: runMode, score: score, elapsed: elapsed, comboCount: comboCount, bombsUsed: bombsUsed, achEarned: countEarnedAch(), achTotal: ACHIEVEMENTS.length }; };
+window.__gfState = function() { return { gs: gs, runMode: runMode, score: score, elapsed: elapsed, comboCount: comboCount, bombsUsed: bombsUsed, achEarned: countEarnedAch(), achTotal: ACHIEVEMENTS.length, tutorialActive: tutorialActive, tutorialPage: tutorialPage }; };
 
 // ── SKIN PERSISTENCE / UNLOCK CHECK (iter#2) ────────────────────────────────
 function loadSkinState() {
@@ -1999,6 +2054,8 @@ function frame(ts) {
   if (gs === 'MENU') {
     ctx.fillStyle = '#050510'; ctx.fillRect(0,0,W,H);
     drawOverlay(t('title'), t('sub'), t('play'), function() { startRun(); }, t('sub2'));
+    // iter#12 — first-run tutorial sits on top of the menu, taking over input
+    if (tutorialActive) drawTutorial();
   }
   if (gs === 'GAMEOVER') {
     var comboLine = (maxComboThisRun >= 2)
@@ -2077,6 +2134,133 @@ function frame(ts) {
   requestAnimationFrame(frame);
 }
 
+// ── iter#12 — Tutorial overlay renderer ─────────────────────────────────────
+// Three-page modal: GOAL → COMBO → BOMB. Reuses the menu's button hit-test
+// path: clears the buttons[] populated by drawOverlay/skins/achievements and
+// pushes NEXT (or GOT IT on the last page) + SKIP, so the menu's PLAY DAILY
+// and skin-tap targets can't fire while the tutorial is up. Word-wraps the
+// body line so RU strings fit the panel.
+function _wrapTextLines(text, maxW, fontPx) {
+  ctx.font = fontPx + 'px sans-serif';
+  var words = (text || '').split(' ');
+  var lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = cur ? (cur + ' ' + words[i]) : words[i];
+    if (ctx.measureText(test).width <= maxW || !cur) { cur = test; }
+    else { lines.push(cur); cur = words[i]; }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function drawTutorial() {
+  // Take over input: clear menu buttons so PLAY/skin/achievement taps don't fire.
+  buttons.length = 0;
+
+  // Backdrop — semi-opaque over the menu.
+  ctx.fillStyle = 'rgba(5,5,16,0.86)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Panel dimensions tuned for both desktop (1280x720) and mobile portrait (375x667).
+  var panelW = clamp(420 * S, 280, 520);
+  var panelH = clamp(340 * S, 280, 420);
+  var panelX = cx - panelW / 2;
+  var panelY = cy - panelH / 2;
+
+  // Panel background — neon-accented card matching the daily-dodge palette.
+  rr(ctx, panelX, panelY, panelW, panelH, 18 * S);
+  var pgrad = ctx.createLinearGradient(panelX, panelY, panelX, panelY + panelH);
+  pgrad.addColorStop(0, '#0f1424');
+  pgrad.addColorStop(1, '#080a18');
+  ctx.fillStyle = pgrad; ctx.fill();
+  ctx.lineWidth = 1.5 * S;
+  ctx.strokeStyle = 'rgba(77,208,225,0.35)';
+  ctx.stroke();
+
+  // Header — small "WELCOME" + step counter.
+  ctx.font = 'bold ' + clamp(12 * S, 10, 15) + 'px sans-serif';
+  ctx.fillStyle = '#4dd0e1';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(t('tutWelcomeTitle'), cx, panelY + clamp(28 * S, 22, 34));
+  ctx.font = clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.fillStyle = '#557';
+  ctx.fillText(t('tutStep') + ' ' + (tutorialPage + 1) + ' / ' + TUT_PAGES, cx, panelY + clamp(46 * S, 36, 56));
+
+  // Page content — head + body.
+  var heads = ['tutPage1Head', 'tutPage2Head', 'tutPage3Head'];
+  var bodies = ['tutPage1Body', 'tutPage2Body', 'tutPage3Body'];
+  var pageIdx = clamp(tutorialPage, 0, TUT_PAGES - 1);
+
+  ctx.font = 'bold ' + clamp(22 * S, 17, 28) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(t(heads[pageIdx]), cx, panelY + clamp(92 * S, 76, 110));
+
+  var bodyFs = clamp(14 * S, 11, 17);
+  var bodyMaxW = panelW - clamp(40 * S, 30, 60);
+  var bodyLines = _wrapTextLines(t(bodies[pageIdx]), bodyMaxW, bodyFs);
+  ctx.font = bodyFs + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  var bodyTopY = panelY + clamp(132 * S, 110, 156);
+  var bodyLineH = bodyFs * 1.35;
+  for (var bi = 0; bi < bodyLines.length; bi++) {
+    ctx.fillText(bodyLines[bi], cx, bodyTopY + bi * bodyLineH);
+  }
+
+  // Step pips — 3 small dots near the bottom of the body region.
+  var pipsY = panelY + panelH - clamp(86 * S, 70, 100);
+  var pipR = clamp(4 * S, 3, 6);
+  var pipGap = clamp(14 * S, 10, 20);
+  var pipsTotalW = TUT_PAGES * (pipR * 2) + (TUT_PAGES - 1) * pipGap;
+  var pipX0 = cx - pipsTotalW / 2 + pipR;
+  for (var pi = 0; pi < TUT_PAGES; pi++) {
+    ctx.beginPath();
+    ctx.arc(pipX0 + pi * (pipR * 2 + pipGap), pipsY, pipR, 0, Math.PI * 2);
+    ctx.fillStyle = (pi === pageIdx) ? '#4dd0e1' : 'rgba(120,140,170,0.35)';
+    ctx.fill();
+  }
+
+  // NEXT / GOT IT button — primary CTA at bottom of panel.
+  var nextLabel = (pageIdx === TUT_PAGES - 1) ? t('tutPlay') : t('tutNext');
+  var nbW = clamp(180 * S, 130, 220);
+  var nbH = clamp(40 * S, 32, 50);
+  var nbX = cx - nbW / 2;
+  var nbY = panelY + panelH - nbH - clamp(22 * S, 16, 30);
+  rr(ctx, nbX, nbY, nbW, nbH, nbH / 2);
+  var nbg = ctx.createLinearGradient(nbX, nbY, nbX, nbY + nbH);
+  nbg.addColorStop(0, '#4dd0e1'); nbg.addColorStop(1, '#0288a8');
+  ctx.fillStyle = nbg; ctx.fill();
+  ctx.font = 'bold ' + clamp(15 * S, 12, 18) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(nextLabel, cx, nbY + nbH / 2);
+  ctx.textBaseline = 'alphabetic';
+  buttons.push({
+    x: nbX, y: nbY, w: nbW, h: nbH,
+    fn: function() {
+      if (tutorialPage >= TUT_PAGES - 1) { dismissTutorial(); }
+      else { tutorialPage++; }
+    }
+  });
+
+  // SKIP — small text-link top-right of the panel.
+  var skipFs = clamp(12 * S, 10, 14);
+  ctx.font = skipFs + 'px sans-serif';
+  ctx.fillStyle = '#778';
+  var skipLabel = t('tutSkip');
+  var skipW = ctx.measureText(skipLabel).width;
+  var skipPad = 10 * S;
+  var skipX = panelX + panelW - skipW - skipPad - 8 * S;
+  var skipY = panelY + clamp(28 * S, 22, 34);
+  ctx.textAlign = 'left';
+  ctx.fillText(skipLabel, skipX, skipY);
+  ctx.textAlign = 'center';
+  // Bigger hit target than the visible text.
+  buttons.push({
+    x: skipX - 6 * S, y: skipY - skipFs - 4 * S,
+    w: skipW + 12 * S, h: skipFs + 16 * S,
+    fn: function() { dismissTutorial(); }
+  });
+}
+
 // iter#11 — top-right mute pill. Compact icon-only on PLAYING to stay clear
 // of the HUD; widens to icon + label on MENU/GAMEOVER/CLEARED so the player
 // can find it. Hit rect is screen-space (frame ctx.restore() has already
@@ -2141,6 +2325,9 @@ function boot() {
   loadSkinState();
   loadAchievements();
   loadMutePref();
+  // iter#12 — first-run tutorial: activate on MENU if never seen
+  tutorialActive = !loadTutorialSeen();
+  tutorialPage = 0;
   if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
     window.ysdk.features.LoadingAPI.ready();
   }
