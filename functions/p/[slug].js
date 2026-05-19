@@ -97,6 +97,20 @@ a.btn:hover{filter:brightness(1.1)}
 small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
 .alt{margin-top:8px;font-size:13px;color:#6a6a82}
 .alt p{font-size:13px;margin-bottom:0}
+.sg-link{background:none;border:none;color:#8a8aa0;font-size:13px;cursor:pointer;padding:0;margin-top:12px;text-decoration:underline}
+.sg-link:hover{color:#e7e7ee}
+.sg-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);z-index:50;padding:20px}
+.sg-modal.on{display:flex}
+.sg-panel{background:#161622;border:1px solid #2a2a35;border-radius:10px;max-width:440px;width:100%;padding:18px;text-align:left}
+.sg-panel h3{font-size:16px;margin-bottom:6px;color:#f7f7fa}
+.sg-panel p{font-size:13px;color:#8a8aa0;margin-bottom:10px;line-height:1.4}
+.sg-panel textarea{width:100%;background:#0a0a14;color:#e7e7ee;border:1px solid #2a2a35;border-radius:6px;padding:8px 10px;font:inherit;font-size:14px;resize:vertical;min-height:80px}
+.sg-actions{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:#5a5a72}
+.sg-actions button{background:#4dd0e1;color:#0a0a14;border:none;border-radius:6px;padding:6px 14px;font-weight:700;cursor:pointer;font-size:13px}
+.sg-actions button:disabled{opacity:0.4;cursor:not-allowed}
+.sg-status{font-size:12px;margin-top:8px;min-height:16px;color:#8a8aa0}
+.sg-status.ok{color:#7c7}.sg-status.err{color:#d77}
+.sg-close{position:absolute;top:8px;right:12px;background:none;border:none;color:#8a8aa0;font-size:20px;cursor:pointer;line-height:1}
 </style>
 </head>
 <body>
@@ -106,7 +120,69 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
   <p>${escapeHtml(ogHook)}</p>
   <a class="btn" href="${playUrl}">${lang === 'ru' ? '▶ Играть' : '▶ Play now'}</a>
   <small><a href="/" style="color:#8a8aa0">${lang === 'ru' ? '← все игры' : '← browse all games'}</a></small>
+  <div><button class="sg-link" id="sg-open" type="button">${lang === 'ru' ? '💡 Предложить игру' : '💡 Suggest a game'}</button></div>
 </div>
+
+<div class="sg-modal" id="sg-modal" role="dialog" aria-hidden="true">
+  <div class="sg-panel" style="position:relative">
+    <button class="sg-close" id="sg-close" aria-label="Close">×</button>
+    <h3>${lang === 'ru' ? 'Предложить игру' : 'Suggest a game'}</h3>
+    <p>${lang === 'ru'
+      ? 'Что должна построить фабрика дальше? Одна механика, один поворот, или описание игры, которую вы хотите.'
+      : 'What should the factory build next? One mechanic, one twist, or a description of the game you want.'}</p>
+    <form id="sg-form" autocomplete="off">
+      <textarea id="sg-text" maxlength="500" placeholder="${lang === 'ru' ? 'Физическая игра, где...' : 'A merge game where each level adds a new...'}"></textarea>
+      <div class="sg-actions">
+        <span id="sg-count">0 / 500</span>
+        <button type="submit" id="sg-send" disabled>${lang === 'ru' ? 'Отправить' : 'Send'}</button>
+      </div>
+      <div class="sg-status" id="sg-status" aria-live="polite"></div>
+    </form>
+  </div>
+</div>
+
+<script>
+(function(){
+  var open=document.getElementById('sg-open'), modal=document.getElementById('sg-modal'),
+      close=document.getElementById('sg-close'), text=document.getElementById('sg-text'),
+      count=document.getElementById('sg-count'), send=document.getElementById('sg-send'),
+      form=document.getElementById('sg-form'), status=document.getElementById('sg-status');
+  function show(){ modal.classList.add('on'); modal.setAttribute('aria-hidden','false'); setTimeout(function(){text.focus();},50); }
+  function hide(){ modal.classList.remove('on'); modal.setAttribute('aria-hidden','true'); status.textContent=''; status.className='sg-status'; text.value=''; count.textContent='0 / 500'; send.disabled=true; send.textContent='${lang === 'ru' ? 'Отправить' : 'Send'}'; }
+  open.addEventListener('click', show);
+  close.addEventListener('click', hide);
+  modal.addEventListener('click', function(e){ if(e.target===modal) hide(); });
+  document.addEventListener('keydown', function(e){ if(e.key==='Escape' && modal.classList.contains('on')) hide(); });
+  text.addEventListener('input', function(){ var n=text.value.length; count.textContent=n+' / 500'; send.disabled=n<3; });
+  form.addEventListener('submit', async function(e){
+    e.preventDefault();
+    var t=text.value.trim().slice(0,500); if(t.length<3) return;
+    send.disabled=true; send.textContent='…'; status.textContent=''; status.className='sg-status';
+    try {
+      var r = await fetch('/api/suggest', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({text:t}) });
+      if (r.ok) {
+        status.textContent='${lang === 'ru' ? 'Спасибо!' : 'Thanks — Tim sees this tomorrow morning.'}';
+        status.className='sg-status ok';
+        send.textContent='${lang === 'ru' ? 'Отправлено' : 'Sent'}';
+        setTimeout(hide, 1800);
+      } else {
+        var d = await r.json().catch(function(){return{};});
+        status.textContent = d.error==='daily_limit_reached' ? '${lang === 'ru' ? 'Уже 3 сегодня — приходите завтра.' : "You\\'ve sent 3 today — come back tomorrow."}'
+                           : d.error==='text_too_short' ? '${lang === 'ru' ? 'Чуть подробнее, пожалуйста.' : 'A bit more detail, please.'}'
+                           : '${lang === 'ru' ? 'Не получилось — попробуйте снова.' : "Couldn\\'t send — try again."}';
+        status.className='sg-status err';
+        send.textContent='${lang === 'ru' ? 'Отправить' : 'Send'}';
+        send.disabled = text.value.length<3;
+      }
+    } catch(_){
+      status.textContent='${lang === 'ru' ? 'Сетевая ошибка.' : 'Network error — try again.'}';
+      status.className='sg-status err';
+      send.textContent='${lang === 'ru' ? 'Отправить' : 'Send'}';
+      send.disabled = text.value.length<3;
+    }
+  });
+})();
+</script>
 </body>
 </html>`;
 

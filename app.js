@@ -581,12 +581,20 @@ function pageWindow(current, total) {
 }
 
 function engagementScore(g) {
+  // CANONICAL FORMULA — MIRROR of Gallery/functions/_lib/engagement.js.
+  // When changing this, update that file AND
+  // Shared/skills/game-factory/tools/eligibility_check.sh AND
+  // Knowledge/Operations/Engagement Formula.md.
+  //
+  // engagement = seconds + (likes - dislikes) * 5
+  //
+  // History: 2026-05-19 unified. Previously this was
+  // (minutes*3 + plays + net*5), which weighted clicks vs depth differently
+  // from the factory's iteration ranker and produced drift in "Top Rated".
   const c = counts[g.slug] || {};
-  // Total minutes weighted heaviest, then plays, then likes-dislikes
-  const minutes = (c.seconds || 0) / 60;
-  const plays   = c.plays || 0;
-  const net     = (c.likes || 0) - (c.dislikes || 0);
-  return minutes * 3 + plays * 1 + net * 5;
+  const seconds = c.seconds || 0;
+  const net = (c.likes || 0) - (c.dislikes || 0);
+  return seconds + net * 5;
 }
 
 function renderFeatured() {
@@ -1046,3 +1054,87 @@ function escapeHtml(s) {
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
   }[c]));
 }
+
+(function wireSuggestModal() {
+  const m = document.getElementById('suggest-modal');
+  const btn = document.getElementById('footer-suggest-btn');
+  if (!m || !btn) return;
+
+  const input = document.getElementById('suggest-modal-input');
+  const counter = document.getElementById('suggest-modal-counter');
+  const submit = document.getElementById('suggest-modal-submit');
+  const statusEl = document.getElementById('suggest-modal-status');
+
+  function open() {
+    input.value = '';
+    counter.textContent = '0 / 500';
+    submit.disabled = true;
+    submit.textContent = 'Send';
+    statusEl.textContent = '';
+    statusEl.className = 'suggest-modal-status';
+    m.classList.remove('hidden');
+    m.setAttribute('aria-hidden', 'false');
+    setTimeout(() => input.focus(), 50);
+    if (window.posthog) posthog.capture('suggest_modal_opened');
+  }
+  function close() {
+    m.classList.add('hidden');
+    m.setAttribute('aria-hidden', 'true');
+  }
+
+  btn.addEventListener('click', open);
+  m.addEventListener('click', (e) => {
+    if (e.target.dataset && e.target.dataset.close) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !m.classList.contains('hidden')) close();
+  });
+  input.addEventListener('input', () => {
+    const n = input.value.length;
+    counter.textContent = `${n} / 500`;
+    submit.disabled = n < 3;
+  });
+
+  document.getElementById('suggest-modal-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = input.value.trim().slice(0, 500);
+    if (text.length < 3) return;
+    submit.disabled = true;
+    submit.textContent = '…';
+    statusEl.textContent = '';
+    statusEl.className = 'suggest-modal-status';
+    try {
+      const r = await fetch('/api/suggest', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ text }),
+      });
+      if (r.ok) {
+        statusEl.textContent = 'Thanks — Tim sees this tomorrow morning.';
+        statusEl.className = 'suggest-modal-status ok';
+        input.value = '';
+        counter.textContent = '0 / 500';
+        submit.textContent = 'Sent';
+        if (window.posthog) posthog.capture('suggest_submitted', { length: text.length });
+        setTimeout(close, 1800);
+      } else {
+        const data = await r.json().catch(() => ({}));
+        if (data.error === 'daily_limit_reached') {
+          statusEl.textContent = 'You\'ve sent 3 already today — come back tomorrow.';
+        } else if (data.error === 'text_too_short') {
+          statusEl.textContent = 'A bit more detail, please.';
+        } else {
+          statusEl.textContent = 'Couldn\'t send — try again.';
+        }
+        statusEl.className = 'suggest-modal-status err';
+        submit.textContent = 'Send';
+        submit.disabled = input.value.length < 3;
+      }
+    } catch (err) {
+      statusEl.textContent = 'Network error — try again.';
+      statusEl.className = 'suggest-modal-status err';
+      submit.textContent = 'Send';
+      submit.disabled = input.value.length < 3;
+    }
+  });
+})();

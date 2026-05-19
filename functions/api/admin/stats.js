@@ -3,6 +3,9 @@
 // Returns aggregate stats for the admin dashboard. Token-gated against the
 // ADMIN_TOKEN env var (configured in CF Pages dashboard → Settings → Environment
 // variables → Production).
+
+import { computeEngagement } from '../../_lib/engagement.js';
+
 //
 // Response shape:
 // {
@@ -176,14 +179,15 @@ export async function onRequestGet({ request, env }) {
   }
 
   // Iteration queue — applies the same logic as eligibility_check.sh:
-  // threshold (likes>=3 OR plays>=5 AND avg_sec>=30), engagement score,
-  // top 3. We don't know iteration count from KV, so we surface candidates
-  // and let the caller worry about the 14-iter cap.
+  // threshold (likes>=3 OR plays>=5 AND avg_sec>=30), engagement score
+  // (CANONICAL formula in ../../_lib/engagement.js), top 3. We don't know
+  // iteration count from KV, so we surface candidates and let the caller
+  // worry about the 14-iter cap.
   const iterationQueue = games
     .map(g => {
       const avgSec = g.plays > 0 ? Math.round(g.seconds / g.plays) : 0;
       const eligible = (g.likes || 0) >= 3 || ((g.plays || 0) >= 5 && avgSec >= 30);
-      const engagement = g.plays * avgSec + ((g.likes || 0) - (g.dislikes || 0)) * 5;
+      const engagement = computeEngagement(g);
       return { slug: g.slug, plays: g.plays, avgSec, likes: g.likes, dislikes: g.dislikes, engagement, eligible };
     })
     .filter(g => g.eligible)
