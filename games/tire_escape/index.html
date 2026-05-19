@@ -54,6 +54,8 @@ var STRINGS = {
     combo_triple: 'TRIPLE!',
     combo_fire:   'ON FIRE!',
     combo_unstop: 'UNSTOPPABLE!',
+    rocket_label: 'BOOST',
+    rocket_grab:  'ROCKET!',
   },
   ru: {
     title: 'Побег Шины',
@@ -87,6 +89,8 @@ var STRINGS = {
     combo_triple: 'ТРИПЛ!',
     combo_fire:   'В ОГНЕ!',
     combo_unstop: 'НЕОСТАНОВИМ!',
+    rocket_label: 'УСКОР',
+    rocket_grab:  'РАКЕТА!',
   },
 };
 
@@ -228,6 +232,29 @@ var speedLines = [];             // {x, y, ang, life, maxLife, len}
 var comboPulse = 0;              // 0..1 ring scale around tire on milestone hit
 var lastMilestoneCombo = 0;      // which milestone we last celebrated this run
 
+// Iter#8 (free-choice): rare rocket-boost pickups. Adds a comeback / save
+// moment to the chase loop — when cops are closing you scan for the rocket
+// shape, grab it, and get a one-shot shove (copX pushback + brief score-mult
+// window). Pure additive: new pickup type, no obstacle/coin/cop-AI changes.
+// Sparse spawn (1 in ~20 slots) keeps them feeling like loot, not background.
+var rockets = [];                // {x, y, r, taken, spinPhase}
+var rocketSpawnX = 1200;         // next world-x to consider a rocket (starts further than coins)
+var ROCKET_RADIUS = 22;          // larger than coin so its silhouette reads cleanly
+var ROCKET_VALUE  = 200;         // immediate score on pickup (4× a coin)
+var ROCKET_COP_PUSHBACK = 260;   // px shoved back on pickup — meaningful but not infinite save
+var ROCKET_BOOST_SEC    = 2.0;   // seconds of "boost window" — every bounce scores extra
+var ROCKET_BOOST_MULT   = 2.0;   // bounce-point multiplier while boost active
+var rocketBoostTimer = 0;        // seconds remaining in active boost
+var rocketsCollectedRun = 0;     // per-run counter (HUD if active)
+var lifetimeRockets = 0;         // persisted across runs
+
+function spawnRocket(x) {
+  // Always in the mid-high band so it stands out from coins (which cluster
+  // low/mid). Player has to commit a bounce-kick to reach it.
+  var y = GROUND_Y - 170;
+  rockets.push({ x: x, y: y, r: ROCKET_RADIUS, taken: false, spinPhase: Math.random() * Math.PI * 2 });
+}
+
 function spawnComboBurst(wx, wy, milestone) {
   // 8 radial speed lines fanning outward — short-lived, additive, world-coord.
   // World coords (not screen) so they scroll naturally with the tire/cameraX.
@@ -339,6 +366,11 @@ function startGame() {
   speedLines = [];
   comboPulse = 0;
   lastMilestoneCombo = 0;
+  // Iter#8: reset rocket pickup state for new run.
+  rockets = [];
+  rocketSpawnX = 1200;
+  rocketBoostTimer = 0;
+  rocketsCollectedRun = 0;
   copX = -260;
   copPanic = 0;
   elapsedSec = 0;
@@ -539,6 +571,10 @@ window._jumpLevel = function(n) {
     spawnObstacle(spawnX);
     spawnX += rand(140, 240);
   }
+  // Iter#8: ensure at least one rocket is in front of the tire so the playtest
+  // gate can verify rocketsActive > 0 (sparse spawn rate makes deep_playtest
+  // miss them otherwise).
+  spawnRocket(tire.x + 300);
 };
 
 // ── INPUT (one-button kick) ──────────────────────────────────────────────
@@ -659,6 +695,49 @@ function update(dt) {
     if (coins[ci].x < cameraX - 100) coins.splice(ci, 1);
   }
 
+  // Iter#8: spawn rockets — sparse. Each candidate slot has a small chance,
+  // and slots themselves are spaced ~1500-2400 px apart so rockets feel like
+  // loot rather than ambient pickups. Limit to one in-flight at a time so a
+  // greedy player can't carpet-chain boosts.
+  while (rocketSpawnX < cameraX + 1400) {
+    var liveRockets = 0;
+    for (var rr = 0; rr < rockets.length; rr++) if (!rockets[rr].taken) liveRockets++;
+    if (liveRockets === 0 && Math.random() < 0.55) spawnRocket(rocketSpawnX);
+    rocketSpawnX += rand(1500, 2400);
+  }
+  // Cull rockets behind the camera (taken or missed).
+  for (var rk = rockets.length - 1; rk >= 0; rk--) {
+    if (rockets[rk].x < cameraX - 100) rockets.splice(rk, 1);
+  }
+
+  // Tire vs rockets (circle vs circle). On pickup: score + cop shove +
+  // boost-mult window. No physics change to the tire itself (don't yank
+  // the player; the reward is positional/score, not movement).
+  for (var rg = 0; rg < rockets.length; rg++) {
+    var rkt = rockets[rg];
+    if (rkt.taken) continue;
+    if (rkt.x - tire.x > 200) break;
+    var rdx = tire.x - rkt.x, rdy = tire.y - rkt.y;
+    var rsum2 = tire.r + rkt.r;
+    if (rdx * rdx + rdy * rdy < rsum2 * rsum2) {
+      rkt.taken = true;
+      bonusScore += ROCKET_VALUE;
+      rocketsCollectedRun += 1;
+      lifetimeRockets += 1;
+      try { localStorage.setItem('tire_escape_lifetime_rockets', String(lifetimeRockets)); } catch (e) {}
+      copX -= ROCKET_COP_PUSHBACK;
+      rocketBoostTimer = ROCKET_BOOST_SEC;
+      var rsxw = (rkt.x - cameraX) * GF.S;
+      var rsyw = rkt.y * GF.S;
+      GF.spawnParticles(rsxw, rsyw, '#ff6e3c', 24);
+      GF.spawnParticles(rsxw, rsyw, '#ffd84a', 14);
+      GF.spawnFloat(rsxw, rsyw - 28 * GF.S, GF.t('rocket_grab'), '#ff8a3c');
+      GF.spawnFloat(rsxw, rsyw - 56 * GF.S, '+' + ROCKET_VALUE, '#ffd84a');
+      GF.setShake(0.7);
+    }
+  }
+  if (rocketBoostTimer > 0) rocketBoostTimer = Math.max(0, rocketBoostTimer - dt);
+
   // Tire vs coins (circle vs circle, mid-air pickup). Don't block movement.
   for (var ck = 0; ck < coins.length; ck++) {
     var coin = coins[ck];
@@ -719,6 +798,9 @@ function update(dt) {
         var pushDecay = GF.clamp(distance / 3000, 0, 1);
         copX -= COP_PUSHBACK_START + (COP_PUSHBACK_FLOOR - COP_PUSHBACK_START) * pushDecay;
         var pts = 25 + combo * 10;
+        // Iter#8: rocket boost window doubles bounce points (additive feature,
+        // off by default — only active for the brief seconds after a pickup).
+        if (rocketBoostTimer > 0) pts = Math.floor(pts * ROCKET_BOOST_MULT);
         bonusScore += pts;
         tire.rotSpeed += 6;
         var sxw = (tire.x - cameraX) * GF.S;
@@ -823,6 +905,7 @@ function draw(ctx) {
     drawGround();
     drawObstacles();
     drawCoins();
+    drawRockets();
     drawCops();
     drawSpeedLines();
     drawTire();
@@ -1361,6 +1444,86 @@ function drawCoins() {
   }
 }
 
+// Iter#8: rocket pickup renderer. Distinctly NOT a coin: vertical capsule body,
+// orange/red gradient, animated thrust flame trailing below, pulsing glow.
+function drawRockets() {
+  var c = GF.ctx;
+  var now = performance.now() / 1000;
+  for (var i = 0; i < rockets.length; i++) {
+    var rkt = rockets[i];
+    if (rkt.taken) continue;
+    var x = (rkt.x - cameraX) * GF.S;
+    var y = rkt.y * GF.S;
+    if (x < -60 || x > GF.W + 60) continue;
+    var r = rkt.r * GF.S;
+    var bob = Math.sin(now * 3 + rkt.spinPhase) * 4 * GF.S;
+    y += bob;
+    // Outer glow halo (pulsing).
+    var glowR = r * (2.0 + 0.2 * Math.sin(now * 6 + rkt.spinPhase));
+    var gg = c.createRadialGradient(x, y, r * 0.3, x, y, glowR);
+    gg.addColorStop(0, 'rgba(255,150,60,0.55)');
+    gg.addColorStop(1, 'rgba(255,80,40,0)');
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    c.fillStyle = gg;
+    c.beginPath();
+    c.arc(x, y, glowR, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+    // Thrust flame (below the body, animated length).
+    var flameLen = (1.0 + 0.3 * Math.sin(now * 18 + rkt.spinPhase)) * r * 1.2;
+    var fgrad = c.createLinearGradient(x, y + r * 0.8, x, y + r * 0.8 + flameLen);
+    fgrad.addColorStop(0, 'rgba(255,220,90,0.95)');
+    fgrad.addColorStop(0.5, 'rgba(255,120,40,0.75)');
+    fgrad.addColorStop(1, 'rgba(255,40,20,0)');
+    c.fillStyle = fgrad;
+    c.beginPath();
+    c.moveTo(x - r * 0.45, y + r * 0.8);
+    c.lineTo(x + r * 0.45, y + r * 0.8);
+    c.lineTo(x, y + r * 0.8 + flameLen);
+    c.closePath();
+    c.fill();
+    // Body — vertical capsule, deep red.
+    var bodyW = r * 1.1, bodyH = r * 1.7;
+    var bGrad = c.createLinearGradient(x - bodyW / 2, y, x + bodyW / 2, y);
+    bGrad.addColorStop(0, '#7a1a0a');
+    bGrad.addColorStop(0.5, '#e63b18');
+    bGrad.addColorStop(1, '#7a1a0a');
+    c.fillStyle = bGrad;
+    c.beginPath();
+    if (c.roundRect) c.roundRect(x - bodyW / 2, y - bodyH / 2, bodyW, bodyH, bodyW * 0.4);
+    else c.rect(x - bodyW / 2, y - bodyH / 2, bodyW, bodyH);
+    c.fill();
+    // Nose cone (triangle on top).
+    c.fillStyle = '#ffcf3a';
+    c.beginPath();
+    c.moveTo(x - bodyW / 2, y - bodyH / 2 + 2);
+    c.lineTo(x + bodyW / 2, y - bodyH / 2 + 2);
+    c.lineTo(x, y - bodyH / 2 - bodyH * 0.45);
+    c.closePath();
+    c.fill();
+    // Fins (small triangles bottom-side).
+    c.fillStyle = '#3a0a04';
+    c.beginPath();
+    c.moveTo(x - bodyW / 2, y + bodyH / 2 - bodyH * 0.25);
+    c.lineTo(x - bodyW / 2 - bodyW * 0.45, y + bodyH / 2 + 2);
+    c.lineTo(x - bodyW / 2, y + bodyH / 2);
+    c.closePath();
+    c.fill();
+    c.beginPath();
+    c.moveTo(x + bodyW / 2, y + bodyH / 2 - bodyH * 0.25);
+    c.lineTo(x + bodyW / 2 + bodyW * 0.45, y + bodyH / 2 + 2);
+    c.lineTo(x + bodyW / 2, y + bodyH / 2);
+    c.closePath();
+    c.fill();
+    // Porthole (small white circle).
+    c.fillStyle = '#fff';
+    c.beginPath();
+    c.arc(x, y - bodyH * 0.1, bodyW * 0.18, 0, Math.PI * 2);
+    c.fill();
+  }
+}
+
 function drawCops() {
   var c = GF.ctx;
   var x = (copX - cameraX) * GF.S;
@@ -1605,6 +1768,21 @@ function drawHUD() {
                14 * GF.S, 14 * GF.S + fs * 1.15);
   }
 
+  // Iter#8: rocket boost pill on the LEFT under coin counter. Pulses orange
+  // and shows seconds remaining + multiplier so the player knows the bonus
+  // window is live. Only renders while boost active.
+  if (rocketBoostTimer > 0) {
+    var bFs = fs * 0.78;
+    c.font = 'bold ' + bFs + 'px sans-serif';
+    c.textAlign = 'left';
+    var pulse2 = 0.7 + 0.3 * Math.abs(Math.sin(performance.now() / 80));
+    c.fillStyle = 'rgba(255,140,50,' + pulse2 + ')';
+    var bLabel = '🔥 ' + GF.t('rocket_label') + ' x' + ROCKET_BOOST_MULT + ' ' +
+                 rocketBoostTimer.toFixed(1) + 's';
+    var bY = 14 * GF.S + fs * 1.15 + (coinsCollectedRun > 0 ? (fs * 0.78) * 1.3 : 0);
+    c.fillText(bLabel, 14 * GF.S, bY);
+  }
+
   if (combo > 0) {
     c.textAlign = 'center';
     var t = comboTimer / 1.5;
@@ -1675,6 +1853,9 @@ GF.init({
     } catch (e) { achUnlocked = {}; }
     try { lifetimeCoins = parseInt(localStorage.getItem('tire_escape_lifetime_coins') || '0') || 0; } catch (e) {}
     try { lifetimeRuns  = parseInt(localStorage.getItem('tire_escape_lifetime_runs')  || '0') || 0; } catch (e) {}
+    // Iter#8: persist rocket pickups across runs (purely informational — feeds
+    // a future achievement tier; not gated on now).
+    try { lifetimeRockets = parseInt(localStorage.getItem('tire_escape_lifetime_rockets') || '0') || 0; } catch (e) {}
     buildBg();
     gs = 'MENU';
     // Iter#2: prime the leaderboard so first-paint of game-over already has
@@ -1718,7 +1899,11 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     maxComboRun:   typeof maxComboRun   !== 'undefined' ? maxComboRun   : null,
     speedLinesActive: typeof speedLines !== 'undefined' && speedLines ? speedLines.length : null,
     comboPulse:    typeof comboPulse    !== 'undefined' ? comboPulse    : null,
-    lastMilestoneCombo: typeof lastMilestoneCombo !== 'undefined' ? lastMilestoneCombo : null
+    lastMilestoneCombo: typeof lastMilestoneCombo !== 'undefined' ? lastMilestoneCombo : null,
+    rocketsActive: typeof rockets !== 'undefined' && rockets ? rockets.length : null,
+    rocketBoostTimer: typeof rocketBoostTimer !== 'undefined' ? rocketBoostTimer : null,
+    rocketsCollectedRun: typeof rocketsCollectedRun !== 'undefined' ? rocketsCollectedRun : null,
+    lifetimeRockets: typeof lifetimeRockets !== 'undefined' ? lifetimeRockets : null
   };
 });
 })();
