@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Sausage Beam</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── TUNABLES ─────────────────────────────────────────────────────────────
+var ARENA_R = 280;
+var CAPSULE_LEN = 70;
+var CAPSULE_R = 18;
+var THRUST = 0.42;
+var FRICTION = 0.94;
+var LASER_LEN = 480;
+var LASER_RECOIL = 0.28;
+var ENEMY_SPEED = 0.55;
+var ENEMY_R = 14;
+var WAVE_COUNT = 5;
+var BASE_ENEMIES = 4;
+var ENEMIES_PER_WAVE = 2;
+
+// ── STRINGS ──────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Sausage Beam',
+    sub:   'Zap and survive the ring',
+    play: 'PLAY', retry: 'RETRY', again: 'PLAY AGAIN',
+    score: 'SCORE', best: 'BEST', wave: 'WAVE',
+    gameover: 'GAME OVER', youwin: 'YOU WIN',
+    fire_on: 'FIRE: ON', fire_off: 'FIRE: OFF',
+    tut_goal: 'Goal: Roll a laser-mounted sausage and zap enemies before they touch you.',
+    tut_controls: 'Controls: WASD or drag to move. SPACE or tap FIRE to toggle the laser.',
+    tut_win: 'Win: Survive 5 waves and clear every enemy.',
+    tut_lose: 'Lose: Capsule crosses the ring OR an enemy touches you.',
+    tut_tip: 'Tip: Firing pushes you backwards — short bursts keep you off the wall.',
+    help: '?',
+  },
+  ru: {
+    title: 'Сосиска-Луч',
+    sub:   'Стреляй и не вылетай за круг',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', again: 'СНОВА',
+    score: 'ОЧКИ', best: 'РЕКОРД', wave: 'ВОЛНА',
+    gameover: 'ИГРА ОКОНЧЕНА', youwin: 'ПОБЕДА',
+    fire_on: 'ОГОНЬ: ВКЛ', fire_off: 'ОГОНЬ: ВЫКЛ',
+    tut_goal: 'Цель: Катайте сосиску с лазером и сжигайте врагов до того, как они вас коснутся.',
+    tut_controls: 'Управление: WASD или тяните пальцем. ПРОБЕЛ или тап по FIRE — лазер.',
+    tut_win: 'Победа: Пройдите 5 волн и уничтожьте всех врагов.',
+    tut_lose: 'Поражение: Сосиска вышла за круг ИЛИ враг до неё дотронулся.',
+    tut_tip: 'Совет: Лазер отталкивает назад — стреляйте короткими очередями.',
+    help: '?',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── STATE ────────────────────────────────────────────────────────────────
+var gs = 'MENU';
+var score = 0, best = 0;
+var wave = 1;
+var showHelp = false;
+var fireBtn = { x: 0, y: 0, w: 0, h: 0 };
+var helpBtn = { x: 0, y: 0, w: 0, h: 0 };
+var helpCloseRect = { x: 0, y: 0, w: 0, h: 0 };
+var menuPlayRect = { x: 0, y: 0, w: 0, h: 0 };
+
+var cap = {
+  x: 0, y: 0, vx: 0, vy: 0,
+  ang: 0,
+  firing: false,
+};
+
+// Debug-only screenshot mode: disables death + zeroes recoil so the
+// arrow-key sequence the take_screenshots tool fires can't kill the player
+// mid-capture. Set by window._setupForScreenshot / _jumpLevel.
+var SHOT_MODE = false;
+
+var enemies = [];
+var beam = { active: false, hitX: 0, hitY: 0, hitWall: false };
+
+function ARENA_CX() { return GF.cx; }
+function ARENA_CY() { return GF.cy; }
+function arenaRpx() { return ARENA_R * GF.S; }
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+function rand(min, max) { return min + Math.random() * (max - min); }
+
+function spawnWave(w) {
+  enemies = [];
+  var n = BASE_ENEMIES + (w - 1) * ENEMIES_PER_WAVE;
+  for (var i = 0; i < n; i++) {
+    var a = (i / n) * Math.PI * 2 + rand(-0.2, 0.2);
+    var r = arenaRpx() - 8 * GF.S;
+    enemies.push({
+      x: ARENA_CX() + Math.cos(a) * r,
+      y: ARENA_CY() + Math.sin(a) * r,
+      alive: true,
+      hue: 280 + Math.random() * 60,
+    });
+  }
+}
+
+function startGame() {
+  score = 0; wave = 1;
+  cap.x = ARENA_CX(); cap.y = ARENA_CY();
+  cap.vx = 0; cap.vy = 0;
+  cap.ang = -Math.PI / 2;
+  cap.firing = false;
+  spawnWave(wave);
+  gs = 'PLAYING';
+  showHelp = false;
+  GF.saveRun();
+  GF.gameStarted();
+}
+
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('sausage_beam_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  cap.firing = false;
+  GF.saveRun();
+  GF.gameEnded();
+}
+
+function youWin() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('sausage_beam_best', best); } catch (e) {}
+  }
+  gs = 'WON';
+  cap.firing = false;
+  GF.saveRun();
+  GF.gameEnded();
+}
+
+function _setupShot(n) {
+  startGame();
+  SHOT_MODE = true;
+  wave = Math.max(2, Math.min(WAVE_COUNT, n || 3));
+  spawnWave(wave);
+  // Park capsule near centre, tilted, firing for visual richness
+  cap.x = ARENA_CX() - 70 * GF.S;
+  cap.y = ARENA_CY() + 30 * GF.S;
+  cap.vx = 0; cap.vy = 0;
+  cap.ang = -0.4;
+  cap.firing = true;
+  // Pull enemies inward halfway so they sit between capsule and edge
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    var dx = ARENA_CX() - e.x, dy = ARENA_CY() - e.y;
+    var d = Math.sqrt(dx * dx + dy * dy) || 1;
+    var move = 70 * GF.S;
+    e.x += (dx / d) * move;
+    e.y += (dy / d) * move;
+  }
+}
+
+window._jumpLevel = function(n) {
+  if (n >= 99) {
+    // Reachability check from the runtime gate — force a terminal state
+    startGame();
+    SHOT_MODE = false;
+    gameOver();
+    return;
+  }
+  _setupShot(n);
+};
+window._setupForScreenshot = _setupShot;
+
+function distPointCapsule(px, py, cx0, cy0, ang, len) {
+  var hx = Math.cos(ang) * len / 2;
+  var hy = Math.sin(ang) * len / 2;
+  var ax = cx0 - hx, ay = cy0 - hy;
+  var bx = cx0 + hx, by = cy0 + hy;
+  var dx = bx - ax, dy = by - ay;
+  var ll = dx * dx + dy * dy;
+  var t = ll > 0 ? ((px - ax) * dx + (py - ay) * dy) / ll : 0;
+  if (t < 0) t = 0; else if (t > 1) t = 1;
+  var cxp = ax + dx * t, cyp = ay + dy * t;
+  var ex = px - cxp, ey = py - cyp;
+  return Math.sqrt(ex * ex + ey * ey);
+}
+
+function rayHitCircle(ox, oy, dx, dy, maxLen, cx0, cy0, r) {
+  var fx = ox - cx0, fy = oy - cy0;
+  var b = fx * dx + fy * dy;
+  var c = fx * fx + fy * fy - r * r;
+  var disc = b * b - c;
+  if (disc < 0) return -1;
+  var sq = Math.sqrt(disc);
+  var t1 = -b - sq;
+  if (t1 >= 0 && t1 <= maxLen) return t1;
+  var t2 = -b + sq;
+  if (t2 >= 0 && t2 <= maxLen) return t2;
+  return -1;
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+  if (showHelp) return;
+
+  var S = GF.S;
+
+  var ax = 0, ay = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA']) ax -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) ax += 1;
+  if (GF.keys['ArrowUp']    || GF.keys['KeyW']) ay -= 1;
+  if (GF.keys['ArrowDown']  || GF.keys['KeyS']) ay += 1;
+  if (GF.touch.active) { ax += GF.touch.dx; ay += GF.touch.dy; }
+  var alen = Math.sqrt(ax * ax + ay * ay);
+  if (alen > 0.05) {
+    ax /= alen; ay /= alen;
+    cap.vx += ax * THRUST * S;
+    cap.vy += ay * THRUST * S;
+    var targetAng = Math.atan2(ay, ax);
+    var d = targetAng - cap.ang;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    cap.ang += d * 0.18;
+  }
+
+  cap.vx *= FRICTION;
+  cap.vy *= FRICTION;
+  cap.x += cap.vx;
+  cap.y += cap.vy;
+
+  beam.active = cap.firing;
+  beam.hitWall = false;
+  beam.hitX = 0; beam.hitY = 0;
+
+  if (cap.firing) {
+    var fx = Math.cos(cap.ang);
+    var fy = Math.sin(cap.ang);
+    if (!SHOT_MODE) {
+      cap.vx -= fx * LASER_RECOIL * S;
+      cap.vy -= fy * LASER_RECOIL * S;
+    }
+    var ox = cap.x + fx * (CAPSULE_LEN / 2) * S;
+    var oy = cap.y + fy * (CAPSULE_LEN / 2) * S;
+    var maxLen = LASER_LEN * S;
+    var bestT = maxLen;
+    var hitIdx = -1;
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (!e.alive) continue;
+      var t = rayHitCircle(ox, oy, fx, fy, bestT, e.x, e.y, ENEMY_R * S);
+      if (t >= 0 && t < bestT) { bestT = t; hitIdx = i; }
+    }
+    if (hitIdx >= 0) {
+      var hitE = enemies[hitIdx];
+      if (!SHOT_MODE) {
+        hitE.alive = false;
+        score += 10;
+        GF.spawnParticles(hitE.x, hitE.y, '#ffeb3b', 18);
+        GF.spawnFloat(hitE.x, hitE.y, '+10', '#ffeb3b');
+        GF.setShake(0.4);
+      } else {
+        // Sparkle particles for visual richness without killing enemy
+        if (Math.random() < 0.4) GF.spawnParticles(hitE.x, hitE.y, '#ffeb3b', 4);
+      }
+      beam.hitX = hitE.x; beam.hitY = hitE.y;
+    } else {
+      beam.hitX = ox + fx * bestT;
+      beam.hitY = oy + fy * bestT;
+      beam.hitWall = true;
+    }
+  }
+
+  for (var k = enemies.length - 1; k >= 0; k--) if (!enemies[k].alive) enemies.splice(k, 1);
+
+  for (var j = 0; j < enemies.length; j++) {
+    var en = enemies[j];
+    var dxc = ARENA_CX() - en.x, dyc = ARENA_CY() - en.y;
+    var dlen = Math.sqrt(dxc * dxc + dyc * dyc) || 1;
+    en.x += (dxc / dlen) * ENEMY_SPEED * S;
+    en.y += (dyc / dlen) * ENEMY_SPEED * S;
+  }
+
+  var cdx = cap.x - ARENA_CX(), cdy = cap.y - ARENA_CY();
+  var cdist = Math.sqrt(cdx * cdx + cdy * cdy);
+  if (!SHOT_MODE && cdist >= arenaRpx() - CAPSULE_R * S * 0.4) {
+    GF.spawnParticles(cap.x, cap.y, '#ff5252', 28);
+    GF.setShake(1.0);
+    gameOver();
+    return;
+  }
+  // In SHOT_MODE, clamp capsule inside the arena so arrow-key inputs from
+  // the screenshot tool can't push it off the visible area.
+  if (SHOT_MODE) {
+    // Keep the whole capsule visible inside the ring (centre + half-length must fit)
+    var maxR = arenaRpx() - (CAPSULE_LEN / 2 + CAPSULE_R) * S;
+    if (maxR < 0) maxR = arenaRpx() * 0.5;
+    if (cdist > maxR) {
+      cap.x = ARENA_CX() + (cdx / cdist) * maxR;
+      cap.y = ARENA_CY() + (cdy / cdist) * maxR;
+      cap.vx = 0; cap.vy = 0;
+    }
+  }
+
+  for (var m = 0; m < enemies.length; m++) {
+    var ee = enemies[m];
+    var dd = distPointCapsule(ee.x, ee.y, cap.x, cap.y, cap.ang, CAPSULE_LEN * S);
+    if (dd < (CAPSULE_R + ENEMY_R) * S) {
+      if (SHOT_MODE) {
+        // Bump enemy away rather than die during screenshot capture
+        var nx = ee.x - cap.x, ny = ee.y - cap.y;
+        var nl = Math.sqrt(nx * nx + ny * ny) || 1;
+        ee.x += (nx / nl) * 20 * S;
+        ee.y += (ny / nl) * 20 * S;
+        continue;
+      }
+      GF.spawnParticles(cap.x, cap.y, '#ff5252', 28);
+      GF.setShake(1.0);
+      gameOver();
+      return;
+    }
+  }
+
+  if (enemies.length === 0) {
+    if (wave >= WAVE_COUNT) {
+      youWin();
+    } else {
+      wave++;
+      score += 25;
+      spawnWave(wave);
+      GF.spawnParticles(ARENA_CX(), ARENA_CY(), '#4dd0e1', 30);
+      GF.saveRun();
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawArena(c) {
+  var r = arenaRpx();
+  var grd = c.createRadialGradient(ARENA_CX(), ARENA_CY(), r * 0.1, ARENA_CX(), ARENA_CY(), r);
+  grd.addColorStop(0, '#1c2236');
+  grd.addColorStop(1, '#0d1020');
+  c.fillStyle = grd;
+  c.beginPath(); c.arc(ARENA_CX(), ARENA_CY(), r, 0, Math.PI * 2); c.fill();
+
+  c.lineWidth = 6 * GF.S;
+  c.strokeStyle = '#ff5252';
+  c.shadowColor = 'rgba(255,82,82,0.6)';
+  c.shadowBlur = 22 * GF.S;
+  c.beginPath(); c.arc(ARENA_CX(), ARENA_CY(), r, 0, Math.PI * 2); c.stroke();
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  c.strokeStyle = 'rgba(255,255,255,0.05)';
+  c.lineWidth = 1;
+  for (var i = 1; i < 5; i++) {
+    c.beginPath(); c.arc(ARENA_CX(), ARENA_CY(), r * i / 5, 0, Math.PI * 2); c.stroke();
+  }
+}
+
+function drawCapsule(c) {
+  var S = GF.S;
+  var len = CAPSULE_LEN * S, rad = CAPSULE_R * S;
+  c.save();
+  c.translate(cap.x, cap.y);
+  c.rotate(cap.ang);
+  var bg = c.createLinearGradient(0, -rad, 0, rad);
+  bg.addColorStop(0, '#f8b878');
+  bg.addColorStop(0.4, '#e3884a');
+  bg.addColorStop(1, '#a85222');
+  c.fillStyle = bg;
+  c.beginPath();
+  c.moveTo(-len / 2 + rad, -rad);
+  c.lineTo(len / 2 - rad, -rad);
+  c.arc(len / 2 - rad, 0, rad, -Math.PI / 2, Math.PI / 2);
+  c.lineTo(-len / 2 + rad, rad);
+  c.arc(-len / 2 + rad, 0, rad, Math.PI / 2, -Math.PI / 2);
+  c.closePath();
+  c.fill();
+  c.strokeStyle = 'rgba(160,40,20,0.4)';
+  c.lineWidth = 2 * S;
+  c.beginPath();
+  c.moveTo(-len / 2 + rad * 0.6, 0);
+  c.lineTo(len / 2 - rad * 0.6, 0);
+  c.stroke();
+  c.fillStyle = '#cfd8dc';
+  c.beginPath();
+  c.arc(len / 2 - rad * 0.2, 0, rad * 0.55, 0, Math.PI * 2);
+  c.fill();
+  c.fillStyle = cap.firing ? '#ff1744' : '#5b0e0e';
+  c.beginPath();
+  c.arc(len / 2 - rad * 0.05, 0, rad * 0.3, 0, Math.PI * 2);
+  c.fill();
+  c.restore();
+}
+
+function drawEnemies(c) {
+  var S = GF.S;
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    var pulse = 1 + 0.12 * Math.sin(performance.now() * 0.006 + i);
+    var r = ENEMY_R * S * pulse;
+    c.fillStyle = 'hsl(' + e.hue + ', 70%, 55%)';
+    c.shadowColor = 'rgba(180,80,255,0.6)';
+    c.shadowBlur = 14 * S;
+    c.beginPath(); c.arc(e.x, e.y, r, 0, Math.PI * 2); c.fill();
+    c.shadowColor = 'transparent'; c.shadowBlur = 0;
+    c.fillStyle = '#fff';
+    c.beginPath(); c.arc(e.x - r * 0.25, e.y - r * 0.15, r * 0.28, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#222';
+    c.beginPath(); c.arc(e.x - r * 0.25, e.y - r * 0.15, r * 0.14, 0, Math.PI * 2); c.fill();
+  }
+}
+
+function drawBeam(c) {
+  if (!beam.active) return;
+  var S = GF.S;
+  var fx = Math.cos(cap.ang), fy = Math.sin(cap.ang);
+  var ox = cap.x + fx * (CAPSULE_LEN / 2) * S;
+  var oy = cap.y + fy * (CAPSULE_LEN / 2) * S;
+  c.strokeStyle = 'rgba(255,82,82,0.35)';
+  c.lineWidth = 18 * S;
+  c.lineCap = 'round';
+  c.beginPath(); c.moveTo(ox, oy); c.lineTo(beam.hitX, beam.hitY); c.stroke();
+  c.strokeStyle = '#ff5252';
+  c.lineWidth = 8 * S;
+  c.beginPath(); c.moveTo(ox, oy); c.lineTo(beam.hitX, beam.hitY); c.stroke();
+  c.strokeStyle = '#ffeb3b';
+  c.lineWidth = 2.5 * S;
+  c.beginPath(); c.moveTo(ox, oy); c.lineTo(beam.hitX, beam.hitY); c.stroke();
+  c.fillStyle = '#ffeb3b';
+  c.beginPath(); c.arc(beam.hitX, beam.hitY, 8 * S, 0, Math.PI * 2); c.fill();
+  c.lineCap = 'butt';
+}
+
+function drawHUD(c) {
+  var S = GF.S;
+  var fs = GF.clamp(18 * S, 13, 24);
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+  c.fillText(GF.t('wave') + ': ' + wave + ' / ' + WAVE_COUNT, 16 * S, 14 * S);
+  c.textAlign = 'right';
+  c.fillText(GF.t('score') + ': ' + score, GF.W - 16 * S, 14 * S);
+
+  var hb = GF.clamp(36 * S, 28, 48);
+  helpBtn.x = 16 * S; helpBtn.y = 56 * S; helpBtn.w = hb; helpBtn.h = hb;
+  c.fillStyle = 'rgba(255,255,255,0.12)';
+  GF.rr(c, helpBtn.x, helpBtn.y, hb, hb, 8 * S); c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + (hb * 0.6) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('help'), helpBtn.x + hb / 2, helpBtn.y + hb / 2);
+
+  var fbw = GF.clamp(140 * S, 100, 180), fbh = GF.clamp(46 * S, 36, 60);
+  fireBtn.x = GF.W - fbw - 16 * S; fireBtn.y = 56 * S; fireBtn.w = fbw; fireBtn.h = fbh;
+  var grad = c.createLinearGradient(fireBtn.x, fireBtn.y, fireBtn.x, fireBtn.y + fbh);
+  if (cap.firing) { grad.addColorStop(0, '#ff5252'); grad.addColorStop(1, '#b71c1c'); }
+  else { grad.addColorStop(0, '#37474f'); grad.addColorStop(1, '#1c252a'); }
+  c.fillStyle = grad;
+  GF.rr(c, fireBtn.x, fireBtn.y, fbw, fbh, 10 * S); c.fill();
+  c.strokeStyle = cap.firing ? '#ffeb3b' : 'rgba(255,255,255,0.2)';
+  c.lineWidth = 2 * S;
+  GF.rr(c, fireBtn.x, fireBtn.y, fbw, fbh, 10 * S); c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(14 * S, 10, 17) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(cap.firing ? GF.t('fire_on') : GF.t('fire_off'), fireBtn.x + fbw / 2, fireBtn.y + fbh / 2);
+  c.textBaseline = 'alphabetic';
+}
+
+function drawTutorialPanel(c, atY) {
+  var S = GF.S;
+  var lineFs = GF.clamp(14 * S, 10, 18);
+  c.font = lineFs + 'px sans-serif';
+  c.fillStyle = '#cfd8dc';
+  c.textAlign = 'center';
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var lh = lineFs * 1.45;
+  for (var i = 0; i < lines.length; i++) {
+    c.fillText(lines[i], GF.cx, atY + i * lh);
+  }
+}
+
+function drawHelpOverlay(c) {
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var S = GF.S;
+  var titleFs = GF.clamp(28 * S, 18, 40);
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.textAlign = 'center';
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 140 * S);
+  drawTutorialPanel(c, GF.cy - 80 * S);
+  var btnW = GF.clamp(200 * S, 140, 260), btnH = GF.clamp(46 * S, 36, 56);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 110 * S;
+  var grad = c.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  c.fillStyle = grad;
+  GF.rr(c, btnX, btnY, btnW, btnH, btnH / 2); c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(16 * S, 12, 20) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText('OK', GF.cx, btnY + btnH / 2);
+  c.textBaseline = 'alphabetic';
+  helpCloseRect.x = btnX; helpCloseRect.y = btnY; helpCloseRect.w = btnW; helpCloseRect.h = btnH;
+}
+
+function drawMenuOverlay(c) {
+  c.fillStyle = 'rgba(8,8,18,0.88)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var S = GF.S;
+  var titleFs = GF.clamp(38 * S, 22, 56);
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.textAlign = 'center';
+  c.shadowColor = 'rgba(255,82,82,0.6)';
+  c.shadowBlur = 30 * S;
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 180 * S);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.font = GF.clamp(14 * S, 11, 18) + 'px sans-serif';
+  c.fillStyle = '#9ab';
+  c.fillText(GF.t('sub'), GF.cx, GF.cy - 148 * S);
+
+  drawTutorialPanel(c, GF.cy - 110 * S);
+
+  var btnW = GF.clamp(240 * S, 160, 320), btnH = GF.clamp(52 * S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 110 * S;
+  var grad = c.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ff5252'); grad.addColorStop(1, '#b71c1c');
+  c.fillStyle = grad;
+  GF.rr(c, btnX, btnY, btnW, btnH, btnH / 2); c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * S, 13, 22) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+  c.textBaseline = 'alphabetic';
+
+  if (best > 0) {
+    c.font = GF.clamp(13 * S, 10, 16) + 'px sans-serif';
+    c.fillStyle = '#557';
+    c.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 26 * S);
+  }
+  menuPlayRect.x = btnX; menuPlayRect.y = btnY; menuPlayRect.w = btnW; menuPlayRect.h = btnH;
+}
+
+function drawEndOverlay(c, isWin) {
+  c.fillStyle = 'rgba(8,8,18,0.88)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var S = GF.S;
+  var titleFs = GF.clamp(40 * S, 22, 60);
+  c.fillStyle = isWin ? '#ffeb3b' : '#fff';
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.textAlign = 'center';
+  c.shadowColor = isWin ? 'rgba(255,235,59,0.6)' : 'rgba(255,82,82,0.6)';
+  c.shadowBlur = 30 * S;
+  c.fillText(isWin ? GF.t('youwin') : GF.t('gameover'), GF.cx, GF.cy - 60 * S);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  c.font = GF.clamp(18 * S, 12, 22) + 'px sans-serif';
+  c.fillStyle = '#cfd8dc';
+  c.fillText(GF.t('score') + ': ' + score, GF.cx, GF.cy - 16 * S);
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(14 * S, 10, 18) + 'px sans-serif';
+  c.fillText(GF.t('best') + ': ' + best, GF.cx, GF.cy + 10 * S);
+
+  var btnW = GF.clamp(240 * S, 160, 320), btnH = GF.clamp(52 * S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 50 * S;
+  var grad = c.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  c.fillStyle = grad;
+  GF.rr(c, btnX, btnY, btnW, btnH, btnH / 2); c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * S, 13, 22) + 'px sans-serif';
+  c.textBaseline = 'middle';
+  c.fillText(isWin ? GF.t('again') : GF.t('retry'), GF.cx, btnY + btnH / 2);
+  c.textBaseline = 'alphabetic';
+  menuPlayRect.x = btnX; menuPlayRect.y = btnY; menuPlayRect.w = btnW; menuPlayRect.h = btnH;
+}
+
+function draw(ctx) {
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  drawArena(ctx);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WON') {
+    drawEnemies(ctx);
+    drawBeam(ctx);
+    drawCapsule(ctx);
+  }
+
+  if (gs === 'PLAYING') {
+    drawHUD(ctx);
+    if (showHelp) drawHelpOverlay(ctx);
+  }
+  if (gs === 'MENU') drawMenuOverlay(ctx);
+  if (gs === 'GAMEOVER') drawEndOverlay(ctx, false);
+  if (gs === 'WON') drawEndOverlay(ctx, true);
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function hit(rect, x, y) { return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h; }
+
+function onClick(x, y) {
+  if (gs === 'MENU') {
+    if (hit(menuPlayRect, x, y)) startGame();
+    return;
+  }
+  if (gs === 'GAMEOVER' || gs === 'WON') {
+    if (hit(menuPlayRect, x, y)) startGame();
+    return;
+  }
+  if (gs === 'PLAYING') {
+    if (showHelp) {
+      if (hit(helpCloseRect, x, y)) showHelp = false;
+      return;
+    }
+    if (hit(helpBtn, x, y)) { showHelp = true; return; }
+    if (hit(fireBtn, x, y)) {
+      cap.firing = !cap.firing;
+      try { localStorage.setItem('sausage_beam_seen_tutorial', '1'); } catch (e) {}
+      return;
+    }
+  }
+}
+
+GF.canvas.addEventListener('click', function(e) { onClick(e.clientX, e.clientY); });
+GF.canvas.addEventListener('touchstart', function(e) {
+  if (e.changedTouches && e.changedTouches[0]) {
+    var t0 = e.changedTouches[0];
+    onClick(t0.clientX, t0.clientY);
+  }
+}, { passive: true });
+
+document.addEventListener('keydown', function(e) {
+  if (e.code === 'Space') {
+    if (gs === 'PLAYING' && !showHelp) cap.firing = !cap.firing;
+    else if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') startGame();
+    e.preventDefault();
+  }
+  if (e.code === 'Enter') {
+    if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') startGame();
+  }
+});
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'sausage_beam',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('sausage_beam_best') || '0') || 0; } catch (e) {}
+    GF.persist('sausage_beam_run_v1',
+      function() { return { gs: gs, wave: wave, score: score, capX: cap.x, capY: cap.y, capAng: cap.ang }; },
+      function(s) {
+        if (!s) return;
+        gs = 'MENU';
+        wave = s.wave || 1;
+        score = s.score || 0;
+      }
+    );
+    if (gs !== 'MENU') gs = 'MENU';
+    cap.x = ARENA_CX(); cap.y = ARENA_CY();
+    cap.ang = -Math.PI / 2;
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+GF.exposeState(function() {
+  var cdx = cap.x - ARENA_CX(), cdy = cap.y - ARENA_CY();
+  var cdist = Math.sqrt(cdx * cdx + cdy * cdy);
+  return {
+    gs: gs,
+    wave: wave,
+    score: score,
+    enemyCount: enemies.length,
+    capX: cap.x,
+    capY: cap.y,
+    capAng: cap.ang,
+    edgeDist: arenaRpx() - cdist,
+    firing: cap.firing,
+    best: best,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

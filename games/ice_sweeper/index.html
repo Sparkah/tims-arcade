@@ -48,6 +48,8 @@ var STRINGS = {
     secAbbr:      's',
     hullClassic:  'CLASSIC', hullArctic: 'ARCTIC', hullSunset: 'SUNSET',
     hullLocked:   'BEST',
+    daySeed:      'Day seed',
+    todaysLake:   'Today’s lake',
     tut_goal:     'Goal: Pilot the icebreaker over dirty ice tiles to crack and clear the lake within the time limit.',
     tut_controls: 'Controls: Arrow keys / WASD on desktop; drag anywhere on mobile to steer the icebreaker.',
     tut_win:      'Win: Hit the level\'s clean percentage before TIME runs out — clear all 10 lakes for a perfect run.',
@@ -64,6 +66,8 @@ var STRINGS = {
     secAbbr:      'с',
     hullClassic:  'КЛАССИКА', hullArctic: 'АРКТИКА', hullSunset: 'ЗАКАТ',
     hullLocked:   'РЕКОРД',
+    daySeed:      'Сид дня',
+    todaysLake:   'Сегодняшнее озеро',
     tut_goal:     'Цель: Веди ледокол по грязным плиткам льда, чтобы расколоть и очистить озеро до окончания времени.',
     tut_controls: 'Управление: Стрелки/WASD на ПК; тащи в любом месте на мобиле, чтобы рулить ледоколом.',
     tut_win:      'Победа: Достигни нормы чистоты до окончания времени — пройди все 10 озёр для идеального забега.',
@@ -85,6 +89,31 @@ function rr(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
 }
+
+// ── iter#4: DAILY SEED — same lake layout for every player today ────────────
+// Mulberry32 deterministic PRNG seeded from YYYYMMDD ^ level so the dirty-tile
+// pattern, wobble phases, and crack-pattern choices are identical for every
+// player on the same calendar day. Chasing the same lake creates the
+// "race-the-day" hook: come back tomorrow for a fresh layout.
+function makeRng(seed) {
+  var s = seed | 0;
+  return function() {
+    s = (s + 0x6D2B79F5) | 0;
+    var t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function getDaySeed() {
+  var d = new Date();
+  return d.getFullYear() * 10000 + (d.getMonth()+1) * 100 + d.getDate();
+}
+function getDayKey() {
+  var d = new Date();
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+var levelRng = Math.random; // re-bound per startLevel from daily seed ^ level
 
 // ── CONSTANTS ───────────────────────────────────────────────────────────────
 var HUD_H = 56;
@@ -227,16 +256,21 @@ function startLevel(lvl) {
   // tile dirty density grows with level
   var dirtyChance = clamp(0.55 + (lvl - 1) * 0.06, 0.55, 0.92);
 
+  // iter#4: seed the level RNG from today's date ^ level so every player
+  // races the SAME lake on the same calendar day. Layout, wobble phases,
+  // and crack patterns are now deterministic per day.
+  levelRng = makeRng((getDaySeed() ^ (lvl * 2654435761)) | 0);
+
   grid = [];
   totalDirty = 0;
   for (var r = 0; r < ROWS; r++) {
     var row = [];
     for (var c = 0; c < COLS; c++) {
-      var dirty = Math.random() < dirtyChance;
+      var dirty = levelRng() < dirtyChance;
       var tile = {
         state: dirty ? 0 : -1,  // -1 = clean from start
-        wobble: Math.random() * Math.PI * 2,
-        crackPattern: Math.floor(Math.random() * 3),
+        wobble: levelRng() * Math.PI * 2,
+        crackPattern: Math.floor(levelRng() * 3),
         chunkParts: [],
       };
       if (dirty) totalDirty++;
@@ -274,6 +308,8 @@ window.__gfState = function () {
       chain: (typeof chain !== 'undefined') ? chain : 0,
       hullIdx: hullIdx,
       hullsUnlocked: HULL_PALETTES.filter(isHullUnlocked).length,
+      daySeed: getDaySeed(),
+      dayKey: getDayKey(),
     };
   } catch (e) { return { __error: String(e) }; }
 };
@@ -814,6 +850,20 @@ function drawHullSwatches() {
   }
 }
 
+// ── iter#4: Day-seed tag (rendered on MENU + GAMEOVER) ──────────────────────
+function drawDaySeedTag() {
+  var fs = clamp(11*S, 9, 14);
+  ctx.save();
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = 'rgba(120,180,220,0.55)';
+  // top-of-screen, just below safe margin — never collides with overlay title
+  // because title sits at cy - 50*S and W centers are decoupled by Y.
+  ctx.fillText(t('daySeed') + ' ' + getDaySeed(), cx, 22*S);
+  ctx.restore();
+}
+
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────
 function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
@@ -858,10 +908,12 @@ function frame(ts) {
     ctx.fillStyle = '#0a1530'; ctx.fillRect(0,0,W,H);
     drawOverlay(t('title'), t('sub'), t('play'), function() { score=0; startLevel(1); });
     drawHullSwatches();
+    drawDaySeedTag(); // iter#4: small "Day seed YYYYMMDD" tag near top
   }
   if (gs === 'LEVELEND') {
     drawOverlay(t('complete'), t('score')+': '+score, t('next'),
       function() { startLevel(level+1); });
+    drawDaySeedTag();
   }
   if (gs === 'GAMEOVER') {
     if (score > best && score > 0) {
@@ -872,6 +924,7 @@ function frame(ts) {
     // iter#1: RETRY routes through throttled interstitial (Yandex 4.1)
     drawOverlay(t('gameover'), t('score')+': '+score, t('retry'),
       function() { showInterstitial(function() { score=0; startLevel(level); }); });
+    drawDaySeedTag(); // iter#4
 
     // iter#2: NEW BEST! banner above the title — pulses gold
     if (newBestThisRun) {

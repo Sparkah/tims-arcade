@@ -92,6 +92,10 @@ var STRINGS = {
     stars:        'STARS',
     starsRating:  'RATING',
     starsNewBest: 'NEW BEST!',
+    yesterday:    'Yesterday',
+    today:        'Today',
+    vsYesterday:  'vs yesterday',
+    firstDailyRun: 'First daily run — come back tomorrow!',
     tut_goal:     'Goal: Roll your donut over crumbs and trash to reach the cleanup percentage before time runs out.',
     tut_controls: 'Controls: Arrow keys / WASD on desktop; drag anywhere on mobile to steer the donut.',
     tut_win:      'Win: Hit the level’s cleanup target before TIME hits 0 — beat all 10 levels for a clean run.',
@@ -140,6 +144,10 @@ var STRINGS = {
     stars:        'ЗВЁЗДЫ',
     starsRating:  'ОЦЕНКА',
     starsNewBest: 'НОВЫЙ РЕКОРД!',
+    yesterday:    'Вчера',
+    today:        'Сегодня',
+    vsYesterday:  'против вчера',
+    firstDailyRun: 'Первый дневной заход — возвращайся завтра!',
     tut_goal:     'Цель: Катите пончик по крошкам и мусору, чтобы выполнить норму уборки до окончания времени.',
     tut_controls: 'Управление: Стрелки/WASD на ПК; тащи в любом месте на мобиле, чтобы рулить пончиком.',
     tut_win:      'Победа: Достигни нормы уборки до того, как ВРЕМЯ кончится — пройди все 10 уровней.',
@@ -154,7 +162,15 @@ window._jumpLevel = function(n) {
   // it can exercise the retry/cycle path without burning 60s. (2026-05-15
   // adapter compatibility — without this Clean Sweep falls back to the
   // 'generic' yandex-testing adapter and skips every click test.)
-  if (n === 99) { gs = 'GAMEOVER'; timeLeft = 0; return; }
+  if (n === 99) {
+    gs = 'GAMEOVER'; timeLeft = 0;
+    // iter#11 visual-test hook: seed a plausible yesterday score so the
+    // "Yesterday → Today" pill renders for screenshot harness runs that
+    // otherwise have an empty dailyScores map.
+    if (yesterdayScore <= 0) { yesterdayScore = 800; }
+    if (todayBestScore <= 0 && score > 0) todayBestScore = score;
+    return;
+  }
   // iter#10: n=98 is the visual-test "drop me into LEVELEND with 3 stars"
   // signal so the iteration harness can verify the new star UI without
   // physically clearing the level. Harmless in production; no UI exposure.
@@ -412,6 +428,65 @@ function totalLevelStars() {
   var n = 0;
   for (var k in levelStars) n += levelStars[k] || 0;
   return n;
+}
+
+// ── iter#11: YESTERDAY'S SCORE (daily-seed delta) ────────────────────────────
+// Every player on the same UTC date faces an identical layout (iter#4), so
+// today's score is DIRECTLY comparable to yesterday's. Persist the best
+// score per UTC date (last 7 kept), then on GAMEOVER show a small
+// "Yesterday: N → Today: M (±Δ)" pill beneath the leaderboard. Layers a
+// compete-with-yesterday-you loop on top of the shared daily seed —
+// orthogonal to leaderboard rank (which is vs. other players) and personal
+// best (which is lifetime, not date-aware).
+var DAILY_SCORE_KEY = 'clean_sweep_daily_score_v1';   // JSON {YYYY-MM-DD: bestScoreThatDay}
+var dailyScores = {};                                  // hydrated from localStorage
+var yesterdayScore = 0;                                // 0 = no yesterday entry (first-day player)
+var todayBestScore = 0;                                // best score recorded so far today
+function loadDailyScores() {
+  try {
+    var raw = localStorage.getItem(DAILY_SCORE_KEY);
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        for (var k in parsed) {
+          var n = parseInt(parsed[k], 10);
+          // basic YYYY-MM-DD sanity + positive score
+          if (/^\d{4}-\d{2}-\d{2}$/.test(k) && n > 0) dailyScores[k] = n;
+        }
+      }
+    }
+  } catch(e) {}
+  // hydrate "yesterday" + "today" snapshots for fast render lookups
+  var today = getDayKey();
+  todayBestScore = dailyScores[today] || 0;
+  // yesterday key = today's UTC date minus 24h
+  var d = new Date();
+  d.setUTCDate(d.getUTCDate() - 1);
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var day = String(d.getUTCDate()).padStart(2, '0');
+  var yesterdayKey = y + '-' + m + '-' + day;
+  yesterdayScore = dailyScores[yesterdayKey] || 0;
+}
+function saveDailyScores() {
+  try {
+    // garbage-collect to last 7 days to keep the localStorage entry tiny
+    var keys = Object.keys(dailyScores).sort();
+    if (keys.length > 7) {
+      var drop = keys.length - 7;
+      for (var i = 0; i < drop; i++) delete dailyScores[keys[i]];
+    }
+    localStorage.setItem(DAILY_SCORE_KEY, JSON.stringify(dailyScores));
+  } catch(e) {}
+}
+function recordDailyScore(s) {
+  if (!s || s <= 0) return;
+  var today = getDayKey();
+  if (s > (dailyScores[today] || 0)) {
+    dailyScores[today] = s;
+    todayBestScore = s;
+    saveDailyScores();
+  }
 }
 
 // ── DONUT SKINS (iter#3: cosmetic unlocks tied to lifetime best) ─────────────
@@ -788,7 +863,7 @@ function update(dt) {
   if (gs !== 'PLAYING') return;
 
   timeLeft -= dt;
-  if (timeLeft <= 0) { timeLeft = 0; sfxGameOver(); gs = 'GAMEOVER';try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}; submitAndFetchLeaderboard(); return; }
+  if (timeLeft <= 0) { timeLeft = 0; sfxGameOver(); gs = 'GAMEOVER';try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}; submitAndFetchLeaderboard(); recordDailyScore(score); return; }
 
   if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = 0; }
   if (shake > 0) shake = Math.max(0, shake - dt * 8);
@@ -1698,6 +1773,63 @@ function drawLeaderboard() {
   }
 }
 
+// iter#11: GAMEOVER "Yesterday → Today" pill — daily-seed delta loop.
+// Renders below the leaderboard (or, if no leaderboard, below the retry/revive
+// stack). Stays compact + single-line on mobile to avoid clipping bottom of
+// viewport. Gold delta if today > yesterday, dim if today < yesterday, neutral
+// if equal. If there's no yesterday entry (first-day player) we show a
+// one-line "come back tomorrow" hint instead — closes the loop without
+// pretending data exists.
+function drawYesterdayPill() {
+  // Y anchor: stack BELOW the leaderboard if it rendered, else below the
+  // revive button. Same math as drawLeaderboard for the base Y.
+  var btnH = clamp(52*S, 40, 66);
+  var btnY = cy + 20*S;
+  var lbHasRows = (leaderboard && leaderboard.length > 0);
+  var rowH = clamp(20*S, 16, 26);
+  var startY;
+  if (lbHasRows) {
+    var rows = Math.min(5, leaderboard.length);
+    var lbStartY = btnY + btnH + 60*S;
+    startY = lbStartY + (rows + 1) * rowH + 22*S;
+  } else {
+    // below revive button (if shown) or below retry
+    startY = btnY + btnH + (extraTimeUsed ? 30*S : (clamp(42*S,34,54) + 30*S));
+  }
+
+  // Compose the line
+  var fs = clamp(12*S, 10, 16);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+
+  if (yesterdayScore <= 0) {
+    // first-day player — short hint, low chroma so it doesn't fight the LB
+    ctx.fillStyle = '#7a7a8a';
+    ctx.font = fs + 'px sans-serif';
+    ctx.fillText(t('firstDailyRun'), cx, startY);
+    return;
+  }
+
+  // Use the higher of today's run vs today's saved (in case multiple runs today)
+  var todayShown = Math.max(todayBestScore, score);
+  var delta = todayShown - yesterdayScore;
+  var deltaStr = (delta >= 0 ? '+' : '') + delta;
+  var col = delta > 0 ? '#FFD700' : (delta < 0 ? '#c97070' : '#aaaaaa');
+
+  // Single line: "Yesterday: 1240 → Today: 1320 (+80)"
+  var line = t('yesterday') + ': ' + yesterdayScore + '  →  ' +
+             t('today') + ': ' + todayShown + '  (' + deltaStr + ')';
+  // measure to make sure it fits the canvas — if not, downsize one notch
+  var widthGuess = ctx.measureText(line).width;
+  if (widthGuess > W - 24*S) {
+    fs = Math.max(10, fs - 2);
+    ctx.font = 'bold ' + fs + 'px sans-serif';
+  }
+  ctx.fillStyle = col;
+  ctx.fillText(line, cx, startY);
+}
+
 // ── MAIN LOOP ─────────────────────────────────────────────────────────────────
 function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
@@ -1803,6 +1935,7 @@ function frame(ts) {
     if (newBest) drawNewBestBanner();
     drawChainSummary(); // iter#9
     drawLeaderboard();
+    drawYesterdayPill(); // iter#11
     // iter#3: skin picker on GAMEOVER (only on desktop — mobile portrait
     // is too tight; the picker IS still on MENU for everyone).
     // Achievement row is MENU-only — on GAMEOVER it stacked under the skin
@@ -1883,6 +2016,8 @@ window.__gfState = function () {
       maxComboThisRun: maxComboThisRun,
       lastLevelStars: lastLevelStars,
       totalLevelStars: (typeof totalLevelStars === 'function') ? totalLevelStars() : 0,
+      yesterdayScore: yesterdayScore,
+      todayBestScore: todayBestScore,
     };
   } catch (e) { return { __error: String(e) }; }
 };
@@ -1902,6 +2037,7 @@ function boot() {
   loadMute();           // iter#8
   loadBestCombo();      // iter#9
   loadLevelStars();     // iter#10
+  loadDailyScores();    // iter#11
   // If lifetime best already crosses higher tiers, mark them seen on first
   // boot so we don't dump multiple toasts on a returning player. checkSkinUnlocks
   // would otherwise fire all of them on the next collect.
@@ -1961,6 +2097,9 @@ Object.defineProperty(window, 'maxComboThisRun',  { get: function(){ return maxC
 // iter#10: per-level star ratings — playtest can verify clear→stars→persist
 Object.defineProperty(window, 'lastLevelStars',   { get: function(){ return lastLevelStars; } });
 Object.defineProperty(window, 'totalLevelStars',  { get: function(){ return totalLevelStars(); } });
+// iter#11: yesterday-vs-today daily-seed delta — playtest can verify record+render
+Object.defineProperty(window, 'yesterdayScore',   { get: function(){ return yesterdayScore; } });
+Object.defineProperty(window, 'todayBestScore',   { get: function(){ return todayBestScore; } });
 
 (function() {
   if (typeof YaGames === 'undefined') { setTimeout(boot, 3000); return; }

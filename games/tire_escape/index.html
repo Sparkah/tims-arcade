@@ -56,6 +56,9 @@ var STRINGS = {
     combo_unstop: 'UNSTOPPABLE!',
     rocket_label: 'BOOST',
     rocket_grab:  'ROCKET!',
+    shield_label: 'SHIELD',
+    shield_grab:  'SHIELD!',
+    shield_save:  'SAVED!',
   },
   ru: {
     title: 'Побег Шины',
@@ -91,6 +94,9 @@ var STRINGS = {
     combo_unstop: 'НЕОСТАНОВИМ!',
     rocket_label: 'УСКОР',
     rocket_grab:  'РАКЕТА!',
+    shield_label: 'ЩИТ',
+    shield_grab:  'ЩИТ!',
+    shield_save:  'СПАСЁН!',
   },
 };
 
@@ -248,6 +254,32 @@ var rocketBoostTimer = 0;        // seconds remaining in active boost
 var rocketsCollectedRun = 0;     // per-run counter (HUD if active)
 var lifetimeRockets = 0;         // persisted across runs
 
+// Iter#9 (free-choice): one-shot shield pickup. Distinct from rocket — rocket
+// is PROACTIVE (push cops back when you grab it), shield is REACTIVE (saves
+// you when cops catch you). Adds a "clutch moment" beat: the run-saving
+// pickup the player remembers and re-tells. Sparse spawn (sparser than
+// rockets — should feel rare). Pure additive: new pickup type, new HUD pill,
+// new game-over branch (consume shield instead of dying); no obstacle/coin/
+// cop-AI/physics changes.
+var shields = [];                  // {x, y, r, taken, spinPhase}
+var shieldSpawnX = 2400;           // first shield candidate far ahead (rarer than rockets)
+var SHIELD_RADIUS = 24;            // slightly bigger than rocket so silhouette reads
+var SHIELD_COP_PUSHBACK = 380;     // px shoved back on save — bigger than rocket pickup
+var SHIELD_INVULN_SEC = 1.2;       // brief invuln window after a save so a 2nd touch doesn't double-die
+var shieldActive = false;          // do you currently hold a shield charge?
+var shieldInvuln = 0;              // seconds of post-save invuln remaining
+var shieldFlash = 0;               // visual flash (0..1) immediately after save consumed
+var shieldsCollectedRun = 0;       // per-run pickups
+var shieldSavesRun = 0;            // per-run saves consumed
+var lifetimeShieldSaves = 0;       // persisted across runs
+
+function spawnShield(x) {
+  // Mid-high band, slightly higher than rockets so the silhouette doesn't
+  // overlap them visually. Encourages a bounce-chain commit to reach.
+  var y = GROUND_Y - 200;
+  shields.push({ x: x, y: y, r: SHIELD_RADIUS, taken: false, spinPhase: Math.random() * Math.PI * 2 });
+}
+
 function spawnRocket(x) {
   // Always in the mid-high band so it stands out from coins (which cluster
   // low/mid). Player has to commit a bounce-kick to reach it.
@@ -371,6 +403,14 @@ function startGame() {
   rocketSpawnX = 1200;
   rocketBoostTimer = 0;
   rocketsCollectedRun = 0;
+  // Iter#9: reset shield pickup state for new run.
+  shields = [];
+  shieldSpawnX = 2400;
+  shieldActive = false;
+  shieldInvuln = 0;
+  shieldFlash = 0;
+  shieldsCollectedRun = 0;
+  shieldSavesRun = 0;
   copX = -260;
   copPanic = 0;
   elapsedSec = 0;
@@ -575,6 +615,8 @@ window._jumpLevel = function(n) {
   // gate can verify rocketsActive > 0 (sparse spawn rate makes deep_playtest
   // miss them otherwise).
   spawnRocket(tire.x + 300);
+  // Iter#9: same logic — pre-spawn a shield so playtest gate sees shieldsActive>0.
+  spawnShield(tire.x + 480);
 };
 
 // ── INPUT (one-button kick) ──────────────────────────────────────────────
@@ -738,6 +780,45 @@ function update(dt) {
   }
   if (rocketBoostTimer > 0) rocketBoostTimer = Math.max(0, rocketBoostTimer - dt);
 
+  // Iter#9: spawn shields — even sparser than rockets. Only spawn if player
+  // doesn't already hold a shield (don't stack), and skip spawn if a live one
+  // is already on screen. Spacing is wider so they feel like a treat.
+  while (shieldSpawnX < cameraX + 1400) {
+    var liveShields = 0;
+    for (var ss = 0; ss < shields.length; ss++) if (!shields[ss].taken) liveShields++;
+    if (liveShields === 0 && !shieldActive && Math.random() < 0.45) {
+      spawnShield(shieldSpawnX);
+    }
+    shieldSpawnX += rand(2200, 3400);
+  }
+  // Cull shields behind the camera (taken or missed).
+  for (var sk = shields.length - 1; sk >= 0; sk--) {
+    if (shields[sk].x < cameraX - 100) shields.splice(sk, 1);
+  }
+  // Tire vs shields (circle vs circle). On pickup: store shield charge, no
+  // immediate effect. The reward is the safety net, surfaced when cops hit.
+  for (var sg = 0; sg < shields.length; sg++) {
+    var shd = shields[sg];
+    if (shd.taken) continue;
+    if (shd.x - tire.x > 200) break;
+    var sdx = tire.x - shd.x, sdy = tire.y - shd.y;
+    var ssum2 = tire.r + shd.r;
+    if (sdx * sdx + sdy * sdy < ssum2 * ssum2) {
+      shd.taken = true;
+      shieldActive = true;
+      shieldsCollectedRun += 1;
+      var ssxw = (shd.x - cameraX) * GF.S;
+      var ssyw = shd.y * GF.S;
+      GF.spawnParticles(ssxw, ssyw, '#5ad8ff', 22);
+      GF.spawnParticles(ssxw, ssyw, '#a0e8ff', 14);
+      GF.spawnFloat(ssxw, ssyw - 28 * GF.S, GF.t('shield_grab'), '#5ad8ff');
+      GF.setShake(0.5);
+    }
+  }
+  // Tick shield timers.
+  if (shieldInvuln > 0) shieldInvuln = Math.max(0, shieldInvuln - dt);
+  if (shieldFlash > 0) shieldFlash = Math.max(0, shieldFlash - dt * 1.5);
+
   // Tire vs coins (circle vs circle, mid-air pickup). Don't block movement.
   for (var ck = 0; ck < coins.length; ck++) {
     var coin = coins[ck];
@@ -863,8 +944,31 @@ function update(dt) {
   }
 
   if (copX > tire.x - tire.r - 6) {
-    GF.setShake(1.6);
-    gameOver();
+    // Iter#9: shield save — if the player picked up a shield, consume it
+    // instead of dying. Big cop shove + invuln window so a follow-up frame
+    // doesn't double-die before the cop is meaningfully behind.
+    if (shieldActive || shieldInvuln > 0) {
+      if (shieldActive) {
+        shieldActive = false;
+        shieldInvuln = SHIELD_INVULN_SEC;
+        shieldFlash = 1.0;
+        shieldSavesRun += 1;
+        lifetimeShieldSaves += 1;
+        try { localStorage.setItem('tire_escape_lifetime_shield_saves', String(lifetimeShieldSaves)); } catch (e) {}
+        copX -= SHIELD_COP_PUSHBACK;
+        copPanic = 0;
+        var savX = (tire.x - cameraX) * GF.S;
+        var savY = tire.y * GF.S;
+        GF.spawnParticles(savX, savY, '#5ad8ff', 32);
+        GF.spawnParticles(savX, savY, '#ffffff', 18);
+        GF.spawnFloat(savX, savY - 50 * GF.S, GF.t('shield_save'), '#5ad8ff');
+        GF.setShake(1.0);
+      }
+      // shield active OR within invuln: skip game-over this frame.
+    } else {
+      GF.setShake(1.6);
+      gameOver();
+    }
   }
 
   // Iter#1: detect crossing the previous best mid-run for instant feedback.
@@ -906,6 +1010,7 @@ function draw(ctx) {
     drawObstacles();
     drawCoins();
     drawRockets();
+    drawShields();
     drawCops();
     drawSpeedLines();
     drawTire();
@@ -1524,6 +1629,64 @@ function drawRockets() {
   }
 }
 
+// Iter#9: shield pickup renderer. Distinctly NOT a coin or rocket — a glowing
+// blue-cyan hex-orb with a chevron/shield glyph. Pulsing white core.
+function drawShields() {
+  var c = GF.ctx;
+  var now = performance.now() / 1000;
+  for (var i = 0; i < shields.length; i++) {
+    var shd = shields[i];
+    if (shd.taken) continue;
+    var x = (shd.x - cameraX) * GF.S;
+    var y = shd.y * GF.S;
+    if (x < -60 || x > GF.W + 60) continue;
+    var r = shd.r * GF.S;
+    var bob = Math.sin(now * 2.5 + shd.spinPhase) * 4 * GF.S;
+    y += bob;
+    // Pulsing outer glow halo (cyan).
+    var glowR = r * (2.2 + 0.25 * Math.sin(now * 5 + shd.spinPhase));
+    var gg = c.createRadialGradient(x, y, r * 0.3, x, y, glowR);
+    gg.addColorStop(0, 'rgba(90,216,255,0.55)');
+    gg.addColorStop(1, 'rgba(40,140,220,0)');
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    c.fillStyle = gg;
+    c.beginPath();
+    c.arc(x, y, glowR, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+    // Hexagon body (rotated slowly).
+    var rot = now * 0.6 + shd.spinPhase;
+    c.save();
+    c.translate(x, y);
+    c.rotate(rot);
+    var hexGrad = c.createRadialGradient(0, 0, r * 0.2, 0, 0, r);
+    hexGrad.addColorStop(0, '#a8eaff');
+    hexGrad.addColorStop(0.6, '#3aa0e8');
+    hexGrad.addColorStop(1, '#1a4080');
+    c.fillStyle = hexGrad;
+    c.beginPath();
+    for (var k = 0; k < 6; k++) {
+      var ang = (k / 6) * Math.PI * 2;
+      var hx = Math.cos(ang) * r;
+      var hy = Math.sin(ang) * r;
+      if (k === 0) c.moveTo(hx, hy); else c.lineTo(hx, hy);
+    }
+    c.closePath();
+    c.fill();
+    c.strokeStyle = 'rgba(255,255,255,0.7)';
+    c.lineWidth = 2 * GF.S;
+    c.stroke();
+    c.restore();
+    // Shield glyph in centre (not rotated — readable).
+    c.fillStyle = '#ffffff';
+    c.font = 'bold ' + (r * 1.1) + 'px sans-serif';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText('\u{1F6E1}', x, y + 1);
+  }
+}
+
 function drawCops() {
   var c = GF.ctx;
   var x = (copX - cameraX) * GF.S;
@@ -1713,6 +1876,43 @@ function drawTire() {
     c.stroke();
     bounceFlash = Math.max(0, bounceFlash - 0.04);
   }
+
+  // Iter#9: shield active aura — soft pulsing cyan ring around tire while
+  // the shield charge is held. Disappears after consumption.
+  if (shieldActive) {
+    var sp = 0.65 + 0.35 * Math.sin(performance.now() / 180);
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    c.strokeStyle = 'rgba(90,216,255,' + (0.55 * sp) + ')';
+    c.lineWidth = 5 * GF.S;
+    c.beginPath();
+    c.arc(x, y, r + 9 * GF.S, 0, Math.PI * 2);
+    c.stroke();
+    c.strokeStyle = 'rgba(170,230,255,' + (0.35 * sp) + ')';
+    c.lineWidth = 2 * GF.S;
+    c.beginPath();
+    c.arc(x, y, r + 14 * GF.S, 0, Math.PI * 2);
+    c.stroke();
+    c.restore();
+  }
+  // Iter#9: shield-save burst — expanding ring + flash on the frame the
+  // shield got consumed by a cop hit. Fades over ~0.66s.
+  if (shieldFlash > 0) {
+    var grow = (1 - shieldFlash) * 80 * GF.S;
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    c.strokeStyle = 'rgba(90,216,255,' + (shieldFlash * 0.9) + ')';
+    c.lineWidth = 6 * GF.S * shieldFlash;
+    c.beginPath();
+    c.arc(x, y, r + grow, 0, Math.PI * 2);
+    c.stroke();
+    c.strokeStyle = 'rgba(255,255,255,' + (shieldFlash * 0.6) + ')';
+    c.lineWidth = 3 * GF.S * shieldFlash;
+    c.beginPath();
+    c.arc(x, y, r + grow * 0.55, 0, Math.PI * 2);
+    c.stroke();
+    c.restore();
+  }
 }
 
 function drawHUD() {
@@ -1781,6 +1981,22 @@ function drawHUD() {
                  rocketBoostTimer.toFixed(1) + 's';
     var bY = 14 * GF.S + fs * 1.15 + (coinsCollectedRun > 0 ? (fs * 0.78) * 1.3 : 0);
     c.fillText(bLabel, 14 * GF.S, bY);
+  }
+
+  // Iter#9: shield pill — appears while a shield charge is held. Cyan
+  // pulse so the safety-net status reads clearly even at a glance. Sits
+  // below the coin/boost stack so existing HUD layout isn't disturbed.
+  if (shieldActive) {
+    var shFs = fs * 0.78;
+    c.font = 'bold ' + shFs + 'px sans-serif';
+    c.textAlign = 'left';
+    var shPulse = 0.7 + 0.3 * Math.abs(Math.sin(performance.now() / 220));
+    c.fillStyle = 'rgba(90,216,255,' + shPulse + ')';
+    var shLabel = '\u{1F6E1} ' + GF.t('shield_label');
+    var shY = 14 * GF.S + fs * 1.15
+              + (coinsCollectedRun > 0 ? (fs * 0.78) * 1.3 : 0)
+              + (rocketBoostTimer > 0 ? (fs * 0.78) * 1.3 : 0);
+    c.fillText(shLabel, 14 * GF.S, shY);
   }
 
   if (combo > 0) {
@@ -1856,6 +2072,9 @@ GF.init({
     // Iter#8: persist rocket pickups across runs (purely informational — feeds
     // a future achievement tier; not gated on now).
     try { lifetimeRockets = parseInt(localStorage.getItem('tire_escape_lifetime_rockets') || '0') || 0; } catch (e) {}
+    // Iter#9: persist lifetime shield-save count (informational; could feed a
+    // future achievement). Not gated on now.
+    try { lifetimeShieldSaves = parseInt(localStorage.getItem('tire_escape_lifetime_shield_saves') || '0') || 0; } catch (e) {}
     buildBg();
     gs = 'MENU';
     // Iter#2: prime the leaderboard so first-paint of game-over already has
@@ -1903,7 +2122,12 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     rocketsActive: typeof rockets !== 'undefined' && rockets ? rockets.length : null,
     rocketBoostTimer: typeof rocketBoostTimer !== 'undefined' ? rocketBoostTimer : null,
     rocketsCollectedRun: typeof rocketsCollectedRun !== 'undefined' ? rocketsCollectedRun : null,
-    lifetimeRockets: typeof lifetimeRockets !== 'undefined' ? lifetimeRockets : null
+    lifetimeRockets: typeof lifetimeRockets !== 'undefined' ? lifetimeRockets : null,
+    shieldsActive: typeof shields !== 'undefined' && shields ? shields.length : null,
+    shieldActive:  typeof shieldActive !== 'undefined' ? shieldActive : null,
+    shieldsCollectedRun: typeof shieldsCollectedRun !== 'undefined' ? shieldsCollectedRun : null,
+    shieldSavesRun: typeof shieldSavesRun !== 'undefined' ? shieldSavesRun : null,
+    lifetimeShieldSaves: typeof lifetimeShieldSaves !== 'undefined' ? lifetimeShieldSaves : null
   };
 });
 })();

@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pruner's Tower</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── TUNABLES (mirror DESIGN.md) ──────────────────────────────────────────
+var GRID_W = 8;
+var GRID_H = 8;
+var MAX_WAVES = 6;
+var START_TURRETS = 24;
+var MAX_LIVES = 3;
+var QUOTA_BASE = 2;
+var QUOTA_GROWTH = 1;
+var ENEMY_BASE_HP = 30;
+var ENEMY_SPEED = 28;
+var ENEMY_BASE_COUNT = 6;
+var SPAWN_INTERVAL_MS = 750;
+
+// 5 lanes used for enemy paths
+var LANES = 5;
+
+// Turret types
+var TURRET_TYPES = {
+  cannon: { color: '#e67e22', dmg: 6,  range: 130, fireMs: 600,  slow: 0,    value: 3 },
+  laser:  { color: '#e74c3c', dmg: 2,  range: 110, fireMs: 120,  slow: 0,    value: 4 },
+  freeze: { color: '#3498db', dmg: 1,  range: 100, fireMs: 350,  slow: 0.45, value: 3 },
+  sniper: { color: '#9b59b6', dmg: 14, range: 240, fireMs: 1100, slow: 0,    value: 5 },
+};
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: "Pruner's Tower",
+    sub:   "Tower-defense in reverse — REMOVE turrets to satisfy budget cuts.",
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'GAME OVER',
+    won: 'YOU WON',
+    wave: 'WAVE',
+    lives: 'LIVES',
+    start_wave: 'START WAVE',
+    council: 'COUNCIL DEMANDS',
+    remove_n_of: 'Remove at least {n} {type}',
+    remove_n_any: 'Remove at least {n} turrets',
+    reduce_value: 'Reduce grid value by {n}',
+    quota_met: 'Quota met',
+    quota_unmet: 'Quota NOT met',
+    refused: 'You refused the council. The city defunds you.',
+    leaked: 'Your defenses crumbled. Too many leaks.',
+    cannon: 'cannons',
+    laser: 'lasers',
+    freeze: 'freezers',
+    sniper: 'snipers',
+    tut_goal:     'Goal: Survive 6 waves while the council slashes your defenses.',
+    tut_controls: 'Controls: Tap turrets to mark for removal, then tap START WAVE.',
+    tut_win:      'Win: Clear all 6 waves with at least 1 life left.',
+    tut_lose:     'Lose: 3 leaks past your grid, OR refuse the council.',
+    tut_tip:      'Tip: Plan the gap — remove overlapping turrets, not unique lanes.',
+    help: '?',
+    close: 'CLOSE',
+    how_to_play: 'HOW TO PLAY',
+  },
+  ru: {
+    title: 'Сад Башни',
+    sub:   'Tower-defense наоборот — СНОСИТЕ турели по требованию совета.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'ИГРА ОКОНЧЕНА',
+    won: 'ПОБЕДА',
+    wave: 'ВОЛНА',
+    lives: 'ЖИЗНИ',
+    start_wave: 'НАЧАТЬ ВОЛНУ',
+    council: 'СОВЕТ ТРЕБУЕТ',
+    remove_n_of: 'Снести минимум {n} — {type}',
+    remove_n_any: 'Снести минимум {n} турелей',
+    reduce_value: 'Снизить ценность сетки на {n}',
+    quota_met: 'Квота выполнена',
+    quota_unmet: 'Квота НЕ выполнена',
+    refused: 'Вы отказали совету. Город снял финансирование.',
+    leaked: 'Оборона рухнула. Слишком много прорывов.',
+    cannon: 'пушек',
+    laser: 'лазеров',
+    freeze: 'заморозок',
+    sniper: 'снайперов',
+    tut_goal:     'Цель: Продержитесь 6 волн, пока совет урезает оборону.',
+    tut_controls: 'Управление: Нажмите на турель чтобы пометить, затем НАЧАТЬ ВОЛНУ.',
+    tut_win:      'Победа: Очистите все 6 волн, сохранив хотя бы 1 жизнь.',
+    tut_lose:     'Проигрыш: 3 прорыва, или отказ совету.',
+    tut_tip:      'Совет: Планируйте брешь — сносите перекрывающиеся, не уникальные турели.',
+    help: '?',
+    close: 'ЗАКРЫТЬ',
+    how_to_play: 'КАК ИГРАТЬ',
+  },
+};
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var phase = 'PRUNE';
+var wave = 1;
+var lives = MAX_LIVES;
+var score = 0, best = 0;
+var pruneFailed = false;
+var enemies_remaining = 0;
+var enemiesToSpawn = 0;
+var spawnTimerMs = 0;
+var gridValue = 0;
+var gridValueAtPrune = 0;
+
+var turrets = [];
+var enemies = [];
+var bullets = [];
+
+var council = null;
+var helpOpen = false;
+var helpBtn = null;
+var startBtn = null;
+var endingReason = '';
+var _menuBtn = null;
+
+var lay = { gridX:0, gridY:0, cell:0, gridW:0, gridH:0, btnX:0, btnY:0, btnW:0, btnH:0 };
+
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  var pad = Math.max(10, 14 * GF.S);
+  var hudH = Math.max(70, 86 * GF.S);
+  var btnH = Math.max(54, 64 * GF.S);
+  var avail_h = H - hudH - btnH - pad * 2;
+  var avail_w = W - pad * 2;
+  var cell = Math.min(avail_w / GRID_W, avail_h / LANES);
+  cell = Math.max(36, Math.floor(cell));
+  var gridW = cell * GRID_W;
+  var gridH = cell * LANES;
+  lay.cell = cell;
+  lay.gridW = gridW;
+  lay.gridH = gridH;
+  lay.gridX = (W - gridW) / 2;
+  lay.gridY = hudH;
+  lay.btnW = Math.min(280 * GF.S, W - pad * 2);
+  lay.btnH = btnH;
+  lay.btnX = (W - lay.btnW) / 2;
+  lay.btnY = lay.gridY + gridH + pad;
+}
+
+// ── INIT GRID ────────────────────────────────────────────────────────────
+function buildGrid() {
+  turrets = [];
+  var types = ['cannon', 'laser', 'freeze', 'sniper'];
+  var slots = [];
+  for (var gx = 0; gx < GRID_W; gx++) {
+    for (var gy = 0; gy < LANES; gy++) slots.push({gx:gx, gy:gy});
+  }
+  var seed = 7421;
+  function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+  for (var i = slots.length - 1; i > 0; i--) {
+    var j = Math.floor(rnd() * (i + 1));
+    var tmp = slots[i]; slots[i] = slots[j]; slots[j] = tmp;
+  }
+  var id = 0;
+  for (var k = 0; k < START_TURRETS && k < slots.length; k++) {
+    var s = slots[k];
+    var t = types[k % 4];
+    turrets.push({ id: id++, type: t, gx: s.gx, gy: s.gy, removed: false, removedThisPrune: false, lastFireMs: 0 });
+  }
+  recomputeGridValue();
+}
+
+function recomputeGridValue() {
+  var v = 0;
+  for (var i = 0; i < turrets.length; i++) {
+    if (!turrets[i].removed) v += TURRET_TYPES[turrets[i].type].value;
+  }
+  gridValue = v;
+}
+
+// ── COUNCIL ──────────────────────────────────────────────────────────────
+function generateCouncil(w) {
+  var roll = (w * 137 + 11) % 3;
+  var typeOrder = ['laser', 'cannon', 'sniper', 'freeze'];
+  var n = QUOTA_BASE + (w - 1) * QUOTA_GROWTH;
+  if (roll === 0) {
+    var tt = typeOrder[(w + 1) % 4];
+    var count = 0;
+    for (var i = 0; i < turrets.length; i++) if (!turrets[i].removed && turrets[i].type === tt) count++;
+    n = Math.min(n, Math.max(1, count));
+    return { kind: 'type', type: tt, n: n };
+  } else if (roll === 1) {
+    var alive = 0;
+    for (var j = 0; j < turrets.length; j++) if (!turrets[j].removed) alive++;
+    n = Math.min(n + 1, Math.max(1, alive));
+    return { kind: 'any', n: n };
+  } else {
+    var dec = Math.min(gridValue - 4, 4 + w * 2);
+    if (dec < 3) dec = 3;
+    return { kind: 'value', n: dec };
+  }
+}
+
+function quotaMet() {
+  if (!council) return true;
+  if (council.kind === 'type') {
+    var c = 0;
+    for (var i = 0; i < turrets.length; i++) {
+      if (turrets[i].removedThisPrune && turrets[i].type === council.type) c++;
+    }
+    return c >= council.n;
+  } else if (council.kind === 'any') {
+    var c2 = 0;
+    for (var j = 0; j < turrets.length; j++) if (turrets[j].removedThisPrune) c2++;
+    return c2 >= council.n;
+  } else if (council.kind === 'value') {
+    return (gridValueAtPrune - gridValue) >= council.n;
+  }
+  return true;
+}
+
+function councilText() {
+  if (!council) return '';
+  var n = council.n;
+  if (council.kind === 'type') {
+    return GF.t('remove_n_of').replace('{n}', n).replace('{type}', GF.t(council.type));
+  } else if (council.kind === 'any') {
+    return GF.t('remove_n_any').replace('{n}', n);
+  } else {
+    return GF.t('reduce_value').replace('{n}', n);
+  }
+}
+
+// ── PHASE TRANSITIONS ────────────────────────────────────────────────────
+function startGame() {
+  wave = 1;
+  lives = MAX_LIVES;
+  score = 0;
+  pruneFailed = false;
+  enemies = []; bullets = [];
+  endingReason = '';
+  buildGrid();
+  enterPrune();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function enterPrune() {
+  phase = 'PRUNE';
+  for (var i = 0; i < turrets.length; i++) turrets[i].removedThisPrune = false;
+  recomputeGridValue();
+  gridValueAtPrune = gridValue;
+  council = generateCouncil(wave);
+  GF.saveRun();
+}
+
+function startWave() {
+  if (gs !== 'PLAYING' || phase !== 'PRUNE') return;
+  if (!quotaMet()) {
+    pruneFailed = true;
+    endingReason = GF.t('refused');
+    gameOver();
+    return;
+  }
+  phase = 'WAVE';
+  enemies = [];
+  bullets = [];
+  enemiesToSpawn = ENEMY_BASE_COUNT + (wave - 1) * 2;
+  enemies_remaining = enemiesToSpawn;
+  spawnTimerMs = 0;
+  GF.saveRun();
+}
+
+function spawnEnemy() {
+  var lane = Math.floor(Math.random() * LANES);
+  var hp = ENEMY_BASE_HP + (wave - 1) * 10;
+  var strengthBonus = Math.max(0, Math.floor(gridValue / 6));
+  hp += strengthBonus;
+  enemies.push({
+    x: lay.gridX - lay.cell * 0.6,
+    y: lay.gridY + lane * lay.cell + lay.cell / 2,
+    lane: lane,
+    hp: hp,
+    maxHp: hp,
+    slow: 0,
+    slowUntil: 0,
+    id: Math.random(),
+  });
+}
+
+function endWave() {
+  if (wave >= MAX_WAVES) {
+    score += 250 + lives * 50;
+    gs = 'WON';
+    GF.gameEnded();
+    if (score > best) { best = score; try { localStorage.setItem('pruners_tower_best', best); } catch (e) {} }
+    GF.saveRun();
+    return;
+  }
+  wave++;
+  score += 100 * wave + lives * 25;
+  enterPrune();
+}
+
+function gameOver() {
+  if (!endingReason) endingReason = GF.t('leaked');
+  if (score > best) { best = score; try { localStorage.setItem('pruners_tower_best', best); } catch (e) {} }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function pressAt(x, y) {
+  if (helpOpen) { helpOpen = false; return; }
+  if (helpBtn && x >= helpBtn.x && x <= helpBtn.x + helpBtn.w && y >= helpBtn.y && y <= helpBtn.y + helpBtn.h) {
+    helpOpen = true; return;
+  }
+  if (gs !== 'PLAYING') return;
+  if (phase === 'PRUNE') {
+    for (var i = 0; i < turrets.length; i++) {
+      var tr = turrets[i];
+      var px = lay.gridX + tr.gx * lay.cell + lay.cell / 2;
+      var py = lay.gridY + tr.gy * lay.cell + lay.cell / 2;
+      if (Math.abs(x - px) < lay.cell / 2 - 2 && Math.abs(y - py) < lay.cell / 2 - 2) {
+        if (tr.removed && !tr.removedThisPrune) return;
+        if (tr.removed && tr.removedThisPrune) {
+          tr.removed = false; tr.removedThisPrune = false;
+        } else if (!tr.removed) {
+          tr.removed = true; tr.removedThisPrune = true;
+        }
+        recomputeGridValue();
+        GF.saveRun();
+        return;
+      }
+    }
+    if (startBtn && x >= startBtn.x && x <= startBtn.x + startBtn.w && y >= startBtn.y && y <= startBtn.y + startBtn.h) {
+      startWave();
+    }
+  }
+}
+
+GF.canvas.addEventListener('pointerdown', function(e) {
+  if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') return;
+  pressAt(e.clientX, e.clientY);
+});
+
+document.addEventListener('keydown', function(e) {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    if (gs === 'PLAYING' && phase === 'PRUNE') startWave();
+  }
+});
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  recomputeLayout();
+  if (gs !== 'PLAYING' || phase !== 'WAVE') return;
+
+  spawnTimerMs += dt * 1000;
+  if (enemiesToSpawn > 0 && spawnTimerMs >= SPAWN_INTERVAL_MS) {
+    spawnTimerMs = 0;
+    enemiesToSpawn--;
+    spawnEnemy();
+  }
+
+  for (var i = enemies.length - 1; i >= 0; i--) {
+    var en = enemies[i];
+    var sp = ENEMY_SPEED * GF.S;
+    if (en.slowUntil > performance.now()) sp *= (1 - en.slow);
+    en.x += sp * dt;
+    if (en.x > lay.gridX + lay.gridW + lay.cell * 0.4) {
+      enemies.splice(i, 1);
+      enemies_remaining--;
+      lives--;
+      GF.setShake(0.6);
+      GF.spawnFloat(GF.W - 60 * GF.S, 40 * GF.S, '-1', '#ff4d4d');
+      if (lives <= 0) { gameOver(); return; }
+    }
+  }
+
+  var now = performance.now();
+  for (var t = 0; t < turrets.length; t++) {
+    var tr = turrets[t];
+    if (tr.removed) continue;
+    var def = TURRET_TYPES[tr.type];
+    if (now - tr.lastFireMs < def.fireMs) continue;
+    var tx = lay.gridX + tr.gx * lay.cell + lay.cell / 2;
+    var ty = lay.gridY + tr.gy * lay.cell + lay.cell / 2;
+    var best_idx = -1, bestD = (def.range * GF.S) * (def.range * GF.S);
+    for (var ei = 0; ei < enemies.length; ei++) {
+      var e = enemies[ei];
+      var dx = e.x - tx, dy = e.y - ty;
+      var d2 = dx*dx + dy*dy;
+      if (d2 <= bestD) { bestD = d2; best_idx = ei; }
+    }
+    if (best_idx >= 0) {
+      tr.lastFireMs = now;
+      var target = enemies[best_idx];
+      if (tr.type === 'sniper') {
+        target.hp -= def.dmg;
+        bullets.push({ x: tx, y: ty, x2: target.x, y2: target.y, life: 0.12, color: def.color, beam: true });
+      } else if (tr.type === 'laser') {
+        target.hp -= def.dmg;
+        bullets.push({ x: tx, y: ty, x2: target.x, y2: target.y, life: 0.08, color: def.color, beam: true });
+      } else {
+        var ang = Math.atan2(target.y - ty, target.x - tx);
+        var bsp = 380 * GF.S;
+        bullets.push({ x: tx, y: ty, vx: Math.cos(ang) * bsp, vy: Math.sin(ang) * bsp, life: 0.6, color: def.color, dmg: def.dmg, slow: def.slow, target: target.id, beam: false });
+      }
+    }
+  }
+
+  for (var b = bullets.length - 1; b >= 0; b--) {
+    var bu = bullets[b];
+    bu.life -= dt;
+    if (bu.life <= 0) { bullets.splice(b, 1); continue; }
+    if (bu.beam) continue;
+    bu.x += bu.vx * dt;
+    bu.y += bu.vy * dt;
+    for (var ej = 0; ej < enemies.length; ej++) {
+      var en2 = enemies[ej];
+      var ddx = en2.x - bu.x, ddy = en2.y - bu.y;
+      if (ddx*ddx + ddy*ddy < (lay.cell * 0.28) * (lay.cell * 0.28)) {
+        en2.hp -= bu.dmg;
+        if (bu.slow > 0) { en2.slow = bu.slow; en2.slowUntil = performance.now() + 900; }
+        bullets.splice(b, 1);
+        break;
+      }
+    }
+  }
+
+  for (var i2 = enemies.length - 1; i2 >= 0; i2--) {
+    if (enemies[i2].hp <= 0) {
+      GF.spawnParticles(enemies[i2].x, enemies[i2].y, '#ffe066', 8);
+      enemies.splice(i2, 1);
+      enemies_remaining--;
+      score += 10;
+    }
+  }
+
+  if (enemiesToSpawn <= 0 && enemies.length === 0) {
+    endWave();
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function drawBg() {
+  var c = GF.ctx;
+  var g = c.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#1a1530');
+  g.addColorStop(1, '#0a0a14');
+  c.fillStyle = g; c.fillRect(0, 0, GF.W, GF.H);
+  c.fillStyle = 'rgba(255,255,255,0.04)';
+  for (var i = 0; i < 14; i++) {
+    var bx = (i * 73) % GF.W;
+    var bh = 30 + ((i * 17) % 80);
+    c.fillRect(bx, GF.H - 100 - bh, 50, bh + 100);
+  }
+}
+
+function drawHUD() {
+  var c = GF.ctx;
+  var fs = GF.clamp(15 * GF.S, 11, 20);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textAlign = 'left';
+  c.textBaseline = 'top';
+
+  c.fillStyle = 'rgba(8,8,18,0.7)';
+  c.fillRect(0, 0, GF.W, lay.gridY - 6);
+
+  c.fillStyle = '#fff';
+  c.fillText(GF.t('wave') + ': ' + wave + ' / ' + MAX_WAVES, 12 * GF.S, 8 * GF.S);
+  c.fillStyle = '#ff8080';
+  c.fillText(GF.t('lives') + ': ' + lives, 12 * GF.S, 8 * GF.S + fs + 4);
+  c.fillStyle = '#88ddff';
+  c.textAlign = 'right';
+  c.fillText(GF.t('score') + ': ' + score, GF.W - 60 * GF.S, 8 * GF.S);
+  c.fillStyle = '#ffd166';
+  c.fillText('VAL: ' + gridValue, GF.W - 60 * GF.S, 8 * GF.S + fs + 4);
+
+  var hbS = Math.max(32, 38 * GF.S);
+  helpBtn = { x: GF.W - hbS - 8 * GF.S, y: 6 * GF.S, w: hbS, h: hbS };
+  c.fillStyle = 'rgba(255,255,255,0.12)';
+  c.fillRect(helpBtn.x, helpBtn.y, helpBtn.w, helpBtn.h);
+  c.strokeStyle = '#9ab'; c.lineWidth = 1;
+  c.strokeRect(helpBtn.x + 0.5, helpBtn.y + 0.5, helpBtn.w - 1, helpBtn.h - 1);
+  c.fillStyle = '#fff';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.font = 'bold ' + Math.max(16, 20 * GF.S) + 'px sans-serif';
+  c.fillText('?', helpBtn.x + helpBtn.w / 2, helpBtn.y + helpBtn.h / 2);
+
+  if (phase === 'PRUNE') {
+    c.textAlign = 'center'; c.textBaseline = 'top';
+    var cy = lay.gridY - 28 * GF.S;
+    c.fillStyle = '#ffd166';
+    c.font = 'bold ' + GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    c.fillText(GF.t('council') + ': ' + councilText(), GF.cx, cy);
+    var met = quotaMet();
+    c.fillStyle = met ? '#7be88a' : '#ff8080';
+    c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+    c.fillText(met ? GF.t('quota_met') : GF.t('quota_unmet'), GF.cx, cy + 16 * GF.S);
+  }
+}
+
+function drawGrid() {
+  var c = GF.ctx;
+  c.fillStyle = 'rgba(20,30,50,0.6)';
+  c.fillRect(lay.gridX, lay.gridY, lay.gridW, lay.gridH);
+
+  for (var l = 0; l < LANES; l++) {
+    c.fillStyle = (l % 2 === 0) ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.02)';
+    c.fillRect(lay.gridX, lay.gridY + l * lay.cell, lay.gridW, lay.cell);
+  }
+
+  c.strokeStyle = 'rgba(255,255,255,0.08)';
+  c.lineWidth = 1;
+  for (var gx = 0; gx <= GRID_W; gx++) {
+    c.beginPath();
+    c.moveTo(lay.gridX + gx * lay.cell + 0.5, lay.gridY);
+    c.lineTo(lay.gridX + gx * lay.cell + 0.5, lay.gridY + lay.gridH);
+    c.stroke();
+  }
+  for (var gy = 0; gy <= LANES; gy++) {
+    c.beginPath();
+    c.moveTo(lay.gridX, lay.gridY + gy * lay.cell + 0.5);
+    c.lineTo(lay.gridX + lay.gridW, lay.gridY + gy * lay.cell + 0.5);
+    c.stroke();
+  }
+
+  c.fillStyle = 'rgba(123,232,138,0.18)';
+  c.fillRect(lay.gridX - 6, lay.gridY, 4, lay.gridH);
+  c.fillStyle = 'rgba(255,80,80,0.22)';
+  c.fillRect(lay.gridX + lay.gridW + 2, lay.gridY, 4, lay.gridH);
+}
+
+function drawTurret(tr) {
+  var c = GF.ctx;
+  var px = lay.gridX + tr.gx * lay.cell + lay.cell / 2;
+  var py = lay.gridY + tr.gy * lay.cell + lay.cell / 2;
+  var r = lay.cell * 0.34;
+  var def = TURRET_TYPES[tr.type];
+  if (tr.removed) {
+    c.strokeStyle = 'rgba(255,80,80,0.7)';
+    c.lineWidth = 2;
+    c.beginPath();
+    c.moveTo(px - r, py - r); c.lineTo(px + r, py + r);
+    c.moveTo(px + r, py - r); c.lineTo(px - r, py + r);
+    c.stroke();
+    return;
+  }
+  c.fillStyle = '#222';
+  c.beginPath(); c.arc(px, py, r, 0, Math.PI * 2); c.fill();
+  c.fillStyle = def.color;
+  c.beginPath(); c.arc(px, py, r * 0.72, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#111';
+  c.fillRect(px - r * 0.15, py - r * 0.95, r * 0.3, r * 0.7);
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + Math.max(11, lay.cell * 0.28) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(tr.type[0].toUpperCase(), px, py + r * 0.35);
+}
+
+function drawEnemy(en) {
+  var c = GF.ctx;
+  var r = lay.cell * 0.26;
+  c.fillStyle = '#2a1010';
+  c.beginPath(); c.arc(en.x, en.y, r + 2, 0, Math.PI * 2); c.fill();
+  c.fillStyle = en.slowUntil > performance.now() ? '#7fb3ff' : '#ff6b6b';
+  c.beginPath(); c.arc(en.x, en.y, r, 0, Math.PI * 2); c.fill();
+  var hpw = r * 2;
+  c.fillStyle = '#000';
+  c.fillRect(en.x - hpw / 2, en.y - r - 8, hpw, 4);
+  c.fillStyle = '#7be88a';
+  c.fillRect(en.x - hpw / 2, en.y - r - 8, hpw * Math.max(0, en.hp / en.maxHp), 4);
+}
+
+function drawBullets() {
+  var c = GF.ctx;
+  for (var i = 0; i < bullets.length; i++) {
+    var b = bullets[i];
+    if (b.beam) {
+      c.strokeStyle = b.color;
+      c.lineWidth = 2 + 1.5 * Math.min(1, b.life / 0.12);
+      c.globalAlpha = Math.min(1, b.life * 8);
+      c.beginPath();
+      c.moveTo(b.x, b.y); c.lineTo(b.x2, b.y2);
+      c.stroke();
+      c.globalAlpha = 1;
+    } else {
+      c.fillStyle = b.color;
+      c.beginPath(); c.arc(b.x, b.y, 3 * GF.S, 0, Math.PI * 2); c.fill();
+    }
+  }
+}
+
+function drawStartButton() {
+  if (phase !== 'PRUNE') return;
+  var c = GF.ctx;
+  var met = quotaMet();
+  startBtn = { x: lay.btnX, y: lay.btnY, w: lay.btnW, h: lay.btnH };
+  var grad = c.createLinearGradient(startBtn.x, startBtn.y, startBtn.x, startBtn.y + startBtn.h);
+  if (met) {
+    grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  } else {
+    grad.addColorStop(0, '#c0392b'); grad.addColorStop(1, '#7d251a');
+  }
+  GF.rr(c, startBtn.x, startBtn.y, startBtn.w, startBtn.h, startBtn.h / 2);
+  c.fillStyle = grad; c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('start_wave'), startBtn.x + startBtn.w / 2, startBtn.y + startBtn.h / 2);
+}
+
+function drawTutorialOverlay() {
+  var c = GF.ctx;
+  c.fillStyle = 'rgba(0,0,0,0.78)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var fs = GF.clamp(15 * GF.S, 11, 19);
+  c.font = 'bold ' + GF.clamp(22 * GF.S, 16, 28) + 'px sans-serif';
+  c.fillStyle = '#ffd166';
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  c.fillText(GF.t('how_to_play'), GF.cx, GF.cy - 130 * GF.S);
+  c.font = fs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  for (var i = 0; i < lines.length; i++) {
+    c.fillText(lines[i], GF.cx, GF.cy - 80 * GF.S + i * (fs + 8));
+  }
+  c.fillStyle = '#9ab';
+  c.font = GF.clamp(13 * GF.S, 10, 16) + 'px sans-serif';
+  c.fillText('— ' + GF.t('close') + ' —', GF.cx, GF.cy + 90 * GF.S);
+}
+
+function drawMenu() {
+  var c = GF.ctx;
+  recomputeLayout();
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(38 * GF.S, 22, 56);
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.fillStyle = '#ffd166';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(255,209,102,0.45)'; c.shadowBlur = 22 * GF.S;
+  c.fillText(GF.t('title'), GF.cx, GF.cy - 170 * GF.S);
+  c.shadowColor = 'transparent'; c.shadowBlur = 0;
+
+  c.font = GF.clamp(13 * GF.S, 10, 16) + 'px sans-serif';
+  c.fillStyle = '#9ab';
+  c.fillText(GF.t('sub'), GF.cx, GF.cy - 140 * GF.S);
+
+  var fs = GF.clamp(14 * GF.S, 11, 18);
+  c.font = fs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  c.textBaseline = 'top';
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  for (var i = 0; i < lines.length; i++) {
+    c.fillText(lines[i], GF.cx, GF.cy - 100 * GF.S + i * (fs + 8));
+  }
+
+  var btnW = GF.clamp(260 * GF.S, 180, 340), btnH = GF.clamp(56 * GF.S, 44, 70);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 80 * GF.S;
+  var grad = c.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  GF.rr(c, btnX, btnY, btnW, btnH, btnH / 2);
+  c.fillStyle = grad; c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+  _menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+  if (best > 0) {
+    c.font = GF.clamp(12 * GF.S, 9, 15) + 'px sans-serif';
+    c.fillStyle = '#557';
+    c.textBaseline = 'top';
+    c.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 14 * GF.S);
+  }
+  try { localStorage.setItem('pruners_tower_seen_tutorial', '1'); } catch (e) {}
+}
+
+function drawEnd(isWin) {
+  var c = GF.ctx;
+  c.fillStyle = 'rgba(8,8,18,0.92)';
+  c.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(40 * GF.S, 24, 60);
+  c.font = 'bold ' + titleFs + 'px sans-serif';
+  c.fillStyle = isWin ? '#7be88a' : '#ff6b6b';
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillText(isWin ? GF.t('won') : GF.t('gameover'), GF.cx, GF.cy - 70 * GF.S);
+
+  c.font = GF.clamp(15 * GF.S, 11, 19) + 'px sans-serif';
+  c.fillStyle = '#bcd';
+  c.fillText(endingReason || '', GF.cx, GF.cy - 30 * GF.S);
+
+  c.fillStyle = '#fff';
+  c.fillText(GF.t('score') + ': ' + score + '   ·   ' + GF.t('wave') + ': ' + wave + ' / ' + MAX_WAVES, GF.cx, GF.cy);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 36 * GF.S;
+  var grad = c.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  GF.rr(c, btnX, btnY, btnW, btnH, btnH / 2);
+  c.fillStyle = grad; c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+  _menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+
+  c.font = GF.clamp(12 * GF.S, 9, 15) + 'px sans-serif';
+  c.fillStyle = '#557';
+  c.textBaseline = 'top';
+  c.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 14 * GF.S);
+}
+
+function draw(ctx) {
+  drawBg();
+  recomputeLayout();
+  if (gs === 'PLAYING') {
+    drawGrid();
+    for (var i = 0; i < turrets.length; i++) drawTurret(turrets[i]);
+    for (var e = 0; e < enemies.length; e++) drawEnemy(enemies[e]);
+    drawBullets();
+    drawHUD();
+    drawStartButton();
+    if (helpOpen) drawTutorialOverlay();
+  } else if (gs === 'MENU') {
+    drawMenu();
+  } else if (gs === 'GAMEOVER') {
+    drawEnd(false);
+  } else if (gs === 'WON') {
+    drawEnd(true);
+  }
+}
+
+GF.canvas.addEventListener('click', function(e) {
+  if (helpOpen) { helpOpen = false; return; }
+  if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') {
+    if (_menuBtn && e.clientX >= _menuBtn.x && e.clientX <= _menuBtn.x + _menuBtn.w &&
+        e.clientY >= _menuBtn.y && e.clientY <= _menuBtn.y + _menuBtn.h) {
+      startGame();
+    }
+  }
+});
+
+// ── SCREENSHOT HOOKS ─────────────────────────────────────────────────────
+window._jumpLevel = function(n) {
+  if (n === 99) {
+    startGame();
+    gameOver();
+  } else if (n && n > 1) {
+    // For screenshots: land in a live mid-wave state with enemies + bullets.
+    window._setupForScreenshot(n);
+  } else {
+    startGame();
+  }
+};
+
+window._setupForScreenshot = function(level) {
+  startGame();
+  wave = Math.min(level || 2, MAX_WAVES);
+  recomputeLayout();
+  var rng = 991;
+  function nx() { rng = (rng * 22695477 + 1) & 0x7fffffff; return rng / 0x7fffffff; }
+  var removed = 0;
+  for (var i = 0; i < turrets.length && removed < 4; i++) {
+    if (nx() < 0.25) { turrets[i].removed = true; removed++; }
+  }
+  recomputeGridValue();
+  phase = 'WAVE';
+  enemiesToSpawn = 4;
+  enemies_remaining = 6;
+  spawnTimerMs = 0;
+  for (var k = 0; k < 2; k++) {
+    var lane = k % LANES;
+    var hp = ENEMY_BASE_HP + (wave - 1) * 10;
+    enemies.push({
+      x: lay.gridX + lay.cell * (1.5 + k * 2),
+      y: lay.gridY + lane * lay.cell + lay.cell / 2,
+      lane: lane, hp: hp - 8, maxHp: hp, slow: 0, slowUntil: 0, id: Math.random(),
+    });
+  }
+};
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 1280,
+  designH: 720,
+  strings: STRINGS,
+  sprites: [],
+  saveKey: 'pruners_tower',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('pruners_tower_best') || '0') || 0; } catch (e) {}
+    GF.persist('pruners_tower_run_v1',
+      function() {
+        return {
+          gs: gs, phase: phase, wave: wave, lives: lives, score: score,
+          turrets: turrets.map(function(t){return{id:t.id,type:t.type,gx:t.gx,gy:t.gy,removed:t.removed,removedThisPrune:t.removedThisPrune};}),
+          council: council, gridValueAtPrune: gridValueAtPrune
+        };
+      },
+      function(s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        phase = s.phase || 'PRUNE';
+        wave = s.wave || 1;
+        lives = (typeof s.lives === 'number') ? s.lives : MAX_LIVES;
+        score = s.score || 0;
+        if (s.turrets && s.turrets.length) {
+          turrets = s.turrets.map(function(t){ return { id:t.id, type:t.type, gx:t.gx, gy:t.gy, removed:!!t.removed, removedThisPrune:!!t.removedThisPrune, lastFireMs: 0 }; });
+          recomputeGridValue();
+        }
+        if (s.council) council = s.council;
+        if (typeof s.gridValueAtPrune === 'number') gridValueAtPrune = s.gridValueAtPrune;
+        if (gs === 'PLAYING' && phase === 'WAVE') phase = 'PRUNE';
+      }
+    );
+    if (!turrets.length) buildGrid();
+    if (!council) council = generateCouncil(wave);
+    if (gs === 'PLAYING' && phase !== 'PRUNE' && phase !== 'WAVE') phase = 'PRUNE';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    phase: phase,
+    wave: wave,
+    lives: lives,
+    score: score,
+    enemies_remaining: enemies_remaining,
+    pruneFailed: pruneFailed,
+    gridValue: gridValue,
+    turrets: turrets.length,
+    turrets_removed: turrets.filter(function(t){return t.removed;}).length,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
