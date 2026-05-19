@@ -105,10 +105,6 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
   <h1>${escapeHtml(ogTitle)}</h1>
   <p>${escapeHtml(ogHook)}</p>
   <a class="btn" href="${playUrl}">${lang === 'ru' ? '▶ Играть' : '▶ Play now'}</a>
-  <div class="alt">
-    <p><strong>${lang === 'ru' ? titleEn : titleRu}</strong></p>
-    <p>${escapeHtml(lang === 'ru' ? hookEn : hookRu)}</p>
-  </div>
   <small><a href="/" style="color:#8a8aa0">${lang === 'ru' ? '← все игры' : '← browse all games'}</a></small>
 </div>
 </body>
