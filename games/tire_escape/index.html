@@ -102,6 +102,144 @@ var STRINGS = {
 
 var SPRITE_NAMES = ['tire', 'cop_car', 'parked_car', 'street_sign', 'brick_wall', 'dust_particle'];
 
+// ── SFX (iter#10 free-choice: sound design pass) ─────────────────────────
+// First nine iterations were all visual / mechanic layers — zero audio. Even
+// short blips on bounce / pickup / milestone make the chase loop feel kinetic
+// and the loot loop feel earned. WebAudio (no asset files), lazy-init on first
+// user gesture (browser autoplay policy), per-event short envelopes. Pure
+// additive: silent if AudioContext fails or user mutes; no impact on physics,
+// scoring, or any existing system. Mute state persists across runs.
+var sfxMuted = false;
+try { sfxMuted = (localStorage.getItem('tire_escape_sfx_muted') === '1'); } catch (e) {}
+var SFX = (function () {
+  var ctx = null;
+  var master = null;
+  var lastPlay = {};   // id -> timestamp (rate-limit re-triggers)
+  function ensure() {
+    if (ctx) return ctx;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = 0.35;
+      master.connect(ctx.destination);
+    } catch (e) { ctx = null; }
+    return ctx;
+  }
+  function tone(opts) {
+    if (sfxMuted) return;
+    var c = ensure();
+    if (!c) return;
+    if (c.state === 'suspended') { try { c.resume(); } catch (e) {} }
+    var now = c.currentTime;
+    var osc = c.createOscillator();
+    var g = c.createGain();
+    osc.type = opts.type || 'sine';
+    osc.frequency.setValueAtTime(opts.f0 || 440, now);
+    if (opts.f1 != null) {
+      osc.frequency.exponentialRampToValueAtTime(Math.max(40, opts.f1), now + (opts.dur || 0.1));
+    }
+    var vol = opts.vol != null ? opts.vol : 0.4;
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(vol, now + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + (opts.dur || 0.1));
+    osc.connect(g); g.connect(master);
+    osc.start(now);
+    osc.stop(now + (opts.dur || 0.1) + 0.02);
+  }
+  function noise(opts) {
+    if (sfxMuted) return;
+    var c = ensure();
+    if (!c) return;
+    if (c.state === 'suspended') { try { c.resume(); } catch (e) {} }
+    var dur = opts.dur || 0.18;
+    var buf = c.createBuffer(1, Math.floor(c.sampleRate * dur), c.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1);
+    var src = c.createBufferSource();
+    src.buffer = buf;
+    var g = c.createGain();
+    var bp = c.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = opts.f || 800;
+    bp.Q.value = opts.q || 1.0;
+    var now = c.currentTime;
+    var vol = opts.vol != null ? opts.vol : 0.35;
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(vol, now + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    src.connect(bp); bp.connect(g); g.connect(master);
+    src.start(now);
+    src.stop(now + dur + 0.02);
+  }
+  function play(id, opts) {
+    if (sfxMuted) return;
+    // rate-limit very chatty triggers (bounce on rapid contacts)
+    var minGap = (opts && opts.minGap != null) ? opts.minGap : 0;
+    if (minGap > 0) {
+      var t = performance.now();
+      if (lastPlay[id] && (t - lastPlay[id]) < minGap) return;
+      lastPlay[id] = t;
+    }
+    switch (id) {
+      case 'bounce':
+        // pitch scales with combo so chains sound rising
+        var combo01 = Math.min(1, (opts && opts.combo ? opts.combo : 0) / 10);
+        tone({ type: 'square', f0: 320 + 140 * combo01, f1: 180, dur: 0.07, vol: 0.18 });
+        break;
+      case 'milestone_3':
+        tone({ type: 'triangle', f0: 540, f1: 880, dur: 0.16, vol: 0.32 }); break;
+      case 'milestone_5':
+        tone({ type: 'square', f0: 660, f1: 990, dur: 0.20, vol: 0.30 }); break;
+      case 'milestone_10':
+        tone({ type: 'sawtooth', f0: 440, f1: 1320, dur: 0.32, vol: 0.32 });
+        setTimeout(function () { tone({ type: 'sawtooth', f0: 660, f1: 1760, dur: 0.22, vol: 0.30 }); }, 120);
+        break;
+      case 'coin':
+        tone({ type: 'sine', f0: 880, f1: 1480, dur: 0.10, vol: 0.22 });
+        setTimeout(function () { tone({ type: 'sine', f0: 1320, f1: 1760, dur: 0.08, vol: 0.20 }); }, 50);
+        break;
+      case 'rocket':
+        noise({ f: 1200, q: 0.8, dur: 0.32, vol: 0.30 });
+        tone({ type: 'sawtooth', f0: 220, f1: 640, dur: 0.30, vol: 0.30 });
+        break;
+      case 'shield_grab':
+        tone({ type: 'sine', f0: 660, f1: 990, dur: 0.18, vol: 0.30 });
+        setTimeout(function () { tone({ type: 'sine', f0: 990, f1: 1320, dur: 0.20, vol: 0.28 }); }, 90);
+        break;
+      case 'shield_save':
+        // bright "saved" arpeggio
+        tone({ type: 'triangle', f0: 880, f1: 1320, dur: 0.20, vol: 0.40 });
+        setTimeout(function () { tone({ type: 'triangle', f0: 1320, f1: 1760, dur: 0.20, vol: 0.36 }); }, 90);
+        setTimeout(function () { tone({ type: 'triangle', f0: 1760, f1: 2200, dur: 0.24, vol: 0.32 }); }, 200);
+        break;
+      case 'ach':
+        tone({ type: 'triangle', f0: 660, f1: 990, dur: 0.18, vol: 0.34 });
+        setTimeout(function () { tone({ type: 'triangle', f0: 990, f1: 1320, dur: 0.22, vol: 0.32 }); }, 110);
+        setTimeout(function () { tone({ type: 'triangle', f0: 1320, f1: 1760, dur: 0.32, vol: 0.30 }); }, 240);
+        break;
+      case 'newbest':
+        tone({ type: 'square', f0: 660, f1: 880, dur: 0.14, vol: 0.30 });
+        setTimeout(function () { tone({ type: 'square', f0: 990, f1: 1320, dur: 0.18, vol: 0.30 }); }, 100);
+        break;
+      case 'gameover':
+        // descending whomp
+        tone({ type: 'sawtooth', f0: 320, f1: 90, dur: 0.42, vol: 0.30 });
+        noise({ f: 220, q: 1.4, dur: 0.32, vol: 0.18 });
+        break;
+      case 'ui':
+        tone({ type: 'square', f0: 520, f1: 720, dur: 0.06, vol: 0.20 });
+        break;
+    }
+  }
+  function setMuted(m) {
+    sfxMuted = !!m;
+    try { localStorage.setItem('tire_escape_sfx_muted', sfxMuted ? '1' : '0'); } catch (e) {}
+  }
+  return { play: play, setMuted: setMuted, isMuted: function () { return sfxMuted; } };
+})();
+
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';            // MENU | PLAYING | GAMEOVER
 var bonusScore = 0, best = 0;
@@ -442,6 +580,11 @@ function gameOver() {
     best = total;
     try { localStorage.setItem('tire_escape_best', best); } catch (e) {}
   }
+  // Iter#10: end-of-run audio — newbest stinger trumps gameover whomp.
+  try {
+    if (wasNewBest) SFX.play('newbest');
+    else SFX.play('gameover');
+  } catch (e) {}
   // Iter#4: after best is updated, check if a new skin tier just unlocked.
   // Toast is rendered on top of the GAMEOVER overlay (below leaderboard).
   checkSkinUnlock();
@@ -570,6 +713,9 @@ function checkAchievements() {
     achPendingQueue = unlockedThisRun.slice();
     achToastId = achPendingQueue.shift();
     achToast = 4.0;
+    // Iter#10: ach unlock fanfare — delayed slightly so it doesn't pile on the
+    // gameover whomp / newbest stinger.
+    setTimeout(function () { try { SFX.play('ach'); } catch (e) {} }, 480);
   }
 }
 
@@ -776,6 +922,8 @@ function update(dt) {
       GF.spawnFloat(rsxw, rsyw - 28 * GF.S, GF.t('rocket_grab'), '#ff8a3c');
       GF.spawnFloat(rsxw, rsyw - 56 * GF.S, '+' + ROCKET_VALUE, '#ffd84a');
       GF.setShake(0.7);
+      // Iter#10: rocket whoosh
+      SFX.play('rocket');
     }
   }
   if (rocketBoostTimer > 0) rocketBoostTimer = Math.max(0, rocketBoostTimer - dt);
@@ -813,6 +961,8 @@ function update(dt) {
       GF.spawnParticles(ssxw, ssyw, '#a0e8ff', 14);
       GF.spawnFloat(ssxw, ssyw - 28 * GF.S, GF.t('shield_grab'), '#5ad8ff');
       GF.setShake(0.5);
+      // Iter#10: shield grab chime (lower, two-note)
+      SFX.play('shield_grab');
     }
   }
   // Tick shield timers.
@@ -840,6 +990,8 @@ function update(dt) {
       var csyw = coin.y * GF.S;
       GF.spawnParticles(csxw, csyw, '#ffd84a', 10);
       GF.spawnFloat(csxw, csyw - 18 * GF.S, '+' + COIN_VALUE, '#ffd84a');
+      // Iter#10: coin chime
+      SFX.play('coin');
     }
   }
 
@@ -899,7 +1051,12 @@ function update(dt) {
         if (milestone > 0) {
           lastMilestoneCombo = milestone;
           spawnComboBurst(tire.x, tire.y, milestone);
+          // Iter#10: milestone audio (distinct timbre per tier)
+          SFX.play(milestone >= 10 ? 'milestone_10' : (milestone >= 5 ? 'milestone_5' : 'milestone_3'));
         }
+        // Iter#10: per-bounce blip — pitch rises with combo; rate-limited so
+        // chained contacts in one obstacle frame don't double-fire.
+        SFX.play('bounce', { combo: combo, minGap: 40 });
       }
     }
   }
@@ -963,6 +1120,8 @@ function update(dt) {
         GF.spawnParticles(savX, savY, '#ffffff', 18);
         GF.spawnFloat(savX, savY - 50 * GF.S, GF.t('shield_save'), '#5ad8ff');
         GF.setShake(1.0);
+        // Iter#10: triumphant "saved" arpeggio
+        SFX.play('shield_save');
       }
       // shield active OR within invuln: skip game-over this frame.
     } else {
@@ -1061,6 +1220,38 @@ function draw(ctx) {
     drawAchBadge();
     if (achToast > 0 && achToastId) drawAchToast();
   }
+
+  // Iter#10: mute toggle — pinned bottom-right in every state. Small disc so it
+  // never overlaps SCORE/BEST (top-right) or achievement strip (bottom-left).
+  drawMuteButton();
+}
+
+// Iter#10: bottom-right mute toggle. Hit-tested in canvas click handler below.
+// Rect cached in `muteBtnRect` so the click handler reads exact bounds.
+var muteBtnRect = { x: 0, y: 0, r: 0 };
+function drawMuteButton() {
+  var c = GF.ctx;
+  var W = GF.W, H = GF.H, S = GF.S;
+  var r = GF.clamp(18 * S, 14, 24);
+  var pad = GF.clamp(14 * S, 10, 20);
+  var cx = W - pad - r;
+  var cy = H - pad - r;
+  muteBtnRect.x = cx; muteBtnRect.y = cy; muteBtnRect.r = r + 4 * S;
+  c.save();
+  c.beginPath();
+  c.arc(cx, cy, r, 0, Math.PI * 2);
+  c.fillStyle = 'rgba(20, 22, 32, 0.62)';
+  c.fill();
+  c.lineWidth = 1.5;
+  c.strokeStyle = SFX.isMuted() ? 'rgba(180, 80, 80, 0.85)' : 'rgba(180, 220, 255, 0.65)';
+  c.stroke();
+  var fs = GF.clamp(18 * S, 14, 22);
+  c.font = fs + 'px sans-serif';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillStyle = SFX.isMuted() ? '#ff8080' : '#e0f0ff';
+  c.fillText(SFX.isMuted() ? '\u{1F507}' : '\u{1F50A}', cx, cy + 1 * S);
+  c.restore();
 }
 
 // Iter#2 (ladder2): paints top-5 + your rank below the GAMEOVER overlay button.
@@ -1295,6 +1486,37 @@ function drawAchToast() {
   c.fillText(ach.emoji + ' ' + GF.t(ach.nameKey) + ' — ' + GF.t('ach_unlocked'),
              W / 2, GF.clamp(78 * S, 56, 100));
 }
+
+// Iter#10: canvas click for the mute toggle. Attached FIRST so it consumes
+// the click before skin-slot or PLAY button handlers see it. Capture phase
+// + stopPropagation when the click is inside the disc.
+(function attachMuteClicks() {
+  function handler(ev) {
+    if (!muteBtnRect.r) return; // not drawn yet
+    var px, py;
+    if (ev.changedTouches && ev.changedTouches.length) {
+      px = ev.changedTouches[0].clientX;
+      py = ev.changedTouches[0].clientY;
+    } else {
+      px = ev.clientX; py = ev.clientY;
+    }
+    if (px == null || py == null) return;
+    var dx = px - muteBtnRect.x, dy = py - muteBtnRect.y;
+    if (dx * dx + dy * dy <= muteBtnRect.r * muteBtnRect.r) {
+      SFX.setMuted(!SFX.isMuted());
+      if (!SFX.isMuted()) SFX.play('ui');
+      try { ev.stopPropagation(); } catch (e) {}
+      try { ev.preventDefault(); } catch (e) {}
+    }
+  }
+  function attach() {
+    if (!GF.canvas) { setTimeout(attach, 50); return; }
+    // capture-phase so we intercept before gf-lib's overlay-button listener
+    GF.canvas.addEventListener('click', handler, true);
+    GF.canvas.addEventListener('touchend', handler, { passive: false, capture: true });
+  }
+  attach();
+})();
 
 // Canvas click for skin slots (separate from gf-lib's button system, which is
 // reserved for the PLAY/RETRY action). Order matters: PLAY button click is
@@ -2127,7 +2349,8 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     shieldActive:  typeof shieldActive !== 'undefined' ? shieldActive : null,
     shieldsCollectedRun: typeof shieldsCollectedRun !== 'undefined' ? shieldsCollectedRun : null,
     shieldSavesRun: typeof shieldSavesRun !== 'undefined' ? shieldSavesRun : null,
-    lifetimeShieldSaves: typeof lifetimeShieldSaves !== 'undefined' ? lifetimeShieldSaves : null
+    lifetimeShieldSaves: typeof lifetimeShieldSaves !== 'undefined' ? lifetimeShieldSaves : null,
+    sfxMuted: typeof sfxMuted !== 'undefined' ? sfxMuted : null
   };
 });
 })();

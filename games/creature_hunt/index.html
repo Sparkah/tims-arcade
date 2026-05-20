@@ -5,6 +5,36 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Creature Hunt</title>
 <script src="/sdk.js"></script>
+<script>
+// CG sitelock — defense-in-depth on top of the optional dev-portal toggle.
+// Refuses to run when the CG SDK script is present but the page isn't on
+// crazygames.com / *.crazygames.com / *.cgames.dev (CG previews) / local.
+// Yandex and local builds don't include the CG SDK so this is a no-op
+// there. Required per CG submission expectations to prevent rehosting.
+(function() {
+  var SDK_MARKER = 'crazygames-sdk-v3.js';
+  var scripts = document.getElementsByTagName('script');
+  var isCgBuild = false;
+  for (var i = 0; i < scripts.length; i++) {
+    var s = scripts[i].src || '';
+    if (s.indexOf(SDK_MARKER) !== -1) { isCgBuild = true; break; }
+  }
+  if (!isCgBuild) return;
+  var host = (location.hostname || '').toLowerCase();
+  var endsWith = function(h, suf) { return h === suf || h.length > suf.length + 1 && h.slice(-(suf.length + 1)) === '.' + suf; };
+  var ok = host === '' || host === 'localhost' || host === '127.0.0.1' ||
+           endsWith(host, 'crazygames.com') ||
+           endsWith(host, 'cgames.dev');
+  if (ok) return;
+  document.documentElement.innerHTML =
+    '<style>html,body{margin:0;height:100%}body{background:#0a0a0a;color:#f0e6c8;font-family:system-ui,-apple-system,sans-serif;' +
+    'display:flex;align-items:center;justify-content:center;text-align:center;padding:24px}a{color:#7cf;text-decoration:none}' +
+    'a:hover{text-decoration:underline}h1{font-size:22px;margin:0 0 14px}p{font-size:15px;margin:0}</style>' +
+    '<div><h1>Play Creature Hunt on CrazyGames</h1>' +
+    '<p><a href="https://www.crazygames.com/" target="_top">crazygames.com</a></p></div>';
+  throw new Error('Sitelock: this build is licensed to crazygames.com');
+})();
+</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;user-select:none;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;-webkit-tap-highlight-color:transparent}
 html,body{overflow:hidden;position:fixed;width:100%;height:100%;overscroll-behavior:none;touch-action:none}
@@ -978,6 +1008,30 @@ const Platform = {
             } catch(_) {}
           });
         } catch(_) {}
+        // CG "Play with Friends" wiring (2026-05-19 platform mandate).
+        // Capture any invite-link param the player arrived with so the
+        // multiplayer connect can request that specific room. Also
+        // register the room-join listener for the in-game case (friend
+        // clicks the link while the inviter is already loaded).
+        try {
+          this.cgInviteRoomId = this._sdk.game.getInviteParam('roomId') || null;
+          this.cgIsInstantMP  = !!this._sdk.game.isInstantMultiplayer;
+        } catch(_) {
+          this.cgInviteRoomId = null;
+          this.cgIsInstantMP  = false;
+        }
+        try {
+          this._sdk.game.addJoinRoomListener((params) => {
+            try {
+              var newRoom = (params && params.roomId) || null;
+              if (!newRoom) return;
+              this.cgInviteRoomId = newRoom;
+              if (typeof window.onCgFriendJoinedRoom === 'function') {
+                window.onCgFriendJoinedRoom(newRoom);
+              }
+            } catch(_) {}
+          });
+        } catch(_) {}
         try { onReady(); } catch(_) {}
         this.loadingReady();
       } catch(_) {
@@ -1063,6 +1117,32 @@ const Platform = {
     } else if (this.name === 'crazygames' && this._sdk) {
       try { this._sdk.game.happytime(); } catch(_) {}
     }
+  },
+
+  // ── CrazyGames "Play with Friends" room/invite helpers ──
+  // No-ops on non-CG platforms. Pre-2026-05-19 the CG MP API was optional;
+  // it's now mandatory for the Games With Friends placement.
+  cgUpdateRoom(roomId) {
+    if (this.name !== 'crazygames' || !this._sdk) return;
+    try { this._sdk.game.updateRoom({ roomId: String(roomId) }); } catch(_) {}
+  },
+  cgShowInviteButton(roomId) {
+    if (this.name !== 'crazygames' || !this._sdk) return;
+    try { this._sdk.game.showInviteButton({ roomId: String(roomId) }); } catch(_) {}
+  },
+  cgHideInviteButton() {
+    if (this.name !== 'crazygames' || !this._sdk) return;
+    try { this._sdk.game.hideInviteButton(); } catch(_) {}
+  },
+  cgLeftRoom() {
+    if (this.name !== 'crazygames' || !this._sdk) return;
+    try { this._sdk.game.leftRoom(); } catch(_) {}
+  },
+  // Read-once helper for the menu flow.
+  cgConsumeInviteRoomId() {
+    var id = this.cgInviteRoomId || null;
+    this.cgInviteRoomId = null;
+    return id;
   },
 
   detectLanguage() {
@@ -1389,7 +1469,17 @@ function bfsPath(fromX, fromY, toX, toY, ignoreDoors) {
   return null;
 }
 
+// v4 (2026-05-20): SP felt too fast vs the new server-driven MP pace.
+// Apply a uniform slowdown to every client-side tryMove when offline.
+// MP never enters this branch — server-authoritative entities are
+// interpolated client-side, not tryMove'd, so this is SP-only.
+const SP_SPEED_MULT = 1 / 1.5;
+
 function tryMove(ent, dx, dy) {
+  if (mpState !== 'playing') {
+    dx *= SP_SPEED_MULT;
+    dy *= SP_SPEED_MULT;
+  }
   const r = ent.radius - 1;
   const nx = ent.x + dx, ny = ent.y + dy;
   if (!pixelBlocked(nx - r, ny - r) && !pixelBlocked(nx + r, ny - r) &&
@@ -1738,6 +1828,18 @@ function toggleHiding() {
   }
 }
 
+// Hide the F (throw rock) touch button + relabel the E button for the
+// creature role, since creatures don't throw rocks and their E action is
+// "break barrel", not "hide". Call after role is set (startGame / MP start).
+function updateTouchButtonsForRole() {
+  try {
+    const btnF = document.getElementById('touch-f');
+    const btnE = document.getElementById('touch-e');
+    if (btnF) btnF.style.display = (playerRole === 'creature') ? 'none' : '';
+    if (btnE && playerRole === 'creature') btnE.textContent = 'E';
+  } catch(_) {}
+}
+
 function handleEKey() {
   if (!player.alive || gameState !== 'playing') return;
   if (player.hiding) {
@@ -1746,7 +1848,28 @@ function handleEKey() {
   }
   // Prioritize barrel if near one
   const barrel = getNearBarrel();
-  if (barrel && playerRole !== 'creature') {
+  if (barrel) {
+    if (playerRole === 'creature') {
+      // Creature smashes the barrel and ejects any hidden human at that
+      // tile. Without this the creature had no way to flush hidden
+      // survivors and the round stalled.
+      mapGrid[barrel.row][barrel.col] = '.';
+      AudioManager.playBarrel(barrel.x, barrel.y);
+      for (let i = 0; i < 12; i++) {
+        particles.push({
+          x: barrel.x, y: barrel.y,
+          vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3,
+          life: 600, maxLife: 600, color: '#c8945a', size: 3
+        });
+      }
+      // Eject any AI human hiding at this barrel
+      for (const h of humans) {
+        if (h.hiding && Math.abs(h.x - barrel.x) < 4 && Math.abs(h.y - barrel.y) < 4) {
+          h.hiding = false;
+        }
+      }
+      return;
+    }
     if (player.hideCooldown > 0) {
       showAlert(t('cant_hide_yet'));
       return;
@@ -3438,6 +3561,7 @@ function startGame(role) {
 
     gameState = 'playing';
     lastTime = performance.now();
+    updateTouchButtonsForRole();
 
     // Start persistent audio (wrapped separately — audio issues shouldn't block game)
     try {
@@ -3515,6 +3639,9 @@ function _doBackToMenu() {
   }
   mpState = null;
   mpPlayerId = null;
+  // CG: tell SDK we're no longer in any room so friend status reflects
+  // "in menu" rather than "in game".
+  try { Platform.cgLeftRoom(); Platform.cgHideInviteButton(); } catch(_) {}
   document.getElementById('connection-status').style.display = 'none';
 }
 
@@ -3672,6 +3799,7 @@ function leaveOnline() {
   mpState = null;
   mpPlayerId = null;
   mpReconnectAttempts = 0;
+  try { Platform.cgLeftRoom(); Platform.cgHideInviteButton(); } catch(_) {}
   document.getElementById('lobby').style.display = 'none';
   document.getElementById('overlay').style.display = 'flex';
   document.getElementById('connection-status').style.display = 'none';
@@ -3694,7 +3822,14 @@ function connectToServer() {
     mpReconnectAttempts = 0;
     updateConnectionStatus('Connected', '#5e5');
     const playerName = 'Player' + Math.floor(Math.random() * 999);
-    mpSocket.send(JSON.stringify({ type: 'join', name: playerName }));
+    // CG "Play with Friends": if this session arrived via an invite link
+    // (or a JoinRoomListener fired before we connected), forward the room
+    // id so the server places us in that lobby instead of matchmaking us.
+    var inviteRoomId = (typeof Platform !== 'undefined' && Platform.cgConsumeInviteRoomId)
+      ? Platform.cgConsumeInviteRoomId() : null;
+    var joinMsg = { type: 'join', name: playerName };
+    if (inviteRoomId) joinMsg.roomId = inviteRoomId;
+    mpSocket.send(JSON.stringify(joinMsg));
 
     // Start ping interval
     mpSocket._pingInterval = setInterval(() => {
@@ -3748,6 +3883,12 @@ function handleServerMessage(msg) {
     case 'lobby':
       mpState = 'lobby';
       mpRoomId = msg.roomId;
+      // CG: notify SDK of the current room (drives friend status +
+      // notifications) and surface the invite button so the inviter can
+      // share the room with friends. Re-called on every lobby tick so
+      // the SDK stays in sync as players come and go.
+      try { Platform.cgUpdateRoom(mpRoomId); } catch(_) {}
+      try { Platform.cgShowInviteButton(mpRoomId); } catch(_) {}
       const lobbyInfo = document.getElementById('lobby-info');
       lobbyInfo.textContent = `Room #${msg.roomId} — ${msg.players.length} player${msg.players.length !== 1 ? 's' : ''}`;
       const lobbyPlayers = document.getElementById('lobby-players');
@@ -3768,6 +3909,8 @@ function handleServerMessage(msg) {
       mpPlayerId = msg.playerId;
       mpRole = msg.role;
       playerRole = msg.role;
+      // Round started — hide the CG invite UI; the room is sealed now.
+      try { Platform.cgHideInviteButton(); } catch(_) {}
       document.getElementById('lobby').style.display = 'none';
       document.getElementById('overlay').style.display = 'none';
       document.getElementById('game-over').style.display = 'none';
@@ -3832,10 +3975,29 @@ function handleServerMessage(msg) {
       creatureSpawnTimer = 0;
       camera.x = player.x;
       camera.y = player.y;
-      intro = null;
+      // Creature role gets the overview→zoom→blackout intro cinematic that
+      // SP already shows (~6s). v3 MP was skipping it — player just spawned
+      // frozen waiting for the round timer. Mirror startGame() lines 3501-3517.
+      if (mpRole === 'creature') {
+        const _mapW = MAP_COLS * TILE, _mapH = MAP_ROWS * TILE;
+        intro = {
+          phase: 'overview',
+          timer: 0,
+          spawnX: player.x,
+          spawnY: player.y,
+          mapCX: _mapW / 2,
+          mapCY: _mapH / 2,
+          zoom: Math.min(CW / _mapW, CH / _mapH),
+        };
+        camera.x = intro.mapCX;
+        camera.y = intro.mapCY;
+      } else {
+        intro = null;
+      }
 
       gameState = 'playing';
       lastTime = performance.now();
+      updateTouchButtonsForRole();
 
       AudioManager.stopAll();
       AudioManager.ensure();
@@ -3988,6 +4150,23 @@ function handleServerEvent(evt) {
         AudioManager.playDoor(evt.data.col * TILE + TILE / 2, evt.data.row * TILE + TILE / 2, true);
       }
       break;
+    case 'barrel_broken':
+      // Server smashed a barrel — mirror locally so getNearBarrel + render
+      // stop seeing it. Particle burst + sound for feedback.
+      if (evt.data) {
+        if (mapGrid && mapGrid[evt.data.row] && mapGrid[evt.data.row][evt.data.col] === 'B') {
+          mapGrid[evt.data.row][evt.data.col] = '.';
+        }
+        try { AudioManager.playBarrel(evt.data.x, evt.data.y); } catch(_) {}
+        for (let i = 0; i < 12; i++) {
+          particles.push({
+            x: evt.data.x, y: evt.data.y,
+            vx: (Math.random() - 0.5) * 3, vy: (Math.random() - 0.5) * 3,
+            life: 600, maxLife: 600, color: '#c8945a', size: 3
+          });
+        }
+      }
+      break;
   }
 }
 
@@ -4096,16 +4275,18 @@ function setup() {
     if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
     // Init audio on first interaction
     AudioManager.ensure();
-    // E key — hide in barrel or toggle door
+    // E key — humans hide in barrel / toggle door; creature smashes barrel
     if (e.code === 'KeyE' && gameState === 'playing') {
       if (mpState === 'playing') {
-        sendAction('hide');
+        // Creature can't hide — server ignores 'hide' from creature role.
+        // Send 'break_barrel' instead so E does something useful.
+        sendAction(playerRole === 'creature' ? 'break_barrel' : 'hide');
       } else {
         handleEKey();
       }
     }
-    // F key — throw rock distraction
-    if (e.code === 'KeyF' && gameState === 'playing') {
+    // F key — throw rock distraction (humans only; creature has no rocks)
+    if (e.code === 'KeyF' && gameState === 'playing' && playerRole !== 'creature') {
       if (mpState === 'playing') {
         sendAction('throw');
       } else {
@@ -4281,7 +4462,148 @@ function setup() {
   applyLocalization();
   renderMenuStats();
   requestAnimationFrame(gameLoop);
+
+  // CG "Play with Friends": if this session loaded via an invite link
+  // (game.isInstantMultiplayer + getInviteParam("roomId")), skip the
+  // menu and drop the player straight into the inviter's lobby. The
+  // roomId is consumed inside connectToServer via cgConsumeInviteRoomId.
+  try {
+    if (Platform.name === 'crazygames' && Platform.cgIsInstantMP && Platform.cgInviteRoomId) {
+      setTimeout(function(){ try { joinOnline(); } catch(_) {} }, 50);
+    }
+  } catch(_) {}
+
+  // ?promo=climax — headless capture mode. Boots into a fixed-seed map
+  // with the creature pre-spawned near the player and a scripted key
+  // chain that drives a chase. Never user-facing (not linked from menus,
+  // not in any submission zip). See crazygames_promo/record_promo.js +
+  // Shared/skills/promo-video/.
+  try {
+    var _q = new URLSearchParams(location.search);
+    if (_q.get('promo') === 'climax') setTimeout(setupPromoClimax, 50);
+  } catch(_) {}
 }
+
+// ── Promo capture mode ────────────────────────────────────────────
+// Triggered ONLY by ?promo=climax. Sets up a deterministic survival
+// scene + drives the player via scripted keystrokes so a headless
+// browser can record a clean 15-20s gameplay clip (CG video spec:
+// 1080p 16:9 landscape, silent, no overlays, no cursor).
+function setupPromoClimax() {
+  try {
+    ['overlay','game-over','lobby','pause-btn','connection-status','touch-controls'].forEach(function(id){
+      var el = document.getElementById(id); if (el) el.style.display = 'none';
+    });
+    if (document.body && document.body.style) document.body.style.cursor = 'none';
+
+    // Override the resize cap so the 860x620 canvas FILLS the recording
+    // viewport (no letterbox — CG explicitly rejects black bars). Uses
+    // max-scale so one axis fills, the other crops slightly. The game's
+    // HUD/minimap may clip at the edges; gameplay stays centered.
+    var _cont = document.getElementById('game-container');
+    if (_cont) {
+      var _fill = function(){
+        var sx = window.innerWidth / 860, sy = window.innerHeight / 620;
+        var s = Math.max(sx, sy);
+        _cont.style.transform = 'scale(' + s + ')';
+        _cont.style.transformOrigin = 'center center';
+      };
+      _fill();
+      window.addEventListener('resize', _fill);
+    }
+
+    playerRole = 'human';
+    gameSeed = 424242; // fixed → deterministic map
+    initGame();
+
+    // Spawn the creature within camera view so the chase reads on screen
+    // from frame 1 — no 8s spawn delay, no off-screen wandering.
+    if (creature && player) {
+      creature.x = player.x + 540;
+      creature.y = player.y + 60;
+    }
+    creatureSpawned = true;
+    creatureSpawnTimer = (typeof CREATURE_SPAWN_DELAY === 'number' ? CREATURE_SPAWN_DELAY : 8000) + 1;
+    rocksLeft = 3;
+    // Keep the round running for the entire capture window — headless
+    // Chrome can race rAF faster than wall-clock and burn through the 60s
+    // round before 18s of video finish. 2-minute cap is plenty (at the
+    // observed ~4x speedup, 18s wall ≈ 70s game time → leaves ~50s on
+    // the visible "Time left" counter at the end, which reads normal).
+    try { huntTimeLimit = 120000; } catch(_) {}
+
+    intro = null; // skip the cinematic — pure gameplay only
+    gameState = 'playing';
+    lastTime = performance.now();
+    try { AudioManager.muted = true; if (AudioManager.master) AudioManager.master.gain.value = 0; } catch(_) {}
+    try { Platform.gameplayStart(); } catch(_) {}
+
+    runPromoKeyChain();
+    requestAnimationFrame(gameLoop);
+  } catch(e) {}
+}
+
+// Scripted keystroke timeline. Each tuple = [absMs, code, down].
+// Sustained directions create natural-looking chase movement; sprint
+// bursts + a rock throw add visual variety. ~18s total — within CG's
+// 15-20s preview window with margin for the encode tail.
+var PROMO_KEY_TIMELINE = [
+  [   0, 'KeyW', true],
+  [1800, 'KeyW', false],
+  [1800, 'KeyD', true],
+  [3000, 'ShiftLeft', true],
+  [4400, 'ShiftLeft', false],
+  [4400, 'KeyD', false],
+  [4400, 'KeyW', true],
+  [6200, 'KeyW', false],
+  [6200, 'KeyA', true],
+  [7600, 'KeyA', false],
+  [7600, 'KeyS', true],
+  [8400, 'KeyF', true],      // throw a rock — distraction particle
+  [8500, 'KeyF', false],
+  [9200, 'KeyS', false],
+  [9200, 'KeyD', true],
+  [9200, 'ShiftLeft', true],
+  [11000, 'ShiftLeft', false],
+  [11000, 'KeyD', false],
+  [11000, 'KeyW', true],
+  [13000, 'KeyW', false],
+  [13000, 'KeyA', true],
+  [13000, 'ShiftLeft', true],
+  [15500, 'ShiftLeft', false],
+  [15500, 'KeyA', false],
+  [15500, 'KeyS', true],
+  [17500, 'KeyS', false]
+];
+
+function runPromoKeyChain() {
+  for (var i = 0; i < PROMO_KEY_TIMELINE.length; i++) {
+    (function(step){
+      setTimeout(function(){
+        try { keys[step[1]] = !!step[2]; } catch(_) {}
+      }, step[0]);
+    })(PROMO_KEY_TIMELINE[i]);
+  }
+}
+
+// CG: a friend clicked an invite while we're already loaded. The SDK
+// listener stored the new roomId on Platform; reconnect with it (or
+// auto-launch into the lobby if we're still on the menu) so we land
+// in their room without a page reload.
+window.onCgFriendJoinedRoom = function(roomId) {
+  try {
+    if (mpState === 'playing') return; // mid-match, can't switch
+    if (mpState === 'lobby' || mpState === 'connecting') {
+      // Recycle the socket; next connectToServer() picks up cgInviteRoomId.
+      if (mpSocket) { try { mpSocket.close(); } catch(_) {} mpSocket = null; }
+      if (mpReconnectTimer) { clearTimeout(mpReconnectTimer); mpReconnectTimer = null; }
+      mpReconnectAttempts = 0;
+      connectToServer();
+      return;
+    }
+    if (typeof joinOnline === 'function') joinOnline();
+  } catch(_) {}
+};
 
 let _errShown = false;
 

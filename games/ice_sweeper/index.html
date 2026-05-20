@@ -44,6 +44,7 @@ var STRINGS = {
     level: 'LEVEL', time: 'TIME', clean: 'CLEAN', score: 'SCORE', best: 'BEST',
     complete: 'LAKE CLEARED!', gameover: "TIME'S UP!",
     chain: 'CHAIN', bonus: 'TIME BONUS', newBest: 'NEW BEST!',
+    chainHot: 'HOT CHAIN!', chainBlaze: 'BLAZE!', chainInferno: 'INFERNO!!',
     extraTime:    '+15s EXTRA TIME',
     secAbbr:      's',
     hullClassic:  'CLASSIC', hullArctic: 'ARCTIC', hullSunset: 'SUNSET',
@@ -62,6 +63,7 @@ var STRINGS = {
     level: 'УРОВЕНЬ', time: 'ВРЕМЯ', clean: 'ЧИСТО', score: 'ОЧКИ', best: 'РЕКОРД',
     complete: 'ОЗЕРО ОЧИЩЕНО!', gameover: 'ВРЕМЯ ВЫШЛО!',
     chain: 'ЦЕПЬ', bonus: 'БОНУС', newBest: 'НОВЫЙ РЕКОРД!',
+    chainHot: 'ГОРЯЧАЯ ЦЕПЬ!', chainBlaze: 'ПЛАМЯ!', chainInferno: 'ПОЖАР!!',
     extraTime:    '+15с ДОП. ВРЕМЯ',
     secAbbr:      'с',
     hullClassic:  'КЛАССИКА', hullArctic: 'АРКТИКА', hullSunset: 'ЗАКАТ',
@@ -136,6 +138,16 @@ var COLS, ROWS, TILE;
 // iter#2: NEW BEST! popup state (set on game-over when score > prior best)
 var newBestThisRun = false;
 var newBestPulse = 0;
+
+// iter#5: CHAIN MILESTONES — when a run crosses x3/x5/x10, fire a big banner +
+// bonus points + extra particle burst. Reset per-level so each lake offers
+// the full skill expression ladder. Lifetime ceiling of milestoneShown
+// prevents re-firing the same tier multiple times within a single chain run.
+var chainTierShown = 0;          // 0 = none, 1 = HOT (x3), 2 = BLAZE (x5), 3 = INFERNO (x10)
+var chainBannerText = '';
+var chainBannerColor = '#FFD700';
+var chainBannerLife = 0;
+var chainBannerPulse = 0;
 
 // iter#3: cosmetic HULL palette unlocks tied to BEST score thresholds.
 // Player selects unlocked palette on MENU; selection persists; default is free.
@@ -220,6 +232,7 @@ function startLevel(lvl) {
   level = lvl;
   particles = []; floats = []; buttons = [];
   chain = 0; chainTimer = 0; shake = 0;
+  chainTierShown = 0; chainBannerLife = 0;
   cleared = 0;
   newBestThisRun = false; newBestPulse = 0;
   // iter#1: reset the rewarded-ad slot each level
@@ -306,6 +319,7 @@ window.__gfState = function () {
       best: best,
       timeLeft: timeLeft,
       chain: (typeof chain !== 'undefined') ? chain : 0,
+      chainTier: chainTierShown,
       hullIdx: hullIdx,
       hullsUnlocked: HULL_PALETTES.filter(isHullUnlocked).length,
       daySeed: getDaySeed(),
@@ -407,7 +421,8 @@ function update(dt) {
   timeLeft -= dt;
   if (timeLeft <= 0) { timeLeft = 0; gs = 'GAMEOVER';try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}; return; }
 
-  if (chainTimer > 0) { chainTimer -= dt; if (chainTimer <= 0) chain = 0; }
+  if (chainTimer > 0) { chainTimer -= dt; if (chainTimer <= 0) { chain = 0; chainTierShown = 0; } }
+  if (chainBannerLife > 0) { chainBannerLife -= dt; chainBannerPulse += dt * 8; }
   if (shake > 0) shake = Math.max(0, shake - dt * 8);
 
   // ship movement
@@ -461,6 +476,27 @@ function update(dt) {
       spawnParticles(px, py, '#ffffff', 8);
       spawnParticles(px, py, '#88e0ff', 6);
       spawnFloat(px, py - 8*S, (chain > 1 ? 'x'+chain+' ' : '') + '+'+pts, chain > 1 ? '#FFD700' : '#fff');
+
+      // iter#5: CHAIN MILESTONES — x3/x5/x10 fire banner + bonus + extra juice
+      var milestoneTier = 0;
+      if (chain >= 10) milestoneTier = 3;
+      else if (chain >= 5) milestoneTier = 2;
+      else if (chain >= 3) milestoneTier = 1;
+      if (milestoneTier > chainTierShown) {
+        chainTierShown = milestoneTier;
+        var bonusPts = milestoneTier === 1 ? 25 : milestoneTier === 2 ? 75 : 200;
+        score += bonusPts;
+        chainBannerLife = 1.6;
+        chainBannerPulse = 0;
+        if (milestoneTier === 1) { chainBannerText = t('chainHot'); chainBannerColor = '#FFB347'; }
+        else if (milestoneTier === 2) { chainBannerText = t('chainBlaze'); chainBannerColor = '#FF6B35'; shake = Math.max(shake, 0.28); }
+        else { chainBannerText = t('chainInferno'); chainBannerColor = '#FF3030'; shake = Math.max(shake, 0.42); }
+        // burst of fire-toned particles around the ship
+        var burstN = milestoneTier === 3 ? 28 : milestoneTier === 2 ? 18 : 12;
+        spawnParticles(ship.x, ship.y, chainBannerColor, burstN);
+        spawnParticles(ship.x, ship.y, '#FFD700', Math.floor(burstN * 0.6));
+        spawnFloat(ship.x, ship.y - 26*S, '+'+bonusPts, chainBannerColor);
+      }
 
       // chain bonus to neighbours: if neighbour is at state >=2, advance it
       var dirs = [[-1,0],[1,0],[0,-1],[0,1]];
@@ -864,6 +900,32 @@ function drawDaySeedTag() {
   ctx.restore();
 }
 
+// ── iter#5: CHAIN MILESTONE banner — centre-top during PLAY ────────────────
+// Fires when player crosses chain x3/x5/x10. Positioned below HUD so it never
+// overlaps the score/timer (top 56*S) and clears the playfield centre so
+// chunk action stays visible. Auto-decays in ~1.6s.
+function drawChainBanner() {
+  if (chainBannerLife <= 0) return;
+  var alpha = Math.min(1, chainBannerLife / 0.5);
+  var pulse = 1 + Math.sin(chainBannerPulse) * 0.10;
+  var fs = clamp(30*S, 22, 46);
+  var by = (HUD_H + 38) * S;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(cx, by);
+  ctx.scale(pulse, pulse);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = chainBannerColor;
+  ctx.shadowBlur = 22*S;
+  ctx.fillStyle = chainBannerColor;
+  ctx.fillText(chainBannerText, 0, 0);
+  ctx.restore();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
 // ── MAIN LOOP ───────────────────────────────────────────────────────────────
 function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
@@ -901,6 +963,7 @@ function frame(ts) {
 
     drawShip(ship.x, ship.y, ship.angle);
     drawHUD();
+    drawChainBanner(); // iter#5
   }
   ctx.restore();
 
