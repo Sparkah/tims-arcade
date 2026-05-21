@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Shit Truck</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #2a2418; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── TUNABLES (mirror DESIGN.md) ──────────────────────────────────────────
+var TANK_MAX           = 100;
+var RUPTURE_THRESHOLD  = 100;
+var VACUUM_RADIUS      = 110;
+var VACUUM_RATE        = 55;
+var BIN_COUNT          = 4;
+var SLUDGE_PER_BIN     = 30;
+var BIN_REGEN_RATE     = 4.5;
+var STRIKE_LIMIT       = 3;
+var PLANT_RADIUS       = 80;
+var TRUCK_SPEED        = 240;
+var SPLAT_PER_OVERFILL = 0.6;
+var DUMP_REWARD_PER    = 6;
+
+// Hitboxes
+var TRUCK_WIDTH = 46;
+var TRUCK_LEN   = 70;
+var BIN_RADIUS  = 28;
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Shit Truck',
+    sub:   'Vacuum the bins. Dump at the plant. Do not rupture.',
+    play: 'START SHIFT',
+    retry: 'NEW SHIFT',
+    score: 'CASH', best: 'BEST',
+    gameover: 'SHIFT OVER',
+    rupture_reason: 'Tank ruptured!',
+    strike_reason: 'Reputation lost!',
+    tank_label: 'TANK',
+    bins_label: 'BINS',
+    contract_label: 'CONTRACT',
+    cash_label: 'CASH',
+    upgrade_head: 'Upgrade',
+    upgrade_sub: 'Pick a perk for the next contract.',
+    up_radius: '+ SUCTION RADIUS',
+    up_tank: '+ TANK CAPACITY',
+    up_buffer: '+ RUPTURE BUFFER',
+    contract_done: 'CONTRACT DONE',
+    next_contract: 'NEXT CONTRACT',
+    help: '?',
+    close: 'CLOSE',
+    dump_here: 'DUMP HERE',
+    nearest_bin: 'TO BIN',
+    hold_to_vac: 'HOLD TO VACUUM',
+    drive_to_plant: 'DRIVE TO PLANT',
+    tut_goal:     'Goal: Vacuum overflowing bins and dump the sludge at the plant for cash.',
+    tut_controls: 'Controls: Arrow keys or WASD or drag to drive. Hold mouse or finger on a bin in range to vacuum.',
+    tut_win:      'Win: Score climbs forever. Each contract clears more bins than the last.',
+    tut_lose:     'Lose: Three strikes (from splat trails or overflowing bins) OR rupturing the tank.',
+    tut_tip:      'Tip: Dump at the plant the moment the tank crosses 70 percent. A full tank ruptures fast.',
+    final_line:   'You banked {s} across {c} contracts.',
+    best_line:    'Best: {b}',
+    tap_close:    'TAP TO CLOSE',
+  },
+  ru: {
+    title: 'Говновоз',
+    sub:   'Откачивай баки. Сливай на станции. Не разорви цистерну.',
+    play: 'НАЧАТЬ СМЕНУ',
+    retry: 'НОВАЯ СМЕНА',
+    score: 'ВЫРУЧКА', best: 'РЕКОРД',
+    gameover: 'СМЕНА ОКОНЧЕНА',
+    rupture_reason: 'Цистерна разорвана!',
+    strike_reason: 'Репутация потеряна!',
+    tank_label: 'ЦИСТЕРНА',
+    bins_label: 'БАКИ',
+    contract_label: 'КОНТРАКТ',
+    cash_label: 'ВЫРУЧКА',
+    upgrade_head: 'Прокачка',
+    upgrade_sub: 'Выбери бонус на следующий контракт.',
+    up_radius: '+ РАДИУС ВАКУУМА',
+    up_tank: '+ ОБЪЁМ ЦИСТЕРНЫ',
+    up_buffer: '+ ЗАПАС ПРОЧНОСТИ',
+    contract_done: 'КОНТРАКТ ВЫПОЛНЕН',
+    next_contract: 'СЛЕДУЮЩИЙ КОНТРАКТ',
+    help: '?',
+    close: 'ЗАКРЫТЬ',
+    dump_here: 'СЛЕЙ ЗДЕСЬ',
+    nearest_bin: 'К БАКУ',
+    hold_to_vac: 'УДЕРЖИВАЙ ДЛЯ ВАКУУМА',
+    drive_to_plant: 'К СТАНЦИИ',
+    tut_goal:     'Цель: Откачивай переполненные баки и сливай на станции за деньги.',
+    tut_controls: 'Управление: Стрелки или WASD или свайп — ехать. Удерживай мышь или палец на баке в радиусе.',
+    tut_win:      'Победа: Очки растут бесконечно. Каждый контракт чистит больше баков.',
+    tut_lose:     'Поражение: Три штрафа (за лужи или переполнение баков) ИЛИ разрыв цистерны.',
+    tut_tip:      'Совет: Сливай на станции, как только цистерна перевалит 70 процентов. Полная цистерна рвётся быстро.',
+    final_line:   'Заработано {s} за {c} контрактов.',
+    best_line:    'Рекорд: {b}',
+    tap_close:    'НАЖМИ, ЧТОБЫ ЗАКРЫТЬ',
+  },
+};
+
+var SPRITE_NAMES = []; // procedural only for v0.1
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU'; // MENU | PLAYING | UPGRADE | GAMEOVER
+var truck = { x: 0, y: 0, vx: 0, vy: 0, dirX: 1, dirY: 0 };
+var bins = [];
+var plant = { x: 0, y: 0 };
+var splats = [];
+var sludgeParticles = [];
+
+var tank            = 0;
+var tankPressure    = 0;
+var reputationStrikes = 0;
+var splatStrikeFrac = 0;
+var binOverflowFrac = 0;
+var score           = 0;
+var best            = 0;
+var contractsCompleted = 0;
+var binsClearedThisContract = 0;
+var contractBinTotal = 0;
+
+// Per-run upgrades
+var upgRadiusBonus = 0;
+var upgTankBonus   = 0;
+var upgBufferBonus = 0; // extra units of headroom above RUPTURE_THRESHOLD
+
+var vacuumActive = false;
+var vacuumTargetBinIdx = -1;
+var pointer = { down: false, x: 0, y: 0 };
+
+var gameOverReason = 'strike'; // 'strike' | 'rupture'
+var tutOpen = false;
+var helpRect = null;
+var playRect = null;
+var upgRects = null; // [{x,y,w,h,which}, ...]
+var menuArmedAt = 0;
+var contractDoneAnim = 0;
+
+// Ad gating: don't auto-fire — set flag, fire on next user click.
+var _pendingAd = false;
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+function rand(lo, hi) { return lo + Math.random() * (hi - lo); }
+function nowMs() { return performance.now ? performance.now() : Date.now(); }
+
+function currentTankMax() { return TANK_MAX + upgTankBonus; }
+function currentRuptureThreshold() { return RUPTURE_THRESHOLD + upgBufferBonus; }
+function currentVacuumRadius() { return VACUUM_RADIUS + upgRadiusBonus; }
+
+function nozzleX() { return truck.x - truck.dirX * (TRUCK_LEN * 0.35) * GF.S; }
+function nozzleY() { return truck.y - truck.dirY * (TRUCK_LEN * 0.35) * GF.S; }
+
+// ── WORLD SETUP ──────────────────────────────────────────────────────────
+function spawnContract() {
+  var n = BIN_COUNT + contractsCompleted;
+  if (n > 10) n = 10;
+  bins = [];
+  var margin = Math.max(70, 80 * GF.S);
+  var tries = 0;
+  while (bins.length < n && tries < 400) {
+    tries++;
+    var bx = rand(margin, GF.W - margin);
+    var by = rand(margin + 80 * GF.S, GF.H - margin);
+    if (GF.dist(bx, by, plant.x, plant.y) < 160 * GF.S) continue;
+    var ok = true;
+    for (var i = 0; i < bins.length; i++) {
+      if (GF.dist(bx, by, bins[i].x, bins[i].y) < 100 * GF.S) { ok = false; break; }
+    }
+    if (!ok) continue;
+    bins.push({
+      x: bx, y: by,
+      fill: SLUDGE_PER_BIN * (0.4 + Math.random() * 0.3),
+      cleared: false,
+    });
+  }
+  contractBinTotal = bins.length;
+  binsClearedThisContract = 0;
+}
+
+function placePlant() {
+  plant.x = GF.W * 0.5;
+  plant.y = 110 * GF.S;
+}
+
+function placeTruck() {
+  truck.x = GF.W * 0.5;
+  truck.y = GF.H * 0.65;
+  truck.vx = 0; truck.vy = 0;
+  truck.dirX = 1; truck.dirY = 0;
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────
+function startGame() {
+  tank = 0;
+  tankPressure = 0;
+  reputationStrikes = 0;
+  splatStrikeFrac = 0;
+  binOverflowFrac = 0;
+  score = 0;
+  contractsCompleted = 0;
+  splats = [];
+  sludgeParticles = [];
+  upgRadiusBonus = 0;
+  upgTankBonus = 0;
+  upgBufferBonus = 0;
+  placePlant();
+  placeTruck();
+  spawnContract();
+  vacuumActive = false;
+  vacuumTargetBinIdx = -1;
+  gs = 'PLAYING';
+  tutOpen = false;
+  if (GF.saveRun) GF.saveRun();
+  if (GF.gameStarted) GF.gameStarted();
+}
+
+function gameOver(reason) {
+  gameOverReason = reason || 'strike';
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('shit_truck_best', best); } catch (e) {}
+  }
+  // Mark pending ad — fires on next user click (Retry button).
+  _pendingAd = true;
+  gs = 'GAMEOVER';
+  menuArmedAt = nowMs() + 500;
+  if (GF.saveRun) GF.saveRun();
+  if (GF.gameEnded) GF.gameEnded();
+}
+
+function openUpgrade() {
+  gs = 'UPGRADE';
+  _pendingAd = true; // fire ad on upgrade button click
+  if (GF.saveRun) GF.saveRun();
+}
+
+function pickUpgrade(which) {
+  if (which === 'radius') upgRadiusBonus += 35;
+  else if (which === 'tank') upgTankBonus += 25;
+  else if (which === 'buffer') upgBufferBonus += 25;
+  contractsCompleted += 1;
+  spawnContract();
+  splats = [];
+  sludgeParticles = [];
+  tankPressure = 0;
+  gs = 'PLAYING';
+  if (GF.saveRun) GF.saveRun();
+  // Fire pending ad inside the user's click on the upgrade button.
+  maybeFireAd();
+}
+
+function maybeFireAd() {
+  if (!_pendingAd) return;
+  _pendingAd = false;
+  if (typeof GF.showAd === 'function') {
+    try { GF.showAd('midgame'); } catch (e) {}
+  }
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function onPointerDown(x, y) {
+  pointer.down = true;
+  pointer.x = x; pointer.y = y;
+
+  if (tutOpen) { tutOpen = false; return; }
+
+  if (helpRect && hit(helpRect, x, y)) { tutOpen = true; return; }
+
+  if (gs === 'MENU') {
+    if (playRect && hit(playRect, x, y)) {
+      try { localStorage.setItem('shit_truck_seen_tutorial', '1'); } catch (e) {}
+      startGame();
+      return;
+    }
+    if (nowMs() > menuArmedAt) {
+      try { localStorage.setItem('shit_truck_seen_tutorial', '1'); } catch (e) {}
+      startGame();
+    }
+    return;
+  }
+
+  if (gs === 'GAMEOVER') {
+    if (playRect && hit(playRect, x, y)) { maybeFireAd(); startGame(); return; }
+    if (nowMs() > menuArmedAt) { maybeFireAd(); startGame(); }
+    return;
+  }
+
+  if (gs === 'UPGRADE') {
+    if (upgRects) {
+      for (var i = 0; i < upgRects.length; i++) {
+        if (hit(upgRects[i], x, y)) { pickUpgrade(upgRects[i].which); return; }
+      }
+    }
+    return;
+  }
+  // PLAYING — pointer-down arms vacuum gesture (logic in update)
+}
+
+function onPointerMove(x, y) {
+  if (pointer.down) { pointer.x = x; pointer.y = y; }
+}
+
+function onPointerUp() {
+  pointer.down = false;
+  vacuumActive = false;
+  vacuumTargetBinIdx = -1;
+}
+
+function hit(rect, x, y) {
+  return rect && x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+}
+
+document.addEventListener('mousedown', function (e) { onPointerDown(e.clientX, e.clientY); });
+document.addEventListener('mousemove', function (e) { onPointerMove(e.clientX, e.clientY); });
+document.addEventListener('mouseup',   function () { onPointerUp(); });
+document.addEventListener('mouseleave',function () { onPointerUp(); });
+document.addEventListener('touchstart', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPointerDown(t.clientX, t.clientY);
+}, { passive: true });
+document.addEventListener('touchmove', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  var t = e.changedTouches[0];
+  onPointerMove(t.clientX, t.clientY);
+}, { passive: true });
+document.addEventListener('touchend',    function () { onPointerUp(); }, { passive: true });
+document.addEventListener('touchcancel', function () { onPointerUp(); }, { passive: true });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs === 'MENU') return;
+  if (gs === 'UPGRADE') return;
+  if (gs === 'GAMEOVER') {
+    decaySplats(dt);
+    decaySludge(dt);
+    return;
+  }
+
+  // ── PLAYING ──
+
+  // Truck movement
+  var ax = 0, ay = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA']) ax -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) ax += 1;
+  if (GF.keys['ArrowUp']    || GF.keys['KeyW']) ay -= 1;
+  if (GF.keys['ArrowDown']  || GF.keys['KeyS']) ay += 1;
+  if (GF.touch.active) {
+    ax += GF.touch.dx;
+    ay += GF.touch.dy;
+  }
+  var alen = Math.sqrt(ax * ax + ay * ay);
+  if (alen > 0) { ax /= alen; ay /= alen; }
+
+  var accel = TRUCK_SPEED * 0.08 * GF.S;
+  truck.vx = (truck.vx + ax * accel) * 0.84;
+  truck.vy = (truck.vy + ay * accel) * 0.84;
+  truck.x += truck.vx;
+  truck.y += truck.vy;
+
+  var spd = Math.sqrt(truck.vx * truck.vx + truck.vy * truck.vy);
+  if (spd > 0.6) {
+    truck.dirX = truck.vx / spd;
+    truck.dirY = truck.vy / spd;
+  }
+
+  var pad = TRUCK_LEN * 0.5 * GF.S;
+  if (truck.x < pad) { truck.x = pad; truck.vx = 0; }
+  if (truck.x > GF.W - pad) { truck.x = GF.W - pad; truck.vx = 0; }
+  if (truck.y < pad) { truck.y = pad; truck.vy = 0; }
+  if (truck.y > GF.H - pad) { truck.y = GF.H - pad; truck.vy = 0; }
+
+  // Vacuum logic
+  var radius = currentVacuumRadius() * GF.S;
+  vacuumActive = false;
+  vacuumTargetBinIdx = -1;
+
+  if (pointer.down) {
+    var nx = nozzleX(), ny = nozzleY();
+    var bestD = Infinity, bestI = -1;
+    for (var i = 0; i < bins.length; i++) {
+      var b = bins[i];
+      if (b.cleared) continue;
+      if (b.fill <= 0.01) continue;
+      var d = GF.dist(nx, ny, b.x, b.y);
+      if (d <= radius && d < bestD) { bestD = d; bestI = i; }
+    }
+    if (bestI >= 0) {
+      vacuumActive = true;
+      vacuumTargetBinIdx = bestI;
+      var b2 = bins[bestI];
+      var pull = Math.min(VACUUM_RATE * dt, b2.fill);
+      var tmax = currentTankMax();
+      if (tank < tmax) {
+        var room = tmax - tank;
+        var intoTank = Math.min(pull, room);
+        tank += intoTank;
+        b2.fill -= intoTank;
+        tankPressure = Math.max(0, tankPressure - dt * 8);
+      } else {
+        tankPressure += pull * 4.5;
+        b2.fill -= pull * 0.3;
+      }
+      if (Math.random() < dt * 18) {
+        sludgeParticles.push({
+          x: b2.x + rand(-8, 8) * GF.S,
+          y: b2.y - 4 * GF.S,
+          tx: nx, ty: ny,
+          life: 0.6,
+          r: rand(2.5, 4.2) * GF.S,
+        });
+      }
+      if (b2.fill <= 0.05 && !b2.cleared) {
+        b2.fill = 0;
+        b2.cleared = true;
+        binsClearedThisContract += 1;
+        GF.spawnParticles(b2.x, b2.y, '#6b4e2a', 22);
+        GF.spawnFloat(b2.x, b2.y - 24 * GF.S, '+' + Math.floor(SLUDGE_PER_BIN * DUMP_REWARD_PER * 0.1), '#ffd24d');
+      }
+    }
+  }
+
+  if (!vacuumActive && tankPressure > 0) {
+    tankPressure = Math.max(0, tankPressure - dt * 18);
+  }
+
+  if (tankPressure >= currentRuptureThreshold()) {
+    for (var sp = 0; sp < 6; sp++) {
+      splats.push({ x: truck.x + rand(-30, 30) * GF.S, y: truck.y + rand(-30, 30) * GF.S, r: rand(20, 35) * GF.S, life: 3 });
+    }
+    GF.spawnParticles(truck.x, truck.y, '#5a3a1a', 60);
+    GF.setShake(0.9);
+    gameOver('rupture');
+    return;
+  }
+
+  // Over-fill drips when held with full tank
+  if (tank >= currentTankMax() && vacuumActive) {
+    if (Math.random() < dt * 12) {
+      splats.push({ x: truck.x + rand(-8, 8) * GF.S, y: truck.y + rand(6, 12) * GF.S, r: rand(8, 14) * GF.S, life: 3 });
+      splatStrikeFrac += SPLAT_PER_OVERFILL * 0.35;
+    }
+  }
+
+  // Plant dump
+  var dToPlant = GF.dist(truck.x, truck.y, plant.x, plant.y);
+  if (dToPlant <= PLANT_RADIUS * GF.S && tank > 0.5) {
+    var dumped = Math.min(tank, VACUUM_RATE * 1.4 * dt);
+    tank -= dumped;
+    score += Math.floor(dumped * DUMP_REWARD_PER);
+    tankPressure = Math.max(0, tankPressure - dt * 40);
+    if (Math.random() < dt * 25) {
+      GF.spawnParticles(plant.x, plant.y, '#3a6a2a', 6);
+    }
+    if (tank <= 0.5) {
+      tank = 0;
+      checkContractComplete();
+    }
+  }
+
+  // Bin regen + overflow
+  var regenRate = BIN_REGEN_RATE * (1 + Math.floor(contractsCompleted / 4) * 0.12);
+  var overflowCap = SLUDGE_PER_BIN * 1.8;
+  for (var bi = 0; bi < bins.length; bi++) {
+    var bn = bins[bi];
+    if (bn.cleared) continue;
+    if (bi !== vacuumTargetBinIdx) {
+      bn.fill += regenRate * dt;
+    }
+    if (bn.fill > overflowCap) {
+      binOverflowFrac += dt * 0.6;
+      if (Math.random() < dt * 6) {
+        GF.spawnParticles(bn.x, bn.y + 10 * GF.S, '#4a2e16', 3);
+      }
+    }
+  }
+
+  if (splatStrikeFrac >= 1) { splatStrikeFrac -= 1; addStrike(); }
+  if (binOverflowFrac >= 1) { binOverflowFrac -= 1; addStrike(); }
+
+  // Sludge particles glide to nozzle
+  for (var pi = sludgeParticles.length - 1; pi >= 0; pi--) {
+    var p = sludgeParticles[pi];
+    p.life -= dt * 2;
+    p.x = p.x + (p.tx - p.x) * 0.18;
+    p.y = p.y + (p.ty - p.y) * 0.18;
+    if (p.life <= 0) sludgeParticles.splice(pi, 1);
+  }
+
+  decaySplats(dt);
+  if (contractDoneAnim > 0) contractDoneAnim -= dt;
+}
+
+function addStrike() {
+  reputationStrikes += 1;
+  GF.setShake(0.5);
+  GF.spawnFloat(truck.x, truck.y - 30 * GF.S, '-1 HP', '#ef5350');
+  if (GF.saveRun) GF.saveRun();
+  if (reputationStrikes >= STRIKE_LIMIT) {
+    gameOver('strike');
+  }
+}
+
+function checkContractComplete() {
+  var allCleared = true;
+  for (var i = 0; i < bins.length; i++) {
+    if (!bins[i].cleared) { allCleared = false; break; }
+  }
+  if (allCleared && tank <= 0.5) {
+    score += 50 + contractsCompleted * 25;
+    GF.setShake(0.4);
+    GF.spawnFloat(plant.x, plant.y - 40 * GF.S, '+CONTRACT', '#9be58e');
+    contractDoneAnim = 1.6;
+    if (GF.saveRun) GF.saveRun();
+    setTimeout(function () {
+      if (gs === 'PLAYING') openUpgrade();
+    }, 700);
+  }
+}
+
+function decaySplats(dt) {
+  for (var i = splats.length - 1; i >= 0; i--) {
+    splats[i].life -= dt;
+    if (splats[i].life <= 0) splats.splice(i, 1);
+  }
+}
+function decaySludge(dt) {
+  for (var i = sludgeParticles.length - 1; i >= 0; i--) {
+    sludgeParticles[i].life -= dt * 2;
+    if (sludgeParticles[i].life <= 0) sludgeParticles.splice(i, 1);
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+
+  // Background
+  var bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#2c2418');
+  bg.addColorStop(1, '#1a140a');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Dashed road lines
+  ctx.save();
+  ctx.strokeStyle = 'rgba(180,140,60,0.10)';
+  ctx.lineWidth = 2 * S;
+  ctx.setLineDash([14 * S, 22 * S]);
+  for (var ry = 60 * S; ry < H; ry += 90 * S) {
+    ctx.beginPath();
+    ctx.moveTo(0, ry); ctx.lineTo(W, ry);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  if (gs === 'PLAYING' || gs === 'UPGRADE' || gs === 'GAMEOVER') {
+    drawPlant(ctx);
+    drawBins(ctx);
+    drawSplats(ctx);
+    drawTruck(ctx);
+    drawSludgeStream(ctx);
+    drawHUD(ctx);
+    if (gs === 'PLAYING') drawHelpButton(ctx);
+  }
+
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'UPGRADE')  drawUpgrade(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if (tutOpen)           drawTutorialPanel(ctx);
+}
+
+function drawPlant(ctx) {
+  var S = GF.S;
+  ctx.save();
+  ctx.fillStyle = 'rgba(40,80,40,0.7)';
+  ctx.beginPath();
+  ctx.arc(plant.x, plant.y, PLANT_RADIUS * S, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#6fbf6f';
+  ctx.lineWidth = 3 * S;
+  ctx.setLineDash([8 * S, 6 * S]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#5a8a5a';
+  GF.rr(ctx, plant.x - 36 * S, plant.y - 26 * S, 72 * S, 32 * S, 6 * S);
+  ctx.fill();
+  ctx.fillStyle = '#3a5a3a';
+  ctx.fillRect(plant.x + 18 * S, plant.y - 42 * S, 8 * S, 16 * S);
+  ctx.fillStyle = '#cfe6cf';
+  ctx.font = 'bold ' + Math.max(11, 14 * S) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('dump_here'), plant.x, plant.y + PLANT_RADIUS * S + 6 * S);
+  ctx.restore();
+}
+
+function drawBins(ctx) {
+  var S = GF.S;
+  for (var i = 0; i < bins.length; i++) {
+    var b = bins[i];
+    var fillRatio = Math.min(b.fill / SLUDGE_PER_BIN, 2.0);
+    var overflowing = b.fill > SLUDGE_PER_BIN * 1.8;
+    ctx.save();
+    ctx.fillStyle = b.cleared ? '#3a352a' : '#4a3a26';
+    GF.rr(ctx, b.x - BIN_RADIUS * S, b.y - BIN_RADIUS * S, BIN_RADIUS * 2 * S, BIN_RADIUS * 2 * S, 8 * S);
+    ctx.fill();
+    ctx.fillStyle = '#2e2418';
+    GF.rr(ctx, b.x - (BIN_RADIUS + 4) * S, b.y - BIN_RADIUS * S - 4 * S, (BIN_RADIUS + 4) * 2 * S, 8 * S, 3 * S);
+    ctx.fill();
+    if (!b.cleared) {
+      var bubbleH = Math.min(BIN_RADIUS * 2 * S, BIN_RADIUS * fillRatio * S);
+      var grd = ctx.createLinearGradient(b.x, b.y - bubbleH, b.x, b.y + BIN_RADIUS * S);
+      grd.addColorStop(0, overflowing ? '#7a4b1a' : '#5a3a1a');
+      grd.addColorStop(1, '#3a2410');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y - BIN_RADIUS * S + bubbleH * 0.5, BIN_RADIUS * 0.85 * S, 0, Math.PI * 2);
+      ctx.fill();
+      var barY = b.y + BIN_RADIUS * S + 6 * S;
+      var barW = BIN_RADIUS * 2 * S;
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      GF.rr(ctx, b.x - barW * 0.5, barY, barW, 5 * S, 2 * S);
+      ctx.fill();
+      var f = Math.min(1, fillRatio / 1.0);
+      var fillCol = overflowing ? '#ef5350' : (fillRatio > 1 ? '#ffa726' : '#ffd24d');
+      ctx.fillStyle = fillCol;
+      GF.rr(ctx, b.x - barW * 0.5, barY, barW * f, 5 * S, 2 * S);
+      ctx.fill();
+      if (overflowing) {
+        var pulse = 0.5 + 0.5 * Math.sin(nowMs() * 0.012);
+        ctx.strokeStyle = 'rgba(239,83,80,' + (0.4 + pulse * 0.5) + ')';
+        ctx.lineWidth = 3 * S;
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, (BIN_RADIUS + 8) * S, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else {
+      ctx.strokeStyle = '#6fbf6f';
+      ctx.lineWidth = 4 * S;
+      ctx.beginPath();
+      ctx.moveTo(b.x - 12 * S, b.y);
+      ctx.lineTo(b.x - 3 * S, b.y + 9 * S);
+      ctx.lineTo(b.x + 14 * S, b.y - 10 * S);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+function drawSplats(ctx) {
+  for (var i = 0; i < splats.length; i++) {
+    var sp = splats[i];
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, sp.life / 1.5));
+    var grd = ctx.createRadialGradient(sp.x, sp.y, 1, sp.x, sp.y, sp.r);
+    grd.addColorStop(0, '#5a3a18');
+    grd.addColorStop(1, '#2a1a08');
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, sp.r, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawTruck(ctx) {
+  var S = GF.S;
+  ctx.save();
+  ctx.translate(truck.x, truck.y);
+  var ang = Math.atan2(truck.dirY, truck.dirX);
+  ctx.rotate(ang);
+  var w = TRUCK_LEN * S, h = TRUCK_WIDTH * S;
+  ctx.fillStyle = '#8b6a3a';
+  GF.rr(ctx, -w * 0.5, -h * 0.5, w, h, 6 * S);
+  ctx.fill();
+  ctx.strokeStyle = '#5a4220';
+  ctx.lineWidth = 2 * S;
+  ctx.stroke();
+  // Tank
+  var tankRatio = tank / currentTankMax();
+  ctx.fillStyle = '#3a2a14';
+  GF.rr(ctx, -w * 0.15, -h * 0.4, w * 0.55, h * 0.8, 8 * S);
+  ctx.fill();
+  var tankColor = tankRatio > 0.9 ? '#ef5350' : (tankRatio > 0.7 ? '#ffa726' : '#8b5a2a');
+  ctx.fillStyle = tankColor;
+  var innerW = w * 0.55 - 4 * S;
+  GF.rr(ctx, -w * 0.15 + 2 * S, -h * 0.4 + 2 * S, innerW * tankRatio, h * 0.8 - 4 * S, 6 * S);
+  ctx.fill();
+  // Cabin + window
+  ctx.fillStyle = '#c0a070';
+  GF.rr(ctx, w * 0.18, -h * 0.45, w * 0.3, h * 0.9, 5 * S);
+  ctx.fill();
+  ctx.fillStyle = '#4dd0e1';
+  GF.rr(ctx, w * 0.22, -h * 0.32, w * 0.22, h * 0.65, 3 * S);
+  ctx.fill();
+  // Nozzle
+  ctx.fillStyle = '#3a2818';
+  GF.rr(ctx, -w * 0.5 - 8 * S, -h * 0.12, 12 * S, h * 0.24, 3 * S);
+  ctx.fill();
+  // Wheels
+  ctx.fillStyle = '#1a1208';
+  ctx.beginPath(); ctx.arc(-w * 0.25, -h * 0.55, 7 * S, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-w * 0.25,  h * 0.55, 7 * S, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( w * 0.30, -h * 0.55, 7 * S, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc( w * 0.30,  h * 0.55, 7 * S, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  if (vacuumActive) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,180,80,0.45)';
+    ctx.lineWidth = 2 * S;
+    ctx.setLineDash([6 * S, 6 * S]);
+    ctx.beginPath();
+    ctx.arc(nozzleX(), nozzleY(), currentVacuumRadius() * S, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+
+function drawSludgeStream(ctx) {
+  for (var i = 0; i < sludgeParticles.length; i++) {
+    var p = sludgeParticles[i];
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, p.life * 1.5));
+    ctx.fillStyle = '#5a3a18';
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawHUD(ctx) {
+  var W = GF.W, S = GF.S;
+  var pad = 12 * S;
+
+  // Tank gauge top-left
+  var gx = pad, gy = pad, gw = Math.min(260 * S, W * 0.35), gh = 22 * S;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  GF.rr(ctx, gx - 4 * S, gy - 4 * S, gw + 8 * S, gh + 8 * S, 6 * S);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  GF.rr(ctx, gx, gy, gw, gh, 4 * S);
+  ctx.fill();
+  var tmax = currentTankMax();
+  var tFrac = Math.min(1, tank / tmax);
+  var tankCol = tFrac > 0.9 ? '#ef5350' : (tFrac > 0.7 ? '#ffa726' : '#9be58e');
+  ctx.fillStyle = tankCol;
+  GF.rr(ctx, gx, gy, gw * tFrac, gh, 4 * S);
+  ctx.fill();
+  if (tankPressure > 0) {
+    var pFrac = Math.min(1, tankPressure / currentRuptureThreshold());
+    ctx.fillStyle = 'rgba(239,83,80,' + (0.4 + pFrac * 0.5) + ')';
+    GF.rr(ctx, gx, gy + gh - 6 * S, gw * pFrac, 6 * S, 3 * S);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.max(11, 13 * S) + 'px sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('tank_label') + ': ' + Math.floor(tank) + '/' + tmax, gx + 6 * S, gy + gh / 2);
+  ctx.restore();
+
+  // Strikes + cash top-right
+  ctx.save();
+  var rx = W - pad;
+  var heartR = 10 * S;
+  for (var i = 0; i < STRIKE_LIMIT; i++) {
+    var filled = i < (STRIKE_LIMIT - reputationStrikes);
+    ctx.fillStyle = filled ? '#ef5350' : 'rgba(120,40,40,0.55)';
+    ctx.beginPath();
+    ctx.arc(rx - (i * heartR * 2.4 + heartR), pad + heartR, heartR, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.fillStyle = '#ffd24d';
+  ctx.font = 'bold ' + Math.max(13, 16 * S) + 'px sans-serif';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('cash_label') + ': ' + score, rx, pad + heartR * 2 + 6 * S);
+  ctx.restore();
+
+  // Contract progress top-center
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  var cw = Math.min(220 * S, W * 0.4), ch = 26 * S;
+  var cxh = GF.cx - cw / 2;
+  GF.rr(ctx, cxh, pad, cw, ch, 6 * S);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.max(11, 13 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(
+    GF.t('contract_label') + ' #' + (contractsCompleted + 1) +
+    '   ' + GF.t('bins_label') + ': ' + binsClearedThisContract + '/' + contractBinTotal,
+    GF.cx, pad + ch / 2
+  );
+  ctx.restore();
+
+  if (gs === 'PLAYING') drawGuideHint(ctx);
+
+  if (contractDoneAnim > 0) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(155,229,142,' + Math.min(1, contractDoneAnim) + ')';
+    ctx.font = 'bold ' + Math.max(20, 36 * S) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(GF.t('contract_done'), GF.cx, GF.cy);
+    ctx.restore();
+  }
+}
+
+function drawGuideHint(ctx) {
+  var S = GF.S;
+  var tx = plant.x, ty = plant.y;
+  var allDone = true;
+  var bestD = Infinity, bestI = -1;
+  for (var i = 0; i < bins.length; i++) {
+    var b = bins[i];
+    if (b.cleared) continue;
+    if (b.fill < 0.5) continue;
+    allDone = false;
+    var d = GF.dist(truck.x, truck.y, b.x, b.y);
+    if (d < bestD) { bestD = d; bestI = i; }
+  }
+  if (!allDone && tank < currentTankMax() * 0.95 && bestI >= 0) {
+    tx = bins[bestI].x; ty = bins[bestI].y;
+  }
+  var dx = tx - truck.x, dy = ty - truck.y;
+  var dlen = Math.sqrt(dx * dx + dy * dy);
+  if (dlen < 140 * S) return;
+  dx /= dlen; dy /= dlen;
+  var ax = truck.x + dx * 60 * S, ay = truck.y + dy * 60 * S;
+  ctx.save();
+  ctx.translate(ax, ay);
+  ctx.rotate(Math.atan2(dy, dx));
+  ctx.fillStyle = 'rgba(255,210,80,0.7)';
+  ctx.beginPath();
+  ctx.moveTo(12 * S, 0);
+  ctx.lineTo(-6 * S, -8 * S);
+  ctx.lineTo(-6 * S, 8 * S);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawHelpButton(ctx) {
+  var S = GF.S;
+  var r = 18 * S;
+  var x = GF.W - r - 14 * S;
+  var y = GF.H - r - 14 * S;
+  helpRect = { x: x - r, y: y - r, w: r * 2, h: r * 2 };
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#ffd24d';
+  ctx.lineWidth = 2 * S;
+  ctx.stroke();
+  ctx.fillStyle = '#ffd24d';
+  ctx.font = 'bold ' + Math.max(14, 18 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('help'), x, y);
+  ctx.restore();
+}
+
+function drawMenu(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S, cx = GF.cx, cy = GF.cy;
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,15,8,0.92)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#ffd24d';
+  ctx.font = 'bold ' + Math.max(28, 48 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var titleY = cy - 160 * S;
+  ctx.shadowColor = 'rgba(255,210,77,0.5)'; ctx.shadowBlur = 24 * S;
+  ctx.fillText(GF.t('title'), cx, titleY);
+  ctx.shadowBlur = 0;
+
+  ctx.fillStyle = '#cfb88a';
+  ctx.font = '' + Math.max(12, 16 * S) + 'px sans-serif';
+  ctx.fillText(GF.t('sub'), cx, titleY + 42 * S);
+
+  var tutLines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var lineH = Math.max(15, 19 * S);
+  var startY = titleY + 90 * S;
+  ctx.fillStyle = '#e8d8b8';
+  ctx.font = '' + Math.max(11, 14 * S) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  for (var i = 0; i < tutLines.length; i++) {
+    wrapText(ctx, tutLines[i], cx, startY + i * (lineH + 6 * S), Math.min(540 * S, W * 0.88), lineH);
+  }
+
+  var bw = Math.min(280 * S, W * 0.7), bh = 56 * S;
+  var bx = cx - bw / 2;
+  var by = startY + tutLines.length * (lineH + 18 * S) + 20 * S;
+  if (by + bh > H - 30 * S) by = H - bh - 30 * S;
+  playRect = { x: bx, y: by, w: bw, h: bh };
+  var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
+  grad.addColorStop(0, '#ffd24d');
+  grad.addColorStop(1, '#e0a020');
+  ctx.fillStyle = grad;
+  GF.rr(ctx, bx, by, bw, bh, bh / 2);
+  ctx.fill();
+  ctx.fillStyle = '#2a1a08';
+  ctx.font = 'bold ' + Math.max(15, 20 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), cx, by + bh / 2);
+
+  if (best > 0) {
+    ctx.fillStyle = '#8a7050';
+    ctx.font = '' + Math.max(10, 13 * S) + 'px sans-serif';
+    ctx.fillText(GF.t('best_line').replace('{b}', best), cx, by + bh + 28 * S);
+  }
+  ctx.restore();
+  if (!menuArmedAt) menuArmedAt = nowMs() + 350;
+}
+
+function drawUpgrade(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S, cx = GF.cx, cy = GF.cy;
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,15,8,0.85)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#9be58e';
+  ctx.font = 'bold ' + Math.max(20, 32 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('upgrade_head'), cx, cy - 140 * S);
+
+  ctx.fillStyle = '#cfb88a';
+  ctx.font = '' + Math.max(12, 16 * S) + 'px sans-serif';
+  ctx.fillText(GF.t('upgrade_sub'), cx, cy - 100 * S);
+
+  var opts = [
+    { which: 'radius', label: GF.t('up_radius'), col: '#4dd0e1' },
+    { which: 'tank',   label: GF.t('up_tank'),   col: '#ffd24d' },
+    { which: 'buffer', label: GF.t('up_buffer'), col: '#9be58e' },
+  ];
+  var bw = Math.min(300 * S, W * 0.8), bh = 58 * S, gap = 16 * S;
+  var totalH = opts.length * bh + (opts.length - 1) * gap;
+  var startY = cy - totalH / 2 + 30 * S;
+  upgRects = [];
+  for (var i = 0; i < opts.length; i++) {
+    var by = startY + i * (bh + gap);
+    var bx = cx - bw / 2;
+    var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
+    grad.addColorStop(0, opts[i].col);
+    grad.addColorStop(1, '#2a1a08');
+    ctx.fillStyle = grad;
+    GF.rr(ctx, bx, by, bw, bh, 10 * S);
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + Math.max(13, 17 * S) + 'px sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(opts[i].label, cx, by + bh / 2);
+    upgRects.push({ x: bx, y: by, w: bw, h: bh, which: opts[i].which });
+  }
+  ctx.restore();
+}
+
+function drawGameOver(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S, cx = GF.cx, cy = GF.cy;
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,10,4,0.88)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.fillStyle = '#ef5350';
+  ctx.font = 'bold ' + Math.max(24, 40 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('gameover'), cx, cy - 100 * S);
+
+  ctx.fillStyle = '#cfb88a';
+  ctx.font = '' + Math.max(13, 18 * S) + 'px sans-serif';
+  var reason = gameOverReason === 'rupture' ? GF.t('rupture_reason') : GF.t('strike_reason');
+  ctx.fillText(reason, cx, cy - 50 * S);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.max(14, 18 * S) + 'px sans-serif';
+  ctx.fillText(GF.t('final_line').replace('{s}', '$' + score).replace('{c}', contractsCompleted), cx, cy);
+
+  if (best > 0) {
+    ctx.fillStyle = '#8a7050';
+    ctx.font = '' + Math.max(11, 14 * S) + 'px sans-serif';
+    ctx.fillText(GF.t('best_line').replace('{b}', '$' + best), cx, cy + 30 * S);
+  }
+
+  var bw = Math.min(280 * S, W * 0.7), bh = 54 * S;
+  var bx = cx - bw / 2, by = cy + 60 * S;
+  playRect = { x: bx, y: by, w: bw, h: bh };
+  var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
+  grad.addColorStop(0, '#ffd24d');
+  grad.addColorStop(1, '#e0a020');
+  ctx.fillStyle = grad;
+  GF.rr(ctx, bx, by, bw, bh, bh / 2);
+  ctx.fill();
+  ctx.fillStyle = '#2a1a08';
+  ctx.font = 'bold ' + Math.max(14, 18 * S) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('retry'), cx, by + bh / 2);
+  ctx.restore();
+}
+
+function drawTutorialPanel(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S, cx = GF.cx, cy = GF.cy;
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, W, H);
+  var pw = Math.min(560 * S, W * 0.92);
+  var ph = Math.min(340 * S, H * 0.82);
+  var px = cx - pw / 2, py = cy - ph / 2;
+  ctx.fillStyle = '#2a2014';
+  GF.rr(ctx, px, py, pw, ph, 14 * S);
+  ctx.fill();
+  ctx.strokeStyle = '#ffd24d';
+  ctx.lineWidth = 2 * S;
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffd24d';
+  ctx.font = 'bold ' + Math.max(15, 20 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('title'), cx, py + 18 * S);
+
+  ctx.fillStyle = '#e8d8b8';
+  ctx.font = '' + Math.max(11, 14 * S) + 'px sans-serif';
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var lineH = Math.max(14, 18 * S);
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(ctx, lines[i], cx, py + 60 * S + i * (lineH + 8 * S), pw - 40 * S, lineH);
+  }
+
+  ctx.fillStyle = '#cfb88a';
+  ctx.font = 'bold ' + Math.max(11, 13 * S) + 'px sans-serif';
+  ctx.fillText(GF.t('tap_close'), cx, py + ph - 24 * S);
+  ctx.restore();
+}
+
+function wrapText(ctx, txt, cx, y, maxW, lineH) {
+  var words = txt.split(' ');
+  var line = '';
+  var lines = [];
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? (line + ' ' + words[i]) : words[i];
+    if (ctx.measureText(test).width > maxW && line) {
+      lines.push(line);
+      line = words[i];
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  for (var j = 0; j < lines.length; j++) {
+    ctx.fillText(lines[j], cx, y + j * lineH);
+  }
+}
+
+// ── SCREENSHOT / GATE HELPERS ────────────────────────────────────────────
+window._setupForScreenshot = function (level) {
+  startGame();
+  if (bins.length >= 4) {
+    truck.x = bins[0].x + 80 * GF.S;
+    truck.y = bins[0].y + 30 * GF.S;
+    truck.dirX = -1; truck.dirY = -0.2;
+  }
+  tank = currentTankMax() * 0.55;
+  tankPressure = 18;
+  reputationStrikes = 1;
+  score = 240 + (level || 1) * 60;
+  contractsCompleted = Math.max(0, (level || 1) - 1);
+  binsClearedThisContract = Math.min(2, bins.length - 1);
+  if (bins[0]) bins[0].cleared = true;
+  for (var i = 0; i < 8; i++) {
+    sludgeParticles.push({
+      x: bins[1] ? bins[1].x + (i - 4) * 4 : truck.x - 50,
+      y: bins[1] ? bins[1].y - 6 : truck.y,
+      tx: nozzleX(), ty: nozzleY(),
+      life: 0.55,
+      r: 3 * GF.S,
+    });
+  }
+  splats.push({ x: truck.x + 40 * GF.S, y: truck.y + 30 * GF.S, r: 10 * GF.S, life: 2.5 });
+  splats.push({ x: truck.x + 70 * GF.S, y: truck.y + 50 * GF.S, r: 8 * GF.S, life: 2.0 });
+  vacuumActive = true;
+  vacuumTargetBinIdx = bins[1] ? 1 : 0;
+  pointer.down = true;
+  gs = 'PLAYING';
+  tutOpen = false;
+};
+
+window._jumpLevel = function (n) {
+  if (n == null || n === 1) { window._setupForScreenshot(1); return; }
+  if (n >= 99) {
+    // Force a terminal state for the runtime gate.
+    startGame();
+    reputationStrikes = STRIKE_LIMIT;
+    gameOver('strike');
+    return;
+  }
+  window._setupForScreenshot(n);
+};
+
+window._setLang = function (lng) { GF.lang = (lng === 'ru') ? 'ru' : 'en'; };
+window._setState = function (s) { if (s) gs = s; };
+window._getI18N = function () { return STRINGS; };
+window._getFontBody = function () { return 'sans-serif'; };
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'shit_truck',
+  onReady: function () {
+    try { best = parseInt(localStorage.getItem('shit_truck_best') || '0') || 0; } catch (e) {}
+    GF.persist('shit_truck_run_v1',
+      function () {
+        return {
+          gs: gs,
+          score: score,
+          tank: tank,
+          tankPressure: tankPressure,
+          reputationStrikes: reputationStrikes,
+          contractsCompleted: contractsCompleted,
+          binsClearedThisContract: binsClearedThisContract,
+          upgRadiusBonus: upgRadiusBonus,
+          upgTankBonus: upgTankBonus,
+          upgBufferBonus: upgBufferBonus,
+        };
+      },
+      function (s) {
+        if (!s) return;
+        score = s.score || 0;
+        tank = s.tank || 0;
+        tankPressure = s.tankPressure || 0;
+        reputationStrikes = s.reputationStrikes || 0;
+        contractsCompleted = s.contractsCompleted || 0;
+        binsClearedThisContract = s.binsClearedThisContract || 0;
+        upgRadiusBonus = s.upgRadiusBonus || 0;
+        upgTankBonus = s.upgTankBonus || 0;
+        upgBufferBonus = s.upgBufferBonus || 0;
+        // Safe re-entry: bounce to MENU instead of mid-PLAYING.
+        gs = 'MENU';
+      }
+    );
+    if (gs === 'PLAYING') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    score: score,
+    best: best,
+    tank: tank,
+    tankPressure: tankPressure,
+    reputationStrikes: reputationStrikes,
+    contractsCompleted: contractsCompleted,
+    binsClearedThisContract: binsClearedThisContract,
+    contractBinTotal: contractBinTotal,
+    binsCount: bins.length,
+    TANK_MAX: TANK_MAX,
+    RUPTURE_THRESHOLD: RUPTURE_THRESHOLD,
+    VACUUM_RADIUS: VACUUM_RADIUS,
+    VACUUM_RATE: VACUUM_RATE,
+    BIN_COUNT: BIN_COUNT,
+    SLUDGE_PER_BIN: SLUDGE_PER_BIN,
+    BIN_REGEN_RATE: BIN_REGEN_RATE,
+    STRIKE_LIMIT: STRIKE_LIMIT,
+    PLANT_RADIUS: PLANT_RADIUS,
+    TRUCK_SPEED: TRUCK_SPEED,
+    SPLAT_PER_OVERFILL: SPLAT_PER_OVERFILL,
+    DUMP_REWARD_PER: DUMP_REWARD_PER,
+  };
+});
+
+// ── YANDEX MUST-HAVES SUMMARY ────────────────────────────────────────────
+// 1. GF.t() routes every UI label (STRINGS.en + STRINGS.ru both present).
+// 2. GF.persist() registers + GF.saveRun() called inside startGame, gameOver,
+//    openUpgrade, pickUpgrade, checkContractComplete, addStrike. Safe boot
+//    bounces restored game to MENU rather than mid-PLAYING combat.
+// 3. Fullscreen-exit resize handled by gf-lib (do not override).
+// 4. Ads on user-click only: _pendingAd flag set on gameOver and openUpgrade;
+//    fired inside the next user click (Retry button or upgrade pick button).
+// ─────────────────────────────────────────────────────────────────────────
+
+})();
+</script>
+</body>
+</html>
