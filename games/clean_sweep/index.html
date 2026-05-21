@@ -102,6 +102,10 @@ var STRINGS = {
     tut_lose:     'Lose: TIME hits 0 with the cleanup percentage below the target.',
     tut_tip:      'Tip: Chain pickups within 1.5s to build a combo multiplier — bigger trash piles are worth more.',
     sprinkleToast:'+3s SPRINKLE!',
+    perfectSweep: 'PERFECT SWEEP!',
+    perfectBonus: '+50',
+    weekBest:     '7-DAY BEST',
+    weekBestNew:  'NEW 7-DAY BEST!',
   },
   ru: {
     title: 'Чистая Уборка',
@@ -155,6 +159,10 @@ var STRINGS = {
     tut_lose:     'Поражение: ВРЕМЯ кончилось, а уборка ниже нормы.',
     tut_tip:      'Подсказка: Цепляй уборку в течение 1.5с, чтобы копить комбо — крупный мусор даёт больше очков.',
     sprinkleToast:'+3с ПОСЫПКА!',
+    perfectSweep: 'ИДЕАЛЬНАЯ УБОРКА!',
+    perfectBonus: '+50',
+    weekBest:     'РЕКОРД НЕДЕЛИ',
+    weekBestNew:  'НОВЫЙ РЕКОРД НЕДЕЛИ!',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -171,6 +179,12 @@ window._jumpLevel = function(n) {
     // otherwise have an empty dailyScores map.
     if (yesterdayScore <= 0) { yesterdayScore = 800; }
     if (todayBestScore <= 0 && score > 0) todayBestScore = score;
+    // iter#14 visual-test hook: seed a plausible rolling 7-day ceiling so the
+    // 7-DAY BEST pill renders for screenshot harness runs that otherwise have
+    // an empty dailyScores map. Also flip weekBestIsNew if the seeded score
+    // exceeds it, so harness can also capture the gold "NEW 7-DAY BEST!" path.
+    if (weekBestScore <= 0) { weekBestScore = 1200; }
+    if (score > 0 && score > weekBestScore) weekBestIsNew = true;
     return;
   }
   // iter#10: n=98 is the visual-test "drop me into LEVELEND with 3 stars"
@@ -182,6 +196,8 @@ window._jumpLevel = function(n) {
     var priorStars = levelStars[level] || 0;
     if (lastLevelStars > priorStars) { levelStars[level] = lastLevelStars; saveLevelStars(); lastLevelStarsNewBest = true; }
     else { lastLevelStarsNewBest = false; }
+    // iter#13 visual-test hook: also seed PERFECT SWEEP so harness paints the stamp
+    lastLevelPerfect = true;
     gs = 'LEVELEND';
     return;
   }
@@ -491,6 +507,43 @@ function recordDailyScore(s) {
   }
 }
 
+// ── iter#14: ROLLING 7-DAY BEST (no new persistence — reuses iter#11 store) ──
+// dailyScores already holds the last 7 UTC days of best-per-day scores (iter#11
+// garbage-collects to that window). Reduce them into a single rolling 7-day
+// ceiling. Render on GAMEOVER as a small purple pill beneath the
+// "Yesterday → Today" delta. When the current run beats the prior 7-day ceiling
+// (excluding today's own entry — we want the comparison to be against the
+// previous 6 days), flag it gold + show "NEW 7-DAY BEST!" sub-line. Zero new
+// localStorage keys, zero gameplay change.
+var weekBestScore = 0;        // current rolling 7-day ceiling
+var weekBestIsNew = false;    // true if this run beat the prior 7-day high
+function recomputeWeekBest() {
+  // Best across all entries in the rolling 7-day window (dailyScores is already
+  // GC'd to <= 7 entries by saveDailyScores).
+  var b = 0;
+  for (var k in dailyScores) {
+    if (!Object.prototype.hasOwnProperty.call(dailyScores, k)) continue;
+    var v = dailyScores[k] | 0;
+    if (v > b) b = v;
+  }
+  weekBestScore = b;
+}
+// Compute the prior 7-day high (excluding today) — used on GAMEOVER to decide
+// whether this run set a new 7-day best. We can't just compare to weekBestScore
+// after recording, because recordDailyScore already wrote today's score into
+// the store before this is called.
+function priorWeekBestExcludingToday() {
+  var today = getDayKey();
+  var b = 0;
+  for (var k in dailyScores) {
+    if (!Object.prototype.hasOwnProperty.call(dailyScores, k)) continue;
+    if (k === today) continue;
+    var v = dailyScores[k] | 0;
+    if (v > b) b = v;
+  }
+  return b;
+}
+
 // ── iter#12: GOLDEN SPRINKLE PICKUPS (in-run time-bonus collectible) ─────────
 // First new in-run pickup variety since launch — every prior iter layered meta
 // (best, board, skins, seed, streak, badges, sound, chain, stars, yesterday).
@@ -531,6 +584,20 @@ function spawnSprinklesForLevel(lvl) {
     }
   }
 }
+
+// ── iter#13: PERFECT SWEEP BONUS (no-combo-break tactical layer) ─────────────
+// Orthogonal to stars (time-based), sprinkles (collection-based), bestCombo
+// (peak chain height). Goal: clear the entire level without ever letting the
+// combo timer expire — i.e. always pick up another piece within COMBO_DECAY_SEC.
+// Reward: +50 bonus score on level clear + a gold 'PERFECT SWEEP! +50' stamp
+// drawn on LEVELEND below the star row. Pure in-run, no persistence layer
+// (combos already feed BEST CHAIN persistence at iter#9). Adds a tactical
+// "keep moving, plan route" axis on top of the existing time-pressure / target
+// loop — orthogonal to all 12 prior meta layers.
+var PERFECT_BONUS = 50;
+var chainStartedThisLevel = false;  // armed on first collect of the level
+var perfectChainAlive = false;      // false once comboTimer expires after a chain started
+var lastLevelPerfect = false;       // true on level clear if perfectChainAlive at clear time
 
 // ── DONUT SKINS (iter#3: cosmetic unlocks tied to lifetime best) ─────────────
 // Tints the donut sprite via 'source-atop' composite — additive, no new art.
@@ -847,6 +914,8 @@ function startLevel(lvl) {
   level = lvl;
   debrisList = []; particles = []; floats = []; buttons = [];
   combo = 0; comboTimer = 0; shake = 0;
+  // iter#13: per-level reset — combo-break tracker for the PERFECT SWEEP bonus
+  chainStartedThisLevel = false; perfectChainAlive = true; lastLevelPerfect = false;
   // newBest is per-RUN, not per-level — only reset when starting a fresh run from level 1
   if (lvl === 1) { newBest = false; bestPulse = 0; lbSubmitted = false; myRank = null; maxComboThisRun = 0; newBestCombo = false; chainPulse = 0; lastLevelStars = 0; lastLevelStarsNewBest = false; sprinkleHudPulse = 0; sprinkleToastTimer = 0; }
   // iter#7: reset the "+15s" rewarded-ad slot each level
@@ -908,9 +977,18 @@ function update(dt) {
   if (gs !== 'PLAYING') return;
 
   timeLeft -= dt;
-  if (timeLeft <= 0) { timeLeft = 0; sfxGameOver(); gs = 'GAMEOVER';try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}; submitAndFetchLeaderboard(); recordDailyScore(score); return; }
+  if (timeLeft <= 0) { timeLeft = 0; sfxGameOver(); gs = 'GAMEOVER';try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){};
+    // iter#14: snapshot prior 7-day ceiling BEFORE writing today's score so we
+    // can detect a fresh 7-day best on this run. recordDailyScore mutates
+    // dailyScores; recomputeWeekBest then refreshes the rolling ceiling for
+    // the GAMEOVER pill.
+    var _priorWB = priorWeekBestExcludingToday();
+    submitAndFetchLeaderboard(); recordDailyScore(score);
+    recomputeWeekBest();
+    weekBestIsNew = (score > 0 && score > _priorWB);
+    return; }
 
-  if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = 0; }
+  if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) { combo = 0; if (chainStartedThisLevel) perfectChainAlive = false; } } // iter#13: combo decay also breaks the PERFECT SWEEP chain
   if (shake > 0) shake = Math.max(0, shake - dt * 8);
   if (bestPulse > 0) bestPulse = Math.max(0, bestPulse - dt * 0.6);
   if (chainPulse > 0) chainPulse = Math.max(0, chainPulse - dt * 0.6); // iter#9
@@ -958,6 +1036,7 @@ function update(dt) {
       if (now - lastCollect < 700) { combo++; comboTimer = 1.3; }
       else { combo = 1; comboTimer = 1.3; }
       lastCollect = now;
+      chainStartedThisLevel = true; // iter#13: PERFECT SWEEP — arm the chain on first collect
       var pts = d.score * Math.max(1, Math.floor(combo * 0.7 + 0.5));
       score += pts;
       // live-track best so a closed tab mid-run doesn't lose the high-water mark
@@ -1028,6 +1107,23 @@ function update(dt) {
     spawnFloat(cx, cy - 30*S, t('bonus')+' +'+bonus, '#2ecc71');
     spawnParticles(donut.x, donut.y, '#FFD700', 25);
     sfxLevelEnd(); // iter#8
+    // iter#13: PERFECT SWEEP bonus — clear without ever breaking the combo chain
+    if (chainStartedThisLevel && perfectChainAlive) {
+      lastLevelPerfect = true;
+      score += PERFECT_BONUS;
+      spawnFloat(cx, cy + 12*S, t('perfectSweep')+' '+t('perfectBonus'), '#FFD700');
+      spawnParticles(donut.x, donut.y, '#FFD700', 18);
+      spawnParticles(donut.x, donut.y, '#FFF8C0', 12);
+      try { if (typeof sfxBadge === 'function') sfxBadge(); } catch(e) {}
+      // live-best tracking matches debris/sprinkle paths
+      if (score > best) {
+        if (best > 0 && !newBest) bestPulse = 1;
+        best = score; newBest = true; saveBest();
+        if (typeof checkSkinUnlocks === 'function') checkSkinUnlocks();
+      }
+    } else {
+      lastLevelPerfect = false;
+    }
     // iter#10: per-level star rating (1-3 based on % time remaining)
     lastLevelStars = computeStarsForRun(timeLeft, levelStartTime);
     var priorStars = levelStars[level] || 0;
@@ -1461,6 +1557,48 @@ function drawLevelEndStars() {
     ctx.textBaseline = 'alphabetic';
     ctx.fillText(t('starsNewBest'), cx, y + size*0.7 + fs);
   }
+}
+
+// iter#13: PERFECT SWEEP stamp drawn on LEVELEND. Renders only when the player
+// cleared the level without ever letting the combo timer expire after the first
+// pickup. Sits BELOW the star row and ABOVE the NEXT button so it doesn't fight
+// either UI. Gold pill with subtle pulse — matches the +50 score bonus already
+// granted on level clear.
+var _perfectPulseT = 0;
+function drawPerfectSweepStamp() {
+  if (!lastLevelPerfect) return;
+  _perfectPulseT += 0.07;
+  var size = clamp(38*S, 22, 54);
+  // Y mirrors drawLevelEndStars: stars centred at cy - 8*S; this stamp goes
+  // ~size*1.0 below the stars so the NEW BEST sub-line (if present) doesn't
+  // get sat-on. Stays well above the NEXT button (at cy + ~30*S).
+  var y = cy - 8*S + size * 1.05;
+  var fs = clamp(15*S, 12, 20);
+  var pulse = 1 + Math.sin(_perfectPulseT * 5) * 0.04;
+  var label = t('perfectSweep') + '  ' + t('perfectBonus');
+  ctx.save();
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  var tw = ctx.measureText(label).width;
+  var padX = clamp(14*S, 10, 22);
+  var padY = clamp(7*S, 5, 12);
+  var pw = (tw + padX * 2) * pulse;
+  var ph = (fs + padY * 2) * pulse;
+  var px = cx - pw/2;
+  var py = y - ph/2;
+  rr(ctx, px, py, pw, ph, ph/2);
+  ctx.shadowColor = 'rgba(255,215,0,0.5)';
+  ctx.shadowBlur = 14*S;
+  ctx.fillStyle = '#FFD700';
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1.3 * S;
+  ctx.stroke();
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillText(label, cx, y);
+  ctx.restore();
 }
 
 // iter#10: Tiny ★N/30 pill drawn on MENU near the top to show lifetime stars
@@ -1951,6 +2089,64 @@ function drawYesterdayPill() {
   ctx.fillText(line, cx, startY);
 }
 
+// ── iter#14: GAMEOVER 7-day rolling best pill ────────────────────────────────
+// Sits BELOW the yesterday pill (which already sits below the leaderboard).
+// Renders nothing while we have no data points (weekBestScore === 0). Purple
+// because every other meta pill already claimed a colour (teal=seed,
+// orange=streak, gold=newbest, grey=neutral). Gold pulse + sub-line when
+// weekBestIsNew (this run beat the prior 6-day high).
+var _weekPillAnim = 0;
+function drawWeekBestPill() {
+  if (weekBestScore <= 0) return;
+  // Compute Y by stacking under the yesterday pill. The yesterday pill uses
+  // the same anchor math as drawLeaderboard — replicate so we stay in sync.
+  var btnH = clamp(52*S, 40, 66);
+  var btnY = cy + 20*S;
+  var lbHasRows = (leaderboard && leaderboard.length > 0);
+  var rowH = clamp(20*S, 16, 26);
+  var yesterdayY;
+  if (lbHasRows) {
+    var rows = Math.min(5, leaderboard.length);
+    var lbStartY = btnY + btnH + 60*S;
+    yesterdayY = lbStartY + (rows + 1) * rowH + 22*S;
+  } else {
+    yesterdayY = btnY + btnH + (extraTimeUsed ? 30*S : (clamp(42*S,34,54) + 30*S));
+  }
+  // Our Y: ~22*S below the yesterday line
+  var startY = yesterdayY + clamp(22*S, 16, 28);
+  // Pulse animation on new 7-day best
+  _weekPillAnim += 0.06;
+  var pulse = weekBestIsNew ? (1 + Math.sin(_weekPillAnim * 4) * 0.06) : 1;
+  var fs = clamp(11*S, 9, 14) * pulse;
+  ctx.save();
+  ctx.font = 'bold '+fs+'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  var label = t('weekBest') + ': ' + weekBestScore;
+  var padX = 12*S, padY = 5*S;
+  var w = ctx.measureText(label).width + padX*2;
+  var h = fs + padY*2;
+  var bx = cx - w/2, by = startY - h + padY;
+  // Purple pill bg, gold tint when fresh best
+  if (weekBestIsNew) {
+    ctx.fillStyle = 'rgba(255,215,0,0.22)';
+  } else {
+    ctx.fillStyle = 'rgba(155,120,210,0.18)';
+  }
+  rr(ctx, bx, by, w, h, h/2);
+  ctx.fill();
+  ctx.fillStyle = weekBestIsNew ? '#FFD700' : '#b89df0';
+  ctx.fillText(label, cx, by + h - padY - 1*S);
+  // Sub-line only when this run set a new ceiling
+  if (weekBestIsNew) {
+    var subFs = clamp(10*S, 8, 13);
+    ctx.font = 'bold '+subFs+'px sans-serif';
+    ctx.fillStyle = '#FFD700';
+    ctx.fillText(t('weekBestNew'), cx, by + h + subFs + 4*S);
+  }
+  ctx.restore();
+}
+
 // ── MAIN LOOP ─────────────────────────────────────────────────────────────────
 function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
@@ -2020,6 +2216,8 @@ function frame(ts) {
       function() { startLevel(level+1); });
     // iter#10: per-level 1-3 star rating between title and NEXT button
     drawLevelEndStars();
+    // iter#13: PERFECT SWEEP stamp (sits below the star row, above the NEXT button)
+    drawPerfectSweepStamp();
   }
   if (gs === 'GAMEOVER') {
     // (best is already live-tracked during play; saveBest also runs on each new high)
@@ -2059,6 +2257,7 @@ function frame(ts) {
     drawChainSummary(); // iter#9
     drawLeaderboard();
     drawYesterdayPill(); // iter#11
+    drawWeekBestPill();  // iter#14
     // iter#3: skin picker on GAMEOVER (only on desktop — mobile portrait
     // is too tight; the picker IS still on MENU for everyone).
     // Achievement row is MENU-only — on GAMEOVER it stacked under the skin
@@ -2143,6 +2342,11 @@ window.__gfState = function () {
       todayBestScore: todayBestScore,
       sprinklesCollected: sprinklesCollected,
       sprinklesOnField: sprinkleList.length,
+      lastLevelPerfect: lastLevelPerfect,
+      perfectChainAlive: perfectChainAlive,
+      chainStartedThisLevel: chainStartedThisLevel,
+      weekBestScore: weekBestScore,
+      weekBestIsNew: weekBestIsNew,
     };
   } catch (e) { return { __error: String(e) }; }
 };
@@ -2163,6 +2367,7 @@ function boot() {
   loadBestCombo();      // iter#9
   loadLevelStars();     // iter#10
   loadDailyScores();    // iter#11
+  recomputeWeekBest();  // iter#14 — seed rolling 7-day ceiling from loaded daily scores
   loadSprinkleStats();  // iter#12
   // If lifetime best already crosses higher tiers, mark them seen on first
   // boot so we don't dump multiple toasts on a returning player. checkSkinUnlocks
@@ -2226,6 +2431,13 @@ Object.defineProperty(window, 'totalLevelStars',  { get: function(){ return tota
 // iter#11: yesterday-vs-today daily-seed delta — playtest can verify record+render
 Object.defineProperty(window, 'yesterdayScore',   { get: function(){ return yesterdayScore; } });
 Object.defineProperty(window, 'todayBestScore',   { get: function(){ return todayBestScore; } });
+// iter#13: PERFECT SWEEP bonus — playtest can verify chain-break detection + bonus award
+Object.defineProperty(window, 'lastLevelPerfect',     { get: function(){ return lastLevelPerfect; } });
+Object.defineProperty(window, 'perfectChainAlive',    { get: function(){ return perfectChainAlive; } });
+Object.defineProperty(window, 'chainStartedThisLevel',{ get: function(){ return chainStartedThisLevel; } });
+// iter#14: rolling 7-day best — playtest can verify ceiling recomputes + new-best flag
+Object.defineProperty(window, 'weekBestScore',        { get: function(){ return weekBestScore; } });
+Object.defineProperty(window, 'weekBestIsNew',        { get: function(){ return weekBestIsNew; } });
 
 (function() {
   if (typeof YaGames === 'undefined') { setTimeout(boot, 3000); return; }

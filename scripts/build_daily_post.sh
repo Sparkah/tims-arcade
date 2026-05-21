@@ -13,13 +13,24 @@
 #   bash Gallery/scripts/build_daily_post.sh \
 #     --new "echo_locator,gravity_mailman,forge_heir" \
 #     --new-hooks "<hook1>|<hook2>|<hook3>" \
-#     --iter "clean_sweep:daily leaderboard,daily_dodge:skin unlocks,tire_escape:live BEST pip" \
+#     --iter "clean_sweep:daily leaderboard|daily_dodge:skin unlocks|tire_escape:live BEST pip" \
 #     --photo /path/to/cover.png
 #
 # Behaviour:
 #   - ABORTS if any URL doesn't return 200. Won't print, won't post.
 #   - Looks up titles from games.source.json (so spelling matches).
 #   - Outputs the post body to stdout. Pipe to notify.sh --public.
+#
+# Separator notes (2026-05-20 fix):
+#   --new        comma-delimited slugs ([a-z0-9_-] regex safe)
+#   --new-hooks  pipe-delimited hooks (hook text may contain commas)
+#   --iter       PIPE-delimited pairs `slug:feature|slug:feature|...`
+#                Changed from comma: an iteration feature like
+#                "golden sprinkles (+3s, x5 combo)" contains a comma and
+#                broke the comma-split parser, causing the 2026-05-20
+#                public-post abort. Falls back to comma split if no pipe
+#                is found, for backward compat with callers that haven't
+#                migrated yet.
 
 set -uo pipefail
 
@@ -96,7 +107,13 @@ fi
 
 # ── iteration section ──────────────────────────────────────────────────────
 if [[ -n "$ITER_PAIRS" ]]; then
-  IFS=',' read -ra iter_arr <<< "$ITER_PAIRS"
+  # Prefer pipe separator (safe for feature text containing commas); fall back
+  # to comma split for callers that haven't migrated yet (2026-05-20 fix).
+  if [[ "$ITER_PAIRS" == *"|"* ]]; then
+    IFS='|' read -ra iter_arr <<< "$ITER_PAIRS"
+  else
+    IFS=',' read -ra iter_arr <<< "$ITER_PAIRS"
+  fi
   if [[ ${#iter_arr[@]} -gt 0 ]]; then
     MSG_LINES+=("🔧 UPDATED (${#iter_arr[@]}):")
     for pair in "${iter_arr[@]}"; do

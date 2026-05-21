@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Bins of Holding</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1d28; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+var STRINGS = {
+  en: {
+    title: 'Bins of Holding',
+    sub:   'Sort by deduction. Wrong drop = boom.',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT SHIFT',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'STOCKROOM CLOSED',
+    win: 'PROMOTED',
+    shiftend: 'SHIFT COMPLETE',
+    hud_bins: 'BINS',
+    hud_shift: 'SHIFT',
+    hud_routed: 'ROUTED',
+    hud_lives: 'LIVES',
+    discard: 'DISCARD',
+    tut_goal: 'GOAL: route all 80 items into the right bins.',
+    tut_controls: 'CONTROLS: drag an item from the conveyor onto a bin.',
+    tut_win: 'WIN: survive 3 shifts losing no more than 2 bins.',
+    tut_lose: 'LOSE: a third bin detonates from a wrong drop.',
+    tut_tip: 'TIP: every bin has a hidden rule. Experiment early.',
+    boom: 'BOOM!',
+    nice: '+1',
+    survived: 'bins survived',
+    dismiss: 'tap to dismiss',
+  },
+  ru: {
+    title: 'Полки Безразмерные',
+    sub:   'Сортируй методом дедукции. Ошибка - взрыв.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'СЛЕДУЮЩАЯ СМЕНА',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'СКЛАД ЗАКРЫТ',
+    win: 'ПОВЫШЕНИЕ',
+    shiftend: 'СМЕНА ЗАВЕРШЕНА',
+    hud_bins: 'ПОЛКИ',
+    hud_shift: 'СМЕНА',
+    hud_routed: 'РАЗЛОЖЕНО',
+    hud_lives: 'ЖИЗНИ',
+    discard: 'СБРОС',
+    tut_goal: 'ЦЕЛЬ: разложить все 80 предметов по правильным полкам.',
+    tut_controls: 'УПРАВЛЕНИЕ: перетащите предмет с конвейера на полку.',
+    tut_win: 'ПОБЕДА: пережить 3 смены, потеряв не больше 2 полок.',
+    tut_lose: 'ПОРАЖЕНИЕ: третья полка взрывается от неверного предмета.',
+    tut_tip: 'СОВЕТ: у каждой полки скрытое правило. Пробуйте рано.',
+    boom: 'БУМ!',
+    nice: '+1',
+    survived: 'полок выжило',
+    dismiss: 'нажмите чтобы закрыть',
+  },
+};
+
+var SPRITE_NAMES = ['bin_intact', 'item_a', 'item_b', 'item_c', 'item_d'];
+
+var BIN_COUNT           = 6;
+var MAX_LOSSES          = 3;
+var ITEMS_PER_SHIFT     = 80;
+var TOTAL_SHIFTS        = 3;
+var COMPRESSION_FACTOR  = 0.92;
+var DETONATE_THRESHOLD  = 1;
+var ITEM_CATEGORIES     = 4;
+var CONVEYOR_SPEED      = 70;
+var HINT_REVEAL_AFTER   = 5;
+var DISCARD_PENALTY     = 0;
+var BIN_RADIUS          = 56;
+var ITEM_RADIUS         = 22;
+var BIN_DROP_TOLERANCE  = 72;
+
+var gs = 'MENU';
+var shift = 1;
+var bin_losses = 0;
+var routed = 0;
+var score = 0, best = 0;
+var bins = [];
+var items = [];
+var dragging = null;
+var shiftQueue = [];
+var hudButtons = [];
+var showTutorialOverlay = false;
+
+var CATEGORY_COLORS = ['#e74c3c','#3498db','#f1c40f','#9b59b6','#1abc9c','#e67e22'];
+var CATEGORY_SHAPES = ['circle','square','triangle','hex','star','diamond'];
+
+function rngInt(n) { return Math.floor(Math.random() * n); }
+
+function activeCategories() {
+  return Math.min(CATEGORY_COLORS.length, ITEM_CATEGORIES + (shift - 1));
+}
+
+function rerollBinRules() {
+  var nCat = activeCategories();
+  var pool = [];
+  for (var c = 0; c < nCat; c++) pool.push(c);
+  while (pool.length < BIN_COUNT) pool.push(rngInt(nCat));
+  for (var i = pool.length - 1; i > 0; i--) {
+    var j = rngInt(i + 1);
+    var t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+  }
+  for (var b = 0; b < bins.length; b++) {
+    bins[b].accept = pool[b];
+    bins[b].fills = 0;
+    bins[b].pulse = 0;
+    bins[b].intact = true;
+    bins[b].detonateT = 0;
+    bins[b].r = bins[b].base_r;
+  }
+}
+
+function rerollSurvivingRules() {
+  var nCat = activeCategories();
+  for (var bi = 0; bi < bins.length; bi++) {
+    if (bins[bi].intact) {
+      bins[bi].accept = rngInt(nCat);
+      bins[bi].fills = 0;
+      bins[bi].r = bins[bi].base_r;
+    }
+  }
+}
+
+function buildShiftQueue() {
+  var binsByCat = {};
+  for (var i = 0; i < bins.length; i++) {
+    if (!bins[i].intact) continue;
+    binsByCat[bins[i].accept] = (binsByCat[bins[i].accept] || 0) + 1;
+  }
+  var queue = [];
+  var availableCats = Object.keys(binsByCat).map(Number);
+  if (availableCats.length === 0) availableCats = [0];
+  for (var k = 0; k < ITEMS_PER_SHIFT; k++) {
+    var cat = availableCats[k % availableCats.length];
+    queue.push(cat);
+  }
+  for (var s = queue.length - 1; s > 0; s--) {
+    var jj = rngInt(s + 1);
+    var tt = queue[s]; queue[s] = queue[jj]; queue[jj] = tt;
+  }
+  return queue;
+}
+
+function layoutBins() {
+  bins = [];
+  var W = GF.W, H = GF.H, S = GF.S;
+  var topPad = 110 * S;
+  var bottomPad = 170 * S;
+  var avW = W;
+  var avH = H - topPad - bottomPad;
+  var cols = 3, rows = 2;
+  var cellW = avW / cols;
+  var cellH = avH / rows;
+  for (var r = 0; r < rows; r++) {
+    for (var c = 0; c < cols; c++) {
+      var bx = cellW * c + cellW / 2;
+      var by = topPad + cellH * r + cellH / 2;
+      var br = Math.min(cellW, cellH) * 0.36;
+      bins.push({
+        id: r * cols + c,
+        x: bx, y: by,
+        r: br, base_r: br,
+        accept: 0,
+        intact: true,
+        fills: 0,
+        pulse: 0,
+        detonateT: 0,
+      });
+    }
+  }
+}
+
+function spawnNextConveyorItems() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var stripY = H - 70 * S;
+  var spacing = 80 * S;
+  while (items.length < 5 && shiftQueue.length > 0) {
+    var cat = shiftQueue.shift();
+    var startX = W + spacing + items.length * spacing;
+    items.push({
+      category: cat,
+      x: startX,
+      y: stripY,
+      onConveyor: true,
+    });
+  }
+}
+
+function startGame() {
+  shift = 1;
+  bin_losses = 0;
+  routed = 0;
+  score = 0;
+  layoutBins();
+  rerollBinRules();
+  shiftQueue = buildShiftQueue();
+  items = [];
+  dragging = null;
+  spawnNextConveyorItems();
+  gs = 'PLAYING';
+  try { GF.gameStarted(); } catch(_) {}
+  try { GF.saveRun(); } catch(_) {}
+  try { localStorage.setItem('bins_of_holding_seen_tutorial', '1'); } catch(_) {}
+}
+
+function nextShift() {
+  if (shift >= TOTAL_SHIFTS) {
+    gs = 'WIN';
+    if (score > best) { best = score; try { localStorage.setItem('bins_of_holding_best', best); } catch(_) {} }
+    try { GF.gameEnded(); } catch(_) {}
+    return;
+  }
+  shift++;
+  routed = 0;
+  rerollSurvivingRules();
+  shiftQueue = buildShiftQueue();
+  items = [];
+  dragging = null;
+  spawnNextConveyorItems();
+  gs = 'PLAYING';
+  try { GF.saveRun(); } catch(_) {}
+}
+
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('bins_of_holding_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  try { GF.gameEnded(); } catch(_) {}
+  try { GF.saveRun(); } catch(_) {}
+}
+
+function endShift() {
+  gs = 'SHIFT_END';
+  try { GF.saveRun(); } catch(_) {}
+}
+
+window._setupForScreenshot = function(lvl) {
+  startGame();
+  if (lvl >= 2) shift = 2;
+  if (lvl >= 3) shift = 3;
+  for (var i = 0; i < bins.length; i++) {
+    bins[i].fills = Math.min(6, 2 + rngInt(4));
+    bins[i].r = bins[i].base_r * Math.pow(COMPRESSION_FACTOR, bins[i].fills);
+    bins[i].pulse = 0.4 + Math.random() * 0.4;
+  }
+  if (lvl >= 2 && bins.length >= 4) {
+    bins[3].intact = false;
+    bins[3].detonateT = 0.6;
+    bin_losses = 1;
+    for (var k = 0; k < 18; k++) {
+      GF.spawnParticles(bins[3].x, bins[3].y, '#ff6633', 1);
+    }
+  }
+  routed = 18 + rngInt(20);
+  shiftQueue = buildShiftQueue();
+  items = [];
+  spawnNextConveyorItems();
+  // Drag-state simulation: pretend a player is mid-drag for visual energy
+  if (items.length > 0) {
+    dragging = items[0];
+    dragging.x = GF.W * 0.5;
+    dragging.y = GF.H * 0.45;
+  }
+};
+window._jumpLevel = window._setupForScreenshot;
+
+function getPointerXY(e) {
+  if (e.touches && e.touches[0]) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  if (e.changedTouches && e.changedTouches[0]) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  return { x: e.clientX, y: e.clientY };
+}
+
+function onPointerDown(e) {
+  var p = getPointerXY(e);
+  for (var i = 0; i < hudButtons.length; i++) {
+    var b = hudButtons[i];
+    if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
+      b.fn();
+      if (e.preventDefault) e.preventDefault();
+      return;
+    }
+  }
+  if (gs !== 'PLAYING') return;
+  if (showTutorialOverlay) {
+    showTutorialOverlay = false;
+    if (e.preventDefault) e.preventDefault();
+    return;
+  }
+  if (items.length > 0 && !dragging) {
+    var front = items[0];
+    var d = GF.dist(p.x, p.y, front.x, front.y);
+    if (d < ITEM_RADIUS * GF.S * 3.0 || p.y > GF.H * 0.6) {
+      dragging = front;
+      dragging.x = p.x;
+      dragging.y = p.y;
+      if (e.preventDefault) e.preventDefault();
+    }
+  }
+}
+
+function onPointerMove(e) {
+  if (!dragging) return;
+  var p = getPointerXY(e);
+  dragging.x = p.x;
+  dragging.y = p.y;
+  if (e.preventDefault) e.preventDefault();
+}
+
+function onPointerUp(e) {
+  if (!dragging) return;
+  var p = getPointerXY(e);
+  var nearest = null, nd = Infinity;
+  for (var i = 0; i < bins.length; i++) {
+    if (!bins[i].intact) continue;
+    var d = GF.dist(p.x, p.y, bins[i].x, bins[i].y);
+    if (d < nd) { nd = d; nearest = bins[i]; }
+  }
+  if (nearest && nd < BIN_DROP_TOLERANCE * GF.S) {
+    handleDrop(dragging, nearest);
+  }
+  dragging = null;
+  if (e.preventDefault) e.preventDefault();
+}
+
+function handleDrop(item, bin) {
+  if (item.category === bin.accept) {
+    bin.fills++;
+    bin.pulse = 1;
+    bin.r = bin.base_r * Math.pow(COMPRESSION_FACTOR, bin.fills);
+    score += 10;
+    routed++;
+    GF.spawnParticles(bin.x, bin.y, CATEGORY_COLORS[item.category], 12);
+    GF.spawnFloat(bin.x, bin.y - bin.r - 10, GF.t('nice'), '#2ecc71');
+  } else {
+    bin.intact = false;
+    bin.detonateT = 0.8;
+    bin_losses++;
+    routed++;
+    GF.spawnParticles(bin.x, bin.y, '#ff6633', 28);
+    GF.spawnParticles(bin.x, bin.y, '#ffcc00', 18);
+    GF.spawnFloat(bin.x, bin.y, GF.t('boom'), '#e74c3c');
+    GF.setShake(0.9);
+    score = Math.max(0, score - 5);
+  }
+  var idx = items.indexOf(item);
+  if (idx >= 0) items.splice(idx, 1);
+
+  if (bin_losses >= MAX_LOSSES) {
+    gameOver();
+    return;
+  }
+  spawnNextConveyorItems();
+  if (routed >= ITEMS_PER_SHIFT) {
+    if (shift >= TOTAL_SHIFTS) {
+      gs = 'WIN';
+      if (score > best) { best = score; try { localStorage.setItem('bins_of_holding_best', best); } catch(_) {} }
+      try { GF.gameEnded(); } catch(_) {}
+    } else {
+      endShift();
+    }
+  }
+  try { GF.saveRun(); } catch(_) {}
+}
+
+function discardCurrent() {
+  if (gs !== 'PLAYING') return;
+  if (items.length === 0) return;
+  var front = items.shift();
+  if (dragging === front) dragging = null;
+  routed++;
+  spawnNextConveyorItems();
+  if (routed >= ITEMS_PER_SHIFT) {
+    if (shift >= TOTAL_SHIFTS) {
+      gs = 'WIN';
+    } else {
+      endShift();
+    }
+  }
+  try { GF.saveRun(); } catch(_) {}
+}
+
+function openTutorial() {
+  showTutorialOverlay = true;
+}
+
+function update(dt) {
+  for (var i = 0; i < bins.length; i++) {
+    var b = bins[i];
+    if (b.pulse > 0) b.pulse = Math.max(0, b.pulse - dt * 2.5);
+    if (b.detonateT > 0) b.detonateT = Math.max(0, b.detonateT - dt * 1.4);
+  }
+  if (gs !== 'PLAYING') return;
+  if (showTutorialOverlay) return;
+  var H = GF.H, S = GF.S;
+  var stripY = H - 70 * S;
+  var startX = 80 * S;
+  var spacing = 80 * S;
+  for (var j = 0; j < items.length; j++) {
+    var it = items[j];
+    if (it === dragging) continue;
+    var tx = startX + j * spacing;
+    it.y = stripY;
+    it.x += (tx - it.x) * Math.min(1, dt * 6);
+  }
+}
+
+function drawWarehouseFloor() {
+  var ctx = GF.ctx, W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = '#1a1d28';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  var step = 40 * S;
+  for (var x = 0; x < W; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (var y = 0; y < H; y += step) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+}
+
+function drawCategoryGlyph(x, y, r, cat) {
+  var ctx = GF.ctx;
+  ctx.fillStyle = CATEGORY_COLORS[cat];
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  var shape = CATEGORY_SHAPES[cat % CATEGORY_SHAPES.length];
+  ctx.beginPath();
+  if (shape === 'circle') {
+    ctx.arc(x, y, r, 0, Math.PI*2);
+  } else if (shape === 'square') {
+    ctx.rect(x - r, y - r, r*2, r*2);
+  } else if (shape === 'triangle') {
+    ctx.moveTo(x, y - r); ctx.lineTo(x + r, y + r); ctx.lineTo(x - r, y + r); ctx.closePath();
+  } else if (shape === 'hex') {
+    for (var i = 0; i < 6; i++) {
+      var a = i * Math.PI / 3;
+      var px = x + Math.cos(a) * r, py = y + Math.sin(a) * r;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  } else if (shape === 'star') {
+    for (var s = 0; s < 10; s++) {
+      var aa = s * Math.PI / 5 - Math.PI / 2;
+      var rr2 = (s % 2 === 0) ? r : r * 0.45;
+      var sx = x + Math.cos(aa) * rr2, sy = y + Math.sin(aa) * rr2;
+      if (s === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+    }
+    ctx.closePath();
+  } else {
+    ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath();
+  }
+  ctx.fill(); ctx.stroke();
+}
+
+function drawBin(b) {
+  var ctx = GF.ctx, S = GF.S;
+  if (!b.intact) {
+    if (b.detonateT > 0) {
+      ctx.save();
+      ctx.globalAlpha = b.detonateT;
+      ctx.fillStyle = '#3a1a14';
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.base_r * 0.7, 0, Math.PI*2); ctx.fill();
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = '#552222';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5,5]);
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.base_r * 0.7, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+    return;
+  }
+  var pulse = b.pulse;
+  ctx.save();
+  if (pulse > 0) {
+    ctx.shadowColor = CATEGORY_COLORS[b.accept] + 'cc';
+    ctx.shadowBlur = 28 * S * pulse;
+  }
+  ctx.lineWidth = 4 * S;
+  ctx.strokeStyle = '#7a8295';
+  ctx.fillStyle = '#23283a';
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.base_r, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#0d1018';
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.78, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(120,180,255,0.18)';
+  ctx.lineWidth = 2 * S;
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.62, 0, Math.PI*2); ctx.stroke();
+
+  var nFills = Math.min(b.fills, 8);
+  for (var d = 0; d < nFills; d++) {
+    var ang = (d / Math.max(1,nFills)) * Math.PI * 2;
+    var rr = b.r * 0.42;
+    var dx = b.x + Math.cos(ang) * rr;
+    var dy = b.y + Math.sin(ang) * rr;
+    ctx.fillStyle = CATEGORY_COLORS[b.accept];
+    ctx.beginPath(); ctx.arc(dx, dy, 4*S, 0, Math.PI*2); ctx.fill();
+  }
+  if (b.fills >= HINT_REVEAL_AFTER) {
+    drawCategoryGlyph(b.x + b.base_r * 0.7, b.y - b.base_r * 0.7, 11 * S, b.accept);
+  }
+  ctx.restore();
+}
+
+function drawItem(it, isDragging) {
+  var ctx = GF.ctx, S = GF.S;
+  var r = ITEM_RADIUS * S * (isDragging ? 1.2 : 1);
+  ctx.save();
+  if (isDragging) {
+    ctx.shadowColor = '#ffffff88';
+    ctx.shadowBlur = 18 * S;
+  }
+  ctx.fillStyle = CATEGORY_COLORS[it.category];
+  ctx.beginPath(); ctx.arc(it.x, it.y, r * 1.15, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#ffffff22';
+  ctx.beginPath(); ctx.arc(it.x, it.y, r * 0.7, 0, Math.PI*2); ctx.fill();
+  drawCategoryGlyph(it.x, it.y, r * 0.55, it.category);
+  ctx.restore();
+}
+
+function drawConveyor() {
+  var ctx = GF.ctx, W = GF.W, H = GF.H, S = GF.S;
+  var stripH = 110 * S;
+  var stripY = H - stripH;
+  var grd = ctx.createLinearGradient(0, stripY, 0, stripY + stripH);
+  grd.addColorStop(0, '#22273a');
+  grd.addColorStop(1, '#0e1018');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, stripY, W, stripH);
+  ctx.fillStyle = '#3a4256';
+  ctx.fillRect(0, stripY, W, 3 * S);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, stripY + 3*S, W, stripH - 3*S); ctx.clip();
+  var t = (performance.now() / 1000) * CONVEYOR_SPEED * S;
+  ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+  ctx.lineWidth = 4 * S;
+  for (var x = -200; x < W + 200; x += 30 * S) {
+    ctx.beginPath();
+    ctx.moveTo(x + (t % (30*S)), stripY);
+    ctx.lineTo(x + (t % (30*S)) - 40 * S, stripY + stripH);
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  if (items.length > 0) {
+    var front = items[0];
+    if (front !== dragging) {
+      ctx.save();
+      ctx.strokeStyle = '#ffd166';
+      ctx.lineWidth = 3 * S;
+      ctx.setLineDash([6 * S, 4 * S]);
+      ctx.beginPath();
+      ctx.arc(front.x, front.y, ITEM_RADIUS * S * 1.6, 0, Math.PI*2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+  for (var i = 0; i < items.length; i++) {
+    if (items[i] === dragging) continue;
+    drawItem(items[i], false);
+  }
+  if (dragging) drawItem(dragging, true);
+}
+
+function drawHeart(x, y, r, ctx) {
+  ctx.beginPath();
+  ctx.moveTo(x, y - r * 0.4);
+  ctx.bezierCurveTo(x - r, y - r * 1.1, x - r * 1.4, y + r * 0.4, x, y + r);
+  ctx.bezierCurveTo(x + r * 1.4, y + r * 0.4, x + r, y - r * 1.1, x, y - r * 0.4);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawHUD() {
+  var ctx = GF.ctx, W = GF.W, H = GF.H, S = GF.S;
+  hudButtons = [];
+  var fs = GF.clamp(16 * S, 12, 22);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  var intact = 0;
+  for (var i = 0; i < bins.length; i++) if (bins[i].intact) intact++;
+  ctx.fillStyle = '#9bd9ff';
+  ctx.fillText(GF.t('hud_bins') + ': ' + intact + '/' + BIN_COUNT, 14 * S, 14 * S);
+  var livesLeft = MAX_LOSSES - bin_losses;
+  for (var h = 0; h < MAX_LOSSES; h++) {
+    var hx = 14 * S + h * (22 * S);
+    var hy = 14 * S + fs + 8 * S;
+    ctx.fillStyle = h < livesLeft ? '#e74c3c' : '#552222';
+    drawHeart(hx + 10*S, hy + 8*S, 8 * S, ctx);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd166';
+  ctx.fillText(GF.t('hud_shift') + ' ' + shift + '/' + TOTAL_SHIFTS, W / 2, 14 * S);
+  ctx.fillStyle = '#fff';
+  ctx.font = (fs * 0.9) + 'px sans-serif';
+  ctx.fillText(GF.t('hud_routed') + ': ' + routed + '/' + ITEMS_PER_SHIFT, W / 2, 14 * S + fs + 4 * S);
+
+  var btnSize = 36 * S;
+  var qx = W - btnSize - 14 * S;
+  var qy = 14 * S;
+  ctx.fillStyle = '#3a4256';
+  GF.rr(ctx, qx, qy, btnSize, btnSize, 8 * S);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + (fs * 1.1) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText('?', qx + btnSize/2, qy + btnSize/2);
+  hudButtons.push({ x: qx, y: qy, w: btnSize, h: btnSize, fn: openTutorial });
+
+  var dW = GF.clamp(110 * S, 80, 160), dH = 32 * S;
+  var dx = W - dW - 12 * S;
+  var dy = H - 110 * S - dH - 8 * S;
+  ctx.fillStyle = '#5a3030';
+  GF.rr(ctx, dx, dy, dW, dH, 6 * S);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + (fs * 0.85) + 'px sans-serif';
+  ctx.fillText(GF.t('discard'), dx + dW/2, dy + dH/2);
+  hudButtons.push({ x: dx, y: dy, w: dW, h: dH, fn: discardCurrent });
+
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawTutorialOverlay() {
+  var ctx = GF.ctx, W = GF.W, H = GF.H, S = GF.S;
+  ctx.save();
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, W, H);
+  var fs = GF.clamp(18 * S, 14, 26);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + (fs * 1.4) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('title'), W/2, H * 0.18);
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillStyle = '#cde';
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  for (var i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], W/2, H * 0.32 + i * (fs * 1.5));
+  }
+  ctx.fillStyle = '#9ab';
+  ctx.font = (fs * 0.85) + 'px sans-serif';
+  ctx.fillText(GF.t('dismiss'), W/2, H * 0.86);
+  ctx.restore();
+}
+
+function drawMenuOverlay(title, multiSub, btnText, btnFn, bestText) {
+  var ctx = GF.ctx, W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(34 * S, 22, 54);
+  var subFs   = GF.clamp(15 * S, 12, 20);
+  ctx.shadowColor = 'rgba(46,204,113,0.45)'; ctx.shadowBlur = 28 * S;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(title, W / 2, H * 0.18);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#cde';
+  var parts = multiSub.split('\n');
+  var startY = H * 0.28;
+  var lineH = subFs * 1.4;
+  for (var i = 0; i < parts.length; i++) {
+    ctx.fillText(parts[i], W/2, startY + i * lineH);
+  }
+
+  var btnW = GF.clamp(240*S, 160, 320), btnH = GF.clamp(52*S, 40, 66);
+  var btnX = W/2 - btnW/2, btnY = startY + parts.length * lineH + 24 * S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY+btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + subFs + 'px sans-serif'; ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(btnText, W/2, btnY + btnH/2);
+  ctx.textBaseline = 'alphabetic';
+  hudButtons = [{ x: btnX, y: btnY, w: btnW, h: btnH, fn: btnFn }];
+
+  if (bestText) {
+    ctx.font = GF.clamp(13*S,10,17) + 'px sans-serif';
+    ctx.fillStyle = '#557';
+    ctx.fillText(bestText, W/2, btnY + btnH + 24 * S);
+  }
+}
+
+function draw(ctx) {
+  drawWarehouseFloor();
+
+  if (gs !== 'MENU') {
+    for (var i = 0; i < bins.length; i++) drawBin(bins[i]);
+    drawConveyor();
+    drawHUD();
+  }
+
+  if (gs === 'PLAYING' && showTutorialOverlay) {
+    drawTutorialOverlay();
+  }
+
+  if (gs === 'MENU') {
+    var sub = GF.t('sub') + '\n\n' +
+              GF.t('tut_goal') + '\n' +
+              GF.t('tut_controls') + '\n' +
+              GF.t('tut_win') + '\n' +
+              GF.t('tut_lose') + '\n' +
+              GF.t('tut_tip');
+    drawMenuOverlay(GF.t('title'), sub, GF.t('play'), startGame, best > 0 ? GF.t('best') + ': ' + best : null);
+  }
+  if (gs === 'SHIFT_END') {
+    var intact2 = 0;
+    for (var k = 0; k < bins.length; k++) if (bins[k].intact) intact2++;
+    GF.drawOverlay({
+      title: GF.t('shiftend'),
+      sub: intact2 + ' ' + GF.t('survived'),
+      sub2: GF.t('score') + ': ' + score,
+      btnText: GF.t('next'),
+      btnFn: nextShift,
+    });
+    hudButtons = [];
+  }
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+    hudButtons = [];
+  }
+  if (gs === 'WIN') {
+    GF.drawOverlay({
+      title: GF.t('win'),
+      sub: GF.t('score') + ': ' + score,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: GF.t('best') + ': ' + best,
+    });
+    hudButtons = [];
+  }
+}
+
+GF.init({
+  designW: 1280,
+  designH: 720,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'bins_of_holding',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('bins_of_holding_best') || '0') || 0; } catch (e) {}
+    GF.persist('bins_of_holding_run_v1',
+      function() { return { gs: gs, shift: shift, bin_losses: bin_losses, routed: routed, score: score }; },
+      function(s) {
+        if (!s) return;
+        gs = 'MENU';
+        score = s.score || 0;
+      }
+    );
+    if (gs === 'PLAYING') gs = 'MENU';
+    layoutBins();
+    rerollBinRules();
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    shift: shift,
+    bin_losses: bin_losses,
+    routed: routed,
+    score: score,
+    BIN_COUNT: BIN_COUNT,
+    MAX_LOSSES: MAX_LOSSES,
+    ITEMS_PER_SHIFT: ITEMS_PER_SHIFT,
+    TOTAL_SHIFTS: TOTAL_SHIFTS,
+    COMPRESSION_FACTOR: COMPRESSION_FACTOR,
+    DETONATE_THRESHOLD: DETONATE_THRESHOLD,
+    ITEM_CATEGORIES: ITEM_CATEGORIES,
+    CONVEYOR_SPEED: CONVEYOR_SPEED,
+    HINT_REVEAL_AFTER: HINT_REVEAL_AFTER,
+    DISCARD_PENALTY: DISCARD_PENALTY,
+  };
+});
+
+var canvas = document.getElementById('c');
+canvas.addEventListener('mousedown', onPointerDown);
+window.addEventListener('mousemove', onPointerMove);
+window.addEventListener('mouseup', onPointerUp);
+canvas.addEventListener('touchstart', function(e) { onPointerDown(e); }, { passive: false });
+canvas.addEventListener('touchmove', function(e) { onPointerMove(e); }, { passive: false });
+canvas.addEventListener('touchend', function(e) { onPointerUp(e); }, { passive: false });
+
+window._setLang = function(l) { GF.lang = l; };
+window._setState = function(s) { gs = s; };
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+
+})();
+</script>
+</body>
+</html>

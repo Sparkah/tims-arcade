@@ -59,6 +59,12 @@ var STRINGS = {
     shield_label: 'SHIELD',
     shield_grab:  'SHIELD!',
     shield_save:  'SAVED!',
+    tier_bronze:  'BRONZE',
+    tier_silver:  'SILVER',
+    tier_gold:    'GOLD',
+    tier_legend:  'LEGEND',
+    tier_reached: 'TIER!',
+    tier_next:    'NEXT',
   },
   ru: {
     title: 'Побег Шины',
@@ -97,6 +103,12 @@ var STRINGS = {
     shield_label: 'ЩИТ',
     shield_grab:  'ЩИТ!',
     shield_save:  'СПАСЁН!',
+    tier_bronze:  'БРОНЗА',
+    tier_silver:  'СЕРЕБРО',
+    tier_gold:    'ЗОЛОТО',
+    tier_legend:  'ЛЕГЕНДА',
+    tier_reached: 'РАНГ!',
+    tier_next:    'ДО',
   },
 };
 
@@ -411,6 +423,28 @@ var shieldsCollectedRun = 0;       // per-run pickups
 var shieldSavesRun = 0;            // per-run saves consumed
 var lifetimeShieldSaves = 0;       // persisted across runs
 
+// Iter#11 (free-choice): distance-tier milestones. The game now has rich
+// pickups/score juice but no per-run "progress shape" — long runs blur
+// together with no felt sense of crossing a threshold. Tiers (BRONZE 500m,
+// SILVER 1000m, GOLD 2000m, LEGEND 3500m) give the run an arc: visible HUD
+// chevron with progress-to-next, a banner + score injection + shake + SFX on
+// each cross. Pure additive layer — distance & scoring untouched, no impact
+// on cop AI, pickups, achievements, or physics.
+var DIST_TIERS = [
+  { id: 'bronze', nameKey: 'tier_bronze', dist:  500, bonus:  100, col: '#cd7f32' },
+  { id: 'silver', nameKey: 'tier_silver', dist: 1000, bonus:  300, col: '#c8d0d8' },
+  { id: 'gold',   nameKey: 'tier_gold',   dist: 2000, bonus:  700, col: '#ffd84a' },
+  { id: 'legend', nameKey: 'tier_legend', dist: 3500, bonus: 1500, col: '#ff6ee8' },
+];
+var tierReached = -1;              // index into DIST_TIERS already crossed this run (-1 = none)
+var tierBannerTimer = 0;           // seconds remaining for centred TIER banner
+var tierBannerIdx = -1;            // which tier the banner is showing
+var lifetimeTopTier = -1;          // persisted: highest tier ever reached (for menu badge later)
+try {
+  var _ltt = parseInt(localStorage.getItem('tire_escape_lifetime_top_tier') || '-1', 10);
+  if (!isNaN(_ltt)) lifetimeTopTier = _ltt;
+} catch (e) {}
+
 function spawnShield(x) {
   // Mid-high band, slightly higher than rockets so the silhouette doesn't
   // overlap them visually. Encourages a bounce-chain commit to reach.
@@ -549,6 +583,10 @@ function startGame() {
   shieldFlash = 0;
   shieldsCollectedRun = 0;
   shieldSavesRun = 0;
+  // Iter#11: reset tier state for new run.
+  tierReached = -1;
+  tierBannerTimer = 0;
+  tierBannerIdx = -1;
   copX = -260;
   copPanic = 0;
   elapsedSec = 0;
@@ -1091,6 +1129,32 @@ function update(dt) {
 
   distance += scrollSpeed * dt * 0.1;
 
+  // Iter#11: distance-tier milestones. Detect crossing the next-tier
+  // threshold, fire bonus + banner + shake + SFX. Latch by index so each
+  // tier fires at most once per run.
+  if (tierReached < DIST_TIERS.length - 1) {
+    var nextIdx = tierReached + 1;
+    var nextT = DIST_TIERS[nextIdx];
+    if (distance >= nextT.dist) {
+      tierReached = nextIdx;
+      tierBannerIdx = nextIdx;
+      tierBannerTimer = 2.4;
+      bonusScore += nextT.bonus;
+      if (nextIdx > lifetimeTopTier) {
+        lifetimeTopTier = nextIdx;
+        try { localStorage.setItem('tire_escape_lifetime_top_tier', String(lifetimeTopTier)); } catch (e) {}
+      }
+      var txw = (tire.x - cameraX) * GF.S;
+      var tyw = tire.y * GF.S;
+      GF.spawnParticles(txw, tyw, nextT.col, 28);
+      GF.spawnFloat(txw, tyw - 70 * GF.S, '+' + nextT.bonus, nextT.col);
+      GF.setShake(nextIdx >= 2 ? 1.0 : 0.7);
+      // Reuse milestone SFX for tier crossings — distinct timbres on 3/5/10.
+      try { SFX.play(nextIdx >= 2 ? 'milestone_10' : (nextIdx === 1 ? 'milestone_5' : 'milestone_3')); } catch (e) {}
+    }
+  }
+  if (tierBannerTimer > 0) tierBannerTimer = Math.max(0, tierBannerTimer - dt);
+
   var copDist = tire.x - copX;
   copPanic = GF.clamp(1 - copDist / 320, 0, 1);
 
@@ -1176,6 +1240,9 @@ function draw(ctx) {
     drawComboPulse();
     drawHUD();
     if (gs === 'PLAYING') drawCopPanicVignette();
+    // Iter#11: tier banner over HUD but only while PLAYING (gameover overlay
+    // takes the centre on GAMEOVER, so a stale banner would clash).
+    if (gs === 'PLAYING' && tierBannerTimer > 0) drawTierBanner();
   }
 
   if (gs === 'MENU') {
@@ -2221,6 +2288,78 @@ function drawHUD() {
     c.fillText(shLabel, 14 * GF.S, shY);
   }
 
+  // Iter#11: tier progress chip. Stacks below shield/boost/coin pills.
+  // Shows current tier name + progress bar toward next tier. Once LEGEND
+  // is reached, shows just the LEGEND label without progress bar.
+  {
+    var tFs = fs * 0.72;
+    c.font = 'bold ' + tFs + 'px sans-serif';
+    c.textAlign = 'left';
+    var tY = 14 * GF.S + fs * 1.15
+             + (coinsCollectedRun > 0 ? (fs * 0.78) * 1.3 : 0)
+             + (rocketBoostTimer > 0 ? (fs * 0.78) * 1.3 : 0)
+             + (shieldActive ? (fs * 0.78) * 1.3 : 0);
+    var curIdx = tierReached;
+    var curT = curIdx >= 0 ? DIST_TIERS[curIdx] : null;
+    var curLabel = curT ? GF.t(curT.nameKey) : '—';
+    var curCol = curT ? curT.col : '#9ab';
+    c.fillStyle = curCol;
+    c.fillText(curLabel, 14 * GF.S, tY);
+    var labelW = c.measureText(curLabel).width;
+    if (curIdx < DIST_TIERS.length - 1) {
+      var nxt = DIST_TIERS[curIdx + 1];
+      var prevD = curIdx >= 0 ? DIST_TIERS[curIdx].dist : 0;
+      var prog = GF.clamp((distance - prevD) / Math.max(1, (nxt.dist - prevD)), 0, 1);
+      var barW = 90 * GF.S, barH = 5 * GF.S;
+      var bx = 14 * GF.S + labelW + 8 * GF.S;
+      var by = tY + tFs * 0.4;
+      c.fillStyle = 'rgba(255,255,255,0.18)';
+      c.fillRect(bx, by, barW, barH);
+      c.fillStyle = nxt.col;
+      c.fillRect(bx, by, barW * prog, barH);
+      // small "next: 1000m" suffix
+      var nfFs = tFs * 0.85;
+      c.font = 'bold ' + nfFs + 'px sans-serif';
+      c.fillStyle = '#9ab';
+      c.fillText(GF.t('tier_next') + ' ' + nxt.dist + 'm', bx, by + barH + 4 * GF.S);
+    }
+  }
+}
+
+// Iter#11: centred tier banner shown briefly when player crosses a threshold.
+// Pulses for 2.4s with the tier colour. Pure visual — drawn over HUD but
+// under GAMEOVER overlay (called from PLAYING-state branch only).
+function drawTierBanner() {
+  if (tierBannerTimer <= 0 || tierBannerIdx < 0) return;
+  var c = GF.ctx;
+  var t = tierBannerTimer / 2.4;       // 1 -> 0
+  var alpha = t < 0.2 ? (t / 0.2) : (t > 0.7 ? 1 : (1 - (0.7 - t) / 0.7) * 0 + 1);
+  // simpler: fade-in 0.2s, hold, fade-out last 0.3s
+  if (t > 0.875) alpha = (1 - t) / 0.125;     // first 0.3s = fade in (t: 1 -> 0.875)
+  else if (t < 0.25) alpha = t / 0.25;        // last 0.6s = fade out
+  else alpha = 1;
+  alpha = GF.clamp(alpha, 0, 1);
+  var tier = DIST_TIERS[tierBannerIdx];
+  var cx = GF.W / 2;
+  var cy = GF.H * 0.32;
+  var fs = GF.clamp(56 * GF.S, 36, 96);
+  var pulse = 1 + 0.06 * Math.sin(performance.now() / 120);
+  c.save();
+  c.globalAlpha = alpha * 0.85;
+  c.fillStyle = '#000';
+  c.fillRect(0, cy - fs * 0.95, GF.W, fs * 1.9);
+  c.globalAlpha = alpha;
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.font = 'bold ' + (fs * pulse) + 'px sans-serif';
+  c.fillStyle = tier.col;
+  c.fillText(GF.t(tier.nameKey) + ' ' + GF.t('tier_reached'), cx, cy - fs * 0.1);
+  var subFs = fs * 0.42;
+  c.font = 'bold ' + subFs + 'px sans-serif';
+  c.fillStyle = '#fff';
+  c.fillText('+' + tier.bonus, cx, cy + fs * 0.55);
+  c.restore();
+
   if (combo > 0) {
     c.textAlign = 'center';
     var t = comboTimer / 1.5;
@@ -2350,7 +2489,11 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     shieldsCollectedRun: typeof shieldsCollectedRun !== 'undefined' ? shieldsCollectedRun : null,
     shieldSavesRun: typeof shieldSavesRun !== 'undefined' ? shieldSavesRun : null,
     lifetimeShieldSaves: typeof lifetimeShieldSaves !== 'undefined' ? lifetimeShieldSaves : null,
-    sfxMuted: typeof sfxMuted !== 'undefined' ? sfxMuted : null
+    sfxMuted: typeof sfxMuted !== 'undefined' ? sfxMuted : null,
+    tierReached:     typeof tierReached     !== 'undefined' ? tierReached     : null,
+    tierBannerIdx:   typeof tierBannerIdx   !== 'undefined' ? tierBannerIdx   : null,
+    tierBannerTimer: typeof tierBannerTimer !== 'undefined' ? tierBannerTimer : null,
+    lifetimeTopTier: typeof lifetimeTopTier !== 'undefined' ? lifetimeTopTier : null
   };
 });
 })();

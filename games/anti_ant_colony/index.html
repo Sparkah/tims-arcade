@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Anti-Ant Colony</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'ANTI-ANT COLONY',
+    sub:   'Sacrifice workers to save the Queen',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'KILLS', best: 'BEST WAVE',
+    gameover: 'QUEEN FELL',
+    won: 'COLONY SURVIVED',
+    wave: 'WAVE', ants: 'ANTS', kills: 'KILLS',
+    breed: 'BREED', cooldown: 'WAIT',
+    queen_breached: 'The enemy reached the queen',
+    waves_cleared: 'All 12 waves cleared',
+    tut_goal:     'Goal: Defend the QUEEN — outlast 12 enemy waves.',
+    tut_controls: 'Controls: Tap a tunnel to sacrifice a worker as a plug. Tap BREED to grow more.',
+    tut_win:      'Win: Survive all 12 waves with the queen alive.',
+    tut_lose:     'Lose: Any enemy ant reaches the queen chamber on the right.',
+    tut_tip:      'Tip: Plugs decay in 8s — re-plug or breed before the wall crumbles.',
+    close: 'CLOSE',
+  },
+  ru: {
+    title: 'АНТИ-МУРАВЕЙНИК',
+    sub:   'Жертвуй рабочих ради королевы',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'УБИТО', best: 'ЛУЧШАЯ ВОЛНА',
+    gameover: 'КОРОЛЕВА ПАЛА',
+    won: 'КОЛОНИЯ ВЫЖИЛА',
+    wave: 'ВОЛНА', ants: 'РАБОЧИЕ', kills: 'УБИТО',
+    breed: 'РАЗМН.', cooldown: 'ЖДИ',
+    queen_breached: 'Враг достиг королевы',
+    waves_cleared: 'Все 12 волн пройдены',
+    tut_goal:     'Цель: Защити КОРОЛЕВУ — переживи 12 волн.',
+    tut_controls: 'Управление: Тапни по туннелю — рабочий жертвует собой. Тапни РАЗМН. — больше рабочих.',
+    tut_win:      'Победа: Переживи все 12 волн.',
+    tut_lose:     'Поражение: Враг доберётся до камеры королевы справа.',
+    tut_tip:      'Совет: Затычки разрушаются за 8 сек — обновляй или размножайся.',
+    close: 'ЗАКРЫТЬ',
+  },
+};
+
+var SPRITE_NAMES = ['queen', 'enemy', 'worker', 'plug'];
+
+// ── TUNABLES (from DESIGN.md) ────────────────────────────────────────────
+var START_ANTS         = 12;
+var MAX_ANTS           = 30;
+var BREED_RATE         = 3;
+var BREED_COOLDOWN_SEC = 4;
+var ENEMY_DIG_RATE     = 22;   // px/sec at design scale
+var ENEMY_HP_PLUG      = 1;
+var PLUG_DECAY_SEC     = 8;
+var WAVE_SPAWN_BASE    = 3;
+var WAVE_SPAWN_SCALE   = 1;
+var WAVE_GAP_SEC       = 2.5;
+var WIN_WAVES          = 12;
+var QUEEN_X_FRAC       = 0.88;
+var TUNNEL_LANES       = 4;
+var ENEMY_RADIUS       = 10;
+var PLUG_RADIUS        = 14;
+var PLUG_TAP_RADIUS    = 24;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';           // MENU | PLAYING | GAMEOVER | WON
+var ants = START_ANTS;
+var kills = 0;
+var wave = 1;
+var bestWave = 1;
+var wave_target = 0;
+var wave_spawned = 0;
+var wave_killed_or_blocked = 0;
+var waveGapTimer = 0;
+var spawnTimer = 0;
+var breedCooldown = 0;
+var queen_breach = 0;
+var enemies = [];
+var plugs = [];
+var seenTutorial = false;
+var helpOpen = false;
+var menuButtons = [];
+var hudBtns = [];
+var laneY = [];
+
+function layout() {
+  laneY = [];
+  var top = GF.H * 0.18;
+  var bottom = GF.H * 0.80;
+  for (var i = 0; i < TUNNEL_LANES; i++) {
+    laneY.push(top + (bottom - top) * (i + 0.5) / TUNNEL_LANES);
+  }
+}
+
+function queenX() { return GF.W * QUEEN_X_FRAC; }
+function spawnX() { return GF.W * 0.06; }
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  ants = START_ANTS;
+  kills = 0;
+  wave = 1;
+  queen_breach = 0;
+  enemies = [];
+  plugs = [];
+  breedCooldown = 0;
+  waveGapTimer = 0.6;
+  spawnTimer = 0;
+  wave_target = WAVE_SPAWN_BASE + 1 * WAVE_SPAWN_SCALE;
+  wave_spawned = 0;
+  wave_killed_or_blocked = 0;
+  gs = 'PLAYING';
+  helpOpen = false;
+  layout();
+  try { localStorage.setItem('anti_ant_colony_seen_tutorial', '1'); } catch (e) {}
+  seenTutorial = true;
+  if (GF.gameStarted) GF.gameStarted();
+  GF.saveRun();
+}
+
+function startNextWave() {
+  wave_target = WAVE_SPAWN_BASE + wave * WAVE_SPAWN_SCALE;
+  wave_spawned = 0;
+  wave_killed_or_blocked = 0;
+  spawnTimer = 0;
+  GF.saveRun();
+}
+
+function gameOver() {
+  if (wave > bestWave) {
+    bestWave = wave;
+    try { localStorage.setItem('anti_ant_colony_best', bestWave); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.setShake(0.6);
+  if (GF.gameEnded) GF.gameEnded();
+  GF.saveRun();
+}
+
+function gameWon() {
+  if (wave > bestWave) {
+    bestWave = wave;
+    try { localStorage.setItem('anti_ant_colony_best', bestWave); } catch (e) {}
+  }
+  gs = 'WON';
+  if (GF.gameEnded) GF.gameEnded();
+  GF.saveRun();
+}
+
+function spawnEnemy() {
+  var lane = Math.floor(Math.random() * TUNNEL_LANES);
+  enemies.push({
+    x: spawnX(),
+    y: laneY[lane],
+    lane: lane,
+    alive: true,
+    age: 0,
+  });
+  wave_spawned++;
+}
+
+function tryPlug(x, y) {
+  if (ants <= 0) return false;
+  var lane = 0, best = Infinity;
+  for (var i = 0; i < laneY.length; i++) {
+    var d = Math.abs(laneY[i] - y);
+    if (d < best) { best = d; lane = i; }
+  }
+  if (best > 80 * GF.S) return false;
+  var py = laneY[lane];
+  if (x < spawnX() + 30 * GF.S || x > queenX() - 30 * GF.S) return false;
+  for (var j = 0; j < plugs.length; j++) {
+    var p = plugs[j];
+    if (p.lane === lane && Math.abs(p.x - x) < PLUG_RADIUS * GF.S * 1.5) return false;
+  }
+  plugs.push({
+    x: x, y: py, lane: lane,
+    life: PLUG_DECAY_SEC,
+    hp: ENEMY_HP_PLUG,
+    flash: 0.3,
+  });
+  ants--;
+  GF.spawnParticles(x, py, '#f4c163', 10);
+  GF.spawnFloat(x, py - 16 * GF.S, '-1', '#e74c3c');
+  GF.saveRun();
+  return true;
+}
+
+function tryBreed() {
+  if (breedCooldown > 0) return false;
+  if (ants >= MAX_ANTS) return false;
+  ants = Math.min(MAX_ANTS, ants + BREED_RATE);
+  breedCooldown = BREED_COOLDOWN_SEC;
+  GF.spawnFloat(GF.cx, GF.H - 80 * GF.S, '+' + BREED_RATE, '#2ecc71');
+  GF.saveRun();
+  return true;
+}
+
+// Screenshot helper
+window._jumpLevel = function(lvl) {
+  startGame();
+  wave = Math.max(1, Math.min(WIN_WAVES, lvl || 5));
+  wave_target = WAVE_SPAWN_BASE + wave * WAVE_SPAWN_SCALE;
+  ants = 14;
+  kills = 8 + wave * 2;
+  enemies = [];
+  plugs = [];
+  layout();
+  for (var i = 0; i < 6; i++) {
+    var lane = i % TUNNEL_LANES;
+    var t = 0.25 + (i * 0.11);
+    enemies.push({
+      x: spawnX() + (queenX() - spawnX()) * t,
+      y: laneY[lane], lane: lane, alive: true, age: 1 + i * 0.4,
+    });
+  }
+  for (var k = 0; k < 5; k++) {
+    var ln = k % TUNNEL_LANES;
+    plugs.push({
+      x: spawnX() + (queenX() - spawnX()) * (0.55 + k * 0.07),
+      y: laneY[ln], lane: ln, life: PLUG_DECAY_SEC - k * 0.8, hp: 1, flash: 0,
+    });
+  }
+  waveGapTimer = 0;
+  spawnTimer = 1;
+  GF.saveRun();
+};
+window._setupForScreenshot = function(lvl) { window._jumpLevel(lvl || 5); };
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+
+  if (breedCooldown > 0) breedCooldown = Math.max(0, breedCooldown - dt);
+
+  if (waveGapTimer > 0) {
+    waveGapTimer -= dt;
+    if (waveGapTimer <= 0 && wave_spawned === 0) {
+      startNextWave();
+    }
+  } else {
+    if (wave_spawned < wave_target) {
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) {
+        spawnEnemy();
+        var minS = 0.6, maxS = 1.4;
+        spawnTimer = Math.max(minS, maxS - wave * 0.06);
+      }
+    }
+  }
+
+  var qx = queenX();
+  for (var i = enemies.length - 1; i >= 0; i--) {
+    var e = enemies[i];
+    if (!e.alive) { enemies.splice(i, 1); continue; }
+    e.age += dt;
+    e.x += ENEMY_DIG_RATE * GF.S * dt;
+    var blocked = false;
+    for (var p = plugs.length - 1; p >= 0; p--) {
+      var pl = plugs[p];
+      if (pl.lane !== e.lane) continue;
+      var dx = pl.x - e.x;
+      if (dx > 0 && dx < (PLUG_RADIUS + ENEMY_RADIUS) * GF.S) {
+        pl.hp -= 1;
+        e.alive = false;
+        kills++;
+        wave_killed_or_blocked++;
+        GF.spawnParticles(e.x, e.y, '#c0392b', 12);
+        GF.spawnParticles(pl.x, pl.y, '#f4c163', 6);
+        GF.spawnFloat(e.x, e.y - 10 * GF.S, '+1', '#2ecc71');
+        if (pl.hp <= 0) plugs.splice(p, 1);
+        GF.setShake(0.12);
+        blocked = true;
+        break;
+      }
+    }
+    if (blocked) continue;
+    if (e.x >= qx) {
+      queen_breach += 1;
+      GF.setShake(0.8);
+      gameOver();
+      return;
+    }
+  }
+
+  for (var k = plugs.length - 1; k >= 0; k--) {
+    var pp = plugs[k];
+    pp.life -= dt;
+    if (pp.flash > 0) pp.flash = Math.max(0, pp.flash - dt);
+    if (pp.life <= 0) plugs.splice(k, 1);
+  }
+
+  if (wave_spawned >= wave_target && enemies.length === 0 && waveGapTimer <= 0) {
+    if (wave >= WIN_WAVES) {
+      gameWon();
+      return;
+    }
+    wave++;
+    waveGapTimer = WAVE_GAP_SEC;
+    if (wave > bestWave) {
+      bestWave = wave;
+      try { localStorage.setItem('anti_ant_colony_best', bestWave); } catch (e) {}
+    }
+    GF.saveRun();
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  drawBackground(ctx);
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WON') {
+    drawTunnels(ctx);
+    drawEnemies(ctx);
+    drawPlugs(ctx);
+    drawQueen(ctx);
+    drawHUD(ctx);
+  }
+  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if (gs === 'WON') drawWon(ctx);
+  if (helpOpen && gs === 'PLAYING') drawHelpPanel(ctx);
+}
+
+function drawBackground(ctx) {
+  var g = ctx.createLinearGradient(0, 0, GF.W, 0);
+  g.addColorStop(0, '#3b0a0a');
+  g.addColorStop(0.45, '#1a0a14');
+  g.addColorStop(0.7, '#1a1208');
+  g.addColorStop(1, '#3d2410');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.12)';
+  for (var y = 0; y < GF.H; y += 18 * GF.S) {
+    ctx.fillRect(0, y, GF.W, 1.5 * GF.S);
+  }
+  var topG = ctx.createLinearGradient(0, 0, 0, GF.H * 0.12);
+  topG.addColorStop(0, 'rgba(0,0,0,0.7)'); topG.addColorStop(1, 'transparent');
+  ctx.fillStyle = topG; ctx.fillRect(0, 0, GF.W, GF.H * 0.12);
+  var botG = ctx.createLinearGradient(0, GF.H * 0.88, 0, GF.H);
+  botG.addColorStop(0, 'transparent'); botG.addColorStop(1, 'rgba(0,0,0,0.7)');
+  ctx.fillStyle = botG; ctx.fillRect(0, GF.H * 0.88, GF.W, GF.H * 0.12);
+}
+
+function drawTunnels(ctx) {
+  if (laneY.length === 0) layout();
+  var sx = spawnX();
+  var sg = ctx.createRadialGradient(sx, GF.cy, 0, sx, GF.cy, GF.H * 0.6);
+  sg.addColorStop(0, 'rgba(231,76,60,0.45)');
+  sg.addColorStop(1, 'transparent');
+  ctx.fillStyle = sg;
+  ctx.fillRect(0, 0, GF.W * 0.5, GF.H);
+
+  for (var i = 0; i < laneY.length; i++) {
+    var ly = laneY[i];
+    var laneH = (GF.H * 0.62) / TUNNEL_LANES * 0.7;
+    ctx.fillStyle = 'rgba(20,8,8,0.5)';
+    ctx.beginPath();
+    GF.rr(ctx, sx, ly - laneH/2, queenX() - sx, laneH, laneH/2);
+    ctx.fill();
+  }
+}
+
+function drawEnemies(ctx) {
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    ctx.strokeStyle = 'rgba(231,76,60,0.45)';
+    ctx.lineWidth = 4 * GF.S;
+    ctx.beginPath();
+    ctx.moveTo(spawnX(), e.y);
+    ctx.lineTo(e.x, e.y);
+    ctx.stroke();
+    var size = ENEMY_RADIUS * 2.6 * GF.S;
+    GF.drawSprite('enemy', e.x, e.y, size, function(c, x, y, s) {
+      c.fillStyle = '#c0392b';
+      c.beginPath(); c.arc(x, y, s/2, 0, Math.PI*2); c.fill();
+      c.fillStyle = '#7a1410';
+      c.beginPath(); c.arc(x - s*0.3, y, s*0.28, 0, Math.PI*2); c.fill();
+      c.beginPath(); c.arc(x + s*0.3, y, s*0.28, 0, Math.PI*2); c.fill();
+      c.fillStyle = '#ffeb3b';
+      c.beginPath(); c.arc(x + s*0.18, y - s*0.06, s*0.07, 0, Math.PI*2); c.fill();
+    });
+  }
+}
+
+function drawPlugs(ctx) {
+  for (var i = 0; i < plugs.length; i++) {
+    var p = plugs[i];
+    var lifeFrac = p.life / PLUG_DECAY_SEC;
+    var size = PLUG_RADIUS * 2 * GF.S;
+    ctx.save();
+    ctx.globalAlpha = 0.45 + 0.55 * lifeFrac;
+    GF.drawSprite('plug', p.x, p.y, size, function(c, x, y, s) {
+      c.fillStyle = '#f4c163';
+      GF.rr(c, x - s/2, y - s/2, s, s, s*0.2);
+      c.fill();
+      c.strokeStyle = '#7a4d10';
+      c.lineWidth = 2 * GF.S;
+      c.stroke();
+      c.fillStyle = '#8a5a1a';
+      c.fillRect(x - s/2, y - s*0.05, s, s*0.1);
+    });
+    if (p.flash > 0) {
+      ctx.globalAlpha = p.flash;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3 * GF.S;
+      ctx.beginPath(); ctx.arc(p.x, p.y, size * 0.7, 0, Math.PI*2); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+function drawQueen(ctx) {
+  var qx = queenX();
+  var chW = GF.W - qx + 12 * GF.S;
+  var chG = ctx.createLinearGradient(qx, 0, GF.W, 0);
+  chG.addColorStop(0, 'rgba(244,193,99,0.15)');
+  chG.addColorStop(1, 'rgba(244,193,99,0.45)');
+  ctx.fillStyle = chG;
+  ctx.fillRect(qx, GF.H * 0.12, chW, GF.H * 0.76);
+  ctx.strokeStyle = '#f4c163';
+  ctx.lineWidth = 3 * GF.S;
+  ctx.beginPath();
+  ctx.moveTo(qx, GF.H * 0.12);
+  ctx.lineTo(qx, GF.H * 0.88);
+  ctx.stroke();
+  var qy = GF.cy;
+  var qSize = GF.clamp(80 * GF.S, 56, 120);
+  GF.drawSprite('queen', qx + chW * 0.4, qy, qSize, function(c, x, y, s) {
+    c.fillStyle = '#f4c163';
+    c.beginPath(); c.arc(x, y, s/2, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#c0902a';
+    c.beginPath(); c.arc(x - s*0.3, y, s*0.32, 0, Math.PI*2); c.fill();
+    c.beginPath(); c.arc(x + s*0.3, y, s*0.32, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#ffeb3b';
+    c.beginPath();
+    c.moveTo(x - s*0.35, y - s*0.55);
+    c.lineTo(x - s*0.2,  y - s*0.35);
+    c.lineTo(x - s*0.1,  y - s*0.55);
+    c.lineTo(x,          y - s*0.35);
+    c.lineTo(x + s*0.1,  y - s*0.55);
+    c.lineTo(x + s*0.2,  y - s*0.35);
+    c.lineTo(x + s*0.35, y - s*0.55);
+    c.lineTo(x + s*0.35, y - s*0.3);
+    c.lineTo(x - s*0.35, y - s*0.3);
+    c.closePath(); c.fill();
+  });
+}
+
+function drawHUD(ctx) {
+  hudBtns = [];
+  var fs = GF.clamp(18 * GF.S, 13, 24);
+  var pad = 12 * GF.S;
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('wave') + ' ' + wave + ' / ' + WIN_WAVES, pad, pad);
+
+  ctx.textAlign = 'center';
+  var antColor = ants > 6 ? '#2ecc71' : (ants >= 3 ? '#f4c163' : '#e74c3c');
+  ctx.fillStyle = antColor;
+  ctx.fillText(GF.t('ants') + ': ' + ants + ' / ' + MAX_ANTS, GF.cx, pad);
+
+  var btnSize = GF.clamp(36 * GF.S, 28, 48);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('kills') + ': ' + kills, GF.W - pad - btnSize - 10 * GF.S, pad);
+
+  var hx = GF.W - pad - btnSize, hy = pad;
+  ctx.fillStyle = '#3498db';
+  GF.rr(ctx, hx, hy, btnSize, btnSize, 8);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + (fs + 2) + 'px sans-serif';
+  ctx.fillText('?', hx + btnSize/2, hy + btnSize/2);
+  hudBtns.push({ x: hx, y: hy, w: btnSize, h: btnSize, fn: function() { helpOpen = !helpOpen; } });
+
+  var bw = GF.clamp(200 * GF.S, 140, 260);
+  var bh = GF.clamp(56 * GF.S, 42, 72);
+  var bx = GF.cx - bw/2;
+  var by = GF.H - bh - 18 * GF.S;
+  var onCD = breedCooldown > 0;
+  var capped = ants >= MAX_ANTS;
+  var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
+  if (onCD || capped) {
+    grad.addColorStop(0, '#555a66'); grad.addColorStop(1, '#383c46');
+  } else {
+    grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#1d8348');
+  }
+  GF.rr(ctx, bx, by, bw, bh, bh/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 2 * GF.S;
+  GF.rr(ctx, bx, by, bw, bh, bh/2);
+  ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + Math.floor(bh * 0.32) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var lbl = onCD ? (GF.t('cooldown') + ' ' + breedCooldown.toFixed(1) + 's')
+                 : (capped ? GF.t('ants') + ' MAX' : GF.t('breed') + ' +' + BREED_RATE);
+  ctx.fillText(lbl, GF.cx, by + bh/2);
+  hudBtns.push({ x: bx, y: by, w: bw, h: bh, fn: function() { tryBreed(); } });
+
+  if (ants < 3 && gs === 'PLAYING') {
+    var t = (Date.now() / 1000) % 1;
+    ctx.globalAlpha = 0.18 + 0.18 * Math.sin(t * Math.PI * 2);
+    ctx.fillStyle = '#e74c3c';
+    ctx.fillRect(0, 0, GF.W, 6 * GF.S);
+    ctx.fillRect(0, GF.H - 6 * GF.S, GF.W, 6 * GF.S);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawMenu(ctx) {
+  menuButtons = [];
+  ctx.fillStyle = 'rgba(8,8,18,0.85)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var S = GF.S;
+  var titleFs = GF.clamp(38 * S, 22, 56);
+  var subFs = GF.clamp(16 * S, 12, 22);
+  ctx.shadowColor = 'rgba(244,193,99,0.5)';
+  ctx.shadowBlur = 30 * S;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#f4c163';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  var titleY = GF.cy - GF.H * 0.30;
+  ctx.fillText(GF.t('title'), GF.cx, titleY);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#b9bccf';
+  ctx.fillText(GF.t('sub'), GF.cx, titleY + titleFs * 0.7);
+
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var lineFs = GF.clamp(14 * S, 11, 19);
+  ctx.font = lineFs + 'px sans-serif';
+  ctx.fillStyle = '#dde2f0';
+  var startY = titleY + titleFs * 0.7 + subFs + 18 * S;
+  var lineH = lineFs + 10 * S;
+  ctx.textBaseline = 'top';
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(ctx, lines[i], GF.cx, startY + i * lineH, GF.W - 40 * S, lineH);
+  }
+
+  var btnW = GF.clamp(280 * S, 200, 380);
+  var btnH = GF.clamp(58 * S, 46, 76);
+  var btnX = GF.cx - btnW/2;
+  var btnY = startY + lines.length * lineH + 24 * S;
+  if (btnY + btnH > GF.H - 30) btnY = GF.H - 30 - btnH;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#e74c3c'); grad.addColorStop(1, '#c0392b');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + Math.floor(btnH * 0.4) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH/2);
+  ctx.textBaseline = 'alphabetic';
+  menuButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame });
+
+  if (bestWave > 1) {
+    ctx.font = (lineFs - 1) + 'px sans-serif';
+    ctx.fillStyle = '#7a809c';
+    ctx.fillText(GF.t('best') + ': ' + bestWave, GF.cx, btnY + btnH + 26 * S);
+  }
+}
+
+function drawGameOver(ctx) {
+  menuButtons = [];
+  ctx.fillStyle = 'rgba(8,8,18,0.9)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var S = GF.S;
+  ctx.shadowColor = 'rgba(231,76,60,0.6)';
+  ctx.shadowBlur = 30 * S;
+  ctx.font = 'bold ' + GF.clamp(42 * S, 24, 60) + 'px sans-serif';
+  ctx.fillStyle = '#e74c3c';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('gameover'), GF.cx, GF.cy - 60 * S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(18 * S, 13, 24) + 'px sans-serif';
+  ctx.fillStyle = '#dde';
+  ctx.fillText(GF.t('queen_breached'), GF.cx, GF.cy - 20 * S);
+  ctx.fillText(GF.t('wave') + ' ' + wave + '  ·  ' + GF.t('kills') + ' ' + kills, GF.cx, GF.cy + 8 * S);
+
+  var btnW = GF.clamp(260 * S, 200, 360);
+  var btnH = GF.clamp(54 * S, 42, 70);
+  var btnX = GF.cx - btnW/2;
+  var btnY = GF.cy + 40 * S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3498db'); grad.addColorStop(1, '#2980b9');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + Math.floor(btnH * 0.4) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH/2);
+  menuButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame });
+}
+
+function drawWon(ctx) {
+  menuButtons = [];
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var S = GF.S;
+  ctx.shadowColor = 'rgba(46,204,113,0.6)';
+  ctx.shadowBlur = 30 * S;
+  ctx.font = 'bold ' + GF.clamp(40 * S, 24, 60) + 'px sans-serif';
+  ctx.fillStyle = '#2ecc71';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 60 * S);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(18 * S, 13, 24) + 'px sans-serif';
+  ctx.fillStyle = '#dde';
+  ctx.fillText(GF.t('waves_cleared'), GF.cx, GF.cy - 20 * S);
+  ctx.fillText(GF.t('kills') + ': ' + kills, GF.cx, GF.cy + 8 * S);
+
+  var btnW = GF.clamp(260 * S, 200, 360);
+  var btnH = GF.clamp(54 * S, 42, 70);
+  var btnX = GF.cx - btnW/2;
+  var btnY = GF.cy + 40 * S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + Math.floor(btnH * 0.4) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH/2);
+  menuButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame });
+}
+
+function drawHelpPanel(ctx) {
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var S = GF.S;
+  var panelW = GF.clamp(440 * S, 280, 540);
+  var panelH = GF.clamp(300 * S, 220, 380);
+  var px = GF.cx - panelW/2;
+  var py = GF.cy - panelH/2;
+  ctx.fillStyle = '#1a1a26';
+  GF.rr(ctx, px, py, panelW, panelH, 16);
+  ctx.fill();
+  ctx.strokeStyle = '#f4c163';
+  ctx.lineWidth = 2 * S;
+  GF.rr(ctx, px, py, panelW, panelH, 16);
+  ctx.stroke();
+
+  var titleFs = GF.clamp(22 * S, 16, 28);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#f4c163';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('title'), GF.cx, py + 16);
+
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var lineFs = GF.clamp(14 * S, 11, 18);
+  ctx.font = lineFs + 'px sans-serif';
+  ctx.fillStyle = '#dde2f0';
+  var y0 = py + 16 + titleFs + 14 * S;
+  var lineH = lineFs + 10 * S;
+  for (var i = 0; i < lines.length; i++) {
+    wrapText(ctx, lines[i], GF.cx, y0 + i * lineH, panelW - 30 * S, lineH);
+  }
+}
+
+function wrapText(ctx, text, x, y, maxW, lineH) {
+  var words = String(text).split(/\s+/);
+  var line = '';
+  var cy = y;
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, x, cy);
+      line = words[i];
+      cy += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) ctx.fillText(line, x, cy);
+}
+
+// ── INPUT HANDLER ────────────────────────────────────────────────────────
+function onPress(x, y) {
+  if (helpOpen && gs === 'PLAYING') {
+    helpOpen = false;
+    return;
+  }
+  if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') {
+    for (var i = 0; i < menuButtons.length; i++) {
+      var b = menuButtons[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; }
+    }
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  for (var hi = 0; hi < hudBtns.length; hi++) {
+    var hb = hudBtns[hi];
+    if (x >= hb.x && x <= hb.x + hb.w && y >= hb.y && y <= hb.y + hb.h) { hb.fn(); return; }
+  }
+  tryPlug(x, y);
+}
+
+var _canvas = document.getElementById('c');
+_canvas.addEventListener('mousedown', function(e) {
+  onPress(e.clientX, e.clientY);
+});
+_canvas.addEventListener('touchstart', function(e) {
+  if (e.changedTouches && e.changedTouches[0]) {
+    var t = e.changedTouches[0];
+    onPress(t.clientX, t.clientY);
+  }
+});
+
+document.addEventListener('keydown', function(e) {
+  if (gs !== 'PLAYING') return;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    tryBreed();
+  }
+});
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 1280,
+  designH: 720,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'anti_ant_colony',
+  onReady: function() {
+    try { bestWave = parseInt(localStorage.getItem('anti_ant_colony_best') || '1') || 1; } catch (e) {}
+    try { seenTutorial = !!localStorage.getItem('anti_ant_colony_seen_tutorial'); } catch (e) {}
+    layout();
+    GF.persist('anti_ant_colony_run_v1',
+      function() {
+        return {
+          gs: gs, wave: wave, ants: ants, kills: kills,
+          wave_target: wave_target, wave_spawned: wave_spawned,
+          breedCooldown: breedCooldown,
+        };
+      },
+      function(s) {
+        if (!s) return;
+        if (s.gs === 'PLAYING') {
+          gs = 'PLAYING';
+          wave = s.wave || 1;
+          ants = typeof s.ants === 'number' ? s.ants : START_ANTS;
+          kills = s.kills || 0;
+          wave_target = WAVE_SPAWN_BASE + wave * WAVE_SPAWN_SCALE;
+          wave_spawned = 0;
+          wave_killed_or_blocked = 0;
+          breedCooldown = s.breedCooldown || 0;
+          enemies = [];
+          plugs = [];
+          waveGapTimer = WAVE_GAP_SEC * 0.5;
+        }
+      }
+    );
+    if (gs !== 'PLAYING') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    wave: wave,
+    ants: ants,
+    kills: kills,
+    enemies: enemies.length,
+    plugs: plugs.length,
+    queen_breach: queen_breach,
+    WIN_WAVES: WIN_WAVES,
+    MAX_ANTS: MAX_ANTS,
+    START_ANTS: START_ANTS,
+    BREED_RATE: BREED_RATE,
+    BREED_COOLDOWN_SEC: BREED_COOLDOWN_SEC,
+    ENEMY_DIG_RATE: ENEMY_DIG_RATE,
+    PLUG_DECAY_SEC: PLUG_DECAY_SEC,
+    WAVE_SPAWN_BASE: WAVE_SPAWN_BASE,
+    WAVE_SPAWN_SCALE: WAVE_SPAWN_SCALE,
+    WAVE_GAP_SEC: WAVE_GAP_SEC,
+    QUEEN_X_FRAC: QUEEN_X_FRAC,
+    TUNNEL_LANES: TUNNEL_LANES,
+  };
+});
+
+})();
+</script>
+</body>
+</html>
