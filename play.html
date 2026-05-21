@@ -421,14 +421,13 @@
       </div>
       <textarea id="rate-comment" placeholder="One thing that worked / didn't work? (optional)" rows="2"></textarea>
       <div id="rate-img-zone" class="rate-img-zone" tabindex="0">
-        <input type="file" id="rate-img-file" accept="image/png,image/jpeg,image/webp" hidden>
+        <input type="file" id="rate-img-file" accept="image/png,image/jpeg,image/webp" hidden multiple>
         <div class="rate-img-empty">
           <span class="rate-img-icon">📎</span>
-          <span class="rate-img-text">Drop / paste a screenshot, or <a href="#" id="rate-img-pick">pick a file</a></span>
+          <span class="rate-img-text">Drop / paste up to 5 screenshots, or <a href="#" id="rate-img-pick">pick files</a></span>
         </div>
         <div class="rate-img-preview" hidden>
-          <img id="rate-img-thumb" alt="Attached screenshot">
-          <button type="button" id="rate-img-clear" class="rate-img-clear" title="Remove">×</button>
+          <div id="rate-img-thumbs" class="rate-img-thumbs" aria-label="Attached screenshots"></div>
           <span id="rate-img-status" class="rate-img-status"></span>
         </div>
       </div>
@@ -548,30 +547,50 @@
        tile is always visible and a missing src shows the broken-image glyph
        (Tim flagged 2026-05-15). */
     .rate-img-empty[hidden], .rate-img-preview[hidden] { display: none !important; }
-    .rate-img-preview img {
-      max-width: 120px;
-      max-height: 90px;
+    .rate-img-preview {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 8px;
+    }
+    .rate-img-thumbs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .rate-img-thumb {
+      position: relative;
+      width: 72px;
+      height: 72px;
       border-radius: 4px;
       border: 1px solid var(--rule);
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .rate-img-thumb img {
+      width: 100%;
+      height: 100%;
       object-fit: cover;
+      display: block;
     }
-    @media (max-width: 600px) {
-      .rate-img-preview img { max-width: 160px; max-height: 120px; }
-    }
-    .rate-img-clear {
-      background: var(--bg);
-      border: 1px solid var(--rule);
-      color: var(--ink-muted);
-      width: 28px; height: 28px;
+    .rate-img-thumb .rate-img-clear {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      background: rgba(0,0,0,0.6);
+      border: 1px solid rgba(255,255,255,0.4);
+      color: #fff;
+      width: 22px; height: 22px;
       border-radius: 50%;
       cursor: pointer;
-      font-size: 16px;
+      font-size: 14px;
       line-height: 1;
       display: flex; align-items: center; justify-content: center;
       padding: 0;
-      flex-shrink: 0;
     }
-    .rate-img-clear:hover { color: var(--warn); border-color: var(--warn); }
+    .rate-img-thumb .rate-img-clear:hover { background: var(--warn); border-color: var(--warn); }
+    @media (max-width: 600px) {
+      .rate-img-thumb { width: 64px; height: 64px; }
+    }
     /* Status pill — visible on phone, not the 11px ghost it used to be.
        Tim 2026-05-21: silent rejection on mobile (HEIC blob.type slipped past
        the regex check, error showed in 11px muted text, easy to miss). The
@@ -1148,15 +1167,18 @@
       const imgPick    = document.getElementById('rate-img-pick');
       const imgEmpty   = imgZone.querySelector('.rate-img-empty');
       const imgPreview = imgZone.querySelector('.rate-img-preview');
-      const imgThumb   = document.getElementById('rate-img-thumb');
-      const imgClear   = document.getElementById('rate-img-clear');
+      const imgThumbs  = document.getElementById('rate-img-thumbs');
       const imgStatus  = document.getElementById('rate-img-status');
       let selectedVote = null;   // 'like' | 'dislike' | null — committed only on Send
-      let attachedImage = null;  // { mime, dataUrl, blob } once resized
-      let attachedImageId = null; // set after successful upload
+      // Multi-image support (Tim 2026-05-21: "allow up to 5 uploads"). Each
+      // entry is { mime, dataUrl, b64, bytes, id|null }. id gets populated
+      // after successful POST /api/feedback-image; null means we still need
+      // to upload it on Send.
+      const MAX_IMAGES = 5;
+      let attachedImages = [];
 
       function refreshReady() {
-        const ready = !!selectedVote || commentEl.value.trim().length > 0 || !!attachedImage;
+        const ready = !!selectedVote || commentEl.value.trim().length > 0 || attachedImages.length > 0;
         sendBtn.classList.toggle('ready', ready);
       }
       function setVote(v) {
@@ -1170,23 +1192,25 @@
         const comment = commentEl.value.trim().slice(0, 500);
         const vote    = selectedVote || 'empty';   // explicit "I saw it, sending blank"
 
-        // If an image was picked but not uploaded yet, await the upload
-        // before posting feedback. If the upload fails we keep the overlay
-        // open so the player sees the error and can retry or remove the
-        // image — sending the comment with imageId='' silently would be
-        // worse since the player thinks their screenshot went through.
-        if (attachedImage && !attachedImageId) {
-          try { await uploadAttachedImage(); }
-          catch (e) {
-            showImgError('Upload failed — retry or remove');
-            return;
-          }
+        // Upload any attached images that haven't been uploaded yet. Run
+        // in parallel — they're small (≤1.5 MB decoded after resize) and
+        // CF KV writes are fast. If ANY upload fails we keep the overlay
+        // open so the player can retry or remove the broken one;
+        // shipping a comment with a missing imageId is worse than making
+        // them click again.
+        const pending = attachedImages.filter(im => !im.id);
+        if (pending.length > 0) {
+          try { await Promise.all(pending.map(uploadOne)); }
+          catch (e) { return; /* uploadOne already painted the error */ }
         }
-        const imageId = attachedImageId || '';
+        const imageIds = attachedImages.map(im => im.id).filter(Boolean);
 
-        if (window.posthog) posthog.capture('game_feedback_submitted', { slug, vote, has_comment: comment.length > 0, has_image: !!imageId });
+        if (window.posthog) posthog.capture('game_feedback_submitted', { slug, vote, has_comment: comment.length > 0, image_count: imageIds.length });
         try {
-          const body = JSON.stringify({ slug, vote, comment, imageId });
+          // Send both `imageIds` (new shape, array) and `imageId` (old
+          // shape, single string) so an in-flight rollout of the server
+          // never strands a single-image submission.
+          const body = JSON.stringify({ slug, vote, comment, imageIds, imageId: imageIds[0] || '' });
           if (navigator.sendBeacon) {
             navigator.sendBeacon('/api/feedback', new Blob([body], { type: 'application/json' }));
           } else {
@@ -1214,15 +1238,48 @@
         imgStatus.classList.remove('error');
       }
 
-      function clearImage() {
-        attachedImage = null;
-        attachedImageId = null;
+      function renderThumbs() {
+        imgThumbs.innerHTML = '';
+        attachedImages.forEach((im, i) => {
+          const tile = document.createElement('div');
+          tile.className = 'rate-img-thumb';
+          const img = document.createElement('img');
+          img.src = im.dataUrl;
+          img.alt = `Screenshot ${i + 1}`;
+          const x = document.createElement('button');
+          x.type = 'button';
+          x.className = 'rate-img-clear';
+          x.title = 'Remove';
+          x.textContent = '×';
+          x.addEventListener('click', e => { e.stopPropagation(); removeAt(i); });
+          tile.appendChild(img);
+          tile.appendChild(x);
+          imgThumbs.appendChild(tile);
+        });
+        const has = attachedImages.length > 0;
+        imgPreview.hidden = !has;
+        imgEmpty.hidden = has;
+      }
+
+      function removeAt(i) {
+        attachedImages.splice(i, 1);
+        renderThumbs();
+        if (attachedImages.length === 0) {
+          imgFile.value = '';
+          imgStatus.textContent = '';
+          imgStatus.classList.remove('error');
+        } else {
+          showImgInfo(`📎 ${attachedImages.length} screenshot${attachedImages.length === 1 ? '' : 's'} attached`);
+        }
+        refreshReady();
+      }
+
+      function clearAllImages() {
+        attachedImages = [];
         imgFile.value = '';
-        imgThumb.src = '';
-        imgPreview.hidden = true;
-        imgEmpty.hidden = false;
         imgStatus.textContent = '';
         imgStatus.classList.remove('error');
+        renderThumbs();
         refreshReady();
       }
 
@@ -1231,26 +1288,42 @@
       // old regex rejected with an invisible 11px error. If the blob can be
       // decoded as an image, we accept it; if not, the catch path surfaces a
       // loud red pill so the player knows their attach didn't take.
-      async function attachFromBlob(blob) {
+      async function attachOneBlob(blob) {
         if (!blob) return;
+        if (attachedImages.length >= MAX_IMAGES) {
+          showImgError(`Max ${MAX_IMAGES} screenshots — remove one to add another`);
+          return;
+        }
         if (blob.size > 12_000_000) {
           showImgError('Image too big — try one under 12 MB');
           if (window.posthog) posthog.capture('game_feedback_image_attach_failed', { slug, reason: 'too_big', mime: blob.type || '', bytes: blob.size });
           return;
         }
-        showImgInfo('Reading image…');
         try {
           const resized = await resizeImage(blob);
-          attachedImage = resized;
-          attachedImageId = null;
-          imgThumb.src = resized.dataUrl;
-          imgEmpty.hidden = true;
-          imgPreview.hidden = false;
-          showImgInfo(`📎 Screenshot attached · ${(resized.bytes / 1024).toFixed(0)} KB`);
+          attachedImages.push({ ...resized, id: null });
+          renderThumbs();
+          showImgInfo(`📎 ${attachedImages.length} screenshot${attachedImages.length === 1 ? '' : 's'} attached`);
           refreshReady();
         } catch (e) {
           showImgError("Couldn't read this image — try a screenshot or PNG/JPG instead");
           if (window.posthog) posthog.capture('game_feedback_image_attach_failed', { slug, reason: 'decode_failed', mime: blob.type || '', err: String((e && e.message) || e).slice(0, 80) });
+        }
+      }
+
+      // Walk a FileList (from <input multiple>, drop, or paste) and attach
+      // each up to the per-overlay 5-image cap. Stop quietly when the cap
+      // is hit so a 9-photo dump doesn't spam errors.
+      async function attachFromFiles(files) {
+        if (!files || !files.length) return;
+        if (attachedImages.length >= MAX_IMAGES) {
+          showImgError(`Max ${MAX_IMAGES} screenshots — remove one to add another`);
+          return;
+        }
+        showImgInfo(files.length > 1 ? `Reading ${files.length} images…` : 'Reading image…');
+        for (const f of files) {
+          if (attachedImages.length >= MAX_IMAGES) break;
+          await attachOneBlob(f);
         }
       }
 
@@ -1271,10 +1344,9 @@
         return { mime, dataUrl, b64, bytes };
       }
 
-      async function uploadAttachedImage() {
-        if (!attachedImage) return;
-        showImgInfo('Uploading screenshot…');
-        const body = JSON.stringify({ slug, mime: attachedImage.mime, data: attachedImage.b64 });
+      async function uploadOne(im) {
+        showImgInfo(`Uploading screenshot${attachedImages.length > 1 ? 's' : ''}…`);
+        const body = JSON.stringify({ slug, mime: im.mime, data: im.b64 });
         const r = await fetch('/api/feedback-image', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -1288,41 +1360,42 @@
           throw new Error('upload');
         }
         const out = await r.json();
-        attachedImageId = out.id;
-        showImgInfo('📎 Screenshot attached ✓');
+        im.id = out.id;
+        showImgInfo(`📎 ${attachedImages.length} screenshot${attachedImages.length === 1 ? '' : 's'} attached ✓`);
       }
 
       imgPick.addEventListener('click', e => { e.preventDefault(); imgFile.click(); });
       imgZone.addEventListener('click', e => {
-        if (e.target.closest('.rate-img-preview')) return;
-        if (imgPreview.hidden) imgFile.click();
+        if (e.target.closest('.rate-img-thumb')) return;
+        imgFile.click();
       });
       imgFile.addEventListener('change', () => {
-        const f = imgFile.files && imgFile.files[0];
-        if (f) attachFromBlob(f);
+        attachFromFiles(imgFile.files);
       });
-      imgClear.addEventListener('click', e => { e.stopPropagation(); clearImage(); });
 
       imgZone.addEventListener('dragover', e => { e.preventDefault(); imgZone.classList.add('dragover'); });
       imgZone.addEventListener('dragleave', () => imgZone.classList.remove('dragover'));
       imgZone.addEventListener('drop', e => {
         e.preventDefault();
         imgZone.classList.remove('dragover');
-        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-        if (f) attachFromBlob(f);
+        attachFromFiles(e.dataTransfer && e.dataTransfer.files);
       });
 
       // Paste handler — works while textarea OR drop zone is focused, plus
-      // a window-level handler when the overlay is open.
+      // a window-level handler when the overlay is open. Multi-image
+      // paste (rare but possible from some clipboards) collects every
+      // image item into a synthetic FileList-shaped array.
       function handlePaste(e) {
         if (overlay.style.display !== 'flex') return;
         const items = (e.clipboardData || {}).items || [];
+        const files = [];
         for (const it of items) {
           if (it.kind === 'file' && /^image\//.test(it.type)) {
             const f = it.getAsFile();
-            if (f) { e.preventDefault(); attachFromBlob(f); break; }
+            if (f) files.push(f);
           }
         }
+        if (files.length) { e.preventDefault(); attachFromFiles(files); }
       }
       window.addEventListener('paste', handlePaste);
 

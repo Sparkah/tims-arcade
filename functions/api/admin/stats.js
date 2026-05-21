@@ -91,7 +91,19 @@ export async function onRequestGet({ request, env }) {
         const id = rest.slice(lastColon + 1);
         const data = await env.VOTES.get(k.name, 'json');
         if (!data) continue;
-        comments.push({ slug, id, vote: data.vote, comment: data.comment, ts: data.ts, ...(data.imageId ? { imageId: data.imageId } : {}) });
+        // Surface both: imageIds[] is the new shape (≤5 entries),
+        // imageId is the legacy single-id mirror that the dashboard
+        // already reads. Either being present means "has attachment".
+        const imgs = Array.isArray(data.imageIds) && data.imageIds.length
+          ? data.imageIds
+          : (data.imageId ? [data.imageId] : []);
+        comments.push({
+          slug, id,
+          vote: data.vote,
+          comment: data.comment,
+          ts: data.ts,
+          ...(imgs.length ? { imageIds: imgs, imageId: imgs[0] } : {}),
+        });
       }
       cursor = list.list_complete ? null : list.cursor;
     } while (cursor);
