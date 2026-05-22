@@ -60,6 +60,7 @@ export async function onRequest({ params, env, request }) {
 <html lang="${lang}">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(pageTitle)}</title>
 <meta name="description" content="${escapeHtml(ogHook)}">
 <link rel="canonical" href="${url}">
@@ -87,9 +88,10 @@ export async function onRequest({ params, env, request }) {
 
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{background:#0a0a14;color:#e7e7ee;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;height:100%;display:flex;align-items:center;justify-content:center;text-align:center}
-.wrap{max-width:560px;padding:32px 20px}
-img{max-width:100%;border-radius:12px;margin-bottom:18px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+	html,body{background:#0a0a14;color:#e7e7ee;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;min-height:100%;display:flex;align-items:center;justify-content:center;text-align:center}
+	body{min-height:100dvh}
+	.wrap{width:min(560px,100%);padding:32px 20px}
+	img{width:100%;max-width:100%;border-radius:12px;margin-bottom:18px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
 h1{font-size:24px;margin-bottom:6px;color:#f7f7fa}
 p{color:#8a8aa0;font-size:15px;line-height:1.5;margin-bottom:18px}
 a.btn{display:inline-block;background:#4dd0e1;color:#0a0a14;padding:10px 22px;border-radius:999px;font-weight:700;text-decoration:none;font-size:15px}
@@ -110,8 +112,17 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
 .sg-actions button:disabled{opacity:0.4;cursor:not-allowed}
 .sg-status{font-size:12px;margin-top:8px;min-height:16px;color:#8a8aa0}
 .sg-status.ok{color:#7c7}.sg-status.err{color:#d77}
-.sg-close{position:absolute;top:8px;right:12px;background:none;border:none;color:#8a8aa0;font-size:20px;cursor:pointer;line-height:1}
-</style>
+	.sg-close{position:absolute;top:8px;right:12px;background:none;border:none;color:#8a8aa0;font-size:20px;cursor:pointer;line-height:1}
+	@media (max-width:600px){
+	  html,body{align-items:flex-start}
+	  .wrap{padding:18px 16px 22px}
+	  img{max-height:36dvh;object-fit:cover;margin-bottom:14px;border-radius:10px}
+	  h1{font-size:23px;line-height:1.15;margin-bottom:7px}
+	  p{font-size:15px;line-height:1.35;margin-bottom:14px}
+	  a.btn{padding:11px 24px}
+	  small{margin-top:18px}
+	}
+	</style>
 </head>
 <body>
 <div class="wrap">
