@@ -56,6 +56,49 @@ export async function onRequest({ params, env, request }) {
   const url   = `${site}/p/${slug}`;
   const playUrl = `/play.html?slug=${encodeURIComponent(slug)}`;
 
+  const genre = (game.genre || '').trim();
+  const genreLabel = genre ? genre.charAt(0).toUpperCase() + genre.slice(1) : '';
+  const playMode = /multi/i.test(genre) ? 'MultiPlayer' : 'SinglePlayer';
+
+  // Pick up to 3 related games for internal linking. Same-genre first
+  // (Google rewards topic clusters), then most-recent as fallback.
+  const others = games.filter(g => g.slug !== slug && g.published !== false);
+  const sameGenre = others.filter(g => g.genre === genre && genre);
+  const relatedPool = sameGenre.length >= 3
+    ? sameGenre
+    : sameGenre.concat(others.filter(g => g.genre !== genre));
+  const related = relatedPool
+    .sort((a, b) => (b.addedDate || '').localeCompare(a.addedDate || ''))
+    .slice(0, 3);
+
+  const ld = {
+    '@context': 'https://schema.org',
+    '@type': 'VideoGame',
+    name: ogTitle,
+    description: ogHook,
+    image: img,
+    url,
+    inLanguage: lang === 'ru' ? 'ru' : 'en',
+    datePublished: game.addedDate,
+    genre: genreLabel || undefined,
+    playMode,
+    applicationCategory: 'Game',
+    operatingSystem: 'Web Browser',
+    browserRequirements: 'Requires JavaScript and HTML5 canvas',
+    publisher: {
+      '@type': 'Organization',
+      name: "Tim's Game Lab",
+      url: site,
+    },
+    offers: {
+      '@type': 'Offer',
+      price: '0',
+      priceCurrency: 'USD',
+      availability: 'https://schema.org/InStock',
+    },
+  };
+  const ldJson = JSON.stringify(ld).replace(/</g, '\\u003c');
+
   const html = `<!DOCTYPE html>
 <html lang="${lang}">
 <head>
@@ -86,6 +129,8 @@ export async function onRequest({ params, env, request }) {
 <meta name="twitter:description" content="${escapeHtml(ogHook)}">
 <meta name="twitter:image" content="${img}">
 
+<script type="application/ld+json">${ldJson}</script>
+
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 	html,body{background:#0a0a14;color:#e7e7ee;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;min-height:100%;display:flex;align-items:center;justify-content:center;text-align:center}
@@ -99,6 +144,15 @@ a.btn:hover{filter:brightness(1.1)}
 small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
 .alt{margin-top:8px;font-size:13px;color:#6a6a82}
 .alt p{font-size:13px;margin-bottom:0}
+.meta{font-size:13px;color:#6a6a82;margin-bottom:14px;letter-spacing:0.01em}
+.related{margin-top:22px;padding-top:18px;border-top:1px solid #1f1f2c;text-align:left}
+.related h2{font-size:13px;color:#8a8aa0;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px}
+.related ul{list-style:none;display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.related li{margin:0}
+.related a{display:block;color:#e7e7ee;text-decoration:none;font-size:13px;line-height:1.3;padding:8px;border-radius:8px;background:#13131f;border:1px solid #1f1f2c}
+.related a:hover{background:#191928;border-color:#2a2a3a}
+.related img{width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:5px;margin-bottom:6px;box-shadow:none}
+@media (max-width:600px){.related ul{grid-template-columns:repeat(3,1fr);gap:6px}.related a{padding:6px;font-size:12px}}
 .sg-link{background:none;border:none;color:#8a8aa0;font-size:13px;cursor:pointer;padding:0;margin-top:12px;text-decoration:underline}
 .sg-link:hover{color:#e7e7ee}
 .sg-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);z-index:50;padding:20px}
@@ -129,8 +183,20 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
   <img src="${img}" alt="${escapeHtml(ogTitle)}">
   <h1>${escapeHtml(ogTitle)}</h1>
   <p>${escapeHtml(ogHook)}</p>
+  ${genreLabel || game.addedDate ? `<p class="meta">${[
+    genreLabel ? `${lang === 'ru' ? 'Жанр' : 'Genre'}: ${escapeHtml(genreLabel)}` : '',
+    game.addedDate ? `${lang === 'ru' ? 'Добавлено' : 'Added'} ${escapeHtml(game.addedDate)}` : '',
+    lang === 'ru' ? 'Играй в браузере, без установки' : 'Play in-browser, no install',
+  ].filter(Boolean).join(' · ')}</p>` : ''}
   <a class="btn" href="${playUrl}">${lang === 'ru' ? '▶ Играть' : '▶ Play now'}</a>
   <small><a href="/" style="color:#8a8aa0">${lang === 'ru' ? '← все игры' : '← browse all games'}</a></small>
+  ${related.length ? `<nav class="related" aria-label="${lang === 'ru' ? 'Похожие игры' : 'Related games'}">
+    <h2>${lang === 'ru' ? 'Похожие игры' : 'More games'}</h2>
+    <ul>${related.map(r => {
+      const rTitle = lang === 'ru' ? (r.title_ru || r.title) : r.title;
+      return `<li><a href="/p/${encodeURIComponent(r.slug)}"><img src="${site}/thumbs/${encodeURIComponent(r.slug)}.png" alt="" loading="lazy">${escapeHtml(rTitle)}</a></li>`;
+    }).join('')}</ul>
+  </nav>` : ''}
   <div><button class="sg-link" id="sg-open" type="button">${lang === 'ru' ? '💡 Предложить игру' : '💡 Suggest a game'}</button></div>
 </div>
 
