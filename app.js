@@ -860,23 +860,20 @@ function openCommentModal(g) {
   document.getElementById('comment-modal-submit').disabled = true;
   document.getElementById('comment-modal-list').innerHTML =
     '<div class="comment-modal-empty">Loading…</div>';
-  m.classList.remove('hidden');
-  m.setAttribute('aria-hidden', 'false');
+  if (!m.open) m.showModal();
   loadModalComments(g.slug);
   if (window.posthog) posthog.capture('comments_modal_opened', { slug: g.slug });
 }
 
 function closeCommentModal() {
-  // Delegate to the wireModal-returned helper when available; falls back
-  // to direct DOM mutation for the rare case where modal.js failed to load.
+  // Delegate to the wireModal-returned helper when available (it also runs
+  // onClose cleanup); fallback to dialog.close() directly.
   if (commentModal && commentModal.close) {
     commentModal.close();
-    return;
+  } else {
+    const m = document.getElementById('comment-modal');
+    if (m && m.open) m.close();
   }
-  const m = document.getElementById('comment-modal');
-  if (!m) return;
-  m.classList.add('hidden');
-  m.setAttribute('aria-hidden', 'true');
   _commentModalState.slug = null;
 }
 

@@ -1,23 +1,24 @@
-// Shared modal wiring — open/close/escape/backdrop/char-counter/submit
-// state-machine that's identical between the comment modal (app.js) and
-// the suggest-a-game modal (suggest.js). Loaded on both index.html and
-// play.html so suggest.js (which runs on play.html without app.js) has it.
+// Shared modal wiring — opens a native <dialog> with showModal(), wires
+// char-counter + submit state machine. Open/close/escape/backdrop/focus-trap
+// are handled by the platform via <dialog closedby="any"> + showModal().
+// Safari (no closedby support as of mid-2026) gets a 15-line click-coordinate
+// fallback below.
 //
-// Exposed on window so call sites don't need ESM import boilerplate.
+// Migration history: until 2026-05-22 this hand-rolled ~70 lines of
+// escape/backdrop/aria-hidden plumbing. Replaced with native <dialog>
+// per Google Modern Web Guidance §light-dismiss-a-dialog.
 //
 // HOST PAGE CONTRACT — each modal must expose these DOM ids:
-//   <div id="<modalId>">                  the modal root (toggle .hidden + aria-hidden)
-//     <form id="<formId>">                the submit-event source
-//       <textarea id="<inputId>">         the input
-//       <span    id="<counterId>">        char counter, format "N / max"
-//       <button  id="<submitId>">         the submit button
-//   <div id="<statusId>">                 optional status line (ok/err classes)
-//   <[any]    id="<triggerId>">           optional open-trigger button
-//   Anywhere in the modal tree, `data-close="1"` on a child = backdrop/close
+//   <dialog id="<modalId>" closedby="any" aria-labelledby="...">
+//     <form id="<formId>">
+//       <textarea id="<inputId>">
+//       <span    id="<counterId>">   char counter, format "N / max"
+//       <button  id="<submitId>">    submit button
+//   <[any] id="<statusId>">         optional status line (ok/err classes)
+//   <[any] id="<triggerId>">        optional open-trigger button
+//   Anywhere inside, data-close="1" on a child = manual close button (the X)
 //
-// Returns { open, close } so external code can drive the modal.
-//
-// Backlog item: "Consolidate modal IIFEs in app.js" (resolved 2026-05-22).
+// Returns { open, close } for external callers.
 window.wireModal = function wireModal(opts) {
   const modal = document.getElementById(opts.modalId);
   if (!modal) return null;
@@ -51,16 +52,13 @@ window.wireModal = function wireModal(opts) {
     submit.disabled = true;
     submit.textContent = labels.idle;
     setStatus('');
-    modal.classList.remove('hidden');
-    modal.setAttribute('aria-hidden', 'false');
+    modal.showModal();
     setTimeout(() => input.focus(), 50);
     if (opts.onOpen) opts.onOpen();
   }
 
   function close() {
-    modal.classList.add('hidden');
-    modal.setAttribute('aria-hidden', 'true');
-    if (opts.onClose) opts.onClose();
+    if (modal.open) modal.close();
   }
 
   // Optional trigger button opens the modal on click.
@@ -69,14 +67,28 @@ window.wireModal = function wireModal(opts) {
     if (btn) btn.addEventListener('click', open);
   }
 
-  // Backdrop close: any descendant with data-close="1" calls close().
+  // The X button uses data-close="1"; clicking it (or any data-close descendant) closes the dialog.
+  // Escape, backdrop-click, and mobile-back-gesture are handled by the browser via closedby="any".
   modal.addEventListener('click', (e) => {
-    if (e.target.dataset && e.target.dataset.close) close();
+    if (e.target.dataset && e.target.dataset.close) modal.close();
   });
 
-  // Escape closes only when this modal is the one visible.
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !modal.classList.contains('hidden')) close();
+  // Safari fallback for closedby (not yet supported as of 2026).
+  // Detects backdrop clicks via coordinate check; Esc still works natively.
+  if (!('closedBy' in HTMLDialogElement.prototype)) {
+    modal.addEventListener('click', (e) => {
+      if (e.target !== modal) return; // only the dialog element itself
+      const r = modal.getBoundingClientRect();
+      const inside = e.clientY >= r.top && e.clientY <= r.bottom &&
+                     e.clientX >= r.left && e.clientX <= r.right;
+      if (!inside) modal.close();
+    });
+  }
+
+  // Browser fires 'close' for every dismissal path — Esc, X, backdrop, modal.close().
+  // Single hook for cleanup.
+  modal.addEventListener('close', () => {
+    if (opts.onClose) opts.onClose();
   });
 
   // Char counter + submit-disabled state on input.
@@ -112,7 +124,7 @@ window.wireModal = function wireModal(opts) {
       if (opts.autoCloseMs) {
         setTimeout(close, opts.autoCloseMs);
       } else {
-        // Keep modal open for another action; revert button label after a beat
+        // Keep modal open for another action; revert button label after a beat.
         setTimeout(() => {
           submit.textContent = labels.idle;
           refreshSubmitDisabled();
