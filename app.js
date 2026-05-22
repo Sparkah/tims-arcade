@@ -867,6 +867,12 @@ function openCommentModal(g) {
 }
 
 function closeCommentModal() {
+  // Delegate to the wireModal-returned helper when available; falls back
+  // to direct DOM mutation for the rare case where modal.js failed to load.
+  if (commentModal && commentModal.close) {
+    commentModal.close();
+    return;
+  }
   const m = document.getElementById('comment-modal');
   if (!m) return;
   m.classList.add('hidden');
@@ -918,60 +924,58 @@ async function loadModalComments(slug) {
   }
 }
 
-(function wireCommentModal() {
-  const m = document.getElementById('comment-modal');
-  if (!m) return;
-  m.addEventListener('click', (e) => {
-    if (e.target.dataset && e.target.dataset.close) closeCommentModal();
-  });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !m.classList.contains('hidden')) closeCommentModal();
-  });
-  const input = document.getElementById('comment-modal-input');
-  const counter = document.getElementById('comment-modal-counter');
-  const submit = document.getElementById('comment-modal-submit');
-  input.addEventListener('input', () => {
-    const n = input.value.length;
-    counter.textContent = `${n} / 500`;
-    submit.disabled = n < 2;
-  });
-  document.getElementById('comment-modal-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
+// Comment modal — open is driven by `openCommentModal(g)` above (slug-aware,
+// loads comments async). This helper call wires the submit/close/escape/
+// counter machinery shared with the suggest-a-game modal. Helper lives in
+// `Gallery/modal.js` (see that file's header for the host-page contract).
+const commentModal = window.wireModal && window.wireModal({
+  modalId:  'comment-modal',
+  formId:   'comment-modal-form',
+  inputId:  'comment-modal-input',
+  counterId:'comment-modal-counter',
+  submitId: 'comment-modal-submit',
+  minLength: 2,
+  labels: { idle: 'Post', sending: '…', sent: 'Post' },
+  errorMessages: {
+    no_slug: 'Pick a game first.',
+    network: 'Network error — try again.',
+    default: 'Try again.',
+  },
+  onClose() {
+    _commentModalState.slug = null;
+  },
+  async onSubmit(text) {
     const slug = _commentModalState.slug;
-    const text = input.value.trim().slice(0, 500);
-    if (!slug || text.length < 2) return;
-    submit.disabled = true;
-    submit.textContent = '…';
+    if (!slug) return { ok: false, errorCode: 'no_slug' };
     try {
-      const body = JSON.stringify({ slug, vote: 'neutral', comment: text });
       await fetch('/api/feedback', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body, keepalive: true,
+        body: JSON.stringify({ slug, vote: 'neutral', comment: text }),
+        keepalive: true,
       });
-      // Optimistic local prepend
-      const list = document.getElementById('comment-modal-list');
-      const empty = list.querySelector('.comment-modal-empty');
-      if (empty) list.innerHTML = '';
-      list.insertAdjacentHTML('afterbegin',
-        `<div class="comment-modal-row">
-          <div class="vote-emoji">💬</div>
-          <div>
-            <div>${escapeText(text)}</div>
-            <div class="meta">just now · you</div>
-          </div>
-        </div>`);
-      input.value = '';
-      counter.textContent = '0 / 500';
       if (window.posthog) posthog.capture('comment_posted_modal', { slug, length: text.length });
+      return { ok: true };
     } catch (err) {
-      counter.textContent = 'Error — try again';
-    } finally {
-      submit.textContent = 'Post';
-      submit.disabled = input.value.length < 2;
+      return { ok: false, errorCode: 'network' };
     }
-  });
-})();
+  },
+  onSuccess(text) {
+    // Optimistic local prepend to the visible comment list
+    const list = document.getElementById('comment-modal-list');
+    if (!list) return;
+    const empty = list.querySelector('.comment-modal-empty');
+    if (empty) list.innerHTML = '';
+    list.insertAdjacentHTML('afterbegin',
+      `<div class="comment-modal-row">
+        <div class="vote-emoji">💬</div>
+        <div>
+          <div>${escapeText(text)}</div>
+          <div class="meta">just now · you</div>
+        </div>
+      </div>`);
+  },
+});
 
 function logVariantClick(slug, variant) {
   // sendBeacon survives the navigation that's about to happen
