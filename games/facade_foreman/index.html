@@ -1,0 +1,1043 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Facade Foreman</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1c22; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── STRINGS ──────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Facade Foreman',
+    sub:   'Layer chips before the camera rolls',
+    play: 'PLAY', retry: 'RETRY', again: 'PLAY AGAIN', ok: 'OK',
+    ready: 'READY', take: 'TAKE',
+    passed: 'OK', failed: 'NG',
+    chips: 'CHIPS',
+    score: 'TAKES', best: 'BEST',
+    gameover: 'DIRECTOR WALKED',
+    won: 'WRAP! 10 TAKES SHIPPED',
+    take_ok: 'TAKE GOOD',
+    take_fail: 'READS FLAT',
+    tut_goal: 'Goal: Cover route buildings with enough facade layers for the camera car.',
+    tut_controls: 'Controls: Tap a chip type, then tap a building tile. Hit READY.',
+    tut_win: 'Win: Pass enough takes — finish all 10 without 3 fails.',
+    tut_lose: 'Lose: 3 takes flagged as flat. The director walks.',
+    tut_tip: 'Tip: Stack different chips on the same tile — depth beats variety.',
+  },
+  ru: {
+    title: 'Бригадир Фасадов',
+    sub:   'Наклей слои до начала съёмки',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', again: 'СНОВА', ok: 'OK',
+    ready: 'ГОТОВО', take: 'ДУБЛЬ',
+    passed: 'OK', failed: 'NG',
+    chips: 'ЧИПЫ',
+    score: 'ДУБЛИ', best: 'РЕКОРД',
+    gameover: 'РЕЖИССЁР УШЁЛ',
+    won: 'СНЯТО! 10 ДУБЛЕЙ',
+    take_ok: 'ДУБЛЬ ХОРОШ',
+    take_fail: 'ВЫГЛЯДИТ ПЛОСКО',
+    tut_goal: 'Цель: покрыть здания по маршруту камеры слоями фасада.',
+    tut_controls: 'Управление: тапни тип чипа, потом плитку здания. Жми ГОТОВО.',
+    tut_win: 'Победа: пройти все 10 дублей не получив 3 провала.',
+    tut_lose: 'Поражение: 3 дубля выглядят плоско — режиссёр уходит.',
+    tut_tip: 'Совет: складывай разные чипы на одной плитке — важна глубина.',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES ─────────────────────────────────────────────────────────────
+var GRID_W            = 8;
+var GRID_H            = 6;
+var CHIP_BUDGET       = 5;
+var LAYER_THRESHOLD   = 3;
+var TAKES_PER_SESSION = 10;
+var FAIL_TOLERANCE    = 3;
+var CHIP_TYPES        = 5;
+var BUILDING_DENSITY  = 7;
+var ROUTE_LEN_MIN     = 4;
+var ROUTE_LEN_MAX     = 7;
+var TILE_SIZE         = 60;
+var CHIP_SLOT_W       = 92;
+var CHIP_SLOT_H       = 68;
+var TRAY_HEIGHT       = 96;
+
+// ── CHIP CATALOG ─────────────────────────────────────────────────────────
+var CHIPS = [
+  { id: 0, key: 'win',  color: '#4dd0e1', glyph: 'W' },  // window
+  { id: 1, key: 'ac',   color: '#cccccc', glyph: 'A' },  // AC box
+  { id: 2, key: 'bal',  color: '#e67e22', glyph: 'B' },  // balcony
+  { id: 3, key: 'curt', color: '#9b59b6', glyph: 'C' },  // curtain
+  { id: 4, key: 'sign', color: '#f1c40f', glyph: 'S' },  // signage
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var take_num = 1;
+var takes_passed = 0;
+var takes_failed = 0;
+var chips_left = CHIP_BUDGET;
+var best = 0;
+var seed = 0;
+var rng = null;
+// Grid of cells: each cell { type:'empty'|'building', layers:[chipId,...] }
+var grid = [];
+// Route: array of {gx, gy} ordered start->end
+var route = [];
+var route_set = {}; // 'gx,gy' -> true for fast lookup
+// Building tiles to score (route-adjacent buildings)
+var visible_tiles = [];
+var selected_chip = -1;
+var car_pos = 0;     // index into route during SCORING
+var car_t = 0;       // animation progress for current segment
+var car_per_tile = 0.4; // seconds per tile
+var take_result_t = 0;
+var take_result_ok = false;
+var pulse_t = 0;
+var ready_btn_rect = null;
+var help_btn_rect = null;
+var menu_btn_rect = null;
+var help_close_rect = null;
+var grid_origin = { x: 0, y: 0, w: 0, h: 0, tile: 0 };
+var tray_slots = []; // computed each frame
+var scored_marks = []; // [{gx,gy,ok}] populated as car passes
+var failed_tile_keys = {};
+
+// ── SEEDED RNG ───────────────────────────────────────────────────────────
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function dailySeed() {
+  var d = new Date();
+  return d.getFullYear() * 10000 + (d.getMonth()+1) * 100 + d.getDate();
+}
+
+// ── ROUTE / GRID SETUP ───────────────────────────────────────────────────
+function inBounds(gx, gy) { return gx >= 0 && gx < GRID_W && gy >= 0 && gy < GRID_H; }
+function keyXY(gx, gy) { return gx + ',' + gy; }
+
+function generateRoute() {
+  var len = ROUTE_LEN_MIN + Math.floor(rng() * (ROUTE_LEN_MAX - ROUTE_LEN_MIN + 1));
+  // Start on left or top edge, end somewhere far away — simple random walk
+  // with no overlap so the route reads as a line.
+  var attempts = 0;
+  while (attempts++ < 50) {
+    var path = [];
+    var occ = {};
+    var sx, sy;
+    // Start from random column at bottom row (or random row at left col)
+    if (rng() < 0.5) { sx = Math.floor(rng() * GRID_W); sy = GRID_H - 1; }
+    else { sx = 0; sy = Math.floor(rng() * GRID_H); }
+    path.push({ gx: sx, gy: sy });
+    occ[keyXY(sx, sy)] = true;
+    var cx = sx, cy = sy;
+    var prefDx = sx === 0 ? 1 : 0;
+    var prefDy = sy === GRID_H - 1 ? -1 : 0;
+    var failed = false;
+    for (var i = 1; i < len; i++) {
+      var dirs = [];
+      // Bias toward going forward into the lot
+      if (prefDx !== 0) dirs.push([prefDx, 0], [prefDx, 0], [0, -1], [0, 1]);
+      else dirs.push([0, prefDy], [0, prefDy], [-1, 0], [1, 0]);
+      // shuffle
+      for (var s = dirs.length - 1; s > 0; s--) {
+        var j = Math.floor(rng() * (s + 1));
+        var tmp = dirs[s]; dirs[s] = dirs[j]; dirs[j] = tmp;
+      }
+      var advanced = false;
+      for (var k = 0; k < dirs.length; k++) {
+        var nx = cx + dirs[k][0], ny = cy + dirs[k][1];
+        if (!inBounds(nx, ny)) continue;
+        if (occ[keyXY(nx, ny)]) continue;
+        cx = nx; cy = ny;
+        path.push({ gx: cx, gy: cy });
+        occ[keyXY(cx, cy)] = true;
+        advanced = true;
+        break;
+      }
+      if (!advanced) { failed = true; break; }
+    }
+    if (!failed && path.length >= ROUTE_LEN_MIN) return path;
+  }
+  // Fallback straight line
+  var p = [];
+  for (var t = 0; t < ROUTE_LEN_MIN; t++) p.push({ gx: t, gy: Math.floor(GRID_H / 2) });
+  return p;
+}
+
+function setupTake() {
+  chips_left = CHIP_BUDGET;
+  selected_chip = -1;
+  scored_marks = [];
+  failed_tile_keys = {};
+  // build grid empty
+  grid = [];
+  for (var y = 0; y < GRID_H; y++) {
+    var row = [];
+    for (var x = 0; x < GRID_W; x++) row.push({ type: 'empty', layers: [] });
+    grid.push(row);
+  }
+  // generate route
+  route = generateRoute();
+  route_set = {};
+  for (var i = 0; i < route.length; i++) route_set[keyXY(route[i].gx, route[i].gy)] = true;
+  // Sprinkle building tiles adjacent to route (the "facade flats")
+  visible_tiles = [];
+  var placed = 0;
+  var target = BUILDING_DENSITY;
+  var candidates = [];
+  for (var ri = 0; ri < route.length; ri++) {
+    var r = route[ri];
+    // adjacent 4-dir cells
+    var adj = [[r.gx-1,r.gy],[r.gx+1,r.gy],[r.gx,r.gy-1],[r.gx,r.gy+1]];
+    for (var ai = 0; ai < adj.length; ai++) {
+      var ax = adj[ai][0], ay = adj[ai][1];
+      if (!inBounds(ax, ay)) continue;
+      if (route_set[keyXY(ax, ay)]) continue;
+      candidates.push({ gx: ax, gy: ay });
+    }
+  }
+  // shuffle candidates
+  for (var ci = candidates.length - 1; ci > 0; ci--) {
+    var cj = Math.floor(rng() * (ci + 1));
+    var ctmp = candidates[ci]; candidates[ci] = candidates[cj]; candidates[cj] = ctmp;
+  }
+  var seen = {};
+  for (var qi = 0; qi < candidates.length && placed < target; qi++) {
+    var c = candidates[qi];
+    var ck = keyXY(c.gx, c.gy);
+    if (seen[ck]) continue;
+    seen[ck] = true;
+    grid[c.gy][c.gx].type = 'building';
+    visible_tiles.push(c);
+    placed++;
+  }
+  gs = 'PLACING';
+}
+
+function startGame() {
+  take_num = 1;
+  takes_passed = 0;
+  takes_failed = 0;
+  seed = dailySeed() + Math.floor(Math.random() * 1000);
+  rng = mulberry32(seed);
+  setupTake();
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  if (takes_passed > best) {
+    best = takes_passed;
+    try { localStorage.setItem('facade_foreman_best', String(best)); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.setShake(0.5);
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+function wonRun() {
+  if (takes_passed > best) {
+    best = takes_passed;
+    try { localStorage.setItem('facade_foreman_best', String(best)); } catch (e) {}
+  }
+  gs = 'WON';
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// ── PLACEMENT ────────────────────────────────────────────────────────────
+function placeChipOnTile(gx, gy, chipId) {
+  if (!inBounds(gx, gy)) return false;
+  if (grid[gy][gx].type !== 'building') return false;
+  if (chips_left <= 0) return false;
+  grid[gy][gx].layers.push(chipId);
+  chips_left--;
+  var px = gridToScreen(gx, gy);
+  GF.spawnParticles(px.x, px.y, CHIPS[chipId].color, 14);
+  GF.spawnFloat(px.x, px.y - 24 * GF.S, '+1', '#fff');
+  if (chips_left <= 0) {
+    // auto-advance to scoring
+    startScoring();
+  }
+  GF.saveRun();
+  return true;
+}
+
+function startScoring() {
+  if (gs !== 'PLACING') return;
+  gs = 'SCORING';
+  car_pos = 0;
+  car_t = 0;
+  scored_marks = [];
+  failed_tile_keys = {};
+  GF.saveRun();
+}
+
+function finishScoring() {
+  // Evaluate each visible building tile: score if any layer-count >= LAYER_THRESHOLD
+  // for at least half the buildings; otherwise the take "reads flat".
+  var ok_count = 0;
+  for (var i = 0; i < visible_tiles.length; i++) {
+    var v = visible_tiles[i];
+    var depth = grid[v.gy][v.gx].layers.length;
+    if (depth >= LAYER_THRESHOLD) ok_count++;
+    else failed_tile_keys[keyXY(v.gx, v.gy)] = true;
+  }
+  var needed = Math.ceil(visible_tiles.length * 0.5);
+  take_result_ok = ok_count >= needed && visible_tiles.length > 0;
+  if (take_result_ok) {
+    takes_passed++;
+    GF.setShake(0.15);
+  } else {
+    takes_failed++;
+    GF.setShake(0.4);
+  }
+  gs = 'TAKE_RESULT';
+  take_result_t = 1.4;
+  GF.saveRun();
+}
+
+function advanceAfterResult() {
+  if (takes_failed >= FAIL_TOLERANCE) { gameOver(); return; }
+  if (take_num >= TAKES_PER_SESSION) { wonRun(); return; }
+  take_num++;
+  setupTake();
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+// ── COORDS ───────────────────────────────────────────────────────────────
+function computeGridOrigin() {
+  // Available vertical region: from top bar (60*S) to tray top
+  var top = 64 * GF.S;
+  var bottom = GF.H - TRAY_HEIGHT * GF.S - 8 * GF.S;
+  var avail_h = bottom - top;
+  var avail_w = GF.W - 16 * GF.S;
+  var tile = Math.min(avail_w / GRID_W, avail_h / GRID_H);
+  var w = tile * GRID_W;
+  var h = tile * GRID_H;
+  var x = (GF.W - w) / 2;
+  var y = top + (avail_h - h) / 2;
+  grid_origin = { x: x, y: y, w: w, h: h, tile: tile };
+}
+
+function gridToScreen(gx, gy) {
+  var t = grid_origin.tile;
+  return { x: grid_origin.x + (gx + 0.5) * t, y: grid_origin.y + (gy + 0.5) * t };
+}
+
+function screenToGrid(px, py) {
+  var t = grid_origin.tile;
+  if (t <= 0) return null;
+  var gx = Math.floor((px - grid_origin.x) / t);
+  var gy = Math.floor((py - grid_origin.y) / t);
+  if (!inBounds(gx, gy)) return null;
+  return { gx: gx, gy: gy };
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function handleTap(px, py) {
+  // Help button (top right) — works in PLACING + SCORING + TAKE_RESULT
+  if (help_btn_rect && (gs === 'PLACING' || gs === 'TAKE_RESULT')) {
+    var b = help_btn_rect;
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+      gs = 'HELP';
+      return;
+    }
+  }
+  if (gs === 'HELP') {
+    if (help_close_rect) {
+      var c = help_close_rect;
+      if (px >= c.x && px <= c.x + c.w && py >= c.y && py <= c.y + c.h) {
+        gs = 'PLACING';
+        return;
+      }
+    }
+    return;
+  }
+  if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') {
+    if (menu_btn_rect) {
+      var m = menu_btn_rect;
+      if (px >= m.x && px <= m.x + m.w && py >= m.y && py <= m.y + m.h) {
+        if (gs === 'MENU') {
+          try { localStorage.setItem('facade_foreman_seen_tutorial', '1'); } catch (e) {}
+        }
+        startGame();
+        return;
+      }
+    }
+    return;
+  }
+  if (gs !== 'PLACING') return;
+
+  // READY button
+  if (ready_btn_rect) {
+    var r = ready_btn_rect;
+    if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h) {
+      if (chips_left < CHIP_BUDGET) startScoring();
+      return;
+    }
+  }
+  // Tray chip taps
+  for (var i = 0; i < tray_slots.length; i++) {
+    var t = tray_slots[i];
+    if (px >= t.x && px <= t.x + t.w && py >= t.y && py <= t.y + t.h) {
+      selected_chip = (selected_chip === i) ? -1 : i;
+      return;
+    }
+  }
+  // Grid taps
+  var g = screenToGrid(px, py);
+  if (g) {
+    if (selected_chip < 0) return;
+    placeChipOnTile(g.gx, g.gy, selected_chip);
+    return;
+  }
+}
+
+document.addEventListener('click', function(e) { handleTap(e.clientX, e.clientY); });
+document.addEventListener('touchstart', function(e) {
+  if (e.changedTouches && e.changedTouches.length) {
+    var t = e.changedTouches[0];
+    handleTap(t.clientX, t.clientY);
+  }
+}, { passive: false });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  pulse_t += dt;
+  if (gs === 'SCORING') {
+    car_t += dt;
+    while (car_t >= car_per_tile && car_pos < route.length - 1) {
+      car_t -= car_per_tile;
+      car_pos++;
+      // mark adjacent building tiles as scored when car passes them
+      markAdjacent(route[car_pos]);
+    }
+    if (car_pos >= route.length - 1 && car_t >= car_per_tile * 0.5) {
+      finishScoring();
+    }
+  }
+  if (gs === 'TAKE_RESULT') {
+    take_result_t -= dt;
+    if (take_result_t <= 0) advanceAfterResult();
+  }
+}
+
+function markAdjacent(node) {
+  // Mark visible building tiles adjacent to this route node as "scored" — record OK/FAIL
+  var adj = [[node.gx-1,node.gy],[node.gx+1,node.gy],[node.gx,node.gy-1],[node.gx,node.gy+1]];
+  for (var i = 0; i < adj.length; i++) {
+    var ax = adj[i][0], ay = adj[i][1];
+    if (!inBounds(ax, ay)) continue;
+    if (grid[ay][ax].type !== 'building') continue;
+    var k = keyXY(ax, ay);
+    var already = false;
+    for (var j = 0; j < scored_marks.length; j++) if (scored_marks[j].key === k) { already = true; break; }
+    if (already) continue;
+    var depth = grid[ay][ax].layers.length;
+    var ok = depth >= LAYER_THRESHOLD;
+    scored_marks.push({ key: k, gx: ax, gy: ay, ok: ok });
+    var sp = gridToScreen(ax, ay);
+    if (ok) {
+      GF.spawnParticles(sp.x, sp.y, '#2ecc71', 12);
+      GF.spawnFloat(sp.x, sp.y - 20 * GF.S, GF.t('passed'), '#2ecc71');
+    } else {
+      GF.spawnParticles(sp.x, sp.y, '#e74c3c', 10);
+      GF.spawnFloat(sp.x, sp.y - 20 * GF.S, GF.t('failed'), '#e74c3c');
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  // Backlot background
+  ctx.fillStyle = '#1a1c22';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  computeGridOrigin();
+
+  if (gs === 'PLACING' || gs === 'SCORING' || gs === 'TAKE_RESULT' || gs === 'HELP' || gs === 'GAMEOVER' || gs === 'WON') {
+    drawBacklot(ctx);
+    drawRoute(ctx);
+    drawGridContents(ctx);
+    if (gs === 'SCORING' || gs === 'TAKE_RESULT') drawCar(ctx);
+    drawTray(ctx);
+    drawHUD(ctx);
+  }
+  if (gs === 'TAKE_RESULT') drawTakeResult(ctx);
+  if (gs === 'MENU')        drawMenu(ctx);
+  if (gs === 'HELP')        drawHelpOverlay(ctx);
+  if (gs === 'GAMEOVER')    drawGameOver(ctx);
+  if (gs === 'WON')         drawWonRun(ctx);
+}
+
+function drawBacklot(ctx) {
+  var go = grid_origin;
+  // asphalt
+  ctx.fillStyle = '#2b2e36';
+  ctx.fillRect(go.x - 6, go.y - 6, go.w + 12, go.h + 12);
+  // grid cells
+  var t = go.tile;
+  for (var y = 0; y < GRID_H; y++) {
+    for (var x = 0; x < GRID_W; x++) {
+      var sx = go.x + x * t;
+      var sy = go.y + y * t;
+      ctx.fillStyle = (x + y) % 2 === 0 ? '#33363f' : '#2e313a';
+      ctx.fillRect(sx, sy, t, t);
+    }
+  }
+  // outer border
+  ctx.strokeStyle = '#4a4f5a';
+  ctx.lineWidth = 2 * GF.S;
+  ctx.strokeRect(go.x, go.y, go.w, go.h);
+}
+
+function drawRoute(ctx) {
+  if (!route.length) return;
+  var t = grid_origin.tile;
+  // glow line
+  ctx.save();
+  ctx.strokeStyle = '#ffd24d';
+  ctx.lineWidth = Math.max(4, t * 0.12);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.globalAlpha = 0.55 + 0.25 * Math.sin(pulse_t * 3);
+  ctx.beginPath();
+  for (var i = 0; i < route.length; i++) {
+    var p = gridToScreen(route[i].gx, route[i].gy);
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+  // arrowheads at each route tile
+  for (var j = 0; j < route.length - 1; j++) {
+    var a = gridToScreen(route[j].gx, route[j].gy);
+    var b = gridToScreen(route[j+1].gx, route[j+1].gy);
+    drawArrow(ctx, a.x, a.y, b.x, b.y);
+  }
+  // start marker
+  var s0 = gridToScreen(route[0].gx, route[0].gy);
+  ctx.fillStyle = '#ffd24d';
+  ctx.beginPath();
+  ctx.arc(s0.x, s0.y, Math.max(4, t * 0.1), 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawArrow(ctx, ax, ay, bx, by) {
+  var dx = bx - ax, dy = by - ay;
+  var len = Math.sqrt(dx*dx + dy*dy);
+  if (len < 1) return;
+  var ux = dx / len, uy = dy / len;
+  var mx = ax + dx * 0.5, my = ay + dy * 0.5;
+  var sz = Math.max(5, grid_origin.tile * 0.18);
+  ctx.fillStyle = '#fff5b2';
+  ctx.beginPath();
+  ctx.moveTo(mx + ux * sz, my + uy * sz);
+  ctx.lineTo(mx - ux * sz * 0.5 + uy * sz * 0.6, my - uy * sz * 0.5 - ux * sz * 0.6);
+  ctx.lineTo(mx - ux * sz * 0.5 - uy * sz * 0.6, my - uy * sz * 0.5 + ux * sz * 0.6);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawGridContents(ctx) {
+  var t = grid_origin.tile;
+  for (var y = 0; y < GRID_H; y++) {
+    for (var x = 0; x < GRID_W; x++) {
+      if (grid[y][x].type !== 'building') continue;
+      var sx = grid_origin.x + x * t + 4;
+      var sy = grid_origin.y + y * t + 4;
+      var w = t - 8, h = t - 8;
+      // building base
+      ctx.fillStyle = '#d6c3a3';
+      GF.rr(ctx, sx, sy, w, h, 6);
+      ctx.fill();
+      // dark roof band
+      ctx.fillStyle = '#7e6a48';
+      ctx.fillRect(sx, sy, w, Math.max(3, h * 0.1));
+      // draw stacked layers
+      var layers = grid[y][x].layers;
+      var pad = 4;
+      for (var li = 0; li < layers.length; li++) {
+        var cid = layers[li];
+        var col = CHIPS[cid].color;
+        // each layer occupies a small zone within tile
+        var rows = 3, cols = 2;
+        var slotW = (w - pad * 3) / cols;
+        var slotH = (h - pad * 4) / rows;
+        var rr2 = Math.floor(li / cols) % rows;
+        var cc2 = li % cols;
+        var lx = sx + pad + cc2 * (slotW + pad);
+        var ly = sy + pad + h * 0.13 + rr2 * (slotH + pad);
+        ctx.fillStyle = col;
+        GF.rr(ctx, lx, ly, slotW, slotH, 3);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.font = 'bold ' + Math.max(8, slotH * 0.6) + 'px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(CHIPS[cid].glyph, lx + slotW / 2, ly + slotH / 2);
+      }
+      // FAIL highlight if scored mark says so
+      var key = keyXY(x, y);
+      var mark = null;
+      for (var mi = 0; mi < scored_marks.length; mi++) if (scored_marks[mi].key === key) { mark = scored_marks[mi]; break; }
+      if (mark) {
+        ctx.strokeStyle = mark.ok ? '#2ecc71' : '#e74c3c';
+        ctx.lineWidth = 3 * GF.S;
+        GF.rr(ctx, sx, sy, w, h, 6);
+        ctx.stroke();
+      } else if (gs === 'PLACING' && layers.length < LAYER_THRESHOLD) {
+        // depth warning ring (subtle)
+        ctx.globalAlpha = 0.35;
+        ctx.strokeStyle = '#888';
+        ctx.lineWidth = 1.5 * GF.S;
+        GF.rr(ctx, sx, sy, w, h, 6);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+  // Selection ghost on grid: where the player would place if they tap a tile
+  if (gs === 'PLACING' && selected_chip >= 0) {
+    var gt = grid_origin.tile;
+    // pulse outline
+    ctx.save();
+    ctx.globalAlpha = 0.5 + 0.3 * Math.sin(pulse_t * 4);
+    ctx.strokeStyle = CHIPS[selected_chip].color;
+    ctx.lineWidth = 2 * GF.S;
+    for (var by = 0; by < GRID_H; by++) {
+      for (var bx = 0; bx < GRID_W; bx++) {
+        if (grid[by][bx].type !== 'building') continue;
+        var bsx = grid_origin.x + bx * gt + 4;
+        var bsy = grid_origin.y + by * gt + 4;
+        GF.rr(ctx, bsx, bsy, gt - 8, gt - 8, 6);
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+  }
+}
+
+function drawCar(ctx) {
+  if (!route.length) return;
+  // interpolate car position
+  var a = route[Math.min(car_pos, route.length - 1)];
+  var b = route[Math.min(car_pos + 1, route.length - 1)];
+  var sa = gridToScreen(a.gx, a.gy);
+  var sb = gridToScreen(b.gx, b.gy);
+  var k = Math.min(1, car_t / car_per_tile);
+  var cxp = sa.x + (sb.x - sa.x) * k;
+  var cyp = sa.y + (sb.y - sa.y) * k;
+  var t = grid_origin.tile;
+  var w = t * 0.45, h = t * 0.32;
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  GF.rr(ctx, cxp - w/2 + 3, cyp - h/2 + 4, w, h, 6);
+  ctx.fill();
+  // body
+  ctx.fillStyle = '#ffd24d';
+  GF.rr(ctx, cxp - w/2, cyp - h/2, w, h, 6);
+  ctx.fill();
+  ctx.fillStyle = '#1a1c22';
+  GF.rr(ctx, cxp - w/2 + 4, cyp - h/2 + 3, w - 8, h * 0.4, 3);
+  ctx.fill();
+  // lens
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(cxp, cyp + h * 0.12, h * 0.18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#4dd0e1';
+  ctx.beginPath();
+  ctx.arc(cxp, cyp + h * 0.12, h * 0.09, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawTray(ctx) {
+  tray_slots = [];
+  var trayY = GF.H - TRAY_HEIGHT * GF.S;
+  ctx.fillStyle = 'rgba(12, 14, 22, 0.95)';
+  ctx.fillRect(0, trayY, GF.W, TRAY_HEIGHT * GF.S);
+  ctx.fillStyle = '#ffd24d';
+  ctx.fillRect(0, trayY, GF.W, 2 * GF.S);
+
+  // Layout: 5 chip slots + READY button
+  var pad = 8 * GF.S;
+  // ready button on the right
+  var readyW = 110 * GF.S;
+  var readyH = (TRAY_HEIGHT - 18) * GF.S;
+  var availW = GF.W - readyW - pad * 3;
+  var slotW = Math.min(CHIP_SLOT_W * GF.S, availW / CHIP_TYPES - pad);
+  var slotH = Math.min(CHIP_SLOT_H * GF.S, readyH);
+  var totalW = slotW * CHIP_TYPES + pad * (CHIP_TYPES - 1);
+  var startX = pad;
+  var slotY = trayY + (TRAY_HEIGHT * GF.S - slotH) / 2;
+
+  for (var i = 0; i < CHIP_TYPES; i++) {
+    var x = startX + i * (slotW + pad);
+    var c = CHIPS[i];
+    var selected = (selected_chip === i);
+    tray_slots.push({ x: x, y: slotY, w: slotW, h: slotH });
+    // chip body
+    ctx.fillStyle = c.color;
+    GF.rr(ctx, x, slotY, slotW, slotH, 10 * GF.S);
+    ctx.fill();
+    if (selected) {
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 3 * GF.S;
+      GF.rr(ctx, x - 2, slotY - 2, slotW + 4, slotH + 4, 12 * GF.S);
+      ctx.stroke();
+    }
+    // glyph
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.font = 'bold ' + Math.max(18, slotH * 0.5) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(c.glyph, x + slotW / 2, slotY + slotH / 2);
+  }
+
+  // READY button
+  var rx = GF.W - readyW - pad;
+  var ry = trayY + (TRAY_HEIGHT * GF.S - readyH) / 2;
+  ready_btn_rect = { x: rx, y: ry, w: readyW, h: readyH };
+  var canReady = (gs === 'PLACING' && chips_left < CHIP_BUDGET);
+  var grad = ctx.createLinearGradient(rx, ry, rx, ry + readyH);
+  if (canReady) { grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60'); }
+  else { grad.addColorStop(0, '#555'); grad.addColorStop(1, '#333'); }
+  GF.rr(ctx, rx, ry, readyW, readyH, 12 * GF.S);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('ready'), rx + readyW / 2, ry + readyH / 2);
+}
+
+function drawHUD(ctx) {
+  var barH = 56 * GF.S;
+  ctx.fillStyle = 'rgba(10, 12, 20, 0.9)';
+  ctx.fillRect(0, 0, GF.W, barH);
+
+  var fs = GF.clamp(13 * GF.S, 10, 18);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  // Take counter
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('take') + ' ' + take_num + '/' + TAKES_PER_SESSION, 12 * GF.S, barH / 2);
+
+  // Takes passed / failed
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#2ecc71';
+  ctx.fillText(GF.t('passed') + ' ' + takes_passed, GF.cx - 60 * GF.S, barH / 2);
+  ctx.fillStyle = takes_failed >= FAIL_TOLERANCE - 1 ? '#e74c3c' : '#ffd24d';
+  ctx.fillText(GF.t('failed') + ' ' + takes_failed + '/' + FAIL_TOLERANCE, GF.cx + 40 * GF.S, barH / 2);
+
+  // Chips remaining
+  ctx.textAlign = 'right';
+  ctx.fillStyle = chips_left === 0 ? '#888' : '#fff';
+  ctx.fillText(GF.t('chips') + ': ' + chips_left + '/' + CHIP_BUDGET, GF.W - 60 * GF.S, barH / 2);
+
+  // ? button
+  var hbS = 36 * GF.S;
+  help_btn_rect = { x: GF.W - hbS - 8 * GF.S, y: 8 * GF.S, w: hbS, h: hbS };
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  GF.rr(ctx, help_btn_rect.x, help_btn_rect.y, help_btn_rect.w, help_btn_rect.h, 8 * GF.S);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', help_btn_rect.x + help_btn_rect.w / 2, help_btn_rect.y + help_btn_rect.h / 2);
+}
+
+function drawWrappedTextCentered(ctx, text, cxp, y, maxW, lineH) {
+  var words = String(text).split(/\s+/);
+  var line = '';
+  var cyp = y;
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, cxp, cyp);
+      line = words[i];
+      cyp += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) {
+    ctx.fillText(line, cxp, cyp);
+    cyp += lineH;
+  }
+  return cyp;
+}
+
+function drawTutorialPanel(ctx, cxp, top) {
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var fs = GF.clamp(13 * GF.S, 10, 17);
+  ctx.font = fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#cde';
+  var y = top;
+  var maxW = Math.max(220 * GF.S, GF.W - 42 * GF.S);
+  var lineH = fs + 5 * GF.S;
+  for (var i = 0; i < lines.length; i++) {
+    y = drawWrappedTextCentered(ctx, lines[i], cxp, y, maxW, lineH) + 4 * GF.S;
+  }
+  return y;
+}
+
+function drawMenu(ctx) {
+  ctx.fillStyle = 'rgba(10,12,20,0.94)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(34 * GF.S, 22, 50);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ffd24d';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = '#ffd24d';
+  ctx.shadowBlur = 30 * GF.S;
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 150 * GF.S);
+  ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillStyle = '#9ab';
+  ctx.fillText(GF.t('sub'), GF.cx, GF.cy - 118 * GF.S);
+
+  var tutEnd = drawTutorialPanel(ctx, GF.cx, GF.cy - 90 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = Math.min(Math.max(tutEnd + 16 * GF.S, GF.cy + 90 * GF.S), GF.H - btnH - 24 * GF.S);
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ffd24d');
+  grad.addColorStop(1, '#e67e22');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#0a0a14';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+
+  if (best > 0) {
+    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#778';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 28 * GF.S);
+  }
+  menu_btn_rect = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawGameOver(ctx) {
+  ctx.fillStyle = 'rgba(10,12,20,0.94)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(36 * GF.S, 22, 54);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#e74c3c';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('gameover'), GF.cx, GF.cy - 60 * GF.S);
+
+  ctx.font = GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  ctx.fillText(GF.t('score') + ': ' + takes_passed + '/' + TAKES_PER_SESSION, GF.cx, GF.cy - 20 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 30 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71');
+  grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+
+  ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.fillStyle = '#778';
+  ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 28 * GF.S);
+  menu_btn_rect = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawWonRun(ctx) {
+  ctx.fillStyle = 'rgba(10,12,20,0.94)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.font = 'bold ' + GF.clamp(40 * GF.S, 22, 58) + 'px sans-serif';
+  ctx.fillStyle = '#ffd24d';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 50 * GF.S);
+
+  ctx.font = GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  ctx.fillText(GF.t('score') + ': ' + takes_passed + '/' + TAKES_PER_SESSION, GF.cx, GF.cy - 10 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 30 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71');
+  grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.fillText(GF.t('again'), GF.cx, btnY + btnH / 2);
+  menu_btn_rect = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawHelpOverlay(ctx) {
+  ctx.fillStyle = 'rgba(10,12,20,0.94)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.font = 'bold ' + GF.clamp(26 * GF.S, 18, 38) + 'px sans-serif';
+  ctx.fillStyle = '#ffd24d';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 130 * GF.S);
+  var tutEnd = drawTutorialPanel(ctx, GF.cx, GF.cy - 90 * GF.S);
+
+  var btnW = GF.clamp(200 * GF.S, 140, 280);
+  var btnH = GF.clamp(46 * GF.S, 38, 60);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = Math.min(Math.max(tutEnd + 18 * GF.S, GF.cy + 70 * GF.S), GF.H - btnH - 24 * GF.S);
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = '#4dd0e1';
+  ctx.fill();
+  ctx.fillStyle = '#0a0a14';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillText(GF.t('ok'), GF.cx, btnY + btnH / 2);
+  help_close_rect = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawTakeResult(ctx) {
+  var alpha = Math.max(0, Math.min(1, take_result_t));
+  var col = take_result_ok ? 'rgba(46, 204, 113, ' : 'rgba(231, 76, 60, ';
+  ctx.fillStyle = col + (alpha * 0.55) + ')';
+  ctx.fillRect(0, GF.cy - 60 * GF.S, GF.W, 120 * GF.S);
+  ctx.font = 'bold ' + GF.clamp(34 * GF.S, 22, 52) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.globalAlpha = alpha;
+  ctx.fillText(take_result_ok ? GF.t('take_ok') : GF.t('take_fail'), GF.cx, GF.cy);
+  ctx.globalAlpha = 1;
+}
+
+// Screenshot helper — land in mid-PLACING with chips placed
+window._setupForScreenshot = function(level) {
+  startGame();
+  // Place 3 chips on the first three visible building tiles
+  for (var i = 0; i < Math.min(3, visible_tiles.length); i++) {
+    var v = visible_tiles[i];
+    grid[v.gy][v.gx].layers.push(0);
+    grid[v.gy][v.gx].layers.push(1);
+    grid[v.gy][v.gx].layers.push(2);
+  }
+  chips_left = 2;
+  selected_chip = 3;
+  gs = 'PLACING';
+};
+
+window._jumpLevel = function(level) {
+  if (level >= 99) {
+    startGame();
+    takes_failed = FAIL_TOLERANCE;
+    gameOver();
+    return;
+  }
+  window._setupForScreenshot(level);
+};
+
+// Expose state EARLY (before init) so runtime gate's 800ms probe sees it
+GF.exposeState(function() {
+  return { gs: gs, take_num: take_num, takes_passed: takes_passed, takes_failed: takes_failed, chips_left: chips_left };
+});
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'facade_foreman',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('facade_foreman_best') || '0') || 0; } catch (e) {}
+    GF.persist('facade_foreman_run_v1',
+      function() {
+        return {
+          gs: gs, take_num: take_num, takes_passed: takes_passed, takes_failed: takes_failed,
+          chips_left: chips_left, seed: seed, best: best,
+          grid: grid, route: route, visible_tiles: visible_tiles
+        };
+      },
+      function(s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        take_num = s.take_num || 1;
+        takes_passed = s.takes_passed || 0;
+        takes_failed = s.takes_failed || 0;
+        chips_left = (s.chips_left == null) ? CHIP_BUDGET : s.chips_left;
+        seed = s.seed || 0;
+        best = s.best || best;
+        if (s.grid) grid = s.grid;
+        if (s.route) {
+          route = s.route;
+          route_set = {};
+          for (var i = 0; i < route.length; i++) route_set[keyXY(route[i].gx, route[i].gy)] = true;
+        }
+        if (s.visible_tiles) visible_tiles = s.visible_tiles;
+      }
+    );
+    if (gs === 'SCORING' || gs === 'TAKE_RESULT') gs = 'PLACING';
+    if (gs !== 'PLACING') gs = 'MENU';
+    GF.exposeState(function() {
+      return { gs: gs, take_num: take_num, takes_passed: takes_passed, takes_failed: takes_failed, chips_left: chips_left };
+    });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

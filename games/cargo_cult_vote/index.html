@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Cargo Cult Vote</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── STRINGS ──────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Cargo Cult Vote',
+    sub:   'Sort the freighter cargo — keep the tribe alive',
+    play: 'PLAY', retry: 'RETRY', again: 'PLAY AGAIN',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'TRIBE COLLAPSED',
+    won: 'TRIBE ASCENDS!',
+    morale: 'MORALE', prod: 'PROD', heat: 'HEAT', gen: 'GEN',
+    useful: 'USEFUL', useless: 'USELESS', sacred: 'SACRED',
+    locked: 'LOCKED',
+    resolved: 'GENERATION RESOLVED',
+    tut_goal: 'Goal: Survive 8 generations by sorting freighter cargo wisely.',
+    tut_controls: 'Controls: Tap a chip, tap a bin (USEFUL, USELESS, SACRED).',
+    tut_win: 'Win: Keep morale above zero through 8 freighter drops.',
+    tut_lose: 'Lose: Morale drops to zero from repeated mis-categorisation.',
+    tut_tip: 'Tip: SACRED locks that family for 2 generations — pick wisely.',
+  },
+  ru: {
+    title: 'Голосование Племени',
+    sub:   'Сортируй груз с парохода — спаси племя',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', again: 'СНОВА',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'ПЛЕМЯ ПАЛО',
+    won: 'ПЛЕМЯ ВОЗВЫСИЛОСЬ!',
+    morale: 'ДУХ', prod: 'ПРОИЗ', heat: 'ЖАР', gen: 'ПОК',
+    useful: 'ПОЛЕЗНО', useless: 'ХЛАМ', sacred: 'СВЯТО',
+    locked: 'ЗАМОК',
+    resolved: 'ПОКОЛЕНИЕ РЕШЕНО',
+    tut_goal: 'Цель: пережить 8 поколений, мудро сортируя груз.',
+    tut_controls: 'Управление: коснись фишки, затем корзины.',
+    tut_win: 'Победа: удержи дух племени выше нуля все 8 поколений.',
+    tut_lose: 'Поражение: дух племени упал до нуля от ошибок.',
+    tut_tip: 'Совет: СВЯТО запирает категорию на 2 поколения.',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES ─────────────────────────────────────────────────────────────
+var GEN_TOTAL        = 8;
+var CARGO_PER_GEN    = 7;
+var CHIPS_TO_PLACE   = 5;
+var BIN_CAP_USEFUL   = 3;
+var BIN_CAP_USELESS  = 3;
+var BIN_CAP_SACRED   = 2;
+var SACRED_LOCK      = 2;
+var MORALE_START     = 60;
+var MORALE_MAX       = 100;
+var MIS_PENALTY      = 10;
+var MIS_TOL          = 1;
+var HEAT_PER_USEFUL  = 4;
+var PROD_PER_USEFUL  = 8;
+var SACRED_BONUS     = 6;
+var CHIP_W           = 84;
+var CHIP_H           = 64;
+var BIN_W            = 220;
+var BIN_H            = 110;
+var IDOL_R           = 56;
+
+// ── CARGO FAMILIES ───────────────────────────────────────────────────────
+// Each family: name, glyph (ascii), color, default bias (which bin they
+// most often want to go to per the freighter "manifest"). The manifest
+// rotates per generation — see makeManifest().
+var FAMILIES = [
+  { id: 0, name: 'RADIO',   glyph: '))',  color: '#e74c3c' },
+  { id: 1, name: 'OILDRUM', glyph: 'oo',  color: '#34495e' },
+  { id: 2, name: 'PALLET',  glyph: '##',  color: '#c97b3a' },
+  { id: 3, name: 'ANTENNA', glyph: 'Y',   color: '#48c9b0' },
+  { id: 4, name: 'IDOL',    glyph: 'Oo',  color: '#ffd24d' },
+  { id: 5, name: 'CHAIN',   glyph: '@@',  color: '#888899' },
+];
+
+var BIN_KEYS = ['useful', 'useless', 'sacred'];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';
+var gen = 1;
+var morale = MORALE_START;
+var production = 0;
+var heat = 0;
+var best = 0;
+var seed = 0;
+var rng = null;
+var cargo_deck = [];       // [{ family, placed_bin: null|'useful'|'useless'|'sacred' }]
+var manifest = [];         // per-family preferred bin index (0/1/2) for this gen
+var locked = [0, 0, 0, 0, 0, 0]; // generations remaining locked per family
+var bin_chip_count = { useful: 0, useless: 0, sacred: 0 };
+var selected_chip = -1;
+var pulse_t = 0;
+var resolve_banner_t = 0;
+var resolve_text = '';
+var freighter_x = 0;
+var chip_xy = []; // computed each frame
+var bin_xy = {};
+var help_btn = null;
+var won_run_score = 0;
+
+// ── SEEDED RNG ───────────────────────────────────────────────────────────
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function dailySeed() {
+  var d = new Date();
+  return d.getFullYear() * 10000 + (d.getMonth()+1) * 100 + d.getDate();
+}
+
+// ── ROUND SETUP ──────────────────────────────────────────────────────────
+function makeManifest(rnd) {
+  // For each family, pick the "correct" bin this generation:
+  // 0 = useful, 1 = useless, 2 = sacred.
+  // Distribution roughly: 40% useful, 35% useless, 25% sacred.
+  var m = [];
+  for (var i = 0; i < FAMILIES.length; i++) {
+    var r = rnd();
+    if (r < 0.40) m.push(0);
+    else if (r < 0.75) m.push(1);
+    else m.push(2);
+  }
+  return m;
+}
+
+function makeCargo(rnd) {
+  var deck = [];
+  for (var i = 0; i < CARGO_PER_GEN; i++) {
+    var fam = Math.floor(rnd() * FAMILIES.length);
+    deck.push({ family: fam, placed_bin: null });
+  }
+  return deck;
+}
+
+function startGame() {
+  gen = 1;
+  morale = MORALE_START;
+  production = 0;
+  heat = 0;
+  locked = [0, 0, 0, 0, 0, 0];
+  seed = dailySeed() + Math.floor(Math.random() * 1000);
+  rng = mulberry32(seed);
+  setupGeneration();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function setupGeneration() {
+  for (var i = 0; i < locked.length; i++) {
+    if (locked[i] > 0) locked[i]--;
+  }
+  manifest = makeManifest(rng);
+  cargo_deck = makeCargo(rng);
+  bin_chip_count = { useful: 0, useless: 0, sacred: 0 };
+  selected_chip = -1;
+  freighter_x = -200;
+}
+
+function placedTotal() {
+  var n = 0;
+  for (var i = 0; i < cargo_deck.length; i++) if (cargo_deck[i].placed_bin) n++;
+  return n;
+}
+
+function resolveGeneration() {
+  // Tally mistakes (chips placed not in their manifest-preferred bin).
+  // Locked families: if a family is locked, the "correct" bin for them
+  // is SACRED — placing elsewhere = mistake.
+  var mistakes = 0;
+  var prod_gain = 0;
+  var heat_gain = 0;
+  var sacred_gain = 0;
+  for (var i = 0; i < cargo_deck.length; i++) {
+    var c = cargo_deck[i];
+    if (!c.placed_bin) continue;
+    var fam = c.family;
+    var correct_bin_idx = locked[fam] > 0 ? 2 : manifest[fam];
+    var placed_idx = BIN_KEYS.indexOf(c.placed_bin);
+    if (placed_idx === correct_bin_idx) {
+      if (placed_idx === 0) { prod_gain += PROD_PER_USEFUL; heat_gain += HEAT_PER_USEFUL; }
+      else if (placed_idx === 2) { sacred_gain += SACRED_BONUS; }
+    } else {
+      mistakes++;
+    }
+    // Sacred placement locks the family for SACRED_LOCK generations
+    if (placed_idx === 2) {
+      locked[fam] = SACRED_LOCK + 1; // +1 because next setup decrements first
+    }
+  }
+  var morale_delta = -MIS_PENALTY * Math.max(0, mistakes - MIS_TOL) + sacred_gain - Math.floor(heat_gain / 4);
+  morale = Math.max(0, Math.min(MORALE_MAX, morale + morale_delta));
+  production += prod_gain;
+  heat += heat_gain;
+
+  resolve_text = (morale_delta >= 0 ? '+' : '') + morale_delta + ' ' + GF.t('morale');
+  resolve_banner_t = 1.2;
+
+  // Float numbers near HUD
+  GF.spawnFloat(GF.W * 0.18, 80 * GF.S, (morale_delta >= 0 ? '+' : '') + morale_delta, morale_delta >= 0 ? '#2ecc71' : '#e74c3c');
+  if (prod_gain > 0) GF.spawnFloat(GF.W * 0.5, 80 * GF.S, '+' + prod_gain, '#ffd24d');
+  if (heat_gain > 0) GF.spawnFloat(GF.W * 0.82, 80 * GF.S, '+' + heat_gain, '#e67e22');
+
+  if (morale <= 0) {
+    gameOver();
+    return;
+  }
+  if (gen >= GEN_TOTAL) {
+    wonRun();
+    return;
+  }
+  gs = 'GEN_RESOLVE';
+}
+
+function nextGeneration() {
+  gen++;
+  setupGeneration();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  var final_score = production - Math.floor(heat / 2);
+  if (final_score > best) {
+    best = final_score;
+    try { localStorage.setItem('cargo_cult_vote_best', String(best)); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.setShake(0.5);
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+function wonRun() {
+  won_run_score = production - Math.floor(heat / 2);
+  if (won_run_score > best) {
+    best = won_run_score;
+    try { localStorage.setItem('cargo_cult_vote_best', String(best)); } catch (e) {}
+  }
+  gs = 'WON_RUN';
+  GF.setShake(0.3);
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// ── PLACEMENT ────────────────────────────────────────────────────────────
+function binCap(bin) {
+  if (bin === 'useful') return BIN_CAP_USEFUL;
+  if (bin === 'useless') return BIN_CAP_USELESS;
+  return BIN_CAP_SACRED;
+}
+
+function placeChip(chipIdx, bin) {
+  if (chipIdx < 0 || chipIdx >= cargo_deck.length) return;
+  var c = cargo_deck[chipIdx];
+  if (c.placed_bin) return;
+  if (bin_chip_count[bin] >= binCap(bin)) return;
+  // Locked family rule: can only place into sacred
+  if (locked[c.family] > 0 && bin !== 'sacred') return;
+  if (placedTotal() >= CHIPS_TO_PLACE) return;
+  c.placed_bin = bin;
+  bin_chip_count[bin]++;
+  selected_chip = -1;
+  // VFX
+  var bx = bin_xy[bin];
+  if (bx) {
+    GF.spawnParticles(bx.x + bx.w / 2, bx.y + bx.h / 2, FAMILIES[c.family].color, 14);
+  }
+  if (placedTotal() >= CHIPS_TO_PLACE) {
+    resolveGeneration();
+  }
+  GF.saveRun();
+}
+
+function unplaceChip(chipIdx) {
+  if (chipIdx < 0 || chipIdx >= cargo_deck.length) return;
+  var c = cargo_deck[chipIdx];
+  if (!c.placed_bin) return;
+  bin_chip_count[c.placed_bin]--;
+  c.placed_bin = null;
+  GF.saveRun();
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function handleTap(x, y) {
+  if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON_RUN' || gs === 'HELP') {
+    _handleMenuPress(x, y);
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  // ? help
+  if (help_btn && x >= help_btn.x && x <= help_btn.x + help_btn.w &&
+      y >= help_btn.y && y <= help_btn.y + help_btn.h) {
+    gs = 'HELP';
+    return;
+  }
+  // Tap a bin?
+  for (var k = 0; k < BIN_KEYS.length; k++) {
+    var key = BIN_KEYS[k];
+    var b = bin_xy[key];
+    if (!b) continue;
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+      if (selected_chip >= 0) {
+        placeChip(selected_chip, key);
+      }
+      return;
+    }
+  }
+  // Tap a chip in the deck?
+  for (var i = 0; i < chip_xy.length; i++) {
+    var t = chip_xy[i];
+    if (!t) continue;
+    if (x >= t.x && x <= t.x + t.w && y >= t.y && y <= t.y + t.h) {
+      var c = cargo_deck[i];
+      if (c.placed_bin) {
+        // Tap a placed chip removes it
+        unplaceChip(i);
+        return;
+      }
+      selected_chip = (selected_chip === i) ? -1 : i;
+      return;
+    }
+  }
+}
+
+document.addEventListener('click', function(e) {
+  handleTap(e.clientX, e.clientY);
+});
+document.addEventListener('touchstart', function(e) {
+  if (e.changedTouches && e.changedTouches.length) {
+    var t = e.changedTouches[0];
+    handleTap(t.clientX, t.clientY);
+  }
+}, { passive: false });
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  pulse_t += dt;
+  freighter_x += dt * 30 * GF.S;
+  if (freighter_x > GF.W + 240 * GF.S) freighter_x = -240 * GF.S;
+  if (gs === 'GEN_RESOLVE') {
+    resolve_banner_t -= dt;
+    if (resolve_banner_t <= 0) {
+      nextGeneration();
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  ctx.fillStyle = '#0a0a14';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING' || gs === 'GEN_RESOLVE' || gs === 'HELP' ||
+      gs === 'GAMEOVER' || gs === 'WON_RUN') {
+    drawScene(ctx);
+    drawBins(ctx);
+    drawCargoDeck(ctx);
+    drawHUD(ctx);
+  }
+  if (gs === 'GEN_RESOLVE') drawResolveBanner(ctx);
+  if (gs === 'HELP')        drawHelpOverlay(ctx);
+  if (gs === 'MENU')        drawMenu(ctx);
+  if (gs === 'GAMEOVER')    drawGameOverOverlay(ctx);
+  if (gs === 'WON_RUN')     drawWonRunOverlay(ctx);
+}
+
+function getSceneRect() {
+  var top = 70 * GF.S;
+  var bottom = GF.H - (BIN_H + 110) * GF.S;
+  return { x: 0, y: top, w: GF.W, h: Math.max(80 * GF.S, bottom - top) };
+}
+
+function drawScene(ctx) {
+  var r = getSceneRect();
+  // Sky gradient
+  var sky = ctx.createLinearGradient(0, r.y, 0, r.y + r.h * 0.6);
+  sky.addColorStop(0, '#1b2a4e');
+  sky.addColorStop(1, '#3d5a80');
+  ctx.fillStyle = sky;
+  ctx.fillRect(r.x, r.y, r.w, r.h * 0.6);
+
+  // Sea band
+  var sea = ctx.createLinearGradient(0, r.y + r.h * 0.5, 0, r.y + r.h * 0.7);
+  sea.addColorStop(0, '#2c5f7d');
+  sea.addColorStop(1, '#1a4060');
+  ctx.fillStyle = sea;
+  ctx.fillRect(r.x, r.y + r.h * 0.5, r.w, r.h * 0.2);
+
+  // Sand/ground
+  var ground = ctx.createLinearGradient(0, r.y + r.h * 0.65, 0, r.y + r.h);
+  ground.addColorStop(0, '#a87a4a');
+  ground.addColorStop(1, '#6a4a28');
+  ctx.fillStyle = ground;
+  ctx.fillRect(r.x, r.y + r.h * 0.65, r.w, r.h * 0.35);
+
+  // Freighter (silhouette top band)
+  var freighterY = r.y + 30 * GF.S;
+  var fw = 200 * GF.S, fh = 28 * GF.S;
+  ctx.fillStyle = '#13243a';
+  GF.rr(ctx, freighter_x, freighterY, fw, fh, 4 * GF.S);
+  ctx.fill();
+  // smoke stack
+  ctx.fillRect(freighter_x + fw * 0.62, freighterY - 14 * GF.S, 10 * GF.S, 14 * GF.S);
+  // bridge
+  ctx.fillRect(freighter_x + fw * 0.42, freighterY - 10 * GF.S, 20 * GF.S, 10 * GF.S);
+
+  // 4x4 village grid (huts) below
+  var gridY = r.y + r.h * 0.72;
+  var gridH = r.h * 0.28;
+  var cellW = r.w / 6;
+  var cellH = gridH / 2;
+  for (var gx = 0; gx < 4; gx++) {
+    for (var gy = 0; gy < 2; gy++) {
+      var hx = r.x + cellW + gx * cellW;
+      var hy = gridY + gy * cellH + 6 * GF.S;
+      drawHut(ctx, hx, hy, cellW * 0.55, cellH * 0.6);
+    }
+  }
+
+  // Central altar / idol
+  var ix = GF.cx;
+  var iy = r.y + r.h * 0.5;
+  drawIdol(ctx, ix, iy, IDOL_R * GF.S);
+}
+
+function drawHut(ctx, x, y, w, h) {
+  ctx.fillStyle = '#5a3a22';
+  ctx.fillRect(x, y, w, h);
+  // roof
+  ctx.fillStyle = '#3a2010';
+  ctx.beginPath();
+  ctx.moveTo(x - 4 * GF.S, y);
+  ctx.lineTo(x + w / 2, y - h * 0.45);
+  ctx.lineTo(x + w + 4 * GF.S, y);
+  ctx.closePath();
+  ctx.fill();
+  // door
+  ctx.fillStyle = '#1a0e08';
+  ctx.fillRect(x + w * 0.38, y + h * 0.45, w * 0.25, h * 0.55);
+}
+
+function drawIdol(ctx, cx, cy, r) {
+  // body (totem)
+  var bodyW = r * 1.2, bodyH = r * 2.1;
+  ctx.fillStyle = '#7a4a1a';
+  GF.rr(ctx, cx - bodyW / 2, cy - bodyH * 0.4, bodyW, bodyH, 6 * GF.S);
+  ctx.fill();
+  // head
+  ctx.fillStyle = '#a36a2a';
+  ctx.beginPath();
+  ctx.arc(cx, cy - bodyH * 0.4, r * 0.7, 0, Math.PI * 2);
+  ctx.fill();
+  // eyes (bug-eyed)
+  var eyR = r * 0.22;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(cx - r * 0.32, cy - bodyH * 0.42, eyR, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + r * 0.32, cy - bodyH * 0.42, eyR, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#0a0a14';
+  ctx.beginPath(); ctx.arc(cx - r * 0.30, cy - bodyH * 0.42, eyR * 0.55, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx + r * 0.34, cy - bodyH * 0.42, eyR * 0.55, 0, Math.PI * 2); ctx.fill();
+  // sacred bonus glow (count chips in sacred bin)
+  var sacredCount = 0;
+  for (var i = 0; i < cargo_deck.length; i++) if (cargo_deck[i].placed_bin === 'sacred') sacredCount++;
+  if (sacredCount > 0 || production > 30) {
+    var pulse = 0.5 + 0.5 * Math.sin(pulse_t * 3);
+    ctx.globalAlpha = 0.3 + 0.3 * pulse;
+    var glowR = r * (1.6 + sacredCount * 0.18);
+    var grad = ctx.createRadialGradient(cx, cy, r * 0.2, cx, cy, glowR);
+    grad.addColorStop(0, 'rgba(255, 210, 77, 0.8)');
+    grad.addColorStop(1, 'rgba(255, 210, 77, 0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawBins(ctx) {
+  bin_xy = {};
+  var binsY = GF.H - (BIN_H + 18) * GF.S;
+  var totalW = 3 * BIN_W * GF.S + 2 * 12 * GF.S;
+  var scale = totalW > GF.W - 16 * GF.S ? (GF.W - 16 * GF.S) / totalW : 1;
+  var bw = BIN_W * GF.S * scale;
+  var bh = BIN_H * GF.S * scale;
+  var startX = (GF.W - (3 * bw + 2 * 12 * GF.S * scale)) / 2;
+
+  var keys = ['useful', 'useless', 'sacred'];
+  var colors = ['#2ecc71', '#7f8c8d', '#ffd24d'];
+  var labels = [GF.t('useful'), GF.t('useless'), GF.t('sacred')];
+  for (var i = 0; i < 3; i++) {
+    var bx = startX + i * (bw + 12 * GF.S * scale);
+    var by = binsY;
+    bin_xy[keys[i]] = { x: bx, y: by, w: bw, h: bh };
+    var cnt = bin_chip_count[keys[i]];
+    var cap = binCap(keys[i]);
+
+    // bg
+    ctx.fillStyle = 'rgba(15, 18, 30, 0.92)';
+    GF.rr(ctx, bx, by, bw, bh, 14 * GF.S);
+    ctx.fill();
+    // border
+    ctx.strokeStyle = colors[i];
+    ctx.lineWidth = (selected_chip >= 0 ? 4 : 2) * GF.S;
+    ctx.setLineDash(selected_chip >= 0 && cnt < cap ? [6 * GF.S, 5 * GF.S] : []);
+    GF.rr(ctx, bx, by, bw, bh, 14 * GF.S);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Label
+    ctx.fillStyle = colors[i];
+    var lf = GF.clamp(15 * GF.S * scale, 10, 20);
+    ctx.font = 'bold ' + lf + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(labels[i], bx + bw / 2, by + 8 * GF.S);
+
+    // Cap counter
+    ctx.fillStyle = '#fff';
+    ctx.font = GF.clamp(12 * GF.S * scale, 9, 16) + 'px sans-serif';
+    ctx.fillText(cnt + '/' + cap, bx + bw / 2, by + 8 * GF.S + lf + 4 * GF.S);
+
+    // Sacred: draw chain icons for locked families
+    if (keys[i] === 'sacred') {
+      var anyLocked = false;
+      for (var k = 0; k < locked.length; k++) if (locked[k] > 0) { anyLocked = true; break; }
+      if (anyLocked) {
+        ctx.fillStyle = '#ffd24d';
+        ctx.font = GF.clamp(10 * GF.S * scale, 8, 14) + 'px sans-serif';
+        ctx.fillText('[' + GF.t('locked') + ']', bx + bw / 2, by + bh - 22 * GF.S);
+      }
+    }
+
+    // Draw placed chips inside bin (small)
+    var placedHere = [];
+    for (var pi = 0; pi < cargo_deck.length; pi++) {
+      if (cargo_deck[pi].placed_bin === keys[i]) placedHere.push(pi);
+    }
+    var chipMiniW = (bw - 24 * GF.S) / Math.max(1, cap);
+    var chipMiniH = bh * 0.42;
+    var chipY = by + bh - chipMiniH - 8 * GF.S - 18 * GF.S;
+    for (var pj = 0; pj < placedHere.length; pj++) {
+      var fam = cargo_deck[placedHere[pj]].family;
+      var cx = bx + 12 * GF.S + pj * chipMiniW;
+      ctx.fillStyle = FAMILIES[fam].color;
+      GF.rr(ctx, cx, chipY, chipMiniW - 4 * GF.S, chipMiniH, 6 * GF.S);
+      ctx.fill();
+      ctx.fillStyle = '#0a0a14';
+      ctx.font = 'bold ' + GF.clamp(11 * GF.S * scale, 8, 14) + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(FAMILIES[fam].glyph, cx + (chipMiniW - 4 * GF.S) / 2, chipY + chipMiniH / 2);
+    }
+  }
+}
+
+function drawCargoDeck(ctx) {
+  chip_xy = [];
+  var r = getSceneRect();
+  var deckY = r.y + r.h - 90 * GF.S;
+  var slotW = CHIP_W * GF.S;
+  var slotH = CHIP_H * GF.S;
+  var pad = 8 * GF.S;
+  var n = cargo_deck.length;
+  var totalW = n * slotW + (n - 1) * pad;
+  var scale = totalW > GF.W - 16 * GF.S ? (GF.W - 16 * GF.S) / totalW : 1;
+  slotW *= scale; slotH *= scale;
+  var startX = (GF.W - (n * slotW + (n - 1) * pad)) / 2;
+  // Use the band right under freighter
+  var y = r.y + 70 * GF.S;
+
+  for (var i = 0; i < n; i++) {
+    var c = cargo_deck[i];
+    var x = startX + i * (slotW + pad);
+    var slot = { x: x, y: y, w: slotW, h: slotH };
+    chip_xy.push(slot);
+
+    var fam = FAMILIES[c.family];
+    var placed = c.placed_bin !== null;
+    ctx.save();
+    ctx.globalAlpha = placed ? 0.25 : 1;
+    GF.rr(ctx, x, y, slotW, slotH, 10 * GF.S);
+    ctx.fillStyle = fam.color;
+    ctx.fill();
+    if (i === selected_chip) {
+      ctx.strokeStyle = '#ffeb3b';
+      ctx.lineWidth = 3 * GF.S;
+      GF.rr(ctx, x - 2, y - 2, slotW + 4, slotH + 4, 12 * GF.S);
+      ctx.stroke();
+    }
+    // Lock indicator on chip if family is locked
+    if (locked[c.family] > 0 && !placed) {
+      ctx.fillStyle = 'rgba(255, 210, 77, 0.55)';
+      GF.rr(ctx, x, y, slotW, slotH, 10 * GF.S);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    ctx.fillStyle = '#0a0a14';
+    ctx.font = 'bold ' + GF.clamp(16 * GF.S * scale, 10, 22) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(fam.glyph, x + slotW / 2, y + slotH / 2 - 6 * GF.S);
+    ctx.font = 'bold ' + GF.clamp(9 * GF.S * scale, 7, 12) + 'px sans-serif';
+    ctx.fillText(fam.name, x + slotW / 2, y + slotH - 10 * GF.S);
+  }
+}
+
+function drawHUD(ctx) {
+  var barH = 56 * GF.S;
+  ctx.fillStyle = 'rgba(10, 14, 24, 0.88)';
+  ctx.fillRect(0, 0, GF.W, barH);
+
+  var fs = GF.clamp(13 * GF.S, 10, 18);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+
+  // Morale bar left
+  var mx = 12 * GF.S;
+  var my = barH / 2 - 8 * GF.S;
+  var mw = GF.W * 0.30;
+  var mh = 16 * GF.S;
+  ctx.fillStyle = '#222';
+  GF.rr(ctx, mx, my, mw, mh, 4 * GF.S);
+  ctx.fill();
+  var fw = (morale / MORALE_MAX) * mw;
+  var col = morale > 30 ? '#2ecc71' : (morale > 12 ? '#ffd24d' : '#e74c3c');
+  ctx.fillStyle = col;
+  GF.rr(ctx, mx, my, fw, mh, 4 * GF.S);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('morale') + ': ' + morale, mx, my - 12 * GF.S);
+
+  // Production center
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd24d';
+  ctx.fillText(GF.t('prod') + ': ' + production, GF.W * 0.5, barH / 2 - 6 * GF.S);
+  ctx.fillStyle = '#e67e22';
+  ctx.fillText(GF.t('heat') + ': ' + heat, GF.W * 0.5, barH / 2 + 12 * GF.S);
+
+  // Generation right + ? button
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('gen') + ' ' + gen + '/' + GEN_TOTAL, GF.W - 56 * GF.S, barH / 2);
+  var hbS = 36 * GF.S;
+  help_btn = { x: GF.W - hbS - 8 * GF.S, y: 8 * GF.S, w: hbS, h: hbS };
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  GF.rr(ctx, help_btn.x, help_btn.y, help_btn.w, help_btn.h, 8 * GF.S);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', help_btn.x + help_btn.w / 2, help_btn.y + help_btn.h / 2);
+}
+
+function drawTutorialPanel(ctx, cx, top) {
+  var lines = [
+    GF.t('tut_goal'),
+    GF.t('tut_controls'),
+    GF.t('tut_win'),
+    GF.t('tut_lose'),
+    GF.t('tut_tip'),
+  ];
+  var fs = GF.clamp(13 * GF.S, 10, 17);
+  ctx.font = fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#cde';
+  var y = top;
+  var maxW = Math.max(220 * GF.S, GF.W - 42 * GF.S);
+  var lineH = fs + 5 * GF.S;
+  for (var i = 0; i < lines.length; i++) {
+    y = drawWrappedTextCentered(ctx, lines[i], cx, y, maxW, lineH) + 4 * GF.S;
+  }
+  return y;
+}
+
+function drawWrappedTextCentered(ctx, text, cx, y, maxW, lineH) {
+  var words = String(text).split(/\s+/);
+  var line = '';
+  var cy = y;
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) {
+      ctx.fillText(line, cx, cy);
+      line = words[i];
+      cy += lineH;
+    } else {
+      line = test;
+    }
+  }
+  if (line) {
+    ctx.fillText(line, cx, cy);
+    cy += lineH;
+  }
+  return cy;
+}
+
+var _menuBtn = null;
+
+function drawMenu(ctx) {
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(34 * GF.S, 22, 50);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ffd24d';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = '#ffd24d';
+  ctx.shadowBlur = 30 * GF.S;
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 140 * GF.S);
+  ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillStyle = '#9ab';
+  ctx.fillText(GF.t('sub'), GF.cx, GF.cy - 110 * GF.S);
+
+  var tutEnd = drawTutorialPanel(ctx, GF.cx, GF.cy - 80 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = Math.min(Math.max(tutEnd + 16 * GF.S, GF.cy + 90 * GF.S), GF.H - btnH - 24 * GF.S);
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#ffd24d');
+  grad.addColorStop(1, '#e67e22');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#0a0a14';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+
+  if (best > 0) {
+    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#778';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 28 * GF.S);
+  }
+
+  _menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawResolveBanner(ctx) {
+  var a = Math.max(0, Math.min(1, resolve_banner_t));
+  ctx.fillStyle = 'rgba(46, 204, 113, ' + (a * 0.55) + ')';
+  ctx.fillRect(0, GF.cy - 60 * GF.S, GF.W, 120 * GF.S);
+  ctx.font = 'bold ' + GF.clamp(30 * GF.S, 18, 46) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.globalAlpha = a;
+  ctx.fillText(GF.t('resolved'), GF.cx, GF.cy - 16 * GF.S);
+  ctx.font = 'bold ' + GF.clamp(22 * GF.S, 14, 34) + 'px sans-serif';
+  ctx.fillText(resolve_text, GF.cx, GF.cy + 24 * GF.S);
+  ctx.globalAlpha = 1;
+}
+
+function drawGameOverOverlay(ctx) {
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.font = 'bold ' + GF.clamp(38 * GF.S, 22, 56) + 'px sans-serif';
+  ctx.fillStyle = '#e74c3c';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('gameover'), GF.cx, GF.cy - 60 * GF.S);
+
+  ctx.font = GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  var finalScore = production - Math.floor(heat / 2);
+  ctx.fillText(GF.t('gen') + ' ' + gen + '/' + GEN_TOTAL + '   ' + GF.t('score') + ': ' + finalScore, GF.cx, GF.cy - 20 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 30 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71');
+  grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+
+  ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.fillStyle = '#778';
+  ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 28 * GF.S);
+
+  _menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawWonRunOverlay(ctx) {
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.font = 'bold ' + GF.clamp(42 * GF.S, 24, 60) + 'px sans-serif';
+  ctx.fillStyle = '#ffd24d';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('won'), GF.cx, GF.cy - 50 * GF.S);
+
+  ctx.font = GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  ctx.fillText(GF.t('score') + ': ' + won_run_score, GF.cx, GF.cy - 10 * GF.S);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320);
+  var btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = GF.cy + 30 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#2ecc71');
+  grad.addColorStop(1, '#27ae60');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.fillText(GF.t('again'), GF.cx, btnY + btnH / 2);
+
+  _menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawHelpOverlay(ctx) {
+  ctx.fillStyle = 'rgba(8,8,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.font = 'bold ' + GF.clamp(26 * GF.S, 18, 38) + 'px sans-serif';
+  ctx.fillStyle = '#ffd24d';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy - 130 * GF.S);
+  var tutEnd = drawTutorialPanel(ctx, GF.cx, GF.cy - 90 * GF.S);
+
+  var btnW = GF.clamp(200 * GF.S, 140, 280);
+  var btnH = GF.clamp(46 * GF.S, 38, 60);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = Math.min(Math.max(tutEnd + 18 * GF.S, GF.cy + 70 * GF.S), GF.H - btnH - 24 * GF.S);
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = '#4dd0e1';
+  ctx.fill();
+  ctx.fillStyle = '#0a0a14';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillText('OK', GF.cx, btnY + btnH / 2);
+
+  _menuBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function _handleMenuPress(x, y) {
+  if (!_menuBtn) return false;
+  if (x >= _menuBtn.x && x <= _menuBtn.x + _menuBtn.w &&
+      y >= _menuBtn.y && y <= _menuBtn.y + _menuBtn.h) {
+    if (gs === 'MENU') {
+      try { localStorage.setItem('cargo_cult_vote_seen_tutorial', '1'); } catch (e) {}
+      startGame();
+      return true;
+    } else if (gs === 'GAMEOVER' || gs === 'WON_RUN') {
+      startGame();
+      return true;
+    } else if (gs === 'HELP') {
+      gs = 'PLAYING';
+      return true;
+    }
+  }
+  return false;
+}
+
+// Screenshot helper — land in mid-puzzle PLAYING state
+window._setupForScreenshot = function(level) {
+  startGame();
+  // Place 2 chips into bins so screenshots show populated puzzle
+  // (1 useful, 1 sacred), leave selected_chip set so a bin highlight glow shows.
+  placeChip(0, 'useful');
+  placeChip(2, 'sacred');
+  selected_chip = 4;
+  // Don't go all the way to resolution
+  gs = 'PLAYING';
+};
+window._jumpLevel = function(level) {
+  if (level >= 99) {
+    startGame();
+    morale = 0;
+    gameOver();
+    return;
+  }
+  window._setupForScreenshot(level);
+};
+
+// Expose state for the runtime gate (called early + after onReady)
+GF.exposeState(function() {
+  return { gs: gs, gen: gen, morale: morale, production: production, heat: heat,
+           cargo_placed: placedTotal(),
+           bin_useful: bin_chip_count.useful, bin_useless: bin_chip_count.useless, bin_sacred: bin_chip_count.sacred };
+});
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'cargo_cult_vote',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('cargo_cult_vote_best') || '0') || 0; } catch (e) {}
+    GF.persist('cargo_cult_vote_run_v1',
+      function() {
+        return { gs: gs, gen: gen, morale: morale, production: production, heat: heat,
+                 locked: locked, cargo_deck: cargo_deck, manifest: manifest,
+                 bin_chip_count: bin_chip_count, seed: seed, best: best };
+      },
+      function(s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        gen = s.gen || 1;
+        morale = (typeof s.morale === 'number') ? s.morale : MORALE_START;
+        production = s.production || 0;
+        heat = s.heat || 0;
+        locked = s.locked || [0,0,0,0,0,0];
+        cargo_deck = s.cargo_deck || [];
+        manifest = s.manifest || [];
+        bin_chip_count = s.bin_chip_count || { useful: 0, useless: 0, sacred: 0 };
+        seed = s.seed || 0;
+        best = s.best || best;
+      }
+    );
+    // Bounce back to MENU on cold start (don't try to resume live PLAYING)
+    if (gs !== 'PLAYING' && gs !== 'MENU') gs = 'MENU';
+    if (gs === 'PLAYING' && (!cargo_deck || cargo_deck.length === 0)) {
+      gs = 'MENU';
+    }
+    GF.exposeState(function() {
+      return { gs: gs, gen: gen, morale: morale, production: production, heat: heat,
+               cargo_placed: placedTotal(),
+               bin_useful: bin_chip_count.useful, bin_useless: bin_chip_count.useless, bin_sacred: bin_chip_count.sacred };
+    });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

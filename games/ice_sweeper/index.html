@@ -194,9 +194,122 @@ function checkAchievements(ev) {
       achMask |= a.bit;
       saveAchievements();
       fireAchievementToast(a);
+      SFX.achievement();
     }
   }
 }
+
+// iter#8: SFX — synthesized WebAudio sound design (no external assets).
+// All sounds are short envelope-shaped oscillator blips so the bundle stays
+// zero-asset. AudioContext is created lazily on first user gesture (Chrome
+// autoplay policy). 'M' key (or sfxMute button on MENU/GAMEOVER) toggles a
+// persistent mute, stored in 'ice_sfx_mute' localStorage. crack is throttled
+// (≥70ms between plays) so contact-spam doesn't blow out the mixer.
+var SFX = (function() {
+  var ctx = null;
+  var muted = false;
+  try { muted = localStorage.getItem('ice_sfx_mute') === '1'; } catch(e) {}
+  var lastCrack = 0;
+  function ensureCtx() {
+    if (ctx) return ctx;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return null;
+      ctx = new AC();
+    } catch(e) { ctx = null; }
+    return ctx;
+  }
+  function blip(freq, dur, type, gain, slide) {
+    if (muted) return;
+    var c = ensureCtx(); if (!c) return;
+    try {
+      if (c.state === 'suspended') c.resume();
+      var t = c.currentTime;
+      var osc = c.createOscillator();
+      var g = c.createGain();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      if (slide) osc.frequency.linearRampToValueAtTime(slide, t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(Math.max(0.0001, gain || 0.18), t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      osc.connect(g); g.connect(c.destination);
+      osc.start(t); osc.stop(t + dur + 0.02);
+    } catch(e) {}
+  }
+  function noise(dur, gain, hp) {
+    if (muted) return;
+    var c = ensureCtx(); if (!c) return;
+    try {
+      if (c.state === 'suspended') c.resume();
+      var t = c.currentTime;
+      var n = Math.max(1, Math.floor(c.sampleRate * dur));
+      var buf = c.createBuffer(1, n, c.sampleRate);
+      var data = buf.getChannelData(0);
+      for (var i = 0; i < n; i++) data[i] = (Math.random()*2-1) * (1 - i/n);
+      var src = c.createBufferSource(); src.buffer = buf;
+      var g = c.createGain(); g.gain.value = gain || 0.12;
+      if (hp) {
+        var f = c.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = hp;
+        src.connect(f); f.connect(g);
+      } else { src.connect(g); }
+      g.connect(c.destination);
+      src.start(t);
+    } catch(e) {}
+  }
+  function chord(freqs, dur, type, gain) {
+    for (var i = 0; i < freqs.length; i++) blip(freqs[i], dur, type, (gain||0.14) / Math.max(1, freqs.length*0.7));
+  }
+  return {
+    isMuted: function() { return muted; },
+    toggleMute: function() {
+      muted = !muted;
+      try { localStorage.setItem('ice_sfx_mute', muted ? '1' : '0'); } catch(e) {}
+      if (!muted) blip(660, 0.08, 'square', 0.14);
+      return muted;
+    },
+    crack: function() {
+      var now = performance.now();
+      if (now - lastCrack < 70) return; lastCrack = now;
+      noise(0.06, 0.08, 1800);
+    },
+    pop: function(chainN) {
+      var base = 520 + Math.min(12, (chainN||1)) * 40;
+      blip(base, 0.11, 'triangle', 0.18, base * 1.35);
+    },
+    chainTier: function(tier) {
+      // tier 1: HOT (C-E-G), 2: BLAZE (E-G-B), 3: INFERNO (G-B-D + low rumble)
+      if (tier === 1) chord([523, 659, 784], 0.22, 'triangle', 0.16);
+      else if (tier === 2) { chord([659, 784, 988], 0.28, 'sawtooth', 0.14); noise(0.12, 0.06, 600); }
+      else { chord([784, 988, 1175, 1568], 0.36, 'sawtooth', 0.14); noise(0.22, 0.10, 200); }
+    },
+    achievement: function() {
+      // ascending arpeggio
+      blip(523, 0.11, 'triangle', 0.18);
+      setTimeout(function(){ blip(659, 0.11, 'triangle', 0.18); }, 90);
+      setTimeout(function(){ blip(784, 0.11, 'triangle', 0.18); }, 180);
+      setTimeout(function(){ blip(1047, 0.22, 'triangle', 0.20); }, 270);
+    },
+    newBest: function() {
+      blip(880, 0.14, 'square', 0.16, 1320);
+      setTimeout(function(){ blip(1320, 0.20, 'square', 0.16, 1760); }, 130);
+    },
+    levelEnd: function() {
+      blip(523, 0.10, 'triangle', 0.18);
+      setTimeout(function(){ blip(659, 0.10, 'triangle', 0.18); }, 90);
+      setTimeout(function(){ blip(784, 0.18, 'triangle', 0.20); }, 180);
+    },
+    gameOver: function() {
+      blip(330, 0.18, 'sawtooth', 0.16, 220);
+      setTimeout(function(){ blip(220, 0.30, 'sawtooth', 0.16, 110); }, 160);
+    },
+    ui: function() { blip(880, 0.05, 'square', 0.10); },
+    extraTime: function() {
+      blip(659, 0.10, 'triangle', 0.18);
+      setTimeout(function(){ blip(988, 0.16, 'triangle', 0.20); }, 90);
+    }
+  };
+})();
 
 // iter#5: CHAIN MILESTONES — when a run crosses x3/x5/x10, fire a big banner +
 // bonus points + extra particle burst. Reset per-level so each lake offers
@@ -237,7 +350,10 @@ function selectHull(n) {
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
-document.addEventListener('keydown', function(e) { keys[e.code] = true; });
+document.addEventListener('keydown', function(e) {
+  keys[e.code] = true;
+  if (e.code === 'KeyM') { SFX.toggleMute(); }
+});
 document.addEventListener('keyup',   function(e) { keys[e.code] = false; });
 document.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
 document.addEventListener('wheel',     function(e) { e.preventDefault(); }, { passive: false });
@@ -252,7 +368,7 @@ canvas.addEventListener('touchstart', function(e) {
   touch.dx = 0; touch.dy = 0;
   for (var i = 0; i < buttons.length; i++) {
     var b = buttons[i];
-    if (t0.clientX >= b.x && t0.clientX <= b.x+b.w && t0.clientY >= b.y && t0.clientY <= b.y+b.h) b.fn();
+    if (t0.clientX >= b.x && t0.clientX <= b.x+b.w && t0.clientY >= b.y && t0.clientY <= b.y+b.h) { SFX.ui(); b.fn(); }
   }
 }, { passive: false });
 canvas.addEventListener('touchmove', function(e) {
@@ -276,7 +392,7 @@ canvas.addEventListener('touchend', function(e) {
 canvas.addEventListener('click', function(e) {
   for (var i = 0; i < buttons.length; i++) {
     var b = buttons[i];
-    if (e.clientX >= b.x && e.clientX <= b.x+b.w && e.clientY >= b.y && e.clientY <= b.y+b.h) b.fn();
+    if (e.clientX >= b.x && e.clientX <= b.x+b.w && e.clientY >= b.y && e.clientY <= b.y+b.h) { SFX.ui(); b.fn(); }
   }
 });
 
@@ -387,6 +503,7 @@ window.__gfState = function () {
       achUnlocked: ACHIEVEMENTS.filter(isAchUnlocked).length,
       daySeed: getDaySeed(),
       dayKey: getDayKey(),
+      sfxMuted: SFX.isMuted(),
     };
   } catch (e) { return { __error: String(e) }; }
 };
@@ -434,6 +551,7 @@ function grantExtraTime() {
   extraTimeUsed = true;
   timeLeft = EXTRA_TIME_SEC;
   gs = 'PLAYING';
+  SFX.extraTime();
 }
 
 // ── GRID HELPERS ────────────────────────────────────────────────────────────
@@ -486,7 +604,7 @@ function update(dt) {
   if (gs !== 'PLAYING') return;
 
   timeLeft -= dt;
-  if (timeLeft <= 0) { timeLeft = 0; gs = 'GAMEOVER'; checkAchievements({ score: score }); try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}; return; }
+  if (timeLeft <= 0) { timeLeft = 0; gs = 'GAMEOVER'; SFX.gameOver(); checkAchievements({ score: score }); try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){}; return; }
 
   if (chainTimer > 0) { chainTimer -= dt; if (chainTimer <= 0) { chain = 0; chainTierShown = 0; } }
   if (chainBannerLife > 0) { chainBannerLife -= dt; chainBannerPulse += dt * 8; }
@@ -523,11 +641,13 @@ function update(dt) {
     if (hit.tile.state >= 1 && !hit.tile._cracked1) {
       hit.tile._cracked1 = true;
       spawnParticles(o.x + hit.c*TILE + TILE/2, o.y + hit.r*TILE + TILE/2, '#bcd5e8', 4);
+      SFX.crack();
     }
     if (hit.tile.state >= 2 && !hit.tile._cracked2) {
       hit.tile._cracked2 = true;
       spawnParticles(o.x + hit.c*TILE + TILE/2, o.y + hit.r*TILE + TILE/2, '#e7f0fa', 6);
       spawnChunkParts(o, hit.c, hit.r);
+      SFX.crack();
     }
     if (hit.tile.state >= CRACK_MAX) {
       hit.tile.state = -1; // collected
@@ -535,6 +655,7 @@ function update(dt) {
       var now = performance.now();
       if (chainTimer > 0) chain++;
       else chain = 1;
+      SFX.pop(chain);
       chainTimer = 1.4;
       // iter#6: live-bump bestChain so the swatch on MENU/GAMEOVER reflects this run
       if (chain > bestChain) {
@@ -561,6 +682,7 @@ function update(dt) {
         chainTierShown = milestoneTier;
         var bonusPts = milestoneTier === 1 ? 25 : milestoneTier === 2 ? 75 : 200;
         score += bonusPts;
+        SFX.chainTier(milestoneTier);
         chainBannerLife = 1.6;
         chainBannerPulse = 0;
         if (milestoneTier === 1) { chainBannerText = t('chainHot'); chainBannerColor = '#FFB347'; }
@@ -588,6 +710,7 @@ function update(dt) {
         spawnFloat(cx, cy - 30*S, t('bonus')+' +'+bonus, '#2ecc71');
         // iter#7: score-tier achievements at level end (bonus already in score)
         checkAchievements({ score: score });
+        SFX.levelEnd();
         gs = 'LEVELEND';try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){};
       }
     }
@@ -1067,6 +1190,26 @@ function drawAchievementBadges() {
 // Fires when player crosses chain x3/x5/x10. Positioned below HUD so it never
 // overlaps the score/timer (top 56*S) and clears the playfield centre so
 // chunk action stays visible. Auto-decays in ~1.6s.
+// iter#8: SFX mute toggle — small circular speaker icon top-right corner.
+// Drawn on MENU / LEVELEND / GAMEOVER (states where drawOverlay resets
+// the buttons array). Click toggles SFX.toggleMute().
+function drawMuteToggle() {
+  var sz = clamp(36*S, 28, 44);
+  var pad = clamp(12*S, 8, 16);
+  var x = W - sz - pad, y = pad;
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,30,55,0.78)';
+  ctx.strokeStyle = 'rgba(160,200,255,0.45)';
+  ctx.lineWidth = Math.max(1, 1.4*S);
+  ctx.beginPath(); ctx.arc(x + sz/2, y + sz/2, sz/2, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.font = 'bold '+clamp(18*S, 14, 22)+'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = SFX.isMuted() ? '#ff6b6b' : '#bcd5e8';
+  ctx.fillText(SFX.isMuted() ? '🔇' : '🔊', x + sz/2, y + sz/2 + 1*S);
+  ctx.restore();
+  buttons.push({ x:x, y:y, w:sz, h:sz, fn: function(){ SFX.toggleMute(); } });
+}
+
 function drawChainBanner() {
   if (chainBannerLife <= 0) return;
   var alpha = Math.min(1, chainBannerLife / 0.5);
@@ -1136,17 +1279,20 @@ function frame(ts) {
     drawHullSwatches();
     drawDaySeedTag(); // iter#4: small "Day seed YYYYMMDD" tag near top
     drawAchievementBadges(); // iter#7: 5 emoji badges below day-seed tag
+    drawMuteToggle(); // iter#8
   }
   if (gs === 'LEVELEND') {
     drawOverlay(t('complete'), t('score')+': '+score, t('next'),
       function() { startLevel(level+1); });
     drawDaySeedTag();
+    drawMuteToggle(); // iter#8
   }
   if (gs === 'GAMEOVER') {
     if (score > best && score > 0) {
       best = score;
       newBestThisRun = true;
       try { localStorage.setItem('ice_best', best); } catch(e) {}
+      SFX.newBest();
     }
     // iter#1: RETRY routes through throttled interstitial (Yandex 4.1)
     drawOverlay(t('gameover'), t('score')+': '+score, t('retry'),
@@ -1192,6 +1338,7 @@ function frame(ts) {
       ctx.textBaseline = 'alphabetic';
       buttons.push({ x: rX, y: rY, w: rW, h: rH, fn: showRewardedExtraTime });
     }
+    drawMuteToggle(); // iter#8
   }
 
   // iter#7: achievement toast rendered LAST so it sits above HUD / overlays

@@ -445,6 +445,60 @@ try {
   if (!isNaN(_ltt)) lifetimeTopTier = _ltt;
 } catch (e) {}
 
+// Iter#12 (free-choice): dynamic time-of-day sky tied to distance tiers.
+// Game had 11 feature layers but the world looked identical at 50m and 4000m —
+// long runs visually blurred together. Tying the sky gradient to tier
+// progression (NIGHT → BRONZE DAWN → SILVER NOON → GOLD HOUR → LEGEND NEON)
+// adds an environmental "I've made it deep" beat on top of the existing TIER!
+// banner. Pure additive: replaces the 3 hardcoded gradient stops in draw() with
+// interpolated values based on `distance` progress between tier thresholds. No
+// impact on physics, cop AI, pickups, scoring, achievements, or HUD elements.
+// MENU + initial-run paint = SKY_PALETTES[0] (the same dusk-purple as before).
+var SKY_PALETTES = [
+  // idx 0 — start / menu (matches old hardcoded gradient exactly so MENU paint unchanged)
+  { top: [0x1a, 0x0a, 0x2a], mid: [0x2a, 0x10, 0x40], bot: [0x3a, 0x1a, 0x30] },
+  // idx 1 — BRONZE 500m: warmer dawn rust
+  { top: [0x2a, 0x10, 0x18], mid: [0x4a, 0x1e, 0x20], bot: [0x6a, 0x36, 0x24] },
+  // idx 2 — SILVER 1000m: pale-blue overcast noon
+  { top: [0x10, 0x20, 0x38], mid: [0x28, 0x46, 0x66], bot: [0x6a, 0x88, 0xa0] },
+  // idx 3 — GOLD 2000m: golden-hour amber
+  { top: [0x20, 0x10, 0x28], mid: [0x66, 0x32, 0x18], bot: [0xc8, 0x82, 0x28] },
+  // idx 4 — LEGEND 3500m: hot neon-magenta night
+  { top: [0x18, 0x04, 0x2a], mid: [0x46, 0x08, 0x6a], bot: [0xc8, 0x18, 0x88] },
+];
+function _lerp(a, b, t) { return a + (b - a) * t; }
+function _palCss(rgb) {
+  return 'rgb(' + ((rgb[0]|0)) + ',' + ((rgb[1]|0)) + ',' + ((rgb[2]|0)) + ')';
+}
+function _lerpPal(p0, p1, t) {
+  return {
+    top: [_lerp(p0.top[0], p1.top[0], t), _lerp(p0.top[1], p1.top[1], t), _lerp(p0.top[2], p1.top[2], t)],
+    mid: [_lerp(p0.mid[0], p1.mid[0], t), _lerp(p0.mid[1], p1.mid[1], t), _lerp(p0.mid[2], p1.mid[2], t)],
+    bot: [_lerp(p0.bot[0], p1.bot[0], t), _lerp(p0.bot[1], p1.bot[1], t), _lerp(p0.bot[2], p1.bot[2], t)],
+  };
+}
+// Map current distance to a smooth 0..4 palette position based on DIST_TIERS
+// thresholds (500/1000/2000/3500). Returns interpolated palette ready for sky
+// gradient. On MENU / GAMEOVER we lock to the highest tier reached so the
+// gameover overlay shows the world you actually played to.
+function getSkyPalette() {
+  // Pick the "anchor distance" — current run distance, but on GAMEOVER lock to
+  // the tier the player finished in so the overlay reflects their final state.
+  var d = (gs === 'GAMEOVER') ? distance : (gs === 'MENU' ? 0 : distance);
+  var thresholds = [0, 500, 1000, 2000, 3500];
+  var idx = 0;
+  for (var i = 0; i < thresholds.length - 1; i++) {
+    if (d >= thresholds[i] && d < thresholds[i + 1]) { idx = i; break; }
+    if (d >= thresholds[thresholds.length - 1]) { idx = thresholds.length - 1; break; }
+  }
+  if (idx >= SKY_PALETTES.length - 1) {
+    return SKY_PALETTES[SKY_PALETTES.length - 1];
+  }
+  var span = thresholds[idx + 1] - thresholds[idx];
+  var t = span > 0 ? Math.max(0, Math.min(1, (d - thresholds[idx]) / span)) : 0;
+  return _lerpPal(SKY_PALETTES[idx], SKY_PALETTES[idx + 1], t);
+}
+
 function spawnShield(x) {
   // Mid-high band, slightly higher than rockets so the silhouette doesn't
   // overlap them visually. Encourages a bounce-chain commit to reach.
@@ -1219,10 +1273,13 @@ function update(dt) {
 
 // ── DRAW ─────────────────────────────────────────────────────────────────
 function draw(ctx) {
+  // Iter#12: sky palette interpolates between tier presets based on distance.
+  // getSkyPalette() returns the same starting purple on MENU / fresh runs.
+  var _pal = getSkyPalette();
   var skyGrad = ctx.createLinearGradient(0, 0, 0, GF.H);
-  skyGrad.addColorStop(0, '#1a0a2a');
-  skyGrad.addColorStop(0.6, '#2a1040');
-  skyGrad.addColorStop(1, '#3a1a30');
+  skyGrad.addColorStop(0,   _palCss(_pal.top));
+  skyGrad.addColorStop(0.6, _palCss(_pal.mid));
+  skyGrad.addColorStop(1,   _palCss(_pal.bot));
   ctx.fillStyle = skyGrad;
   ctx.fillRect(0, 0, GF.W, GF.H);
 
@@ -2493,7 +2550,15 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     tierReached:     typeof tierReached     !== 'undefined' ? tierReached     : null,
     tierBannerIdx:   typeof tierBannerIdx   !== 'undefined' ? tierBannerIdx   : null,
     tierBannerTimer: typeof tierBannerTimer !== 'undefined' ? tierBannerTimer : null,
-    lifetimeTopTier: typeof lifetimeTopTier !== 'undefined' ? lifetimeTopTier : null
+    lifetimeTopTier: typeof lifetimeTopTier !== 'undefined' ? lifetimeTopTier : null,
+    // Iter#12: which sky palette anchor the current frame is interpolating from.
+    // Computed from distance vs DIST_TIERS thresholds (0, 500, 1000, 2000, 3500).
+    skyPaletteIdx: (function(){
+      if (typeof distance === 'undefined') return 0;
+      var d = distance, ths = [0,500,1000,2000,3500];
+      for (var i = ths.length - 1; i >= 0; i--) { if (d >= ths[i]) return i; }
+      return 0;
+    })()
   };
 });
 })();

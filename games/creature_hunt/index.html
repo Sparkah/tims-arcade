@@ -63,7 +63,15 @@ canvas{display:block;touch-action:none}
 .role-btn .role-desc{font-size:11px;opacity:0.6;margin-top:4px}
 #game-over{display:none;position:absolute;top:0;left:0;width:100%;height:100%;flex-direction:column;justify-content:center;align-items:center;background:rgba(0,0,0,0.92);z-index:10}
 #game-over h2{font-size:42px;margin-bottom:10px;text-shadow:0 0 30px rgba(255,0,0,0.5)}
-#game-over .stats{font-size:16px;color:#aaa;margin-bottom:24px;text-align:center;line-height:1.8}
+#game-over .stats{font-size:16px;color:#aaa;margin-bottom:14px;text-align:center;line-height:1.8}
+#go-leaderboard{font-size:13px;color:#bbb;margin-bottom:18px;min-width:240px;max-width:320px;text-align:left;line-height:1.55}
+#go-leaderboard .lb-title{font-size:12px;letter-spacing:2px;color:#9ad;text-align:center;margin-bottom:8px;text-shadow:0 0 12px rgba(120,170,220,0.3)}
+#go-leaderboard .lb-row{display:flex;justify-content:space-between;gap:8px;padding:2px 6px;border-radius:3px}
+#go-leaderboard .lb-row.me{background:rgba(120,170,220,0.12);color:#fff}
+#go-leaderboard .lb-rank{color:#778;width:24px;flex:0 0 24px;text-align:right}
+#go-leaderboard .lb-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 6px}
+#go-leaderboard .lb-score{color:#cda;flex:0 0 auto}
+#go-leaderboard .lb-empty{color:#666;text-align:center;font-style:italic;padding:6px 0}
 #caught-list{position:absolute;bottom:12px;left:12px;font-size:12px;color:#f66;pointer-events:none;text-shadow:0 1px 3px #000;line-height:1.5}
 #lobby{display:none;position:absolute;top:0;left:0;width:100%;height:100%;flex-direction:column;justify-content:center;align-items:center;background:rgba(0,0,0,0.95);z-index:10}
 #lobby h2{font-size:36px;color:#4af;margin-bottom:16px;text-shadow:0 0 30px rgba(68,170,255,0.4)}
@@ -149,6 +157,7 @@ canvas{display:block;touch-action:none}
   <div id="game-over">
     <h2 id="go-title"></h2>
     <div class="stats" id="go-stats"></div>
+    <div id="go-leaderboard"></div>
     <div style="display:flex;gap:12px">
       <!-- v5 (2026-05-20): PLAY AGAIN removed. In MP it was firing a SP
            restartGame() that separated the two players into different
@@ -267,6 +276,13 @@ const STRINGS = {
     new_best: 'NEW BEST!',
     lifetime_stats: 'Your record',
     sprint_btn: 'SPRINT',
+    lb_today_human: "TODAY'S SURVIVORS",
+    lb_today_creature: "TODAY'S HUNTERS",
+    lb_rank: 'Rank',
+    lb_empty: 'Be the first to post a score today.',
+    lb_name_prompt: 'Name for the daily leaderboard:',
+    lb_you: 'You',
+    lb_loading: 'Loading leaderboard...',
   },
   ru: {
     title: 'Creature Hunt',
@@ -349,6 +365,13 @@ const STRINGS = {
     new_best: 'НОВЫЙ РЕКОРД!',
     lifetime_stats: 'Ваш рекорд',
     sprint_btn: 'БЕГ',
+    lb_today_human: 'ВЫЖИВШИЕ ДНЯ',
+    lb_today_creature: 'ОХОТНИКИ ДНЯ',
+    lb_rank: 'Место',
+    lb_empty: 'Будьте первым, кто оставит счёт сегодня.',
+    lb_name_prompt: 'Имя для таблицы лидеров:',
+    lb_you: 'Вы',
+    lb_loading: 'Загрузка таблицы...',
   }
 };
 
@@ -404,6 +427,109 @@ const PersonalBest = (function() {
   }
   return { get, recordRound, fmtTime };
 })();
+
+// ── Daily Leaderboard (iter#2 ladder) ──────────────────────────
+// Shared daily top-10 via Gallery's /api/scores. Two boards keyed
+// by role so creatures (kills) and humans (survival sec) compete
+// separately. Date = UTC YYYY-MM-DD, same convention as Daily Dodge.
+//
+// Slugs: 'creature_hunt_human' (score = survival seconds)
+//        'creature_hunt_creature' (score = humans caught this round)
+//
+// Multiplayer-safe: this is a personal record submission, not a
+// per-round live ranking — every player submits their own number
+// at game-over, independent of WS server state. Works even when
+// the WS server is asleep (single-player vs bots).
+const Leaderboard = (function() {
+  const NAME_KEY = 'creature_hunt_name';
+  function getDayKey() {
+    const d = new Date();
+    return d.getUTCFullYear() + '-' + String(d.getUTCMonth()+1).padStart(2,'0') +
+           '-' + String(d.getUTCDate()).padStart(2,'0');
+  }
+  function slugFor(role) {
+    return role === 'creature' ? 'creature_hunt_creature' : 'creature_hunt_human';
+  }
+  let playerName = '';
+  try { playerName = localStorage.getItem(NAME_KEY) || ''; } catch(_) {}
+  function ensureName() {
+    if (playerName) return playerName;
+    let entered = '';
+    try { entered = (window.prompt(t('lb_name_prompt'), t('lb_you')) || '').trim().slice(0, 16); } catch(_) {}
+    // Sanitize to API regex: letters/digits/space/-_. plus unicode word chars.
+    entered = entered.replace(/[^\wÀ-￿ \-.]/g, '').trim().slice(0, 16);
+    if (entered) {
+      playerName = entered;
+      try { localStorage.setItem(NAME_KEY, playerName); } catch(_) {}
+    }
+    return playerName;
+  }
+  function fetchTop(role) {
+    const url = '/api/scores?slug=' + slugFor(role) + '&date=' + getDayKey();
+    return fetch(url, { cache: 'no-store' })
+      .then(function(r){ return r.ok ? r.json() : { entries: [] }; })
+      .then(function(d){ return (d.entries || []).slice(0, 10); })
+      .catch(function(){ return []; });
+  }
+  // Submit (best-effort). Returns { rank, entries } via the follow-up fetch.
+  function submitAndFetch(role, score) {
+    const name = ensureName();
+    if (!name || !Number.isFinite(score) || score <= 0) {
+      return fetchTop(role).then(function(entries){ return { rank: null, entries: entries }; });
+    }
+    return fetch('/api/scores', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ slug: slugFor(role), date: getDayKey(), name: name, score: Math.floor(score) }),
+      keepalive: true,
+    })
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(data){
+      const rank = data && data.rank ? data.rank : null;
+      return fetchTop(role).then(function(entries){ return { rank: rank, entries: entries }; });
+    })
+    .catch(function(){
+      return fetchTop(role).then(function(entries){ return { rank: null, entries: entries }; });
+    });
+  }
+  function getName() { return playerName; }
+  return { submitAndFetch, fetchTop, ensureName, slugFor, getDayKey, getName };
+})();
+
+// Render daily leaderboard into #go-leaderboard. role = 'human'|'creature'.
+// `myScore` highlights the player's row when name matches.
+function renderLeaderboard(role, myScore, result) {
+  const el = document.getElementById('go-leaderboard');
+  if (!el) return;
+  const titleKey = role === 'creature' ? 'lb_today_creature' : 'lb_today_human';
+  const entries = (result && result.entries) || [];
+  const rank = result && result.rank;
+  const myName = Leaderboard.getName();
+  let html = '<div class="lb-title">' + t(titleKey);
+  if (rank) html += ' &middot; ' + t('lb_rank') + ' #' + rank;
+  html += '</div>';
+  if (!entries.length) {
+    html += '<div class="lb-empty">' + t('lb_empty') + '</div>';
+  } else {
+    const top = entries.slice(0, 5);
+    for (let i = 0; i < top.length; i++) {
+      const e = top[i];
+      const isMe = myName && e.name === myName;
+      const scoreText = role === 'creature'
+        ? (e.score + '/10')
+        : PersonalBest.fmtTime(e.score);
+      const safeName = String(e.name || '').replace(/[<>&"']/g, function(c){
+        return { '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;' }[c];
+      });
+      html += '<div class="lb-row' + (isMe ? ' me' : '') + '">' +
+              '<span class="lb-rank">' + (i+1) + '.</span>' +
+              '<span class="lb-name">' + safeName + '</span>' +
+              '<span class="lb-score">' + scoreText + '</span>' +
+              '</div>';
+    }
+  }
+  el.innerHTML = html;
+}
 
 function renderMenuStats() {
   const el = document.getElementById('menu-stats');
@@ -3840,6 +3966,22 @@ function endGame(won) {
   document.getElementById('go-title').textContent = title;
   document.getElementById('go-title').style.color = titleColor;
   document.getElementById('go-stats').innerHTML = stats;
+  // Iter#2: show daily leaderboard. Score = survivalSec for human,
+  // caughtCount for creature. Loading placeholder until fetch resolves.
+  const lbEl = document.getElementById('go-leaderboard');
+  if (lbEl) lbEl.innerHTML = '<div class="lb-empty">' + t('lb_loading') + '</div>';
+  const _lbScore = (playerRole === 'creature') ? caughtCount : survivalSec;
+  const _lbRole = playerRole;
+  // Best-effort — never block the UI, never throw if endpoint missing.
+  try {
+    Leaderboard.submitAndFetch(_lbRole, _lbScore).then(function(res){
+      // Only render if game-over is still on-screen
+      const goEl = document.getElementById('game-over');
+      if (goEl && goEl.style.display !== 'none') {
+        renderLeaderboard(_lbRole, _lbScore, res);
+      }
+    });
+  } catch(_) {}
   document.getElementById('game-over').style.display = 'flex';
   showTouchControls(false);
   showPauseBtn(false);
@@ -4405,8 +4547,10 @@ function setup() {
     if (e.code === 'KeyM') {
       AudioManager.toggleMute();
     }
-    // Escape — toggle pause
-    if (e.code === 'Escape') {
+    // P key — toggle pause. CrazyGames reserves Escape for fullscreen exit
+    // (CG rejection cause 2026-05-21); the pause button (top-right ☰) is the
+    // primary affordance, P is the keyboard shortcut for parity.
+    if (e.code === 'KeyP') {
       e.preventDefault();
       togglePause();
     }
