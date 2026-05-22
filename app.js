@@ -130,6 +130,21 @@ async function init() {
 
   attachEvents();
   renderGenres();
+
+  // Honour ?q=... from URL — wires the SearchAction in JSON-LD into the
+  // actual search input so external links / Google sitelinks searchbox
+  // land on a pre-filtered grid instead of the unfiltered homepage.
+  try {
+    const q = new URLSearchParams(location.search).get('q');
+    if (q) {
+      const trimmed = q.trim().toLowerCase().slice(0, 80);
+      if (trimmed) {
+        searchTerm = trimmed;
+        if (search) search.value = trimmed;
+      }
+    }
+  } catch (e) { /* malformed URL — ignore */ }
+
   render();
 
   // SECOND PAINT — vote counts + featured game. We wait for BOTH so the
