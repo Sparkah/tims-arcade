@@ -10,7 +10,7 @@ Surface area:
 
 - `index.html` / `play.html` / `admin.html` / `lab.html` / `login.html` — HTML entry points
 - `app.js` (43KB) — main client logic: card rendering, voting UX, theme switching, identity, PostHog wiring
-- `style.css` (55KB) — three themes (`data-theme=lab|brutalist|editorial`), self-hosted fonts
+- `style.css` (~30KB) — single Lab theme, tokens at `:root`, self-hosted fonts. Brutalist + Editorial themes existed until 2026-05-22, deleted as dead code (recoverable from git history)
 - `functions/api/**` — 25+ Cloudflare Functions:
   - `auth/*` — magic-link request/verify/logout (Resend + HMAC session cookie `tgl_session`)
   - `vote.js`, `counts.js`, `feedback.js`, `feedback-image.js` — voting + rate-on-leave overlay
