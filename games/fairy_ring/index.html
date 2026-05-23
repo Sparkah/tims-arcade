@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Fairy Ring</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0c1410; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISATION ─────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Fairy Ring',
+    sub:   'Drop spores. Merge the rings.',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT LEVEL', gotit: 'GOT IT',
+    grow: 'GROW', score: 'SCORE', best: 'BEST',
+    win: 'GROVE BLOOMED', fullclear: 'FOREST AWAKENED', gameover: 'POUCH EMPTY',
+    level: 'Level', cover: 'Cover', spores: 'Spores', combo: 'COMBO',
+    daily: 'Daily seed', merge: 'MERGE!', settled: 'Rings settled',
+    placeHint: 'Tap a tile to drop a spore',
+    growHint: 'Tap GROW to expand the rings',
+    'tut_goal': 'Goal: Cover enough of the forest with mushrooms to hit the target percentage.',
+    'tut_controls': 'Controls: Tap an empty tile to drop a spore. Tap GROW to expand every ring one ring outward.',
+    'tut_win': 'Win: Reach the coverage target before your spore pouch and your rings run out.',
+    'tut_lose': 'Lose: The pouch is empty and every ring has died against trees and rocks below the target.',
+    'tut_tip': 'Tip: Space spores so their rings overlap and MERGE - merges give a combo multiplier and big coverage.',
+  },
+  ru: {
+    title: 'Ведьмино Кольцо',
+    sub:   'Бросай споры. Сливай кольца.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЬШЕ', gotit: 'ПОНЯТНО',
+    grow: 'РОСТ', score: 'ОЧКИ', best: 'РЕКОРД',
+    win: 'РОЩА РАСЦВЕЛА', fullclear: 'ЛЕС ПРОБУДИЛСЯ', gameover: 'СПОРЫ КОНЧИЛИСЬ',
+    level: 'Уровень', cover: 'Покрытие', spores: 'Споры', combo: 'КОМБО',
+    daily: 'Сид дня', merge: 'СЛИЯНИЕ!', settled: 'Кольца осели',
+    placeHint: 'Нажми на клетку, чтобы бросить спору',
+    growHint: 'Нажми РОСТ, чтобы кольца выросли',
+    'tut_goal': 'Цель: Покрой грибами достаточную часть леса, чтобы достичь нужного процента.',
+    'tut_controls': 'Управление: Нажми на пустую клетку, чтобы бросить спору. Нажми РОСТ, чтобы каждое кольцо выросло на одно кольцо.',
+    'tut_win': 'Победа: Достигни цели покрытия, пока не кончились споры и кольца.',
+    'tut_lose': 'Поражение: Споры кончились, а все кольца погибли о деревья и камни, не достигнув цели.',
+    'tut_tip': 'Совет: Размещай споры так, чтобы кольца пересекались и СЛИВАЛИСЬ - слияния дают комбо-множитель и большое покрытие.',
+  },
+};
+
+var SPRITE_NAMES = ['mushroom', 'tree', 'rock', 'spore'];
+
+// ── TUNABLES (mirrors DESIGN.md) ─────────────────────────────────────────
+var GRID            = 9;
+var MAX_SPORES      = 5;
+var COVERAGE_TARGET = 32;     // current level's target %, set per level
+var TOTAL_LEVELS    = 4;
+var RING_GROW_TURNS = 3;
+var MERGE_BONUS     = 2;
+var OBSTACLE_BASE   = 6;
+var COMBO_DECAY     = 0;
+var BLOOM_POINTS    = 10;
+var DAILY_SEED_SALT = 'fairy_ring';
+
+var LEVEL_TARGETS   = [32, 42, 52, 60];
+
+// ── DAILY SEED + RNG ─────────────────────────────────────────────────────
+function utcDateStr() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  var dd = String(d.getUTCDate()).padStart(2, '0');
+  return y + '-' + m + '-' + dd;
+}
+function simpleHash(str) {
+  var h = 2166136261;
+  for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = (h * 16777619) >>> 0; }
+  return h >>> 0;
+}
+function makeRNG(seed) {
+  var s = seed >>> 0; if (s === 0) s = 1;
+  return function() {
+    s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0;
+    return (s >>> 0) / 0xFFFFFFFF;
+  };
+}
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';              // MENU | PLAYING | WIN | GAMEOVER | TUTORIAL_OVERLAY
+var prevState = 'MENU';
+var dailyDate = utcDateStr();
+var dailySeed = simpleHash(DAILY_SEED_SALT + '_' + dailyDate);
+
+var level       = 1;
+var cells       = null;       // 2D: 'empty' | 'obstacle' | 'mushroom'
+var obstacleKind= null;       // 2D: 'tree' | 'rock' | null
+var rings       = [];         // { cx, cy, radius, alive }
+var sporesLeft  = MAX_SPORES;
+var coverage    = 0;          // percent of plantable tiles covered
+var score       = 0;
+var best        = 0;
+var combo       = 1;
+var liveRings   = 0;
+var nonObstacleTiles = 1;
+var growPulse   = 0;
+var bannerText  = '';
+var bannerT     = 0;
+var seenTutorial = false;
+
+var overlayBtnRect = null;
+var growBtnRect    = null;
+var L = {};                   // layout
+
+// ── LEVEL SETUP ──────────────────────────────────────────────────────────
+function obstacleCountFor(lv) { return OBSTACLE_BASE + (lv - 1) * 3; }
+
+function startLevel(lv) {
+  level = lv;
+  COVERAGE_TARGET = LEVEL_TARGETS[Math.min(lv, TOTAL_LEVELS) - 1];
+  dailyDate = utcDateStr();
+  dailySeed = simpleHash(DAILY_SEED_SALT + '_' + dailyDate);
+  var rng = makeRNG((dailySeed + lv * 7919) >>> 0);
+
+  cells = [];
+  obstacleKind = [];
+  for (var x = 0; x < GRID; x++) {
+    cells.push([]); obstacleKind.push([]);
+    for (var y = 0; y < GRID; y++) { cells[x].push('empty'); obstacleKind[x].push(null); }
+  }
+
+  var want = obstacleCountFor(lv);
+  var placed = 0, tries = 0;
+  var midC = (GRID - 1) >> 1;
+  while (placed < want && tries < 800) {
+    tries++;
+    var ox = Math.floor(rng() * GRID);
+    var oy = Math.floor(rng() * GRID);
+    if (ox === midC && oy === midC) continue;   // keep center clear for opening
+    if (cells[ox][oy] !== 'empty') continue;
+    cells[ox][oy] = 'obstacle';
+    obstacleKind[ox][oy] = rng() < 0.55 ? 'tree' : 'rock';
+    placed++;
+  }
+
+  nonObstacleTiles = GRID * GRID - placed;
+  rings = [];
+  sporesLeft = MAX_SPORES;
+  coverage = 0;
+  combo = 1;
+  liveRings = 0;
+  growPulse = 0;
+  bannerText = '';
+  bannerT = 0;
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function startGame() { score = 0; startLevel(1); }
+function nextLevel() {
+  if (level >= TOTAL_LEVELS) { startGame(); return; }
+  startLevel(level + 1);
+}
+
+// ── COVERAGE ─────────────────────────────────────────────────────────────
+function recomputeCoverage() {
+  var covered = 0;
+  for (var x = 0; x < GRID; x++) for (var y = 0; y < GRID; y++) {
+    if (cells[x][y] === 'mushroom') covered++;
+  }
+  coverage = Math.round((covered / nonObstacleTiles) * 100);
+}
+
+function countLiveRings() {
+  var n = 0;
+  for (var i = 0; i < rings.length; i++) if (rings[i].alive) n++;
+  liveRings = n;
+  return n;
+}
+
+// ── SEED + GROW ──────────────────────────────────────────────────────────
+function seedAt(gx, gy) {
+  if (gs !== 'PLAYING') return false;
+  if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) return false;
+  if (cells[gx][gy] !== 'empty') return false;
+  if (sporesLeft <= 0) return false;
+  sporesLeft--;
+  cells[gx][gy] = 'mushroom';
+  rings.push({ cx: gx, cy: gy, radius: 0, alive: true });
+  if (L.cell) {
+    var p = cellCenter(gx, gy);
+    GF.spawnParticles(p.x, p.y, '#ffe27a', 10);
+  }
+  recomputeCoverage();
+  countLiveRings();
+  checkWin();
+  GF.saveRun();
+  return true;
+}
+
+// One GROW turn: every alive ring expands radius by 1 and paints its frontier.
+function growTurn() {
+  if (gs !== 'PLAYING') return;
+  if (countLiveRings() === 0) { checkLose(); return; }
+  growPulse = 1;
+  var newlyCovered = {};   // key "x,y" -> { count, x, y }
+  var bloomedTiles = [];
+
+  for (var i = 0; i < rings.length; i++) {
+    var ring = rings[i];
+    if (!ring.alive) continue;
+    ring.radius++;
+    var anyOpen = false;
+    var r = ring.radius;
+    for (var dx = -r; dx <= r; dx++) {
+      var dy = r - Math.abs(dx);
+      var pts = (dy === 0) ? [[dx, 0]] : [[dx, dy], [dx, -dy]];
+      for (var k = 0; k < pts.length; k++) {
+        var gx = ring.cx + pts[k][0];
+        var gy = ring.cy + pts[k][1];
+        if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) continue;
+        if (cells[gx][gy] === 'obstacle') continue;       // blocked — arm dies here
+        anyOpen = true;
+        var key = gx + ',' + gy;
+        if (cells[gx][gy] !== 'mushroom') {
+          if (!newlyCovered[key]) { newlyCovered[key] = { count: 0, x: gx, y: gy }; bloomedTiles.push(key); }
+          newlyCovered[key].count++;
+        }
+      }
+    }
+    if (!anyOpen || ring.radius >= RING_GROW_TURNS) ring.alive = false;
+  }
+
+  // Apply bloom + detect merges (a tile reached by >=2 distinct rings this turn)
+  var mergeThisTurn = false;
+  var turnScore = 0;
+  for (var b = 0; b < bloomedTiles.length; b++) {
+    var info = newlyCovered[bloomedTiles[b]];
+    cells[info.x][info.y] = 'mushroom';
+    var mult = info.count >= 2 ? MERGE_BONUS : 1;
+    if (info.count >= 2) mergeThisTurn = true;
+    turnScore += BLOOM_POINTS * mult;
+    if (L.cell) {
+      var p = cellCenter(info.x, info.y);
+      GF.spawnParticles(p.x, p.y, info.count >= 2 ? '#ff7adf' : '#9be38a', info.count >= 2 ? 12 : 5);
+    }
+  }
+
+  if (mergeThisTurn) {
+    combo++;
+    bannerText = GF.t('merge');
+    bannerT = 1.2;
+    GF.setShake(0.5);
+    GF.spawnFloat(GF.cx, GF.cy - 40 * GF.S, 'x' + MERGE_BONUS, '#ff7adf');
+  } else if (combo > 1) {
+    combo = 1; // reset multiplier when a turn produces no merge
+  }
+
+  score += turnScore * (mergeThisTurn ? combo : 1);
+  if (score > best) { best = score; try { localStorage.setItem('fairy_ring_best', String(best)); } catch (e) {} }
+
+  recomputeCoverage();
+  countLiveRings();
+  GF.saveRun();
+  checkWin();
+  if (gs === 'PLAYING') checkLose();
+}
+
+function checkWin() {
+  if (gs !== 'PLAYING') return;
+  if (coverage >= COVERAGE_TARGET) {
+    gs = 'WIN';
+    GF.gameEnded();
+    GF.happytime();
+    GF.saveRun();
+  }
+}
+
+function checkLose() {
+  if (gs !== 'PLAYING') return;
+  if (sporesLeft <= 0 && countLiveRings() === 0 && coverage < COVERAGE_TARGET) {
+    gs = 'GAMEOVER';
+    GF.gameEnded();
+    GF.saveRun();
+  }
+}
+
+// ── TUTORIAL ─────────────────────────────────────────────────────────────
+function openTutorial() {
+  if (gs === 'TUTORIAL_OVERLAY') return;
+  prevState = gs;
+  gs = 'TUTORIAL_OVERLAY';
+}
+function dismissTutorial() {
+  try { localStorage.setItem('fairy_ring_seen_tutorial', '1'); } catch (e) {}
+  seenTutorial = true;
+  gs = (prevState && prevState !== 'TUTORIAL_OVERLAY') ? prevState : 'MENU';
+}
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+function computeLayout() {
+  var W = GF.W, H = GF.H;
+  var hudH = GF.clamp(54 * GF.S, 42, 74);
+  var btnH = GF.clamp(56 * GF.S, 44, 72);
+  var topPad = hudH + GF.clamp(10 * GF.S, 6, 16);
+  var botPad = btnH + GF.clamp(30 * GF.S, 20, 44);
+  var availH = H - topPad - botPad;
+  var availW = W - GF.clamp(24 * GF.S, 12, 40) * 2;
+  var board = Math.min(availW, availH);
+  var cell = Math.floor(board / GRID);
+  board = cell * GRID;
+  var bx = Math.floor((W - board) / 2);
+  var by = Math.floor(topPad + (availH - board) / 2);
+  L = { hudH: hudH, btnH: btnH, board: board, cell: cell, bx: bx, by: by };
+}
+
+function cellCenter(gx, gy) {
+  return { x: L.bx + (gx + 0.5) * L.cell, y: L.by + (gy + 0.5) * L.cell };
+}
+function pickCell(px, py) {
+  if (!L.cell) return null;
+  if (px < L.bx || px > L.bx + L.board || py < L.by || py > L.by + L.board) return null;
+  var gx = Math.floor((px - L.bx) / L.cell);
+  var gy = Math.floor((py - L.by) / L.cell);
+  if (gx < 0 || gx >= GRID || gy < 0 || gy >= GRID) return null;
+  return { gx: gx, gy: gy };
+}
+function pointInRect(x, y, r) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+function helpButtonRect() {
+  var sz = GF.clamp(34 * GF.S, 26, 44);
+  var pad = GF.clamp(8 * GF.S, 6, 12);
+  return { x: GF.W - sz - pad, y: pad, w: sz, h: sz };
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+GF.canvas.addEventListener('mousedown', function(ev) { onPointerDown(ev.clientX, ev.clientY); });
+GF.canvas.addEventListener('touchstart', function(ev) {
+  ev.preventDefault();
+  if (ev.touches && ev.touches.length > 0) onPointerDown(ev.touches[0].clientX, ev.touches[0].clientY);
+}, { passive: false });
+window.addEventListener('keydown', function(ev) {
+  if (ev.code === 'Space' && gs === 'PLAYING') { growTurn(); }
+});
+
+function onPointerDown(x, y) {
+  if (gs === 'TUTORIAL_OVERLAY') { dismissTutorial(); return; }
+
+  if (gs === 'MENU' || gs === 'PLAYING') {
+    if (pointInRect(x, y, helpButtonRect())) { openTutorial(); return; }
+  }
+
+  if (gs === 'MENU' || gs === 'WIN' || gs === 'GAMEOVER') {
+    if (pointInRect(x, y, overlayBtnRect) && overlayBtnRect.fn) { overlayBtnRect.fn(); }
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+
+  // GROW button
+  if (pointInRect(x, y, growBtnRect)) { growTurn(); return; }
+
+  // Seed a tile
+  var c = pickCell(x, y);
+  if (c) seedAt(c.gx, c.gy);
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (bannerT > 0) bannerT -= dt;
+  if (growPulse > 0) growPulse = Math.max(0, growPulse - dt * 3);
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  computeLayout();
+
+  // forest background
+  var grd = ctx.createRadialGradient(GF.cx, GF.cy, 0, GF.cx, GF.cy, Math.max(GF.W, GF.H) * 0.7);
+  grd.addColorStop(0, '#15291c');
+  grd.addColorStop(1, '#0a120c');
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  overlayBtnRect = null;
+  growBtnRect = null;
+
+  if (gs === 'PLAYING' || gs === 'WIN' || gs === 'GAMEOVER' || gs === 'TUTORIAL_OVERLAY') {
+    drawBoard(ctx);
+    drawHUD(ctx);
+    if (gs === 'PLAYING') drawGrowButton(ctx);
+    if (bannerT > 0 && bannerText) drawBanner(ctx, bannerText, bannerT);
+  }
+
+  if (gs === 'MENU') {
+    drawTutorialPanel(ctx, GF.t('play'), function() {
+      try { localStorage.setItem('fairy_ring_seen_tutorial', '1'); } catch (e) {}
+      seenTutorial = true;
+      startGame();
+    }, best > 0 ? GF.t('best') + ': ' + best : null);
+  }
+  if (gs === 'WIN') {
+    var won = (level >= TOTAL_LEVELS);
+    GF.drawOverlay({
+      title: won ? GF.t('fullclear') : GF.t('win'),
+      sub: GF.t('cover') + ': ' + coverage + '% · ' + GF.t('score') + ': ' + score,
+      sub2: GF.t('daily') + ': ' + dailyDate,
+      btnText: won ? GF.t('retry') : GF.t('next'),
+      btnFn: won ? startGame : nextLevel,
+      bestText: best > 0 ? (GF.t('best') + ': ' + best) : null,
+    });
+    overlayBtnRect = captureOverlayBtn(won ? startGame : nextLevel);
+  }
+  if (gs === 'GAMEOVER') {
+    GF.drawOverlay({
+      title: GF.t('gameover'),
+      sub: GF.t('cover') + ': ' + coverage + '% / ' + COVERAGE_TARGET + '%',
+      sub2: GF.t('daily') + ': ' + dailyDate,
+      btnText: GF.t('retry'),
+      btnFn: startGame,
+      bestText: best > 0 ? (GF.t('best') + ': ' + best) : null,
+    });
+    overlayBtnRect = captureOverlayBtn(startGame);
+  }
+  if (gs === 'TUTORIAL_OVERLAY') {
+    drawTutorialPanel(ctx, GF.t('gotit'), dismissTutorial, null);
+  }
+
+  if (gs === 'MENU' || gs === 'PLAYING') drawHelpButton(ctx);
+}
+
+// drawOverlay registers its own internal button; mirror its geometry so taps land.
+function captureOverlayBtn(fn) {
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(52 * GF.S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 20 * GF.S;
+  return { x: btnX, y: btnY, w: btnW, h: btnH, fn: fn };
+}
+
+function drawBoard(ctx) {
+  var bx = L.bx, by = L.by, cell = L.cell;
+  ctx.fillStyle = 'rgba(10, 22, 14, 0.55)';
+  GF.rr(ctx, bx - 4, by - 4, L.board + 8, L.board + 8, 12);
+  ctx.fill();
+
+  for (var gx = 0; gx < GRID; gx++) {
+    for (var gy = 0; gy < GRID; gy++) {
+      var px = bx + gx * cell, py = by + gy * cell;
+      var checker = ((gx + gy) & 1) === 0;
+      ctx.fillStyle = checker ? 'rgba(40, 70, 48, 0.45)' : 'rgba(30, 56, 38, 0.45)';
+      ctx.fillRect(px + 1, py + 1, cell - 2, cell - 2);
+      ctx.strokeStyle = 'rgba(120, 180, 130, 0.10)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(px + 0.5, py + 0.5, cell - 1, cell - 1);
+
+      var st = cells[gx][gy];
+      var ccx = px + cell / 2, ccy = py + cell / 2;
+      if (st === 'obstacle') {
+        if (obstacleKind[gx][gy] === 'tree') drawTree(ctx, ccx, ccy, cell);
+        else drawRock(ctx, ccx, ccy, cell);
+      } else if (st === 'mushroom') {
+        drawMushroom(ctx, ccx, ccy, cell);
+      }
+    }
+  }
+
+  ctx.strokeStyle = 'rgba(120, 200, 140, 0.4)';
+  ctx.lineWidth = Math.max(1.5, 2 * GF.S);
+  GF.rr(ctx, bx, by, L.board, L.board, 8);
+  ctx.stroke();
+}
+
+function drawMushroom(ctx, x, y, cell) {
+  GF.drawSprite('mushroom', x, y, cell * 0.92, function(c, sx, sy, s) {
+    var r = cell * 0.32;
+    c.fillStyle = '#efe6d2';
+    c.fillRect(sx - r * 0.28, sy, r * 0.56, r * 0.85);
+    c.shadowColor = 'rgba(255, 120, 200, 0.65)';
+    c.shadowBlur = cell * 0.35;
+    var cap = c.createLinearGradient(sx, sy - r, sx, sy + r * 0.4);
+    cap.addColorStop(0, '#ff7adf');
+    cap.addColorStop(1, '#c0408f');
+    c.fillStyle = cap;
+    c.beginPath();
+    c.ellipse(sx, sy, r, r * 0.78, 0, Math.PI, 0);
+    c.fill();
+    c.shadowBlur = 0;
+    c.fillStyle = 'rgba(255,255,255,0.85)';
+    c.beginPath(); c.arc(sx - r * 0.35, sy - r * 0.18, r * 0.14, 0, Math.PI * 2); c.fill();
+    c.beginPath(); c.arc(sx + r * 0.30, sy - r * 0.10, r * 0.11, 0, Math.PI * 2); c.fill();
+  });
+}
+
+function drawTree(ctx, x, y, cell) {
+  GF.drawSprite('tree', x, y, cell * 0.9, function(c, sx, sy, s) {
+    var h = cell * 0.78;
+    c.fillStyle = '#5b3a22';
+    c.fillRect(sx - h * 0.07, sy + h * 0.12, h * 0.14, h * 0.28);
+    c.fillStyle = '#2f6b3a';
+    c.beginPath();
+    c.moveTo(sx, sy - h * 0.42);
+    c.lineTo(sx - h * 0.34, sy + h * 0.16);
+    c.lineTo(sx + h * 0.34, sy + h * 0.16);
+    c.closePath(); c.fill();
+    c.fillStyle = '#3f8a4c';
+    c.beginPath();
+    c.moveTo(sx, sy - h * 0.28);
+    c.lineTo(sx - h * 0.26, sy + h * 0.02);
+    c.lineTo(sx + h * 0.26, sy + h * 0.02);
+    c.closePath(); c.fill();
+  });
+}
+
+function drawRock(ctx, x, y, cell) {
+  GF.drawSprite('rock', x, y, cell * 0.86, function(c, sx, sy, s) {
+    var r = cell * 0.32;
+    c.fillStyle = '#7a8088';
+    c.beginPath();
+    c.moveTo(sx - r, sy + r * 0.5);
+    c.lineTo(sx - r * 0.6, sy - r * 0.5);
+    c.lineTo(sx + r * 0.4, sy - r * 0.7);
+    c.lineTo(sx + r, sy + r * 0.3);
+    c.lineTo(sx + r * 0.5, sy + r * 0.7);
+    c.closePath(); c.fill();
+    c.fillStyle = 'rgba(255,255,255,0.18)';
+    c.beginPath();
+    c.moveTo(sx - r * 0.6, sy - r * 0.5);
+    c.lineTo(sx + r * 0.4, sy - r * 0.7);
+    c.lineTo(sx, sy);
+    c.closePath(); c.fill();
+  });
+}
+
+function drawHUD(ctx) {
+  var fs = GF.clamp(14 * GF.S, 11, 19);
+  var pad = GF.clamp(10 * GF.S, 6, 16);
+  ctx.textBaseline = 'top';
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#cfeacb';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillText(GF.t('level') + ' ' + level + '/' + TOTAL_LEVELS, pad, pad);
+  ctx.fillStyle = coverage >= COVERAGE_TARGET ? '#9be38a' : '#bcd';
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(GF.t('cover') + ': ' + coverage + '% / ' + COVERAGE_TARGET + '%', pad, pad + fs * 1.35);
+
+  if (combo > 1) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff7adf';
+    ctx.font = 'bold ' + (fs * 1.1) + 'px sans-serif';
+    ctx.fillText(GF.t('combo') + ' x' + combo, GF.cx, pad);
+  }
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = sporesLeft <= 1 ? '#ff6a6a' : '#ffe27a';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  var helpSz = GF.clamp(34 * GF.S, 26, 44);
+  ctx.fillText(GF.t('spores') + ': ' + sporesLeft + '/' + MAX_SPORES, GF.W - pad - helpSz - 6, pad + fs * 1.35);
+}
+
+function drawGrowButton(ctx) {
+  var canGrow = countLiveRings() > 0;
+  var bw = GF.clamp(220 * GF.S, 150, 300);
+  var bh = L.btnH;
+  var bx = GF.cx - bw / 2;
+  var by = GF.H - bh - GF.clamp(14 * GF.S, 8, 24);
+  growBtnRect = { x: bx, y: by, w: bw, h: bh };
+
+  var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
+  if (canGrow) { grad.addColorStop(0, '#3fae5a'); grad.addColorStop(1, '#268a44'); }
+  else { grad.addColorStop(0, '#3a4a40'); grad.addColorStop(1, '#2a362f'); }
+  ctx.save();
+  if (growPulse > 0) { ctx.shadowColor = 'rgba(255, 226, 122, ' + growPulse + ')'; ctx.shadowBlur = 24 * GF.S; }
+  GF.rr(ctx, bx, by, bw, bh, bh / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+
+  ctx.fillStyle = canGrow ? '#fff' : '#8aa090';
+  var fs = GF.clamp(20 * GF.S, 15, 26);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('grow'), GF.cx, by + bh / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  var hintFs = GF.clamp(13 * GF.S, 10, 16);
+  ctx.font = hintFs + 'px sans-serif';
+  ctx.fillStyle = 'rgba(207, 234, 203, 0.7)';
+  ctx.textAlign = 'center';
+  var hint = canGrow ? GF.t('growHint') : (sporesLeft > 0 ? GF.t('placeHint') : GF.t('settled'));
+  ctx.fillText(hint, GF.cx, by - hintFs - 4 * GF.S);
+}
+
+function drawBanner(ctx, txt, t) {
+  var alpha = Math.min(1, t * 1.6);
+  var fs = GF.clamp(30 * GF.S, 18, 42);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var w = ctx.measureText(txt).width + fs * 1.4;
+  var h = fs * 1.7;
+  var x = GF.cx - w / 2, y = GF.H * 0.16;
+  ctx.fillStyle = 'rgba(20, 8, 24,' + (alpha * 0.85) + ')';
+  GF.rr(ctx, x, y, w, h, h / 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255, 122, 223,' + alpha + ')';
+  ctx.fillText(txt, GF.cx, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawHelpButton(ctx) {
+  var b = helpButtonRect();
+  ctx.fillStyle = 'rgba(14, 26, 18, 0.85)';
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.h / 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(155, 227, 138, 0.7)';
+  ctx.lineWidth = Math.max(1.2, 1.6 * GF.S);
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.h / 2); ctx.stroke();
+  ctx.fillStyle = '#9be38a';
+  ctx.font = 'bold ' + Math.max(13, b.w * 0.55) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', b.x + b.w / 2, b.y + b.h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawTutorialPanel(ctx, ctaText, ctaFn, footerText) {
+  var lines = [
+    GF.t('title'), '',
+    GF.t('tut_goal'), GF.t('tut_controls'),
+    GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip'),
+  ];
+  ctx.fillStyle = 'rgba(8, 14, 10, 0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(26 * GF.S, 18, 38);
+  var subFs   = GF.clamp(13 * GF.S, 11, 17);
+  var lineGap = 7 * GF.S;
+  var pad     = 20 * GF.S;
+  var btnH    = GF.clamp(46 * GF.S, 36, 56);
+  var btnW    = GF.clamp(200 * GF.S, 140, 280);
+  var footH   = footerText ? (GF.clamp(12 * GF.S, 10, 15) + 8 * GF.S) : 0;
+
+  var pw = Math.min(GF.W - 24, GF.clamp(560 * GF.S, 320, 600));
+  ctx.font = subFs + 'px sans-serif';
+  var maxW = pw - pad * 2;
+  var bodyRows = 0;
+  for (var i = 1; i < lines.length; i++) {
+    if (!lines[i]) { bodyRows += 1; continue; }
+    var words = lines[i].split(' '); var cur = ''; var rows = 1;
+    for (var w = 0; w < words.length; w++) {
+      var test = cur ? cur + ' ' + words[w] : words[w];
+      if (ctx.measureText(test).width > maxW && cur) { rows += 1; cur = words[w]; }
+      else cur = test;
+    }
+    bodyRows += rows;
+  }
+  var ph = pad + titleFs + lineGap + bodyRows * (subFs + lineGap) + pad + btnH + pad + footH;
+  var px = (GF.W - pw) / 2;
+  var py = Math.max(8 * GF.S, (GF.H - ph) / 2);
+
+  ctx.fillStyle = 'rgba(16, 26, 18, 0.97)';
+  GF.rr(ctx, px, py, pw, ph, 14); ctx.fill();
+  ctx.strokeStyle = 'rgba(155, 227, 138, 0.55)';
+  ctx.lineWidth = Math.max(1.5, 1.8 * GF.S);
+  GF.rr(ctx, px, py, pw, ph, 14); ctx.stroke();
+
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.shadowColor = 'rgba(255, 122, 223, 0.5)'; ctx.shadowBlur = 16;
+  ctx.fillText(lines[0], GF.W / 2, py + pad);
+  ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#cfeacb';
+  ctx.textAlign = 'left';
+  var ty = py + pad + titleFs + lineGap;
+  var tx = px + pad;
+  for (var i2 = 1; i2 < lines.length; i2++) {
+    if (!lines[i2]) { ty += subFs + lineGap; continue; }
+    var words2 = lines[i2].split(' '); var cur2 = '';
+    for (var w2 = 0; w2 < words2.length; w2++) {
+      var test2 = cur2 ? cur2 + ' ' + words2[w2] : words2[w2];
+      if (ctx.measureText(test2).width > maxW && cur2) { ctx.fillText(cur2, tx, ty); ty += subFs + lineGap; cur2 = words2[w2]; }
+      else cur2 = test2;
+    }
+    if (cur2) { ctx.fillText(cur2, tx, ty); ty += subFs + lineGap; }
+  }
+
+  var bx = (GF.W - btnW) / 2;
+  var by = py + ph - btnH - pad - footH;
+  var grad = ctx.createLinearGradient(bx, by, bx, by + btnH);
+  grad.addColorStop(0, '#3fae5a'); grad.addColorStop(1, '#268a44');
+  ctx.fillStyle = grad;
+  GF.rr(ctx, bx, by, btnW, btnH, btnH / 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 20) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(ctaText, GF.W / 2, by + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+
+  if (footerText) {
+    var fFs = GF.clamp(12 * GF.S, 10, 15);
+    ctx.font = fFs + 'px sans-serif';
+    ctx.fillStyle = '#7a9080';
+    ctx.textAlign = 'center';
+    ctx.fillText(footerText, GF.W / 2, by + btnH + 14 * GF.S);
+  }
+
+  overlayBtnRect = { x: bx, y: by, w: btnW, h: btnH, fn: ctaFn };
+}
+
+// ── SCREENSHOT / TEST HOOKS ──────────────────────────────────────────────
+// Land directly on a populated mid-game state for screenshots.
+window._setupForScreenshot = function(lv) {
+  // Always run on the hardest level (target 60%) so 5 spread rings stay
+  // mid-bloom (PLAYING) instead of tripping WIN — a populated, in-action frame.
+  startLevel(TOTAL_LEVELS);
+  // Spread spots whose rings collide & merge but do not fill the board.
+  var seedSpots = [[2,2],[6,2],[4,5],[2,6],[6,6]];
+  for (var i = 0; i < seedSpots.length; i++) {
+    var sx = seedSpots[i][0], sy = seedSpots[i][1];
+    if (cells[sx] && cells[sx][sy] === 'empty' && sporesLeft > 0) seedAt(sx, sy);
+  }
+  // grow a single turn — rings bloom + overlap (merge VFX) yet coverage stays
+  // well under the level-4 target so the state remains PLAYING for the frame.
+  if (gs === 'PLAYING') growTurn();
+  // surface a merge banner + combo for the shot regardless of RNG.
+  bannerText = GF.t('merge'); bannerT = 1.2; combo = Math.max(combo, 2);
+};
+// _jumpLevel: lands on a populated PLAYING state (used by take_screenshots +
+// the runtime gate). Ignores the requested level number on purpose so the
+// frame is always dense and never auto-wins.
+window._jumpLevel = function(_n) { window._setupForScreenshot(TOTAL_LEVELS); };
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'fairy_ring',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('fairy_ring_best') || '0') || 0; } catch (e) {}
+    try { seenTutorial = localStorage.getItem('fairy_ring_seen_tutorial') === '1'; } catch (e) {}
+    GF.persist('fairy_ring_run_v1',
+      function() {
+        return {
+          gs: gs, level: level, sporesLeft: sporesLeft, coverage: coverage,
+          score: score, combo: combo, cells: cells, obstacleKind: obstacleKind,
+          rings: rings, nonObstacleTiles: nonObstacleTiles, COVERAGE_TARGET: COVERAGE_TARGET,
+        };
+      },
+      function(s) {
+        if (!s || !s.cells) return;
+        level = s.level || 1;
+        sporesLeft = (typeof s.sporesLeft === 'number') ? s.sporesLeft : MAX_SPORES;
+        coverage = s.coverage || 0;
+        score = s.score || 0;
+        combo = s.combo || 1;
+        cells = s.cells;
+        obstacleKind = s.obstacleKind;
+        rings = s.rings || [];
+        nonObstacleTiles = s.nonObstacleTiles || (GRID * GRID);
+        COVERAGE_TARGET = s.COVERAGE_TARGET || LEVEL_TARGETS[Math.min(level, TOTAL_LEVELS) - 1];
+        countLiveRings();
+        gs = (s.gs === 'PLAYING') ? 'PLAYING' : (s.gs === 'WIN' || s.gs === 'GAMEOVER' ? s.gs : 'MENU');
+      }
+    );
+    if (gs === 'TUTORIAL_OVERLAY') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE (post-build-tester gate cross-checks DESIGN.md) ────────
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    level: level,
+    coverage: coverage,
+    COVERAGE_TARGET: COVERAGE_TARGET,
+    sporesLeft: sporesLeft,
+    MAX_SPORES: MAX_SPORES,
+    liveRings: liveRings,
+    combo: combo,
+    score: score,
+    best: best,
+    GRID: GRID,
+    TOTAL_LEVELS: TOTAL_LEVELS,
+    RING_GROW_TURNS: RING_GROW_TURNS,
+    MERGE_BONUS: MERGE_BONUS,
+    OBSTACLE_BASE: OBSTACLE_BASE,
+    COMBO_DECAY: COMBO_DECAY,
+    BLOOM_POINTS: BLOOM_POINTS,
+    DAILY_SEED_SALT: DAILY_SEED_SALT,
+    dailyDate: dailyDate,
+    dailySeed: dailySeed,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

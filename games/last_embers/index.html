@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Last Embers</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #060912; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// LOCALISED STRINGS
+var STRINGS = {
+  en: {
+    title: 'Last Embers',
+    play: 'PLAY', retry: 'RETRY',
+    gameover: 'THE FIRE DIED',
+    won: 'YOU OUTLASTED WINTER',
+    night: 'Night', cold: 'Cold tonight',
+    warmth: 'WARMTH', hunger: 'HUNGER',
+    burn: 'BURN LOG', eat: 'EAT FOOD', wrap: 'WRAP BLANKET', endnight: 'END NIGHT',
+    logs: 'Logs', food: 'Food', blankets: 'Blankets',
+    help: '?',
+    nights_survived: 'Nights survived',
+    froze: 'Your fire went out — you froze.',
+    starved: 'The food ran out — you starved.',
+    tut_goal:     'Goal: outlast 12 nights of deepening winter before your fire or your belly runs out.',
+    tut_controls: 'Controls: tap BURN LOG, EAT FOOD or WRAP BLANKET to spend from your finite hoard, then tap END NIGHT.',
+    tut_win:      'Win: survive all 12 nights with Warmth and Hunger both above zero.',
+    tut_lose:     'Lose: Warmth or Hunger drops to zero after a night resolves.',
+    tut_tip:      'Tip: the cold gets worse every night. Save blankets for the brutal late nights and ration logs you will need later.',
+  },
+  ru: {
+    title: 'Последние Угли',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    gameover: 'КОСТЁР ПОГАС',
+    won: 'ТЫ ПЕРЕЖИЛ ЗИМУ',
+    night: 'Ночь', cold: 'Холод этой ночью',
+    warmth: 'ТЕПЛО', hunger: 'СЫТОСТЬ',
+    burn: 'ПОЛЕНО', eat: 'ПОЕСТЬ', wrap: 'ОДЕЯЛО', endnight: 'КОНЕЦ НОЧИ',
+    logs: 'Поленья', food: 'Еда', blankets: 'Одеяла',
+    help: '?',
+    nights_survived: 'Ночей пережито',
+    froze: 'Огонь потух — ты замёрз.',
+    starved: 'Еда кончилась — ты умер с голоду.',
+    tut_goal:     'Цель: продержись 12 ночей всё более лютой зимы, пока не погас костёр и не кончилась еда.',
+    tut_controls: 'Управление: жми ПОЛЕНО, ПОЕСТЬ или ОДЕЯЛО, чтобы тратить из конечных запасов, затем жми КОНЕЦ НОЧИ.',
+    tut_win:      'Победа: переживи все 12 ночей, держа Тепло и Сытость выше нуля.',
+    tut_lose:     'Поражение: Тепло или Сытость падает до нуля после ночи.',
+    tut_tip:      'Совет: холод крепчает каждую ночь. Береги одеяла на поздние лютые ночи и экономь поленья, которые понадобятся позже.',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// TUNABLES (match DESIGN.md)
+var WIN_NIGHTS     = 12;
+var START_WARMTH   = 100;
+var START_HUNGER   = 100;
+var START_LOGS     = 14;
+var START_FOOD     = 12;
+var START_BLANKETS = 4;
+var WARMTH_DECAY   = 6;
+var HUNGER_DECAY   = 12;
+var COLD_BASE      = 10;
+var COLD_RAMP      = 4;
+var LOG_WARMTH     = 22;
+var FOOD_HUNGER    = 26;
+var BLANKET_REDUCE = 14;
+
+// PALETTE
+var COL_BG_TOP   = '#070b16';
+var COL_BG_BOT   = '#0d1426';
+var COL_WARM     = '#ff7a2e';
+var COL_WARM_DK  = '#a83b0e';
+var COL_HUNGER   = '#5fd36b';
+var COL_HUNGER_DK= '#1f7a33';
+var COL_EMBER_A  = '#ffe27a';
+var COL_EMBER_B  = '#ff6a1f';
+var COL_EMBER_C  = '#7a1f08';
+var COL_LOG      = '#8a5a32';
+var COL_LOG_DK   = '#5a3a1f';
+var COL_BLANKET  = '#7c8bd0';
+var COL_HUD      = '#e9eefb';
+var COL_HUD_DIM  = '#7e8aa8';
+var COL_DANGER   = '#ff5247';
+var COL_GOOD     = '#5fd36b';
+var COL_SNOW     = '#cdd9f5';
+
+// GAME STATE
+var gs = 'MENU';
+var warmth = START_WARMTH, hunger = START_HUNGER;
+var logs = START_LOGS, food = START_FOOD, blankets = START_BLANKETS;
+var night = 1;
+var coldCost = COLD_BASE;          // extra warmth drain this night (ramps)
+var blanketReduce = 0;             // accumulated this-night cold reduction from blankets
+var loseReason = '';               // 'warmth' | 'hunger'
+var bestNights = 0;
+var flickerT = 0;
+var dangerFlash = 0;
+var snow = [];
+
+// SNOW
+function initSnow() {
+  snow = [];
+  var n = 70;
+  for (var i = 0; i < n; i++) {
+    snow.push({
+      x: Math.random(), y: Math.random(),
+      r: 0.6 + Math.random() * 1.8,
+      sp: 0.06 + Math.random() * 0.14,
+      sw: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+// coldCost for a given night number
+function coldForNight(n) { return COLD_BASE + (n - 1) * COLD_RAMP; }
+
+// effective warmth drain applied at END NIGHT
+function tonightWarmthDrain() {
+  return Math.max(0, WARMTH_DECAY + coldCost - blanketReduce);
+}
+
+// LIFECYCLE
+function startGame() {
+  warmth = START_WARMTH; hunger = START_HUNGER;
+  logs = START_LOGS; food = START_FOOD; blankets = START_BLANKETS;
+  night = 1;
+  coldCost = coldForNight(1);
+  blanketReduce = 0;
+  loseReason = '';
+  dangerFlash = 0;
+  initSnow();
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function endRunWin() {
+  bestNights = WIN_NIGHTS;
+  try { localStorage.setItem('last_embers_best', bestNights); } catch (e) {}
+  gs = 'WIN';
+  GF.spawnParticles(GF.cx, GF.cy, COL_GOOD, 40);
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+function endRunLose(reason) {
+  loseReason = reason;
+  if (night - 1 > bestNights) {
+    bestNights = night - 1;
+    try { localStorage.setItem('last_embers_best', bestNights); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.setShake(0.9);
+  GF.spawnParticles(GF.cx, GF.cy, COL_EMBER_C, 26);
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// SPEND ACTIONS
+function burnLog() {
+  if (gs !== 'PLAYING' || logs <= 0) return;
+  logs--;
+  warmth = Math.min(START_WARMTH, warmth + LOG_WARMTH);
+  GF.spawnParticles(GF.cx, GF.cy - 10 * GF.S, COL_EMBER_B, 16);
+  GF.spawnFloat(GF.cx, GF.cy - 60 * GF.S, '+' + LOG_WARMTH, COL_WARM);
+  GF.saveRun();
+}
+function eatFood() {
+  if (gs !== 'PLAYING' || food <= 0) return;
+  food--;
+  hunger = Math.min(START_HUNGER, hunger + FOOD_HUNGER);
+  GF.spawnFloat(GF.W - 70 * GF.S, GF.cy - 40 * GF.S, '+' + FOOD_HUNGER, COL_HUNGER);
+  GF.saveRun();
+}
+function wrapBlanket() {
+  if (gs !== 'PLAYING' || blankets <= 0) return;
+  blankets--;
+  blanketReduce += BLANKET_REDUCE;
+  GF.spawnFloat(70 * GF.S, GF.cy - 40 * GF.S, '-' + BLANKET_REDUCE + '❄', COL_BLANKET);
+  GF.saveRun();
+}
+
+function endNight() {
+  if (gs !== 'PLAYING') return;
+  // Apply this night's decay.
+  var wDrain = tonightWarmthDrain();
+  warmth -= wDrain;
+  hunger -= HUNGER_DECAY;
+  GF.setShake(0.3);
+  dangerFlash = 0;
+  // Resolve lose conditions.
+  if (warmth <= 0) { warmth = 0; endRunLose('warmth'); return; }
+  if (hunger <= 0) { hunger = 0; endRunLose('hunger'); return; }
+  // Advance the night.
+  night++;
+  if (night > WIN_NIGHTS) { endRunWin(); return; }
+  coldCost = coldForNight(night);
+  blanketReduce = 0;             // blankets only protect the night they were used
+  if (warmth < 30 || hunger < 30) dangerFlash = 0.8;
+  GF.saveRun();
+}
+
+function reopenTutorial() { GF.tutorial.reopen(); }
+
+// ── BUTTON LAYOUT ─────────────────────────────────────────────────────────
+// Computed each frame so resize / fullscreen exit re-flows correctly.
+var _spendBtns = [];   // {id,x,y,w,h,enabled,count}
+var _endBtn = null;
+var _playBtn = null;
+var _retryBtn = null;
+var _helpBtn = null;
+
+function layoutButtons() {
+  _spendBtns = [];
+  var S = GF.S;
+  var endH = GF.clamp(58 * S, 46, 72);
+  var spendH = GF.clamp(54 * S, 44, 66);
+  var pad = 10 * S;
+  var bottom = GF.H - 14 * S;
+  var endY = bottom - endH;
+  var endW = Math.min(GF.W - 32 * S, GF.clamp(300 * S, 200, 380));
+  _endBtn = { x: GF.cx - endW / 2, y: endY, w: endW, h: endH };
+  // three spend buttons in a row above END NIGHT
+  var rowY = endY - spendH - 12 * S;
+  var totalW = Math.min(GF.W - 24 * S, 540 * S);
+  var gap = pad;
+  var bw = (totalW - gap * 2) / 3;
+  var startX = GF.cx - totalW / 2;
+  var defs = [
+    { id: 'burn', count: logs },
+    { id: 'eat', count: food },
+    { id: 'wrap', count: blankets },
+  ];
+  for (var i = 0; i < defs.length; i++) {
+    _spendBtns.push({
+      id: defs[i].id, count: defs[i].count,
+      x: startX + i * (bw + gap), y: rowY, w: bw, h: spendH,
+      enabled: defs[i].count > 0,
+    });
+  }
+}
+
+// geometry: vertical span available for the ember scene (between top HUD and buttons)
+function sceneTop() { return 96 * GF.S; }
+function sceneBottom() { return (_spendBtns.length ? _spendBtns[0].y : GF.H * 0.6) - 14 * GF.S; }
+
+// SCREENSHOT HOOKS
+window._jumpLevel = function(n) {
+  startGame();
+  // Advance several nights with a sensible rationing pattern so the shot
+  // lands mid-game with meters partly depleted and hoard dwindled.
+  var nights = Math.max(1, Math.min(n || 5, WIN_NIGHTS - 1));
+  for (var k = 0; k < nights && gs === 'PLAYING'; k++) {
+    if (warmth < 70 && logs > 0) burnLog();
+    if (hunger < 70 && food > 0) eatFood();
+    if (k >= 4 && blankets > 0 && warmth < 60) wrapBlanket();
+    endNight();
+  }
+  GF.tutorial.active = false;
+};
+window._setupForScreenshot = function(level) {
+  try { localStorage.setItem('last_embers_seen_tutorial', '1'); } catch (e) {}
+  window._jumpLevel(level || 5);
+};
+
+// UPDATE
+function update(dt) {
+  GF.tutorial.update(dt);
+  flickerT += dt;
+  if (dangerFlash > 0) dangerFlash = Math.max(0, dangerFlash - dt * 1.2);
+  // drift snow regardless of state for ambience
+  for (var i = 0; i < snow.length; i++) {
+    var f = snow[i];
+    f.y += f.sp * dt * (0.4 + coldCost / 30);
+    f.sw += dt * 1.5;
+    if (f.y > 1.05) { f.y = -0.05; f.x = Math.random(); }
+  }
+  if (gs !== 'PLAYING') return;
+  if (GF.tutorial.active) return;
+}
+
+// DRAW
+function draw(ctx) {
+  var bg = ctx.createLinearGradient(0, 0, 0, GF.H);
+  bg.addColorStop(0, COL_BG_TOP);
+  bg.addColorStop(1, COL_BG_BOT);
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  drawSnow(ctx);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WIN') {
+    layoutButtons();
+    drawScene(ctx);
+    drawHUD(ctx);
+    drawMeters(ctx);
+    if (gs === 'PLAYING') {
+      drawSpendButtons(ctx);
+      drawEndButton(ctx);
+      drawHelpButton(ctx);
+    }
+  }
+
+  if (dangerFlash > 0 && gs === 'PLAYING') {
+    ctx.fillStyle = 'rgba(255,40,30,' + (dangerFlash * 0.25) + ')';
+    ctx.fillRect(0, 0, GF.W, GF.H);
+  }
+
+  if (gs === 'MENU') drawMenu(ctx);
+  else if (gs === 'GAMEOVER') drawEndOverlay(ctx, GF.t('gameover'),
+      loseReason === 'hunger' ? GF.t('starved') : GF.t('froze'), COL_DANGER);
+  else if (gs === 'WIN') drawEndOverlay(ctx, GF.t('won'),
+      GF.t('nights_survived') + ': ' + WIN_NIGHTS, COL_GOOD);
+
+  GF.tutorial.draw(ctx);
+}
+
+function drawSnow(ctx) {
+  ctx.save();
+  ctx.fillStyle = COL_SNOW;
+  for (var i = 0; i < snow.length; i++) {
+    var f = snow[i];
+    var px = (f.x * GF.W) + Math.sin(f.sw) * 6 * GF.S;
+    var py = f.y * GF.H;
+    ctx.globalAlpha = 0.25 + 0.45 * (f.r / 2.4);
+    ctx.beginPath();
+    ctx.arc(px, py, f.r * GF.S, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawScene(ctx) {
+  var top = sceneTop(), bot = sceneBottom();
+  var cy = (top + bot) / 2;
+  var cx = GF.cx;
+  var warmFrac = GF.clamp(warmth / START_WARMTH, 0, 1);
+  var maxGlow = Math.min((bot - top) * 0.7, GF.W * 0.5);
+  var glowR = maxGlow * (0.28 + 0.72 * warmFrac);
+  var flick = 1 + Math.sin(flickerT * 9) * 0.04 + Math.sin(flickerT * 3.3) * 0.03;
+  glowR *= flick;
+
+  // ambient warm glow
+  var g = ctx.createRadialGradient(cx, cy, glowR * 0.1, cx, cy, glowR);
+  var a = 0.10 + 0.35 * warmFrac;
+  g.addColorStop(0, 'rgba(255,150,60,' + a + ')');
+  g.addColorStop(0.5, 'rgba(200,90,30,' + (a * 0.4) + ')');
+  g.addColorStop(1, 'rgba(120,40,10,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(cx, cy, glowR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // log pile under the ember
+  drawLogPile(ctx, cx, cy + glowR * 0.32 + 8 * GF.S);
+
+  // ember core — shrinks + reddens as warmth falls
+  var emR = (10 + 30 * warmFrac) * GF.S * flick;
+  var eg = ctx.createRadialGradient(cx, cy, 1, cx, cy, emR);
+  if (warmFrac > 0.55) {
+    eg.addColorStop(0, COL_EMBER_A);
+    eg.addColorStop(0.6, COL_EMBER_B);
+    eg.addColorStop(1, COL_EMBER_C);
+  } else if (warmFrac > 0.25) {
+    eg.addColorStop(0, COL_EMBER_B);
+    eg.addColorStop(0.7, COL_EMBER_C);
+    eg.addColorStop(1, 'rgba(60,15,5,0)');
+  } else {
+    eg.addColorStop(0, COL_EMBER_C);
+    eg.addColorStop(0.7, '#3a0f06');
+    eg.addColorStop(1, 'rgba(30,8,4,0)');
+  }
+  ctx.fillStyle = eg;
+  ctx.beginPath();
+  ctx.arc(cx, cy, emR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // rising spark dots when reasonably warm
+  if (warmFrac > 0.2) {
+    ctx.fillStyle = COL_EMBER_A;
+    for (var s = 0; s < 4; s++) {
+      var t = (flickerT * (0.7 + s * 0.2)) % 1;
+      var sx = cx + Math.sin(flickerT * 2 + s) * emR * 0.7;
+      var sy = cy - t * emR * 2.4;
+      ctx.globalAlpha = (1 - t) * warmFrac;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 2 * GF.S, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawLogPile(ctx, cx, y) {
+  var S = GF.S;
+  var lw = 46 * S, lh = 13 * S;
+  var stack = Math.min(3, Math.ceil(logs / 5));
+  for (var i = 0; i < Math.max(1, stack); i++) {
+    var ly = y - i * (lh * 0.7);
+    var off = (i % 2) * 10 * S - 5 * S;
+    ctx.fillStyle = i % 2 ? COL_LOG : COL_LOG_DK;
+    GF.rr(ctx, cx - lw / 2 + off, ly, lw, lh, 4 * S);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,180,90,0.25)';
+    ctx.beginPath();
+    ctx.arc(cx - lw / 2 + off + 6 * S, ly + lh / 2, lh * 0.32, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.arc(cx + lw / 2 + off - 6 * S, ly + lh / 2, lh * 0.32, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawHUD(ctx) {
+  var S = GF.S;
+  var fs = GF.clamp(15 * S, 11, 20);
+  var fsBig = GF.clamp(24 * S, 17, 32);
+  ctx.fillStyle = 'rgba(6,9,18,0.7)';
+  ctx.fillRect(0, 0, GF.W, 88 * S);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(GF.t('night'), GF.cx, 10 * S);
+  ctx.fillStyle = COL_HUD;
+  ctx.font = 'bold ' + fsBig + 'px sans-serif';
+  ctx.fillText(night + ' / ' + WIN_NIGHTS, GF.cx, 28 * S);
+  ctx.fillStyle = '#9fc6ff';
+  ctx.font = GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+  var drain = tonightWarmthDrain();
+  ctx.fillText('❄ ' + GF.t('cold') + ': -' + drain, GF.cx, 60 * S);
+}
+
+function drawMeters(ctx) {
+  var S = GF.S;
+  var barW = GF.clamp(20 * S, 14, 28);
+  var top = 96 * S;
+  var bot = sceneBottom();
+  var barH = Math.max(60 * S, bot - top - 8 * S);
+  var labelFs = GF.clamp(12 * S, 9, 15);
+  drawMeter(ctx, 14 * S, top, barW, barH, warmth / START_WARMTH, COL_WARM, COL_WARM_DK,
+            GF.t('warmth'), Math.max(0, Math.round(warmth)), labelFs, true);
+  drawMeter(ctx, GF.W - 14 * S - barW, top, barW, barH, hunger / START_HUNGER, COL_HUNGER, COL_HUNGER_DK,
+            GF.t('hunger'), Math.max(0, Math.round(hunger)), labelFs, false);
+}
+
+function drawMeter(ctx, x, y, w, h, frac, col, colDk, label, val, fs, leftSide) {
+  var S = GF.S;
+  frac = GF.clamp(frac, 0, 1);
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  GF.rr(ctx, x, y, w, h, w / 2);
+  ctx.fill();
+  var fh = h * frac;
+  var fy = y + h - fh;
+  var grad = ctx.createLinearGradient(x, fy, x, y + h);
+  grad.addColorStop(0, col);
+  grad.addColorStop(1, colDk);
+  ctx.fillStyle = grad;
+  GF.rr(ctx, x, fy, w, Math.max(w, fh), w / 2);
+  ctx.fill();
+  if (frac < 0.3) {
+    ctx.strokeStyle = COL_DANGER;
+    ctx.globalAlpha = 0.5 + 0.5 * Math.sin(flickerT * 6);
+    ctx.lineWidth = 2 * S;
+    GF.rr(ctx, x, y, w, h, w / 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = COL_HUD;
+  ctx.font = 'bold ' + GF.clamp(14 * S, 10, 18) + 'px sans-serif';
+  ctx.textAlign = leftSide ? 'left' : 'right';
+  ctx.textBaseline = 'top';
+  var tx = leftSide ? x + w + 6 * S : x - 6 * S;
+  ctx.fillText('' + val, tx, y - 2 * S);
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillText(label, tx, y + 16 * S);
+}
+
+function drawSpendButtons(ctx) {
+  var S = GF.S;
+  for (var i = 0; i < _spendBtns.length; i++) {
+    var b = _spendBtns[i];
+    var col, label;
+    if (b.id === 'burn') { col = COL_WARM; label = GF.t('burn'); }
+    else if (b.id === 'eat') { col = COL_HUNGER; label = GF.t('eat'); }
+    else { col = COL_BLANKET; label = GF.t('wrap'); }
+    var grad = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+    if (b.enabled) {
+      grad.addColorStop(0, col);
+      grad.addColorStop(1, shade(col, -0.35));
+    } else {
+      grad.addColorStop(0, '#2a3142');
+      grad.addColorStop(1, '#1b2030');
+    }
+    GF.rr(ctx, b.x, b.y, b.w, b.h, 12 * S);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.fillStyle = b.enabled ? '#11161f' : '#566';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    var lfs = GF.clamp(13 * S, 9, 16);
+    ctx.font = 'bold ' + lfs + 'px sans-serif';
+    ctx.fillText(label, b.x + b.w / 2, b.y + b.h * 0.38);
+    ctx.fillStyle = b.enabled ? 'rgba(20,25,35,0.9)' : '#445';
+    ctx.font = GF.clamp(12 * S, 8, 15) + 'px sans-serif';
+    ctx.fillText('× ' + b.count, b.x + b.w / 2, b.y + b.h * 0.72);
+  }
+}
+
+function drawEndButton(ctx) {
+  var S = GF.S, b = _endBtn;
+  var grad = ctx.createLinearGradient(b.x, b.y, b.x, b.y + b.h);
+  grad.addColorStop(0, '#e9eefb');
+  grad.addColorStop(1, '#9fb0d4');
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.h / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#0a1020';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(18 * S, 13, 23) + 'px sans-serif';
+  ctx.fillText(GF.t('endnight') + '  ❄', b.x + b.w / 2, b.y + b.h / 2);
+}
+
+function drawHelpButton(ctx) {
+  var S = GF.S;
+  var bw = 34 * S, bh = 34 * S;
+  var bx = GF.W - bw - 8 * S, by = 90 * S;
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  GF.rr(ctx, bx, by, bw, bh, 8 * S);
+  ctx.fill();
+  ctx.strokeStyle = COL_HUD_DIM;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = COL_HUD;
+  ctx.font = 'bold ' + GF.clamp(19 * S, 13, 25) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('?', bx + bw / 2, by + bh / 2);
+  _helpBtn = { x: bx, y: by, w: bw, h: bh };
+}
+
+function shade(hex, amt) {
+  var h = hex.replace('#', '');
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  var r = parseInt(h.substr(0,2),16), g = parseInt(h.substr(2,2),16), b = parseInt(h.substr(4,2),16);
+  r = Math.round(GF.clamp(r + r * amt, 0, 255));
+  g = Math.round(GF.clamp(g + g * amt, 0, 255));
+  b = Math.round(GF.clamp(b + b * amt, 0, 255));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+function drawMenu(ctx) {
+  var S = GF.S;
+  ctx.fillStyle = 'rgba(6,9,18,0.93)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(40 * S, 25, 58);
+  var fs = GF.clamp(14 * S, 11, 18);
+  ctx.fillStyle = COL_EMBER_A;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(255,120,40,0.7)';
+  ctx.shadowBlur = 28 * S;
+  var titleY = Math.max(58 * S, GF.cy - 205 * S);
+  ctx.fillText(GF.t('title'), GF.cx, titleY);
+  ctx.shadowBlur = 0;
+
+  var lines = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillStyle = '#cdd9f5';
+  var lineY = titleY + 34 * S;
+  var maxW = Math.min(GF.W - 40 * S, 560 * S);
+  for (var i = 0; i < lines.length; i++) {
+    var raw = GF.t(lines[i]);
+    var words = raw.split(' ');
+    var cur = '';
+    var rendered = [];
+    for (var w = 0; w < words.length; w++) {
+      var probe = cur ? cur + ' ' + words[w] : words[w];
+      if (ctx.measureText(probe).width > maxW && cur) { rendered.push(cur); cur = words[w]; }
+      else cur = probe;
+    }
+    if (cur) rendered.push(cur);
+    for (var ln = 0; ln < rendered.length; ln++) {
+      ctx.fillText(rendered[ln], GF.cx, lineY);
+      lineY += (fs + 4);
+    }
+    lineY += 5;
+  }
+  var btnW = GF.clamp(240 * S, 160, 320), btnH = GF.clamp(54 * S, 40, 66);
+  var btnX = GF.cx - btnW / 2;
+  var btnY = Math.min(lineY + 12 * S, GF.H - btnH - 26 * S);
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, COL_WARM);
+  grad.addColorStop(1, COL_WARM_DK);
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#1a0f08';
+  ctx.font = 'bold ' + GF.clamp(18 * S, 14, 22) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+  _playBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawEndOverlay(ctx, title, subtitle, color) {
+  var S = GF.S;
+  ctx.fillStyle = 'rgba(6,9,18,0.9)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(44 * S, 28, 64);
+  ctx.fillStyle = color;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 28 * S;
+  ctx.fillText(title, GF.cx, GF.cy - 44 * S);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#cdd9f5';
+  ctx.font = GF.clamp(18 * S, 13, 24) + 'px sans-serif';
+  ctx.fillText(subtitle, GF.cx, GF.cy + 2 * S);
+  ctx.fillStyle = COL_HUD_DIM;
+  ctx.font = GF.clamp(14 * S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('night') + ' ' + Math.min(night, WIN_NIGHTS) + ' / ' + WIN_NIGHTS, GF.cx, GF.cy + 32 * S);
+  var btnW = GF.clamp(240 * S, 160, 320), btnH = GF.clamp(54 * S, 40, 66);
+  var btnX = GF.cx - btnW / 2, btnY = GF.cy + 64 * S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, COL_WARM);
+  grad.addColorStop(1, COL_WARM_DK);
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.fillStyle = '#1a0f08';
+  ctx.font = 'bold ' + GF.clamp(18 * S, 14, 22) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('retry'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+  _retryBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+// INPUT
+function hit(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+
+function onTap(x, y) {
+  if (GF.tutorial.active) {
+    if (GF.tutorial.handleClick(x, y)) return;
+  }
+  if (gs === 'MENU') {
+    if (hit(_playBtn, x, y)) startGame();
+    return;
+  }
+  if (gs === 'GAMEOVER' || gs === 'WIN') {
+    if (hit(_retryBtn, x, y)) gs = 'MENU';
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  if (hit(_helpBtn, x, y)) { reopenTutorial(); return; }
+  for (var i = 0; i < _spendBtns.length; i++) {
+    var b = _spendBtns[i];
+    if (hit(b, x, y)) {
+      if (b.id === 'burn') burnLog();
+      else if (b.id === 'eat') eatFood();
+      else wrapBlanket();
+      return;
+    }
+  }
+  if (hit(_endBtn, x, y)) { endNight(); return; }
+}
+
+GF.canvas.addEventListener('pointerdown', function(e) {
+  var rect = GF.canvas.getBoundingClientRect();
+  onTap(e.clientX - rect.left, e.clientY - rect.top);
+});
+
+// Expose state for the runtime gate (cross-checked against DESIGN.md).
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    warmth: warmth,
+    hunger: hunger,
+    logs: logs,
+    food: food,
+    blankets: blankets,
+    night: night,
+    coldCost: coldCost,
+    WIN_NIGHTS: WIN_NIGHTS,
+    START_LOGS: START_LOGS,
+  };
+});
+
+// Locale-overflow / state test hooks (safe to ship).
+window._setState = function(s) { gs = s; };
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+
+// BOOT
+GF.init({
+  designW: 800,
+  designH: 600,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'last_embers',
+  onReady: function() {
+    try { bestNights = parseInt(localStorage.getItem('last_embers_best') || '0') || 0; } catch (e) {}
+    initSnow();
+    GF.persist('last_embers_run_v1',
+      function() {
+        return { gs: gs, warmth: warmth, hunger: hunger, logs: logs, food: food,
+                 blankets: blankets, night: night, coldCost: coldCost,
+                 blanketReduce: blanketReduce };
+      },
+      function(s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        warmth = (typeof s.warmth === 'number') ? s.warmth : START_WARMTH;
+        hunger = (typeof s.hunger === 'number') ? s.hunger : START_HUNGER;
+        logs = (typeof s.logs === 'number') ? s.logs : START_LOGS;
+        food = (typeof s.food === 'number') ? s.food : START_FOOD;
+        blankets = (typeof s.blankets === 'number') ? s.blankets : START_BLANKETS;
+        night = s.night || 1;
+        coldCost = (typeof s.coldCost === 'number') ? s.coldCost : coldForNight(night);
+        blanketReduce = s.blanketReduce || 0;
+      }
+    );
+
+    GF.tutorial.start([
+      { text: GF.t('tut_goal') + ' ' + GF.t('tut_controls'), advance: 'click_any' },
+      { text: GF.t('tut_win') + ' ' + GF.t('tut_lose'), advance: 'click_any' },
+      { text: GF.t('tut_tip'), advance: 'click_any' },
+    ], { storageKey: 'last_embers_seen_tutorial' });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

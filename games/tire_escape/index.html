@@ -65,6 +65,8 @@ var STRINGS = {
     tier_legend:  'LEGEND',
     tier_reached: 'TIER!',
     tier_next:    'NEXT',
+    magnet_label: 'MAGNET',
+    magnet_grab:  'MAGNET!',
   },
   ru: {
     title: 'Побег Шины',
@@ -109,6 +111,8 @@ var STRINGS = {
     tier_legend:  'ЛЕГЕНДА',
     tier_reached: 'РАНГ!',
     tier_next:    'ДО',
+    magnet_label: 'МАГНИТ',
+    magnet_grab:  'МАГНИТ!',
   },
 };
 
@@ -423,6 +427,22 @@ var shieldsCollectedRun = 0;       // per-run pickups
 var shieldSavesRun = 0;            // per-run saves consumed
 var lifetimeShieldSaves = 0;       // persisted across runs
 
+// Iter#13 (free-choice): coin-magnet pickup. A 5-second power that pulls
+// nearby coins to the tire automatically (radius 180px, speed 400px/s).
+// Coins grabbed while magnet active score double (+100 instead of +50).
+// This gives the player a "set up the sweep" tactical moment: grab a magnet,
+// then charge through a coin cluster. Pure additive: new pickup type, new
+// HUD pill, no impact on cop AI, physics, shields, rockets, or scoring math.
+var magnets = [];                  // {x, y, r, taken, spinPhase}
+var magnetSpawnX = 1800;           // first candidate further than coins
+var MAGNET_RADIUS = 20;            // design-space px, slightly smaller than shield
+var MAGNET_PULL_RADIUS = 180;      // how far coins get attracted (design-space px)
+var MAGNET_PULL_SPEED = 400;       // px/s coins move toward tire while active
+var MAGNET_DURATION = 5.0;        // seconds magnet power lasts
+var MAGNET_COIN_MULT = 2;          // coin score multiplier while magnet active
+var magnetTimer = 0;               // seconds remaining for active magnet
+var magnetsCollectedRun = 0;       // per-run pickups
+
 // Iter#11 (free-choice): distance-tier milestones. The game now has rich
 // pickups/score juice but no per-run "progress shape" — long runs blur
 // together with no felt sense of crossing a threshold. Tiers (BRONZE 500m,
@@ -504,6 +524,12 @@ function spawnShield(x) {
   // overlap them visually. Encourages a bounce-chain commit to reach.
   var y = GROUND_Y - 200;
   shields.push({ x: x, y: y, r: SHIELD_RADIUS, taken: false, spinPhase: Math.random() * Math.PI * 2 });
+}
+
+function spawnMagnet(x) {
+  // Low-mid band — grabable on a single kick, doesn't compete with shield height.
+  var y = GROUND_Y - 130;
+  magnets.push({ x: x, y: y, r: MAGNET_RADIUS, taken: false, spinPhase: Math.random() * Math.PI * 2 });
 }
 
 function spawnRocket(x) {
@@ -637,6 +663,11 @@ function startGame() {
   shieldFlash = 0;
   shieldsCollectedRun = 0;
   shieldSavesRun = 0;
+  // Iter#13: reset magnet pickup state for new run.
+  magnets = [];
+  magnetSpawnX = 1800;
+  magnetTimer = 0;
+  magnetsCollectedRun = 0;
   // Iter#11: reset tier state for new run.
   tierReached = -1;
   tierBannerTimer = 0;
@@ -855,6 +886,8 @@ window._jumpLevel = function(n) {
   spawnRocket(tire.x + 300);
   // Iter#9: same logic — pre-spawn a shield so playtest gate sees shieldsActive>0.
   spawnShield(tire.x + 480);
+  // Iter#13: pre-spawn a magnet so playtest gate can verify magnetsActive>0.
+  spawnMagnet(tire.x + 650);
 };
 
 // ── INPUT (one-button kick) ──────────────────────────────────────────────
@@ -1061,6 +1094,61 @@ function update(dt) {
   if (shieldInvuln > 0) shieldInvuln = Math.max(0, shieldInvuln - dt);
   if (shieldFlash > 0) shieldFlash = Math.max(0, shieldFlash - dt * 1.5);
 
+  // Iter#13: spawn magnets — similar cadence to rockets. At most one live at a
+  // time; won't spawn while magnetTimer is still running (redundant power).
+  while (magnetSpawnX < cameraX + 1400) {
+    var liveMagnets = 0;
+    for (var mg = 0; mg < magnets.length; mg++) if (!magnets[mg].taken) liveMagnets++;
+    if (liveMagnets === 0 && magnetTimer <= 0 && Math.random() < 0.50) spawnMagnet(magnetSpawnX);
+    magnetSpawnX += rand(1600, 2600);
+  }
+  // Cull magnets behind the camera.
+  for (var mk = magnets.length - 1; mk >= 0; mk--) {
+    if (magnets[mk].x < cameraX - 100) magnets.splice(mk, 1);
+  }
+  // Tire vs magnets (circle vs circle). On pickup: activate magnetTimer.
+  for (var mg2 = 0; mg2 < magnets.length; mg2++) {
+    var mgt = magnets[mg2];
+    if (mgt.taken) continue;
+    if (mgt.x - tire.x > 200) break;
+    var mgdx = tire.x - mgt.x, mgdy = tire.y - mgt.y;
+    var mgsum2 = tire.r + mgt.r;
+    if (mgdx * mgdx + mgdy * mgdy < mgsum2 * mgsum2) {
+      mgt.taken = true;
+      magnetTimer = MAGNET_DURATION;
+      magnetsCollectedRun += 1;
+      var mgsxw = (mgt.x - cameraX) * GF.S;
+      var mgsyw = mgt.y * GF.S;
+      GF.spawnParticles(mgsxw, mgsyw, '#a0ff70', 20);
+      GF.spawnParticles(mgsxw, mgsyw, '#60ff30', 12);
+      GF.spawnFloat(mgsxw, mgsyw - 28 * GF.S, GF.t('magnet_grab'), '#a0ff70');
+      GF.setShake(0.4);
+      // Reuse coin SFX at higher pitch feel via double-note
+      try {
+        SFX.play('coin');
+        setTimeout(function() { try { SFX.play('coin'); } catch(e){} }, 80);
+      } catch(e) {}
+    }
+  }
+  // Tick magnet timer and pull nearby coins toward tire while active.
+  if (magnetTimer > 0) {
+    magnetTimer = Math.max(0, magnetTimer - dt);
+    for (var mc = 0; mc < coins.length; mc++) {
+      var coin = coins[mc];
+      if (coin.taken) continue;
+      var mcdx = tire.x - coin.x;
+      var mcdy = tire.y - coin.y;
+      var mcd2 = mcdx * mcdx + mcdy * mcdy;
+      var mcr = MAGNET_PULL_RADIUS;
+      if (mcd2 < mcr * mcr && mcd2 > 1) {
+        var mcd = Math.sqrt(mcd2);
+        var spd = MAGNET_PULL_SPEED * dt;
+        coin.x += (mcdx / mcd) * spd;
+        coin.y += (mcdy / mcd) * spd;
+      }
+    }
+  }
+
   // Tire vs coins (circle vs circle, mid-air pickup). Don't block movement.
   for (var ck = 0; ck < coins.length; ck++) {
     var coin = coins[ck];
@@ -1070,7 +1158,9 @@ function update(dt) {
     var rsum = tire.r + coin.r;
     if (cdx * cdx + cdy * cdy < rsum * rsum) {
       coin.taken = true;
-      bonusScore += COIN_VALUE;
+      // Iter#13: double coin value while magnet active.
+      var coinScore = magnetTimer > 0 ? COIN_VALUE * MAGNET_COIN_MULT : COIN_VALUE;
+      bonusScore += coinScore;
       coinsCollectedRun += 1;
       // Iter#6: lifetime coin counter feeds the "coiner" achievement.
       lifetimeCoins += 1;
@@ -1081,7 +1171,7 @@ function update(dt) {
       var csxw = (coin.x - cameraX) * GF.S;
       var csyw = coin.y * GF.S;
       GF.spawnParticles(csxw, csyw, '#ffd84a', 10);
-      GF.spawnFloat(csxw, csyw - 18 * GF.S, '+' + COIN_VALUE, '#ffd84a');
+      GF.spawnFloat(csxw, csyw - 18 * GF.S, '+' + coinScore, '#ffd84a');
       // Iter#10: coin chime
       SFX.play('coin');
     }
@@ -1291,6 +1381,7 @@ function draw(ctx) {
     drawCoins();
     drawRockets();
     drawShields();
+    drawMagnets();
     drawCops();
     drawSpeedLines();
     drawTire();
@@ -2033,6 +2124,67 @@ function drawShields() {
   }
 }
 
+// Iter#13: magnet pickup renderer. Distinct from coin/rocket/shield — a green
+// glowing sphere with a magnetic-field arc pattern. Bob animation like rocket.
+function drawMagnets() {
+  var c = GF.ctx;
+  var now = performance.now() / 1000;
+  for (var i = 0; i < magnets.length; i++) {
+    var mgt = magnets[i];
+    if (mgt.taken) continue;
+    var x = (mgt.x - cameraX) * GF.S;
+    var y = mgt.y * GF.S;
+    if (x < -60 || x > GF.W + 60) continue;
+    var r = mgt.r * GF.S;
+    var bob = Math.sin(now * 3.5 + mgt.spinPhase) * 3 * GF.S;
+    y += bob;
+    // Pulsing outer glow (yellow-green).
+    var glowR = r * (2.0 + 0.25 * Math.sin(now * 4 + mgt.spinPhase));
+    var gg = c.createRadialGradient(x, y, r * 0.3, x, y, glowR);
+    gg.addColorStop(0, 'rgba(150,255,80,0.55)');
+    gg.addColorStop(1, 'rgba(80,200,40,0)');
+    c.save();
+    c.globalCompositeOperation = 'lighter';
+    c.fillStyle = gg;
+    c.beginPath();
+    c.arc(x, y, glowR, 0, Math.PI * 2);
+    c.fill();
+    c.restore();
+    // Sphere body with radial gradient.
+    var sphereGrad = c.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+    sphereGrad.addColorStop(0, '#d0ffb0');
+    sphereGrad.addColorStop(0.5, '#60d030');
+    sphereGrad.addColorStop(1, '#1a5a0a');
+    c.fillStyle = sphereGrad;
+    c.beginPath();
+    c.arc(x, y, r, 0, Math.PI * 2);
+    c.fill();
+    c.strokeStyle = 'rgba(180,255,120,0.8)';
+    c.lineWidth = 1.5 * GF.S;
+    c.stroke();
+    // Rotating arc lines suggesting magnetic field.
+    var rot = now * 1.8 + mgt.spinPhase;
+    c.save();
+    c.translate(x, y);
+    c.rotate(rot);
+    c.strokeStyle = 'rgba(255,255,200,0.65)';
+    c.lineWidth = 1.5 * GF.S;
+    for (var k = 0; k < 3; k++) {
+      var a = (k / 3) * Math.PI * 2;
+      c.beginPath();
+      c.arc(0, 0, r * 0.55, a, a + Math.PI * 0.6);
+      c.stroke();
+    }
+    c.restore();
+    // Magnet emoji glyph in centre.
+    c.fillStyle = '#ffffff';
+    c.font = 'bold ' + (r * 1.05) + 'px sans-serif';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillText('\u{1F9F2}', x, y + 1);
+  }
+}
+
 function drawCops() {
   var c = GF.ctx;
   var x = (copX - cameraX) * GF.S;
@@ -2345,6 +2497,22 @@ function drawHUD() {
     c.fillText(shLabel, 14 * GF.S, shY);
   }
 
+  // Iter#13: magnet pill — shown while magnetTimer > 0. Lime-green, stacks
+  // below shield pill. Shows seconds remaining + "x2" to indicate double coins.
+  if (magnetTimer > 0) {
+    var mgFs = fs * 0.78;
+    c.font = 'bold ' + mgFs + 'px sans-serif';
+    c.textAlign = 'left';
+    var mgPulse = 0.7 + 0.3 * Math.abs(Math.sin(performance.now() / 150));
+    c.fillStyle = 'rgba(130,255,70,' + mgPulse + ')';
+    var mgLabel = '\u{1F9F2} ' + GF.t('magnet_label') + ' x2 ' + magnetTimer.toFixed(1) + 's';
+    var mgY = 14 * GF.S + fs * 1.15
+             + (coinsCollectedRun > 0 ? (fs * 0.78) * 1.3 : 0)
+             + (rocketBoostTimer > 0 ? (fs * 0.78) * 1.3 : 0)
+             + (shieldActive ? (fs * 0.78) * 1.3 : 0);
+    c.fillText(mgLabel, 14 * GF.S, mgY);
+  }
+
   // Iter#11: tier progress chip. Stacks below shield/boost/coin pills.
   // Shows current tier name + progress bar toward next tier. Once LEGEND
   // is reached, shows just the LEGEND label without progress bar.
@@ -2355,7 +2523,8 @@ function drawHUD() {
     var tY = 14 * GF.S + fs * 1.15
              + (coinsCollectedRun > 0 ? (fs * 0.78) * 1.3 : 0)
              + (rocketBoostTimer > 0 ? (fs * 0.78) * 1.3 : 0)
-             + (shieldActive ? (fs * 0.78) * 1.3 : 0);
+             + (shieldActive ? (fs * 0.78) * 1.3 : 0)
+             + (magnetTimer > 0 ? (fs * 0.78) * 1.3 : 0);
     var curIdx = tierReached;
     var curT = curIdx >= 0 ? DIST_TIERS[curIdx] : null;
     var curLabel = curT ? GF.t(curT.nameKey) : '—';
@@ -2551,6 +2720,9 @@ if (window.GF && GF.exposeState) GF.exposeState(function() {
     tierBannerIdx:   typeof tierBannerIdx   !== 'undefined' ? tierBannerIdx   : null,
     tierBannerTimer: typeof tierBannerTimer !== 'undefined' ? tierBannerTimer : null,
     lifetimeTopTier: typeof lifetimeTopTier !== 'undefined' ? lifetimeTopTier : null,
+    magnetsActive: typeof magnets !== 'undefined' && magnets ? magnets.length : null,
+    magnetTimer:   typeof magnetTimer !== 'undefined' ? magnetTimer : null,
+    magnetsCollectedRun: typeof magnetsCollectedRun !== 'undefined' ? magnetsCollectedRun : null,
     // Iter#12: which sky palette anchor the current frame is interpolating from.
     // Computed from distance vs DIST_TIERS thresholds (0, 500, 1000, 2000, 3500).
     skyPaletteIdx: (function(){
