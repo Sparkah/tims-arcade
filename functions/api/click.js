@@ -9,20 +9,21 @@
 // Anti-abuse: 120 clicks/min per IP. Returns 204 — no-content; sendBeacon
 // callers don't read the response anyway.
 
+import { isValidSlug } from '../_lib/validate.js';
+import { checkRate } from '../_lib/rateLimit.js';
+
 export async function onRequestPost({ request, env }) {
   let body;
   try { body = await request.json(); } catch { return new Response(null, { status: 400 }); }
 
   const slug = String(body.slug || '');
   const variant = parseInt(body.variant);
-  if (!/^[a-z0-9_-]{1,40}$/i.test(slug)) return new Response(null, { status: 400 });
+  if (!isValidSlug(slug)) return new Response(null, { status: 400 });
   if (!Number.isInteger(variant) || variant < 1 || variant > 20) return new Response(null, { status: 400 });
 
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `clickrate:${ip}:${Math.floor(Date.now() / 60000)}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 120) return new Response(null, { status: 429 });
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 120 });
+  if (!await checkRate(env, rateKey, 120, 120)) return new Response(null, { status: 429 });
 
   const key = `click:${slug}:v${variant}`;
   const cur = parseInt(await env.VOTES.get(key)) || 0;

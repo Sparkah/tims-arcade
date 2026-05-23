@@ -20,6 +20,9 @@
 import { readSession } from './_session.js';
 import { parseCookie } from '../_lib/cookie.js';
 import { grantOnce } from '../_lib/meta.js';
+import { jsonError } from '../_lib/response.js';
+import { isValidSlug } from '../_lib/validate.js';
+import { checkRate } from '../_lib/rateLimit.js';
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -27,14 +30,12 @@ export async function onRequestPost({ request, env }) {
   catch { return jsonError('invalid json', 400); }
 
   const slug = String(body.slug || '');
-  if (!/^[a-z0-9_-]{1,40}$/i.test(slug)) return jsonError('bad slug', 400);
+  if (!isValidSlug(slug)) return jsonError('bad slug', 400);
 
   // Rate limit by IP
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `rate:${ip}:${Math.floor(Date.now() / 60000)}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 30) return jsonError('rate limit', 429);
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 120 });
+  if (!await checkRate(env, rateKey, 30, 120)) return jsonError('rate limit', 429);
 
   const session = await readSession(request, env);
 
@@ -93,12 +94,6 @@ export async function onRequestPost({ request, env }) {
   });
 }
 
-function jsonError(msg, status) {
-  return new Response(JSON.stringify({ error: msg }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
-}
 function clampInt(v, lo, hi) {
   const n = parseInt(v);
   if (isNaN(n)) return 0;

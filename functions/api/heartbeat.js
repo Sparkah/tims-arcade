@@ -22,6 +22,8 @@
 
 import { parseCookie } from '../_lib/cookie.js';
 import { creditTokens } from '../_lib/meta.js';
+import { isValidSlug } from '../_lib/validate.js';
+import { checkRate } from '../_lib/rateLimit.js';
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -29,7 +31,7 @@ export async function onRequestPost({ request, env }) {
   catch { return new Response('bad json', { status: 400 }); }
 
   const slug = String(body.slug || '');
-  if (!/^[a-z0-9_-]{1,40}$/i.test(slug)) return new Response('bad slug', { status: 400 });
+  if (!isValidSlug(slug)) return new Response('bad slug', { status: 400 });
 
   // Clamp to [0, 300] — caps anyone trying to spam huge numbers
   const seconds = Math.max(0, Math.min(300, parseInt(body.seconds) || 0));
@@ -38,9 +40,7 @@ export async function onRequestPost({ request, env }) {
   // rate limit by IP
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `hbrate:${ip}:${Math.floor(Date.now() / 3600000)}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 90) return new Response('rate limit', { status: 429 });
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 7200 });
+  if (!await checkRate(env, rateKey, 90, 7200)) return new Response('rate limit', { status: 429 });
 
   // cumulative
   const cumKey = `seconds:${slug}`;

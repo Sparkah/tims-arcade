@@ -8,6 +8,9 @@
 // On success: 204 No Content (don't leak whether email exists).
 // Anti-abuse: 5 requests / IP / 10 min.
 
+import { jsonError } from '../../_lib/response.js';
+import { checkRate } from '../../_lib/rateLimit.js';
+
 export async function onRequestPost({ request, env }) {
   let body;
   try { body = await request.json(); }
@@ -19,9 +22,7 @@ export async function onRequestPost({ request, env }) {
   // Rate limit by IP — soft cap, not security critical
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `authrate:${ip}:${Math.floor(Date.now() / 600000)}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 5) return jsonError('rate_limit', 429);
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 700 });
+  if (!await checkRate(env, rateKey, 5, 700)) return jsonError('rate_limit', 429);
 
   // Generate URL-safe token (16 random bytes → 22 chars b64)
   const tokenBytes = new Uint8Array(16);
@@ -75,13 +76,6 @@ export async function onRequestPost({ request, env }) {
 
 function isValidEmail(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s) && s.length <= 200;
-}
-
-function jsonError(msg, status) {
-  return new Response(JSON.stringify({ error: msg }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 }
 
 function emailBody(link) {

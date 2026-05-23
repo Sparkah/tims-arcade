@@ -18,9 +18,12 @@
 //   - score: integer 0-1000000 (per-game ceiling enforced client-side anyway)
 //   - per-IP: 30 submissions / day per slug (KV TTL 25h)
 
+import { jsonError } from '../_lib/response.js';
+import { SLUG_RE } from '../_lib/validate.js';
+import { checkRate } from '../_lib/rateLimit.js';
+
 const NAME_RE = /^[\wÀ-￿ \-.]{1,16}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const SLUG_RE = /^[a-z0-9_-]{1,40}$/i;
 const TOP_N = 50;
 const CAP_N = 100;
 
@@ -64,9 +67,7 @@ export async function onRequestPost({ request, env }) {
   // Per-IP rate limit
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `scoresrate:${slug}:${ip}:${date}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 30) return jsonError('rate limit', 429);
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 25 * 60 * 60 });
+  if (!await checkRate(env, rateKey, 30, 25 * 60 * 60)) return jsonError('rate limit', 429);
 
   // Insert + sort + cap
   const key = `scores:${slug}:${date}`;
@@ -103,10 +104,4 @@ function recentValidDates() {
   const today = d.toISOString().slice(0, 10);
   d.setUTCDate(d.getUTCDate() - 1);
   return [today, d.toISOString().slice(0, 10)];
-}
-function jsonError(msg, status) {
-  return new Response(JSON.stringify({ error: msg }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 }

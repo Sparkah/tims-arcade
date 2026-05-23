@@ -202,7 +202,11 @@ EOF
     "    <link>" + $site + "/p/" + .slug + "</link>\n" +
     "    <guid isPermaLink=\"true\">" + $site + "/p/" + .slug + "</guid>\n" +
     "    <description>" + (.hook // "" | @html) + "</description>\n" +
-    "    <pubDate>" + .addedDate + " 00:00:00 +0000</pubDate>\n" +
+    # RSS 2.0 requires RFC-822 dates; .addedDate is YYYY-MM-DD, so convert
+    # (mktime|gmtime round-trip recomputes the weekday for %a). try/catch so a
+    # malformed date degrades to a still-parseable string instead of aborting
+    # the whole feed.
+    "    <pubDate>" + (try (.addedDate + "T00:00:00Z" | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime | gmtime | strftime("%a, %d %b %Y %H:%M:%S +0000")) catch (.addedDate + " 00:00:00 +0000")) + "</pubDate>\n" +
     "  </item>"
   ' "$OUT_MANIFEST"
   printf '</channel>\n</rss>\n'

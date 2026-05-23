@@ -12,6 +12,9 @@
 // Caching: 30s edge cache + 60s stale-while-revalidate. Comments don't
 // move fast and the read path hits KV once per cache miss.
 
+import { json } from '../_lib/response.js';
+import { isValidSlug } from '../_lib/validate.js';
+
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const slug = String(url.searchParams.get('slug') || '');
@@ -19,7 +22,7 @@ export async function onRequestGet({ request, env }) {
   if (!Number.isFinite(limit) || limit < 1) limit = 10;
   if (limit > 50) limit = 50;
 
-  if (!/^[a-z0-9_-]{1,40}$/i.test(slug)) {
+  if (!isValidSlug(slug)) {
     return json({ error: 'bad_slug' }, 400);
   }
 
@@ -65,11 +68,4 @@ export async function onRequestGet({ request, env }) {
       },
     }
   );
-}
-
-function json(body, status) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 }

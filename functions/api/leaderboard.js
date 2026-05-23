@@ -12,6 +12,8 @@
 // Cache the result in KV for 5 min (`lb:cache`) so a hot page just reads
 // the cache; the first request of the cache window pays the scan cost.
 
+import { checkRate } from '../_lib/rateLimit.js';
+
 const CACHE_KEY = 'lb:cache';
 const CACHE_TTL = 5 * 60;  // 5 minutes
 
@@ -37,14 +39,12 @@ export async function onRequestGet({ request, env }) {
   // path is uncapped.
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `lbrate:${ip}:${Math.floor(Date.now() / 3600000)}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 5) {
+  if (!await checkRate(env, rateKey, 5, 7200)) {
     return new Response(JSON.stringify({ players: [], total: 0, error: 'rate_limit' }), {
       status: 429,
       headers: { 'content-type': 'application/json' },
     });
   }
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 7200 });
 
   const players = [];
   let cursor;

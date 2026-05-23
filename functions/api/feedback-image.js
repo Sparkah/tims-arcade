@@ -13,6 +13,10 @@
 // Rate limit: 10 image uploads/min/IP (tighter than text feedback because
 // each blob costs KV space).
 
+import { jsonError } from '../_lib/response.js';
+import { isValidSlug } from '../_lib/validate.js';
+import { checkRate } from '../_lib/rateLimit.js';
+
 export async function onRequestPost({ request, env }) {
   let body;
   try { body = await request.json(); } catch { return jsonError('invalid_json', 400); }
@@ -21,7 +25,7 @@ export async function onRequestPost({ request, env }) {
   const mime = String(body.mime || '');
   const data = String(body.data || '');
 
-  if (!/^[a-z0-9_-]{1,40}$/i.test(slug))                 return jsonError('bad_slug', 400);
+  if (!isValidSlug(slug))                                return jsonError('bad_slug', 400);
   if (!['image/webp','image/jpeg','image/png'].includes(mime)) return jsonError('bad_mime', 400);
   if (data.length < 64 || data.length > 2_100_000)       return jsonError('bad_size', 413);
 
@@ -40,9 +44,7 @@ export async function onRequestPost({ request, env }) {
 
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `imgrate:${ip}:${Math.floor(Date.now() / 60000)}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 10) return jsonError('rate_limit', 429);
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 120 });
+  if (!await checkRate(env, rateKey, 10, 120)) return jsonError('rate_limit', 429);
 
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const key = `feedbackimg:${slug}:${id}`;
@@ -54,13 +56,6 @@ export async function onRequestPost({ request, env }) {
 
   return new Response(JSON.stringify({ id }), {
     status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
-}
-
-function jsonError(msg, status) {
-  return new Response(JSON.stringify({ error: msg }), {
-    status,
     headers: { 'content-type': 'application/json' },
   });
 }

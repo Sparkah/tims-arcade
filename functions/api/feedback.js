@@ -17,6 +17,10 @@
 // Rate limit: 30 feedback posts/min/IP (more lenient than vote since this is
 // the "exit interview" path).
 
+import { jsonError } from '../_lib/response.js';
+import { isValidSlug } from '../_lib/validate.js';
+import { checkRate } from '../_lib/rateLimit.js';
+
 const MAX_IMAGES = 5;
 
 export async function onRequestPost({ request, env }) {
@@ -41,14 +45,12 @@ export async function onRequestPost({ request, env }) {
     if (imageIds.length >= MAX_IMAGES) break;
   }
 
-  if (!/^[a-z0-9_-]{1,40}$/i.test(slug))                return jsonError('bad_slug', 400);
+  if (!isValidSlug(slug))                               return jsonError('bad_slug', 400);
   if (!['like','dislike','neutral','empty'].includes(vote)) return jsonError('bad_vote', 400);
 
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `fbrate:${ip}:${Math.floor(Date.now() / 60000)}`;
-  const rate = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (rate >= 30) return jsonError('rate_limit', 429);
-  await env.VOTES.put(rateKey, String(rate + 1), { expirationTtl: 120 });
+  if (!await checkRate(env, rateKey, 30, 120)) return jsonError('rate_limit', 429);
 
   // Tally vote (skipped if neutral)
   if (vote === 'like' || vote === 'dislike') {
@@ -80,11 +82,4 @@ export async function onRequestPost({ request, env }) {
   }
 
   return new Response(null, { status: 204 });
-}
-
-function jsonError(msg, status) {
-  return new Response(JSON.stringify({ error: msg }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 }

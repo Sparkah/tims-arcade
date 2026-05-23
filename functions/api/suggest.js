@@ -9,6 +9,8 @@
 // Rate limit: 3 suggestions / day / (uid or IP).
 
 import { parseCookie } from '../_lib/cookie.js';
+import { jsonError } from '../_lib/response.js';
+import { checkRate } from '../_lib/rateLimit.js';
 
 const MAX_TEXT = 500;
 const MIN_TEXT = 3;
@@ -27,9 +29,7 @@ export async function onRequestPost({ request, env }) {
   const day = new Date().toISOString().slice(0, 10);
   const rateKey = `sugrate:${actor}:${day}`;
 
-  const count = parseInt(await env.VOTES.get(rateKey)) || 0;
-  if (count >= DAILY_CAP) return jsonError('daily_limit_reached', 429);
-  await env.VOTES.put(rateKey, String(count + 1), { expirationTtl: 60 * 60 * 26 });
+  if (!await checkRate(env, rateKey, DAILY_CAP, 60 * 60 * 26)) return jsonError('daily_limit_reached', 429);
 
   const ts = Date.now();
   const id = ts.toString(36) + Math.random().toString(36).slice(2, 6);
@@ -54,11 +54,4 @@ async function hashIp(ip, env) {
   const enc = new TextEncoder();
   const buf = await crypto.subtle.digest('SHA-256', enc.encode(`${salt}|${ip}`));
   return Array.from(new Uint8Array(buf)).slice(0, 6).map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function jsonError(msg, status) {
-  return new Response(JSON.stringify({ error: msg }), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
 }
