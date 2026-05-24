@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Crowd Crusher</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0712; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Crowd Crusher',
+    sub:   'Shove the crowd off the platform.',
+    play: 'PLAY', retry: 'RETRY', again: 'PLAY AGAIN', menu: 'MENU',
+    wave: 'WAVE', best: 'BEST WAVE', foes: 'FOES LEFT', score: 'SCORE',
+    gameover: 'GAME OVER', won: 'YOU WIN!',
+    reached: 'Reached wave', cleared: 'All waves cleared!',
+    howto: 'HOW TO PLAY',
+    tut_goal: 'Goal: Steer your heavy blob to shove every smaller foe off the platform edge.',
+    tut_controls: 'Controls: Drag to steer, or use arrow keys / WASD. Build momentum to bulldoze foes.',
+    tut_win: 'Win: Clear all foes off the edge each wave. Survive all 5 waves to win.',
+    tut_lose: 'Lose: You are pushed off the edge, or pinned to a standstill by the crowd. 3 lives.',
+    tut_tip: 'Tip: Eat pellets to grow heavier — momentum times your mass decides how far foes fly.',
+  },
+  ru: {
+    title: 'Давка',
+    sub:   'Вытолкни толпу за край платформы.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', again: 'ИГРАТЬ СНОВА', menu: 'МЕНЮ',
+    wave: 'ВОЛНА', best: 'РЕКОРД', foes: 'ОСТАЛОСЬ', score: 'ОЧКИ',
+    gameover: 'ИГРА ОКОНЧЕНА', won: 'ПОБЕДА!',
+    reached: 'Достигнута волна', cleared: 'Все волны пройдены!',
+    howto: 'КАК ИГРАТЬ',
+    tut_goal: 'Цель: Управляй тяжёлым шаром и вытолкни всех меньших врагов за край платформы.',
+    tut_controls: 'Управление: Тяни, чтобы рулить, или стрелки / WASD. Набирай скорость, чтобы сносить врагов.',
+    tut_win: 'Победа: Очисти платформу от врагов в каждой волне. Пройди все 5 волн.',
+    tut_lose: 'Поражение: Тебя вытолкнули за край или зажали до полной остановки. 3 жизни.',
+    tut_tip: 'Совет: Глотай шарики, чтобы расти — масса и скорость решают, как далеко улетит враг.',
+  },
+};
+
+// AI sprites (procedural fallback if missing).
+var SPRITE_NAMES = ['player', 'foe_a', 'foe_b', 'pellet'];
+
+// ── TUNABLES (honored by DESIGN.md) ──────────────────────────────────────
+var TOTAL_WAVES       = 5;
+var MAX_LIVES         = 3;
+var PLAYER_START_MASS = 46;     // field px radius at wave start
+var PELLET_MASS_GAIN  = 2.2;    // mass per pellet absorbed
+var PLAYER_ACCEL      = 1500;   // field px/s^2
+var PLAYER_DRAG       = 0.90;   // per-frame velocity retention
+var SHOVE_FORCE       = 2.0;    // momentum transfer on collision
+var STALL_SPEED       = 70;     // field px/s threshold for "stalled"
+var STALL_SEC         = 2.2;    // continuous stalled+surrounded seconds = lose life
+var STALL_FOE_COUNT   = 4;      // touching this many while slow = pinned
+var PLATFORM_RADIUS   = 250;    // field px
+var PELLET_RADIUS     = 9;      // field px
+var MAX_PLAYER_MASS   = 96;     // cap so the player can't fill the whole disc
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | GAMEOVER | WON
+var wave = 1, lives = MAX_LIVES, bestWave = 0, score = 0;
+var showHelp = false;
+var stallTimer = 0;              // seconds the player has been pinned
+var invuln = 0;                  // grace seconds after respawn / wave start
+var pulseT = 0;
+
+// player blob — radius == mass (field px)
+var player = { fx: 0, fy: 0, vx: 0, vy: 0, mass: PLAYER_START_MASS };
+var foes = [];                   // { fx, fy, vx, vy, mass, type, drift, hue }
+var pellets = [];                // { fx, fy }
+var spawnTotal = 0;              // foes spawned this wave (HUD denom)
+
+var hudButtons = [];
+var stars = [];                  // ambient background field (fills dead space)
+
+// ── DETERMINISTIC RNG PER WAVE ───────────────────────────────────────────
+function rngFor(seed) {
+  var s = seed * 2654435761 % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return function() { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+}
+
+// ── FIELD PROJECTION (virtual field -> viewport) ─────────────────────────
+// The platform is a round arena; the field is sized so the disc nearly fills
+// the smaller viewport dimension. Projection: fit the disc to whichever of
+// width/height is tighter, leaving a small margin, and center it. This keeps
+// the round arena dominant on both portrait phones and landscape desktop.
+var PLAT_CX = 270, PLAT_CY = 500;       // field-space center
+var fScale = 1, fOffX = 0, fOffY = 0;
+function projectField() {
+  var topPad = 64 * GF.S;               // HUD band at the top
+  var botPad = 14 * GF.S;
+  var availW = GF.W - 12 * GF.S;
+  var availH = GF.H - topPad - botPad;
+  // size the disc to fill ~96% of the smaller available dimension
+  var targetDiscPx = Math.min(availW, availH) * 0.96;
+  fScale = (targetDiscPx / 2) / PLATFORM_RADIUS;
+  // center the disc in the available band
+  fOffX = GF.W / 2 - PLAT_CX * fScale;
+  fOffY = topPad + availH / 2 - PLAT_CY * fScale;
+}
+function fx2sx(fx) { return fOffX + fx * fScale; }
+function fy2sy(fy) { return fOffY + fy * fScale; }
+function fr2sr(fr) { return fr * fScale; }
+
+// ── WAVE GENERATION ──────────────────────────────────────────────────────
+function foeCountFor(n)   { return 5 + n * 3; }                  // 8..20
+function foeMassFor(n, r) { return 16 + r() * 8 + n * 2.5; }     // grows w/ wave
+function pelletCountFor(n) { return 7 + n; }
+
+function buildWave(n) {
+  var rand = rngFor(7000 + n * 53);
+  player.fx = PLAT_CX; player.fy = PLAT_CY;
+  player.vx = 0; player.vy = 0;
+  player.mass = PLAYER_START_MASS;
+
+  foes = [];
+  var count = foeCountFor(n);
+  spawnTotal = count;
+  for (var i = 0; i < count; i++) {
+    var ang = rand() * Math.PI * 2;
+    var rr = 90 + rand() * (PLATFORM_RADIUS - 120);
+    var fx = PLAT_CX + Math.cos(ang) * rr;
+    var fy = PLAT_CY + Math.sin(ang) * rr;
+    var heavy = rand() < (0.18 + n * 0.06);
+    var mass = foeMassFor(n, rand) * (heavy ? 1.45 : 1);
+    foes.push({
+      fx: fx, fy: fy, vx: 0, vy: 0,
+      mass: mass, type: heavy ? 'foe_b' : 'foe_a',
+      drift: 22 + rand() * 16 + n * 3,
+      hue: heavy ? (350 + rand() * 18) : (24 + rand() * 22),
+    });
+  }
+
+  pellets = [];
+  var pc = pelletCountFor(n);
+  for (var p = 0; p < pc; p++) {
+    var pa = rand() * Math.PI * 2;
+    var pr = 30 + rand() * (PLATFORM_RADIUS - 60);
+    pellets.push({ fx: PLAT_CX + Math.cos(pa) * pr, fy: PLAT_CY + Math.sin(pa) * pr });
+  }
+  invuln = 1.0;
+  stallTimer = 0;
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function startGame() {
+  wave = 1; lives = MAX_LIVES; score = 0;
+  gs = 'PLAYING';
+  buildWave(wave);
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function respawnPlayer() {
+  player.fx = PLAT_CX; player.fy = PLAT_CY;
+  player.vx = 0; player.vy = 0;
+  invuln = 1.2;
+  stallTimer = 0;
+  for (var i = 0; i < foes.length; i++) {
+    var f = foes[i];
+    var dx = f.fx - PLAT_CX, dy = f.fy - PLAT_CY;
+    var d = Math.hypot(dx, dy) || 1;
+    if (d < 150) { f.vx += dx / d * 360; f.vy += dy / d * 360; }
+  }
+}
+
+function loseLife() {
+  lives--;
+  GF.setShake(1.1);
+  GF.spawnParticles(fx2sx(player.fx), fy2sy(player.fy), '#ff5252', 30);
+  if (lives <= 0) {
+    if (wave > bestWave) { bestWave = wave; saveBest(); }
+    gs = 'GAMEOVER';
+    GF.gameEnded();
+  } else {
+    respawnPlayer();
+  }
+  GF.saveRun();
+}
+
+function clearWave() {
+  GF.setShake(0.6);
+  if (wave >= TOTAL_WAVES) {
+    bestWave = TOTAL_WAVES; saveBest();
+    gs = 'WON';
+    GF.gameEnded();
+    GF.happytime();
+  } else {
+    if (wave > bestWave) { bestWave = wave; saveBest(); }
+    wave++;
+    buildWave(wave);
+    GF.gameStarted();
+  }
+  GF.saveRun();
+}
+
+function saveBest() {
+  try { localStorage.setItem('crowd_crusher_best', bestWave); } catch (e) {}
+}
+
+function backToMenu() {
+  gs = 'MENU';
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// ── INPUT — drag-to-steer; clicks route to HUD buttons ───────────────────
+function onTap(sx, sy) {
+  for (var b = 0; b < hudButtons.length; b++) {
+    var bt = hudButtons[b];
+    if (sx >= bt.x && sx <= bt.x + bt.w && sy >= bt.y && sy <= bt.y + bt.h) { bt.fn(); return; }
+  }
+  if (showHelp) { showHelp = false; return; }
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  pulseT += dt;
+  if (gs !== 'PLAYING') return;
+  projectField();
+  if (invuln > 0) invuln -= dt;
+
+  // ── steering input → acceleration ──
+  var ax = 0, ay = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA']) ax -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) ax += 1;
+  if (GF.keys['ArrowUp']    || GF.keys['KeyW']) ay -= 1;
+  if (GF.keys['ArrowDown']  || GF.keys['KeyS']) ay += 1;
+  if (GF.touch.active) { ax += GF.touch.dx; ay += GF.touch.dy; }
+  var alen = Math.hypot(ax, ay);
+  if (alen > 0) { ax /= alen; ay /= alen; }
+
+  // crowd-drag: more foes touching = harder to move
+  var touching = 0;
+  for (var ti = 0; ti < foes.length; ti++) {
+    var ft = foes[ti];
+    if (Math.hypot(ft.fx - player.fx, ft.fy - player.fy) < ft.mass + player.mass + 4) touching++;
+  }
+  var slowFactor = 1 / (1 + touching * 0.18);
+
+  player.vx += ax * PLAYER_ACCEL * slowFactor * dt;
+  player.vy += ay * PLAYER_ACCEL * slowFactor * dt;
+  var dragF = Math.pow(PLAYER_DRAG, dt * 60);
+  player.vx *= dragF; player.vy *= dragF;
+  player.fx += player.vx * dt;
+  player.fy += player.vy * dt;
+
+  var pspeed = Math.hypot(player.vx, player.vy);
+
+  // ── foes: drift inward toward player + integrate ──
+  for (var i = 0; i < foes.length; i++) {
+    var f = foes[i];
+    var dx = player.fx - f.fx, dy = player.fy - f.fy;
+    var d = Math.hypot(dx, dy) || 1;
+    f.vx += (dx / d) * f.drift * dt * 2.4;
+    f.vy += (dy / d) * f.drift * dt * 2.4;
+    var fdrag = Math.pow(0.93, dt * 60);
+    f.vx *= fdrag; f.vy *= fdrag;
+    f.fx += f.vx * dt;
+    f.fy += f.vy * dt;
+  }
+
+  // ── player ↔ foe collisions (mass-weighted shove) ──
+  for (var j = 0; j < foes.length; j++) {
+    var fo = foes[j];
+    var ddx = fo.fx - player.fx, ddy = fo.fy - player.fy;
+    var dd = Math.hypot(ddx, ddy);
+    var minD = fo.mass + player.mass;
+    if (dd < minD && dd > 0.01) {
+      var nx = ddx / dd, ny = ddy / dd;
+      var overlap = minD - dd;
+      var pm = player.mass, fm = fo.mass;
+      var totalM = pm + fm;
+      fo.fx += nx * overlap * (pm / totalM);
+      fo.fy += ny * overlap * (pm / totalM);
+      player.fx -= nx * overlap * (fm / totalM);
+      player.fy -= ny * overlap * (fm / totalM);
+      var vAlong = player.vx * nx + player.vy * ny;
+      if (vAlong > 0) {
+        var massRatio = pm / fm;
+        var impulse = vAlong * SHOVE_FORCE * Math.min(massRatio, 4);
+        fo.vx += nx * impulse;
+        fo.vy += ny * impulse;
+        player.vx -= nx * vAlong * 0.10 * (fm / pm);
+        player.vy -= ny * vAlong * 0.10 * (fm / pm);
+        if (impulse > 220) {
+          GF.spawnParticles(fx2sx(fo.fx), fy2sy(fo.fy), 'hsl(' + fo.hue + ',80%,60%)', 6);
+        }
+      }
+    }
+  }
+
+  // ── foe ↔ foe light separation ──
+  for (var a = 0; a < foes.length; a++) {
+    for (var bI = a + 1; bI < foes.length; bI++) {
+      var fa = foes[a], fb = foes[bI];
+      var sx = fb.fx - fa.fx, sy = fb.fy - fa.fy;
+      var sd = Math.hypot(sx, sy);
+      var md = fa.mass + fb.mass;
+      if (sd < md && sd > 0.01) {
+        var snx = sx / sd, sny = sy / sd, ov = (md - sd) * 0.5;
+        fa.fx -= snx * ov; fa.fy -= sny * ov;
+        fb.fx += snx * ov; fb.fy += sny * ov;
+      }
+    }
+  }
+
+  // ── foes leaving the platform edge are cleared ──
+  for (var k = foes.length - 1; k >= 0; k--) {
+    var fk = foes[k];
+    if (Math.hypot(fk.fx - PLAT_CX, fk.fy - PLAT_CY) > PLATFORM_RADIUS) {
+      GF.spawnParticles(fx2sx(fk.fx), fy2sy(fk.fy), '#ffd34d', 14);
+      GF.spawnFloat(fx2sx(fk.fx), fy2sy(fk.fy), '+10', '#ffe08a');
+      score += 10;
+      foes.splice(k, 1);
+    }
+  }
+
+  // ── pellets: absorb on overlap → grow ──
+  for (var pI = pellets.length - 1; pI >= 0; pI--) {
+    var pe = pellets[pI];
+    if (Math.hypot(pe.fx - player.fx, pe.fy - player.fy) < player.mass + PELLET_RADIUS) {
+      player.mass = Math.min(player.mass + PELLET_MASS_GAIN, MAX_PLAYER_MASS);
+      score += 5;
+      GF.spawnParticles(fx2sx(pe.fx), fy2sy(pe.fy), '#5be3a0', 10);
+      pellets.splice(pI, 1);
+    }
+  }
+
+  // ── lose conditions ──
+  if (invuln <= 0) {
+    if (Math.hypot(player.fx - PLAT_CX, player.fy - PLAT_CY) > PLATFORM_RADIUS) {
+      loseLife();
+      return;
+    }
+    if (touching >= STALL_FOE_COUNT && pspeed < STALL_SPEED) {
+      stallTimer += dt;
+      if (stallTimer >= STALL_SEC) { loseLife(); return; }
+    } else {
+      stallTimer = Math.max(0, stallTimer - dt * 1.5);
+    }
+  }
+
+  // ── win condition ──
+  if (foes.length === 0) { clearWave(); return; }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#0a0712'); g.addColorStop(0.6, '#120a1f'); g.addColorStop(1, '#0d0818');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, GF.W, GF.H);
+  drawStars(ctx);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WON') drawWorld(ctx);
+  if (gs === 'PLAYING') {
+    drawHUD(ctx);
+    if (showHelp) drawHelpPanel(ctx);
+  }
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'GAMEOVER') drawEndScreen(ctx, GF.t('gameover'), GF.t('reached') + ' ' + Math.max(wave, 1), GF.t('retry'), startGame, false);
+  if (gs === 'WON')      drawEndScreen(ctx, GF.t('won'), GF.t('cleared'), GF.t('again'), startGame, true);
+}
+
+function drawStars(ctx) {
+  if (stars.length === 0) {
+    for (var i = 0; i < 80; i++) {
+      stars.push({ x: Math.random(), y: Math.random(), r: Math.random() * 1.4 + 0.3, tw: Math.random() * 6 });
+    }
+  }
+  for (var j = 0; j < stars.length; j++) {
+    var st = stars[j];
+    var a = 0.35 + 0.55 * Math.abs(Math.sin(pulseT * 0.7 + st.tw));
+    ctx.globalAlpha = a * 0.6;
+    ctx.fillStyle = '#d6c8ff';
+    ctx.beginPath();
+    ctx.arc(st.x * GF.W, st.y * GF.H, st.r * GF.S, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawWorld(ctx) {
+  projectField();
+  var cx = fx2sx(PLAT_CX), cy = fy2sy(PLAT_CY), pr = fr2sr(PLATFORM_RADIUS);
+
+  // soft arena glow behind the disc — fills the surrounding space so the
+  // round arena reads as the focal point rather than leaving dead black
+  ctx.save();
+  var halo = ctx.createRadialGradient(cx, cy, pr * 0.8, cx, cy, pr * 1.9);
+  halo.addColorStop(0, 'rgba(90,60,150,0.30)');
+  halo.addColorStop(1, 'rgba(90,60,150,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath(); ctx.arc(cx, cy, pr * 1.9, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  // platform disc
+  ctx.save();
+  var pg = ctx.createRadialGradient(cx, cy - pr * 0.2, pr * 0.2, cx, cy, pr);
+  pg.addColorStop(0, '#2a2540'); pg.addColorStop(0.82, '#1b1730'); pg.addColorStop(1, '#241c3a');
+  ctx.fillStyle = pg;
+  ctx.beginPath(); ctx.arc(cx, cy, pr, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = 4 * GF.S;
+  ctx.strokeStyle = 'rgba(255,107,129,0.55)';
+  ctx.shadowColor = 'rgba(255,107,129,0.5)'; ctx.shadowBlur = 14 * GF.S;
+  ctx.beginPath(); ctx.arc(cx, cy, pr - 2 * GF.S, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+
+  // pellets
+  for (var i = 0; i < pellets.length; i++) {
+    var pe = pellets[i];
+    var px = fx2sx(pe.fx), py = fy2sy(pe.fy), prr = fr2sr(PELLET_RADIUS);
+    GF.drawSprite('pellet', px, py, prr * 2.4, function(c, x, y, s) {
+      var gr = c.createRadialGradient(x - s * 0.15, y - s * 0.15, s * 0.1, x, y, s / 2);
+      gr.addColorStop(0, '#bdffe0'); gr.addColorStop(1, '#2fae78');
+      c.fillStyle = gr;
+      c.beginPath(); c.arc(x, y, s / 2 * (0.7 + 0.12 * Math.sin(pulseT * 4 + x)), 0, Math.PI * 2); c.fill();
+    });
+  }
+
+  // foes
+  for (var f = 0; f < foes.length; f++) {
+    var fo = foes[f];
+    var fxs = fx2sx(fo.fx), fys = fy2sy(fo.fy), fr = fr2sr(fo.mass);
+    var hue = fo.hue;
+    GF.drawSprite(fo.type, fxs, fys, fr * 2, function(c, x, y, s) {
+      var gr = c.createRadialGradient(x - s * 0.25, y - s * 0.25, s * 0.1, x, y, s / 2);
+      gr.addColorStop(0, 'hsl(' + hue + ',85%,68%)');
+      gr.addColorStop(1, 'hsl(' + hue + ',75%,38%)');
+      c.fillStyle = gr;
+      c.beginPath(); c.arc(x, y, s / 2, 0, Math.PI * 2); c.fill();
+      c.fillStyle = 'rgba(20,10,20,0.8)';
+      var er = s * 0.08;
+      c.beginPath(); c.arc(x - s * 0.16, y - s * 0.08, er, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(x + s * 0.16, y - s * 0.08, er, 0, Math.PI * 2); c.fill();
+    });
+  }
+
+  // player blob
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    var plx = fx2sx(player.fx), ply = fy2sy(player.fy), plr = fr2sr(player.mass);
+    var blink = invuln > 0 && (Math.floor(pulseT * 12) % 2 === 0);
+    ctx.save();
+    if (!blink) { ctx.shadowColor = 'rgba(77,208,225,0.7)'; ctx.shadowBlur = 22 * GF.S; }
+    ctx.globalAlpha = blink ? 0.45 : 1;
+    GF.drawSprite('player', plx, ply, plr * 2, function(c, x, y, s) {
+      var gr = c.createRadialGradient(x - s * 0.22, y - s * 0.22, s * 0.12, x, y, s / 2);
+      gr.addColorStop(0, '#aef4ff'); gr.addColorStop(0.6, '#3fc6dd'); gr.addColorStop(1, '#1f7e96');
+      c.fillStyle = gr;
+      c.beginPath(); c.arc(x, y, s / 2, 0, Math.PI * 2); c.fill();
+      c.fillStyle = 'rgba(10,30,40,0.85)';
+      var er = s * 0.07;
+      c.beginPath(); c.arc(x - s * 0.16, y - s * 0.06, er, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(x + s * 0.16, y - s * 0.06, er, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = 'rgba(10,30,40,0.8)'; c.lineWidth = s * 0.05; c.lineCap = 'round';
+      c.beginPath(); c.arc(x, y + s * 0.06, s * 0.18, 0.15 * Math.PI, 0.85 * Math.PI); c.stroke();
+    });
+    ctx.restore();
+
+    // momentum arrow when moving fast
+    var sp = Math.hypot(player.vx, player.vy);
+    if (gs === 'PLAYING' && sp > 80) {
+      var ux = player.vx / sp, uy = player.vy / sp;
+      ctx.save();
+      ctx.globalAlpha = Math.min(sp / 400, 0.6);
+      ctx.strokeStyle = '#aef4ff'; ctx.lineWidth = 3 * GF.S; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(plx, ply);
+      ctx.lineTo(plx + ux * plr * 1.4, ply + uy * plr * 1.4);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+}
+
+function drawHUD(ctx) {
+  hudButtons = [];
+  var pad = 12 * GF.S;
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  ctx.textBaseline = 'top';
+
+  // lives (top-left hearts)
+  ctx.textAlign = 'left';
+  for (var i = 0; i < MAX_LIVES; i++) {
+    ctx.fillStyle = i < lives ? '#ff6b81' : 'rgba(255,107,129,0.22)';
+    drawHeart(ctx, pad + i * (fs + 8) + fs / 2, pad + fs / 2, fs * 0.62);
+  }
+
+  // wave (top-center)
+  ctx.fillStyle = '#e6ddff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillText(GF.t('wave') + ' ' + wave + ' / ' + TOTAL_WAVES, GF.W / 2, pad);
+
+  // ? and MENU buttons (top-right)
+  var btnH = GF.clamp(26 * GF.S, 22, 34);
+  var helpW = btnH, gapb = 6 * GF.S;
+  var menuW = GF.clamp(66 * GF.S, 60, 86);
+  var rx = GF.W - pad - helpW;
+  GF.rr(ctx, rx, pad, helpW, btnH, 6 * GF.S);
+  ctx.fillStyle = 'rgba(122,215,255,0.18)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(122,215,255,0.6)'; ctx.lineWidth = 1.5 * GF.S; ctx.stroke();
+  ctx.fillStyle = '#cfe9ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  ctx.fillText('?', rx + helpW / 2, pad + btnH / 2);
+  hudButtons.push({ x: rx, y: pad, w: helpW, h: btnH, fn: function() { showHelp = true; } });
+
+  var mx = rx - gapb - menuW;
+  GF.rr(ctx, mx, pad, menuW, btnH, 6 * GF.S);
+  ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5 * GF.S; ctx.stroke();
+  ctx.fillStyle = '#e6ecff';
+  ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 15) + 'px sans-serif';
+  ctx.fillText(GF.t('menu'), mx + menuW / 2, pad + btnH / 2);
+  hudButtons.push({ x: mx, y: pad, w: menuW, h: btnH, fn: backToMenu });
+
+  // foes left + score (center, below wave)
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#b9aede';
+  ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  ctx.fillText(GF.t('foes') + ': ' + foes.length + '   ' + GF.t('score') + ': ' + score, GF.W / 2, pad + fs + 12 * GF.S);
+
+  // stall warning bar
+  if (stallTimer > 0.2) {
+    var frac = GF.clamp(stallTimer / STALL_SEC, 0, 1);
+    var barW = GF.clamp(160 * GF.S, 120, 220), barH = 6 * GF.S;
+    var barX = GF.W / 2 - barW / 2, barY = pad + fs + 32 * GF.S;
+    ctx.fillStyle = 'rgba(255,107,129,0.2)';
+    GF.rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fill();
+    ctx.fillStyle = '#ff6b81';
+    GF.rr(ctx, barX, barY, barW * frac, barH, barH / 2); ctx.fill();
+  }
+  ctx.textBaseline = 'top';
+}
+
+function drawHeart(ctx, cx, cy, s) {
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + s * 0.5);
+  ctx.bezierCurveTo(cx + s, cy - s * 0.4, cx + s * 0.5, cy - s, cx, cy - s * 0.35);
+  ctx.bezierCurveTo(cx - s * 0.5, cy - s, cx - s, cy - s * 0.4, cx, cy + s * 0.5);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ── MENU + tutorial block ────────────────────────────────────────────────
+function drawMenu(ctx) {
+  hudButtons = [];
+  ctx.fillStyle = 'rgba(10,7,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(34 * GF.S, 24, 50);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.save();
+  ctx.shadowColor = 'rgba(77,208,225,0.5)'; ctx.shadowBlur = 26 * GF.S;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  var topY = GF.H * 0.12;
+  ctx.fillText(GF.t('title'), GF.W / 2, topY);
+  ctx.restore();
+
+  drawMenuGlyph(ctx, GF.W / 2, topY + 38 * GF.S);
+
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var bodyFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = bodyFs + 'px sans-serif';
+  var maxW = Math.min(GF.W * 0.86, 520 * GF.S);
+  var lineH = bodyFs * 1.32;
+  var blockGap = bodyFs * 0.7;
+  var y = topY + 78 * GF.S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  var leftX = GF.W / 2 - maxW / 2;
+  for (var i = 0; i < lines.length; i++) {
+    y = wrapText(ctx, lines[i], leftX, y, maxW, lineH, '#d3cdf0') + blockGap;
+  }
+
+  var btnW = GF.clamp(230 * GF.S, 160, 320), btnH = GF.clamp(54 * GF.S, 44, 66);
+  var btnX = GF.W / 2 - btnW / 2;
+  var btnY = Math.min(y + 12 * GF.S, GF.H - btnH - 22 * GF.S);
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#4dd0e1'); grad.addColorStop(1, '#2b95a8');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#06181d';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.W / 2, btnY + btnH / 2);
+  hudButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame });
+
+  if (bestWave > 0) {
+    ctx.fillStyle = '#6a5b93';
+    ctx.font = GF.clamp(13 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillText(GF.t('best') + ': ' + bestWave + ' / ' + TOTAL_WAVES, GF.W / 2, btnY + btnH + 14 * GF.S);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawMenuGlyph(ctx, cx, cy) {
+  // big blob ringed by little foes — the core fantasy
+  ctx.save();
+  var R = 18 * GF.S;
+  var rad = ctx.createRadialGradient(cx - R * 0.25, cy - R * 0.25, R * 0.1, cx, cy, R);
+  rad.addColorStop(0, '#aef4ff'); rad.addColorStop(1, '#1f7e96');
+  for (var i = 0; i < 6; i++) {
+    var a = pulseT * 0.9 + i * Math.PI / 3;
+    var rr = R * 2.4;
+    var ex = cx + Math.cos(a) * rr, ey = cy + Math.sin(a) * rr;
+    var eg = ctx.createRadialGradient(ex, ey, 1, ex, ey, R * 0.5);
+    eg.addColorStop(0, 'hsl(' + (24 + i * 12) + ',85%,62%)');
+    eg.addColorStop(1, 'hsl(' + (24 + i * 12) + ',75%,38%)');
+    ctx.fillStyle = eg;
+    ctx.beginPath(); ctx.arc(ex, ey, R * 0.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.shadowColor = 'rgba(77,208,225,0.6)'; ctx.shadowBlur = 16 * GF.S;
+  ctx.fillStyle = rad;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawHelpPanel(ctx) {
+  ctx.fillStyle = 'rgba(10,7,18,0.94)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(22 * GF.S, 17, 30);
+  ctx.fillStyle = '#4dd0e1'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  var topY = GF.H * 0.15;
+  ctx.fillText(GF.t('howto'), GF.W / 2, topY);
+
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var bodyFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = bodyFs + 'px sans-serif';
+  var maxW = Math.min(GF.W * 0.86, 520 * GF.S);
+  var lineH = bodyFs * 1.32, blockGap = bodyFs * 0.7;
+  var y = topY + titleFs + 18 * GF.S;
+  ctx.textAlign = 'left';
+  var leftX = GF.W / 2 - maxW / 2;
+  for (var i = 0; i < lines.length; i++) {
+    y = wrapText(ctx, lines[i], leftX, y, maxW, lineH, '#d3cdf0') + blockGap;
+  }
+  var btnW = GF.clamp(180 * GF.S, 130, 240), btnH = GF.clamp(46 * GF.S, 38, 56);
+  var btnX = GF.W / 2 - btnW / 2, btnY = Math.min(y + 18 * GF.S, GF.H - btnH - 24 * GF.S);
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = '#4dd0e1'; ctx.fill();
+  ctx.fillStyle = '#06181d'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 21) + 'px sans-serif';
+  ctx.fillText('OK', GF.W / 2, btnY + btnH / 2);
+  hudButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { showHelp = false; } });
+  ctx.textBaseline = 'top';
+}
+
+function drawEndScreen(ctx, title, sub, btnLabel, btnFn, isWin) {
+  hudButtons = [];
+  ctx.fillStyle = 'rgba(10,7,18,0.88)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(36 * GF.S, 24, 54);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.save();
+  ctx.shadowColor = isWin ? 'rgba(77,255,158,0.5)' : 'rgba(255,107,129,0.45)';
+  ctx.shadowBlur = 24 * GF.S;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillText(title, GF.W / 2, GF.H / 2 - 64 * GF.S);
+  ctx.restore();
+  ctx.fillStyle = '#b9aede';
+  ctx.font = GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillText(sub, GF.W / 2, GF.H / 2 - 24 * GF.S);
+  ctx.fillStyle = '#8a7eb8';
+  ctx.font = GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('score') + ': ' + score, GF.W / 2, GF.H / 2 + 2 * GF.S);
+
+  var btnW = GF.clamp(220 * GF.S, 160, 300), btnH = GF.clamp(52 * GF.S, 42, 64);
+  var btnX = GF.W / 2 - btnW / 2, btnY = GF.H / 2 + 28 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#4dd0e1'); grad.addColorStop(1, '#2b95a8');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#06181d'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(17 * GF.S, 14, 23) + 'px sans-serif';
+  ctx.fillText(btnLabel, GF.W / 2, btnY + btnH / 2);
+  hudButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: btnFn });
+
+  var mW = GF.clamp(180 * GF.S, 130, 240), mH = GF.clamp(44 * GF.S, 36, 54);
+  var mX = GF.W / 2 - mW / 2, mY = btnY + btnH + 14 * GF.S;
+  GF.rr(ctx, mX, mY, mW, mH, mH / 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5 * GF.S; ctx.stroke();
+  ctx.fillStyle = '#e6ecff';
+  ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('menu'), GF.W / 2, mY + mH / 2);
+  hudButtons.push({ x: mX, y: mY, w: mW, h: mH, fn: backToMenu });
+  ctx.textBaseline = 'alphabetic';
+}
+
+function wrapText(ctx, text, x, y, maxW, lineH, color) {
+  ctx.fillStyle = color || '#fff';
+  var words = String(text).split(/\s+/);
+  var line = '', yy = y;
+  for (var i = 0; i < words.length; i++) {
+    var probe = line ? line + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && line) {
+      ctx.fillText(line, x, yy);
+      yy += lineH; line = words[i];
+    } else { line = probe; }
+  }
+  if (line) { ctx.fillText(line, x, yy); yy += lineH; }
+  return yy;
+}
+
+// ── TAP WIRING (scaleX/Y from getBoundingClientRect every click) ─────────
+var cnv = document.getElementById('c');
+function clientToCanvas(clientX, clientY) {
+  var r = cnv.getBoundingClientRect();
+  var scaleX = cnv.width / r.width;
+  var scaleY = cnv.height / r.height;
+  return { x: (clientX - r.left) * scaleX, y: (clientY - r.top) * scaleY };
+}
+cnv.addEventListener('pointerdown', function(e) {
+  var p = clientToCanvas(e.clientX, e.clientY);
+  onTap(p.x, p.y);
+}, { passive: true });
+
+// ── SCREENSHOT HELPERS ───────────────────────────────────────────────────
+// _jumpLevel: post-build-tester calls _jumpLevel(1) (populated PLAYING) and
+// _jumpLevel(99) (terminal). take_screenshots.js prefers _setupForScreenshot.
+window._jumpLevel = function(lv) {
+  if (lv >= 99) {                      // sentinel → drive to GAMEOVER
+    gs = 'PLAYING'; wave = 1; lives = 1;
+    buildWave(1);
+    invuln = 0;
+    loseLife();                        // last life → GAMEOVER
+    return;
+  }
+  window._setupForScreenshot(lv && lv > 1 ? lv : 3);
+};
+window._setupForScreenshot = function(lv) {
+  lv = lv || 3;
+  wave = Math.min(Math.max(lv, 1), TOTAL_WAVES);
+  lives = MAX_LIVES;
+  score = 120 + wave * 40;
+  gs = 'PLAYING';
+  buildWave(wave);
+  projectField();
+  invuln = 0;
+  showHelp = false;
+  player.mass = Math.min(PLAYER_START_MASS + 22, MAX_PLAYER_MASS);
+  // pull the foe cloud in tight around the player for a dense action frame
+  for (var i = 0; i < foes.length; i++) {
+    var f = foes[i];
+    var ang = (i / foes.length) * Math.PI * 2 + 0.3;
+    var rr = player.mass + f.mass + 6 + (i % 5) * 16;
+    f.fx = PLAT_CX + Math.cos(ang) * rr;
+    f.fy = PLAT_CY + Math.sin(ang) * rr;
+    if (i % 4 === 0) { f.vx = Math.cos(ang) * 220; f.vy = Math.sin(ang) * 220; }
+  }
+  player.vx = 160; player.vy = -120;
+  GF.spawnParticles(fx2sx(player.fx + player.mass), fy2sy(player.fy), '#ffd34d', 14);
+  GF.spawnParticles(fx2sx(player.fx - player.mass), fy2sy(player.fy), 'hsl(30,80%,60%)', 10);
+};
+
+// ── EXPOSE STATE (post-build-tester gate) ────────────────────────────────
+GF.exposeState(function() {
+  return { gs: gs, wave: wave, lives: lives, foes: foes.length, mass: player.mass, score: score };
+});
+
+// read-only positional probe (test hook; safe to ship)
+window._probe = function() {
+  return {
+    player: { x: player.fx, y: player.fy, vx: player.vx, vy: player.vy, mass: player.mass },
+    plat: { cx: PLAT_CX, cy: PLAT_CY, r: PLATFORM_RADIUS },
+    foes: foes.map(function(f) { return { x: f.fx, y: f.fy, mass: f.mass }; }),
+    pellets: pellets.length, gs: gs, lives: lives, wave: wave,
+  };
+};
+
+// hooks for locale_overflow_check
+window._setLang = function(l) { GF.lang = l; };
+window._setState = function(s) {
+  if (s === 'PLAYING') { if (gs !== 'PLAYING') startGame(); }
+  else gs = s;
+};
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 540,
+  designH: 940,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'crowd_crusher',
+  onReady: function() {
+    try { bestWave = parseInt(localStorage.getItem('crowd_crusher_best') || '0') || 0; } catch (e) {}
+    GF.persist('crowd_crusher_run_v1',
+      function() { return { gs: gs, wave: wave, lives: lives, score: score }; },
+      function(s) {
+        if (!s) return;
+        wave = s.wave || 1;
+        lives = (typeof s.lives === 'number') ? s.lives : MAX_LIVES;
+        score = s.score || 0;
+        gs = s.gs || 'MENU';
+      }
+    );
+    // Safe entry: never resume live combat; bounce a saved PLAYING to MENU.
+    if (gs === 'PLAYING') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

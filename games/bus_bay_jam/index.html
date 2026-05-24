@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Bus Bay Jam</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #11161f; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — every UI string both languages) ────
+var STRINGS = {
+  en: {
+    title: 'Bus Bay Jam',
+    sub:   'Dispatch buses, clear the queue',
+    play: 'PLAY', retry: 'RETRY', menu: 'MENU', next: 'NEXT LEVEL',
+    cleared_level: 'CLEARED!', deadlock: 'DEADLOCK', allclear: 'ALL CLEAR!',
+    level: 'LEVEL', cleared: 'CLEARED', queue: 'QUEUE',
+    deadlock_sub: 'No bay serves the front passenger',
+    win_sub: 'The whole queue boarded',
+    allclear_sub: 'You cleared every level today',
+    lobby: 'DEPOT', lobby_sub: 'Tap a level to ride out',
+    start: 'START', continue_btn: 'CONTINUE', best_label: 'Best dispatches',
+    tut_goal: 'Goal: clear the whole passenger queue by sending out colour-matched buses.',
+    tut_controls: 'Controls: tap an empty bay to dock the next bus; tap a docked bus to send it off early.',
+    tut_win: 'Win: every passenger boards and the queue empties.',
+    tut_lose: 'Lose: all 3 bays full and the front passenger matches no docked bus — a deadlock.',
+    tut_tip: 'Tip: the queue never reorders, so plan each bay before all three fill.',
+    next_bus: 'NEXT BUSES',
+  },
+  ru: {
+    title: 'Посадочный затор',
+    sub:   'Отправляй автобусы, очищай очередь',
+    play: 'ИГРАТЬ', retry: 'ЗАНОВО', menu: 'МЕНЮ', next: 'ДАЛЬШЕ',
+    cleared_level: 'ОЧИЩЕНО!', deadlock: 'ЗАТОР', allclear: 'ВСЁ ЧИСТО!',
+    level: 'УРОВЕНЬ', cleared: 'ПОСАЖЕНО', queue: 'ОЧЕРЕДЬ',
+    deadlock_sub: 'Ни один залив не везёт переднего',
+    win_sub: 'Вся очередь села в автобусы',
+    allclear_sub: 'Вы прошли все уровни сегодня',
+    lobby: 'ДЕПО', lobby_sub: 'Выбери уровень для выезда',
+    start: 'СТАРТ', continue_btn: 'ПРОДОЛЖИТЬ', best_label: 'Меньше отправок',
+    tut_goal: 'Цель: очистить всю очередь, отправляя автобусы под цвет пассажиров.',
+    tut_controls: 'Управление: коснись пустого залива, чтобы подать автобус; коснись стоящего автобуса, чтобы отправить заранее.',
+    tut_win: 'Победа: все пассажиры сели и очередь опустела.',
+    tut_lose: 'Поражение: все 3 залива заняты, а цвет переднего не совпал ни с одним автобусом — затор.',
+    tut_tip: 'Совет: очередь не меняется местами, планируй залив до того, как все три заняты.',
+    next_bus: 'СЛЕДУЮЩИЕ',
+  },
+};
+
+// AI sprites (procedural fallback always present). Passengers stay procedural
+// so their colour reads unambiguously — colour-matching is the core mechanic.
+var SPRITE_NAMES = ['bus', 'bay'];
+
+// ── TUNABLES ─────────────────────────────────────────────────────────────
+var TOTAL_LEVELS    = 8;
+var NUM_BAYS        = 3;
+var BUS_PEEK        = 3;
+var BUS_CAPACITY    = 4;
+var START_COLORS    = 3;
+var MAX_COLORS      = 6;
+var QUEUE_BASE      = 10;
+var QUEUE_PER_LEVEL = 2;
+var BOARD_MS        = 280;
+var DEPART_MS       = 420;
+
+// Design space (portrait-first)
+var DW = 540, DH = 960;
+
+// Palette of passenger / bus colours (max MAX_COLORS used).
+var PALETTE = [
+  { fill: '#ff5a7a', dark: '#c23552', name: 'rose'   },
+  { fill: '#4dd0e1', dark: '#2596a3', name: 'cyan'   },
+  { fill: '#ffd24d', dark: '#c79a1e', name: 'amber'  },
+  { fill: '#8d6bff', dark: '#5e3fd1', name: 'violet' },
+  { fill: '#5dde8b', dark: '#2fa85c', name: 'green'  },
+  { fill: '#ff944d', dark: '#cc6a26', name: 'orange' },
+];
+
+// ── GAME STATE ──────────────────────────────────────────────────────────
+var gs = 'MENU';        // MENU | LOBBY | PLAYING | GAMEOVER | WIN
+var level = 1;
+var colorCount = START_COLORS;
+var queue = [];         // [{ color }] — front is index 0. IMMOVABLE.
+var totalPassengers = 0;
+var clearedCount = 0;
+var bays = [];          // length NUM_BAYS, each null or { color, seats, depart, departT }
+var pool = [];          // upcoming bus colours (numbers)
+var dispatches = 0;     // buses docked this level (lower = better)
+var best = 0;           // best (fewest) dispatches across a full clear, 0 = none
+var maxLevelReached = 1;
+var boarding = null;    // { bayIdx, t } animation for current boarding step
+
+// help panel toggle during play
+var showHelp = false;
+
+// daily seed PRNG (mulberry32)
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function daySeed() {
+  var d = new Date();
+  return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+}
+
+// ── LEVEL SETUP ───────────────────────────────────────────────────────────
+function buildLevel(n) {
+  colorCount = Math.min(MAX_COLORS, START_COLORS + Math.floor((n - 1) * (MAX_COLORS - START_COLORS) / (TOTAL_LEVELS - 1)));
+  var qlen = QUEUE_BASE + (n - 1) * QUEUE_PER_LEVEL;
+  var rnd = mulberry32(daySeed() + n * 7919);
+
+  // Build the queue: random colours. Bus supply is generated to seat the
+  // exact multiset (rounded up to full buses) so a win is always possible
+  // with correct play; the challenge is ordering, not supply.
+  queue = [];
+  var counts = new Array(colorCount).fill(0);
+  for (var i = 0; i < qlen; i++) {
+    var col = Math.floor(rnd() * colorCount);
+    queue.push({ color: col });
+    counts[col]++;
+  }
+  var buses = [];
+  for (var c = 0; c < colorCount; c++) {
+    var need = Math.ceil(counts[c] / BUS_CAPACITY);
+    for (var b = 0; b < need; b++) buses.push(c);
+  }
+  // A couple of spare buses so the pool is never starved exactly.
+  var spare = 2 + Math.floor(rnd() * 2);
+  for (var s = 0; s < spare; s++) buses.push(Math.floor(rnd() * colorCount));
+  // Seeded Fisher-Yates shuffle
+  for (var k = buses.length - 1; k > 0; k--) {
+    var j = Math.floor(rnd() * (k + 1));
+    var tmp = buses[k]; buses[k] = buses[j]; buses[j] = tmp;
+  }
+  pool = buses;
+
+  totalPassengers = qlen;
+  clearedCount = 0;
+  bays = new Array(NUM_BAYS).fill(null);
+  dispatches = 0;
+  boarding = null;
+}
+
+function startLevel(n) {
+  level = n;
+  if (n > maxLevelReached) maxLevelReached = n;
+  buildLevel(n);
+  gs = 'PLAYING';
+  showHelp = false;
+  GF.gameStarted();
+  saveAll();
+}
+
+function startGame() {
+  startLevel(1);
+}
+
+// ── CORE MECHANIC ──────────────────────────────────────────────────────────
+// Dock the next pool bus into an empty bay index.
+function dockBus(bayIdx) {
+  if (bayIdx < 0 || bayIdx >= NUM_BAYS) return;
+  if (bays[bayIdx] !== null) return;
+  if (pool.length === 0) return;
+  var col = pool.shift();
+  bays[bayIdx] = { color: col, seats: 0, depart: false, departT: 0, popIn: 0 };
+  dispatches++;
+  GF.spawnParticles(dx(bayCenterX(bayIdx)), dy(bayCenterY()), PALETTE[col].fill, 8);
+  attemptBoard(bayIdx);
+  saveAll();
+}
+
+// Try to start boarding matching front passengers onto a bay's bus.
+function attemptBoard(bayIdx) {
+  if (boarding) return; // one boarding animation at a time
+  var bus = bays[bayIdx];
+  if (!bus || bus.depart) return;
+  if (queue.length === 0) { checkDeadlockOrWin(); return; }
+  if (bus.seats >= BUS_CAPACITY) { departBus(bayIdx); return; }
+  if (queue[0].color !== bus.color) { checkDeadlockOrWin(); return; }
+  boarding = { bayIdx: bayIdx, t: 0 };
+}
+
+// Called when a boarding step completes.
+function finishBoardStep() {
+  if (!boarding) return;
+  var bayIdx = boarding.bayIdx;
+  var bus = bays[bayIdx];
+  boarding = null;
+  if (!bus || bus.depart) return;
+  if (queue.length > 0 && queue[0].color === bus.color && bus.seats < BUS_CAPACITY) {
+    queue.shift();
+    bus.seats++;
+    clearedCount++;
+    GF.spawnFloat(dx(bayCenterX(bayIdx)), dy(bayCenterY()) - 30 * GF.S, '+1', '#fff');
+    saveAll();
+  }
+  if (bus.seats >= BUS_CAPACITY) { departBus(bayIdx); return; }
+  if (queue.length > 0 && queue[0].color === bus.color) { attemptBoard(bayIdx); return; }
+  rescanBays();
+}
+
+// After a colour break, see if any other docked bus matches the new front.
+function rescanBays() {
+  if (queue.length === 0) { checkDeadlockOrWin(); return; }
+  for (var i = 0; i < NUM_BAYS; i++) {
+    var b = bays[i];
+    if (b && !b.depart && b.color === queue[0].color && b.seats < BUS_CAPACITY) {
+      attemptBoard(i);
+      return;
+    }
+  }
+  checkDeadlockOrWin();
+}
+
+// Depart a bus: animate it pulling out, then free the bay.
+function departBus(bayIdx) {
+  var bus = bays[bayIdx];
+  if (!bus || bus.depart) return;
+  bus.depart = true;
+  bus.departT = 0;
+  GF.spawnParticles(dx(bayCenterX(bayIdx)), dy(bayCenterY()), PALETTE[bus.color].fill, 14);
+  saveAll();
+}
+
+// Manual early-depart on tap.
+function tapDockedBus(bayIdx) {
+  var bus = bays[bayIdx];
+  if (!bus || bus.depart) return;
+  if (boarding && boarding.bayIdx === bayIdx) return; // don't yank mid-board
+  departBus(bayIdx);
+}
+
+function freeBay(bayIdx) {
+  bays[bayIdx] = null;
+  saveAll();
+  if (queue.length === 0) { checkDeadlockOrWin(); return; }
+  rescanBays();
+}
+
+function checkDeadlockOrWin() {
+  if (queue.length === 0 && !boarding) { onLevelClear(); return; }
+  if (boarding) return;
+  var occupied = 0, matchExists = false;
+  for (var i = 0; i < NUM_BAYS; i++) {
+    var b = bays[i];
+    if (b) {
+      occupied++; // departing bays still count as occupied until freed
+      if (!b.depart && b.color === queue[0].color && b.seats < BUS_CAPACITY) matchExists = true;
+    }
+  }
+  if (occupied >= NUM_BAYS && !matchExists) onDeadlock();
+}
+
+function onLevelClear() {
+  gs = 'WIN';
+  GF.gameEnded();
+  GF.happytime();
+  if (level >= TOTAL_LEVELS) {
+    if (best === 0 || dispatches < best) {
+      best = dispatches;
+      try { localStorage.setItem('bus_bay_jam_best', String(best)); } catch (e) {}
+    }
+  }
+  saveAll();
+}
+
+function onDeadlock() {
+  gs = 'GAMEOVER';
+  GF.setShake(1.0);
+  GF.gameEnded();
+  saveAll();
+}
+
+function nextLevel() {
+  var n = level + 1;
+  if (n > TOTAL_LEVELS) { gs = 'LOBBY'; saveAll(); return; }
+  startLevel(n);
+}
+
+function toLobby() {
+  gs = 'LOBBY';
+  GF.gameEnded();
+  saveAll();
+}
+
+// ── LAYOUT HELPERS (design-space coords) ────────────────────────────────
+var TOPBAR_H = 92;
+var QUEUE_X = 56;
+var QUEUE_TOP = TOPBAR_H + 56;
+var QUEUE_SPACING = 38;
+var QUEUE_MAX_SHOW = 12;     // cap so the column ends clear of the pool strip
+var PASSENGER_R = 16;
+var BAY_ROW_Y = 460;
+var BAY_W = 144, BAY_H = 168;
+var POOL_Y = 800;            // pool strip near the bottom, below the bays
+var POOL_BUS_W = 80;
+var POOL_X0 = 150;           // pool starts clear of the queue column
+
+function bayCenterX(i) {
+  var laneX = 168;
+  var span = DW - laneX - 24;
+  var gap = span / NUM_BAYS;
+  return laneX + gap * i + gap / 2;
+}
+function bayCenterY() { return BAY_ROW_Y; }
+
+// ── design-space → device-px ──
+function originX() { return (GF.W - DW * GF.S) / 2; }
+function originY() { return (GF.H - DH * GF.S) / 2; }
+function dx(x) { return originX() + x * GF.S; }
+function dy(y) { return originY() + y * GF.S; }
+function ds(v) { return v * GF.S; }
+
+// ── INPUT — tap handling ────────────────────────────────────────────────
+function toDesign(px, py) {
+  var s = GF.S;
+  return { x: (px - originX()) / s, y: (py - originY()) / s };
+}
+
+function onTapPlaying(px, py) {
+  var p = toDesign(px, py);
+  // back arrow
+  if (p.x >= 8 && p.x <= 64 && p.y >= 20 && p.y <= 72) { toLobby(); return; }
+  // ? help
+  if (p.x >= DW - 64 && p.x <= DW - 8 && p.y >= 20 && p.y <= 72) { showHelp = !showHelp; return; }
+  if (showHelp) { showHelp = false; return; }
+  if (boarding) return;
+  for (var i = 0; i < NUM_BAYS; i++) {
+    var bx = bayCenterX(i), by = bayCenterY();
+    if (p.x >= bx - BAY_W / 2 && p.x <= bx + BAY_W / 2 &&
+        p.y >= by - BAY_H / 2 && p.y <= by + BAY_H / 2) {
+      if (bays[i] === null) dockBus(i);
+      else tapDockedBus(i);
+      return;
+    }
+  }
+}
+
+// Single unified tap dispatcher (overlay buttons + live play).
+(function installTapHandler() {
+  var canvas = document.getElementById('c');
+  var downX = 0, downY = 0, downT = 0;
+  function press(x, y) { downX = x; downY = y; downT = Date.now(); }
+  function release(x, y) {
+    if (Date.now() - downT >= 600 || Math.hypot(x - downX, y - downY) >= 24) return;
+    // overlay buttons first
+    var lists = { MENU: menuButtons, LOBBY: lobbyButtons, GAMEOVER: endButtons, WIN: endButtons };
+    var arr = lists[gs];
+    if (arr) {
+      for (var i = 0; i < arr.length; i++) {
+        var b = arr[i];
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return; }
+      }
+    }
+    if (gs === 'PLAYING') onTapPlaying(x, y);
+  }
+  canvas.addEventListener('mousedown', function(e) { press(e.clientX, e.clientY); });
+  canvas.addEventListener('mouseup',   function(e) { release(e.clientX, e.clientY); });
+  canvas.addEventListener('touchstart', function(e) {
+    var t = e.changedTouches[0]; press(t.clientX, t.clientY);
+  }, { passive: true });
+  canvas.addEventListener('touchend', function(e) {
+    var t = e.changedTouches[0]; release(t.clientX, t.clientY);
+  }, { passive: true });
+})();
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING') return;
+  if (boarding) {
+    boarding.t += dt * 1000;
+    if (boarding.t >= BOARD_MS) finishBoardStep();
+  }
+  for (var i = 0; i < NUM_BAYS; i++) {
+    var b = bays[i];
+    if (b && b.depart) {
+      b.departT += dt * 1000;
+      if (b.departT >= DEPART_MS) freeBay(i);
+    } else if (b && b.popIn < 1) {
+      b.popIn = Math.min(1, b.popIn + dt * 6);
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#1b2330');
+  g.addColorStop(1, '#0e131c');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING') {
+    drawPlatform(ctx);
+    drawQueue(ctx);
+    drawBays(ctx);
+    drawPool(ctx);
+    drawTopBar(ctx);
+    if (showHelp) drawHelpPanel(ctx);
+    return;
+  }
+  if (gs === 'MENU')  { drawMenu(ctx); return; }
+  if (gs === 'LOBBY') { drawLobby(ctx); return; }
+  if (gs === 'GAMEOVER') {
+    drawPlatform(ctx); drawQueue(ctx); drawBays(ctx); drawPool(ctx); drawTopBar(ctx);
+    drawEndCard(ctx, GF.t('deadlock'), GF.t('deadlock_sub'), '#ff5a7a',
+      [ { label: GF.t('retry'), fn: function() { startLevel(level); } },
+        { label: GF.t('menu'),  fn: toLobby } ]);
+    return;
+  }
+  if (gs === 'WIN') {
+    drawPlatform(ctx); drawBays(ctx); drawPool(ctx); drawTopBar(ctx);
+    var isAll = level >= TOTAL_LEVELS;
+    drawEndCard(ctx, isAll ? GF.t('allclear') : GF.t('cleared_level'),
+      isAll ? GF.t('allclear_sub') : GF.t('win_sub'), '#5dde8b',
+      isAll ? [ { label: GF.t('menu'), fn: toLobby } ]
+            : [ { label: GF.t('next'), fn: nextLevel }, { label: GF.t('menu'), fn: toLobby } ]);
+    return;
+  }
+}
+
+function drawPlatform(ctx) {
+  // asphalt apron behind the bays
+  ctx.fillStyle = 'rgba(255,255,255,0.03)';
+  ctx.fillRect(dx(130), dy(TOPBAR_H + 8), ds(DW - 130 - 12), ds(560 - TOPBAR_H));
+  // queue rail (left column), sized to the visible queue length
+  var visN = Math.min(queue.length, QUEUE_MAX_SHOW);
+  var railH = Math.max(120, (visN > 0 ? (visN - 1) * QUEUE_SPACING + 80 : 120));
+  ctx.fillStyle = 'rgba(120,140,180,0.10)';
+  GF.rr(ctx, dx(QUEUE_X - 28), dy(QUEUE_TOP - 34), ds(56), ds(railH), ds(28));
+  ctx.fill();
+}
+
+function drawQueue(ctx) {
+  ctx.fillStyle = '#7c8aa3';
+  ctx.font = '600 ' + ds(13) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('queue'), dx(QUEUE_X), dy(TOPBAR_H + 28));
+
+  var maxShow = QUEUE_MAX_SHOW;
+  for (var i = 0; i < queue.length && i < maxShow; i++) {
+    var y = QUEUE_TOP + i * QUEUE_SPACING;
+    var pal = PALETTE[queue[i].color];
+    var front = (i === 0);
+    var r = front ? PASSENGER_R + 4 : PASSENGER_R;
+    var cx = dx(QUEUE_X), cy = dy(y);
+    if (front) {
+      var pulse = 0.5 + 0.5 * Math.sin(Date.now() / 240);
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.35 + 0.4 * pulse) + ')';
+      ctx.lineWidth = ds(3);
+      ctx.beginPath(); ctx.arc(cx, cy, ds(r + 6), 0, Math.PI * 2); ctx.stroke();
+    }
+    (function(palc) {
+      GF.drawSprite('passenger', cx, cy, ds(r * 2), function(c, x, y2, s) {
+        drawPassengerProc(c, x, y2, s, palc);
+      });
+    })(pal);
+    if (GF.sprites['passenger']) {
+      ctx.fillStyle = pal.fill;
+      ctx.beginPath(); ctx.arc(cx, cy + ds(r * 0.5), ds(r * 0.55), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  if (queue.length > maxShow) {
+    ctx.fillStyle = '#9aa8c0';
+    ctx.font = '700 ' + ds(13) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('+' + (queue.length - maxShow), dx(QUEUE_X), dy(QUEUE_TOP + maxShow * QUEUE_SPACING));
+  }
+}
+
+function drawPassengerProc(c, x, y, s, pal) {
+  var r = s / 2;
+  c.fillStyle = pal.fill;
+  c.beginPath(); c.arc(x, y + r * 0.18, r * 0.92, 0, Math.PI * 2); c.fill();
+  c.fillStyle = pal.dark;
+  c.beginPath(); c.arc(x, y - r * 0.45, r * 0.45, 0, Math.PI * 2); c.fill();
+}
+
+function drawBays(ctx) {
+  for (var i = 0; i < NUM_BAYS; i++) {
+    var bx = dx(bayCenterX(i)), by = dy(bayCenterY());
+    var b = bays[i];
+    if (GF.sprites['bay']) GF.drawSprite('bay', bx, by, ds(Math.max(BAY_W, BAY_H)), function(){});
+    else drawBayProc(ctx, bx, by);
+    if (b === null) {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.font = '700 ' + ds(34) + 'px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('+', bx, by);
+    } else {
+      drawBus(ctx, bx, by, b);
+    }
+  }
+}
+
+function drawBayProc(c, bx, by) {
+  c.save();
+  c.strokeStyle = 'rgba(255,210,90,0.55)';
+  c.lineWidth = ds(3);
+  c.setLineDash([ds(10), ds(8)]);
+  GF.rr(c, bx - ds(BAY_W / 2), by - ds(BAY_H / 2), ds(BAY_W), ds(BAY_H), ds(14));
+  c.stroke();
+  c.setLineDash([]);
+  c.fillStyle = 'rgba(255,255,255,0.04)';
+  GF.rr(c, bx - ds(BAY_W / 2), by - ds(BAY_H / 2), ds(BAY_W), ds(BAY_H), ds(14));
+  c.fill();
+  c.restore();
+}
+
+function drawBus(ctx, bx, by, bus) {
+  var pal = PALETTE[bus.color];
+  var slide = 0;
+  if (bus.depart) {
+    var p = Math.min(1, bus.departT / DEPART_MS);
+    slide = -p * ds(260);
+    ctx.globalAlpha = 1 - p * 0.9;
+  }
+  var pop = bus.popIn !== undefined ? (0.6 + 0.4 * bus.popIn) : 1;
+  var cx = bx, cy = by + slide;
+  var w = ds(BAY_W * 0.84) * pop, h = ds(BAY_H * 0.78) * pop;
+
+  if (GF.sprites['bus']) {
+    GF.drawSprite('bus', cx, cy, Math.max(w, h), function(){});
+    ctx.fillStyle = pal.fill;
+    GF.rr(ctx, cx - w * 0.42, cy - h * 0.10, w * 0.84, h * 0.20, ds(4));
+    ctx.fill();
+  } else {
+    drawBusProc(ctx, cx, cy, w, h, pal);
+  }
+
+  var pips = BUS_CAPACITY, pipR = ds(7);
+  var startX = cx - (pips - 1) * pipR * 1.6 / 2;
+  for (var s = 0; s < pips; s++) {
+    ctx.beginPath();
+    ctx.arc(startX + s * pipR * 1.6, cy + h * 0.30, pipR, 0, Math.PI * 2);
+    ctx.fillStyle = s < bus.seats ? '#fff' : 'rgba(0,0,0,0.35)';
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBusProc(c, cx, cy, w, h, pal) {
+  c.save();
+  c.fillStyle = 'rgba(0,0,0,0.25)';
+  GF.rr(c, cx - w / 2 + ds(3), cy - h / 2 + ds(5), w, h, ds(16));
+  c.fill();
+  var g = c.createLinearGradient(cx, cy - h / 2, cx, cy + h / 2);
+  g.addColorStop(0, pal.fill);
+  g.addColorStop(1, pal.dark);
+  c.fillStyle = g;
+  GF.rr(c, cx - w / 2, cy - h / 2, w, h, ds(16));
+  c.fill();
+  c.fillStyle = 'rgba(255,255,255,0.85)';
+  GF.rr(c, cx - w * 0.36, cy - h * 0.40, w * 0.72, h * 0.20, ds(8));
+  c.fill();
+  c.fillStyle = 'rgba(255,255,255,0.45)';
+  GF.rr(c, cx - w * 0.40, cy - h * 0.10, w * 0.36, h * 0.16, ds(5));
+  c.fill();
+  GF.rr(c, cx + w * 0.04, cy - h * 0.10, w * 0.36, h * 0.16, ds(5));
+  c.fill();
+  c.restore();
+}
+
+function drawPool(ctx) {
+  ctx.fillStyle = '#7c8aa3';
+  ctx.font = '600 ' + ds(13) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('next_bus'), dx(POOL_X0), dy(POOL_Y - 64));
+
+  var n = Math.min(BUS_PEEK, pool.length);
+  var gap = ds(POOL_BUS_W + 24);
+  var startX = dx(POOL_X0) + ds(POOL_BUS_W / 2);
+  for (var i = 0; i < n; i++) {
+    var pal = PALETTE[pool[i]];
+    var cx = startX + i * gap, cy = dy(POOL_Y);
+    var w = ds(POOL_BUS_W), h = ds(POOL_BUS_W * 0.9);
+    ctx.globalAlpha = i === 0 ? 1 : Math.max(0.6, 0.85 - i * 0.12);
+    drawBusProc(ctx, cx, cy, w, h, pal);
+    if (i === 0) {
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = ds(2.5);
+      GF.rr(ctx, cx - w / 2 - ds(4), cy - h / 2 - ds(4), w + ds(8), h + ds(8), ds(12));
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+  if (pool.length === 0) {
+    ctx.fillStyle = '#5a6680';
+    ctx.font = '600 ' + ds(14) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText('—', dx(POOL_X0), dy(POOL_Y + 4));
+  }
+}
+
+function drawTopBar(ctx) {
+  ctx.fillStyle = 'rgba(10,14,22,0.6)';
+  ctx.fillRect(0, 0, GF.W, dy(TOPBAR_H));
+  // back arrow
+  ctx.strokeStyle = '#c8d4e6';
+  ctx.lineWidth = ds(3.5);
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  var ax = dx(34), ay = dy(46);
+  ctx.beginPath();
+  ctx.moveTo(ax + ds(10), ay - ds(11));
+  ctx.lineTo(ax - ds(8), ay);
+  ctx.lineTo(ax + ds(10), ay + ds(11));
+  ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 ' + ds(20) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('level') + ' ' + level, GF.W / 2, dy(38));
+  ctx.fillStyle = '#9aa8c0';
+  ctx.font = '600 ' + ds(13) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('cleared') + ' ' + clearedCount + ' / ' + totalPassengers, GF.W / 2, dy(64));
+
+  ctx.fillStyle = '#c8d4e6';
+  ctx.font = '800 ' + ds(22) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', dx(DW - 34), dy(44));
+
+  var occ = 0;
+  for (var i = 0; i < NUM_BAYS; i++) if (bays[i] !== null) occ++;
+  var dotR = ds(4);
+  var dStartX = GF.W / 2 - (NUM_BAYS - 1) * dotR * 2.4 / 2;
+  for (var d = 0; d < NUM_BAYS; d++) {
+    ctx.beginPath();
+    ctx.arc(dStartX + d * dotR * 2.4, dy(82), dotR, 0, Math.PI * 2);
+    ctx.fillStyle = d < occ ? '#ff5a7a' : 'rgba(255,255,255,0.25)';
+    ctx.fill();
+  }
+}
+
+function drawHelpPanel(ctx) {
+  ctx.fillStyle = 'rgba(8,11,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var lines = [ GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip') ];
+  ctx.fillStyle = '#ffd24d';
+  ctx.font = '800 ' + ds(26) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('title'), GF.W / 2, dy(180));
+  drawWrappedBlock(ctx, lines, dy(230), ds(15), ds(22), GF.W * 0.84);
+  ctx.fillStyle = '#9aa8c0';
+  ctx.font = '600 ' + ds(14) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(GF.lang === 'ru' ? '(коснитесь, чтобы закрыть)' : '(tap to close)', GF.W / 2, GF.H - dy(60));
+}
+
+// Wrap a list of strings into measured physical lines (no fixed y/item).
+function drawWrappedBlock(ctx, items, startY, fontPx, lineH, maxW) {
+  ctx.font = '500 ' + fontPx + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#dde4f0';
+  ctx.textAlign = 'center';
+  var y = startY;
+  for (var k = 0; k < items.length; k++) {
+    var words = String(items[k]).split(/\s+/);
+    var cur = '', laid = [];
+    for (var w = 0; w < words.length; w++) {
+      var probe = cur ? cur + ' ' + words[w] : words[w];
+      if (ctx.measureText(probe).width > maxW && cur) { laid.push(cur); cur = words[w]; }
+      else cur = probe;
+    }
+    if (cur) laid.push(cur);
+    for (var l = 0; l < laid.length; l++) { ctx.fillText(laid[l], GF.W / 2, y); y += lineH; }
+    y += lineH * 0.45;
+  }
+  return y;
+}
+
+// ── MENU overlay ──
+var menuButtons = [];
+function drawMenu(ctx) {
+  menuButtons = [];
+  decorBuses(ctx);
+  ctx.fillStyle = 'rgba(10,14,22,0.55)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  ctx.shadowColor = 'rgba(255,210,77,0.4)'; ctx.shadowBlur = ds(30);
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 ' + ds(40) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('title'), GF.W / 2, dy(180));
+  ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+
+  ctx.fillStyle = '#9aa8c0';
+  ctx.font = '600 ' + ds(15) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('sub'), GF.W / 2, dy(212));
+
+  var lines = [ GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip') ];
+  drawWrappedBlock(ctx, lines, dy(258), ds(14), ds(20), GF.W * 0.82);
+
+  var btnW = ds(240), btnH = ds(58);
+  var btnX = GF.W / 2 - btnW / 2, btnY = GF.H - dy(150);
+  drawPillButton(ctx, btnX, btnY, btnW, btnH, GF.t('play'), '#5dde8b', '#2fa85c');
+  menuButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame });
+
+  if (best > 0) {
+    ctx.fillStyle = '#7c8aa3';
+    ctx.font = '600 ' + ds(13) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(GF.t('best_label') + ': ' + best, GF.W / 2, btnY + btnH + ds(34));
+  }
+}
+
+function decorBuses(ctx) {
+  var t = Date.now() / 1000;
+  for (var i = 0; i < 4; i++) {
+    var pal = PALETTE[i % PALETTE.length];
+    var x = ((i * 0.27 + (t * 0.04 + i * 0.13)) % 1) * GF.W;
+    var y = dy(420 + i * 110);
+    ctx.globalAlpha = 0.12;
+    drawBusProc(ctx, x, y, ds(120), ds(96), pal);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ── LOBBY (depot / level select) ──
+var lobbyButtons = [];
+function drawLobby(ctx) {
+  lobbyButtons = [];
+  ctx.fillStyle = 'rgba(10,14,22,0.65)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  decorBuses(ctx);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 ' + ds(34) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('lobby'), GF.W / 2, dy(150));
+  ctx.fillStyle = '#9aa8c0';
+  ctx.font = '600 ' + ds(14) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('lobby_sub'), GF.W / 2, dy(182));
+
+  var cols = 4, cell = ds(96), pad = ds(14);
+  var gridW = cols * cell + (cols - 1) * pad;
+  var gx0 = GF.W / 2 - gridW / 2, gy0 = dy(230);
+  for (var n = 1; n <= TOTAL_LEVELS; n++) {
+    var idx = n - 1, col = idx % cols, row = Math.floor(idx / cols);
+    var x = gx0 + col * (cell + pad), y = gy0 + row * (cell + pad);
+    var locked = n > maxLevelReached;
+    ctx.fillStyle = locked ? 'rgba(255,255,255,0.06)' : 'rgba(93,222,139,0.18)';
+    GF.rr(ctx, x, y, cell, cell, ds(14)); ctx.fill();
+    ctx.strokeStyle = locked ? 'rgba(255,255,255,0.12)' : 'rgba(93,222,139,0.6)';
+    ctx.lineWidth = ds(2);
+    GF.rr(ctx, x, y, cell, cell, ds(14)); ctx.stroke();
+    ctx.fillStyle = locked ? '#5a6680' : '#fff';
+    ctx.font = '800 ' + ds(26) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(locked ? '🔒' : String(n), x + cell / 2, y + cell / 2);
+    if (!locked) {
+      (function(nn, bx, by, bw, bh) {
+        lobbyButtons.push({ x: bx, y: by, w: bw, h: bh, fn: function() { startLevel(nn); } });
+      })(n, x, y, cell, cell);
+    }
+  }
+
+  var btnW = ds(240), btnH = ds(56);
+  var btnX = GF.W / 2 - btnW / 2, btnY = GF.H - dy(140);
+  var contLvl = Math.min(maxLevelReached, TOTAL_LEVELS);
+  drawPillButton(ctx, btnX, btnY, btnW, btnH, GF.t('continue_btn') + ' ' + contLvl, '#4dd0e1', '#2596a3');
+  lobbyButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { startLevel(contLvl); } });
+}
+
+// ── end-card overlay ──
+var endButtons = [];
+function drawEndCard(ctx, title, sub, accent, btns) {
+  endButtons = [];
+  ctx.fillStyle = 'rgba(8,11,18,0.82)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var cardW = Math.min(GF.W * 0.86, ds(440)), cardH = ds(300);
+  var cx = GF.W / 2, cardY = GF.H / 2 - cardH / 2;
+  ctx.fillStyle = 'rgba(20,26,38,0.96)';
+  GF.rr(ctx, cx - cardW / 2, cardY, cardW, cardH, ds(20)); ctx.fill();
+  ctx.fillStyle = accent;
+  GF.rr(ctx, cx - cardW / 2, cardY, cardW, ds(6), ds(6)); ctx.fill();
+
+  ctx.shadowColor = accent + '99'; ctx.shadowBlur = ds(24);
+  ctx.fillStyle = '#fff';
+  ctx.font = '800 ' + ds(34) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(title, cx, cardY + ds(70));
+  ctx.shadowBlur = 0; ctx.shadowColor = 'transparent';
+
+  ctx.fillStyle = '#aeb9cc';
+  ctx.font = '600 ' + ds(15) + 'px Inter, system-ui, sans-serif';
+  wrapCentered(ctx, sub, cx, cardY + ds(118), cardW - ds(48), ds(20));
+
+  var bw = cardW - ds(60), bh = ds(50), by = cardY + ds(160);
+  for (var i = 0; i < btns.length; i++) {
+    var primary = (i === 0);
+    drawPillButton(ctx, cx - bw / 2, by, bw, bh, btns[i].label,
+      primary ? accent : '#39435a', primary ? shade(accent) : '#2a3245');
+    (function(fn, x, y, w, h) {
+      endButtons.push({ x: x, y: y, w: w, h: h, fn: fn });
+    })(btns[i].fn, cx - bw / 2, by, bw, bh);
+    by += bh + ds(12);
+  }
+}
+
+function wrapCentered(ctx, text, cx, y, maxW, lineH) {
+  var words = String(text).split(/\s+/);
+  var cur = '', lines = [];
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  for (var l = 0; l < lines.length; l++) ctx.fillText(lines[l], cx, y + l * lineH);
+}
+
+function shade(hex) {
+  var n = parseInt(hex.slice(1), 16);
+  var r = Math.max(0, ((n >> 16) & 255) - 50);
+  var g = Math.max(0, ((n >> 8) & 255) - 50);
+  var b = Math.max(0, (n & 255) - 50);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+function drawPillButton(ctx, x, y, w, h, label, c0, c1) {
+  var g = ctx.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, c0); g.addColorStop(1, c1);
+  GF.rr(ctx, x, y, w, h, h / 2); ctx.fillStyle = g; ctx.fill();
+  ctx.fillStyle = '#fff';
+  var fsz = Math.round(ds(17));
+  ctx.font = '800 ' + fsz + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var maxW = w - ds(28);
+  while (ctx.measureText(label).width > maxW && fsz > 11) {
+    fsz -= 1; ctx.font = '800 ' + fsz + 'px Inter, system-ui, sans-serif';
+  }
+  ctx.fillText(label, x + w / 2, y + h / 2 + ds(1));
+}
+
+// ── SAVE / RESTORE (Yandex 1.9) ────────────────────────────────────────
+function saveAll() { GF.saveRun(); }
+
+// ── BOOT ───────────────────────────────────────────────────────────────
+GF.init({
+  designW: DW,
+  designH: DH,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'bus_bay_jam',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('bus_bay_jam_best') || '0') || 0; } catch (e) {}
+
+    GF.persist('bus_bay_jam_run_v1',
+      function() {
+        return {
+          gs: gs, level: level, colorCount: colorCount,
+          queue: queue, totalPassengers: totalPassengers, clearedCount: clearedCount,
+          bays: bays, pool: pool, dispatches: dispatches,
+          maxLevelReached: maxLevelReached, best: best,
+        };
+      },
+      function(s) {
+        if (!s) return;
+        gs = s.gs || 'MENU';
+        level = s.level || 1;
+        colorCount = s.colorCount || START_COLORS;
+        queue = s.queue || [];
+        totalPassengers = s.totalPassengers || 0;
+        clearedCount = s.clearedCount || 0;
+        bays = s.bays || new Array(NUM_BAYS).fill(null);
+        pool = s.pool || [];
+        dispatches = s.dispatches || 0;
+        maxLevelReached = s.maxLevelReached || 1;
+        best = s.best || best;
+        boarding = null;
+        if (gs === 'PLAYING') {
+          for (var i = 0; i < bays.length; i++) {
+            if (bays[i] && bays[i].depart) bays[i] = null;
+            else if (bays[i]) bays[i].popIn = 1;
+          }
+        }
+      }
+    );
+    if (gs === 'PLAYING' && (!queue || queue.length === 0) && clearedCount === 0) gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Expose game state to the post-build-tester gate.
+GF.exposeState(function() {
+  return { gs: gs, level: level, score: clearedCount, cleared: clearedCount,
+           total: totalPassengers, queueLen: queue.length, dispatches: dispatches };
+});
+
+// ── SCREENSHOT / TEST HOOKS ────────────────────────────────────────────
+window._jumpLevel = function(n) {
+  startLevel(Math.max(1, Math.min(TOTAL_LEVELS, (n && n > 1) ? Math.min(n, 4) : 3)));
+  if (bays[0] === null && pool.length) dockBus(0);
+  if (boarding) { boarding.t = BOARD_MS; finishBoardStep(); }
+  if (bays[1] === null && pool.length) dockBus(1);
+};
+
+window._setupForScreenshot = function(n) {
+  startLevel(n && n > 1 ? Math.min(n, 4) : 3);
+  if (pool.length) dockBus(0);
+  for (var i = 0; i < 2; i++) { if (boarding) { boarding.t = BOARD_MS; finishBoardStep(); } }
+  if (bays[1] === null && pool.length) dockBus(1);
+  showHelp = false;
+  gs = 'PLAYING';
+};
+
+window._setLang = function(l) { GF.lang = (l === 'ru' ? 'ru' : 'en'); };
+window._setState = function(s) {
+  var map = { 1: 'PLAYING', 2: 'WIN', 3: 'GAMEOVER', 4: 'LOBBY', 5: 'MENU' };
+  var target = typeof s === 'number' ? map[s] : s;
+  if (target === 'PLAYING') { startLevel(3); if (pool.length) dockBus(0); }
+  else if (target === 'WIN') { startLevel(3); level = TOTAL_LEVELS - 1; queue = []; gs = 'WIN'; }
+  else if (target === 'GAMEOVER') { startLevel(3); gs = 'GAMEOVER'; }
+  else if (target === 'LOBBY') { gs = 'LOBBY'; }
+  else if (target === 'MENU') { gs = 'MENU'; }
+};
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'Inter, system-ui, sans-serif'; };
+
+})();
+</script>
+</body>
+</html>
