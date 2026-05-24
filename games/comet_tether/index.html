@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Comet Tether</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #05060f; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Comet Tether',
+    sub:   'Lasso a planet. Slingshot to the gate.',
+    play: 'PLAY', retry: 'RETRY', again: 'PLAY AGAIN', menu: 'MENU',
+    level: 'LEVEL', best: 'BEST LEVEL', lives: 'LIVES', tethers: 'TETHERS',
+    gameover: 'GAME OVER', won: 'YOU WIN!',
+    reached: 'Reached level', cleared: 'All levels cleared!',
+    howto: 'HOW TO PLAY',
+    tut_goal: 'Goal: Steer your comet through the glowing exit gate using planet gravity.',
+    tut_controls: 'Controls: Tap a nearby planet to lasso it — gravity whips you into orbit. Tap again to release and slingshot off.',
+    tut_win: 'Win: Pass through the exit gate to clear the level. Clear all 6 levels to win.',
+    tut_lose: 'Lose: Crash into a planet, or run out of tethers before the gate. 3 lives.',
+    tut_tip: 'Tip: Release at the top of your arc to fling the comet farthest.',
+  },
+  ru: {
+    title: 'Хвостатый трос',
+    sub:   'Зацепись за планету. Лети к вратам.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', again: 'ИГРАТЬ СНОВА', menu: 'МЕНЮ',
+    level: 'УРОВЕНЬ', best: 'РЕКОРД', lives: 'ЖИЗНИ', tethers: 'ТРОСЫ',
+    gameover: 'ИГРА ОКОНЧЕНА', won: 'ПОБЕДА!',
+    reached: 'Достигнут уровень', cleared: 'Все уровни пройдены!',
+    howto: 'КАК ИГРАТЬ',
+    tut_goal: 'Цель: Проведите комету сквозь светящиеся врата выхода, используя гравитацию планет.',
+    tut_controls: 'Управление: Коснитесь ближней планеты, чтобы зацепиться — гравитация закрутит вас по орбите. Коснитесь ещё раз, чтобы отпустить.',
+    tut_win: 'Победа: Пройдите сквозь врата выхода, чтобы пройти уровень. Пройдите все 6 уровней.',
+    tut_lose: 'Поражение: Врежетесь в планету или потратите все тросы. 3 жизни.',
+    tut_tip: 'Совет: Отпускайте на вершине дуги, чтобы швырнуть комету дальше всего.',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (honored by DESIGN.md) ──────────────────────────────────────
+var GRAVITY_K     = 26000;   // pull strength toward a tethered planet
+var TETHER_RANGE  = 150;     // max grab distance (design px)
+var COMET_SPEED   = 210;     // baseline free-flight speed (design px/s)
+var COMET_RADIUS  = 9;       // comet hitbox radius (design px)
+var TETHER_BUDGET = 5;       // tethers per level (overridden per level)
+var LIVES         = 3;       // strikes before run ends
+var PLANET_COUNT  = 2;       // bodies on level 1 (grows with level)
+var GATE_RADIUS   = 42;      // exit gate capture radius (design px)
+var ORBIT_MIN     = 46;      // min orbit radius clamp
+var DRAG          = 0.999;   // per-frame velocity retention (free flight)
+var TOTAL_LEVELS  = 6;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';             // MENU | PLAYING | GAMEOVER | WON
+var level = 1, lives = LIVES, bestLevel = 0;
+var tethersLeft = TETHER_BUDGET;
+var tethered = false;        // currently orbiting a planet?
+var tetherPlanet = -1;       // index of orbited planet
+var orbitDir = 1;            // +1 / -1 spin direction
+var orbitR = 0;              // locked orbit radius (screen px)
+var orbitAng = 0;            // current angle around the planet (rad)
+var orbitSpeed = 0;          // orbital speed magnitude (design px/s)
+var showHelp = false;
+
+var comet = { x: 0, y: 0, vx: 0, vy: 0 };
+var spawn = { x: 0, y: 0, fx: 0, fy: 0, aimx: 0, aimy: -100 };
+var planets = [];            // {fx,fy,fr,hue, x,y,r}
+var gate = { x: 0, y: 0, fx: 0, fy: 0 };
+var stars = [];
+var trail = [];              // recent comet positions for the tail
+var pulseT = 0;
+var resetCooldown = 0;       // brief grace after a life loss
+
+var hudButtons = [];
+
+// ── DETERMINISTIC RNG PER LEVEL ──────────────────────────────────────────
+function rngFor(seed) {
+  var s = seed * 2654435761 % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return function() { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646; };
+}
+
+// ── FIELD PROJECTION (virtual portrait field -> viewport) ────────────────
+var fieldW = 540, fieldH = 940, fScale = 1, fOffX = 0, fOffY = 0;
+function projectField() {
+  var topPad = 64 * GF.S;
+  var availW = GF.W - 16 * GF.S;
+  var availH = GF.H - topPad - 12 * GF.S;
+  fScale = Math.min(availW / fieldW, availH / fieldH);
+  fOffX = (GF.W - fieldW * fScale) / 2;
+  fOffY = topPad + (availH - fieldH * fScale) / 2;
+}
+function fx2sx(fx) { return fOffX + fx * fScale; }
+function fy2sy(fy) { return fOffY + fy * fScale; }
+function fr2sr(fr) { return fr * fScale; }
+function syncWorldFromField() {
+  projectField();
+  spawn.x = fx2sx(spawn.fx); spawn.y = fy2sy(spawn.fy);
+  gate.x  = fx2sx(gate.fx);  gate.y  = fy2sy(gate.fy);
+  for (var i = 0; i < planets.length; i++) {
+    planets[i].x = fx2sx(planets[i].fx);
+    planets[i].y = fy2sy(planets[i].fy);
+    planets[i].r = fr2sr(planets[i].fr);
+  }
+}
+
+// ── LEVEL GENERATION ─────────────────────────────────────────────────────
+// Design intent: the comet drifts up the LEFT lane; the gate sits on the
+// RIGHT side near the top. A straight flight misses the gate — the player
+// MUST tether the central "anchor" planet and slingshot rightward to curve
+// into the gate. Extra planets on later levels add obstacles, but the core
+// solution path (anchor planet -> gate) is always kept clear.
+function buildLevel(n) {
+  var rand = rngFor(1000 + n * 37);
+  var count = Math.min(PLANET_COUNT + (n - 1), 5);   // 2..5
+
+  var FW = 540, FH = 940;
+  // spawn on the left, gate on the right near the top (alternate side by level)
+  var leftSpawn = (n % 2 === 1);
+  spawn.fx = leftSpawn ? FW * 0.28 : FW * 0.72;
+  spawn.fy = FH - 90;
+  gate.fx  = leftSpawn ? FW * 0.74 : FW * 0.26;
+  gate.fy  = 110 + rand() * 60;
+  // initial aim leans toward the center anchor so the player has a clear grab
+  spawn.aimx = (FW * 0.5 - spawn.fx);
+  spawn.aimy = -(spawn.fy - FH * 0.5);
+
+  planets = [];
+  // ANCHOR planet — the intended slingshot pivot, mid-field center-ish.
+  var anchorR = 38 + n * 2; anchorR = Math.min(anchorR, 54);
+  var anchor = { fx: FW * 0.5 + (rand() - 0.5) * 60, fy: FH * 0.5 + (rand() - 0.5) * 80, fr: anchorR, hue: 250 + rand() * 80 };
+  planets.push(anchor);
+
+  // OBSTACLE planets (level 2+). Keep them OUT of the solution corridor:
+  // the triangle spawn -> anchor -> gate must stay clear.
+  var tries = 0;
+  while (planets.length < count && tries < 600) {
+    tries++;
+    var px = 70 + rand() * (FW - 140);
+    var py = 200 + rand() * (FH - 420);
+    var pr = 26 + rand() * (18 + n * 2);
+    pr = Math.min(pr, 52);
+    if (Math.hypot(px - spawn.fx, py - spawn.fy) < pr + 130) continue;
+    if (Math.hypot(px - gate.fx,  py - gate.fy)  < pr + 110) continue;
+    // keep clear of the solution path segments
+    if (segDist(px, py, spawn.fx, spawn.fy, anchor.fx, anchor.fy) < pr + 44) continue;
+    if (segDist(px, py, anchor.fx, anchor.fy, gate.fx, gate.fy) < pr + 44) continue;
+    var ok = true;
+    for (var i = 0; i < planets.length; i++) {
+      if (Math.hypot(px - planets[i].fx, py - planets[i].fy) < pr + planets[i].fr + 70) { ok = false; break; }
+    }
+    if (!ok) continue;
+    planets.push({ fx: px, fy: py, fr: pr, hue: 200 + rand() * 140 });
+  }
+
+  fieldW = FW; fieldH = FH;
+}
+
+// distance from point (px,py) to segment (ax,ay)-(bx,by)
+function segDist(px, py, ax, ay, bx, by) {
+  var dx = bx - ax, dy = by - ay;
+  var len2 = dx * dx + dy * dy || 1;
+  var t = ((px - ax) * dx + (py - ay) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  var cx = ax + t * dx, cy = ay + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────
+function levelTethers(n) { return Math.max(3, TETHER_BUDGET - Math.floor((n - 1) / 2)); }
+
+function startGame() {
+  level = 1; lives = LIVES;
+  gs = 'PLAYING';
+  startLevel(level);
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function startLevel(n) {
+  buildLevel(n);
+  syncWorldFromField();
+  tethersLeft = levelTethers(n);
+  resetComet();
+  trail = [];
+  resetCooldown = 0;
+}
+
+function resetComet() {
+  syncWorldFromField();
+  comet.x = spawn.x; comet.y = spawn.y;
+  // aim toward the anchor planet (planets[0]) so the player has a clear grab
+  var ax = (spawn.aimx || 0), ay = (spawn.aimy || -100);
+  var al = Math.hypot(ax, ay) || 1;
+  comet.vx = (ax / al) * COMET_SPEED;
+  comet.vy = (ay / al) * COMET_SPEED;
+  tethered = false; tetherPlanet = -1;
+}
+
+function loseLife() {
+  lives--;
+  GF.setShake(1.0);
+  GF.spawnParticles(comet.x, comet.y, '#ff5252', 26);
+  if (lives <= 0) {
+    var reached = Math.max(level - 1, 0);
+    if (reached > bestLevel) { bestLevel = reached; saveBest(); }
+    gs = 'GAMEOVER';
+    GF.gameEnded();
+  } else {
+    resetCooldown = 0.6;
+    tethersLeft = levelTethers(level);
+    resetComet();
+  }
+  GF.saveRun();
+}
+
+function clearLevel() {
+  GF.spawnParticles(gate.x, gate.y, '#4dff9e', 34);
+  GF.setShake(0.5);
+  if (level >= TOTAL_LEVELS) {
+    bestLevel = TOTAL_LEVELS; saveBest();
+    gs = 'WON';
+    GF.gameEnded();
+    GF.happytime();
+  } else {
+    if (level > bestLevel) { bestLevel = level; saveBest(); }
+    level++;
+    startLevel(level);
+    GF.gameStarted();
+  }
+  GF.saveRun();
+}
+
+function saveBest() {
+  try { localStorage.setItem('comet_tether_best', bestLevel); } catch (e) {}
+}
+
+function backToMenu() {
+  gs = 'MENU';
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// ── INPUT — tap a planet to grab / release ──────────────────────────────
+function onTap(sx, sy) {
+  for (var b = 0; b < hudButtons.length; b++) {
+    var bt = hudButtons[b];
+    if (sx >= bt.x && sx <= bt.x + bt.w && sy >= bt.y && sy <= bt.y + bt.h) { bt.fn(); return; }
+  }
+  if (gs !== 'PLAYING') return;
+  if (showHelp) { showHelp = false; return; }
+  if (resetCooldown > 0) return;
+
+  if (tethered) { releaseTether(); return; }
+
+  var best = -1, bestD = 1e9;
+  var rangeS = TETHER_RANGE * GF.S;
+  for (var i = 0; i < planets.length; i++) {
+    var p = planets[i];
+    var dTap = Math.hypot(sx - p.x, sy - p.y);
+    var dComet = Math.hypot(comet.x - p.x, comet.y - p.y);
+    if (dTap <= p.r + 55 * GF.S && dComet <= rangeS + p.r && dComet < bestD) {
+      bestD = dComet; best = i;
+    }
+  }
+  if (best < 0) return;
+  if (tethersLeft <= 0) return;
+
+  tethersLeft--;
+  tethered = true;
+  tetherPlanet = best;
+  var pp = planets[best];
+  var rx = comet.x - pp.x, ry = comet.y - pp.y;
+  // lock a TIGHT constrained circular orbit — capped so the orbit stays
+  // small and aimable (a huge orbit makes the slingshot impossible to aim).
+  var d = Math.max(Math.hypot(rx, ry), 1);
+  var minR = pp.r + ORBIT_MIN * GF.S;
+  var maxR = pp.r + (ORBIT_MIN + 24) * GF.S;
+  orbitR = GF.clamp(d, minR, maxR);
+  orbitAng = Math.atan2(ry, rx);
+  // preserve speed; pick spin direction from current velocity's tangential sense
+  var sp = Math.hypot(comet.vx, comet.vy);
+  orbitSpeed = Math.max(sp, COMET_SPEED * 0.7);       // keep a lively orbit
+  var cross = rx * comet.vy - ry * comet.vx;           // >0 => CCW
+  orbitDir = cross >= 0 ? 1 : -1;
+  // snap comet onto the orbit ring
+  comet.x = pp.x + Math.cos(orbitAng) * orbitR;
+  comet.y = pp.y + Math.sin(orbitAng) * orbitR;
+  GF.spawnParticles(comet.x, comet.y, '#7ad7ff', 16);
+  GF.setShake(0.25);
+  GF.saveRun();
+}
+
+function releaseTether() {
+  if (!tethered) return;
+  var pp = planets[tetherPlanet];
+  if (pp) {
+    // tangential velocity at the current orbit angle = slingshot
+    var tx = -Math.sin(orbitAng) * orbitDir;
+    var ty =  Math.cos(orbitAng) * orbitDir;
+    comet.vx = tx * orbitSpeed;
+    comet.vy = ty * orbitSpeed;
+    GF.spawnParticles(comet.x, comet.y, '#ffd34d', 20);
+    GF.setShake(0.3);
+  }
+  tethered = false;
+  tetherPlanet = -1;
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  pulseT += dt;
+  if (gs !== 'PLAYING') return;
+  syncWorldFromField();
+
+  if (resetCooldown > 0) {
+    resetCooldown -= dt;
+    comet.x = spawn.x; comet.y = spawn.y;
+    pushTrail();
+    return;
+  }
+
+  if (tethered && planets[tetherPlanet]) {
+    // CONSTRAINED CIRCULAR ORBIT — advance the angle at constant angular
+    // speed; the comet rides a fixed-radius ring so the path always curves
+    // cleanly into an orbit (no spiral-in). Release converts to tangential.
+    var p = planets[tetherPlanet];
+    var omega = (orbitSpeed * GF.S) / Math.max(orbitR, 1);  // rad/s
+    orbitAng += orbitDir * omega * dt;
+    comet.x = p.x + Math.cos(orbitAng) * orbitR;
+    comet.y = p.y + Math.sin(orbitAng) * orbitR;
+    // keep velocity in sync for the tail + release math
+    var tx = -Math.sin(orbitAng) * orbitDir, ty = Math.cos(orbitAng) * orbitDir;
+    comet.vx = tx * orbitSpeed;
+    comet.vy = ty * orbitSpeed;
+  } else {
+    // FREE FLIGHT — straight-line momentum (near-frictionless space)
+    var sub = 3;
+    var h = dt / sub;
+    for (var s = 0; s < sub; s++) {
+      comet.vx *= Math.pow(DRAG, 60 * h);
+      comet.vy *= Math.pow(DRAG, 60 * h);
+      comet.x += comet.vx * GF.S * h;
+      comet.y += comet.vy * GF.S * h;
+    }
+  }
+
+  pushTrail();
+
+  if (Math.hypot(comet.x - gate.x, comet.y - gate.y) <= GATE_RADIUS * GF.S) {
+    clearLevel();
+    return;
+  }
+
+  for (var i = 0; i < planets.length; i++) {
+    var pl = planets[i];
+    var dd = Math.hypot(comet.x - pl.x, comet.y - pl.y);
+    if (tethered && i === tetherPlanet) {
+      if (dd < pl.r - 3 * GF.S) { loseLife(); return; }
+    } else {
+      if (dd < pl.r + COMET_RADIUS * GF.S) { loseLife(); return; }
+    }
+  }
+
+  if (comet.x < -60 * GF.S || comet.x > GF.W + 60 * GF.S ||
+      comet.y < -60 * GF.S || comet.y > GF.H + 60 * GF.S) {
+    loseLife(); return;
+  }
+  if (tethersLeft <= 0 && !tethered) {
+    var speed = Math.hypot(comet.vx, comet.vy);
+    if (speed < COMET_SPEED * 0.25) { loseLife(); return; }
+  }
+}
+
+function pushTrail() {
+  trail.push({ x: comet.x, y: comet.y });
+  if (trail.length > 22) trail.shift();
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#06070f'); g.addColorStop(0.6, '#0a0a1e'); g.addColorStop(1, '#0d0820');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, GF.W, GF.H);
+  drawStars(ctx);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'WON') drawWorld(ctx);
+  if (gs === 'PLAYING') {
+    drawHUD(ctx);
+    if (showHelp) drawHelpPanel(ctx);
+  }
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'GAMEOVER') drawEndScreen(ctx, GF.t('gameover'), GF.t('reached') + ' ' + Math.max(level, 1), GF.t('retry'), startGame, false);
+  if (gs === 'WON')      drawEndScreen(ctx, GF.t('won'), GF.t('cleared'), GF.t('again'), startGame, true);
+}
+
+function drawStars(ctx) {
+  if (stars.length === 0) {
+    for (var i = 0; i < 70; i++) {
+      stars.push({ x: Math.random(), y: Math.random(), r: Math.random() * 1.4 + 0.3, tw: Math.random() * 6 });
+    }
+  }
+  for (var j = 0; j < stars.length; j++) {
+    var st = stars[j];
+    var a = 0.4 + 0.6 * Math.abs(Math.sin(pulseT * 0.8 + st.tw));
+    ctx.globalAlpha = a * 0.7;
+    ctx.fillStyle = '#cdd6ff';
+    ctx.beginPath();
+    ctx.arc(st.x * GF.W, st.y * GF.H, st.r * GF.S, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawWorld(ctx) {
+  var gp = 0.5 + 0.5 * Math.sin(pulseT * 3);
+  var gr = GATE_RADIUS * GF.S;
+  ctx.save();
+  ctx.shadowColor = '#4dff9e'; ctx.shadowBlur = (18 + gp * 14) * GF.S;
+  ctx.strokeStyle = '#4dff9e';
+  ctx.lineWidth = (4 + gp * 2) * GF.S;
+  ctx.beginPath(); ctx.arc(gate.x, gate.y, gr, 0, Math.PI * 2); ctx.stroke();
+  ctx.globalAlpha = 0.5;
+  ctx.lineWidth = 2 * GF.S;
+  ctx.beginPath(); ctx.arc(gate.x, gate.y, gr * (0.5 + gp * 0.3), 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
+
+  for (var i = 0; i < planets.length; i++) {
+    var p = planets[i];
+    var rad = ctx.createRadialGradient(p.x - p.r * 0.3, p.y - p.r * 0.3, p.r * 0.2, p.x, p.y, p.r);
+    rad.addColorStop(0, 'hsl(' + p.hue + ',70%,62%)');
+    rad.addColorStop(1, 'hsl(' + p.hue + ',65%,28%)');
+    ctx.save();
+    if (tethered && i === tetherPlanet) { ctx.shadowColor = '#7ad7ff'; ctx.shadowBlur = 22 * GF.S; }
+    ctx.fillStyle = rad;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    if (!tethered && gs === 'PLAYING' && Math.hypot(comet.x - p.x, comet.y - p.y) <= (TETHER_RANGE + 30) * GF.S && tethersLeft > 0) {
+      ctx.globalAlpha = 0.22 + 0.12 * Math.sin(pulseT * 4);
+      ctx.strokeStyle = '#7ad7ff'; ctx.lineWidth = 2 * GF.S;
+      ctx.setLineDash([6 * GF.S, 6 * GF.S]);
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r + 16 * GF.S, 0, Math.PI * 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
+  if (tethered && planets[tetherPlanet]) {
+    var tp = planets[tetherPlanet];
+    ctx.save();
+    ctx.strokeStyle = 'rgba(122,215,255,0.85)';
+    ctx.lineWidth = 2.5 * GF.S;
+    ctx.shadowColor = '#7ad7ff'; ctx.shadowBlur = 10 * GF.S;
+    ctx.beginPath(); ctx.moveTo(tp.x, tp.y); ctx.lineTo(comet.x, comet.y); ctx.stroke();
+    ctx.restore();
+  }
+
+  for (var t = 0; t < trail.length; t++) {
+    var pt = trail[t];
+    var a = t / trail.length;
+    ctx.globalAlpha = a * 0.55;
+    ctx.fillStyle = tethered ? '#9fe3ff' : '#ffd9a3';
+    ctx.beginPath();
+    ctx.arc(pt.x, pt.y, (COMET_RADIUS * 0.9) * GF.S * a, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  if (gs === 'PLAYING') {
+    ctx.save();
+    var cr = COMET_RADIUS * GF.S;
+    ctx.shadowColor = '#ffe08a'; ctx.shadowBlur = 18 * GF.S;
+    var cg = ctx.createRadialGradient(comet.x, comet.y, cr * 0.2, comet.x, comet.y, cr * 1.6);
+    cg.addColorStop(0, '#fff6e0'); cg.addColorStop(0.5, '#ffd34d'); cg.addColorStop(1, 'rgba(255,160,60,0)');
+    ctx.fillStyle = cg;
+    ctx.beginPath(); ctx.arc(comet.x, comet.y, cr * 1.6, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#fffdf5';
+    ctx.beginPath(); ctx.arc(comet.x, comet.y, cr * 0.7, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawHUD(ctx) {
+  hudButtons = [];
+  var pad = 12 * GF.S;
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  ctx.textBaseline = 'top';
+
+  ctx.textAlign = 'left';
+  for (var i = 0; i < LIVES; i++) {
+    ctx.fillStyle = i < lives ? '#ff6b81' : 'rgba(255,107,129,0.22)';
+    drawHeart(ctx, pad + i * (fs + 8) + fs / 2, pad + fs / 2, fs * 0.62);
+  }
+
+  ctx.fillStyle = '#dfe6ff';
+  ctx.textAlign = 'center';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillText(GF.t('level') + ' ' + level + ' / ' + TOTAL_LEVELS, GF.W / 2, pad);
+
+  var btnH = GF.clamp(26 * GF.S, 22, 34);
+  var helpW = btnH, gapb = 6 * GF.S;
+  var menuW = GF.clamp(58 * GF.S, 48, 80);
+  var rx = GF.W - pad - helpW;
+  GF.rr(ctx, rx, pad, helpW, btnH, 6 * GF.S);
+  ctx.fillStyle = 'rgba(122,215,255,0.18)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(122,215,255,0.6)'; ctx.lineWidth = 1.5 * GF.S; ctx.stroke();
+  ctx.fillStyle = '#cfe9ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 19) + 'px sans-serif';
+  ctx.fillText('?', rx + helpW / 2, pad + btnH / 2);
+  hudButtons.push({ x: rx, y: pad, w: helpW, h: btnH, fn: function() { showHelp = true; } });
+
+  var mx = rx - gapb - menuW;
+  GF.rr(ctx, mx, pad, menuW, btnH, 6 * GF.S);
+  ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.5 * GF.S; ctx.stroke();
+  ctx.fillStyle = '#e6ecff';
+  ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 15) + 'px sans-serif';
+  ctx.fillText(GF.t('menu'), mx + menuW / 2, pad + btnH / 2);
+  hudButtons.push({ x: mx, y: pad, w: menuW, h: btnH, fn: backToMenu });
+  ctx.textBaseline = 'top';
+
+  var pipR = GF.clamp(5 * GF.S, 4, 8);
+  var total = levelTethers(level);
+  var pipGap = pipR * 2.6;
+  var pipsW = (total - 1) * pipGap;
+  var startX = GF.W / 2 - pipsW / 2;
+  var pipY = pad + fs + 14 * GF.S;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#9fb0d8';
+  ctx.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  ctx.fillText(GF.t('tethers'), GF.W / 2, pipY - pipR - 9 * GF.S);
+  for (var k = 0; k < total; k++) {
+    ctx.beginPath();
+    ctx.arc(startX + k * pipGap, pipY, pipR, 0, Math.PI * 2);
+    ctx.fillStyle = k < tethersLeft ? '#7ad7ff' : 'rgba(122,215,255,0.20)';
+    ctx.fill();
+  }
+  ctx.textBaseline = 'top';
+}
+
+function drawHeart(ctx, cx, cy, s) {
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + s * 0.5);
+  ctx.bezierCurveTo(cx + s, cy - s * 0.4, cx + s * 0.5, cy - s, cx, cy - s * 0.35);
+  ctx.bezierCurveTo(cx - s * 0.5, cy - s, cx - s, cy - s * 0.4, cx, cy + s * 0.5);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ── MENU + tutorial block ──────────────────────────────────────────────
+function drawMenu(ctx) {
+  hudButtons = [];
+  ctx.fillStyle = 'rgba(6,7,18,0.9)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(34 * GF.S, 24, 50);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.save();
+  ctx.shadowColor = 'rgba(122,215,255,0.5)'; ctx.shadowBlur = 26 * GF.S;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  var topY = GF.H * 0.12;
+  ctx.fillText(GF.t('title'), GF.W / 2, topY);
+  ctx.restore();
+
+  drawMenuGlyph(ctx, GF.W / 2, topY + 36 * GF.S);
+
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var bodyFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = bodyFs + 'px sans-serif';
+  var maxW = Math.min(GF.W * 0.86, 520 * GF.S);
+  var lineH = bodyFs * 1.32;
+  var blockGap = bodyFs * 0.7;
+  var y = topY + 74 * GF.S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  var leftX = GF.W / 2 - maxW / 2;
+  for (var i = 0; i < lines.length; i++) {
+    y = wrapText(ctx, lines[i], leftX, y, maxW, lineH, '#cfd8f5') + blockGap;
+  }
+
+  var btnW = GF.clamp(230 * GF.S, 160, 320), btnH = GF.clamp(54 * GF.S, 44, 66);
+  var btnX = GF.W / 2 - btnW / 2;
+  var btnY = Math.min(y + 12 * GF.S, GF.H - btnH - 22 * GF.S);
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3ad0ff'); grad.addColorStop(1, '#2b8fd6');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#04121f';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('play'), GF.W / 2, btnY + btnH / 2);
+  hudButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { markTutorialSeen(); startGame(); } });
+
+  if (bestLevel > 0) {
+    ctx.fillStyle = '#5b6a93';
+    ctx.font = GF.clamp(13 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.textBaseline = 'top';
+    ctx.fillText(GF.t('best') + ': ' + bestLevel + ' / ' + TOTAL_LEVELS, GF.W / 2, btnY + btnH + 14 * GF.S);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawMenuGlyph(ctx, cx, cy) {
+  var r = 16 * GF.S;
+  ctx.save();
+  var rad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.2, cx, cy, r);
+  rad.addColorStop(0, '#9b6bff'); rad.addColorStop(1, '#4a2a9e');
+  ctx.fillStyle = rad;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(122,215,255,0.6)'; ctx.lineWidth = 1.5 * GF.S;
+  ctx.setLineDash([4 * GF.S, 4 * GF.S]);
+  ctx.beginPath(); ctx.arc(cx, cy, r * 2.1, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([]);
+  var ang = pulseT * 1.6;
+  var px = cx + Math.cos(ang) * r * 2.1, py = cy + Math.sin(ang) * r * 2.1;
+  ctx.strokeStyle = 'rgba(122,215,255,0.8)';
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py); ctx.stroke();
+  ctx.shadowColor = '#ffd34d'; ctx.shadowBlur = 10 * GF.S;
+  ctx.fillStyle = '#ffe9a8';
+  ctx.beginPath(); ctx.arc(px, py, 4 * GF.S, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawHelpPanel(ctx) {
+  ctx.fillStyle = 'rgba(6,7,18,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(22 * GF.S, 17, 30);
+  ctx.fillStyle = '#7ad7ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  var topY = GF.H * 0.15;
+  ctx.fillText(GF.t('howto'), GF.W / 2, topY);
+
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var bodyFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = bodyFs + 'px sans-serif';
+  var maxW = Math.min(GF.W * 0.86, 520 * GF.S);
+  var lineH = bodyFs * 1.32, blockGap = bodyFs * 0.7;
+  var y = topY + titleFs + 18 * GF.S;
+  ctx.textAlign = 'left';
+  var leftX = GF.W / 2 - maxW / 2;
+  for (var i = 0; i < lines.length; i++) {
+    y = wrapText(ctx, lines[i], leftX, y, maxW, lineH, '#cfd8f5') + blockGap;
+  }
+  var btnW = GF.clamp(180 * GF.S, 130, 240), btnH = GF.clamp(46 * GF.S, 38, 56);
+  var btnX = GF.W / 2 - btnW / 2, btnY = Math.min(y + 18 * GF.S, GF.H - btnH - 24 * GF.S);
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = '#3ad0ff'; ctx.fill();
+  ctx.fillStyle = '#04121f'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 21) + 'px sans-serif';
+  ctx.fillText('OK', GF.W / 2, btnY + btnH / 2);
+  hudButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { showHelp = false; } });
+  ctx.textBaseline = 'top';
+}
+
+function drawEndScreen(ctx, title, sub, btnLabel, btnFn, isWin) {
+  hudButtons = [];
+  ctx.fillStyle = 'rgba(6,7,18,0.86)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(36 * GF.S, 24, 54);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.save();
+  ctx.shadowColor = isWin ? 'rgba(77,255,158,0.5)' : 'rgba(255,107,129,0.45)';
+  ctx.shadowBlur = 24 * GF.S;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillText(title, GF.W / 2, GF.H / 2 - 56 * GF.S);
+  ctx.restore();
+  ctx.fillStyle = '#9ab';
+  ctx.font = GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillText(sub, GF.W / 2, GF.H / 2 - 18 * GF.S);
+
+  var btnW = GF.clamp(220 * GF.S, 160, 300), btnH = GF.clamp(52 * GF.S, 42, 64);
+  var btnX = GF.W / 2 - btnW / 2, btnY = GF.H / 2 + 16 * GF.S;
+  var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  grad.addColorStop(0, '#3ad0ff'); grad.addColorStop(1, '#2b8fd6');
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#04121f'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(17 * GF.S, 14, 23) + 'px sans-serif';
+  ctx.fillText(btnLabel, GF.W / 2, btnY + btnH / 2);
+  hudButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: btnFn });
+
+  var mW = GF.clamp(180 * GF.S, 130, 240), mH = GF.clamp(44 * GF.S, 36, 54);
+  var mX = GF.W / 2 - mW / 2, mY = btnY + btnH + 14 * GF.S;
+  GF.rr(ctx, mX, mY, mW, mH, mH / 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.lineWidth = 1.5 * GF.S; ctx.stroke();
+  ctx.fillStyle = '#e6ecff';
+  ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('menu'), GF.W / 2, mY + mH / 2);
+  hudButtons.push({ x: mX, y: mY, w: mW, h: mH, fn: backToMenu });
+  ctx.textBaseline = 'alphabetic';
+}
+
+function wrapText(ctx, text, x, y, maxW, lineH, color) {
+  ctx.fillStyle = color || '#fff';
+  var words = String(text).split(/\s+/);
+  var line = '', yy = y;
+  for (var i = 0; i < words.length; i++) {
+    var probe = line ? line + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && line) {
+      ctx.fillText(line, x, yy);
+      yy += lineH; line = words[i];
+    } else { line = probe; }
+  }
+  if (line) { ctx.fillText(line, x, yy); yy += lineH; }
+  return yy;
+}
+
+function markTutorialSeen() {
+  try { localStorage.setItem('comet_tether_seen_tutorial', '1'); } catch (e) {}
+}
+
+// ── TAP WIRING (scaleX/Y from getBoundingClientRect every click) ─────────
+var cnv = document.getElementById('c');
+function clientToCanvas(clientX, clientY) {
+  var r = cnv.getBoundingClientRect();
+  var scaleX = cnv.width / r.width;
+  var scaleY = cnv.height / r.height;
+  return { x: (clientX - r.left) * scaleX, y: (clientY - r.top) * scaleY };
+}
+cnv.addEventListener('pointerdown', function(e) {
+  var p = clientToCanvas(e.clientX, e.clientY);
+  onTap(p.x, p.y);
+}, { passive: true });
+
+// ── SCREENSHOT HELPERS ───────────────────────────────────────────────────
+// _jumpLevel: the post-build-tester gate calls _jumpLevel(1) (expects a
+// populated PLAYING state) and _jumpLevel(99) (expects a terminal state).
+// take_screenshots.js prefers _setupForScreenshot, so this can serve the gate.
+window._jumpLevel = function(lv) {
+  if (lv >= 99) {                      // sentinel → drive to GAMEOVER
+    gs = 'PLAYING'; level = 1; lives = 1;
+    startLevel(1);
+    loseLife();                        // last life → GAMEOVER
+    return;
+  }
+  window._setupForScreenshot(lv && lv > 1 ? lv : 3);
+};
+window._setupForScreenshot = function(lv) {
+  lv = lv || 3;
+  level = Math.min(Math.max(lv, 1), TOTAL_LEVELS);
+  lives = LIVES;
+  gs = 'PLAYING';
+  buildLevel(level);
+  syncWorldFromField();
+  if (planets.length) {
+    var idx = Math.floor(planets.length / 2);
+    var p = planets[idx];
+    var orbitR = p.r + 36 * GF.S;
+    comet.x = p.x + orbitR;
+    comet.y = p.y;
+    comet.vx = 0;
+    comet.vy = -COMET_SPEED;
+    tethered = true; tetherPlanet = idx; orbitDir = 1;
+    tethersLeft = Math.max(2, Math.floor(TETHER_BUDGET / 2));
+    trail = [];
+    for (var i = 0; i < 16; i++) {
+      var a = Math.PI * 0.5 + i * 0.16;
+      trail.push({ x: p.x + Math.cos(a) * orbitR, y: p.y + Math.sin(a) * orbitR });
+    }
+    GF.spawnParticles(comet.x, comet.y, '#ffd34d', 14);
+  }
+  showHelp = false;
+};
+
+// ── EXPOSE STATE (post-build-tester gate) ────────────────────────────────
+GF.exposeState(function() {
+  return { gs: gs, level: level, lives: lives, tethersLeft: tethersLeft, tethered: tethered };
+});
+
+// read-only positional probe (test hook; safe to ship like _setupForScreenshot)
+window._probe = function() {
+  return {
+    comet: { x: comet.x, y: comet.y, vx: comet.vx, vy: comet.vy },
+    gate: { x: gate.x, y: gate.y, r: GATE_RADIUS * GF.S },
+    planets: planets.map(function(p) { return { x: p.x, y: p.y, r: p.r }; }),
+    tethered: tethered, tetherPlanet: tetherPlanet, tethersLeft: tethersLeft, gs: gs,
+  };
+};
+
+// hooks for locale_overflow_check
+window._setLang = function(l) { GF.lang = l; };
+window._setState = function(s) {
+  if (s === 'PLAYING') { if (gs !== 'PLAYING') startGame(); }
+  else gs = s;
+};
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 540,
+  designH: 940,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'comet_tether',
+  onReady: function() {
+    try { bestLevel = parseInt(localStorage.getItem('comet_tether_best') || '0') || 0; } catch (e) {}
+    GF.persist('comet_tether_run_v1',
+      function() { return { gs: gs, level: level, lives: lives, tethersLeft: tethersLeft }; },
+      function(s) {
+        if (!s) return;
+        level = s.level || 1;
+        lives = (typeof s.lives === 'number') ? s.lives : LIVES;
+        tethersLeft = (typeof s.tethersLeft === 'number') ? s.tethersLeft : TETHER_BUDGET;
+        gs = s.gs || 'MENU';
+      }
+    );
+    if (gs === 'PLAYING') startLevel(level);
+    else gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

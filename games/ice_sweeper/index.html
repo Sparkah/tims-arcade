@@ -59,6 +59,8 @@ var STRINGS = {
     ach_score500: 'Lake Tamer',
     ach_score1500:'Glacier Hero',
     thickIce:     'THICK ICE!',
+    boostPickup:  'SPEED BOOST!',
+    boostTime:    '+5s',
     tut_goal:     'Goal: Pilot the icebreaker over dirty ice tiles to crack and clear the lake within the time limit.',
     tut_controls: 'Controls: Arrow keys / WASD on desktop; drag anywhere on mobile to steer the icebreaker.',
     tut_win:      'Win: Hit the level\'s clean percentage before TIME runs out — clear all 10 lakes for a perfect run.',
@@ -86,9 +88,11 @@ var STRINGS = {
     ach_score500: 'Покоритель озера',
     ach_score1500:'Герой ледника',
     thickIce:     'ТОЛСТЫЙ ЛЁД!',
+    boostPickup:  'УСКОРЕНИЕ!',
+    boostTime:    '+5с',
     tut_goal:     'Цель: Веди ледокол по грязным плиткам льда, чтобы расколоть и очистить озеро до окончания времени.',
     tut_controls: 'Управление: Стрелки/WASD на ПК; тащи в любом месте на мобиле, чтобы рулить ледоколом.',
-    tut_win:      'Победа: Достигни нормы чистоты до окончания времени — пройди все 10 озёр для идеального забега.',
+    tut_win:      'Победа: Достигни нормы чистоты до окончания времени — пройди все 10 озёр для идеального забег.',
     tut_lose:     'Поражение: ВРЕМЯ кончилось, а уборка ниже нормы.',
     tut_tip:      'Подсказка: Проезжай по одной плитке несколько раз: трещина → откол → чисто. Цепи в течение 1.5с дают множитель ЦЕПЬ.',
   },
@@ -144,6 +148,20 @@ var THICK_CRACK_MAX = 5;
 var THICK_ICE_CHANCE = 0.20;
 var THICK_ICE_BONUS = 20;
 
+// iter#10: POWER-UP DROPS — ~8% of dirty tiles are "boost tiles" marked with
+// a golden lightning icon. When cleared they drop a BOOST pickup that floats
+// on the cleared tile position for 5s. Driving the ship over it collects it:
+// grants +5s time and a 3s speed burst (1.7× normal speed). Only one boost
+// active at a time (extras accumulate but never more than MAX_PICKUPS).
+// Compounds with thick ice (thick tiles can also be boost tiles) and chain
+// system (speed burst helps rack up chains during the window).
+var BOOST_TILE_CHANCE  = 0.08;
+var BOOST_TIME_ADD     = 5;       // seconds granted
+var BOOST_SPEED_MULT   = 1.7;     // ship speed multiplier during boost
+var BOOST_SPEED_DUR    = 3.0;     // seconds the speed boost lasts
+var BOOST_PICKUP_LIFE  = 5.0;     // seconds pickup floats before expiry
+var MAX_PICKUPS        = 4;       // max simultaneous pickups on grid
+
 // ── STATE ───────────────────────────────────────────────────────────────────
 var gs = 'MENU';
 var level = 1, score = 0, best = 0, timeLeft = 0;
@@ -166,6 +184,12 @@ var newBestPulse = 0;
 // the prior personal record. Persisted under 'ice_chain_best'.
 var bestChain = 0;
 var newChainBestThisRun = false;
+
+// iter#10: POWER-UP pickups — floated by boost tiles on clearance.
+// Each pickup: { x, y, life, angle } — rendered as spinning ⚡ icon.
+// speedBoostTimer counts down the active speed-burst window.
+var pickups = [];
+var speedBoostTimer = 0;  // >0 when ship is in speed-boost state
 
 // iter#7: ACHIEVEMENTS — five persistent milestones with on-screen toast
 // when first unlocked. Persisted as bitmask under 'ice_achievements'.
@@ -314,6 +338,13 @@ var SFX = (function() {
     extraTime: function() {
       blip(659, 0.10, 'triangle', 0.18);
       setTimeout(function(){ blip(988, 0.16, 'triangle', 0.20); }, 90);
+    },
+    // iter#10: boost collected — bright electric zap
+    boostCollect: function() {
+      blip(1047, 0.06, 'square', 0.18);
+      setTimeout(function(){ blip(1319, 0.06, 'square', 0.18); }, 50);
+      setTimeout(function(){ blip(1760, 0.14, 'square', 0.22, 2200); }, 100);
+      noise(0.08, 0.07, 1200);
     }
   };
 })();
@@ -418,6 +449,9 @@ function startLevel(lvl) {
   cleared = 0;
   newBestThisRun = false; newBestPulse = 0;
   newChainBestThisRun = false;
+  // iter#10: reset pickups and active speed boost each level
+  pickups = [];
+  speedBoostTimer = 0;
   // iter#1: reset the rewarded-ad slot each level
   extraTimeUsed = false; extraTimeLoading = false;
   timeLeft = Math.max(45, 100 - (lvl - 1) * 7);
@@ -465,12 +499,15 @@ function startLevel(lvl) {
       var dirty = levelRng() < dirtyChance;
       // iter#9: thick ice tiles take THICK_CRACK_MAX hits; ~20% of dirty tiles
       var thick = dirty && (levelRng() < THICK_ICE_CHANCE);
+      // iter#10: boost tile — ~8% of dirty tiles drop a speed-boost pickup when cleared
+      var boost = dirty && (levelRng() < BOOST_TILE_CHANCE);
       var tile = {
         state: dirty ? 0 : -1,  // -1 = clean from start
         wobble: levelRng() * Math.PI * 2,
         crackPattern: Math.floor(levelRng() * 3),
         chunkParts: [],
         thick: thick,           // iter#9: extra-hard tile flag
+        boost: boost,           // iter#10: drops speed-boost pickup on clear
       };
       if (dirty) totalDirty++;
       row.push(tile);
@@ -515,6 +552,9 @@ window.__gfState = function () {
       dayKey: getDayKey(),
       sfxMuted: SFX.isMuted(),
       thickTiles: (function(){ var n=0; for(var r=0;r<(grid||[]).length;r++) for(var c=0;c<(grid[r]||[]).length;c++) if(grid[r][c].thick) n++; return n; })(),
+      boostTiles: (function(){ var n=0; for(var r=0;r<(grid||[]).length;r++) for(var c=0;c<(grid[r]||[]).length;c++) if(grid[r][c].boost) n++; return n; })(),
+      speedBoostTimer: speedBoostTimer,
+      pickupsOnGrid: pickups.length,
     };
   } catch (e) { return { __error: String(e) }; }
 };
@@ -620,6 +660,29 @@ function update(dt) {
   if (chainTimer > 0) { chainTimer -= dt; if (chainTimer <= 0) { chain = 0; chainTierShown = 0; } }
   if (chainBannerLife > 0) { chainBannerLife -= dt; chainBannerPulse += dt * 8; }
   if (shake > 0) shake = Math.max(0, shake - dt * 8);
+  // iter#10: tick speed-boost window
+  if (speedBoostTimer > 0) speedBoostTimer = Math.max(0, speedBoostTimer - dt);
+  // iter#10: animate pickups + check ship collection
+  for (var pi = pickups.length - 1; pi >= 0; pi--) {
+    var pk = pickups[pi];
+    pk.life -= dt;
+    pk.angle += dt * 3.5;
+    if (pk.life <= 0) { pickups.splice(pi, 1); continue; }
+    // collection radius ~= TILE * 0.55
+    var dxp = ship.x - pk.x, dyp = ship.y - pk.y;
+    if (dxp*dxp + dyp*dyp < (TILE * 0.55) * (TILE * 0.55)) {
+      pickups.splice(pi, 1);
+      // grant time bonus + speed burst
+      timeLeft = Math.min(timeLeft + BOOST_TIME_ADD, 120);
+      speedBoostTimer = BOOST_SPEED_DUR;
+      SFX.boostCollect();
+      spawnParticles(ship.x, ship.y, '#FFD700', 14);
+      spawnParticles(ship.x, ship.y, '#ffffff', 8);
+      spawnFloat(ship.x, ship.y - 20*S, t('boostPickup'), '#FFD700');
+      spawnFloat(ship.x, ship.y - 36*S, t('boostTime'), '#2ecc71');
+      shake = Math.max(shake, 0.22);
+    }
+  }
 
   // ship movement
   var ax = 0, ay = 0;
@@ -631,7 +694,8 @@ function update(dt) {
   var alen = Math.sqrt(ax*ax + ay*ay);
   if (alen > 0) { ax /= alen; ay /= alen; }
 
-  var sp = SHIP_SPEED_BASE * S;
+  // iter#10: speed boost multiplier active while speedBoostTimer > 0
+  var sp = SHIP_SPEED_BASE * S * (speedBoostTimer > 0 ? BOOST_SPEED_MULT : 1);
   ship.vx = (ship.vx + ax * 0.9 * S) * 0.82;
   ship.vy = (ship.vy + ay * 0.9 * S) * 0.82;
   var spd = Math.sqrt(ship.vx*ship.vx + ship.vy*ship.vy);
@@ -677,6 +741,15 @@ function update(dt) {
     if (hit.tile.state >= hitMax) {
       hit.tile.state = -1; // collected
       cleared++;
+      // iter#10: boost tiles drop a speed-boost pickup at their centre
+      if (hit.tile.boost && pickups.length < MAX_PICKUPS) {
+        pickups.push({
+          x: o.x + hit.c*TILE + TILE/2,
+          y: o.y + hit.r*TILE + TILE/2,
+          life: BOOST_PICKUP_LIFE,
+          angle: 0,
+        });
+      }
       var now = performance.now();
       if (chainTimer > 0) chain++;
       else chain = 1;
@@ -828,6 +901,21 @@ function drawTile(x, y, t) {
     ctx.strokeStyle = 'rgba(100,200,255,' + glowA + ')';
     ctx.lineWidth = Math.max(1.5, size * 0.055);
     ctx.strokeRect(x+1, y+1, size-2, size-2);
+  }
+
+  // iter#10: boost tiles have a pulsing golden border so players can route to them
+  if (t.boost && t.state >= 0 && s < tileMax) {
+    var boostGlowA = 0.60 + 0.35 * Math.sin(t.wobble * 2.2);
+    ctx.strokeStyle = 'rgba(255,210,60,' + boostGlowA + ')';
+    ctx.lineWidth = Math.max(1.5, size * 0.06);
+    ctx.strokeRect(x+2, y+2, size-4, size-4);
+    // small ⚡ mark in corner
+    ctx.font = 'bold ' + Math.max(8, size * 0.38) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.globalAlpha = boostGlowA;
+    ctx.fillText('⚡', x + size * 0.78, y + size * 0.22);
+    ctx.globalAlpha = 1;
+    ctx.textBaseline = 'alphabetic';
   }
 
   // dirt splotches (visible when state is 0-1 — for thick ice, scaled to progress)
@@ -1250,6 +1338,57 @@ function drawAchievementBadges() {
   ctx.textBaseline = 'alphabetic';
 }
 
+// ── iter#10: draw floating BOOST pickups on the grid ────────────────────────
+// Each pickup is a spinning ⚡ in a golden glow ring. Alpha fades as life
+// decreases (last 1s fades out). Rendered during PLAYING before the ship.
+function drawPickups() {
+  for (var pi = 0; pi < pickups.length; pi++) {
+    var pk = pickups[pi];
+    var alpha = Math.min(1, pk.life);          // fade out last second
+    var pulse = 1 + 0.18 * Math.sin(pk.angle * 1.8);
+    var sz = TILE * 0.52 * pulse;
+    ctx.save();
+    ctx.translate(pk.x, pk.y);
+    ctx.rotate(pk.angle * 0.4);
+    ctx.globalAlpha = alpha;
+    // golden glow ring
+    ctx.beginPath();
+    ctx.arc(0, 0, sz * 0.72, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,210,50,0.75)';
+    ctx.lineWidth = Math.max(1.5, sz * 0.12);
+    ctx.stroke();
+    // fill ring
+    ctx.beginPath();
+    ctx.arc(0, 0, sz * 0.62, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,215,0,0.18)';
+    ctx.fill();
+    // bolt icon
+    ctx.font = 'bold ' + Math.max(10, sz * 0.90) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#FFD700';
+    ctx.shadowColor = '#FFD700';
+    ctx.shadowBlur = sz * 0.6;
+    ctx.fillText('⚡', 0, 0);
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+  // iter#10: draw active speed-boost HUD indicator (bottom of screen near chain)
+  if (speedBoostTimer > 0) {
+    var bAlpha = Math.min(1, speedBoostTimer * 2);
+    var bFs = clamp(16*S, 12, 22);
+    var bY = H - 72*S;
+    ctx.globalAlpha = bAlpha;
+    ctx.font = 'bold ' + bFs + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = '#FFD700';
+    ctx.shadowColor = '#FFD700'; ctx.shadowBlur = 10*S;
+    ctx.fillText('⚡ ' + Math.ceil(speedBoostTimer) + t('secAbbr'), cx, bY);
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+  }
+}
+
 // ── iter#5: CHAIN MILESTONE banner — centre-top during PLAY ────────────────
 // Fires when player crosses chain x3/x5/x10. Positioned below HUD so it never
 // overlaps the score/timer (top 56*S) and clears the playfield centre so
@@ -1331,6 +1470,7 @@ function frame(ts) {
     }
     ctx.globalAlpha = 1;
 
+    drawPickups(); // iter#10: floating speed-boost collectibles
     drawShip(ship.x, ship.y, ship.angle);
     drawHUD();
     drawChainBanner(); // iter#5

@@ -44,6 +44,11 @@ var STRINGS = {
     'tut_step3': 'Pick one of three angles (45°/90°/135°). Cracks propagate from that node.',
     'tut_step4': 'Avoid RED VEINS — any crack crossing one = game over. You have 5 strikes total.',
     close: 'CLOSE',
+    lb_title: "TODAY'S TOP",
+    lb_name_prompt: 'Enter your name for the leaderboard (max 16 chars):',
+    lb_you: 'You',
+    lb_rank: 'RANK',
+    lb_loading: 'Loading...',
   },
   ru: {
     title: 'Молот Каменщика',
@@ -67,6 +72,11 @@ var STRINGS = {
     'tut_step3': 'Выберите один из трёх углов (45°/90°/135°). Трещины расходятся от этой точки.',
     'tut_step4': 'Избегайте КРАСНЫХ ЖИЛ — трещина в них = поражение. Всего 5 ударов.',
     close: 'ЗАКРЫТЬ',
+    lb_title: 'ТОП ДНЯ',
+    lb_name_prompt: 'Ваше имя для таблицы лидеров (макс. 16 символов):',
+    lb_you: 'Вы',
+    lb_rank: 'МЕСТО',
+    lb_loading: 'Загрузка...',
   },
 };
 
@@ -98,6 +108,59 @@ var nodes = [];
 var edgeH = [];
 var edgeV = [];
 var selector = { open: false, nx: 0, ny: 0, x: 0, y: 0 };
+
+// LEADERBOARD (iter#2)
+var lb_entries = [];   // [{name, score}] top-10 from server
+var lb_myRank = null;  // rank returned after submit
+var lb_loading = false;
+var lb_playerName = '';
+function lb_getDayKey() {
+  var d = new Date();
+  return d.getFullYear() + '-' +
+    String(d.getMonth() + 1).padStart(2, '0') + '-' +
+    String(d.getDate()).padStart(2, '0');
+}
+function lb_ensureName() {
+  if (lb_playerName) return lb_playerName;
+  try { lb_playerName = localStorage.getItem('mason_hammer_lb_name') || ''; } catch(e) {}
+  if (!lb_playerName) {
+    var entered = (window.prompt(GF.t('lb_name_prompt'), GF.t('lb_you')) || '').trim().slice(0, 16);
+    if (entered) {
+      lb_playerName = entered;
+      try { localStorage.setItem('mason_hammer_lb_name', lb_playerName); } catch(e) {}
+    }
+  }
+  return lb_playerName;
+}
+function lb_fetch() {
+  var date = lb_getDayKey();
+  lb_loading = true;
+  fetch('/api/scores?slug=mason_hammer&date=' + date, { cache: 'no-store' })
+    .then(function(r) { return r.ok ? r.json() : { entries: [] }; })
+    .then(function(data) {
+      lb_entries = (data.entries || []).slice(0, 10);
+      lb_loading = false;
+    })
+    .catch(function() { lb_loading = false; });
+}
+function lb_submitAndFetch(score) {
+  var name = lb_ensureName();
+  var date = lb_getDayKey();
+  if (!name) { lb_fetch(); return; }
+  lb_loading = true;
+  fetch('/api/scores', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ slug: 'mason_hammer', date: date, name: name, score: score }),
+    keepalive: true,
+  })
+  .then(function(r) { return r.ok ? r.json() : null; })
+  .then(function(data) {
+    if (data && data.rank) lb_myRank = data.rank;
+    return lb_fetch();
+  })
+  .catch(function() { lb_fetch(); });
+}
 
 // RNG
 var rng = mulberry32(1);
@@ -367,12 +430,16 @@ function nextLevel() {
     }
     gs = 'WIN';
     GF.gameEnded();
+    GF.saveRun();
+    // submit max score (LEVEL_COUNT) to daily leaderboard on full clear
+    lb_myRank = null;
+    lb_submitAndFetch(LEVEL_COUNT);
   } else {
     level++;
     buildLevel(level);
     gs = 'PLAYING';
+    GF.saveRun();
   }
-  GF.saveRun();
 }
 function gameOver(reason) {
   gameover_reason = reason;
@@ -383,6 +450,9 @@ function gameOver(reason) {
   gs = 'GAMEOVER';
   GF.gameEnded();
   GF.saveRun();
+  // submit reached level to daily leaderboard
+  lb_myRank = null;
+  lb_submitAndFetch(level);
 }
 
 // Screenshot helpers
@@ -978,6 +1048,35 @@ function drawLevelEnd(ctx) {
   GF._endBtn = { x: bx, y: by, w: bw, h: bh, fn: nextLevel };
 }
 
+function drawLeaderboard(ctx, topY) {
+  var W = GF.W;
+  var S = GF.S;
+  var fs = GF.clamp(13 * S, 10, 17);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#ffd685';
+  ctx.fillText(GF.t('lb_title') + (lb_myRank ? ' — ' + GF.t('lb_rank') + ' #' + lb_myRank : ''), W / 2, topY);
+  topY += fs + 4;
+  if (lb_loading && lb_entries.length === 0) {
+    ctx.fillStyle = '#9a8870';
+    ctx.font = (fs - 1) + 'px sans-serif';
+    ctx.fillText(GF.t('lb_loading'), W / 2, topY + fs);
+    return;
+  }
+  var rowH = GF.clamp(20 * S, 16, 26);
+  var shown = Math.min(lb_entries.length, 5);
+  for (var i = 0; i < shown; i++) {
+    var e = lb_entries[i];
+    var isMe = lb_playerName && e.name === lb_playerName;
+    ctx.fillStyle = isMe ? '#ffd685' : '#bfb4a0';
+    ctx.font = (isMe ? 'bold ' : '') + fs + 'px sans-serif';
+    ctx.textAlign = 'center';
+    var rowY = topY + i * rowH + rowH;
+    ctx.fillText((i + 1) + '. ' + e.name + '  ' + GF.t('level') + ' ' + e.score, W / 2, rowY);
+  }
+}
+
 function drawGameOver(ctx) {
   var W = GF.W, H = GF.H;
   ctx.fillStyle = '#1a0e0e';
@@ -986,15 +1085,20 @@ function drawGameOver(ctx) {
   ctx.textBaseline = 'alphabetic';
   ctx.fillStyle = '#e74c5e';
   ctx.font = 'bold ' + GF.clamp(40 * GF.S, 24, 56) + 'px sans-serif';
-  ctx.fillText(GF.t('gameover'), W / 2, H * 0.42);
+  ctx.fillText(GF.t('gameover'), W / 2, H * 0.30);
   ctx.fillStyle = '#cfc0a0';
   ctx.font = GF.clamp(15 * GF.S, 11, 19) + 'px sans-serif';
-  ctx.fillText(gameover_reason || '', W / 2, H * 0.42 + 30);
+  ctx.fillText(gameover_reason || '', W / 2, H * 0.30 + 28);
+
+  // leaderboard block
+  drawLeaderboard(ctx, H * 0.40);
 
   var bw = GF.clamp(260 * GF.S, 180, 320);
   var bh = GF.clamp(58 * GF.S, 44, 72);
   var bx = (W - bw) / 2;
-  var by = H * 0.62;
+  var by = H * 0.78;
+  // ensure button stays in viewport
+  if (by + bh > H - 8) by = H - bh - 8;
   GF.rr(ctx, bx, by, bw, bh, bh / 2);
   var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
   grad.addColorStop(0, '#e74c5e'); grad.addColorStop(1, '#a0303f');
@@ -1017,16 +1121,20 @@ function drawWon(ctx) {
   ctx.fillStyle = '#ffd685';
   ctx.font = 'bold ' + GF.clamp(48 * GF.S, 28, 64) + 'px sans-serif';
   ctx.shadowColor = 'rgba(255,140,60,0.5)'; ctx.shadowBlur = 24;
-  ctx.fillText(GF.t('won'), W / 2, H * 0.42);
+  ctx.fillText(GF.t('won'), W / 2, H * 0.28);
   ctx.shadowBlur = 0;
   ctx.fillStyle = '#cfc0a0';
   ctx.font = GF.clamp(16 * GF.S, 12, 20) + 'px sans-serif';
-  ctx.fillText(GF.t('level') + ' ' + LEVEL_COUNT + ' / ' + LEVEL_COUNT, W / 2, H * 0.42 + 32);
+  ctx.fillText(GF.t('level') + ' ' + LEVEL_COUNT + ' / ' + LEVEL_COUNT, W / 2, H * 0.28 + 32);
+
+  // leaderboard block
+  drawLeaderboard(ctx, H * 0.38);
 
   var bw = GF.clamp(260 * GF.S, 180, 320);
   var bh = GF.clamp(58 * GF.S, 44, 72);
   var bx = (W - bw) / 2;
-  var by = H * 0.62;
+  var by = H * 0.78;
+  if (by + bh > H - 8) by = H - bh - 8;
   GF.rr(ctx, bx, by, bw, bh, bh / 2);
   var grad = ctx.createLinearGradient(bx, by, bx, by + bh);
   grad.addColorStop(0, '#ffaa55'); grad.addColorStop(1, '#cc7733');
@@ -1138,6 +1246,8 @@ GF.exposeState(function () {
     VEIN_DENSITY: VEIN_DENSITY,
     LEVEL_COUNT: LEVEL_COUNT,
     PREVIEW_ALPHA: PREVIEW_ALPHA,
+    lb_entries: lb_entries,
+    lb_myRank: lb_myRank,
   };
 });
 
