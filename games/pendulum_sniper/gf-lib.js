@@ -445,7 +445,10 @@ function init(config) {
     }).catch(boot);
     setTimeout(boot, 3000);
   } else {
-    setTimeout(boot, 3000);
+    // Standalone / Gallery: no platform SDK to await, so boot immediately.
+    // (boot() is idempotent via the `booted` guard.) Waiting here just showed
+    // a blank canvas for 3s before the first frame.
+    boot();
   }
 }
 

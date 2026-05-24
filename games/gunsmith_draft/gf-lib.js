@@ -390,7 +390,8 @@ function init(config) {
   }
 
   if (typeof YaGames === 'undefined') {
-    setTimeout(boot, 3000);
+    // Standalone / Gallery: no SDK to await, boot immediately (idempotent).
+    boot();
   } else {
     YaGames.init().then(function(ysdk) {
       window.ysdk = ysdk;
