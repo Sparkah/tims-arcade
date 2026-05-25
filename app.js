@@ -772,6 +772,11 @@ function card(g, opts) {
     return s;
   })();
   const primaryExtUrl = platforms ? (platforms.yandex || platforms.crazygames || null) : null;
+  // Badge text reflects the ACTUAL platforms this game links to — never hardcode
+  // "Yandex / CG" (a Yandex-only game must not claim CG, and vice versa).
+  const platLabel = platforms
+    ? Object.keys(platforms).map(k => k === 'crazygames' ? 'CG' : (k.charAt(0).toUpperCase() + k.slice(1))).join(' / ')
+    : '';
   const footHtml = isExternal
     ? `<div class="card-foot ext-foot"><span class="ext-label">Play on</span>${platChips}</div>`
     : `<div class="card-foot">
@@ -825,7 +830,7 @@ function card(g, opts) {
     <div class="card-thumb" data-num="${specimenNum(g)}">
       ${imgTag}
       ${mediaInner}
-      ${isExternal ? '<span class="flagship-badge">★ Yandex / CG</span>' : (isRecent ? '<span class="recent-badge">NEW</span>' : '')}
+      ${isExternal ? `<span class="flagship-badge">★ ${platLabel}</span>` : (isRecent ? '<span class="recent-badge">NEW</span>' : '')}
       ${(!isExternal && c.plays) ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
       ${(!isExternal && c.comments) ? `<span class="comment-count">💬 ${c.comments}</span>` : ''}
       ${isExternal ? '' : `<a class="lab-link" href="/lab.html?slug=${encodeURIComponent(g.slug)}" title="Build journal" aria-label="Open build journal">📓</a>`}
