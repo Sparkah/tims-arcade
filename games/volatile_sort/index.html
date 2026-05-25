@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Volatile Sort</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── STRINGS ──────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Volatile Sort',
+    sub: 'Sort the tubes — keep volatile colours apart',
+    play: 'PLAY', retry: 'RETRY', again: 'PLAY AGAIN', menu: 'MENU',
+    level: 'LVL', pours: 'POURS', best: 'BEST LVL',
+    gameover: 'LEVEL FAILED', win: 'ALL SAFE!',
+    reason_pours: 'Out of pours', reason_blast: 'Volatile blast!',
+    levelsolved: 'LEVEL', solved: 'CLEAR',
+    tap_next: 'tap to continue',
+    danger: "DON'T TOUCH",
+    undo: 'UNDO',
+    tut_goal: 'Goal: sort every tube so each holds one single colour.',
+    tut_controls: 'Tap a tube to pick it up, tap another to pour the top colour.',
+    tut_win: 'Win: every tube is one pure colour before your pours run out.',
+    tut_lose: 'Lose: pours hit zero, OR two VOLATILE colours end up stacked touching — watch the warning glyph between them.',
+    tut_tip: 'Tip: the warning banner shows which colours explode if they touch — route them into separate tubes, never on top of each other.',
+  },
+  ru: {
+    title: 'Реактивная Сортировка',
+    sub: 'Сортируй пробирки — держи реактивные цвета врозь',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', again: 'ИГРАТЬ СНОВА', menu: 'МЕНЮ',
+    level: 'УР', pours: 'ЛИВЫ', best: 'РЕКОРД УР',
+    gameover: 'УРОВЕНЬ ПРОВАЛЕН', win: 'ВСЁ БЕЗОПАСНО!',
+    reason_pours: 'Ливы кончились', reason_blast: 'Реактивный взрыв!',
+    levelsolved: 'УРОВЕНЬ', solved: 'ПРОЙДЕН',
+    tap_next: 'нажми, чтобы продолжить',
+    danger: 'НЕ СОЕДИНЯТЬ',
+    undo: 'ОТМЕНА',
+    tut_goal: 'Цель: рассортируй пробирки — в каждой должен остаться один цвет.',
+    tut_controls: 'Нажми пробирку, чтобы взять, и другую — чтобы перелить верхний цвет.',
+    tut_win: 'Победа: в каждой пробирке один чистый цвет, пока есть переливания.',
+    tut_lose: 'Поражение: ливы кончились ИЛИ два РЕАКТИВНЫХ цвета легли друг на друга — следи за значком между ними.',
+    tut_tip: 'Совет: баннер показывает, какие цвета взрываются при контакте — разводи их по разным пробиркам, никогда не клади один на другой.',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES ─────────────────────────────────────────────────────────────
+var POUR_BUDGET   = 10;    // base pours on level 1 (+2 per level)
+var TUBE_CAP      = 4;     // colour-ball slots per tube
+var START_TUBES   = 6;     // total tubes level 1 (colours + empties)
+var WIN_LEVELS    = 6;     // clear level 6 to win
+var UNDO_MAX      = 3;     // undo charges per level
+var VOLATILE_BASE = 1;     // banned colour pairs on level 1 (+1 each 2 levels)
+var POUR_ANIM_SEC = 0.32;  // pour animation duration
+var SEL_LIFT_PX   = 14;    // px the selected top run lifts
+var WARN_PULSE_HZ = 2.2;   // pulse frequency of the volatile warning glyph
+
+// ── COLOURS ──────────────────────────────────────────────────────────────
+// 0 = empty. Saturated foreground palette, high contrast.
+var COL_HEX = {
+  1: '#e8413a', // red
+  2: '#f6c531', // yellow
+  3: '#3a78e8', // blue
+  4: '#3fb86a', // green
+  5: '#b14ad6', // purple
+};
+var COL_HEX_DK = {
+  1: '#a82820', 2: '#c79a14', 3: '#2152ad', 4: '#2a8a4c', 5: '#7a2f97',
+};
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';           // MENU | PLAYING | LEVELEND | GAMEOVER | WIN
+var level = 1;
+var bestLevel = 0;
+var tubes = [];            // array of arrays (bottom->top), each <= TUBE_CAP
+var pours = POUR_BUDGET;
+var undoLeft = UNDO_MAX;
+var volatilePairs = [];    // [[a,b], ...] banned colour pairs for this level
+var volatileHit = false;   // true the instant a banned pair becomes adjacent
+var loseReason = '';       // 'pours' | 'blast'
+var stuck = false;
+var sel = -1;              // selected source tube index, -1 = none
+var history = [];          // undo snapshots
+var anim = null;           // active pour animation
+var blast = null;          // active detonation vfx { i, layer, t }
+var tubeRects = [];        // computed layout per frame
+var warnT = 0;             // pulse phase for warning glyph
+
+// ── LEVEL GENERATION ───────────────────────────────────────────────────────
+function poursForLevel(lvl) { return POUR_BUDGET + (lvl - 1) * 2; }
+function colorsForLevel(lvl) { return lvl <= 2 ? 3 : (lvl <= 4 ? 4 : 5); }
+function pairsForLevel(lvl) { return VOLATILE_BASE + Math.floor((lvl - 1) / 2); }
+
+function pairKey(a, b) { return Math.min(a, b) + '-' + Math.max(a, b); }
+function isVolatilePair(a, b) {
+  if (a === b || a === 0 || b === 0) return false;
+  var k = pairKey(a, b);
+  for (var i = 0; i < volatilePairs.length; i++) {
+    if (pairKey(volatilePairs[i][0], volatilePairs[i][1]) === k) return true;
+  }
+  return false;
+}
+
+// choose volatile pairs from the colours actually present this level
+function chooseVolatilePairs(nColors, nPairs) {
+  var allPairs = [];
+  for (var a = 1; a <= nColors; a++)
+    for (var b = a + 1; b <= nColors; b++) allPairs.push([a, b]);
+  // shuffle
+  for (var i = allPairs.length - 1; i > 0; i--) {
+    var j = (Math.random() * (i + 1)) | 0;
+    var tmp = allPairs[i]; allPairs[i] = allPairs[j]; allPairs[j] = tmp;
+  }
+  // avoid one colour appearing in too many pairs (keeps levels solvable)
+  var picked = [], usedCount = {};
+  for (var p = 0; p < allPairs.length && picked.length < nPairs; p++) {
+    var pr = allPairs[p];
+    var ua = usedCount[pr[0]] || 0, ub = usedCount[pr[1]] || 0;
+    if (ua >= 2 || ub >= 2) continue;
+    picked.push(pr);
+    usedCount[pr[0]] = ua + 1; usedCount[pr[1]] = ub + 1;
+  }
+  if (!picked.length && allPairs.length) picked.push(allPairs[0]);
+  return picked;
+}
+
+function buildLevel(lvl) {
+  var nColors = colorsForLevel(lvl);
+  var nEmpty = 2;
+  var t = [];
+  for (var ci = 0; ci < nColors; ci++) {
+    var col = ci + 1;
+    t.push([col, col, col, col].slice(0, TUBE_CAP));
+  }
+  for (var e = 0; e < nEmpty; e++) t.push([]);
+
+  volatilePairs = chooseVolatilePairs(nColors, pairsForLevel(lvl));
+
+  // Scramble with single-unit moves. Reject any move that would place a
+  // banned colour directly on a banned partner, so the START state is always
+  // safe (no pre-touching volatile pair) and a clean solution always exists.
+  var moves = 7 + lvl * 3;
+  var tries = 0;
+  for (var m = 0; m < moves && tries < moves * 8; ) {
+    if (scrambleMoveSafe(t)) m++;
+    else tries++;
+  }
+  if (solvedState(t)) { scrambleMoveSafe(t); scrambleMoveSafe(t); }
+
+  tubes = t;
+  pours = poursForLevel(lvl);
+  undoLeft = UNDO_MAX;
+  volatileHit = false;
+  loseReason = '';
+  stuck = false;
+  sel = -1;
+  history = [];
+  anim = null;
+  blast = null;
+}
+
+function topColor(arr) { return arr.length ? arr[arr.length - 1] : 0; }
+function topRunLen(arr) {
+  if (!arr.length) return 0;
+  var c = arr[arr.length - 1], n = 1;
+  for (var i = arr.length - 2; i >= 0; i--) { if (arr[i] === c) n++; else break; }
+  return n;
+}
+
+// single-unit scramble move that never creates a volatile adjacency
+function scrambleMoveSafe(t) {
+  var srcs = [];
+  for (var i = 0; i < t.length; i++) if (t[i].length > 1) srcs.push(i);
+  if (!srcs.length) return false;
+  var s = srcs[(Math.random() * srcs.length) | 0];
+  var moving = t[s][t[s].length - 1];
+  var dsts = [];
+  for (var j = 0; j < t.length; j++) {
+    if (j === s || t[j].length >= TUBE_CAP) continue;
+    var destTop = t[j].length ? t[j][t[j].length - 1] : 0;
+    if (destTop !== 0 && isVolatilePair(moving, destTop)) continue; // would explode
+    dsts.push(j);
+  }
+  if (!dsts.length) return false;
+  var d = dsts[(Math.random() * dsts.length) | 0];
+  t[d].push(t[s].pop());
+  return true;
+}
+
+function solvedState(t) {
+  for (var i = 0; i < t.length; i++) {
+    var a = t[i];
+    if (!a.length) continue;
+    var c = a[0];
+    for (var k = 1; k < a.length; k++) if (a[k] !== c) return false;
+  }
+  return true;
+}
+function isSolved() { return solvedState(tubes); }
+function boardImpure() { return !isSolved(); }
+
+// find first volatile adjacency in any tube -> {i, layer} or null
+function findVolatile() {
+  for (var i = 0; i < tubes.length; i++) {
+    var a = tubes[i];
+    for (var k = 0; k < a.length - 1; k++) {
+      if (isVolatilePair(a[k], a[k + 1])) return { i: i, layer: k + 1 };
+    }
+  }
+  return null;
+}
+
+function canPour(s, d) {
+  if (s === d || s < 0 || d < 0) return false;
+  if (!tubes[s] || !tubes[d]) return false;
+  if (!tubes[s].length) return false;
+  if (tubes[d].length >= TUBE_CAP) return false;
+  return true;
+}
+
+function detectStuck() {
+  if (isSolved()) return false;
+  for (var s = 0; s < tubes.length; s++)
+    for (var d = 0; d < tubes.length; d++)
+      if (canPour(s, d)) return false;
+  return true;
+}
+
+// ── POUR LOGIC ───────────────────────────────────────────────────────────
+function snapshot() {
+  return { tubes: tubes.map(function(a){ return a.slice(); }), pours: pours };
+}
+function pushHistory() {
+  history.push(snapshot());
+  if (history.length > 40) history.shift();
+}
+
+function doUndo() {
+  if (anim || blast) return;
+  if (gs !== 'PLAYING') return;
+  if (undoLeft <= 0 || !history.length) { GF.setShake(0.2); return; }
+  var snap = history.pop();
+  tubes = snap.tubes.map(function(a){ return a.slice(); });
+  pours = snap.pours;
+  undoLeft--;
+  sel = -1;
+  stuck = false;
+  GF.saveRun();
+}
+
+function pour(s, d) {
+  if (!canPour(s, d) || anim || blast) return false;
+  pushHistory();
+  pours--;
+
+  var srcTop = topColor(tubes[s]);
+  var dstTop = topColor(tubes[d]);
+  var space = TUBE_CAP - tubes[d].length;
+  var runLen = topRunLen(tubes[s]);
+  var moveN = Math.min(runLen, space);
+
+  // If pouring onto a DIFFERENT colour, only one ball moves (it sits on top —
+  // this is how a volatile adjacency can form). Same colour: whole run moves.
+  if (tubes[d].length > 0 && dstTop !== srcTop) moveN = 1;
+
+  anim = { from: s, to: d, color: srcTop, t: 0, moveN: moveN };
+  return true;
+}
+
+function applyPour() {
+  var a = anim; if (!a) return;
+  var s = a.from, d = a.to;
+  for (var i = 0; i < a.moveN; i++) tubes[d].push(tubes[s].pop());
+  var cc = tubeRectCenter(d);
+  GF.spawnParticles(cc.x, cc.y - 40 * GF.S, COL_HEX[a.color], 10);
+  anim = null;
+  sel = -1;
+  GF.saveRun();
+  evaluate();
+}
+
+function evaluate() {
+  // 1) detonation check FIRST — a volatile adjacency loses immediately
+  var v = findVolatile();
+  if (v) {
+    volatileHit = true;
+    loseReason = 'blast';
+    blast = { i: v.i, layer: v.layer, t: 0 };
+    var cc = tubeRectCenter(v.i);
+    GF.spawnFloat(cc.x, cc.y - 50 * GF.S, 'BOOM!', '#ff5a3c');
+    GF.spawnParticles(cc.x, cc.y, '#ff7a3c', 26);
+    GF.spawnParticles(cc.x, cc.y, '#ffd23c', 18);
+    GF.setShake(0.7);
+    gs = 'GAMEOVER';
+    GF.gameEnded();
+    GF.saveRun();
+    return;
+  }
+  // 2) win / progression
+  if (isSolved()) {
+    if (level > bestLevel) { bestLevel = level; try { localStorage.setItem('volatile_sort_best', bestLevel); } catch (e) {} }
+    if (level >= WIN_LEVELS) { gs = 'WIN'; GF.gameEnded(); GF.happytime(); }
+    else { gs = 'LEVELEND'; GF.happytime(); }
+    GF.saveRun();
+    return;
+  }
+  // 3) budget / stuck
+  stuck = detectStuck();
+  if (pours <= 0 || stuck) {
+    loseReason = 'pours';
+    gs = 'GAMEOVER';
+    GF.gameEnded();
+    GF.saveRun();
+  }
+}
+
+// ── LIFECYCLE ──────────────────────────────────────────────────────────────
+function startGame() {
+  level = 1;
+  buildLevel(level);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function nextLevel() {
+  level++;
+  if (level > WIN_LEVELS) { gs = 'WIN'; GF.gameEnded(); return; }
+  buildLevel(level);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function retryLevel() {
+  buildLevel(level);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function toMenu() { gs = 'MENU'; GF.saveRun(); }
+
+window._jumpLevel = function(n) {
+  GF.tutorial.active = false;
+  if (n >= 90) {
+    level = WIN_LEVELS;
+    buildLevel(level);
+    gs = 'WIN';
+    GF.gameEnded();
+    return;
+  }
+  level = GF.clamp(n || 3, 1, WIN_LEVELS);
+  buildLevel(level);
+  gs = 'PLAYING';
+};
+window._setupForScreenshot = function(lvl) {
+  try { localStorage.setItem('volatile_sort_seen_tutorial', '1'); } catch (e) {}
+  GF.tutorial.active = false;
+  level = GF.clamp(lvl || 4, 1, WIN_LEVELS);
+  buildLevel(level);
+  gs = 'PLAYING';
+  computeLayout();
+  // Compose an "almost-solved" readable mid-state: leave most tubes pure,
+  // mix the top of one tube so the rack shows clear colour groups + an
+  // in-progress target. Never create a volatile adjacency here.
+  for (var i = 0; i < tubes.length; i++) {
+    if (tubes[i].length && tubes[i].length < TUBE_CAP) {
+      var safe = -1;
+      for (var c = 1; c <= colorsForLevel(level); c++) {
+        if (c !== topColor(tubes[i]) && !isVolatilePair(c, topColor(tubes[i]))) { safe = c; break; }
+      }
+      if (safe > 0) { tubes[i].push(safe); break; }
+    }
+  }
+  sel = 0;
+};
+
+// ── LAYOUT ─────────────────────────────────────────────────────────────────
+function computeLayout() {
+  tubeRects = [];
+  var n = tubes.length;
+  if (!n) return;
+  var W = GF.W, H = GF.H;
+  var topPad = H * 0.215;   // leave room for HUD + danger banner
+  var botPad = H * 0.07;
+  var avail = H - topPad - botPad;
+
+  var pr;
+  if (n <= 4) pr = n;
+  else pr = Math.ceil(n / 2);
+  pr = Math.min(pr, 4);
+  var rows = Math.ceil(n / pr);
+  var rowGap = avail * 0.09;
+  var hLimited = (avail - (rows - 1) * rowGap) / rows;
+  var maxTubeW = (W * 0.92) / (pr + 0.55 * (pr - 1));
+  var wLimitedH = maxTubeW / 0.30;
+  var tubeH = GF.clamp(Math.min(hLimited, wLimitedH), 90, 300);
+  var tubeW = tubeH * 0.30;
+  var gapX = tubeW * 0.6;
+  var totalRowsH = rows * tubeH + (rows - 1) * rowGap;
+  var startY = topPad + (avail - totalRowsH) / 2;
+  if (startY < topPad) startY = topPad;
+
+  for (var r = 0; r < rows; r++) {
+    var inRow = Math.min(pr, n - r * pr);
+    var totalW = inRow * tubeW + (inRow - 1) * gapX;
+    var startX = (W - totalW) / 2;
+    for (var k = 0; k < inRow; k++) {
+      var idx = r * pr + k;
+      var x = startX + k * (tubeW + gapX);
+      var y = startY + r * (tubeH + rowGap);
+      tubeRects[idx] = { x: x, y: y, w: tubeW, h: tubeH };
+    }
+  }
+}
+function tubeRectCenter(i) {
+  var t = tubeRects[i] || { x: GF.cx, y: GF.cy, w: 40, h: 100 };
+  return { x: t.x + t.w / 2, y: t.y + t.h / 2 };
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────────
+function update(dt) {
+  GF.tutorial.update(dt);
+  warnT += dt;
+  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WIN') computeLayout();
+  if (anim) {
+    anim.t += dt / POUR_ANIM_SEC;
+    if (anim.t >= 1) applyPour();
+  }
+  if (blast) { blast.t += dt; if (blast.t > 1.2) blast = null; }
+}
+
+// ── DRAW ──────────────────────────────────────────────────────────────────
+var _playBtn = null, _retryBtn = null, _againBtn = null;
+var _hudMenuBtn = null, _hudHelpBtn = null, _undoBtn = null, _gmMenuBtn = null, _winMenuBtn = null;
+
+function draw(ctx) {
+  drawBg(ctx);
+  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WIN') {
+    if (!tubeRects.length) computeLayout();
+    drawBoard(ctx);
+    drawHUD(ctx);
+    drawDangerBanner(ctx);
+  }
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'LEVELEND') drawLevelEnd(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if (gs === 'WIN')      drawWin(ctx);
+  GF.tutorial.draw(ctx);
+}
+
+function drawBg(ctx) {
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#141a2e');
+  g.addColorStop(0.55, '#0c1020');
+  g.addColorStop(1, '#06080f');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.strokeStyle = 'rgba(120,150,200,0.07)';
+  ctx.lineWidth = 2;
+  var by = GF.H * 0.9;
+  ctx.beginPath(); ctx.moveTo(0, by); ctx.lineTo(GF.W, by); ctx.stroke();
+}
+
+// tube currently holds a volatile colour on top -> halo colour, else null
+function tubeHaloColor(i) {
+  var top = topColor(tubes[i]);
+  if (top === 0) return null;
+  for (var p = 0; p < volatilePairs.length; p++) {
+    if (volatilePairs[p][0] === top || volatilePairs[p][1] === top) return COL_HEX[top];
+  }
+  return null;
+}
+
+function drawBoard(ctx) {
+  var S = GF.S;
+  for (var i = 0; i < tubes.length; i++) {
+    var t = tubeRects[i];
+    if (!t) continue;
+    var lifted = (i === sel) ? SEL_LIFT_PX * S : 0;
+    drawTube(ctx, i, t.x, t.y - lifted, t.w, t.h, i === sel);
+  }
+  if (anim) drawPourStream(ctx);
+  if (blast) drawBlast(ctx);
+}
+
+function drawTube(ctx, idx, x, y, w, h, selected) {
+  var S = GF.S;
+  var arr = tubes[idx];
+  var r = w * 0.5;
+
+  // danger halo for tubes holding a volatile colour on top
+  var halo = tubeHaloColor(idx);
+  if (halo && gs === 'PLAYING') {
+    var pulse = 0.5 + 0.5 * Math.sin(warnT * Math.PI * WARN_PULSE_HZ);
+    ctx.save();
+    ctx.shadowColor = halo;
+    ctx.shadowBlur = (14 + 14 * pulse) * S;
+    GF.rr(ctx, x, y, w, h, r);
+    ctx.strokeStyle = 'rgba(255,90,60,' + (0.35 + 0.4 * pulse) + ')';
+    ctx.lineWidth = Math.max(3 * S, 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.save();
+  GF.rr(ctx, x, y, w, h, r);
+  ctx.fillStyle = 'rgba(200,225,255,0.06)';
+  ctx.fill();
+
+  // clip to inner tube + draw stacked balls
+  ctx.save();
+  GF.rr(ctx, x + 2, y + 2, w - 4, h - 4, r);
+  ctx.clip();
+  var layerH = (h - 4) / TUBE_CAP;
+  var bw = w - 6;
+  for (var li = 0; li < arr.length; li++) {
+    var col = arr[li];
+    var cyb = y + h - 2 - (li + 0.5) * layerH;
+    var cxb = x + w / 2;
+    var rad = Math.min(bw, layerH) * 0.46;
+    var grad = ctx.createRadialGradient(cxb - rad * 0.3, cyb - rad * 0.3, rad * 0.1, cxb, cyb, rad);
+    grad.addColorStop(0, COL_HEX[col]);
+    grad.addColorStop(1, COL_HEX_DK[col]);
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.arc(cxb, cyb, rad, 0, Math.PI * 2); ctx.fill();
+    // highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath(); ctx.arc(cxb - rad * 0.32, cyb - rad * 0.34, rad * 0.26, 0, Math.PI * 2); ctx.fill();
+    // mark a volatile adjacency between this ball and the one above
+    if (li < arr.length - 1 && isVolatilePair(col, arr[li + 1])) {
+      ctx.strokeStyle = 'rgba(255,80,50,0.9)';
+      ctx.lineWidth = Math.max(2 * S, 1.6);
+      var sepY = y + h - 2 - (li + 1) * layerH;
+      ctx.beginPath(); ctx.moveTo(x + 3, sepY); ctx.lineTo(x + w - 3, sepY); ctx.stroke();
+    }
+  }
+  ctx.restore();
+
+  // glass outline
+  GF.rr(ctx, x, y, w, h, r);
+  ctx.lineWidth = Math.max(2.5 * S, 2);
+  ctx.strokeStyle = selected ? '#ffe27a' : 'rgba(190,215,255,0.45)';
+  ctx.stroke();
+  // glass glint
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  ctx.fillRect(x + w * 0.18, y + h * 0.08, w * 0.1, h * 0.8);
+  ctx.restore();
+}
+
+function drawPourStream(ctx) {
+  var a = anim;
+  var sr = tubeRects[a.from], dr = tubeRects[a.to];
+  if (!sr || !dr) return;
+  var sx = sr.x + sr.w / 2, sy = sr.y;
+  var dx = dr.x + dr.w / 2, dy = dr.y;
+  var p = a.t;
+  var col = COL_HEX[a.color];
+  ctx.save();
+  ctx.globalAlpha = 0.92;
+  for (var k = 0; k < 6; k++) {
+    var tt = GF.clamp(p * 1.4 - k * 0.08, 0, 1);
+    var px = GF.lerp(sx, dx, tt);
+    var py = GF.lerp(sy, dy, tt) - Math.sin(tt * Math.PI) * (40 * GF.S);
+    var rad = (3 + (5 - k)) * GF.S * (1 - tt * 0.3);
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(px, py, Math.max(rad, 2), 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawBlast(ctx) {
+  var t = tubeRects[blast.i];
+  if (!t) return;
+  var S = GF.S;
+  var layerH = (t.h - 4) / TUBE_CAP;
+  var cy = t.y + t.h - 2 - blast.layer * layerH;
+  var cx = t.x + t.w / 2;
+  var prog = GF.clamp(blast.t / 0.5, 0, 1);
+  var rad = (t.w * 0.6 + prog * t.w * 1.6);
+  var alpha = 1 - prog;
+  ctx.save();
+  var g = ctx.createRadialGradient(cx, cy, 1, cx, cy, rad);
+  g.addColorStop(0, 'rgba(255,230,120,' + (0.9 * alpha) + ')');
+  g.addColorStop(0.4, 'rgba(255,120,50,' + (0.7 * alpha) + ')');
+  g.addColorStop(1, 'rgba(255,60,40,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawHUD(ctx) {
+  var S = GF.S, W = GF.W;
+  var pad = GF.clamp(12 * S, 8, 20);
+  var fs = GF.clamp(17 * S, 13, 24);
+  ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#cfe0ff';
+  ctx.textAlign = 'left';
+  ctx.fillText(GF.t('level') + ' ' + level + '/' + WIN_LEVELS, pad, pad);
+
+  var maxP = poursForLevel(level);
+  var pipR = GF.clamp(5 * S, 4, 8);
+  var pipGap = pipR * 2.6;
+  var shown = Math.min(maxP, 14);
+  var totalW = shown * pipGap;
+  var px0 = W / 2 - totalW / 2 + pipGap / 2;
+  var py = pad + fs * 0.35;
+  for (var i = 0; i < shown; i++) {
+    ctx.beginPath();
+    ctx.arc(px0 + i * pipGap, py, pipR, 0, Math.PI * 2);
+    ctx.fillStyle = (i < pours) ? '#5fd0ff' : 'rgba(120,140,170,0.3)';
+    ctx.fill();
+  }
+  ctx.font = 'bold ' + GF.clamp(13 * S, 10, 18) + 'px sans-serif';
+  ctx.fillStyle = pours <= 2 ? '#ff7a6c' : '#9fb6d8';
+  ctx.textAlign = 'center';
+  ctx.fillText(GF.t('pours') + ': ' + pours, W / 2, py + pipR + 5 * S);
+
+  var btn = GF.clamp(40 * S, 34, 50);
+  var gap = GF.clamp(8 * S, 6, 12);
+  var rx = W - pad - btn;
+  _hudMenuBtn = drawIconBtn(ctx, rx, pad, btn, 'menu');
+  rx -= (btn + gap);
+  _hudHelpBtn = drawIconBtn(ctx, rx, pad, btn, 'help');
+  rx -= (btn + gap);
+  _undoBtn = drawIconBtn(ctx, rx, pad, btn, 'undo');
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px sans-serif';
+  ctx.fillStyle = undoLeft > 0 ? '#ffe27a' : '#667';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('' + undoLeft, _undoBtn.x + btn / 2, _undoBtn.y + btn + 2 * S);
+}
+
+// the core readability device: which colours must never touch
+function drawDangerBanner(ctx) {
+  if (!volatilePairs.length) return;
+  var S = GF.S, W = GF.W;
+  var fs = GF.clamp(12 * S, 9, 16);
+  var sw = GF.clamp(20 * S, 15, 28);          // swatch size
+  var bolt = GF.clamp(22 * S, 16, 30);        // warning diamond size
+  var pairW = sw * 2 + bolt + GF.clamp(10 * S, 6, 14);
+  var pairGap = GF.clamp(22 * S, 14, 34);
+  var totalW = volatilePairs.length * pairW + (volatilePairs.length - 1) * pairGap;
+  var by = GF.H * 0.135;
+  var bx = (W - totalW) / 2;
+
+  // label
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#ff9c8e';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.fillText(GF.t('danger'), W / 2, by - 3 * S);
+
+  var pulse = 0.5 + 0.5 * Math.sin(warnT * Math.PI * WARN_PULSE_HZ);
+  for (var i = 0; i < volatilePairs.length; i++) {
+    var pr = volatilePairs[i];
+    var x = bx + i * (pairW + pairGap);
+    drawSwatch(ctx, x, by, sw, COL_HEX[pr[0]], COL_HEX_DK[pr[0]]);
+    var dx = x + sw + GF.clamp(5 * S, 3, 7);
+    drawWarnDiamond(ctx, dx + bolt / 2, by + sw / 2, bolt, pulse);
+    var x2 = dx + bolt + GF.clamp(5 * S, 3, 7);
+    drawSwatch(ctx, x2, by, sw, COL_HEX[pr[1]], COL_HEX_DK[pr[1]]);
+  }
+  ctx.textBaseline = 'top';
+}
+
+function drawSwatch(ctx, x, y, sz, c, cd) {
+  var g = ctx.createRadialGradient(x + sz * 0.35, y + sz * 0.35, sz * 0.1, x + sz / 2, y + sz / 2, sz * 0.6);
+  g.addColorStop(0, c); g.addColorStop(1, cd);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x + sz / 2, y + sz / 2, sz / 2, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = Math.max(1.5 * GF.S, 1.2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)';
+  ctx.stroke();
+}
+
+function drawWarnDiamond(ctx, cx, cy, sz, pulse) {
+  var S = GF.S;
+  var r = sz / 2 * (0.92 + 0.12 * pulse);
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,170,40,' + (0.5 + 0.4 * pulse) + ')';
+  ctx.shadowBlur = (8 + 8 * pulse) * S;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - r); ctx.lineTo(cx + r, cy); ctx.lineTo(cx, cy + r); ctx.lineTo(cx - r, cy);
+  ctx.closePath();
+  ctx.fillStyle = '#ffb02e';
+  ctx.fill();
+  ctx.lineWidth = Math.max(1.5 * S, 1.2);
+  ctx.strokeStyle = '#7a3a00';
+  ctx.stroke();
+  ctx.restore();
+  // lightning bolt glyph
+  ctx.fillStyle = '#3a1a00';
+  ctx.beginPath();
+  ctx.moveTo(cx + r * 0.18, cy - r * 0.55);
+  ctx.lineTo(cx - r * 0.28, cy + r * 0.08);
+  ctx.lineTo(cx + r * 0.02, cy + r * 0.08);
+  ctx.lineTo(cx - r * 0.18, cy + r * 0.55);
+  ctx.lineTo(cx + r * 0.30, cy - r * 0.06);
+  ctx.lineTo(cx, cy - r * 0.06);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawIconBtn(ctx, x, y, sz, kind) {
+  var S = GF.S;
+  GF.rr(ctx, x, y, sz, sz, sz * 0.24);
+  ctx.fillStyle = 'rgba(40,55,85,0.85)';
+  ctx.fill();
+  ctx.lineWidth = Math.max(1.5 * S, 1.2);
+  ctx.strokeStyle = 'rgba(150,180,230,0.4)';
+  ctx.stroke();
+  var cx = x + sz / 2, cy = y + sz / 2;
+  ctx.strokeStyle = '#cfe0ff';
+  ctx.fillStyle = '#cfe0ff';
+  ctx.lineWidth = Math.max(2.2 * S, 1.8);
+  if (kind === 'menu') {
+    var lw = sz * 0.42;
+    for (var i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.moveTo(cx - lw / 2, cy + i * (sz * 0.18));
+      ctx.lineTo(cx + lw / 2, cy + i * (sz * 0.18));
+      ctx.stroke();
+    }
+  } else if (kind === 'help') {
+    ctx.font = 'bold ' + (sz * 0.55) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('?', cx, cy + sz * 0.02);
+    ctx.textBaseline = 'top';
+  } else if (kind === 'undo') {
+    ctx.beginPath();
+    ctx.arc(cx, cy, sz * 0.22, Math.PI * 0.4, Math.PI * 1.9);
+    ctx.stroke();
+    var ax = cx + Math.cos(Math.PI * 0.4) * sz * 0.22;
+    var ay = cy + Math.sin(Math.PI * 0.4) * sz * 0.22;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(ax - sz * 0.12, ay - sz * 0.02);
+    ctx.lineTo(ax + sz * 0.02, ay + sz * 0.12);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.textBaseline = 'top';
+  return { x: x, y: y, w: sz, h: sz };
+}
+
+// ── OVERLAYS ─────────────────────────────────────────────────────────────
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/), lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function drawScrim(ctx, alpha) {
+  ctx.fillStyle = 'rgba(6,8,15,' + (alpha || 0.9) + ')';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+}
+
+function drawButton(ctx, label, cx, y, accent) {
+  var S = GF.S;
+  var bw = GF.clamp(250 * S, 170, 330), bh = GF.clamp(56 * S, 44, 70);
+  var bx = cx - bw / 2;
+  var g = ctx.createLinearGradient(bx, y, bx, y + bh);
+  if (accent === '#e88a3a') { g.addColorStop(0, '#ef9b3a'); g.addColorStop(1, '#c46410'); }
+  else { g.addColorStop(0, '#3fb86a'); g.addColorStop(1, '#2a8a4c'); }
+  GF.rr(ctx, bx, y, bw, bh, bh / 2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.font = 'bold ' + GF.clamp(19 * S, 15, 24) + 'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, cx, y + bh / 2);
+  ctx.textBaseline = 'top';
+  return { x: bx, y: y, w: bw, h: bh };
+}
+
+function drawSmallButton(ctx, label, cx, y) {
+  var S = GF.S;
+  var bw = GF.clamp(180 * S, 130, 240), bh = GF.clamp(46 * S, 38, 58);
+  var bx = cx - bw / 2;
+  GF.rr(ctx, bx, y, bw, bh, bh / 2);
+  ctx.fillStyle = 'rgba(60,80,120,0.9)'; ctx.fill();
+  ctx.lineWidth = Math.max(1.5 * S, 1.2);
+  ctx.strokeStyle = 'rgba(150,180,230,0.5)'; ctx.stroke();
+  ctx.font = 'bold ' + GF.clamp(16 * S, 13, 20) + 'px sans-serif';
+  ctx.fillStyle = '#dce8ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, cx, y + bh / 2);
+  ctx.textBaseline = 'top';
+  return { x: bx, y: y, w: bw, h: bh };
+}
+
+function drawMenu(ctx) {
+  drawScrim(ctx, 0.93);
+  var S = GF.S, W = GF.W, H = GF.H, cx = W / 2;
+  var maxW = Math.min(W * 0.86, 460);
+  ctx.shadowColor = 'rgba(255,120,60,0.5)'; ctx.shadowBlur = 26 * S;
+  ctx.font = 'bold ' + GF.clamp(38 * S, 24, 54) + 'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var titleY = H * 0.06;
+  ctx.fillText(GF.t('title'), cx, titleY);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  var tubeBlockY = titleY + GF.clamp(48 * S, 34, 62);
+  drawTitleTubes(ctx, cx, tubeBlockY);
+
+  var y = tubeBlockY + GF.clamp(108 * S, 80, 150);
+  var fs = GF.clamp(14 * S, 11, 18);
+  var lineH = fs * 1.28;
+  ctx.font = fs + 'px sans-serif';
+  ctx.textAlign = 'left';
+  var lx = cx - maxW / 2;
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  var cols = ['#9fe8b5', '#cfe0ff', '#cfe0ff', '#ff9c8e', '#ffe27a'];
+  for (var ki = 0; ki < keys.length; ki++) {
+    var lines = wrapLines(ctx, GF.t(keys[ki]), maxW);
+    ctx.fillStyle = cols[ki];
+    for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], lx, y); y += lineH; }
+    y += lineH * 0.26;
+  }
+  var btnY = Math.min(y + GF.clamp(12 * S, 8, 20), H - GF.clamp(82 * S, 60, 110));
+  _playBtn = drawButton(ctx, GF.t('play'), cx, btnY);
+  if (bestLevel > 0) {
+    ctx.font = GF.clamp(13 * S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = '#7f93b5'; ctx.textAlign = 'center';
+    ctx.fillText(GF.t('best') + ': ' + bestLevel, cx, btnY + _playBtn.h + 12 * S);
+  }
+}
+
+function drawTitleTubes(ctx, cx, y) {
+  var S = GF.S;
+  var w = GF.clamp(26 * S, 18, 38), h = GF.clamp(92 * S, 66, 132);
+  var gap = w * 1.5;
+  var sets = [[1, 1, 2], [3, 4], [5, 3, 1]];
+  for (var i = -1; i <= 1; i++) {
+    var x = cx + i * (w + gap) - w / 2;
+    var arr = sets[i + 1];
+    var r = w * 0.5;
+    GF.rr(ctx, x, y, w, h, r);
+    ctx.fillStyle = 'rgba(200,225,255,0.06)'; ctx.fill();
+    ctx.save();
+    GF.rr(ctx, x + 2, y + 2, w - 4, h - 4, r); ctx.clip();
+    var layerH = (h - 4) / TUBE_CAP;
+    for (var li = 0; li < arr.length; li++) {
+      var cyb = y + h - 2 - (li + 0.5) * layerH;
+      var cxb = x + w / 2;
+      var rad = Math.min(w - 6, layerH) * 0.46;
+      ctx.fillStyle = COL_HEX[arr[li]];
+      ctx.beginPath(); ctx.arc(cxb, cyb, rad, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+    GF.rr(ctx, x, y, w, h, r);
+    ctx.lineWidth = Math.max(2 * S, 1.6);
+    ctx.strokeStyle = 'rgba(190,215,255,0.45)'; ctx.stroke();
+  }
+}
+
+function drawLevelEnd(ctx) {
+  drawScrim(ctx, 0.7);
+  var S = GF.S, H = GF.H, cx = GF.W / 2;
+  ctx.font = 'bold ' + GF.clamp(34 * S, 22, 48) + 'px sans-serif';
+  ctx.fillStyle = '#9fe8b5'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('levelsolved') + ' ' + level + ' ' + GF.t('solved'), cx, H * 0.42);
+  ctx.font = GF.clamp(16 * S, 12, 20) + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  ctx.fillText(GF.t('tap_next'), cx, H * 0.42 + GF.clamp(44 * S, 32, 60));
+  ctx.textBaseline = 'top';
+}
+
+function drawGameOver(ctx) {
+  drawScrim(ctx, 0.9);
+  var S = GF.S, H = GF.H, cx = GF.W / 2;
+  ctx.font = 'bold ' + GF.clamp(36 * S, 24, 52) + 'px sans-serif';
+  ctx.fillStyle = '#ff7a6c'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('gameover'), cx, H * 0.28);
+  ctx.font = GF.clamp(16 * S, 12, 20) + 'px sans-serif';
+  ctx.fillStyle = '#ffd0a0';
+  ctx.fillText(GF.t(loseReason === 'blast' ? 'reason_blast' : 'reason_pours'), cx, H * 0.28 + GF.clamp(48 * S, 36, 64));
+  _retryBtn = drawButton(ctx, GF.t('retry'), cx, H * 0.52, '#e88a3a');
+  _gmMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _retryBtn.h + GF.clamp(18 * S, 12, 26));
+}
+
+function drawWin(ctx) {
+  drawScrim(ctx, 0.92);
+  var S = GF.S, H = GF.H, cx = GF.W / 2;
+  ctx.shadowColor = 'rgba(63,184,106,0.6)'; ctx.shadowBlur = 30 * S;
+  ctx.font = 'bold ' + GF.clamp(42 * S, 28, 58) + 'px sans-serif';
+  ctx.fillStyle = '#9fe8b5'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('win'), cx, H * 0.28);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(16 * S, 12, 20) + 'px sans-serif';
+  ctx.fillStyle = '#bcd';
+  ctx.fillText(GF.t('best') + ': ' + bestLevel, cx, H * 0.28 + GF.clamp(54 * S, 40, 70));
+  _againBtn = drawButton(ctx, GF.t('again'), cx, H * 0.52);
+  _winMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _againBtn.h + GF.clamp(18 * S, 12, 26));
+}
+
+// ── INPUT ──────────────────────────────────────────────────────────────────
+function hit(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+
+function tubeHit(x, y) {
+  var pad = 12 * GF.S;
+  for (var i = 0; i < tubeRects.length; i++) {
+    var t = tubeRects[i];
+    if (!t) continue;
+    var lift = (i === sel) ? SEL_LIFT_PX * GF.S : 0;
+    if (x >= t.x - pad && x <= t.x + t.w + pad &&
+        y >= t.y - lift - pad && y <= t.y + t.h + pad) return i;
+  }
+  return -1;
+}
+
+function onTap(x, y) {
+  if (GF.tutorial.active) { if (GF.tutorial.handleClick(x, y)) return; }
+
+  if (gs === 'MENU') { if (hit(_playBtn, x, y)) startGame(); return; }
+  if (gs === 'LEVELEND') { nextLevel(); return; }
+  if (gs === 'GAMEOVER') {
+    if (hit(_retryBtn, x, y)) { retryLevel(); return; }
+    if (hit(_gmMenuBtn, x, y)) { toMenu(); return; }
+    return;
+  }
+  if (gs === 'WIN') {
+    if (hit(_againBtn, x, y)) { startGame(); return; }
+    if (hit(_winMenuBtn, x, y)) { toMenu(); return; }
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  if (anim || blast) return;
+
+  if (hit(_hudMenuBtn, x, y)) { toMenu(); return; }
+  if (hit(_hudHelpBtn, x, y)) { GF.tutorial.reopen(); return; }
+  if (hit(_undoBtn, x, y)) { doUndo(); return; }
+
+  var idx = tubeHit(x, y);
+  if (idx < 0) { sel = -1; return; }
+  if (sel < 0) { if (tubes[idx].length) sel = idx; return; }
+  if (idx === sel) { sel = -1; return; }
+  if (canPour(sel, idx)) { pour(sel, idx); }
+  else { GF.setShake(0.18); sel = -1; }
+}
+
+GF.canvas.addEventListener('pointerdown', function(e) {
+  var rect = GF.canvas.getBoundingClientRect();
+  var scaleX = GF.canvas.width / rect.width;
+  var scaleY = GF.canvas.height / rect.height;
+  onTap((e.clientX - rect.left) * scaleX, (e.clientY - rect.top) * scaleY);
+});
+
+// ── STATE EXPOSURE (runtime gate cross-checks DESIGN.md) ───────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs,
+    level: level,
+    pours: pours,
+    undoLeft: undoLeft,
+    volatileHit: volatileHit,
+    loseReason: loseReason,
+    stuck: stuck,
+    tubes: tubes.length,
+    volatilePairs: volatilePairs.length,
+    solved: isSolved(),
+    impure: boardImpure(),
+    sel: sel,
+    POUR_BUDGET: POUR_BUDGET,
+    TUBE_CAP: TUBE_CAP,
+    START_TUBES: START_TUBES,
+    WIN_LEVELS: WIN_LEVELS,
+    UNDO_MAX: UNDO_MAX,
+    VOLATILE_BASE: VOLATILE_BASE,
+    POUR_ANIM_SEC: POUR_ANIM_SEC,
+    SEL_LIFT_PX: SEL_LIFT_PX,
+    WARN_PULSE_HZ: WARN_PULSE_HZ,
+  };
+});
+
+window._setState = function(s) { gs = s; };
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+// Test-only: expose tube screen-centres so headless tests can tap precisely.
+window._tubeCenters = function() {
+  computeLayout();
+  return tubeRects.map(function(t){ return { x: t.x + t.w / 2, y: t.y + t.h / 2 }; });
+};
+window._tubes = function() { return tubes.map(function(a){ return a.slice(); }); };
+window._volatilePairs = function() { return volatilePairs.map(function(p){ return p.slice(); }); };
+
+// ── BOOT ────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 540,
+  designH: 960,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'volatile_sort',
+  onReady: function() {
+    try { bestLevel = parseInt(localStorage.getItem('volatile_sort_best') || '0') || 0; } catch (e) {}
+    GF.persist('volatile_sort_run_v1',
+      function() {
+        return { gs: gs, level: level, pours: pours, undoLeft: undoLeft,
+                 volatilePairs: volatilePairs.map(function(p){ return p.slice(); }),
+                 tubes: tubes.map(function(a){ return a.slice(); }) };
+      },
+      function(s) {
+        if (!s) return;
+        level = s.level || 1;
+        pours = (typeof s.pours === 'number') ? s.pours : POUR_BUDGET;
+        undoLeft = (typeof s.undoLeft === 'number') ? s.undoLeft : UNDO_MAX;
+        if (s.volatilePairs && s.volatilePairs.length) volatilePairs = s.volatilePairs.map(function(p){ return p.slice(); });
+        if (s.tubes && s.tubes.length) tubes = s.tubes.map(function(a){ return a.slice(); });
+        gs = (s.gs === 'PLAYING' && tubes.length) ? 'PLAYING' : 'MENU';
+      }
+    );
+
+    GF.tutorial.start([
+      { text: GF.t('tut_goal') + ' ' + GF.t('tut_controls'), advance: 'click_any' },
+      { text: GF.t('tut_win') + ' ' + GF.t('tut_lose'), advance: 'click_any' },
+      { text: GF.t('tut_tip'), advance: 'click_any' },
+    ], { storageKey: 'volatile_sort_seen_tutorial' });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

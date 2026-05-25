@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Power Wash</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0f16; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ──────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Power Wash',
+    sub: 'Blast the grime until it gleams',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT LEVEL', again: 'PLAY AGAIN',
+    clean: 'CLEAN', water: 'WATER', level: 'LEVEL',
+    spotless: 'SPOTLESS!', outofwater: 'OUT OF WATER', won: 'ALL SPARKLING!',
+    holdblast: 'Hold to blast the grime!',
+    coins: 'Coins', upgrade: 'UPGRADE NOZZLE', nozzle: 'Nozzle', maxed: 'NOZZLE MAXED',
+    reached: 'You reached', tankdry: 'Tank ran dry before it was clean.',
+    obj_car: 'Muddy Car', obj_window: 'Grimy Window', obj_statue: 'Stained Statue',
+    obj_sign: 'Filthy Sign', obj_gnome: 'Dirty Gnome',
+    tut_goal: 'Goal: Blast the grime off until the meter hits 98% CLEAN.',
+    tut_controls: 'Controls: Hold and drag the jet over the dirt to wash it away.',
+    tut_win: 'Win: Reach 98% CLEAN to finish the object and unlock the next.',
+    tut_lose: 'Lose: Your water tank runs dry before the surface is clean.',
+    tut_tip: 'Tip: Don\'t spray clean spots — water only refills when you let go.',
+    howto: 'HOW TO PLAY', close: 'GOT IT',
+  },
+  ru: {
+    title: 'Мойка напором',
+    sub: 'Сбей грязь до блеска',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЬШЕ', again: 'СНАЧАЛА',
+    clean: 'ЧИСТО', water: 'ВОДА', level: 'УРОВЕНЬ',
+    spotless: 'БЛЕСК!', outofwater: 'ВОДА КОНЧИЛАСЬ', won: 'ВСЁ СИЯЕТ!',
+    holdblast: 'Держите, чтобы сбить грязь!',
+    coins: 'Монеты', upgrade: 'УЛУЧШИТЬ СОПЛО', nozzle: 'Сопло', maxed: 'МАКС. СОПЛО',
+    reached: 'Вы достигли', tankdry: 'Бак опустел раньше, чем стало чисто.',
+    obj_car: 'Грязная машина', obj_window: 'Грязное окно', obj_statue: 'Грязная статуя',
+    obj_sign: 'Грязный знак', obj_gnome: 'Грязный гном',
+    tut_goal: 'Цель: Сбейте грязь струёй, пока счётчик не достигнет 98% ЧИСТОТЫ.',
+    tut_controls: 'Управление: Держите и водите струёй по грязи, чтобы смыть её.',
+    tut_win: 'Победа: Достигните 98% ЧИСТОТЫ, чтобы открыть следующий уровень.',
+    tut_lose: 'Поражение: Бак с водой опустеет раньше, чем станет чисто.',
+    tut_tip: 'Совет: Не лейте на чистое — вода пополняется, когда отпускаете.',
+    howto: 'КАК ИГРАТЬ', close: 'ПОНЯТНО',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (DESIGN.md — keep in sync) ──────────────────────────────────────
+var TANK_MAX     = 1100;   // base tank; per-level tanks below
+var SPRAY_DRAIN  = 42;     // water units / sec while spraying
+var TANK_REGEN   = 55;     // water units / sec refilled while NOT spraying
+var CLEAN_TARGET = 98;     // % cleaned to clear a level
+var GRIME_LAYERS = 3;      // max passes for a heavy cell (heavy->stain->clean)
+var JET_RADIUS   = 56;     // base jet radius (design px) before nozzle upgrade
+var MAX_NOZZLE   = 5;
+var STRIP_RATE   = 34.0;   // grime removed / sec per cell under the jet
+var TOTAL_LEVELS = 5;
+var UPGRADE_COST = 3;
+
+// Per-level config: object key, grid density, grime layers cap, tank size.
+// Tanks sized so an EFFICIENT clean (jet on grime) finishes with margin, while
+// a wasteful player (spraying clean/empty space) runs the tank dry first.
+var LEVELS = [
+  { obj: 'car',    cols: 22, rows: 13, layers: 2, tank: 1700, shape: 'car' },
+  { obj: 'window', cols: 20, rows: 16, layers: 2, tank: 1900, shape: 'window' },
+  { obj: 'statue', cols: 20, rows: 20, layers: 3, tank: 2500, shape: 'statue' },
+  { obj: 'sign',   cols: 24, rows: 18, layers: 3, tank: 2400, shape: 'sign' },
+  { obj: 'gnome',  cols: 22, rows: 22, layers: 3, tank: 2800, shape: 'gnome' },
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | LEVELEND | GAMEOVER | WON
+var level = 1;
+var nozzlePower = 1;        // meta upgrade, persists
+var coins = 0;              // meta currency, persists
+
+var cols = 0, rows = 0, layersCap = 2;
+var grime = null;           // Float32Array, cells * (col*rows+row)
+var totalGrime0 = 1;        // initial sum of grime (for cleanPct)
+var cleanedSum = 0;         // grime removed so far
+var cleanPct = 0;
+var water = TANK_MAX, tankMax = TANK_MAX;
+var lastCoinsEarned = 0;
+var levelStartGrimePresent = false;
+
+var spraying = false;
+var jetX = 0, jetY = 0;     // current jet target in screen px
+var promptT = 0;            // how long since level start with no cleaning
+var pulseT = 0;
+var tutorialOpen = false;
+var lowWaterFlash = 0;
+var sectionChimeCells = 0;  // counts cells that hit fully clean since last chime
+
+// Object bounds in screen px (recomputed on resize)
+var objX = 0, objY = 0, objW = 0, objH = 0;
+
+// Offscreen mask canvas for grime (procedural)
+var maskCanvas = null, maskCtx = null;
+
+// ── AUDIO (WebAudio, no external files) ──────────────────────────────────────
+var actx = null, sprayNode = null, sprayGain = null, sprayFilter = null, audioOn = true;
+function ensureAudio() {
+  if (actx) return;
+  try {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) { audioOn = false; return; }
+    actx = new AC();
+  } catch (e) { audioOn = false; }
+}
+function startSpraySound() {
+  if (!audioOn) return;
+  ensureAudio();
+  if (!actx || sprayNode) return;
+  try {
+    if (actx.state === 'suspended') actx.resume();
+    // white-noise hiss through a bandpass for a water-jet texture
+    var bufSize = actx.sampleRate * 0.5;
+    var buf = actx.createBuffer(1, bufSize, actx.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+    sprayNode = actx.createBufferSource();
+    sprayNode.buffer = buf; sprayNode.loop = true;
+    sprayFilter = actx.createBiquadFilter();
+    sprayFilter.type = 'bandpass'; sprayFilter.frequency.value = 2400; sprayFilter.Q.value = 0.7;
+    sprayGain = actx.createGain(); sprayGain.gain.value = 0.0;
+    sprayNode.connect(sprayFilter); sprayFilter.connect(sprayGain); sprayGain.connect(actx.destination);
+    sprayNode.start();
+    sprayGain.gain.linearRampToValueAtTime(0.10, actx.currentTime + 0.05);
+  } catch (e) {}
+}
+function stopSpraySound() {
+  if (!actx || !sprayNode) return;
+  try {
+    sprayGain.gain.linearRampToValueAtTime(0.0001, actx.currentTime + 0.06);
+    var n = sprayNode, g = sprayGain;
+    setTimeout(function () { try { n.stop(); n.disconnect(); g.disconnect(); } catch (e) {} }, 90);
+  } catch (e) {}
+  sprayNode = null; sprayGain = null; sprayFilter = null;
+}
+function chime(freq, dur, vol) {
+  if (!audioOn) return;
+  ensureAudio();
+  if (!actx) return;
+  try {
+    if (actx.state === 'suspended') actx.resume();
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'sine'; o.frequency.value = freq;
+    g.gain.value = 0.0001;
+    o.connect(g); g.connect(actx.destination);
+    var t0 = actx.currentTime;
+    g.gain.linearRampToValueAtTime(vol || 0.18, t0 + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + (dur || 0.25));
+    o.start(t0); o.stop(t0 + (dur || 0.25) + 0.02);
+  } catch (e) {}
+}
+function cleanChime() { chime(880, 0.18, 0.16); setTimeout(function () { chime(1320, 0.22, 0.14); }, 70); }
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────────
+var layout = { helpBtn: null };
+function recomputeLayout() {
+  var W = GF.W, H = GF.H;
+  // Fill as much of the canvas as possible (Yandex 70%-gameplay rule).
+  // Reserve a top band for the HUD/meter and a small bottom band for the prompt.
+  var topBand = GF.clamp(96 * GF.S, 78, 130);
+  var botBand = GF.clamp(56 * GF.S, 40, 90);
+  var availW = W * 0.94;
+  var availH = H - topBand - botBand;
+  objW = availW;
+  objH = availH;
+  objX = (W - objW) / 2;
+  objY = topBand;
+  layout.helpBtn = {
+    x: W - GF.clamp(50 * GF.S, 38, 60),
+    y: GF.clamp(12 * GF.S, 8, 20),
+    s: GF.clamp(36 * GF.S, 28, 46),
+  };
+}
+
+// ── GRID / GRIME ──────────────────────────────────────────────────────────────
+function gi(col, row) { return col * rows + row; }
+
+// hash noise for grime density
+function noise2(x, y) {
+  var n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+function buildLevel(lv) {
+  var cfg = LEVELS[Math.min(lv - 1, LEVELS.length - 1)];
+  cols = cfg.cols; rows = cfg.rows; layersCap = cfg.layers;
+  tankMax = cfg.tank; water = tankMax;
+  grime = new Float32Array(cols * rows);
+  var sum = 0;
+  // shape mask determines which cells are part of the object
+  for (var c = 0; c < cols; c++) {
+    for (var r = 0; r < rows; r++) {
+      var u = (c + 0.5) / cols, v = (r + 0.5) / rows;
+      if (!inShape(cfg.shape, u, v)) { grime[gi(c, r)] = -1; continue; } // -1 = not part of object
+      // grime density: mostly heavy with some lighter patches
+      var nz = noise2(c * 0.9 + lv * 3.1, r * 0.9 + lv * 1.7);
+      var g = layersCap * (0.55 + 0.45 * nz);
+      // a few near-clean edge cells so 98% target is reachable
+      if (noise2(c * 2.3, r * 2.7) > 0.93) g *= 0.25;
+      g = Math.max(0.15, Math.min(layersCap, g));
+      grime[gi(c, r)] = g;
+      sum += g;
+    }
+  }
+  totalGrime0 = Math.max(1, sum);
+  cleanedSum = 0;
+  cleanPct = 0;
+  promptT = 0;
+  levelStartGrimePresent = true;
+  recomputeLayout();
+  rebuildMask();
+}
+
+// shape membership in normalized object space [0..1]x[0..1]
+function inShape(shape, u, v) {
+  if (shape === 'car') {
+    // body lower 2/3, cabin upper-middle
+    if (v > 0.32 && v < 0.92) {
+      if (u > 0.05 && u < 0.95) {
+        // wheel-well notches at bottom
+        if (v > 0.82) {
+          var w1 = Math.abs(u - 0.27) < 0.07, w2 = Math.abs(u - 0.73) < 0.07;
+          return !(w1 || w2);
+        }
+        return true;
+      }
+    }
+    // cabin
+    if (v > 0.15 && v <= 0.40 && u > 0.28 && u < 0.78) return true;
+    return false;
+  }
+  if (shape === 'window') {
+    return u > 0.06 && u < 0.94 && v > 0.06 && v < 0.94;
+  }
+  if (shape === 'statue') {
+    // head + torso + base column
+    var dxh = (u - 0.5) / 0.16, dyh = (v - 0.22) / 0.14;
+    if (dxh * dxh + dyh * dyh < 1) return true;       // head
+    if (v > 0.34 && v < 0.74 && Math.abs(u - 0.5) < (0.26 - (v - 0.34) * 0.1)) return true; // torso
+    if (v >= 0.74 && v < 0.95 && Math.abs(u - 0.5) < 0.30) return true; // base
+    return false;
+  }
+  if (shape === 'sign') {
+    if (v > 0.08 && v < 0.62 && u > 0.10 && u < 0.90) return true; // board
+    if (v >= 0.62 && v < 0.96 && Math.abs(u - 0.5) < 0.05) return true; // post
+    return false;
+  }
+  if (shape === 'gnome') {
+    // hat (triangle) + face/body
+    if (v < 0.34) {
+      var halfW = (v / 0.34) * 0.22;
+      return Math.abs(u - 0.5) < halfW;
+    }
+    var dx = (u - 0.5) / 0.30, dy = (v - 0.62) / 0.32;
+    return dx * dx + dy * dy < 1;
+  }
+  return u > 0.05 && u < 0.95 && v > 0.05 && v < 0.95;
+}
+
+// ── MASK RENDER (offscreen grime overlay) ──────────────────────────────────────
+var MASK_SUB = 4; // sub-pixels per cell for finer grime texture
+function rebuildMask() {
+  if (!maskCanvas) { maskCanvas = document.createElement('canvas'); maskCtx = maskCanvas.getContext('2d'); }
+  maskCanvas.width = cols * MASK_SUB; maskCanvas.height = rows * MASK_SUB;
+  redrawMask();
+}
+function grimeColorAt(g) {
+  // returns [r,g,b,a] for a grime amount g in [0..layersCap]
+  var frac = g / layersCap; // 0 clean .. 1 heavy
+  if (frac <= 0) return null;
+  if (frac > 0.55) {
+    // heavy grime — dark brown
+    return [74, 52, 30, Math.min(1, 0.78 + frac * 0.18)];
+  } else if (frac > 0.18) {
+    // stain — ochre
+    return [150, 116, 64, 0.70];
+  } else {
+    // faint film
+    return [180, 160, 120, 0.42];
+  }
+}
+function redrawMask() {
+  var mw = cols * MASK_SUB, mh = rows * MASK_SUB;
+  var img = maskCtx.createImageData(mw, mh);
+  var d = img.data;
+  for (var c = 0; c < cols; c++) {
+    for (var r = 0; r < rows; r++) {
+      var g = grime[gi(c, r)];
+      var col = (g < 0) ? null : grimeColorAt(g);
+      for (var sx = 0; sx < MASK_SUB; sx++) {
+        for (var sy = 0; sy < MASK_SUB; sy++) {
+          var px = c * MASK_SUB + sx, py = r * MASK_SUB + sy;
+          var idx = (py * mw + px) * 4;
+          if (!col) { d[idx + 3] = 0; continue; }
+          // fine grit noise per sub-pixel for a dirt texture
+          var nz = noise2(px * 1.7 + 2.1, py * 1.9 + 3.3) * 40 - 20;
+          d[idx]     = Math.max(0, Math.min(255, col[0] + nz));
+          d[idx + 1] = Math.max(0, Math.min(255, col[1] + nz));
+          d[idx + 2] = Math.max(0, Math.min(255, col[2] + nz));
+          // speckle the alpha slightly so cleaned areas feather
+          var an = noise2(px * 2.3, py * 2.7) * 0.16 - 0.08;
+          d[idx + 3] = Math.round(Math.max(0, Math.min(1, col[3] + an)) * 255);
+        }
+      }
+    }
+  }
+  maskCtx.putImageData(img, 0, 0);
+}
+
+// ── CLEANING (jet hits grime) ──────────────────────────────────────────────────
+function effRadiusPx() {
+  return JET_RADIUS * (1 + 0.22 * (nozzlePower - 1)) * GF.S;
+}
+function applyJet(dt) {
+  if (objW <= 0) return;
+  var rad = effRadiusPx();
+  var stripPerSec = STRIP_RATE * (1 + 0.18 * (nozzlePower - 1));
+  var cellWpx = objW / cols, cellHpx = objH / rows;
+  // cell range under jet
+  var minC = Math.floor((jetX - rad - objX) / cellWpx);
+  var maxC = Math.ceil((jetX + rad - objX) / cellWpx);
+  var minR = Math.floor((jetY - rad - objY) / cellHpx);
+  var maxR = Math.ceil((jetY + rad - objY) / cellHpx);
+  var changed = false, anyHit = false, justClean = 0;
+  for (var c = Math.max(0, minC); c < Math.min(cols, maxC + 1); c++) {
+    for (var r = Math.max(0, minR); r < Math.min(rows, maxR + 1); r++) {
+      var ccx = objX + (c + 0.5) * cellWpx;
+      var ccy = objY + (r + 0.5) * cellHpx;
+      var dx = ccx - jetX, dy = ccy - jetY;
+      if (dx * dx + dy * dy > rad * rad) continue;
+      var k = gi(c, r);
+      var g = grime[k];
+      if (g <= 0) continue; // -1 (not object) or already clean
+      anyHit = true;
+      var falloff = 1 - Math.sqrt(dx * dx + dy * dy) / rad; // stronger at center
+      // flatter falloff so the whole radius strips effectively — the final
+      // few % must be reachable without pixel-perfect aiming.
+      var remove = stripPerSec * dt * (0.78 + 0.22 * falloff);
+      var before = g;
+      g = Math.max(0, g - remove);
+      grime[k] = g;
+      cleanedSum += (before - g);
+      changed = true;
+      if (before > 0.02 && g <= 0.02) { justClean++; }
+      // spray + grime fleck particles
+      if (Math.random() < 0.25) {
+        GF.spawnParticles(ccx, ccy, 'rgba(120,90,55,0.9)', 1);
+      }
+    }
+  }
+  if (anyHit && Math.random() < 0.6) {
+    GF.spawnParticles(jetX + (Math.random() - 0.5) * rad, jetY + (Math.random() - 0.5) * rad, 'rgba(220,235,255,0.9)', 2);
+  }
+  if (changed) {
+    cleanPct = Math.min(100, (cleanedSum / totalGrime0) * 100);
+    if (promptT >= 0 && cleanedSum > 1) promptT = -1; // hide prompt once cleaning started
+    sectionChimeCells += justClean;
+    if (sectionChimeCells >= 14) { sectionChimeCells = 0; chime(660, 0.12, 0.10); GF.setShake(0.25); }
+    redrawMask();
+    if (cleanPct >= CLEAN_TARGET) finishLevel();
+  }
+}
+
+// ── LIFECYCLE ───────────────────────────────────────────────────────────────
+function startGame() {
+  level = 1;
+  buildLevel(level);
+  gs = 'PLAYING';
+  spraying = false;
+  GF.gameStarted();
+  GF.saveRun();
+}
+function restartLevel() {
+  buildLevel(level);
+  gs = 'PLAYING';
+  spraying = false;
+  GF.gameStarted();
+  GF.saveRun();
+}
+function finishLevel() {
+  if (gs !== 'PLAYING') return;
+  stopSpraySound(); spraying = false;
+  cleanChime();
+  lastCoinsEarned = 2 + level; // more coins on deeper levels
+  coins += lastCoinsEarned;
+  GF.setShake(0.6);
+  GF.spawnFloat(GF.cx, GF.cy, '+' + lastCoinsEarned, '#ffd34d');
+  if (level >= TOTAL_LEVELS) {
+    gs = 'WON';
+    GF.gameEnded();
+    GF.happytime();
+  } else {
+    gs = 'LEVELEND';
+    GF.gameEnded();
+  }
+  GF.saveRun();
+}
+function nextLevel() {
+  if (pendingAd && window.ysdk) {
+    pendingAd = false;
+    try {
+      window.ysdk.adv.showFullscreenAdv({ callbacks: { onClose: doNextLevel, onError: doNextLevel } });
+      return;
+    } catch (e) {}
+  }
+  doNextLevel();
+}
+function doNextLevel() {
+  level++;
+  if (level > TOTAL_LEVELS) { gs = 'WON'; GF.saveRun(); return; }
+  buildLevel(level);
+  gs = 'PLAYING';
+  spraying = false;
+  GF.gameStarted();
+  GF.saveRun();
+}
+function gameOver() {
+  if (gs !== 'PLAYING') return;
+  stopSpraySound(); spraying = false;
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+  GF.saveRun();
+}
+function buyUpgrade() {
+  if (nozzlePower >= MAX_NOZZLE) return;
+  if (coins < UPGRADE_COST) return;
+  coins -= UPGRADE_COST;
+  nozzlePower++;
+  chime(990, 0.2, 0.16);
+  GF.saveRun();
+}
+function backToMenu() { gs = 'MENU'; GF.saveRun(); }
+
+var pendingAd = false;
+
+// ── SCREENSHOT HELPERS ──────────────────────────────────────────────────────
+window._jumpLevel = function (n) {
+  n = n || 3;
+  // Runtime-gate convention: a very large level number drives a terminal
+  // state so the gate can verify reachability of GAMEOVER/WON.
+  if (n > TOTAL_LEVELS) {
+    level = TOTAL_LEVELS;
+    buildLevel(level);
+    water = 0;
+    cleanPct = 40;
+    gameOver();
+    return;
+  }
+  level = GF.clamp(n, 1, TOTAL_LEVELS);
+  buildLevel(level);
+  gs = 'PLAYING';
+  // half-clean the surface to show the satisfying before/after split
+  for (var c = 0; c < cols; c++) {
+    for (var r = 0; r < rows; r++) {
+      var k = gi(c, r);
+      if (grime[k] < 0) continue;
+      if (c < cols * 0.52) { cleanedSum += grime[k]; grime[k] = 0; } // left half wiped clean
+    }
+  }
+  cleanPct = Math.min(100, (cleanedSum / totalGrime0) * 100);
+  promptT = -1;
+  water = tankMax * 0.55;
+  redrawMask();
+};
+window._setupForScreenshot = function (n) { window._jumpLevel(n || 3); };
+window._setLang = function (l) { GF.lang = l; };
+
+// ── UPDATE ───────────────────────────────────────────────────────────────────
+function update(dt) {
+  pulseT = (pulseT + dt) % 1000;
+  recomputeLayout();
+  if (gs !== 'PLAYING') return;
+
+  if (spraying && water > 0) {
+    water = Math.max(0, water - SPRAY_DRAIN * dt);
+    applyJet(dt);
+    if (water <= 0) { stopSpraySound(); gameOver(); }
+  } else {
+    if (!spraying && water < tankMax) water = Math.min(tankMax, water + TANK_REGEN * dt);
+  }
+  if (water < tankMax * 0.2) lowWaterFlash = (lowWaterFlash + dt * 6) % (Math.PI * 2);
+  if (promptT >= 0) promptT += dt;
+}
+
+// ── DRAW ───────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  // background
+  var bg = ctx.createLinearGradient(0, 0, 0, GF.H);
+  bg.addColorStop(0, '#101826'); bg.addColorStop(1, '#0a0f16');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, GF.W, GF.H);
+  drawTileFloor(ctx);
+
+  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WON') {
+    drawObject(ctx);
+    if (gs === 'PLAYING') {
+      drawJet(ctx);
+      drawHUD(ctx);
+      drawPrompt(ctx);
+      drawHelpBtn(ctx);
+    }
+  }
+
+  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'LEVELEND') drawLevelEnd(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if (gs === 'WON') drawWon(ctx);
+  if (tutorialOpen) drawTutorialPanel(ctx);
+}
+
+function drawTileFloor(c) {
+  c.save();
+  c.globalAlpha = 0.06;
+  c.strokeStyle = '#6fb3d2';
+  c.lineWidth = 1;
+  var step = GF.clamp(46 * GF.S, 30, 70);
+  for (var x = 0; x < GF.W; x += step) { c.beginPath(); c.moveTo(x, 0); c.lineTo(x, GF.H); c.stroke(); }
+  for (var y = 0; y < GF.H; y += step) { c.beginPath(); c.moveTo(0, y); c.lineTo(GF.W, y); c.stroke(); }
+  c.restore();
+}
+
+// draw the clean base object then overlay grime mask clipped to object bounds
+function drawObject(c) {
+  if (objW <= 0) return;
+  var cfg = LEVELS[Math.min(level - 1, LEVELS.length - 1)];
+  c.save();
+  // clean base — gradient panel that matches the object silhouette via mask alpha
+  // base panel
+  GF.rr(c, objX, objY, objW, objH, GF.clamp(14 * GF.S, 8, 22));
+  var base = c.createLinearGradient(objX, objY, objX, objY + objH);
+  if (cfg.shape === 'window') { base.addColorStop(0, '#bfe6ff'); base.addColorStop(1, '#7fc4e8'); }
+  else if (cfg.shape === 'statue') { base.addColorStop(0, '#e8e6e0'); base.addColorStop(1, '#b9b6ad'); }
+  else if (cfg.shape === 'sign') { base.addColorStop(0, '#3fae5a'); base.addColorStop(1, '#2c8f46'); }
+  else if (cfg.shape === 'gnome') { base.addColorStop(0, '#e85d5d'); base.addColorStop(1, '#c43d3d'); }
+  else { base.addColorStop(0, '#4d9be6'); base.addColorStop(1, '#2f6fb0'); } // car blue
+  c.fillStyle = '#0c121c'; c.fill(); // dark frame behind
+  // draw clean object cells (where part of object)
+  var cellWpx = objW / cols, cellHpx = objH / rows;
+  c.save();
+  GF.rr(c, objX, objY, objW, objH, GF.clamp(14 * GF.S, 8, 22)); c.clip();
+  // fill clean object using the base gradient where cells are part of shape
+  c.fillStyle = base;
+  for (var col = 0; col < cols; col++) {
+    for (var row = 0; row < rows; row++) {
+      if (grime[gi(col, row)] < 0) continue;
+      c.fillRect(objX + col * cellWpx - 0.5, objY + row * cellHpx - 0.5, cellWpx + 1, cellHpx + 1);
+    }
+  }
+  // subtle clean highlight sweep
+  c.globalAlpha = 0.10; c.fillStyle = '#ffffff';
+  c.fillRect(objX, objY, objW, objH * 0.18);
+  c.globalAlpha = 1;
+  // grime overlay (offscreen mask scaled up) — smoothed so cleaned edges
+  // feather softly rather than showing hard pixel blocks
+  if (maskCanvas) {
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = 'high';
+    c.drawImage(maskCanvas, objX, objY, objW, objH);
+  }
+  c.restore();
+  c.restore();
+
+  // object frame outline
+  c.save();
+  GF.rr(c, objX, objY, objW, objH, GF.clamp(14 * GF.S, 8, 22));
+  c.strokeStyle = 'rgba(255,255,255,0.12)';
+  c.lineWidth = GF.clamp(3 * GF.S, 2, 5);
+  c.stroke();
+  c.restore();
+}
+
+function drawJet(c) {
+  if (!spraying || objW <= 0 || water <= 0) return;
+  var rad = effRadiusPx();
+  // spray cone from a virtual nozzle above
+  var nozX = jetX, nozY = jetY - rad * 2.2;
+  c.save();
+  var grad = c.createRadialGradient(jetX, jetY, 1, jetX, jetY, rad);
+  grad.addColorStop(0, 'rgba(225,242,255,0.55)');
+  grad.addColorStop(0.6, 'rgba(180,220,255,0.22)');
+  grad.addColorStop(1, 'rgba(180,220,255,0)');
+  c.fillStyle = grad;
+  c.beginPath(); c.arc(jetX, jetY, rad, 0, Math.PI * 2); c.fill();
+  // cone
+  c.globalAlpha = 0.35;
+  c.fillStyle = 'rgba(200,232,255,0.5)';
+  c.beginPath();
+  c.moveTo(nozX, nozY);
+  c.lineTo(jetX - rad * 0.8, jetY);
+  c.lineTo(jetX + rad * 0.8, jetY);
+  c.closePath(); c.fill();
+  c.globalAlpha = 1;
+  // ring
+  c.strokeStyle = 'rgba(255,255,255,0.5)'; c.lineWidth = 2 * GF.S;
+  c.beginPath(); c.arc(jetX, jetY, rad, 0, Math.PI * 2); c.stroke();
+  c.restore();
+}
+
+// ── HUD ───────────────────────────────────────────────────────────────────────
+function drawHUD(c) {
+  var W = GF.W;
+  var pad = GF.clamp(12 * GF.S, 8, 18);
+  // ── top-center CLEAN meter (big, the goal) ──
+  var meterW = GF.clamp(W * 0.62, 180, 520);
+  var meterH = GF.clamp(26 * GF.S, 20, 38);
+  var meterX = (W - meterW) / 2;
+  var meterY = GF.clamp(56 * GF.S, 44, 78);
+  GF.rr(c, meterX, meterY, meterW, meterH, meterH / 2);
+  c.fillStyle = 'rgba(0,0,0,0.45)'; c.fill();
+  var fillW = meterW * (cleanPct / 100);
+  if (fillW > 2) {
+    GF.rr(c, meterX, meterY, fillW, meterH, meterH / 2);
+    var near = cleanPct >= CLEAN_TARGET - 8;
+    c.fillStyle = near ? '#2ecc71' : '#4dd0e1'; c.fill();
+  }
+  // target tick
+  var tickX = meterX + meterW * (CLEAN_TARGET / 100);
+  c.strokeStyle = '#ffd34d'; c.lineWidth = 2 * GF.S;
+  c.beginPath(); c.moveTo(tickX, meterY - 3); c.lineTo(tickX, meterY + meterH + 3); c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(Math.floor(cleanPct) + '% ' + GF.t('clean'), W / 2, meterY + meterH / 2);
+
+  // ── top-left level + object name ──
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 11, 20) + 'px sans-serif';
+  c.fillStyle = '#cfe3f2';
+  c.fillText(GF.t('level') + ' ' + level + '/' + TOTAL_LEVELS, pad, pad);
+  c.font = GF.clamp(12 * GF.S, 9, 16) + 'px sans-serif';
+  c.fillStyle = '#8fa6b8';
+  var cfg = LEVELS[Math.min(level - 1, LEVELS.length - 1)];
+  c.fillText(GF.t('obj_' + cfg.shape), pad, pad + GF.clamp(20 * GF.S, 15, 28));
+
+  // ── water gauge: horizontal bar under the help button area, top-right ──
+  var wgW = GF.clamp(120 * GF.S, 80, 180);
+  var wgH = GF.clamp(16 * GF.S, 12, 24);
+  var wgX = W - wgW - pad;
+  var wgY = layout.helpBtn.y + layout.helpBtn.s + GF.clamp(8 * GF.S, 5, 12);
+  // label
+  c.textAlign = 'right'; c.textBaseline = 'bottom';
+  c.font = 'bold ' + GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+  var low = water < tankMax * 0.2;
+  c.fillStyle = low ? '#ff6b6b' : '#9fd6ff';
+  c.fillText(GF.t('water'), wgX + wgW, wgY - 2);
+  GF.rr(c, wgX, wgY, wgW, wgH, wgH / 2);
+  c.fillStyle = 'rgba(0,0,0,0.45)'; c.fill();
+  var wFrac = water / tankMax;
+  var wfw = wgW * wFrac;
+  if (wfw > 2) {
+    GF.rr(c, wgX, wgY, wfw, wgH, wgH / 2);
+    if (low) {
+      var fl = 0.5 + 0.5 * Math.sin(lowWaterFlash);
+      c.fillStyle = 'rgba(255,' + Math.floor(80 + fl * 60) + ',80,1)';
+    } else {
+      c.fillStyle = '#3aa0e6';
+    }
+    c.fill();
+  }
+  c.textAlign = 'left'; c.textBaseline = 'top';
+}
+
+function drawPrompt(c) {
+  if (promptT < 0 || promptT > 6) return;
+  var W = GF.W, H = GF.H;
+  var alpha = 0.55 + 0.45 * Math.sin(pulseT * 6);
+  c.save();
+  c.globalAlpha = Math.min(1, alpha);
+  c.fillStyle = '#ffd34d';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 14, 28) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'bottom';
+  var py = H - GF.clamp(40 * GF.S, 28, 60);
+  c.fillText(GF.t('holdblast'), W / 2, py);
+  // pulsing arrow pointing into object
+  c.strokeStyle = '#ffd34d'; c.lineWidth = 4 * GF.S;
+  var ax = W / 2, ay = py + GF.clamp(14 * GF.S, 10, 22), len = GF.clamp(26 * GF.S, 18, 36);
+  c.beginPath(); c.moveTo(ax, ay); c.lineTo(ax, ay - len);
+  c.moveTo(ax - 7 * GF.S, ay - len + 9 * GF.S); c.lineTo(ax, ay - len); c.lineTo(ax + 7 * GF.S, ay - len + 9 * GF.S);
+  c.stroke();
+  c.restore();
+}
+
+function drawHelpBtn(c) {
+  var b = layout.helpBtn;
+  if (!b) return;
+  GF.rr(c, b.x, b.y, b.s, b.s, GF.clamp(8 * GF.S, 5, 12));
+  c.fillStyle = 'rgba(255,255,255,0.12)'; c.fill();
+  c.strokeStyle = 'rgba(255,255,255,0.4)'; c.lineWidth = 1.5; c.stroke();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 15, 28) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', b.x + b.s / 2, b.y + b.s / 2 + 1);
+  c.textAlign = 'left'; c.textBaseline = 'top';
+}
+
+// ── TEXT WRAP ───────────────────────────────────────────────────────────────
+function wrapLines(c, text, maxW) {
+  var words = text.split(' ');
+  var lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = cur ? cur + ' ' + words[i] : words[i];
+    if (c.measureText(test).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = test;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// ── OVERLAYS ──────────────────────────────────────────────────────────────────
+var overlayBtns = [];
+
+function bigButton(c, label, cyPos, color) {
+  var W = GF.W;
+  var bw = GF.clamp(260 * GF.S, 180, 340), bh = GF.clamp(56 * GF.S, 44, 70);
+  var bx = (W - bw) / 2, by = cyPos;
+  var grad = c.createLinearGradient(bx, by, bx, by + bh);
+  grad.addColorStop(0, color[0]); grad.addColorStop(1, color[1]);
+  GF.rr(c, bx, by, bw, bh, bh / 2);
+  c.fillStyle = grad; c.fill();
+  c.fillStyle = '#fff';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 15, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(label, W / 2, by + bh / 2);
+  c.textBaseline = 'top';
+  return { x: bx, y: by, w: bw, h: bh };
+}
+
+function drawMenu(c) {
+  overlayBtns = [];
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,12,20,0.90)'; c.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(40 * GF.S, 26, 58);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.shadowColor = 'rgba(77,208,225,0.5)'; c.shadowBlur = 28 * GF.S;
+  c.fillStyle = '#fff'; c.font = 'bold ' + titleFs + 'px sans-serif';
+  var topY = H * 0.13;
+  c.fillText(GF.t('title').toUpperCase(), W / 2, topY);
+  c.shadowBlur = 0;
+  c.fillStyle = '#7fc4e8'; c.font = GF.clamp(15 * GF.S, 11, 20) + 'px sans-serif';
+  c.fillText(GF.t('sub'), W / 2, topY + GF.clamp(28 * GF.S, 20, 38));
+
+  // tutorial block (measured-wrap)
+  var lh = GF.clamp(20 * GF.S, 15, 26);
+  var maxW = Math.min(W * 0.86, 520 * GF.S || W * 0.86);
+  var lx = W / 2 - maxW / 2;
+  var ly = topY + GF.clamp(56 * GF.S, 42, 78);
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.font = GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  for (var i = 0; i < keys.length; i++) {
+    c.fillStyle = (i === keys.length - 1) ? '#9bd6a0' : '#cfe3f2';
+    var lines = wrapLines(c, GF.t(keys[i]), maxW);
+    for (var j = 0; j < lines.length; j++) { c.fillText(lines[j], lx, ly); ly += lh; }
+    ly += GF.clamp(4 * GF.S, 2, 6);
+  }
+
+  var playY = Math.max(ly + GF.clamp(16 * GF.S, 10, 26), H * 0.74);
+  if (playY > H - GF.clamp(80 * GF.S, 60, 110)) playY = H - GF.clamp(80 * GF.S, 60, 110);
+  overlayBtns.push({ b: bigButton(c, GF.t('play'), playY, ['#2ecc71', '#27ae60']), fn: function () { ensureAudio(); startGame(); } });
+}
+
+function drawLevelEnd(c) {
+  overlayBtns = [];
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,12,20,0.86)'; c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#2ecc71'; c.font = 'bold ' + GF.clamp(42 * GF.S, 28, 60) + 'px sans-serif';
+  c.shadowColor = 'rgba(46,204,113,0.5)'; c.shadowBlur = 24 * GF.S;
+  c.fillText(GF.t('spotless'), W / 2, H * 0.24);
+  c.shadowBlur = 0;
+  c.fillStyle = '#fff'; c.font = GF.clamp(18 * GF.S, 13, 24) + 'px sans-serif';
+  c.fillText(Math.floor(cleanPct) + '% ' + GF.t('clean'), W / 2, H * 0.24 + GF.clamp(36 * GF.S, 26, 48));
+  c.fillStyle = '#ffd34d'; c.font = 'bold ' + GF.clamp(18 * GF.S, 13, 24) + 'px sans-serif';
+  c.fillText('+' + lastCoinsEarned + ' ' + GF.t('coins') + '  (∑ ' + coins + ')', W / 2, H * 0.24 + GF.clamp(64 * GF.S, 46, 84));
+  // nozzle status
+  c.fillStyle = '#9fd6ff'; c.font = GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+  c.fillText(GF.t('nozzle') + ' ' + nozzlePower + '/' + MAX_NOZZLE, W / 2, H * 0.24 + GF.clamp(90 * GF.S, 64, 116));
+
+  var upY = H * 0.56;
+  if (nozzlePower < MAX_NOZZLE && coins >= UPGRADE_COST) {
+    overlayBtns.push({ b: bigButton(c, GF.t('upgrade') + ' (' + UPGRADE_COST + ')', upY, ['#f5a623', '#e08e1b']), fn: buyUpgrade });
+  } else if (nozzlePower >= MAX_NOZZLE) {
+    c.textAlign = 'center'; c.fillStyle = '#8fa6b8'; c.font = GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+    c.fillText(GF.t('maxed'), W / 2, upY + GF.clamp(28 * GF.S, 20, 38));
+  }
+  overlayBtns.push({ b: bigButton(c, GF.t('next'), H * 0.72, ['#2ecc71', '#27ae60']), fn: nextLevel });
+}
+
+function drawGameOver(c) {
+  overlayBtns = [];
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(20,8,8,0.86)'; c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#ff6b6b'; c.font = 'bold ' + GF.clamp(38 * GF.S, 24, 54) + 'px sans-serif';
+  c.fillText(GF.t('outofwater'), W / 2, H * 0.30);
+  c.fillStyle = '#fff'; c.font = GF.clamp(17 * GF.S, 12, 22) + 'px sans-serif';
+  c.fillText(GF.t('reached') + ' ' + Math.floor(cleanPct) + '% ' + GF.t('clean'), W / 2, H * 0.30 + GF.clamp(40 * GF.S, 28, 52));
+  c.fillStyle = '#c9a0a0'; c.font = GF.clamp(13 * GF.S, 10, 18) + 'px sans-serif';
+  var ll = wrapLines(c, GF.t('tankdry'), W * 0.8);
+  var ty = H * 0.30 + GF.clamp(66 * GF.S, 48, 86);
+  for (var i = 0; i < ll.length; i++) { c.fillText(ll[i], W / 2, ty); ty += GF.clamp(18 * GF.S, 14, 24); }
+  overlayBtns.push({ b: bigButton(c, GF.t('retry'), H * 0.62, ['#e74c3c', '#c0392b']), fn: restartLevel });
+}
+
+function drawWon(c) {
+  overlayBtns = [];
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(8,18,12,0.88)'; c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#2ecc71'; c.font = 'bold ' + GF.clamp(40 * GF.S, 26, 56) + 'px sans-serif';
+  c.shadowColor = 'rgba(46,204,113,0.5)'; c.shadowBlur = 26 * GF.S;
+  c.fillText(GF.t('won'), W / 2, H * 0.34);
+  c.shadowBlur = 0;
+  c.fillStyle = '#ffd34d'; c.font = 'bold ' + GF.clamp(18 * GF.S, 13, 24) + 'px sans-serif';
+  c.fillText('∑ ' + coins + ' ' + GF.t('coins'), W / 2, H * 0.34 + GF.clamp(38 * GF.S, 28, 52));
+  overlayBtns.push({ b: bigButton(c, GF.t('again'), H * 0.60, ['#2ecc71', '#27ae60']), fn: function () { startGame(); } });
+}
+
+function drawTutorialPanel(c) {
+  var W = GF.W, H = GF.H;
+  c.fillStyle = 'rgba(6,10,16,0.92)'; c.fillRect(0, 0, W, H);
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#4dd0e1'; c.font = 'bold ' + GF.clamp(26 * GF.S, 18, 36) + 'px sans-serif';
+  var topY = H * 0.16;
+  c.fillText(GF.t('howto'), W / 2, topY);
+  var lh = GF.clamp(22 * GF.S, 16, 28);
+  var maxW = Math.min(W * 0.84, 520);
+  var lx = W / 2 - maxW / 2;
+  var ly = topY + GF.clamp(34 * GF.S, 24, 46);
+  c.textAlign = 'left'; c.textBaseline = 'top';
+  c.font = GF.clamp(15 * GF.S, 11, 20) + 'px sans-serif';
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  for (var i = 0; i < keys.length; i++) {
+    c.fillStyle = (i === keys.length - 1) ? '#9bd6a0' : '#cfe3f2';
+    var lines = wrapLines(c, GF.t(keys[i]), maxW);
+    for (var j = 0; j < lines.length; j++) { c.fillText(lines[j], lx, ly); ly += lh; }
+    ly += GF.clamp(6 * GF.S, 3, 9);
+  }
+  overlayBtns = [];
+  var closeY = Math.max(ly + GF.clamp(16 * GF.S, 10, 26), H * 0.78);
+  if (closeY > H - GF.clamp(80 * GF.S, 60, 110)) closeY = H - GF.clamp(80 * GF.S, 60, 110);
+  overlayBtns.push({ b: bigButton(c, GF.t('close'), closeY, ['#4dd0e1', '#2aa7bd']), fn: function () {
+    tutorialOpen = false;
+    try { localStorage.setItem('power_wash_seen_tutorial', '1'); } catch (e) {}
+  } });
+}
+
+// ── INPUT ──────────────────────────────────────────────────────────────────
+function hitOverlay(x, y) {
+  for (var i = 0; i < overlayBtns.length; i++) {
+    var b = overlayBtns[i].b;
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { overlayBtns[i].fn(); return true; }
+  }
+  return false;
+}
+function hitHelp(x, y) {
+  var b = layout.helpBtn;
+  if (!b) return false;
+  return x >= b.x && x <= b.x + b.s && y >= b.y && y <= b.y + b.s;
+}
+function pointerDown(x, y) {
+  ensureAudio();
+  if (tutorialOpen) { hitOverlay(x, y); return; }
+  if (gs === 'MENU' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WON') { hitOverlay(x, y); return; }
+  if (gs === 'PLAYING') {
+    if (hitHelp(x, y)) { tutorialOpen = true; return; }
+    jetX = x; jetY = y;
+    if (water > 0) { spraying = true; startSpraySound(); promptT = -1; }
+  }
+}
+function pointerMove(x, y) {
+  if (gs === 'PLAYING' && spraying) { jetX = x; jetY = y; }
+}
+function pointerUp() {
+  if (spraying) { spraying = false; stopSpraySound(); }
+}
+
+GF.canvas.addEventListener('mousedown', function (e) { pointerDown(e.clientX, e.clientY); });
+GF.canvas.addEventListener('mousemove', function (e) { pointerMove(e.clientX, e.clientY); });
+window.addEventListener('mouseup', function () { pointerUp(); });
+GF.canvas.addEventListener('touchstart', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  e.preventDefault();
+  var t = e.changedTouches[0];
+  pointerDown(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchmove', function (e) {
+  if (!e.changedTouches || !e.changedTouches.length) return;
+  e.preventDefault();
+  var t = e.changedTouches[0];
+  pointerMove(t.clientX, t.clientY);
+}, { passive: false });
+GF.canvas.addEventListener('touchend', function (e) { e.preventDefault(); pointerUp(); }, { passive: false });
+GF.canvas.addEventListener('touchcancel', function () { pointerUp(); });
+
+// ── INIT ──────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 800,
+  designH: 1200,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'power_wash',
+  onReady: function () {
+    GF.persist('power_wash_run_v1',
+      function () {
+        return { gs: (gs === 'PLAYING' ? 'MENU' : gs), level: level, nozzlePower: nozzlePower, coins: coins, lang: GF.lang };
+      },
+      function (s) {
+        if (!s) return;
+        if (s.lang) GF.lang = s.lang;
+        level = s.level || 1;
+        nozzlePower = GF.clamp(s.nozzlePower || 1, 1, MAX_NOZZLE);
+        coins = s.coins || 0;
+        // never resume into live spray — bounce to a safe screen
+        gs = (s.gs === 'WON' || s.gs === 'LEVELEND') ? 'MENU' : 'MENU';
+      }
+    );
+    var seen = false;
+    try { seen = localStorage.getItem('power_wash_seen_tutorial') === '1'; } catch (e) {}
+    buildLevel(level || 1);
+    recomputeLayout();
+    gs = 'MENU';
+    tutorialOpen = false; // tutorial copy is on the MENU itself
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── STATE EXPOSURE FOR RUNTIME GATE ──────────────────────────────────────────
+GF.exposeState(function () {
+  return {
+    gs: gs,
+    level: level,
+    cleanPct: cleanPct,
+    water: water,
+    tankMax: tankMax,
+    coins: coins,
+    nozzlePower: nozzlePower,
+    spraying: spraying,
+    tutorialOpen: tutorialOpen,
+    cols: cols, rows: rows, layersCap: layersCap,
+    TANK_MAX: TANK_MAX,
+    SPRAY_DRAIN: SPRAY_DRAIN,
+    TANK_REGEN: TANK_REGEN,
+    CLEAN_TARGET: CLEAN_TARGET,
+    GRIME_LAYERS: GRIME_LAYERS,
+    JET_RADIUS: JET_RADIUS,
+    NOZZLE_POWER: nozzlePower,
+    MAX_NOZZLE: MAX_NOZZLE,
+    STRIP_RATE: STRIP_RATE,
+    TOTAL_LEVELS: TOTAL_LEVELS,
+    UPGRADE_COST: UPGRADE_COST,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

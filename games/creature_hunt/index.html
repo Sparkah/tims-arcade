@@ -293,6 +293,7 @@ const STRINGS = {
     skins_label: 'Skins:',
     daily_map_label: "TODAY'S MAP",
     daily_map_hint: 'Same maze for everyone today',
+    rock_pickup: '+2 rocks',
   },
   ru: {
     title: 'Creature Hunt',
@@ -392,6 +393,7 @@ const STRINGS = {
     skins_label: 'Скины:',
     daily_map_label: 'КАРТА ДНЯ',
     daily_map_hint: 'Один лабиринт для всех сегодня',
+    rock_pickup: '+2 камня',
   }
 };
 
@@ -1329,6 +1331,11 @@ const Platform = {
     } else if (window.CrazyGames?.SDK) {
       // ── CrazyGames ──
       this.name = 'crazygames';
+      // Fire loadingStart SYNCHRONOUSLY before init resolves — CG's QA
+      // detector + metrics expect the loading window to open at boot, so
+      // the matching loadingStop() (in loadingReady) measures real load
+      // time. Literal-path call so CG's static scanner sees it.
+      try { window.CrazyGames.SDK.game.loadingStart(); } catch(_) {}
       try {
         this._sdk = window.CrazyGames.SDK;
         await this._sdk.init();
@@ -1410,7 +1417,7 @@ const Platform = {
   loadingReady() {
     try {
       if (this.name === 'yandex' && this._sdk) this._sdk.features.LoadingAPI?.ready();
-      else if (this.name === 'crazygames' && this._sdk) this._sdk.game.loadingStop();
+      else if (this.name === 'crazygames' && this._sdk) window.CrazyGames.SDK.game.loadingStop();
     } catch(_) {}
   },
 
@@ -1922,6 +1929,15 @@ let distractions = []; // { x, y, time }
 let flyingRocks = []; // { x, y, tx, ty, speed, progress }
 let rocksLeft = 3;
 
+// ── Feature: Rock Pickups (iter#5) ──
+// Glowing amber collectibles scattered in the maze. Human players walk over
+// them to restock +2 rocks. Each pickup respawns at the same location after
+// ROCK_PICKUP_RESPAWN ms. Solo-mode only — MP never runs updatePlayer locally.
+const ROCK_PICKUP_COUNT   = 4;
+const ROCK_PICKUP_RESPAWN = 25000; // 25 seconds
+const ROCK_PICKUP_RADIUS  = 12;   // collect within 12px
+let rockPickups = []; // { x, y, respawnAt } — respawnAt=0 means available
+
 // ── Feature: Doors ──
 let doors = []; // { col, row, closed, breakTimer, orientation }
 
@@ -2102,6 +2118,12 @@ function updateDistractions(dt) {
   for (let i = distractions.length - 1; i >= 0; i--) {
     if (gameTime - distractions[i].time > 3000) {
       distractions.splice(i, 1);
+    }
+  }
+  // iter#5: rock pickup respawn timer.
+  for (const rp of rockPickups) {
+    if (rp.respawnAt !== 0 && gameTime >= rp.respawnAt) {
+      rp.respawnAt = 0; // available again
     }
   }
 }
@@ -2908,6 +2930,20 @@ function updatePlayer(dt) {
       }
     }
   }
+
+  // iter#5: rock pickup collection — human role, solo only.
+  if (!isMP && playerRole === 'human' && player.alive) {
+    for (const rp of rockPickups) {
+      if (rp.respawnAt !== 0) continue; // not yet available
+      const d = Math.hypot(player.x - rp.x, player.y - rp.y);
+      if (d < ROCK_PICKUP_RADIUS) {
+        rocksLeft = Math.min(rocksLeft + 2, 9); // cap at 9 so HUD stays compact
+        rp.respawnAt = gameTime + ROCK_PICKUP_RESPAWN;
+        showAlert(t('rock_pickup'));
+        AudioManager.playRockLand(rp.x, rp.y); // soft "pick up" click reuse
+      }
+    }
+  }
 }
 
 // Instant visual feedback for MP: update facing angle + sprint animation without moving
@@ -3176,6 +3212,43 @@ function renderDistractions() {
     ctx.beginPath();
     ctx.arc(sx, sy, 3, 0, Math.PI * 2);
     ctx.fill();
+  }
+
+  // iter#5: rock pickups — glowing amber orbs visible within torch range.
+  if (playerRole === 'human') {
+    for (const rp of rockPickups) {
+      if (rp.respawnAt !== 0) continue; // on cooldown, invisible
+      // Only render if within player torch radius (exploration gating)
+      if (Math.hypot(rp.x - player.x, rp.y - player.y) > TORCH_PLAYER + 20) continue;
+      const sx = rp.x + offX;
+      const sy = rp.y + offY;
+      const pulse = 0.7 + Math.sin(gameTime * 0.004 + rp.x) * 0.3;
+      // Outer glow
+      ctx.globalAlpha = 0.25 * pulse;
+      const grd = ctx.createRadialGradient(sx, sy, 0, sx, sy, 14);
+      grd.addColorStop(0, '#ffaa00');
+      grd.addColorStop(1, 'rgba(255,170,0,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.arc(sx, sy, 14, 0, Math.PI * 2);
+      ctx.fill();
+      // Core dot
+      ctx.globalAlpha = 0.85 * pulse;
+      ctx.fillStyle = '#ffc200';
+      ctx.beginPath();
+      ctx.arc(sx, sy, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      // Small rock icon pips around the dot
+      ctx.fillStyle = 'rgba(255,200,50,0.7)';
+      for (let i = 0; i < 3; i++) {
+        const a = (i / 3) * Math.PI * 2 + gameTime * 0.0008;
+        ctx.beginPath();
+        ctx.arc(sx + Math.cos(a) * 7, sy + Math.sin(a) * 7, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
   }
 
   // Distraction noise — expanding circles
@@ -3600,6 +3673,45 @@ function updateAlert(dt) {
   }
 }
 
+// ── Rock Pickup Placement (iter#5) ─────────────────────────────
+// Called after generateMap(). Places ROCK_PICKUP_COUNT pickups in random
+// open floor tiles, avoiding the starting room so they require exploration.
+function placeRockPickups() {
+  rockPickups = [];
+  if (!mapRooms.length) return;
+  // Exclude the most-central room (spawn area) for fairness.
+  const centerCol = MAP_COLS / 2, centerRow = MAP_ROWS / 2;
+  const sortedRooms = [...mapRooms].sort((a, b) =>
+    Math.hypot(a.cx - centerCol, a.cy - centerRow) - Math.hypot(b.cx - centerCol, b.cy - centerRow)
+  );
+  const excludeRoom = sortedRooms[0];
+  // Collect candidate tiles: open floor not in the spawn room.
+  const candidates = [];
+  for (let r = 2; r < MAP_ROWS - 2; r++) {
+    for (let c = 2; c < MAP_COLS - 2; c++) {
+      if (mapGrid[r][c] !== '.') continue;
+      const inExclude = (c >= excludeRoom.x && c < excludeRoom.x + excludeRoom.w &&
+                         r >= excludeRoom.y && r < excludeRoom.y + excludeRoom.h);
+      if (inExclude) continue;
+      candidates.push({ x: c * TILE + TILE / 2, y: r * TILE + TILE / 2 });
+    }
+  }
+  // Shuffle and pick ROCK_PICKUP_COUNT, spread them apart.
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(seededRandom() * (i + 1));
+    const tmp = candidates[i]; candidates[i] = candidates[j]; candidates[j] = tmp;
+  }
+  const minDist = 180; // keep pickups apart
+  for (const cand of candidates) {
+    if (rockPickups.length >= ROCK_PICKUP_COUNT) break;
+    let tooClose = false;
+    for (const rp of rockPickups) {
+      if (Math.hypot(cand.x - rp.x, cand.y - rp.y) < minDist) { tooClose = true; break; }
+    }
+    if (!tooClose) rockPickups.push({ x: cand.x, y: cand.y, respawnAt: 0 });
+  }
+}
+
 // ── Game Init ──────────────────────────────────────────────────
 function initGame() {
   // Apply active cosmetic skin before any entity is created so COLORS.player
@@ -3689,6 +3801,14 @@ function initGame() {
   rocksLeft = 3;
   creatureEvo = 0;
   // doors are already set during generateMap
+
+  // iter#5: scatter rock refill pickups after map is generated.
+  // Solo-only — MP players never call initGame locally for entity state.
+  if (mpState !== 'playing') {
+    placeRockPickups();
+  } else {
+    rockPickups = [];
+  }
 }
 
 // ── Game Loop ──────────────────────────────────────────────────
@@ -4255,7 +4375,7 @@ function leaveOnline() {
   }
 }
 
-const CLIENT_VERSION = 'v9-2026-05-20';
+const CLIENT_VERSION = 'v10-2026-05-25';
 
 function connectToServer() {
   try {

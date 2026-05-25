@@ -66,6 +66,16 @@ var STRINGS = {
     tut_win:      'Win: Hit the level\'s clean percentage before TIME runs out — clear all 10 lakes for a perfect run.',
     tut_lose:     'Lose: TIME hits 0 with the clean percentage below the target.',
     tut_tip:      'Tip: Run the same tile multiple times to crack → chunk → clear. Chains within 1.5s build a CHAIN multiplier.',
+    shards:       'SHARDS',
+    upgrades:     'UPGRADES',
+    upg_time:     'Extra Time',
+    upg_thick:    'Ice Bonus',
+    upg_speed:    'Speed',
+    upg_maxed:    'MAX',
+    upg_buy:      'Buy',
+    upg_time_desc:  '+5s start',
+    upg_thick_desc: '+50% thick',
+    upg_speed_desc: '+8% speed',
   },
   ru: {
     title: 'Ледокол', sub: 'Разбей грязный лёд — очисти озеро!',
@@ -95,6 +105,16 @@ var STRINGS = {
     tut_win:      'Победа: Достигни нормы чистоты до окончания времени — пройди все 10 озёр для идеального забега.',
     tut_lose:     'Поражение: ВРЕМЯ кончилось, а уборка ниже нормы.',
     tut_tip:      'Подсказка: Проезжай по одной плитке несколько раз: трещина → откол → чисто. Цепи в течение 1.5с дают множитель ЦЕПЬ.',
+    shards:       'ОСКОЛКИ',
+    upgrades:     'УЛУЧШЕНИЯ',
+    upg_time:     'Доп. время',
+    upg_thick:    'Лёд бонус',
+    upg_speed:    'Скорость',
+    upg_maxed:    'МАКС',
+    upg_buy:      'Купить',
+    upg_time_desc:  '+5с старт',
+    upg_thick_desc: '+50% толст.',
+    upg_speed_desc: '+8% скор.',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -177,6 +197,8 @@ var COLS, ROWS, TILE;
 // iter#2: NEW BEST! popup state (set on game-over when score > prior best)
 var newBestThisRun = false;
 var newBestPulse = 0;
+// iter#11: track whether we've already credited shards for the current run
+var shardsGrantedThisRun = false;
 
 // iter#6: BEST CHAIN — second persistent stat axis on top of best score.
 // Compounds with iter#5 milestones: players who hit BLAZE (x5) chase
@@ -386,6 +408,59 @@ function selectHull(n) {
   try { localStorage.setItem('ice_palette', String(n)); } catch(e) {}
 }
 
+// ── iter#11: META-UPGRADES — persistent shard currency + 3 purchasable buffs ─
+// Players earn shards each run: floor(score / 100), credited on GAMEOVER.
+// Three upgrades, each with a max level; purchased on the MENU between runs.
+// Persisted in localStorage: 'ice_shards' (integer) + 'ice_upgrades' (JSON).
+//
+// Upgrade defs:  id | name key | desc key | cost per lvl | max lvl | effect
+//   upg_time:  +5s base time per level purchased (max 3 = +15s extra)
+//   upg_thick: +50% thick-ice bonus per level (max 2 = THICK_ICE_BONUS * 2)
+//   upg_speed: +8% ship speed per level (max 2 = +16%)
+var META_UPGRADES = [
+  { id:'upg_time',  nameKey:'upg_time',  descKey:'upg_time_desc',  cost:10, maxLvl:3 },
+  { id:'upg_thick', nameKey:'upg_thick', descKey:'upg_thick_desc', cost:15, maxLvl:2 },
+  { id:'upg_speed', nameKey:'upg_speed', descKey:'upg_speed_desc', cost:20, maxLvl:2 },
+];
+var metaShards = 0;
+var metaUpgLvls = [0, 0, 0];  // parallel to META_UPGRADES
+
+function loadMeta() {
+  try { metaShards = Math.max(0, parseInt(localStorage.getItem('ice_shards') || '0') || 0); } catch(e) {}
+  try {
+    var raw = JSON.parse(localStorage.getItem('ice_upgrades') || '[]');
+    if (Array.isArray(raw)) {
+      for (var i = 0; i < META_UPGRADES.length; i++) {
+        metaUpgLvls[i] = Math.min(META_UPGRADES[i].maxLvl, Math.max(0, parseInt(raw[i] || 0) || 0));
+      }
+    }
+  } catch(e) {}
+}
+function saveMeta() {
+  try { localStorage.setItem('ice_shards', String(metaShards)); } catch(e) {}
+  try { localStorage.setItem('ice_upgrades', JSON.stringify(metaUpgLvls)); } catch(e) {}
+}
+function purchaseUpgrade(i) {
+  var upg = META_UPGRADES[i];
+  if (!upg) return;
+  if (metaUpgLvls[i] >= upg.maxLvl) return;
+  if (metaShards < upg.cost) return;
+  metaShards -= upg.cost;
+  metaUpgLvls[i]++;
+  saveMeta();
+  SFX.achievement();
+}
+// Computed effective values (applied in startLevel / game constants)
+function metaExtraTime()  { return metaUpgLvls[0] * 5; }           // seconds
+function metaThickMult()  { return 1 + metaUpgLvls[1] * 0.50; }   // multiplier on THICK_ICE_BONUS
+function metaSpeedMult()  { return 1 + metaUpgLvls[2] * 0.08; }   // multiplier on SHIP_SPEED_BASE
+// Credit shards earned this run (called at GAMEOVER before rendering)
+function creditShardsForRun(runScore) {
+  var earned = Math.max(0, Math.floor(runScore / 100));
+  if (earned > 0) { metaShards += earned; saveMeta(); }
+  return earned;
+}
+
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
 document.addEventListener('keydown', function(e) {
@@ -449,12 +524,16 @@ function startLevel(lvl) {
   cleared = 0;
   newBestThisRun = false; newBestPulse = 0;
   newChainBestThisRun = false;
+  // iter#11: reset shard-credit flag each run (level 1 resets on PLAY; subsequent
+  // levels share the run so only reset on level 1 to avoid multi-crediting)
+  if (lvl === 1) shardsGrantedThisRun = false;
   // iter#10: reset pickups and active speed boost each level
   pickups = [];
   speedBoostTimer = 0;
   // iter#1: reset the rewarded-ad slot each level
   extraTimeUsed = false; extraTimeLoading = false;
-  timeLeft = Math.max(45, 100 - (lvl - 1) * 7);
+  // iter#11: meta upgrade — upg_time adds extra start seconds
+  timeLeft = Math.max(45, 100 - (lvl - 1) * 7) + metaExtraTime();
 
   // grid grows with level — adapt aspect ratio to viewport so the playfield fills the screen
   var ar = gridArea();
@@ -555,6 +634,8 @@ window.__gfState = function () {
       boostTiles: (function(){ var n=0; for(var r=0;r<(grid||[]).length;r++) for(var c=0;c<(grid[r]||[]).length;c++) if(grid[r][c].boost) n++; return n; })(),
       speedBoostTimer: speedBoostTimer,
       pickupsOnGrid: pickups.length,
+      metaShards: metaShards,
+      metaUpgLvls: metaUpgLvls.slice(),
     };
   } catch (e) { return { __error: String(e) }; }
 };
@@ -695,7 +776,8 @@ function update(dt) {
   if (alen > 0) { ax /= alen; ay /= alen; }
 
   // iter#10: speed boost multiplier active while speedBoostTimer > 0
-  var sp = SHIP_SPEED_BASE * S * (speedBoostTimer > 0 ? BOOST_SPEED_MULT : 1);
+  // iter#11: meta upg_speed stacks multiplicatively
+  var sp = SHIP_SPEED_BASE * S * (speedBoostTimer > 0 ? BOOST_SPEED_MULT : 1) * metaSpeedMult();
   ship.vx = (ship.vx + ax * 0.9 * S) * 0.82;
   ship.vy = (ship.vy + ay * 0.9 * S) * 0.82;
   var spd = Math.sqrt(ship.vx*ship.vx + ship.vy*ship.vy);
@@ -765,7 +847,8 @@ function update(dt) {
       checkAchievements({ firstClear: true, chainHit: chain, score: score });
       var pts = 8 + Math.floor(chain * 1.5);
       // iter#9: thick ice earns an extra bonus on clear
-      if (hit.tile.thick) pts += THICK_ICE_BONUS;
+      // iter#11: meta upg_thick multiplies the thick-ice bonus
+      if (hit.tile.thick) pts += Math.round(THICK_ICE_BONUS * metaThickMult());
       score += pts;
       shake = 0.18;
       var px = o.x + hit.c*TILE + TILE/2, py = o.y + hit.r*TILE + TILE/2;
@@ -1253,6 +1336,110 @@ function drawHullSwatches() {
   }
 }
 
+// ── iter#11: META-UPGRADE shop panel (rendered on MENU below hull swatches) ──
+// Shows shard balance + 3 upgrade cards. Each card: name, desc, level pips,
+// cost. If maxed → greyed "MAX" pill. If affordable → lit "Buy" button.
+// Click on an affordable non-maxed card calls purchaseUpgrade(i).
+function drawUpgradeShop() {
+  // Determine Y start: mirror drawHullSwatches anchor logic
+  var btnW = clamp(240*S, 160, 320), btnH = clamp(52*S, 40, 66);
+  var btnY = cy + 20*S;
+  var statLines = (best > 0 ? 1 : 0) + (bestChain > 0 ? 1 : 0);
+  var swatchH = clamp(46*S, 36, 60);
+  var swatchY = btnY + btnH + 36*S + statLines * 20*S;
+  if (swatchY > H - swatchH - 12*S) swatchY = H - swatchH - 12*S;
+  var shopY = swatchY + swatchH + 18*S;
+
+  // Guard: if shopY is too close to bottom, skip rendering
+  var cardH = clamp(54*S, 42, 68);
+  if (shopY + cardH + 30*S > H) return;
+
+  // Shard balance header
+  var headerFs = clamp(12*S, 9, 15);
+  ctx.font = 'bold ' + headerFs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = 'rgba(100,210,255,0.75)';
+  ctx.fillText('❄ ' + t('shards') + ': ' + metaShards + '  ' + t('upgrades'), cx, shopY);
+
+  var cardY = shopY + 12*S;
+  var cardW = clamp(108*S, 82, 138);
+  var cardGap = clamp(10*S, 6, 14);
+  var totalW = META_UPGRADES.length * cardW + (META_UPGRADES.length - 1) * cardGap;
+  var x0 = cx - totalW / 2;
+  var labelFs = clamp(10*S, 8, 13);
+  var descFs  = clamp(9*S,  7, 11);
+
+  for (var i = 0; i < META_UPGRADES.length; i++) {
+    var upg = META_UPGRADES[i];
+    var lvl_i = metaUpgLvls[i];
+    var maxed = lvl_i >= upg.maxLvl;
+    var affordable = !maxed && metaShards >= upg.cost;
+    var cx_i = x0 + i * (cardW + cardGap);
+
+    // Card background
+    rr(ctx, cx_i, cardY, cardW, cardH, 7*S);
+    ctx.fillStyle = maxed ? 'rgba(255,255,255,0.04)' : affordable ? 'rgba(77,208,225,0.10)' : 'rgba(255,255,255,0.05)';
+    ctx.fill();
+    ctx.strokeStyle = maxed ? 'rgba(255,255,255,0.12)' : affordable ? 'rgba(77,208,225,0.50)' : 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = Math.max(1, 1.2*S);
+    ctx.stroke();
+
+    // Name
+    ctx.font = 'bold ' + labelFs + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = maxed ? '#556' : '#cde';
+    ctx.fillText(t(upg.nameKey), cx_i + cardW/2, cardY + 14*S);
+
+    // Desc
+    ctx.font = descFs + 'px sans-serif';
+    ctx.fillStyle = maxed ? '#445' : '#89a';
+    ctx.fillText(t(upg.descKey), cx_i + cardW/2, cardY + 24*S);
+
+    // Level pips
+    var pipR = clamp(4*S, 3, 5);
+    var pipGap = pipR*2 + clamp(3*S, 2, 4);
+    var pipTotalW = upg.maxLvl * pipR*2 + (upg.maxLvl-1) * (pipGap - pipR*2);
+    var pipX0 = cx_i + cardW/2 - pipTotalW/2 + pipR;
+    var pipY = cardY + 34*S;
+    for (var p = 0; p < upg.maxLvl; p++) {
+      ctx.beginPath();
+      ctx.arc(pipX0 + p * pipGap, pipY, pipR, 0, Math.PI*2);
+      ctx.fillStyle = p < lvl_i ? '#4dd0e1' : 'rgba(255,255,255,0.15)';
+      ctx.fill();
+    }
+
+    // Buy / MAX pill
+    var pillW = cardW * 0.68, pillH = clamp(18*S, 14, 22);
+    var pillX = cx_i + cardW/2 - pillW/2;
+    var pillY2 = cardY + cardH - pillH - 6*S;
+    rr(ctx, pillX, pillY2, pillW, pillH, pillH/2);
+    if (maxed) {
+      ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fill();
+      ctx.font = 'bold ' + descFs + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#667';
+      ctx.fillText(t('upg_maxed'), cx_i + cardW/2, pillY2 + pillH/2);
+    } else if (affordable) {
+      var g2 = ctx.createLinearGradient(pillX, pillY2, pillX, pillY2+pillH);
+      g2.addColorStop(0, '#4dd0e1'); g2.addColorStop(1, '#0288a8');
+      ctx.fillStyle = g2; ctx.fill();
+      ctx.font = 'bold ' + descFs + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(t('upg_buy') + ' ' + upg.cost + '❄', cx_i + cardW/2, pillY2 + pillH/2);
+      // Register click target
+      buttons.push({ x: pillX, y: pillY2, w: pillW, h: pillH, fn: (function(idx){ return function(){ purchaseUpgrade(idx); }; })(i) });
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fill();
+      ctx.font = 'bold ' + descFs + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#556';
+      ctx.fillText(upg.cost + '❄', cx_i + cardW/2, pillY2 + pillH/2);
+    }
+    ctx.textBaseline = 'alphabetic';
+  }
+}
+
 // ── iter#4: Day-seed tag (rendered on MENU + GAMEOVER) ──────────────────────
 function drawDaySeedTag() {
   var fs = clamp(11*S, 9, 14);
@@ -1481,6 +1668,7 @@ function frame(ts) {
     ctx.fillStyle = '#0a1530'; ctx.fillRect(0,0,W,H);
     drawOverlay(t('title'), t('sub'), t('play'), function() { score=0; startLevel(1); });
     drawHullSwatches();
+    drawUpgradeShop(); // iter#11: meta-upgrade shop below hull swatches
     drawDaySeedTag(); // iter#4: small "Day seed YYYYMMDD" tag near top
     drawAchievementBadges(); // iter#7: 5 emoji badges below day-seed tag
     drawMuteToggle(); // iter#8
@@ -1497,6 +1685,11 @@ function frame(ts) {
       newBestThisRun = true;
       try { localStorage.setItem('ice_best', best); } catch(e) {}
       SFX.newBest();
+    }
+    // iter#11: credit shards once per session (idempotent via shardsGranted flag)
+    if (!shardsGrantedThisRun && score > 0) {
+      shardsGrantedThisRun = true;
+      creditShardsForRun(score);
     }
     // iter#1: RETRY routes through throttled interstitial (Yandex 4.1)
     drawOverlay(t('gameover'), t('score')+': '+score, t('retry'),
@@ -1543,6 +1736,15 @@ function frame(ts) {
       buttons.push({ x: rX, y: rY, w: rW, h: rH, fn: showRewardedExtraTime });
     }
     drawMuteToggle(); // iter#8
+    // iter#11: shard balance indicator bottom-left on GAMEOVER
+    if (metaShards > 0 || shardsGrantedThisRun) {
+      var _sFs = clamp(11*S, 9, 14);
+      ctx.font = 'bold ' + _sFs + 'px sans-serif';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+      ctx.fillStyle = 'rgba(100,210,255,0.65)';
+      ctx.fillText('❄ ' + t('shards') + ': ' + metaShards, 14*S, H - 14*S);
+      ctx.textBaseline = 'alphabetic';
+    }
   }
 
   // iter#7: achievement toast rendered LAST so it sits above HUD / overlays
@@ -1560,6 +1762,7 @@ function boot() {
   try { bestChain = parseInt(localStorage.getItem('ice_chain_best')||'0')||0; } catch(e) {}
   loadHullChoice();
   loadAchievements(); // iter#7
+  loadMeta(); // iter#11: load persistent shards + upgrade levels
   if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
     window.ysdk.features.LoadingAPI.ready();
   }
@@ -1569,9 +1772,7 @@ function boot() {
 }
 
 (function() {
-  // Boot immediately for instant start; re-boot after SDK init to wire ysdk features (boot is idempotent).
-  boot();
-  if (typeof YaGames === 'undefined') return;
+  if (typeof YaGames === 'undefined') { boot(); return; }
   YaGames.init().then(function(ysdk) {
     window.ysdk = ysdk;
     try {
@@ -1580,6 +1781,7 @@ function boot() {
     } catch(e) {}
     boot();
   }).catch(function() { boot(); });
+  setTimeout(boot, 3000);
 })();
 
 })();
