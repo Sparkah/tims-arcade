@@ -71,9 +71,22 @@ fail=0
 total=0
 total_failed=0
 
-while IFS=$'\t' read -r slug gameDir published; do
+while IFS=$'\t' read -r slug gameDir published external; do
   [[ "$published" == "false" ]] && continue  # unpublished games are exempt
   [[ -n "$FILTER_SLUG" && "$slug" != "$FILTER_SLUG" ]] && continue
+
+  # External link-out games (live on Yandex/CG, hosted on the platform) only
+  # need a gallery card thumb — their cover/icon live on the platform side.
+  if [[ "$external" == "true" ]]; then
+    total=$((total + 1))
+    if is_real_png "$THUMBS_DIR/$slug.png"; then
+      [[ $QUIET -eq 0 ]] && echo "✓ $slug (external — thumb only)"
+    else
+      fail=1; total_failed=$((total_failed + 1))
+      echo "✕ $slug"; echo "    gallery thumb missing or empty: $THUMBS_DIR/$slug.png"
+    fi
+    continue
+  fi
   total=$((total + 1))
 
   game_root="$ROOT/$gameDir"
@@ -111,8 +124,9 @@ for g in games:
     slug = g.get('slug', '')
     gd = g.get('gameDir', '')
     pub = 'false' if g.get('published') is False else 'true'
+    ext = 'true' if g.get('external') is True else 'false'
     if slug and gd:
-        print(f'{slug}\t{gd}\t{pub}')
+        print(f'{slug}\t{gd}\t{pub}\t{ext}')
 "
 )
 
