@@ -448,6 +448,13 @@ function visible() {
     // 'all' — newest first by default
     list.sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0));
   }
+
+  // Flagship cross-platform showcase games (live on Yandex/CG) pin to the
+  // front of the main discovery surfaces so our best games lead. Personal
+  // tabs (liked/myplayed) and the date-filtered 'recent' tab are left alone.
+  if (activeTab === 'all' || activeTab === 'top') {
+    list = list.filter(g => g.flagship).concat(list.filter(g => !g.flagship));
+  }
   return list;
 }
 
@@ -752,6 +759,34 @@ function card(g, opts) {
   const thumbWebp = thumbWebpUrl(g.slug, variant);
   const playUrl  = `/play.html?slug=${encodeURIComponent(g.slug)}`;
 
+  // Cross-platform showcase: `external` games (e.g. merge_conquest live on
+  // Yandex + CrazyGames) aren't hosted locally — the card links straight out.
+  // `platforms` may also decorate a normal local game as "also on …" chips.
+  const platforms = g.platforms || null;
+  const isExternal = !!g.external;
+  const platChips = (() => {
+    if (!platforms) return '';
+    let s = '';
+    if (platforms.yandex)     s += `<a class="play-link ext" href="${platforms.yandex}" target="_blank" rel="noopener" data-plat="yandex">▶ Yandex</a>`;
+    if (platforms.crazygames) s += `<a class="play-link ext" href="${platforms.crazygames}" target="_blank" rel="noopener" data-plat="crazygames">▶ CrazyGames</a>`;
+    return s;
+  })();
+  const primaryExtUrl = platforms ? (platforms.yandex || platforms.crazygames || null) : null;
+  const footHtml = isExternal
+    ? `<div class="card-foot ext-foot"><span class="ext-label">Play on</span>${platChips}</div>`
+    : `<div class="card-foot">
+        <button class="vote like ${myVote === 'like' ? 'active' : ''}" data-action="like" aria-label="Like">
+          👍 <span class="num">${c.likes || 0}</span>
+        </button>
+        <button class="vote dislike ${myVote === 'dislike' ? 'active' : ''}" data-action="dislike" aria-label="Dislike">
+          👎 <span class="num">${c.dislikes || 0}</span>
+        </button>
+        <button class="vote comments-open" data-action="comments" aria-label="Read & leave comments">
+          💬 <span class="num">${c.comments || 0}</span>
+        </button>
+        <a class="play-link" href="${playUrl}">▶ Play</a>${platChips}
+      </div>`;
+
   // Eager (above-the-fold) cards get the inline autoplay video right away.
   // Lazy cards get a slot div the IntersectionObserver upgrades to a real
   // <video> when the card scrolls into view — keeps initial bandwidth small.
@@ -790,26 +825,15 @@ function card(g, opts) {
     <div class="card-thumb" data-num="${specimenNum(g)}">
       ${imgTag}
       ${mediaInner}
-      ${isRecent ? '<span class="recent-badge">NEW</span>' : ''}
-      ${c.plays ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
-      ${c.comments ? `<span class="comment-count">💬 ${c.comments}</span>` : ''}
-      <a class="lab-link" href="/lab.html?slug=${encodeURIComponent(g.slug)}" title="Build journal" aria-label="Open build journal">📓</a>
+      ${isExternal ? '<span class="flagship-badge">★ Yandex / CG</span>' : (isRecent ? '<span class="recent-badge">NEW</span>' : '')}
+      ${(!isExternal && c.plays) ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
+      ${(!isExternal && c.comments) ? `<span class="comment-count">💬 ${c.comments}</span>` : ''}
+      ${isExternal ? '' : `<a class="lab-link" href="/lab.html?slug=${encodeURIComponent(g.slug)}" title="Build journal" aria-label="Open build journal">📓</a>`}
     </div>
     <div class="card-body">
       <div class="card-title"></div>
       <div class="card-hook"></div>
-      <div class="card-foot">
-        <button class="vote like ${myVote === 'like' ? 'active' : ''}" data-action="like" aria-label="Like">
-          👍 <span class="num">${c.likes || 0}</span>
-        </button>
-        <button class="vote dislike ${myVote === 'dislike' ? 'active' : ''}" data-action="dislike" aria-label="Dislike">
-          👎 <span class="num">${c.dislikes || 0}</span>
-        </button>
-        <button class="vote comments-open" data-action="comments" aria-label="Read & leave comments">
-          💬 <span class="num">${c.comments || 0}</span>
-        </button>
-        <a class="play-link" href="${playUrl}">▶ Play</a>
-      </div>
+      ${footHtml}
     </div>
   `;
   el.querySelector('.card-title').textContent = gameTitle(g);
@@ -817,6 +841,12 @@ function card(g, opts) {
 
   function goPlay() {
     if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
+    if (isExternal && primaryExtUrl) {
+      const plat = platforms.yandex ? 'yandex' : 'crazygames';
+      if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'thumbnail_external', platform: plat });
+      window.open(primaryExtUrl, '_blank', 'noopener');
+      return;
+    }
     if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'thumbnail' });
     location.href = playUrl;
   }
@@ -826,10 +856,14 @@ function card(g, opts) {
     if (e.target.closest('.lab-link')) return;
     goPlay();
   });
-  el.querySelector('.play-link').addEventListener('click', (e) => {
-    if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
-    if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'play_link' });
-    // let the link navigation proceed
+  el.querySelectorAll('.play-link').forEach(link => {
+    link.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
+      const plat = link.dataset.plat || null;
+      if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: plat ? 'platform_link' : 'play_link', platform: plat });
+      // let the link navigation proceed (external chips are target=_blank)
+    });
   });
   el.querySelectorAll('.vote').forEach(btn => {
     btn.addEventListener('click', (e) => {

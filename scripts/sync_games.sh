@@ -48,6 +48,21 @@ for ((i = 0; i < COUNT; i++)); do
     continue
   fi
 
+  # External "link-out" showcase games (live on Yandex/CrazyGames) are NOT
+  # hosted locally — the card links straight to the platform. We only need a
+  # thumbnail from the game's cover so the card renders. No index.html copy,
+  # no /play.html, no lab page.
+  EXTERNAL=$(jq -r ".[$i].external // false" "$SRC")
+  if [[ "$EXTERNAL" == "true" ]]; then
+    mkdir -p "$OUT_THUMBS"
+    if [[ -f "$GAME_DIR/yandex_promo/cover_800x470.png" ]]; then
+      cp "$GAME_DIR/yandex_promo/cover_800x470.png" "$OUT_THUMBS/$SLUG.png"
+    fi
+    echo "$SLUG 1 false" >> "$GALLERY/.sync.tmp"
+    echo "  ↗ $SLUG (external link-out — thumb only)"
+    continue
+  fi
+
   # Copy index.html. If the source uses the multi-platform placeholder
   # (<!-- PLATFORM_SDK -->), substitute the gallery's SDK stub so the game
   # boots inside the iframe without hitting Yandex's real /sdk.js.
@@ -150,9 +165,12 @@ jq --argjson meta "$META_JSON" '
     genre: (.genre // "other"),
     addedDate,
     published: (.published // true),
-    num: (.gameDir | capture("/(?<n>[0-9]+)_") | .n // ""),
+    num: ((.gameDir | capture("/(?<n>[0-9]+)[_-]")? | .n) // ""),
     thumbCount: ($meta[.slug].thumbCount // 1),
-    hasPreview: ($meta[.slug].hasPreview // false)
+    hasPreview: ($meta[.slug].hasPreview // false),
+    platforms: .platforms,
+    external: (.external // false),
+    flagship: (.flagship // false)
   })
 ' "$SRC" > "$OUT_MANIFEST"
 
@@ -178,7 +196,7 @@ EOF
   printf '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
   printf '  <url><loc>%s/</loc><lastmod>%s</lastmod><priority>1.0</priority></url>\n' "$SITE" "$NOW"
   jq -r --arg site "$SITE" \
-    '.[] | select(.published != false) |
+    '.[] | select(.published != false and (.external != true)) |
       "  <url><loc>" + $site + "/p/" + .slug + "</loc><lastmod>" + .addedDate + "T00:00:00Z</lastmod><priority>0.8</priority></url>"' \
     "$OUT_MANIFEST"
   printf '</urlset>\n'
@@ -196,7 +214,7 @@ EOF
   printf '  <atom:link href="%s/rss.xml" rel="self" type="application/rss+xml"/>\n' "$SITE"
   printf '  <lastBuildDate>%s</lastBuildDate>\n' "$(date -u +'%a, %d %b %Y %H:%M:%S +0000')"
   jq -r --arg site "$SITE" '
-    sort_by(.addedDate) | reverse | .[] | select(.published != false) |
+    sort_by(.addedDate) | reverse | .[] | select(.published != false and (.external != true)) |
     "  <item>\n" +
     "    <title>" + (.title | @html) + "</title>\n" +
     "    <link>" + $site + "/p/" + .slug + "</link>\n" +
