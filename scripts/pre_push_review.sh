@@ -44,10 +44,22 @@ BASE_REF="origin/main"
 if ! git rev-parse --quiet --verify "$BASE_REF" >/dev/null 2>&1; then
   BASE_REF="HEAD~1"
 fi
-DIFF="$(git diff "$BASE_REF"...HEAD 2>/dev/null || git diff HEAD~1 2>/dev/null || true)"
-if [[ -z "$DIFF" ]]; then
-  echo "pre-push-review: no diff vs $BASE_REF, skipping" >&2
-  exit 0
+# REVIEW_WORKTREE=1 → score uncommitted working-tree changes (used by the
+# on-demand /diff-review skill for mid-session review, BEFORE commit/push).
+# Default (unset) → score what a push would deploy: BASE_REF...HEAD.
+if [[ "${REVIEW_WORKTREE:-0}" == "1" ]]; then
+  DIFF="$(git diff HEAD 2>/dev/null || true)"
+  [[ -z "$DIFF" ]] && DIFF="$(git diff 2>/dev/null || true)"
+  if [[ -z "$DIFF" ]]; then
+    echo "pre-push-review: no uncommitted changes to review" >&2
+    exit 0
+  fi
+else
+  DIFF="$(git diff "$BASE_REF"...HEAD 2>/dev/null || git diff HEAD~1 2>/dev/null || true)"
+  if [[ -z "$DIFF" ]]; then
+    echo "pre-push-review: no diff vs $BASE_REF, skipping" >&2
+    exit 0
+  fi
 fi
 
 DIFF_TRUNCATED="$(printf '%s' "$DIFF" | head -c 60000)"
