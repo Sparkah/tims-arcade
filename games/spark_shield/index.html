@@ -1,0 +1,805 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Spark Shield</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #070713; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — all UI text via GF.t()) ────────────
+var STRINGS = {
+  en: {
+    title: 'SPARK SHIELD',
+    sub:   'Spin the shield. Catch every spark.',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST', wave: 'WAVE',
+    gameover: 'CORE BLOWN',
+    newskin: 'NEW CORE SKIN UNLOCKED!',
+    skins: 'CORE SKIN',
+    waveup: 'WAVE',
+    tut_goal: 'Goal: Spin your shield to catch every spark before it hits the core.',
+    tut_controls: 'Controls: Hold the LEFT half of the screen to spin counter-clockwise, the RIGHT half to spin clockwise. (Desktop: arrows or A / D.)',
+    tut_win: 'Win: Endless — survive faster waves and beat your best score.',
+    tut_lose: 'Lose: One spark reaching the core blows it up. Game over.',
+    tip: 'Tip: From wave 4 sparks turn colored — block each with the matching shield half.',
+    resume: '(tap anywhere to resume)',
+  },
+  ru: {
+    title: 'ИСКРОВОЙ ЩИТ',
+    sub:   'Вращай щит. Лови каждую искру.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД', wave: 'ВОЛНА',
+    gameover: 'ЯДРО ВЗОРВАНО',
+    newskin: 'НОВЫЙ СКИН ЯДРА!',
+    skins: 'СКИН ЯДРА',
+    waveup: 'ВОЛНА',
+    tut_goal: 'Цель: вращайте щит, чтобы поймать каждую искру до попадания в ядро.',
+    tut_controls: 'Управление: удерживайте ЛЕВУЮ половину экрана — против часовой; ПРАВУЮ — по часовой. (ПК: стрелки или A / D.)',
+    tut_win: 'Победа: бесконечно — переживайте быстрые волны и бейте рекорд.',
+    tut_lose: 'Поражение: одна искра в ядре взорвёт его. Игра окончена.',
+    tip: 'Совет: с 4-й волны искры цветные — отбивайте половиной щита того же цвета.',
+    resume: '(нажмите в любом месте, чтобы продолжить)',
+  },
+};
+
+var SPRITE_NAMES = []; // procedural neon art — no sprites
+
+// ── TUNABLES (mirror DESIGN.md §Tunables; design-space px) ───────────────
+var CORE_RADIUS      = 34;
+var SHIELD_RADIUS    = 92;
+var SHIELD_ARC_DEG   = 70;
+var SHIELD_THICK     = 16;
+var ROT_SPEED        = 3.6;   // rad/sec
+var SPARK_SPEED_BASE = 78;    // px/sec design-space
+var SPEED_RAMP       = 12;    // px/sec per wave
+var SPAWN_INTERVAL   = 1.55;  // sec @ wave 1
+var SPAWN_MIN        = 0.55;
+var SPAWN_RAMP       = 0.085; // sec shaved per wave
+var WAVE_SIZE        = 10;
+var START_LIVES      = 1;
+var COLOR_MATCH_WAVE = 4;
+var COMBO_STEP       = 5;
+var GRACE_SECONDS    = 10;
+var SPARK_R          = 9;
+
+// Two shield-segment colors (used from COLOR_MATCH_WAVE on).
+var SEG_COLORS = ['#22e3ff', '#ff3df0']; // cyan, magenta
+var SEG_GLOW   = ['rgba(34,227,255,0.9)', 'rgba(255,61,240,0.9)'];
+
+// Core skins unlocked by best-score thresholds.
+var SKINS = [
+  { id: 0, name: 'Ember',  c1: '#ffd24d', c2: '#ff7a18', need: 0 },
+  { id: 1, name: 'Frost',  c1: '#9be9ff', c2: '#1f7bff', need: 25 },
+  { id: 2, name: 'Toxic',  c1: '#caff6b', c2: '#16d36a', need: 60 },
+  { id: 3, name: 'Plasma', c1: '#ff8bf0', c2: '#a51fff', need: 120 },
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | GAMEOVER
+var score = 0, best = 0, wave = 1, lives = START_LIVES, combo = 0, bestCombo = 0;
+var shieldAngle = Math.PI / 2;   // radians, 0 = +x (right), grows CW (canvas y-down)
+var sparks = [];
+var elapsed = 0;                 // sec since startGame (for grace window)
+var spawnTimer = 0;
+var coreFlash = 0;               // 0..1 redness as a spark nears
+var corePulse = 0;
+var showHelp = false;            // in-game "?" panel open
+var helpBtn = null;              // {x,y,w,h} hit rect for the HUD ? button
+var selectedSkin = 0;
+var unlockedSkins = [0];
+var justUnlocked = -1;           // skin id unlocked on last gameover
+var waveBanner = 0;              // banner timer
+var lastWaveSeen = 1;
+var photoMode = false;           // screenshot capture: keep a dense PLAYING frame, no death
+
+// Our own button registry (gf-lib's overlay buttons don't fit custom layouts).
+var myButtons = [];   // [{x,y,w,h,fn}]
+var skinBtns = [];    // [{x,y,w,h,skin}]
+
+// Held-side input (full-screen halves). Tracks active pointers by side.
+var holdLeft = false, holdRight = false;
+var activePointers = {};         // id -> 'L' | 'R'
+
+// ── INPUT: full-screen-half hold zones (the Daily-Dodge mobile fix) ──────
+function sideForX(x) { return x < GF.W / 2 ? 'L' : 'R'; }
+function recomputeHold() {
+  holdLeft = false; holdRight = false;
+  for (var k in activePointers) {
+    if (activePointers[k] === 'L') holdLeft = true;
+    else if (activePointers[k] === 'R') holdRight = true;
+  }
+}
+function inRect(x, y, b) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+
+// A press: register a hold ONLY when actively playing (not on the ? button,
+// not while help open). Buttons/skins are resolved on the tap (click) event.
+function pointerDown(id, x, y) {
+  if (gs !== 'PLAYING' || showHelp) return;
+  if (inRect(x, y, helpBtn)) return;       // ? handled on click
+  activePointers[id] = sideForX(x);
+  recomputeHold();
+}
+function pointerMove(id, x, y) {
+  if (gs === 'PLAYING' && id in activePointers) {
+    activePointers[id] = sideForX(x);
+    recomputeHold();
+  }
+}
+function pointerUp(id) {
+  if (id in activePointers) { delete activePointers[id]; recomputeHold(); }
+}
+function clearHold() { activePointers = {}; holdLeft = false; holdRight = false; }
+
+// A tap (discrete): resolves UI buttons across all states.
+function handleTap(x, y) {
+  if (showHelp) { showHelp = false; return; }
+  if (gs === 'PLAYING') {
+    if (inRect(x, y, helpBtn)) { showHelp = true; clearHold(); return; }
+    return;
+  }
+  // MENU / GAMEOVER: skin row first, then overlay buttons.
+  if (gs === 'MENU') {
+    for (var s = 0; s < skinBtns.length; s++) {
+      if (inRect(x, y, skinBtns[s])) {
+        if (unlockedSkins.indexOf(skinBtns[s].skin) >= 0) { selectedSkin = skinBtns[s].skin; saveMeta(); }
+        return;
+      }
+    }
+  }
+  for (var i = 0; i < myButtons.length; i++) {
+    if (inRect(x, y, myButtons[i])) { myButtons[i].fn(); return; }
+  }
+}
+
+var cnv = document.getElementById('c');
+cnv.addEventListener('touchstart', function(e) {
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    pointerDown(t.identifier, t.clientX, t.clientY);
+  }
+}, { passive: false });
+cnv.addEventListener('touchmove', function(e) {
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    pointerMove(t.identifier, t.clientX, t.clientY);
+  }
+}, { passive: false });
+cnv.addEventListener('touchend', function(e) {
+  for (var i = 0; i < e.changedTouches.length; i++) {
+    var t = e.changedTouches[i];
+    pointerUp(t.identifier);
+    handleTap(t.clientX, t.clientY);   // taps resolve UI
+  }
+}, { passive: false });
+cnv.addEventListener('touchcancel', function(e) {
+  for (var i = 0; i < e.changedTouches.length; i++) pointerUp(e.changedTouches[i].identifier);
+}, { passive: false });
+// Mouse fallback (desktop).
+cnv.addEventListener('mousedown', function(e) { pointerDown('mouse', e.clientX, e.clientY); });
+cnv.addEventListener('mousemove', function(e) { if ('mouse' in activePointers) pointerMove('mouse', e.clientX, e.clientY); });
+window.addEventListener('mouseup', function() { pointerUp('mouse'); });
+cnv.addEventListener('click', function(e) { handleTap(e.clientX, e.clientY); });
+
+// ── META PERSISTENCE (skins + best) ──────────────────────────────────────
+function loadMeta() {
+  try { best = parseInt(localStorage.getItem('spark_shield_best') || '0') || 0; } catch (e) {}
+  try {
+    var raw = localStorage.getItem('spark_shield_skins');
+    if (raw) { var d = JSON.parse(raw); unlockedSkins = d.unlocked || [0]; selectedSkin = d.selected || 0; }
+  } catch (e) {}
+  refreshUnlocks();
+}
+function saveMeta() {
+  try { localStorage.setItem('spark_shield_skins', JSON.stringify({ unlocked: unlockedSkins, selected: selectedSkin })); } catch (e) {}
+}
+function refreshUnlocks() {
+  for (var i = 0; i < SKINS.length; i++) {
+    if (best >= SKINS[i].need && unlockedSkins.indexOf(SKINS[i].id) < 0) unlockedSkins.push(SKINS[i].id);
+  }
+}
+
+// ── GAME LIFECYCLE ─────────────────────────────────────────────────────────
+function startGame() {
+  score = 0; wave = 1; lives = START_LIVES; combo = 0; bestCombo = 0;
+  shieldAngle = Math.PI / 2;
+  sparks = []; elapsed = 0; spawnTimer = 0.4; coreFlash = 0;
+  justUnlocked = -1; waveBanner = 0; lastWaveSeen = 1;
+  photoMode = false;
+  clearHold(); showHelp = false;
+  gs = 'PLAYING';
+  try { localStorage.setItem('spark_shield_seen_tutorial', '1'); } catch (e) {}
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  var newBest = score > best;
+  if (newBest) {
+    best = score;
+    try { localStorage.setItem('spark_shield_best', best); } catch (e) {}
+  }
+  justUnlocked = -1;
+  for (var i = 0; i < SKINS.length; i++) {
+    if (best >= SKINS[i].need && unlockedSkins.indexOf(SKINS[i].id) < 0) {
+      unlockedSkins.push(SKINS[i].id);
+      justUnlocked = SKINS[i].id;
+    }
+  }
+  saveMeta();
+  gs = 'GAMEOVER';
+  clearHold();
+  GF.setShake(1.0);
+  GF.gameEnded();
+  GF.saveRun();
+  if (newBest && best > 0) GF.happytime();
+}
+
+// Screenshot / external escape hatch — populated mid-wave state.
+function seedScreenshotSparks(level) {
+  sparks = [];
+  var n = 10 + Math.min(level, 6);
+  var maxRad = Math.min(GF.W, GF.H) * 0.46; // reach toward frame edges for density
+  var minRad = (SHIELD_RADIUS + 40) * GF.S;
+  for (var i = 0; i < n; i++) {
+    var ang = (i / n) * Math.PI * 2 + (Math.random() - 0.5) * 0.45;
+    var rad = minRad + Math.random() * Math.max(60 * GF.S, (maxRad - minRad));
+    spawnSparkAt(ang, rad, wave >= COLOR_MATCH_WAVE ? (i % 2) : -1);
+  }
+}
+window._setupForScreenshot = function(level) {
+  level = level || 5;
+  startGame();
+  photoMode = true;            // freeze death + keep the frame dense for capture
+  score = level * WAVE_SIZE - 4;
+  wave = Math.floor(score / WAVE_SIZE) + 1;
+  lastWaveSeen = wave;
+  elapsed = 60;
+  shieldAngle = 0.6;
+  combo = 7;
+  seedScreenshotSparks(level);
+};
+// _jumpLevel: the runtime gate uses (1) to reach PLAYING and (99) to reach a
+// terminal state. Screenshots use _setupForScreenshot directly.
+window._jumpLevel = function(n) {
+  n = n || 1;
+  if (n >= 50) {            // gate's terminal-state probe
+    startGame();
+    score = 30; wave = 4; lives = 0;
+    gameOver();
+    return;
+  }
+  startGame();
+  score = n * WAVE_SIZE;
+  wave = Math.floor(score / WAVE_SIZE) + 1;
+  lastWaveSeen = wave;
+  elapsed = 60;
+  seedScreenshotSparks(Math.min(n, 6));
+};
+
+// ── SPARK SPAWNING ─────────────────────────────────────────────────────────
+function currentSpeed() { return (SPARK_SPEED_BASE + (wave - 1) * SPEED_RAMP) * GF.S; }
+function currentSpawnInterval() { return Math.max(SPAWN_MIN, SPAWN_INTERVAL - (wave - 1) * SPAWN_RAMP); }
+
+function spawnSparkAt(angleFromCore, startRad, segColor) {
+  var sx = GF.cx + Math.cos(angleFromCore) * startRad;
+  var sy = GF.cy + Math.sin(angleFromCore) * startRad;
+  var vx = GF.cx - sx, vy = GF.cy - sy;
+  var len = Math.sqrt(vx * vx + vy * vy) || 1;
+  var sp = currentSpeed();
+  sparks.push({
+    x: sx, y: sy, vx: vx / len * sp, vy: vy / len * sp,
+    ang: angleFromCore, seg: segColor, trail: [],
+  });
+}
+
+function spawnSpark() {
+  var inGrace = elapsed < GRACE_SECONDS;
+  var startRad = Math.max(GF.W, GF.H) * 0.62;
+  var ang;
+  if (inGrace) ang = (-0.5 + Math.random()) * 0.8;   // narrow band, right side
+  else ang = Math.random() * Math.PI * 2;            // any edge
+  var seg = -1;
+  if (!inGrace && wave >= COLOR_MATCH_WAVE) seg = Math.random() < 0.5 ? 0 : 1;
+  spawnSparkAt(ang, startRad, seg);
+}
+
+// ── SHIELD / COLLISION ──────────────────────────────────────────────────────
+function angDiff(a, b) {
+  var d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+function segAtAngle(absAng) {
+  var half = (SHIELD_ARC_DEG * Math.PI / 180) / 2;
+  var d = angDiff(absAng, shieldAngle);
+  if (d < -half || d > half) return -2;  // outside arc
+  return d < 0 ? 0 : 1;                   // CCW half color0, CW half color1
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────────
+function update(dt) {
+  corePulse += dt;
+  if (waveBanner > 0) waveBanner -= dt;
+  if (coreFlash > 0) coreFlash = Math.max(0, coreFlash - dt * 1.4);
+  if (gs !== 'PLAYING' || showHelp) return;
+
+  // Photo mode: hold a dense, varied PLAYING frame for screenshots. Sparks
+  // drift inward for motion but are re-seeded before reaching the core, and
+  // no life is ever lost. Active only via window._setupForScreenshot.
+  if (photoMode) {
+    var coreRp = (CORE_RADIUS + SHIELD_RADIUS) * GF.S * 0.6;
+    for (var pi = sparks.length - 1; pi >= 0; pi--) {
+      var ps = sparks[pi];
+      ps.trail.push({ x: ps.x, y: ps.y });
+      if (ps.trail.length > 6) ps.trail.shift();
+      ps.x += ps.vx * dt; ps.y += ps.vy * dt;
+      if (GF.dist(ps.x, ps.y, GF.cx, GF.cy) < coreRp) sparks.splice(pi, 1);
+    }
+    if (sparks.length < 11) seedScreenshotSparks(5);
+    return;
+  }
+
+  elapsed += dt;
+
+  var dir = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA'] || holdLeft)  dir -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD'] || holdRight) dir += 1;
+  shieldAngle += dir * ROT_SPEED * dt;
+  if (shieldAngle > Math.PI) shieldAngle -= Math.PI * 2;
+  if (shieldAngle < -Math.PI) shieldAngle += Math.PI * 2;
+
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    spawnSpark();
+    spawnTimer = currentSpawnInterval() * (0.82 + Math.random() * 0.36);
+  }
+
+  var blockBand = (SHIELD_RADIUS + SHIELD_THICK) * GF.S;
+  var blockInner = (SHIELD_RADIUS - SHIELD_THICK) * GF.S;
+  var coreR = CORE_RADIUS * GF.S;
+  var nearest = 9999;
+
+  for (var i = sparks.length - 1; i >= 0; i--) {
+    var s = sparks[i];
+    s.trail.push({ x: s.x, y: s.y });
+    if (s.trail.length > 6) s.trail.shift();
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    var d = GF.dist(s.x, s.y, GF.cx, GF.cy);
+    if (d < nearest) nearest = d;
+
+    if (d <= blockBand && d >= blockInner - SPARK_R * GF.S) {
+      var absAng = Math.atan2(s.y - GF.cy, s.x - GF.cx);
+      var seg = segAtAngle(absAng);
+      var guarded = (seg !== -2);
+      if (guarded && wave >= COLOR_MATCH_WAVE && s.seg >= 0) guarded = (seg === s.seg);
+      if (guarded) { blockSpark(s, i); continue; }
+    }
+
+    if (d <= coreR + SPARK_R * GF.S) {
+      sparks.splice(i, 1);
+      lives -= 1;
+      coreFlash = 1;
+      GF.setShake(0.8);
+      GF.spawnParticles(GF.cx, GF.cy, '#ff5555', 26);
+      combo = 0;
+      if (lives <= 0) { gameOver(); return; }
+      GF.saveRun();
+    }
+  }
+
+  if (nearest < SHIELD_RADIUS * GF.S * 1.6) {
+    coreFlash = Math.max(coreFlash, GF.clamp(1 - (nearest - coreR) / (SHIELD_RADIUS * GF.S), 0, 0.85));
+  }
+}
+
+function blockSpark(s, idx) {
+  sparks.splice(idx, 1);
+  combo += 1;
+  if (combo > bestCombo) bestCombo = combo;
+  var bonus = Math.floor(combo / COMBO_STEP);
+  var gain = 1 + bonus;
+  score += gain;
+  var col = s.seg >= 0 ? SEG_COLORS[s.seg] : '#ffffff';
+  GF.spawnParticles(s.x, s.y, col, 14);
+  GF.spawnFloat(s.x, s.y - 6, '+' + gain, col);
+  GF.setShake(0.18);
+  var nw = Math.floor(score / WAVE_SIZE) + 1;
+  if (nw > wave) {
+    wave = nw;
+    if (wave > lastWaveSeen) { lastWaveSeen = wave; waveBanner = 1.6; GF.setShake(0.4); }
+  }
+  GF.saveRun();
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  drawBackground(ctx);
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawSparks(ctx);
+    drawCore(ctx);
+    drawShield(ctx);
+  }
+  if (gs === 'PLAYING') {
+    drawHUD();
+    if (waveBanner > 0) drawWaveBanner(ctx);
+    if (showHelp) drawHelpPanel(ctx);
+  }
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+}
+
+function drawBackground(ctx) {
+  ctx.fillStyle = '#070713';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var g = ctx.createRadialGradient(GF.cx, GF.cy, 0, GF.cx, GF.cy, Math.max(GF.W, GF.H) * 0.7);
+  g.addColorStop(0, 'rgba(30,30,70,0.55)');
+  g.addColorStop(1, 'rgba(7,7,19,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.strokeStyle = 'rgba(120,140,200,0.10)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(GF.cx, GF.cy, SHIELD_RADIUS * GF.S, 0, Math.PI * 2); ctx.stroke();
+}
+
+function drawSparks(ctx) {
+  for (var i = 0; i < sparks.length; i++) {
+    var s = sparks[i];
+    var col = s.seg >= 0 ? SEG_COLORS[s.seg] : '#fff6c0';
+    for (var j = 0; j < s.trail.length; j++) {
+      var t = s.trail[j];
+      ctx.globalAlpha = (j / s.trail.length) * 0.5;
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(t.x, t.y, SPARK_R * GF.S * (0.4 + 0.5 * j / s.trail.length), 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.save();
+    ctx.shadowColor = col; ctx.shadowBlur = 14 * GF.S;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(s.x, s.y, SPARK_R * GF.S, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, SPARK_R * GF.S * 0.45, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawCore(ctx) {
+  var skin = SKINS[selectedSkin] || SKINS[0];
+  var r = CORE_RADIUS * GF.S;
+  var pulse = 1 + Math.sin(corePulse * 3) * 0.05;
+  ctx.save();
+  ctx.shadowColor = skin.c2; ctx.shadowBlur = 28 * GF.S;
+  var g = ctx.createRadialGradient(GF.cx, GF.cy, 0, GF.cx, GF.cy, r * pulse);
+  g.addColorStop(0, '#ffffff');
+  g.addColorStop(0.4, skin.c1);
+  g.addColorStop(1, skin.c2);
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(GF.cx, GF.cy, r * pulse, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  if (coreFlash > 0) {
+    ctx.globalAlpha = coreFlash;
+    ctx.strokeStyle = '#ff3b3b'; ctx.lineWidth = 4 * GF.S;
+    ctx.beginPath(); ctx.arc(GF.cx, GF.cy, r * pulse + 5 * GF.S, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawShield(ctx) {
+  var rad = SHIELD_RADIUS * GF.S;
+  var half = (SHIELD_ARC_DEG * Math.PI / 180) / 2;
+  var thick = SHIELD_THICK * GF.S * 1.4;
+  var colored = wave >= COLOR_MATCH_WAVE;
+  ctx.lineCap = 'round';
+  if (colored) {
+    ctx.save();
+    ctx.shadowColor = SEG_GLOW[0]; ctx.shadowBlur = 18 * GF.S;
+    ctx.strokeStyle = SEG_COLORS[0]; ctx.lineWidth = thick;
+    ctx.beginPath(); ctx.arc(GF.cx, GF.cy, rad, shieldAngle - half, shieldAngle, false); ctx.stroke();
+    ctx.shadowColor = SEG_GLOW[1];
+    ctx.strokeStyle = SEG_COLORS[1];
+    ctx.beginPath(); ctx.arc(GF.cx, GF.cy, rad, shieldAngle, shieldAngle + half, false); ctx.stroke();
+    ctx.restore();
+  } else {
+    ctx.save();
+    ctx.shadowColor = 'rgba(120,220,255,0.9)'; ctx.shadowBlur = 18 * GF.S;
+    ctx.strokeStyle = '#7fdfff'; ctx.lineWidth = thick;
+    ctx.beginPath(); ctx.arc(GF.cx, GF.cy, rad, shieldAngle - half, shieldAngle + half, false); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.lineCap = 'butt';
+}
+
+// ── HUD ────────────────────────────────────────────────────────────────────
+function drawHUD() {
+  var c = GF.ctx;
+  var fs = GF.clamp(18 * GF.S, 13, 24);
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.textBaseline = 'top';
+  c.textAlign = 'left';
+  c.fillStyle = '#fff';
+  c.fillText(GF.t('score') + ': ' + score, 14 * GF.S, 14 * GF.S);
+  if (combo >= 2) {
+    c.fillStyle = '#ffd24d';
+    c.font = 'bold ' + GF.clamp(15 * GF.S, 11, 20) + 'px sans-serif';
+    c.fillText('x' + combo, 14 * GF.S, 14 * GF.S + fs + 4);
+  }
+  c.textAlign = 'center';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillStyle = '#9be9ff';
+  c.fillText(GF.t('wave') + ' ' + wave, GF.cx, 14 * GF.S);
+  // life heart (right of center, left of ? button)
+  c.textAlign = 'right';
+  c.fillStyle = lives > 0 ? '#ff5577' : '#553344';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 15, 28) + 'px sans-serif';
+  c.fillText('♥', GF.W - 58 * GF.S, 14 * GF.S);
+  // ? button
+  var bs = GF.clamp(34 * GF.S, 28, 44);
+  helpBtn = { x: GF.W - bs - 10 * GF.S, y: 10 * GF.S, w: bs, h: bs };
+  c.fillStyle = 'rgba(40,50,80,0.7)';
+  GF.rr(c, helpBtn.x, helpBtn.y, helpBtn.w, helpBtn.h, 8 * GF.S); c.fill();
+  c.fillStyle = '#cfe6ff';
+  c.font = 'bold ' + GF.clamp(20 * GF.S, 15, 26) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText('?', helpBtn.x + helpBtn.w / 2, helpBtn.y + helpBtn.h / 2);
+  c.textBaseline = 'top';
+}
+
+function drawWaveBanner(ctx) {
+  var a = Math.min(1, waveBanner / 0.4) * Math.min(1, (1.6 - waveBanner) / 0.3 + 0.3);
+  ctx.globalAlpha = GF.clamp(a, 0, 1);
+  ctx.fillStyle = '#9be9ff';
+  ctx.font = 'bold ' + GF.clamp(42 * GF.S, 26, 64) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(155,233,255,0.8)'; ctx.shadowBlur = 24 * GF.S;
+  ctx.fillText(GF.t('waveup') + ' ' + wave, GF.cx, GF.H * 0.28);
+  ctx.shadowBlur = 0; ctx.globalAlpha = 1; ctx.textBaseline = 'top';
+}
+
+// ── TEXT WRAP (measured, multi-line — the mobile-portrait fix) ──────────────
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/), lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function drawTutorialBlock(ctx, paras, cx, startY, maxW, fs, gapPara) {
+  var lineH = fs * 1.28;
+  var y = startY;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = fs + 'px sans-serif';
+  for (var p = 0; p < paras.length; p++) {
+    var lines = wrapLines(ctx, paras[p].text, maxW);
+    ctx.fillStyle = paras[p].col || '#cfe0f5';
+    for (var i = 0; i < lines.length; i++) { ctx.fillText(lines[i], cx, y); y += lineH; }
+    y += gapPara;
+  }
+  return y - startY;
+}
+function tutorialParas() {
+  return [
+    { text: GF.t('tut_goal'),     col: '#ffffff' },
+    { text: GF.t('tut_controls'), col: '#9be9ff' },
+    { text: GF.t('tut_win'),      col: '#cfe0f5' },
+    { text: GF.t('tut_lose'),     col: '#ff9aa6' },
+    { text: GF.t('tip'),          col: '#ffd24d' },
+  ];
+}
+
+// ── OVERLAYS ────────────────────────────────────────────────────────────────
+function drawMenu(ctx) {
+  myButtons = [];
+  ctx.fillStyle = 'rgba(8,8,20,0.9)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var maxW = Math.min(GF.W * 0.86, 560);
+  var titleFs = GF.clamp(40 * GF.S, 24, 54);
+  var topY = GF.H * 0.055;
+
+  ctx.save();
+  ctx.shadowColor = 'rgba(155,233,255,0.6)'; ctx.shadowBlur = 26 * GF.S;
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('title'), GF.cx, topY);
+  ctx.restore();
+
+  var subFs = GF.clamp(15 * GF.S, 11, 19);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#9ab';
+  ctx.fillText(GF.t('sub'), GF.cx, topY + titleFs + 6 * GF.S);
+
+  var tutFs = GF.clamp(13.5 * GF.S, 11, 17);
+  var tutY = topY + titleFs + subFs + 22 * GF.S;
+  var tutH = drawTutorialBlock(ctx, tutorialParas(), GF.cx, tutY, maxW, tutFs, 7 * GF.S);
+
+  var btnW = GF.clamp(220 * GF.S, 150, 300), btnH = GF.clamp(54 * GF.S, 42, 66);
+  var btnY = tutY + tutH + 14 * GF.S;
+  btnY = Math.min(btnY, GF.H - btnH - 96 * GF.S);
+  drawButton(ctx, GF.cx - btnW / 2, btnY, btnW, btnH, GF.t('play'), startGame);
+
+  if (best > 0) {
+    ctx.fillStyle = '#6c7cae';
+    ctx.font = GF.clamp(13 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 8 * GF.S);
+  }
+  drawSkinSelector(ctx, btnY + btnH + 30 * GF.S);
+}
+
+function drawSkinSelector(ctx, y) {
+  skinBtns = [];
+  ctx.fillStyle = '#8aa';
+  ctx.font = GF.clamp(12 * GF.S, 10, 15) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('skins'), GF.cx, y);
+  var sw = GF.clamp(38 * GF.S, 30, 50);
+  var gap = GF.clamp(14 * GF.S, 8, 18);
+  var total = SKINS.length * sw + (SKINS.length - 1) * gap;
+  var sx = GF.cx - total / 2;
+  var sy = y + 20 * GF.S;
+  for (var i = 0; i < SKINS.length; i++) {
+    var sk = SKINS[i];
+    var unlocked = unlockedSkins.indexOf(sk.id) >= 0;
+    var bx = sx + i * (sw + gap);
+    ctx.save();
+    if (unlocked) {
+      var g = ctx.createRadialGradient(bx + sw / 2, sy + sw / 2, 2, bx + sw / 2, sy + sw / 2, sw / 2);
+      g.addColorStop(0, sk.c1); g.addColorStop(1, sk.c2);
+      ctx.fillStyle = g;
+    } else ctx.fillStyle = '#23263a';
+    ctx.beginPath(); ctx.arc(bx + sw / 2, sy + sw / 2, sw / 2, 0, Math.PI * 2); ctx.fill();
+    if (sk.id === selectedSkin && unlocked) {
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 3 * GF.S;
+      ctx.beginPath(); ctx.arc(bx + sw / 2, sy + sw / 2, sw / 2 + 3 * GF.S, 0, Math.PI * 2); ctx.stroke();
+    }
+    if (!unlocked) {
+      ctx.fillStyle = '#7a7ea0';
+      ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(sk.need + '', bx + sw / 2, sy + sw / 2);
+      ctx.textBaseline = 'top';
+    }
+    ctx.restore();
+    skinBtns.push({ x: bx, y: sy, w: sw, h: sw, skin: sk.id });
+  }
+}
+
+function drawGameOver(ctx) {
+  myButtons = [];
+  ctx.fillStyle = 'rgba(8,8,20,0.88)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(40 * GF.S, 24, 56);
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,80,80,0.55)'; ctx.shadowBlur = 26 * GF.S;
+  ctx.fillStyle = '#ff6b6b';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('gameover'), GF.cx, GF.H * 0.2);
+  ctx.restore();
+
+  var fs = GF.clamp(18 * GF.S, 13, 24);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('score') + ': ' + score + '   ' + GF.t('wave') + ' ' + wave, GF.cx, GF.H * 0.2 + titleFs + 12 * GF.S);
+  ctx.fillStyle = '#9be9ff';
+  ctx.font = GF.clamp(15 * GF.S, 11, 20) + 'px sans-serif';
+  ctx.fillText(GF.t('best') + ': ' + best, GF.cx, GF.H * 0.2 + titleFs + 12 * GF.S + fs + 8 * GF.S);
+
+  if (justUnlocked >= 0) {
+    ctx.fillStyle = '#ffd24d';
+    ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+    ctx.fillText(GF.t('newskin'), GF.cx, GF.H * 0.2 + titleFs + 12 * GF.S + fs + 36 * GF.S);
+  }
+
+  var btnW = GF.clamp(220 * GF.S, 150, 300), btnH = GF.clamp(54 * GF.S, 42, 66);
+  drawButton(ctx, GF.cx - btnW / 2, GF.cy + 30 * GF.S, btnW, btnH, GF.t('retry'), startGame);
+}
+
+function drawHelpPanel(ctx) {
+  ctx.fillStyle = 'rgba(8,8,20,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var maxW = Math.min(GF.W * 0.86, 560);
+  var titleFs = GF.clamp(26 * GF.S, 18, 38);
+  ctx.fillStyle = '#9be9ff';
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('title'), GF.cx, GF.H * 0.1);
+  var tutFs = GF.clamp(14 * GF.S, 11, 18);
+  drawTutorialBlock(ctx, tutorialParas(), GF.cx, GF.H * 0.1 + titleFs + 20 * GF.S, maxW, tutFs, 9 * GF.S);
+  ctx.fillStyle = '#7a8bb5';
+  ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+  ctx.fillText(GF.t('resume'), GF.cx, GF.H * 0.88);
+}
+
+// Button helper — draws a gradient pill + registers a hit rect.
+function drawButton(ctx, x, y, w, h, label, fn) {
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, '#22e3ff'); grad.addColorStop(1, '#1f7bff');
+  GF.rr(ctx, x, y, w, h, h / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#06121f';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  ctx.textBaseline = 'top';
+  myButtons.push({ x: x, y: y, w: w, h: h, fn: fn });
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 540,
+  designH: 900,        // portrait-first design space
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'spark_shield',
+  onReady: function() {
+    loadMeta();
+    GF.persist('spark_shield_run_v1',
+      function() { return { gs: gs === 'PLAYING' ? 'MENU' : gs, score: score, best: best, wave: wave, selectedSkin: selectedSkin }; },
+      function(s) {
+        if (!s) return;
+        best = Math.max(best, s.best || 0);
+        selectedSkin = (typeof s.selectedSkin === 'number') ? s.selectedSkin : selectedSkin;
+        refreshUnlocks();
+        if (unlockedSkins.indexOf(selectedSkin) < 0) selectedSkin = 0;
+      }
+    );
+    gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Expose state for the post-build-tester gate (cross-checks DESIGN.md).
+GF.exposeState(function() {
+  return {
+    gs: gs, score: score, best: best, wave: wave, lives: lives,
+    combo: combo, shieldAngle: shieldAngle, sparkCount: sparks.length,
+    elapsed: elapsed, selectedSkin: selectedSkin, unlocked: unlockedSkins.length,
+  };
+});
+
+// Test-only: nearest-spark bearing so an automated playtest bot can aim the
+// shield. Harmless to ship (read-only diagnostic, like _setLang).
+window._nearestSparkAngle = function() {
+  var bestA = null, bestD = 1e9;
+  for (var i = 0; i < sparks.length; i++) {
+    var s = sparks[i];
+    var d = GF.dist(s.x, s.y, GF.cx, GF.cy);
+    if (d < bestD) { bestD = d; bestA = Math.atan2(s.y - GF.cy, s.x - GF.cx); }
+  }
+  return { ang: bestA, d: bestD, shield: shieldAngle };
+};
+
+// Test hooks for locale/overlap audit + tooling.
+window._setLang = function(l) { GF.lang = (l === 'ru' ? 'ru' : 'en'); };
+window._setState = function(s) {
+  if (s === 'PLAYING') { startGame(); }
+  else if (s === 'GAMEOVER') { startGame(); score = 42; wave = 5; lives = 0; gs = 'GAMEOVER'; }
+  else { gs = 'MENU'; }
+};
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+
+})();
+</script>
+</body>
+</html>
