@@ -459,9 +459,10 @@ function visible() {
     const flags = list.filter(g => g.flagship);
     if (flags.length) {
       list = list.filter(g => !g.flagship);
-      const slots = [4, 14, 24]; // 0-indexed → grid positions 5, 15, 25
+      // One showcase per ~10 cards: positions 5, 15, 25, 35 … (0-indexed 4 + i*10).
+      // Scales to any number of flagships; clamps to the end on short lists.
       flags.forEach((g, i) => {
-        const at = Math.min(slots[i] ?? list.length, list.length);
+        const at = Math.min(4 + i * 10, list.length);
         list.splice(at, 0, g);
       });
     }
