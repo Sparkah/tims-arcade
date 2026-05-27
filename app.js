@@ -119,15 +119,6 @@ async function init() {
   // FIRST PAINT — block only on the catalogue.
   games = await gamesP;
 
-  // Header metadata: build = highest specimen number, date = today
-  const hero = document.getElementById('hero');
-  if (hero) {
-    const maxN = games.reduce((m, g) => Math.max(m, parseInt(g.num) || 0), 0);
-    const dateStr = new Date().toLocaleDateString(LANG === 'ru' ? 'ru-RU' : 'en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-    hero.setAttribute('data-build', String(maxN).padStart(3, '0'));
-    hero.setAttribute('data-date', dateStr);
-  }
-
   attachEvents();
   renderGenres();
 
