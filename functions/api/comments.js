@@ -28,21 +28,24 @@ export async function onRequestGet({ request, env }) {
 
   const prefix = `comment:${slug}:`;
   let cursor;
-  const items = [];
-  // KV.list scans alphabetically; ids are date-based so we walk to gather
-  // the page then sort by ts descending.
+  const names = [];
+  // KV.list scans keys in ascending lexicographic order. Comment ids are
+  // `Date.now().toString(36) + rand` (see feedback.js), so key order is
+  // chronological ascending and the NEWEST comments sit at the TAIL. Walk
+  // every page (list-only, no value reads — cheap) to reach the tail;
+  // stopping at the first 200 keys would freeze the public stream on the
+  // OLDEST 200 once a game crosses 200 comments.
   do {
-    const page = await env.VOTES.list({ prefix, cursor, limit: 200 });
-    cursor = page.cursor;
-    for (const k of page.keys) {
-      items.push(k.name);
-    }
-    if (!cursor || page.list_complete || items.length >= 200) break;
+    const page = await env.VOTES.list({ prefix, cursor, limit: 1000 });
+    cursor = page.list_complete ? null : page.cursor;
+    for (const k of page.keys) names.push(k.name);
   } while (cursor);
 
-  // Fetch in parallel, cap to the most we'd ever want to display
+  // Fetch only the newest tail (a small multiple of `limit` so a few empty/
+  // invalid payloads can't starve the page), then sort by ts and slice.
+  const tail = names.slice(-Math.max(limit * 3, 30));
   const fetched = await Promise.all(
-    items.slice(-200).map(async (k) => {
+    tail.map(async (k) => {
       const raw = await env.VOTES.get(k, 'json');
       return raw ? { ...raw, _key: k } : null;
     })

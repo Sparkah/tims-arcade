@@ -443,7 +443,10 @@ function visible() {
     list = list.filter(g => orderBySlug.has(g.slug));
     list.sort((a, b) => orderBySlug.get(a.slug) - orderBySlug.get(b.slug));
   } else if (activeTab === 'top') {
-    list.sort((a, b) => netScore(b) - netScore(a));
+    // Canonical engagement = seconds + net*5 (see engagementScore +
+    // _lib/engagement.js). Was netScore (votes only), which dropped the
+    // load-bearing play-time signal the formula is built around.
+    list.sort((a, b) => engagementScore(b) - engagementScore(a));
   } else {
     // 'all' — newest first by default
     list.sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0));
@@ -479,8 +482,13 @@ function netScore(g) {
 // Tracks the IntersectionObserver across renders so paginating away mid-paint
 // doesn't leak observers watching cards that no longer exist.
 let _lazyObserver = null;
+// Bumped on every render() so deferred paintChunks() callbacks from a prior
+// render detect they've been superseded and stop appending stale cards into
+// the freshly-cleared grid (counts/trending/featured each trigger a render).
+let _renderGen = 0;
 
 function render() {
+  const gen = ++_renderGen;
   const featuredSlug = renderFeatured();
   let list = visible();
   if (featuredSlug) list = list.filter(g => g.slug !== featuredSlug);
@@ -523,14 +531,17 @@ function render() {
     grid.appendChild(card(first[i], { eager: true, priority: i < 2 }));
   }
   const rest = pageList.slice(CHUNK_SIZE);
-  paintChunks(rest, () => hydrateLazyVideos());
+  paintChunks(rest, () => hydrateLazyVideos(), gen);
   renderPagination(totalPages);
 }
 
-function paintChunks(rest, done) {
+function paintChunks(rest, done, gen) {
   if (rest.length === 0) { done(); return; }
   let cursor = 0;
   const step = () => {
+    // A newer render() superseded us — drop these stale chunks instead of
+    // appending them into the grid the new render already cleared+repainted.
+    if (gen !== _renderGen) return;
     const slice = rest.slice(cursor, cursor + CHUNK_SIZE);
     if (slice.length === 0) { done(); return; }
     const frag = document.createDocumentFragment();

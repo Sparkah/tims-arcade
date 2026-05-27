@@ -48,13 +48,21 @@ export async function onRequestGet({ request, env }) {
   // Pick a deterministic-by-date slug from games.json so the badge still
   // has SOMETHING. Once a heartbeat lands, /api/trending will outrank it
   // on the next cache miss.
+  // The fallback is only a placeholder for the empty-signal window (early
+  // morning / first visitor). It must NOT be cached for the whole day, or the
+  // featured slug + 2x-token target lock to a deterministic-by-date game even
+  // after real heartbeats land (the fast path above would keep serving it).
+  const fromEngagement = !!best;
   if (!best) {
     best = await pickFallbackSlug(request, today);
   }
 
   if (best) {
-    // 25-hour TTL so the key rolls over each UTC day
-    await env.VOTES.put(cacheKey, best, { expirationTtl: 25 * 60 * 60 });
+    // Real engagement pick: cache for the day (rolls over each UTC day).
+    // Fallback placeholder: short TTL so /api/trending takes over within
+    // minutes once the first heartbeat lands, instead of locking the day.
+    const ttl = fromEngagement ? 25 * 60 * 60 : 15 * 60;
+    await env.VOTES.put(cacheKey, best, { expirationTtl: ttl });
   }
 
   return new Response(JSON.stringify({ slug: best, date: today, rewardMultiplier: 2 }), {
