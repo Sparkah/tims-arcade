@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Tight Spot</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #14171d; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── STRINGS (EN + RU) ─────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Tight Spot',
+    sub: 'Thread the gap. Park it clean.',
+    play: 'PLAY', next: 'NEXT', menu: 'MENU', retry: 'RETRY', endless: 'ENDLESS',
+    lvl: 'LVL', daily: 'DAILY', parked: 'PARKED!', perfect: 'PERFECT PARK!',
+    clear: 'PARKED', campaign_done: 'ALL SPOTS CLEARED',
+    hold_left: 'HOLD', hold_right: 'HOLD',
+    tut_goal:     'Goal: Thread your car fully into the glowing parking bay.',
+    tut_controls: 'Controls: Hold the LEFT or RIGHT side of the screen to steer. The car rolls forward on its own. Let go to coast straight.',
+    tut_win:      'Win: Settle inside the bay, lined up straight, without touching anything.',
+    tut_lose:     'Lose: Scrape any wall, parked car, or cone and the level instantly resets - no penalty, just try again.',
+    tut_tip:      'Tip: Go slow and steer early. Clean, short lines earn all 3 stars.',
+    tap_close: '(tap anywhere to close)',
+  },
+  ru: {
+    title: 'Tight Spot',
+    sub: 'Найди зазор. Припаркуйся чисто.',
+    play: 'ИГРАТЬ', next: 'ДАЛЕЕ', menu: 'МЕНЮ', retry: 'ЕЩЁ РАЗ', endless: 'БЕСКОНЕЧНО',
+    lvl: 'УР', daily: 'ДЕНЬ', parked: 'ПРИПАРКОВАН!', perfect: 'ИДЕАЛЬНО!',
+    clear: 'ПАРКОВКА', campaign_done: 'ВСЕ МЕСТА ПРОЙДЕНЫ',
+    hold_left: 'ДЕРЖИ', hold_right: 'ДЕРЖИ',
+    tut_goal:     'Цель: Заведи машину полностью в светящееся парковочное место.',
+    tut_controls: 'Управление: Удерживай ЛЕВУЮ или ПРАВУЮ часть экрана, чтобы рулить. Машина едет вперёд сама. Отпусти - катится прямо.',
+    tut_win:      'Победа: Встань ровно внутри места, ничего не задев.',
+    tut_lose:     'Поражение: Заденешь стену, чужую машину или конус - уровень сразу сбросится, без штрафа, просто попробуй снова.',
+    tut_tip:      'Совет: Не спеши и руль заранее. Чистые короткие траектории дают 3 звезды.',
+    tap_close: '(нажми, чтобы закрыть)',
+  },
+};
+var SPRITE_NAMES = []; // procedural art
+
+function curStrings() { return STRINGS[GF.lang] || STRINGS.en; }
+
+// ── TUNABLES (DESIGN.md contract) ──────────────────────────────────────────
+var CREEP_SPEED     = 78;    // forward auto-creep px/sec (design scale)
+var TURN_RATE       = 2.35;  // rad/sec heading turn while steering
+var FRICTION        = 0.86;  // per-frame coast decel when settling
+var CAR_W           = 26;    // car body width  (design px)
+var CAR_L           = 52;    // car body length (design px)
+var CONE_R          = 11;    // cone collision radius (design px)
+var ANGLE_TOL       = 0.22;  // rad heading tolerance to count parked
+var POS_TOL         = 30;    // design px center→bay-center to park
+var SETTLE_SEC      = 0.45;  // sec near-stationary in bay to win
+var CRASH_RESET_SEC = 0.65;  // sec crash freeze before auto-retry
+var AUTHORED_LEVELS = 14;    // hand-authored layouts before endless
+var WALL_THICK      = 8;     // wall half-width (design px) for swept test
+var PATH_PAR        = 1.55;  // path-length-to-straight ratio under which a star is kept
+
+// ── FIELD (the play box, authored coordinate space) ─────────────────────────
+// All level geometry is authored in field-local units 0..FIELD_W × 0..FIELD_H.
+// The field maps onto the screen centered on (cx,cy), scaled by GF.S.
+var FIELD_W = 360, FIELD_H = 640;
+var fox = 0, foy = 0; // field origin in screen px (top-left of field)
+function layoutField() {
+  fox = GF.cx - (FIELD_W * GF.S) / 2;
+  foy = GF.cy - (FIELD_H * GF.S) / 2;
+}
+// field-local → screen
+function fx(x) { return fox + x * GF.S; }
+function fy(y) { return foy + y * GF.S; }
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | CRASH | LEVELCLEAR | WIN
+var lvl = 1;                // current level (1..AUTHORED_LEVELS, then endless)
+var endless = false;        // true once campaign cleared
+var maxLevel = 1;           // furthest level unlocked (persisted)
+var bestStars = [];         // best stars per authored level (persisted)
+
+var car = null;             // { x,y,heading,speed }  (field-local)
+var walls = [];             // [{x1,y1,x2,y2}]
+var obstacles = [];         // [{x,y,w,l,heading}]  (oriented rects, field-local)
+var cones = [];             // [{x,y}]
+var bay = null;             // {x,y,w,l,heading}  target rect
+
+var crashes = 0;            // resets on this level attempt
+var stars = 3;              // live achievable star ceiling this attempt
+var pathLen = 0;            // distance the car has travelled this attempt
+var straightLen = 1;        // spawn→bay straight-line distance (for par calc)
+var settleT = 0;            // accumulated time parked-in-bay
+var crashT = 0;             // crash freeze countdown
+var attemptTimer = 0;       // soft stat only - never a lose trigger
+var steerHintFade = 1;      // fades after first steer input
+var pulseT = 0;
+var lastParkPerfect = false;
+var earnedStars = 0;        // stars banked on the LEVELCLEAR screen
+var tyreMarks = [];         // cosmetic trail [{x,y}]
+var tutorialOpen = false;
+var _ssMode = false;        // screenshot freeze
+// Ads (Yandex interstitial - user-click only, throttled)
+var lastInterstitialMs = -1e9;
+var INTERSTITIAL_GAP_MS = 180000;
+
+// ── PERSISTENCE ─────────────────────────────────────────────────────────────
+function loadTutorialSeen() {
+  try { return localStorage.getItem('tight_spot_seen_tutorial') === '1'; } catch (e) { return false; }
+}
+function saveTutorialSeen() { try { localStorage.setItem('tight_spot_seen_tutorial', '1'); } catch (e) {} }
+
+// ── LEVEL DATA ──────────────────────────────────────────────────────────────
+// Each level: outer border walls are auto-added; `data` lists interior walls,
+// obstacle cars, cones, the start pose, and the target bay. Authored in
+// field-local units (FIELD_W=360 × FIELD_H=640). heading: 0 = nose pointing
+// UP (-y). Difficulty escalates: wider gaps & gentle approaches first, then
+// tight squeezes, dog-legs, and cone chicanes.
+var PI = Math.PI;
+function carBox(x, y, h) { return { x: x, y: y, w: CAR_W, l: CAR_L, heading: h }; }
+
+var LEVELS = [
+  // 1 - gentle straight-in, fat bay, no obstacles. Teaches forward+steer.
+  {
+    start: { x: 180, y: 560, h: 0 },
+    bay:   { x: 180, y: 150, w: 70, l: 110, heading: 0 },
+    walls: [], obstacles: [], cones: [],
+  },
+  // 2 - straight-in, one parked car beside the bay.
+  {
+    start: { x: 150, y: 560, h: 0 },
+    bay:   { x: 180, y: 150, w: 60, l: 105, heading: 0 },
+    walls: [],
+    obstacles: [ carBox(110, 150, 0) ],
+    cones: [],
+  },
+  // 3 - classic squeeze: bay between two parked cars.
+  {
+    start: { x: 180, y: 560, h: 0 },
+    bay:   { x: 180, y: 150, w: 52, l: 110, heading: 0 },
+    walls: [],
+    obstacles: [ carBox(110, 150, 0), carBox(250, 150, 0) ],
+    cones: [],
+  },
+  // 4 - cone chicane on the way up.
+  {
+    start: { x: 180, y: 570, h: 0 },
+    bay:   { x: 180, y: 130, w: 58, l: 100, heading: 0 },
+    walls: [],
+    obstacles: [],
+    cones: [ {x:120,y:380}, {x:240,y:300}, {x:130,y:240} ],
+  },
+  // 5 - sidewall partition forces a slight curve.
+  {
+    start: { x: 110, y: 560, h: 0 },
+    bay:   { x: 250, y: 150, w: 56, l: 105, heading: 0 },
+    walls: [ {x1:175,y1:640,x2:175,y2:300} ],
+    obstacles: [],
+    cones: [],
+  },
+  // 6 - parallel-style: bay opens to the side (heading sideways).
+  {
+    start: { x: 180, y: 560, h: 0 },
+    bay:   { x: 270, y: 250, w: 60, l: 100, heading: PI/2 },
+    walls: [],
+    obstacles: [ carBox(270, 130, PI/2), carBox(270, 370, PI/2) ],
+    cones: [],
+  },
+  // 7 - narrow lane between two long walls, bay at the end.
+  {
+    start: { x: 180, y: 580, h: 0 },
+    bay:   { x: 180, y: 110, w: 50, l: 95, heading: 0 },
+    walls: [ {x1:130,y1:560,x2:130,y2:170}, {x1:230,y1:560,x2:230,y2:170} ],
+    obstacles: [],
+    cones: [],
+  },
+  // 8 - dog-leg: wall blocks straight, must arc around.
+  {
+    start: { x: 100, y: 570, h: 0 },
+    bay:   { x: 270, y: 130, w: 54, l: 95, heading: 0 },
+    walls: [ {x1:60,y1:330,x2:240,y2:330} ],
+    obstacles: [],
+    cones: [ {x:180,y:430} ],
+  },
+  // 9 - tight squeeze + cones narrowing the mouth.
+  {
+    start: { x: 180, y: 570, h: 0 },
+    bay:   { x: 180, y: 130, w: 48, l: 100, heading: 0 },
+    walls: [],
+    obstacles: [ carBox(110, 130, 0), carBox(250, 130, 0) ],
+    cones: [ {x:150,y:300}, {x:210,y:300} ],
+  },
+  // 10 - sideways bay flanked by cars, partition wall.
+  {
+    start: { x: 110, y: 560, h: 0 },
+    bay:   { x: 95, y: 220, w: 58, l: 95, heading: PI/2 },
+    walls: [ {x1:180,y1:640,x2:180,y2:360} ],
+    obstacles: [ carBox(95, 110, PI/2), carBox(95, 330, PI/2) ],
+    cones: [],
+  },
+  // 11 - S-curve through two staggered walls.
+  {
+    start: { x: 120, y: 580, h: 0 },
+    bay:   { x: 240, y: 110, w: 50, l: 90, heading: 0 },
+    walls: [ {x1:60,y1:420,x2:230,y2:420}, {x1:130,y1:280,x2:300,y2:280} ],
+    obstacles: [],
+    cones: [],
+  },
+  // 12 - very tight squeeze, three parked cars + a cone.
+  {
+    start: { x: 180, y: 580, h: 0 },
+    bay:   { x: 180, y: 120, w: 46, l: 95, heading: 0 },
+    walls: [],
+    obstacles: [ carBox(112, 120, 0), carBox(248, 120, 0), carBox(180, 380, 0) ],
+    cones: [ {x:120,y:470} ],
+  },
+  // 13 - sideways bay at top, lane + cone chicane.
+  {
+    start: { x: 180, y: 590, h: 0 },
+    bay:   { x: 180, y: 95, w: 56, l: 90, heading: PI/2 },
+    walls: [ {x1:120,y1:560,x2:120,y2:300}, {x1:240,y1:560,x2:240,y2:300} ],
+    obstacles: [],
+    cones: [ {x:155,y:230}, {x:205,y:200} ],
+  },
+  // 14 - the gauntlet: dog-leg, parked cars, cones, narrow finish.
+  {
+    start: { x: 100, y: 590, h: 0 },
+    bay:   { x: 260, y: 100, w: 46, l: 90, heading: 0 },
+    walls: [ {x1:60,y1:360,x2:210,y2:360}, {x1:300,y1:520,x2:300,y2:220} ],
+    obstacles: [ carBox(195, 100, 0) ],
+    cones: [ {x:150,y:470}, {x:245,y:280} ],
+  },
+];
+
+// ── DAILY-SEEDED ENDLESS GENERATOR ──────────────────────────────────────────
+// After the 14 authored levels, generate increasingly tight spots. Seeded by
+// today's date + the endless index so the "same day" gives the same ladder
+// (a comeback hook) but each step is tighter.
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function daySeed() {
+  var d = new Date();
+  return d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+}
+function genEndlessLevel(idx) {
+  var rng = mulberry32(daySeed() * 131 + idx * 7919);
+  // tightness grows with idx: bay width shrinks toward the car width.
+  var tight = Math.min(0.85, idx * 0.06);
+  var bw = Math.round(CAR_W + 26 - tight * 18); // 52 → ~34
+  var sideways = rng() < 0.4;
+  var bayX = 90 + Math.round(rng() * 180);
+  var L = { start: { x: 180, y: 580, h: 0 },
+            bay: { x: bayX, y: 110 + Math.round(rng()*30),
+                   w: bw, l: sideways ? 88 : 100, heading: sideways ? PI/2 : 0 },
+            walls: [], obstacles: [], cones: [] };
+  // flanking cars on most spots
+  if (rng() < 0.8) {
+    if (sideways) {
+      L.obstacles.push(carBox(bayX, L.bay.y - 75, PI/2));
+      L.obstacles.push(carBox(bayX, L.bay.y + 75, PI/2));
+    } else {
+      L.obstacles.push(carBox(bayX - 66, L.bay.y, 0));
+      L.obstacles.push(carBox(bayX + 66, L.bay.y, 0));
+    }
+  }
+  // a partition wall sometimes
+  if (rng() < 0.5) {
+    var wx = 110 + Math.round(rng() * 140);
+    L.walls.push({ x1: wx, y1: 620, x2: wx, y2: 300 + Math.round(rng()*60) });
+  }
+  // cones narrowing the approach
+  var nc = Math.round(rng() * 3);
+  for (var i = 0; i < nc; i++) {
+    L.cones.push({ x: 90 + Math.round(rng() * 180), y: 250 + Math.round(rng() * 200) });
+  }
+  return L;
+}
+
+function levelData(n) {
+  if (n <= AUTHORED_LEVELS) return LEVELS[n - 1];
+  return genEndlessLevel(n - AUTHORED_LEVELS);
+}
+
+// ── LEVEL LOADING ───────────────────────────────────────────────────────────
+function loadLevel(n) {
+  var d = levelData(n);
+  // outer border walls
+  walls = [
+    { x1: 0, y1: 0, x2: FIELD_W, y2: 0 },
+    { x1: FIELD_W, y1: 0, x2: FIELD_W, y2: FIELD_H },
+    { x1: FIELD_W, y1: FIELD_H, x2: 0, y2: FIELD_H },
+    { x1: 0, y1: FIELD_H, x2: 0, y2: 0 },
+  ];
+  for (var i = 0; i < d.walls.length; i++) walls.push(d.walls[i]);
+  obstacles = [];
+  for (var j = 0; j < d.obstacles.length; j++) {
+    var o = d.obstacles[j];
+    obstacles.push({ x: o.x, y: o.y, w: o.w, l: o.l, heading: o.heading });
+  }
+  cones = [];
+  for (var k = 0; k < (d.cones || []).length; k++) cones.push({ x: d.cones[k].x, y: d.cones[k].y });
+  bay = { x: d.bay.x, y: d.bay.y, w: d.bay.w, l: d.bay.l, heading: d.bay.heading };
+  resetCar(d.start);
+  straightLen = Math.max(1, GF.dist(d.start.x, d.start.y, bay.x, bay.y));
+}
+
+function resetCar(start) {
+  car = { x: start.x, y: start.y, heading: start.h, speed: 0 };
+  settleT = 0;
+  pathLen = 0;
+  steerHintFade = (lvl === 1 && !endless) ? 1 : 0;
+  tyreMarks = [];
+}
+
+// Start a fresh attempt of `lvl` (first entry - resets crash/star bookkeeping).
+function startLevel(n) {
+  lvl = n;
+  endless = n > AUTHORED_LEVELS;
+  crashes = 0;
+  stars = 3;
+  attemptTimer = 0;
+  loadLevel(n);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+// ── GEOMETRY HELPERS ────────────────────────────────────────────────────────
+// Corners of an oriented rect (field-local). heading 0 = long axis along -y.
+function rectCorners(rx, ry, rw, rl, rh) {
+  var hw = rw / 2, hl = rl / 2;
+  var c = Math.cos(rh), s = Math.sin(rh);
+  // local corners: x across width, y along length (negative y = nose forward)
+  var pts = [ [-hw, -hl], [hw, -hl], [hw, hl], [-hw, hl] ];
+  var out = [];
+  for (var i = 0; i < 4; i++) {
+    var lx = pts[i][0], ly = pts[i][1];
+    out.push({ x: rx + lx * c - ly * s, y: ry + lx * s + ly * c });
+  }
+  return out;
+}
+function carCorners() { return rectCorners(car.x, car.y, CAR_W, CAR_L, car.heading); }
+
+// Separating-axis test between two convex polygons (arrays of {x,y}).
+function polysOverlap(a, b) {
+  var polys = [a, b];
+  for (var p = 0; p < 2; p++) {
+    var poly = polys[p];
+    for (var i = 0; i < poly.length; i++) {
+      var j = (i + 1) % poly.length;
+      var nx = -(poly[j].y - poly[i].y), ny = (poly[j].x - poly[i].x);
+      var minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
+      for (var k = 0; k < a.length; k++) { var d = a[k].x * nx + a[k].y * ny; if (d < minA) minA = d; if (d > maxA) maxA = d; }
+      for (var m = 0; m < b.length; m++) { var e = b[m].x * nx + b[m].y * ny; if (e < minB) minB = e; if (e > maxB) maxB = e; }
+      if (maxA < minB || maxB < minA) return false;
+    }
+  }
+  return true;
+}
+
+// Distance from point P to segment AB.
+function ptSegDist(px, py, ax, ay, bx, by) {
+  var dx = bx - ax, dy = by - ay;
+  var len2 = dx * dx + dy * dy;
+  var t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+  t = t < 0 ? 0 : t > 1 ? 1 : t;
+  var cxp = ax + t * dx, cyp = ay + t * dy;
+  return GF.dist(px, py, cxp, cyp);
+}
+
+// Does the car's oriented rect collide with any wall / obstacle / cone?
+function collide() {
+  var corners = carCorners();
+  // walls: treat as thick capsules - any car corner within WALL_THICK of the
+  // segment, OR the car edge crossing the wall. Corner-distance test catches
+  // the common scrape; also test the wall endpoints against the car polygon.
+  for (var w = 0; w < walls.length; w++) {
+    var wl = walls[w];
+    for (var c = 0; c < 4; c++) {
+      if (ptSegDist(corners[c].x, corners[c].y, wl.x1, wl.y1, wl.x2, wl.y2) <= WALL_THICK) return true;
+    }
+    // also: car center crossing very close (covers thin slivers)
+    if (ptSegDist(car.x, car.y, wl.x1, wl.y1, wl.x2, wl.y2) <= WALL_THICK + 2) {
+      // confirm with edge sampling along the wall for robustness
+      var steps = 6;
+      for (var sI = 0; sI <= steps; sI++) {
+        var tt = sI / steps;
+        var sx = wl.x1 + (wl.x2 - wl.x1) * tt, sy = wl.y1 + (wl.y2 - wl.y1) * tt;
+        if (pointInPoly(sx, sy, corners)) return true;
+      }
+    }
+  }
+  for (var o = 0; o < obstacles.length; o++) {
+    var ob = obstacles[o];
+    var oc = rectCorners(ob.x, ob.y, ob.w, ob.l, ob.heading);
+    if (polysOverlap(corners, oc)) return true;
+  }
+  for (var k = 0; k < cones.length; k++) {
+    if (polyCircleHit(corners, cones[k].x, cones[k].y, CONE_R)) return true;
+  }
+  return false;
+}
+
+function pointInPoly(px, py, poly) {
+  var inside = false;
+  for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    var xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+function polyCircleHit(poly, cxp, cyp, r) {
+  if (pointInPoly(cxp, cyp, poly)) return true;
+  for (var i = 0; i < poly.length; i++) {
+    var j = (i + 1) % poly.length;
+    if (ptSegDist(cxp, cyp, poly[i].x, poly[i].y, poly[j].x, poly[j].y) <= r) return true;
+  }
+  return false;
+}
+
+// Is the car settled inside the bay within tolerance?
+function parkedInBay() {
+  if (!bay) return false;
+  var corners = carCorners();
+  var bc = rectCorners(bay.x, bay.y, bay.w, bay.l, bay.heading);
+  // all four car corners inside bay polygon
+  for (var i = 0; i < 4; i++) if (!pointInPoly(corners[i].x, corners[i].y, bc)) return false;
+  // heading aligned (mod PI so either nose direction along the bay axis is OK)
+  var dh = Math.abs(angDiff(car.heading, bay.heading));
+  if (dh > PI / 2) dh = PI - dh;
+  if (dh > ANGLE_TOL) return false;
+  // center close to bay center
+  if (GF.dist(car.x, car.y, bay.x, bay.y) > POS_TOL) return false;
+  return true;
+}
+function angDiff(a, b) {
+  var d = (a - b) % (2 * PI);
+  if (d > PI) d -= 2 * PI;
+  if (d < -PI) d += 2 * PI;
+  return d;
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────────
+var steerLeft = false, steerRight = false;
+var helpBtn = null, menuBtn = null;
+var uiButtons = [];
+var uiLockUntil = 0;
+// pointer id → 'L' | 'R' so multitouch steer halves track independently
+var activePointers = {};
+
+function uiHit(px, py) {
+  for (var i = 0; i < uiButtons.length; i++) {
+    var b = uiButtons[i];
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+      uiLockUntil = Date.now() + 450;
+      b.fn();
+      return true;
+    }
+  }
+  return false;
+}
+
+function pressDown(id, px, py) {
+  pulseT = 0;
+  if (Date.now() < uiLockUntil && (gs === 'MENU' || gs === 'LEVELCLEAR' || gs === 'WIN')) return;
+  if (gs === 'MENU') {
+    if (tutorialOpen) { tutorialOpen = false; saveTutorialSeen(); return; }
+    uiHit(px, py); return;
+  }
+  if (gs === 'LEVELCLEAR' || gs === 'WIN') { uiHit(px, py); return; }
+  if (gs === 'CRASH') {
+    // only the back-to-menu button is live during the crash freeze
+    if (menuBtn && hitBtn(menuBtn, px, py)) { goMenu(); }
+    return;
+  }
+  if (gs === 'PLAYING') {
+    if (tutorialOpen) { tutorialOpen = false; return; }
+    if (helpBtn && hitBtn(helpBtn, px, py)) { tutorialOpen = true; return; }
+    if (menuBtn && hitBtn(menuBtn, px, py)) { goMenu(); return; }
+    // steer half
+    if (px < GF.W / 2) { activePointers[id] = 'L'; steerLeft = true; }
+    else { activePointers[id] = 'R'; steerRight = true; }
+    steerHintFade = 0;
+  }
+}
+function pressUp(id) {
+  var side = activePointers[id];
+  delete activePointers[id];
+  // recompute held sides from remaining pointers
+  steerLeft = false; steerRight = false;
+  for (var k in activePointers) {
+    if (activePointers[k] === 'L') steerLeft = true;
+    if (activePointers[k] === 'R') steerRight = true;
+  }
+  // keyboard may still hold - handled separately
+  if (keyL) steerLeft = true;
+  if (keyR) steerRight = true;
+}
+function hitBtn(b, px, py) { return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h; }
+
+function goMenu() {
+  gs = 'MENU';
+  steerLeft = steerRight = false;
+  activePointers = {};
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+var _canvas = document.getElementById('c');
+_canvas.addEventListener('pointerdown', function(e) { pressDown(e.pointerId, e.clientX, e.clientY); }, { passive: true });
+_canvas.addEventListener('pointerup',   function(e) { pressUp(e.pointerId); }, { passive: true });
+_canvas.addEventListener('pointercancel', function(e) { pressUp(e.pointerId); }, { passive: true });
+// click is used for the overlay UI buttons on platforms that synthesize it;
+// pointerdown already covers it but keep a guarded fallback for menu taps.
+_canvas.addEventListener('click', function(e) {
+  if (gs === 'MENU' || gs === 'LEVELCLEAR' || gs === 'WIN') {
+    if (Date.now() < uiLockUntil) return;
+    if (gs === 'MENU' && tutorialOpen) return;
+    uiHit(e.clientX, e.clientY);
+  }
+});
+
+// keyboard steer
+var keyL = false, keyR = false;
+document.addEventListener('keydown', function(e) {
+  var c = e.code;
+  if (c === 'Escape') return; // reserved
+  if (gs === 'PLAYING' && tutorialOpen) { return; }
+  if ((c === 'ArrowLeft' || c === 'KeyA')) { keyL = true; if (gs === 'PLAYING') { steerLeft = true; steerHintFade = 0; } }
+  if ((c === 'ArrowRight' || c === 'KeyD')) { keyR = true; if (gs === 'PLAYING') { steerRight = true; steerHintFade = 0; } }
+  if (c === 'Space' || c === 'Enter') {
+    if (gs === 'MENU') startLevel(maxLevel);
+    else if (gs === 'LEVELCLEAR') advance();
+    else if (gs === 'WIN') startEndless();
+    e.preventDefault();
+  }
+});
+document.addEventListener('keyup', function(e) {
+  var c = e.code;
+  if (c === 'ArrowLeft' || c === 'KeyA') { keyL = false; if (!heldSide('L')) steerLeft = false; }
+  if (c === 'ArrowRight' || c === 'KeyD') { keyR = false; if (!heldSide('R')) steerRight = false; }
+});
+function heldSide(s) { for (var k in activePointers) if (activePointers[k] === s) return true; return false; }
+
+// ── PROGRESSION ───────────────────────────────────────────────────────────
+function onCrash() {
+  if (gs !== 'PLAYING') return;
+  crashes += 1;
+  if (stars > 1) stars -= 1; // every reset costs the ceiling, min 1
+  car.speed = 0;
+  GF.setShake(0.5);
+  GF.spawnParticles(fx(car.x), fy(car.y), '#ff5252', 20);
+  GF.spawnParticles(fx(car.x), fy(car.y), '#ffd24a', 12);
+  gs = 'CRASH';
+  crashT = CRASH_RESET_SEC;
+  GF.saveRun();
+}
+
+function onParked() {
+  if (gs !== 'PLAYING') return;
+  // path-length penalty: wandering line loses a star (independent of crashes)
+  var ratio = pathLen / straightLen;
+  if (ratio > PATH_PAR && stars > 1) stars -= 1;
+  earnedStars = Math.max(1, stars);
+  lastParkPerfect = (crashes === 0 && ratio <= PATH_PAR);
+  GF.spawnParticles(fx(car.x), fy(car.y), '#39d98a', 26);
+  GF.spawnFloat(fx(car.x), fy(car.y) - 24 * GF.S, curStrings()[lastParkPerfect ? 'perfect' : 'parked'], '#39d98a');
+  // persist best
+  if (!endless) {
+    if (earnedStars > (bestStars[lvl] || 0)) bestStars[lvl] = earnedStars;
+    if (lvl + 1 > maxLevel) maxLevel = Math.min(AUTHORED_LEVELS + 1, lvl + 1);
+  }
+  if (!endless && lvl >= AUTHORED_LEVELS) {
+    gs = 'WIN';
+    GF.happytime();
+  } else {
+    gs = 'LEVELCLEAR';
+    if (lastParkPerfect) GF.happytime();
+  }
+  steerLeft = steerRight = false;
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+function advance() { // from LEVELCLEAR → next level
+  startLevel(lvl + 1);
+}
+function startEndless() { // from WIN → first endless level
+  startLevel(AUTHORED_LEVELS + 1);
+}
+
+// ── ADS (Yandex) - user-click only, throttled. No auto-fire. ────────────────
+function showInterstitial(onDone) {
+  var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  if (now - lastInterstitialMs < INTERSTITIAL_GAP_MS) { if (onDone) onDone(); return; }
+  lastInterstitialMs = now;
+  GF.showAd('midgame').then(function() { if (onDone) onDone(); });
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────────
+function update(dt) {
+  pulseT += dt;
+  layoutField();
+  if (gs === 'CRASH') {
+    crashT -= dt;
+    if (crashT <= 0) {
+      // forgiving instant retry of the same level
+      var d = levelData(lvl);
+      resetCar(d.start);
+      gs = 'PLAYING';
+      GF.gameStarted();
+      GF.saveRun();
+    }
+    return;
+  }
+  if (gs !== 'PLAYING') return;
+  if (tutorialOpen) return;
+  if (_ssMode) return;
+
+  attemptTimer += dt;
+  if (steerHintFade > 0) steerHintFade = Math.max(0, steerHintFade - dt * 0.6);
+
+  // steering
+  var steer = (steerRight ? 1 : 0) - (steerLeft ? 1 : 0);
+  if (steer !== 0) car.heading += steer * TURN_RATE * dt;
+
+  // forward auto-creep; coast/settle friction when no input near the bay
+  var targetSpeed = CREEP_SPEED;
+  car.speed = targetSpeed; // constant creep - the held breath
+  // integrate
+  var vx = Math.sin(car.heading) * car.speed * dt;   // heading 0 = -y (up)
+  var vy = -Math.cos(car.heading) * car.speed * dt;
+  var nx = car.x + vx, ny = car.y + vy;
+  var moved = GF.dist(car.x, car.y, nx, ny);
+  car.x = nx; car.y = ny;
+  pathLen += moved;
+
+  // tyre trail (cosmetic)
+  if (tyreMarks.length === 0 || GF.dist(car.x, car.y, tyreMarks[tyreMarks.length-1].x, tyreMarks[tyreMarks.length-1].y) > 7) {
+    tyreMarks.push({ x: car.x, y: car.y });
+    if (tyreMarks.length > 90) tyreMarks.shift();
+  }
+
+  // collision → instant retry
+  if (collide()) { onCrash(); return; }
+
+  // win check - must be inside the bay AND aligned. Since the car always
+  // creeps, "settle" is satisfied by dwelling aligned-in-bay for SETTLE_SEC;
+  // we treat being parked-in-bay as the settle accumulator.
+  if (parkedInBay()) {
+    settleT += dt;
+    if (settleT >= SETTLE_SEC) { onParked(); return; }
+  } else {
+    settleT = Math.max(0, settleT - dt * 2);
+  }
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  layoutField();
+  // backdrop
+  ctx.fillStyle = '#14171d';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING' || gs === 'CRASH' || gs === 'LEVELCLEAR' || gs === 'WIN') {
+    drawField(ctx);
+    drawBay(ctx);
+    drawTrail(ctx);
+    drawObstacles(ctx);
+    drawCones(ctx);
+    drawWalls(ctx);
+    drawCar(ctx);
+  }
+
+  if (gs === 'PLAYING') {
+    if (steerHintFade > 0.02) drawSteerHints(ctx);
+    drawHUD(ctx);
+    if (tutorialOpen) drawTutorialPanel(ctx);
+  }
+  if (gs === 'CRASH') {
+    drawHUD(ctx);
+    var a = GF.clamp(crashT / CRASH_RESET_SEC, 0, 1);
+    ctx.fillStyle = 'rgba(255,60,60,' + (0.28 * a) + ')';
+    ctx.fillRect(0, 0, GF.W, GF.H);
+  }
+
+  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'LEVELCLEAR') drawLevelClear(ctx);
+  if (gs === 'WIN') drawWin(ctx);
+}
+
+function drawField(ctx) {
+  // asphalt panel
+  ctx.fillStyle = '#1d2129';
+  ctx.fillRect(fx(0), fy(0), FIELD_W * GF.S, FIELD_H * GF.S);
+  // subtle painted lane lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+  ctx.lineWidth = 1;
+  for (var gx = 60; gx < FIELD_W; gx += 60) {
+    ctx.beginPath(); ctx.moveTo(fx(gx), fy(0)); ctx.lineTo(fx(gx), fy(FIELD_H)); ctx.stroke();
+  }
+  // vignette
+  var g = ctx.createRadialGradient(GF.cx, GF.cy, FIELD_H * GF.S * 0.2, GF.cx, GF.cy, FIELD_H * GF.S * 0.75);
+  g.addColorStop(0, 'rgba(0,0,0,0)');
+  g.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = g;
+  ctx.fillRect(fx(0), fy(0), FIELD_W * GF.S, FIELD_H * GF.S);
+}
+
+function drawBay(ctx) {
+  if (!bay) return;
+  var corners = rectCorners(bay.x, bay.y, bay.w, bay.l, bay.heading);
+  var pulse = 0.55 + 0.45 * Math.sin(pulseT * 3);
+  // glow fill
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(fx(corners[0].x), fy(corners[0].y));
+  for (var i = 1; i < 4; i++) ctx.lineTo(fx(corners[i].x), fy(corners[i].y));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(57,217,138,' + (0.10 + 0.06 * pulse) + ')';
+  ctx.fill();
+  ctx.strokeStyle = '#39d98a';
+  ctx.lineWidth = 3 * GF.S;
+  ctx.shadowColor = '#39d98a';
+  ctx.shadowBlur = (10 + 8 * pulse) * GF.S;
+  ctx.stroke();
+  ctx.restore();
+  // ghost car silhouette at parked pose
+  var gc = rectCorners(bay.x, bay.y, CAR_W, CAR_L, bay.heading);
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(fx(gc[0].x), fy(gc[0].y));
+  for (var j = 1; j < 4; j++) ctx.lineTo(fx(gc[j].x), fy(gc[j].y));
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(57,217,138,0.10)';
+  ctx.fill();
+  ctx.setLineDash([5 * GF.S, 5 * GF.S]);
+  ctx.strokeStyle = 'rgba(57,217,138,0.45)';
+  ctx.lineWidth = 1.5 * GF.S;
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // a little arrow showing the parked facing
+  var nx2 = bay.x + Math.sin(bay.heading) * 0, ny2 = bay.y - Math.cos(bay.heading) * (bay.l/2 - 8);
+  ctx.fillStyle = 'rgba(57,217,138,0.6)';
+  ctx.beginPath();
+  ctx.arc(fx(nx2), fy(ny2), 4 * GF.S, 0, PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawTrail(ctx) {
+  if (tyreMarks.length < 2) return;
+  ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+  ctx.lineWidth = CAR_W * 0.32 * GF.S;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(fx(tyreMarks[0].x), fy(tyreMarks[0].y));
+  for (var i = 1; i < tyreMarks.length; i++) ctx.lineTo(fx(tyreMarks[i].x), fy(tyreMarks[i].y));
+  ctx.stroke();
+}
+
+function drawCarBody(ctx, rx, ry, rh, w, l, body, roof) {
+  ctx.save();
+  ctx.translate(fx(rx), fy(ry));
+  ctx.rotate(rh);
+  var sw = w * GF.S, sl = l * GF.S;
+  // body
+  GF.rr(ctx, -sw/2, -sl/2, sw, sl, 6 * GF.S);
+  ctx.fillStyle = body;
+  ctx.fill();
+  // windshield (nose is -y)
+  ctx.fillStyle = roof;
+  GF.rr(ctx, -sw*0.34, -sl*0.34, sw*0.68, sl*0.26, 3 * GF.S);
+  ctx.fill();
+  // rear window
+  GF.rr(ctx, -sw*0.34, sl*0.12, sw*0.68, sl*0.20, 3 * GF.S);
+  ctx.fill();
+  // headlights at nose
+  ctx.fillStyle = 'rgba(255,255,200,0.9)';
+  ctx.beginPath(); ctx.arc(-sw*0.28, -sl*0.46, 2.4 * GF.S, 0, PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(sw*0.28, -sl*0.46, 2.4 * GF.S, 0, PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawCar(ctx) {
+  var hot = (gs === 'CRASH');
+  drawCarBody(ctx, car.x, car.y, car.heading, CAR_W, CAR_L, hot ? '#ff6b5e' : '#4aa3ff', hot ? '#ffd6d0' : '#bfe0ff');
+}
+function drawObstacles(ctx) {
+  for (var i = 0; i < obstacles.length; i++) {
+    var o = obstacles[i];
+    drawCarBody(ctx, o.x, o.y, o.heading, o.w, o.l, '#7b8696', '#aab4c2');
+  }
+}
+function drawCones(ctx) {
+  for (var i = 0; i < cones.length; i++) {
+    var cn = cones[i];
+    var r = CONE_R * GF.S;
+    ctx.save();
+    ctx.translate(fx(cn.x), fy(cn.y));
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, PI*2);
+    ctx.fillStyle = '#ff8a2b'; ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, PI*2);
+    ctx.fillStyle = '#fff'; ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.28, 0, PI*2);
+    ctx.fillStyle = '#ff8a2b'; ctx.fill();
+    ctx.restore();
+  }
+}
+function drawWalls(ctx) {
+  ctx.strokeStyle = '#3a4150';
+  ctx.lineWidth = WALL_THICK * 2 * GF.S;
+  ctx.lineCap = 'round';
+  for (var i = 0; i < walls.length; i++) {
+    var w = walls[i];
+    ctx.beginPath();
+    ctx.moveTo(fx(w.x1), fy(w.y1));
+    ctx.lineTo(fx(w.x2), fy(w.y2));
+    ctx.stroke();
+  }
+  // top highlight on border
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 2 * GF.S;
+  for (var j = 0; j < walls.length; j++) {
+    var wl = walls[j];
+    ctx.beginPath();
+    ctx.moveTo(fx(wl.x1), fy(wl.y1));
+    ctx.lineTo(fx(wl.x2), fy(wl.y2));
+    ctx.stroke();
+  }
+}
+
+function drawSteerHints(ctx) {
+  ctx.save();
+  ctx.globalAlpha = steerHintFade * 0.5;
+  var midY = GF.H * 0.78;
+  var fs = GF.clamp(15 * GF.S, 12, 22);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#cfe';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // left chevron
+  drawChevron(ctx, GF.W * 0.22, midY, -1);
+  ctx.fillText(curStrings().hold_left, GF.W * 0.22, midY + 30 * GF.S);
+  // right chevron
+  drawChevron(ctx, GF.W * 0.78, midY, 1);
+  ctx.fillText(curStrings().hold_right, GF.W * 0.78, midY + 30 * GF.S);
+  ctx.restore();
+}
+function drawChevron(ctx, x, y, dir) {
+  var s = 16 * GF.S;
+  ctx.strokeStyle = '#cfe';
+  ctx.lineWidth = 3 * GF.S;
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x + dir * s, y - s);
+  ctx.lineTo(x - dir * s, y);
+  ctx.lineTo(x + dir * s, y + s);
+  ctx.stroke();
+}
+
+function drawStars(ctx, n, x, y, size) {
+  for (var i = 0; i < 3; i++) {
+    drawStar(ctx, x + i * size * 1.25, y, size / 2, i < n ? '#ffd24a' : 'rgba(255,255,255,0.18)');
+  }
+}
+function drawStar(ctx, cxp, cyp, r, col) {
+  ctx.save();
+  ctx.translate(cxp, cyp);
+  ctx.beginPath();
+  for (var i = 0; i < 5; i++) {
+    var a = -PI/2 + i * (2*PI/5);
+    ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+    var a2 = a + PI/5;
+    ctx.lineTo(Math.cos(a2) * r * 0.45, Math.sin(a2) * r * 0.45);
+  }
+  ctx.closePath();
+  ctx.fillStyle = col;
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawHUD(ctx) {
+  var fs = GF.clamp(17 * GF.S, 13, 24);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  var label = endless ? (curStrings().daily + ' ' + (lvl - AUTHORED_LEVELS)) : (curStrings().lvl + ' ' + lvl);
+  ctx.fillText(label, 14 * GF.S, 14 * GF.S);
+
+  // live star ceiling - top center
+  var starSz = GF.clamp(16 * GF.S, 12, 22);
+  drawStars(ctx, stars, GF.cx - starSz * 1.6, 14 * GF.S + starSz/2, starSz);
+
+  // help (?) button + menu button top-right
+  var btn = GF.clamp(32 * GF.S, 26, 42);
+  var pad = 12 * GF.S;
+  helpBtn = { x: GF.W - pad - btn, y: 12 * GF.S, w: btn, h: btn };
+  menuBtn = { x: GF.W - pad - btn * 2 - 8 * GF.S, y: 12 * GF.S, w: btn, h: btn };
+  drawIconBtn(ctx, helpBtn, '?');
+  drawIconBtn(ctx, menuBtn, '≡'); // ≡
+
+  // crash dots (risk signal) under the buttons
+  if (crashes > 0) {
+    var dotR = GF.clamp(4 * GF.S, 3, 6);
+    for (var i = 0; i < Math.min(crashes, 6); i++) {
+      ctx.beginPath();
+      ctx.arc(GF.W - pad - i * dotR * 2.6 - dotR, 12 * GF.S + btn + 12 * GF.S, dotR, 0, PI * 2);
+      ctx.fillStyle = '#ff6b5e';
+      ctx.fill();
+    }
+  }
+}
+function drawIconBtn(ctx, b, glyph) {
+  GF.rr(ctx, b.x, b.y, b.w, b.h, 7 * GF.S);
+  ctx.fillStyle = 'rgba(40,48,64,0.85)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(160,180,210,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#cfe';
+  ctx.font = 'bold ' + (b.h * 0.55) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(glyph, b.x + b.w / 2, b.y + b.h / 2 + 1);
+  ctx.textBaseline = 'top';
+}
+
+// ── TEXT WRAP (measured block layout for the tutorial) ──────────────────────
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/);
+  var lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// Returns the y after drawing - so the next block starts after this one.
+function drawTutorialBlock(ctx, items, topY, maxW, lineH, gap) {
+  var y = topY;
+  for (var i = 0; i < items.length; i++) {
+    var lines = wrapLines(ctx, items[i], maxW);
+    for (var j = 0; j < lines.length; j++) {
+      ctx.fillText(lines[j], GF.cx, y);
+      y += lineH;
+    }
+    y += gap;
+  }
+  return y;
+}
+
+function tutorialItems() {
+  var s = curStrings();
+  return [s.tut_goal, s.tut_controls, s.tut_win, s.tut_lose, s.tut_tip];
+}
+
+// ── MENU ─────────────────────────────────────────────────────────────────────
+function drawMenu(ctx) {
+  uiButtons = [];
+  ctx.fillStyle = 'rgba(12,14,20,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(40 * GF.S, 26, 60);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(74,163,255,0.5)'; ctx.shadowBlur = 24 * GF.S;
+  var titleY = GF.H * 0.16;
+  ctx.fillText(curStrings().title, GF.cx, titleY);
+  ctx.shadowBlur = 0;
+  var subFs = GF.clamp(15 * GF.S, 12, 20);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#8aa';
+  ctx.fillText(curStrings().sub, GF.cx, titleY + subFs + 10 * GF.S);
+
+  // tutorial block (measured, wrapped)
+  var bodyFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = bodyFs + 'px sans-serif';
+  ctx.fillStyle = '#cdd6e3';
+  ctx.textBaseline = 'top';
+  var maxW = Math.min(GF.W * 0.86, 460 * GF.S);
+  var topY = titleY + subFs + 40 * GF.S;
+  var endY = drawTutorialBlock(ctx, tutorialItems(), topY, maxW, bodyFs + 5 * GF.S, 9 * GF.S);
+
+  // PLAY button below the tutorial block
+  var btnW = GF.clamp(220 * GF.S, 150, 300), btnH = GF.clamp(54 * GF.S, 42, 66);
+  var btnY = Math.min(endY + 14 * GF.S, GF.H - btnH - 30 * GF.S);
+  var btnX = GF.cx - btnW / 2;
+  drawPrimaryBtn(ctx, btnX, btnY, btnW, btnH, curStrings().play);
+  uiButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() { startLevel(maxLevel); } });
+
+  // best progress line
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  ctx.fillStyle = '#667';
+  var prog = endlessUnlocked() ? curStrings().campaign_done
+    : (curStrings().lvl + ' ' + maxLevel + ' / ' + AUTHORED_LEVELS);
+  ctx.fillText(prog, GF.cx, btnY + btnH + 26 * GF.S);
+}
+function endlessUnlocked() { return maxLevel > AUTHORED_LEVELS; }
+
+function drawPrimaryBtn(ctx, x, y, w, h, label) {
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, '#39d98a'); grad.addColorStop(1, '#23b06b');
+  GF.rr(ctx, x, y, w, h, h / 2);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.fillStyle = '#06140d';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+}
+function drawSecondaryBtn(ctx, x, y, w, h, label) {
+  GF.rr(ctx, x, y, w, h, h / 2);
+  ctx.fillStyle = 'rgba(50,58,76,0.95)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(160,180,210,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 22) + 'px sans-serif';
+  ctx.fillStyle = '#cfe';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── LEVEL CLEAR ───────────────────────────────────────────────────────────
+function drawLevelClear(ctx) {
+  uiButtons = [];
+  ctx.fillStyle = 'rgba(10,14,18,0.82)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(34 * GF.S, 22, 52);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#39d98a';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(curStrings()[lastParkPerfect ? 'perfect' : 'clear'], GF.cx, GF.H * 0.34);
+
+  var starSz = GF.clamp(34 * GF.S, 24, 50);
+  drawStars(ctx, earnedStars, GF.cx - starSz * 1.6, GF.H * 0.34 + starSz * 1.4, starSz);
+
+  var btnW = GF.clamp(220 * GF.S, 150, 300), btnH = GF.clamp(54 * GF.S, 42, 66);
+  var btnX = GF.cx - btnW / 2;
+  var nextY = GF.H * 0.56;
+  drawPrimaryBtn(ctx, btnX, nextY, btnW, btnH, curStrings().next);
+  uiButtons.push({ x: btnX, y: nextY, w: btnW, h: btnH, fn: advance });
+  var menuY = nextY + btnH + 14 * GF.S;
+  drawSecondaryBtn(ctx, btnX, menuY, btnW, btnH * 0.85, curStrings().menu);
+  uiButtons.push({ x: btnX, y: menuY, w: btnW, h: btnH * 0.85, fn: goMenu });
+}
+
+// ── WIN ───────────────────────────────────────────────────────────────────
+function drawWin(ctx) {
+  uiButtons = [];
+  ctx.fillStyle = 'rgba(10,14,18,0.86)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(30 * GF.S, 20, 46);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ffd24a';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(255,210,74,0.5)'; ctx.shadowBlur = 22 * GF.S;
+  ctx.fillText(curStrings().campaign_done, GF.cx, GF.H * 0.34);
+  ctx.shadowBlur = 0;
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(54 * GF.S, 42, 66);
+  var btnX = GF.cx - btnW / 2;
+  var y1 = GF.H * 0.52;
+  drawPrimaryBtn(ctx, btnX, y1, btnW, btnH, curStrings().endless);
+  uiButtons.push({ x: btnX, y: y1, w: btnW, h: btnH, fn: startEndless });
+  var y2 = y1 + btnH + 14 * GF.S;
+  drawSecondaryBtn(ctx, btnX, y2, btnW, btnH * 0.85, curStrings().menu);
+  uiButtons.push({ x: btnX, y: y2, w: btnW, h: btnH * 0.85, fn: goMenu });
+}
+
+// ── TUTORIAL PANEL (in-game, via ? button) ──────────────────────────────────
+function drawTutorialPanel(ctx) {
+  ctx.fillStyle = 'rgba(8,10,16,0.92)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var titleFs = GF.clamp(24 * GF.S, 18, 34);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var topY = GF.H * 0.13;
+  ctx.fillText(curStrings().title, GF.cx, topY);
+
+  var bodyFs = GF.clamp(15 * GF.S, 12, 19);
+  ctx.font = bodyFs + 'px sans-serif';
+  ctx.fillStyle = '#cdd6e3';
+  var maxW = Math.min(GF.W * 0.86, 460 * GF.S);
+  var endY = drawTutorialBlock(ctx, tutorialItems(), topY + titleFs + 18 * GF.S, maxW, bodyFs + 6 * GF.S, 10 * GF.S);
+
+  ctx.fillStyle = '#88a';
+  ctx.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  ctx.fillText(curStrings().tap_close, GF.cx, Math.min(endY + 8 * GF.S, GF.H - 28 * GF.S));
+}
+
+// ── SCREENSHOT / GATE HOOKS ──────────────────────────────────────────────────
+// Land in a populated mid-level PLAYING state for Yandex 5.1.1 screenshots.
+window._setupForScreenshot = function(level) {
+  var n = Math.max(2, Math.min(AUTHORED_LEVELS, level || 9));
+  startLevel(n);
+  _ssMode = true;
+  // pose the car mid-approach, nosing toward the bay, slightly angled for drama
+  var d = levelData(n);
+  // place it ~55% of the way from start to bay
+  car.x = d.start.x + (bay.x - d.start.x) * 0.5;
+  car.y = d.start.y + (bay.y - d.start.y) * 0.55;
+  car.heading = Math.atan2(bay.x - car.x, -(bay.y - car.y)) + 0.12;
+  car.speed = CREEP_SPEED;
+  crashes = 0; stars = 3;
+  // a little tyre trail behind it
+  tyreMarks = [];
+  for (var i = 0; i < 10; i++) {
+    tyreMarks.push({ x: d.start.x + (car.x - d.start.x) * (i/10), y: d.start.y + (car.y - d.start.y) * (i/10) });
+  }
+};
+window._jumpLevel = function(n) {
+  if (n >= 99) {
+    // drive into the campaign-complete terminal (WIN): park on the LAST
+    // authored level so onParked() flips gs='WIN'. The gate treats WIN as a
+    // terminal state and then sweeps the WIN overlay buttons.
+    startLevel(AUTHORED_LEVELS);
+    car.x = bay.x; car.y = bay.y; car.heading = bay.heading; car.speed = 0;
+    settleT = SETTLE_SEC + 1;
+    onParked();
+    return;
+  }
+  window._setupForScreenshot(n || 9);
+};
+
+// ── BOOT ────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 393,
+  designH: 852,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'tight_spot',
+  onReady: function() {
+    // load persisted progression
+    try {
+      maxLevel = parseInt(localStorage.getItem('tight_spot_maxlvl') || '1') || 1;
+    } catch (e) { maxLevel = 1; }
+    try {
+      bestStars = JSON.parse(localStorage.getItem('tight_spot_stars') || '[]') || [];
+    } catch (e) { bestStars = []; }
+    GF.persist('tight_spot_run_v1',
+      function() {
+        return { gs: (gs === 'PLAYING' || gs === 'CRASH') ? 'PLAYING' : gs,
+                 lvl: lvl, endless: endless, maxLevel: maxLevel,
+                 bestStars: bestStars, crashes: crashes, stars: stars };
+      },
+      function(s) {
+        if (!s) return;
+        lvl = s.lvl || 1;
+        endless = !!s.endless;
+        maxLevel = s.maxLevel || maxLevel || 1;
+        if (Array.isArray(s.bestStars)) bestStars = s.bestStars;
+        crashes = s.crashes || 0;
+        stars = s.stars || 3;
+        gs = s.gs || 'MENU';
+      }
+    );
+    // persist the standalone progression keys too
+    try {
+      localStorage.setItem('tight_spot_maxlvl', String(maxLevel));
+      localStorage.setItem('tight_spot_stars', JSON.stringify(bestStars));
+    } catch (e) {}
+    // never resume into live play (Yandex 1.9 best practice) - show MENU
+    if (gs === 'PLAYING' || gs === 'CRASH' || gs === 'LEVELCLEAR' || gs === 'WIN') gs = 'MENU';
+    tutorialOpen = false;
+    layoutField();
+    // preload level geometry so MENU has something behind it if ever drawn
+    loadLevel(Math.min(maxLevel, AUTHORED_LEVELS));
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Save the progression keys whenever they change via a light wrapper.
+var _origSaveRun = GF.saveRun;
+GF.saveRun = function() {
+  try {
+    localStorage.setItem('tight_spot_maxlvl', String(maxLevel));
+    localStorage.setItem('tight_spot_stars', JSON.stringify(bestStars));
+  } catch (e) {}
+  _origSaveRun();
+};
+
+// Expose state for the post-build-tester (DESIGN.md cross-check).
+GF.exposeState(function() {
+  return {
+    gs: gs, lvl: lvl, endless: endless, maxLevel: maxLevel,
+    crashes: crashes, stars: stars, earnedStars: earnedStars,
+    settleT: settleT, pathLen: Math.round(pathLen), straightLen: Math.round(straightLen),
+    attemptTimer: Math.round(attemptTimer * 10) / 10,
+    parked: gs === 'PLAYING' ? parkedInBay() : false,
+    obstacleCount: obstacles.length, coneCount: cones.length, wallCount: walls.length,
+    tutorialOpen: tutorialOpen,
+    CREEP_SPEED: CREEP_SPEED, TURN_RATE: TURN_RATE, FRICTION: FRICTION,
+    CAR_W: CAR_W, CAR_L: CAR_L, CONE_R: CONE_R,
+    ANGLE_TOL: ANGLE_TOL, POS_TOL: POS_TOL, SETTLE_SEC: SETTLE_SEC,
+    CRASH_RESET_SEC: CRASH_RESET_SEC, AUTHORED_LEVELS: AUTHORED_LEVELS,
+    WALL_THICK: WALL_THICK, PATH_PAR: PATH_PAR,
+  };
+});
+
+// Test/automation hooks (safe to ship - platforms don't reject these).
+window._setLang = function(l) { GF.lang = l; };
+window._setState = function(s) { gs = s; };
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+window._steer = function(side, on) {
+  if (side === 'L') steerLeft = !!on; else if (side === 'R') steerRight = !!on;
+  if (on) steerHintFade = 0;
+};
+window._startLevel = function(n) { startLevel(n || 1); };
+
+})();
+</script>
+</body>
+</html>
