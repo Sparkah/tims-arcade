@@ -676,10 +676,19 @@ function renderFeatured() {
       game = allTop;
       topScore = engagementScore(allTop);
     } else {
-      game = featurable.slice().sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0))[0];
+      // counts/trending not loaded yet (first paint) or no engagement signal —
+      // reuse the last scored pick (localStorage) so the hero doesn't flash-swap
+      // when scores land; the post-hydration pick is almost always the same game.
+      let cached = null;
+      try { const s = localStorage.getItem('gf_featured'); if (s) cached = featurable.find(g => g.slug === s); } catch (e) {}
+      game = cached || featurable.slice().sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0))[0];
       topScore = 0;
     }
   }
+
+  // Remember a real (scored) pick so the NEXT first paint can show it instantly
+  // (consumed by the fallback branch above) — kills the hero flash-swap on revisit.
+  if (topScore > 0) { try { localStorage.setItem('gf_featured', game.slug); } catch (e) {} }
 
   // Past page 1 the hero is hidden, but the slug we just picked still needs
   // to flow back to render() so it gets removed from the grid slice on
