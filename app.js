@@ -449,11 +449,22 @@ function visible() {
     list.sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0));
   }
 
-  // Flagship cross-platform showcase games (live on Yandex/CG) pin to the
-  // front of the main discovery surfaces so our best games lead. Personal
-  // tabs (liked/myplayed) and the date-filtered 'recent' tab are left alone.
+  // Flagship cross-platform showcase games (merge_conquest/merge_guns, live on
+  // Yandex/CG) are link-OUTS. Pinning them to the very top pushed native playable
+  // games out of the first row and sent users off-site immediately. Interleave
+  // them deeper instead — ~position 5, then 15 — so local games lead but the
+  // showcases still get prominent exposure. Personal tabs (liked/myplayed) and
+  // the date-filtered 'recent' tab are left alone.
   if (activeTab === 'all' || activeTab === 'top') {
-    list = list.filter(g => g.flagship).concat(list.filter(g => !g.flagship));
+    const flags = list.filter(g => g.flagship);
+    if (flags.length) {
+      list = list.filter(g => !g.flagship);
+      const slots = [4, 14, 24]; // 0-indexed → grid positions 5, 15, 25
+      flags.forEach((g, i) => {
+        const at = Math.min(slots[i] ?? list.length, list.length);
+        list.splice(at, 0, g);
+      });
+    }
   }
   return list;
 }
