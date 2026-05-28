@@ -283,6 +283,7 @@ async function load() {
     // Lazy-load user digests after stats render so the page paints immediately.
     loadUserDigests().catch(e => console.error('user-digests:', e));
     loadSuggestions().catch(e => console.error('suggestions:', e));
+    loadUploads().catch(e => console.error('uploads:', e));
   } catch (e) {
     document.getElementById('content').innerHTML = `<div class="err">Network error: ${e.message}</div>`;
   }
@@ -340,6 +341,10 @@ document.addEventListener('click', (e) => {
   if (e.target && e.target.id === 'refresh-suggestions') {
     e.preventDefault();
     loadSuggestions();
+  }
+  if (e.target && e.target.id === 'refresh-uploads') {
+    e.preventDefault();
+    loadUploads();
   }
 });
 
@@ -410,6 +415,87 @@ document.addEventListener('click', async (e) => {
       body: JSON.stringify({ id, status: act, builtSlug }),
     });
     if (r.ok) loadSuggestions();
+    else { t.disabled = false; alert('Failed: ' + r.status); }
+  }
+});
+
+async function loadUploads() {
+  const el = document.getElementById('uploads-panel');
+  if (!el) return;
+  el.innerHTML = '<div style="opacity:0.5;font-style:italic;padding:12px 0;">Loading uploads…</div>';
+  try {
+    const r = await fetch('/api/admin/uploads?token=' + encodeURIComponent(token), { cache: 'no-store' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      el.innerHTML = `<div class="err">Uploads: ${err.error || r.status}</div>`;
+      return;
+    }
+    const d = await r.json();
+    if (!d.uploads || d.uploads.length === 0) {
+      el.innerHTML = '<div style="opacity:0.5;font-style:italic;padding:12px 0;">No uploads yet — send a developer the /submit link.</div>';
+      return;
+    }
+    const c = d.counts || {};
+    const summary = `<p style="opacity:0.7;font-size:12px;margin:0 0 14px;"><b>${c.pending || 0}</b> pending · ${c.approved || 0} approved · ${c.rejected || 0} rejected · ${c.live || 0} live</p>`;
+    el.innerHTML = summary + d.uploads.map(uploadCard).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="err">Failed to load uploads: ${e.message}</div>`;
+  }
+}
+
+function uploadCard(u) {
+  const ago = u.ts ? Math.round((Date.now() - u.ts) / 60000) : 0;
+  const agoStr = ago < 60 ? ago + 'm' : ago < 1440 ? Math.round(ago / 60) + 'h' : Math.round(ago / 1440) + 'd';
+  const colors = { pending: '#c93', approved: '#2a7', rejected: '#a44', live: '#46a' };
+  const badge = `<span style="background:${colors[u.status] || '#888'};color:#fff;padding:1px 7px;border-radius:3px;font-size:10px;text-transform:uppercase;letter-spacing:0.05em;">${escapeHtml(u.status)}</span>`;
+  const sizeMb = u.sizeBytes ? (u.sizeBytes / 1048576).toFixed(1) + ' MB' : '?';
+  const scan = u.scan;
+  const scanLine = scan
+    ? `<div style="font-size:12px;margin-top:6px;">Scan: <b style="color:${scan.blocked ? '#f7768e' : '#5ad19a'}">${scan.blocked ? 'BLOCKED' : 'clean'}</b> · ${(scan.counts && scan.counts.block) || 0} block, ${(scan.counts && scan.counts.warn) || 0} warn</div>`
+    : '<div style="font-size:12px;margin-top:6px;opacity:0.5;">Scan: not run yet</div>';
+  const v = u.verdict;
+  const vColor = v && v.decision === 'pass' ? '#5ad19a' : v && v.decision === 'reject' ? '#f7768e' : '#ffd23f';
+  const verdictLine = v
+    ? `<div style="font-size:12px;margin-top:4px;">AI verdict: <b style="color:${vColor}">${escapeHtml(v.decision || '?')}</b>${v.notes && v.notes.length ? ' — ' + escapeHtml(String(v.notes[0]).slice(0, 180)) : ''}</div>`
+    : '<div style="font-size:12px;margin-top:4px;opacity:0.5;">AI verdict: pending review</div>';
+  const btn = 'font-size:11px;padding:4px 10px;margin-right:6px;border:1px solid var(--rule);background:transparent;color:var(--ink-soft);cursor:pointer;border-radius:4px;';
+  const actions = (u.status === 'pending' || u.status === 'approved')
+    ? `<button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="approve" style="${btn}">approve</button>
+       <button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="reject" style="${btn}">reject</button>`
+    : `<button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="reset" style="${btn}">reopen</button>`;
+  const rej = u.status === 'rejected' && u.rejectReason
+    ? `<div style="font-size:12px;margin-top:4px;color:#c88;">Rejected: ${escapeHtml(u.rejectReason)}${u.emailed ? '' : ' (email pending)'}</div>` : '';
+  return `<div style="border:1px solid var(--rule);border-radius:6px;padding:14px 16px;margin-bottom:10px;background:var(--bg-card);">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;">
+      <strong style="font-size:14px;">${escapeHtml(u.title || u.slug)}</strong>${badge}
+    </div>
+    <div style="font-size:12px;opacity:0.7;margin-top:3px;">by ${escapeHtml(u.author || '?')} · ${escapeHtml(u.contact || '')} · ${escapeHtml(u.genre || '')} · ${sizeMb} · ${agoStr} ago</div>
+    ${u.hook ? `<div style="font-size:13px;margin-top:6px;">${escapeHtml(u.hook)}</div>` : ''}
+    ${scanLine}
+    ${verdictLine}
+    ${rej}
+    <div style="margin-top:10px;">${actions}</div>
+  </div>`;
+}
+
+document.addEventListener('click', async (e) => {
+  const t = e.target;
+  if (t && t.classList && t.classList.contains('upload-act')) {
+    e.preventDefault();
+    const id = t.dataset.id;
+    const act = t.dataset.act;
+    let reason = null;
+    if (act === 'reject') {
+      reason = prompt('Reject reason (will be emailed to the submitter):', '');
+      if (reason === null || reason.trim().length < 3) return;
+    }
+    t.disabled = true;
+    const r = await fetch('/api/admin/uploads?token=' + encodeURIComponent(token), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id, action: act, reason }),
+    });
+    if (r.ok) loadUploads();
     else { t.disabled = false; alert('Failed: ' + r.status); }
   }
 });
@@ -576,6 +662,14 @@ function render(d) {
         }).join('')}
       </tbody>
     </table>` : ''}
+
+    <h2 style="display:flex;align-items:center;justify-content:space-between;">
+      <span>Community uploads <span style="opacity:0.5;font-weight:400;font-size:14px;">(submitted via /submit — review before publishing)</span></span>
+      <button id="refresh-uploads" style="font-family:var(--font-mono);font-size:11px;padding:6px 12px;border:1px solid var(--rule);background:transparent;color:var(--ink-soft);cursor:pointer;border-radius:4px;letter-spacing:0.06em;text-transform:uppercase;">↻ Refresh</button>
+    </h2>
+    <div id="uploads-panel" style="margin-bottom:32px;">
+      <div style="opacity:0.5;font-style:italic;padding:12px 0;">Loading…</div>
+    </div>
 
     <h2 style="display:flex;align-items:center;justify-content:space-between;">
       <span>Player suggestions <span style="opacity:0.5;font-weight:400;font-size:14px;">(from footer "Suggest a game" button)</span></span>

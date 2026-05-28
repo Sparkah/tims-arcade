@@ -30,10 +30,6 @@ export async function onRequestPost({ request, env }) {
   const session = await readSession(request, env);
   if (!session) return jsonError('sign_in_required', 401);
 
-  const day = new Date().toISOString().slice(0, 10);
-  if (!await checkRate(env, `uploadrate:${session.uid}:${day}`, DAILY_CAP, 60 * 60 * 26))
-    return jsonError('daily_limit_reached', 429);
-
   let form;
   try { form = await request.formData(); } catch { return jsonError('invalid_form', 400); }
 
@@ -65,6 +61,13 @@ export async function onRequestPost({ request, env }) {
   }
   const zv = validateGameZip(zipEntries);
   if (!zv.ok) return jsonError(zv.error, 400);
+
+  // Rate-limit only AFTER validation passes, so a developer iterating on a
+  // rejected zip isn't locked out by fumbled attempts (uploads are already gated
+  // behind a signed-in session). 5 accepted uploads/day/uid.
+  const day = new Date().toISOString().slice(0, 10);
+  if (!await checkRate(env, `uploadrate:${session.uid}:${day}`, DAILY_CAP, 60 * 60 * 26))
+    return jsonError('daily_limit_reached', 429);
 
   let coverBytes = null, coverType = null;
   const cover = form.get('cover');

@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-ROOT="/Users/timmarkin/Desktop/Agents"
+ROOT="/Users/timmarkin/Agents"
 GALLERY="$ROOT/Gallery"
 SRC="$GALLERY/games.source.json"
 OUT_GAMES="$GALLERY/games"
@@ -170,7 +170,10 @@ jq --argjson meta "$META_JSON" '
     hasPreview: ($meta[.slug].hasPreview // false),
     platforms: .platforms,
     external: (.external // false),
-    flagship: (.flagship // false)
+    flagship: (.flagship // false),
+    hosting: .hosting,
+    sandboxUrl: .sandboxUrl,
+    author: .author
   })
 ' "$SRC" > "$OUT_MANIFEST"
 

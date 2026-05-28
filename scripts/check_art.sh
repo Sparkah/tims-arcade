@@ -19,7 +19,7 @@
 
 set -uo pipefail
 
-ROOT="/Users/timmarkin/Desktop/Agents"
+ROOT="/Users/timmarkin/Agents"
 SOURCE_JSON="$ROOT/Gallery/games.source.json"
 THUMBS_DIR="$ROOT/Gallery/thumbs"
 
@@ -71,7 +71,7 @@ fail=0
 total=0
 total_failed=0
 
-while IFS=$'\t' read -r slug gameDir published external; do
+while IFS=$'\t' read -r slug gameDir published external hosting; do
   [[ "$published" == "false" ]] && continue  # unpublished games are exempt
   [[ -n "$FILTER_SLUG" && "$slug" != "$FILTER_SLUG" ]] && continue
 
@@ -81,6 +81,19 @@ while IFS=$'\t' read -r slug gameDir published external; do
     total=$((total + 1))
     if is_real_png "$THUMBS_DIR/$slug.png"; then
       [[ $QUIET -eq 0 ]] && echo "✓ $slug (external — thumb only)"
+    else
+      fail=1; total_failed=$((total_failed + 1))
+      echo "✕ $slug"; echo "    gallery thumb missing or empty: $THUMBS_DIR/$slug.png"
+    fi
+    continue
+  fi
+
+  # Community sandbox uploads (hosting:sandbox, no local gameDir) only need a
+  # gallery card thumb — the game itself lives on the cross-site UGC host.
+  if [[ "$hosting" == "sandbox" ]]; then
+    total=$((total + 1))
+    if is_real_png "$THUMBS_DIR/$slug.png"; then
+      [[ $QUIET -eq 0 ]] && echo "✓ $slug (community — thumb only)"
     else
       fail=1; total_failed=$((total_failed + 1))
       echo "✕ $slug"; echo "    gallery thumb missing or empty: $THUMBS_DIR/$slug.png"
@@ -125,8 +138,9 @@ for g in games:
     gd = g.get('gameDir', '')
     pub = 'false' if g.get('published') is False else 'true'
     ext = 'true' if g.get('external') is True else 'false'
-    if slug and gd:
-        print(f'{slug}\t{gd}\t{pub}\t{ext}')
+    host = g.get('hosting', '') or ''
+    if slug and (gd or host == 'sandbox'):
+        print(f'{slug}\t{gd}\t{pub}\t{ext}\t{host}')
 "
 )
 
