@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Orbit Dodge</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #05060f; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+var PI = Math.PI, TAU = PI * 2;
+
+// ── STRINGS (EN + RU) ─────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Orbit Dodge',
+    sub: 'Flip your spin. Thread every gap.',
+    play: 'PLAY', retry: 'RETRY',
+    score: 'SCORE', best: 'BEST', dist: 'DIST', tier: 'TIER',
+    gameover: 'YOU CRASHED', newbest: 'NEW BEST!',
+    tapflip: 'TAP TO FLIP SPIN',
+    tut_goal:     'Goal: Weave your glowing marble through the gap in every ring closing in on the core. Go as far as you can.',
+    tut_controls: 'Controls: Tap anywhere (or press Space) to instantly reverse the marble spin. That is the only control.',
+    tut_win:      'Win: Endless - there is no finish. Survive, chain clean passes, and beat your best distance.',
+    tut_lose:     'Lose: You have one life. Touch a ring wall (miss the gap) and the run ends.',
+    tut_tip:      'Tip: Line up early - flip a beat before a ring arrives so you sit in the gap as it crosses. Chains build a score multiplier.',
+  },
+  ru: {
+    title: 'Орбита Уворота',
+    sub: 'Меняй вращение. Проходи каждую щель.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД', dist: 'ДИСТ', tier: 'УР',
+    gameover: 'ТЫ РАЗБИЛСЯ', newbest: 'НОВЫЙ РЕКОРД!',
+    tapflip: 'НАЖМИ — СМЕНА ВРАЩЕНИЯ',
+    tut_goal:     'Цель: Проведи светящийся шарик сквозь щель в каждом кольце, что сжимается к ядру. Иди как можно дальше.',
+    tut_controls: 'Управление: Нажми в любом месте (или пробел), чтобы мгновенно сменить вращение шарика. Это единственное управление.',
+    tut_win:      'Победа: Бесконечный режим - финиша нет. Выживай, копи чистые проходы и побей рекорд дистанции.',
+    tut_lose:     'Поражение: У тебя одна жизнь. Коснись стенки кольца (промах мимо щели) - и забег окончен.',
+    tut_tip:      'Совет: Целься заранее - меняй вращение чуть раньше, чем подойдёт кольцо, чтобы стоять в щели. Серии множат очки.',
+  },
+};
+function S0() { return STRINGS[GF.lang] || STRINGS.en; }
+
+// No AI sprites — marble/core/rings are hand-drawn glow (per DESIGN.md).
+var SPRITE_NAMES = [];
+
+// ── TUNABLES (mirror DESIGN.md) ───────────────────────────────────────────
+var ORBIT_RADIUS      = 130;
+var ORBIT_SPEED       = 2.3;
+var RING_CLOSE_SPEED  = 64;
+var RING_SPAWN_MS     = 1550;
+var GAP_ARC_DEG       = 92;
+var RING_THICK        = 14;
+var MARBLE_RADIUS     = 11;
+var CORE_RADIUS       = 30;
+var TIER_RINGS        = 10;
+var RING_ROT_SPEED    = 0.0;
+var PASS_SCORE        = 10;
+var MAX_COMBO_MULT    = 8;
+var START_SPAWN_DELAY = 1100;
+
+// ── TIER PALETTES (progression cue) ────────────────────────────────────────
+// Each tier shifts ring + accent + background tint. Cycles after the last.
+var PALETTES = [
+  { ring: '#4dd0e1', glow: '#26c6da', bg: '#05060f', accent: '#7fe9f5' }, // cyan
+  { ring: '#7c4dff', glow: '#651fff', bg: '#0a0716', accent: '#b39dff' }, // violet
+  { ring: '#ff5e94', glow: '#ff2d6f', bg: '#120610', accent: '#ff9bbd' }, // rose
+  { ring: '#ffb74d', glow: '#ff9100', bg: '#120c05', accent: '#ffd699' }, // amber
+  { ring: '#69f0ae', glow: '#00e676', bg: '#04120a', accent: '#a7ffd0' }, // mint
+  { ring: '#ff8a65', glow: '#ff5722', bg: '#140804', accent: '#ffb59c' }, // ember
+];
+function pal() { return PALETTES[tier % PALETTES.length]; }
+
+// ── GAME STATE ─────────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER
+var score = 0, bestScore = 0;
+var ringsPassed = 0, bestDistance = 0;
+var combo = 0, comboMult = 1;
+var tier = 0;
+var marbleAngle = 0;        // radians, current position on the orbit
+var spinDir = 1;            // +1 or -1
+var rings = [];             // active rings
+var spawnTimer = 0;         // ms until next spawn
+var trail = [];             // marble trail points (for motion legibility)
+var newBestThisRun = false;
+var tierBanner = 0;         // seconds remaining to show TIER N banner
+var deathFlash = 0;         // seconds remaining on red marble flash
+var pulseT = 0;             // global pulse animator
+var hintFade = 1;           // "tap to flip" hint opacity during early play
+var tutorialOpen = false;
+var helpBtn = null;
+var uiButtons = [];
+var uiLockUntil = 0;        // swallow the tap that started the run
+var _ssMode = false;        // screenshot mode (suppresses overlays/hints)
+
+// ── PERSISTENCE ─────────────────────────────────────────────────────────────
+function loadTutorialSeen() {
+  try { return localStorage.getItem('orbit_dodge_seen_tutorial') === '1'; } catch (e) { return false; }
+}
+function saveTutorialSeen() { try { localStorage.setItem('orbit_dodge_seen_tutorial', '1'); } catch (e) {} }
+function saveBests() {
+  try {
+    localStorage.setItem('orbit_dodge_best_score', String(bestScore));
+    localStorage.setItem('orbit_dodge_best_dist', String(bestDistance));
+  } catch (e) {}
+}
+
+// ── TIER SCALING ─────────────────────────────────────────────────────────────
+// Speeds/spawn/gap escalate with tier; gap narrows but never below a floor.
+function tierCloseSpeed()  { return RING_CLOSE_SPEED * (1 + tier * 0.16); }
+function tierOrbitSpeed()  { return ORBIT_SPEED * (1 + tier * 0.06); }
+function tierSpawnMs()     { return Math.max(620, RING_SPAWN_MS - tier * 95); }
+function tierGapDeg()      { return Math.max(48, GAP_ARC_DEG - tier * 5); }
+function tierRotSpeed()    { return tier >= 4 ? (0.5 + (tier - 4) * 0.18) : 0; } // moving gaps tier 5+
+function tierGapCount()    { return tier >= 2 ? 2 : 1; }                          // twin gaps tier 3+
+
+// ── GEOMETRY HELPERS ─────────────────────────────────────────────────────────
+function spawnRadius() {
+  // Just beyond the far corner so rings enter from off-screen.
+  return Math.sqrt(GF.cx * GF.cx + GF.cy * GF.cy) / GF.S + 40;
+}
+// Normalised absolute angular difference in [0, PI].
+function angDiff(a, b) {
+  var d = Math.abs(((a - b) % TAU + TAU) % TAU);
+  return d > PI ? TAU - d : d;
+}
+// Is the marble currently within ANY gap of this ring?
+function inGap(ring) {
+  var half = (ring.gapDeg * PI / 180) / 2;
+  // marble's own angular half-width at the orbit radius
+  var marbHalf = MARBLE_RADIUS / ORBIT_RADIUS;
+  for (var i = 0; i < ring.gaps.length; i++) {
+    if (angDiff(marbleAngle, ring.gaps[i]) <= (half - marbHalf)) return true;
+  }
+  return false;
+}
+
+// ── SPAWN ──────────────────────────────────────────────────────────────────
+var _spawnCount = 0;   // how many rings spawned this run (for the gentle opener)
+function spawnRing() {
+  var gapDeg = tierGapDeg();
+  var count = tierGapCount();
+  // Gentle opener: the FIRST two rings of a run put their gap near the
+  // marble's current angle so a brand-new player passes them and SEES a
+  // clean pass (teaches the mechanic) before fully-random gaps begin.
+  var base;
+  if (_spawnCount === 0)      base = marbleAngle;                       // dead-on
+  else if (_spawnCount === 1) base = marbleAngle + (Math.random() - 0.5) * 1.0; // near
+  else                        base = Math.random() * TAU;              // random
+  _spawnCount += 1;
+  var gaps = [];
+  for (var i = 0; i < count; i++) gaps.push(base + i * (TAU / count));
+  rings.push({
+    r: spawnRadius(),
+    gaps: gaps,
+    gapDeg: gapDeg,
+    rot: tierRotSpeed() * (Math.random() < 0.5 ? 1 : -1),
+    crossed: false,   // already evaluated against the orbit band?
+    scored: false,
+  });
+}
+
+// ── LIFECYCLE ────────────────────────────────────────────────────────────────
+function startGame() {
+  score = 0; ringsPassed = 0; combo = 0; comboMult = 1; tier = 0;
+  marbleAngle = -PI / 2;       // start at top
+  spinDir = 1;
+  rings = [];
+  trail = [];
+  _spawnCount = 0;
+  spawnTimer = START_SPAWN_DELAY;
+  newBestThisRun = false;
+  tierBanner = 0; deathFlash = 0;
+  hintFade = 1;
+  tutorialOpen = false;
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  if (gs !== 'PLAYING') return;
+  gs = 'GAMEOVER';
+  deathFlash = 0.6;
+  GF.setShake(0.6);
+  var mx = GF.cx + Math.cos(marbleAngle) * ORBIT_RADIUS * GF.S;
+  var my = GF.cy + Math.sin(marbleAngle) * ORBIT_RADIUS * GF.S;
+  GF.spawnParticles(mx, my, '#ff5252', 26);
+  GF.spawnParticles(mx, my, '#ffb74d', 14);
+  newBestThisRun = false;
+  if (score > bestScore) { bestScore = score; newBestThisRun = true; }
+  if (ringsPassed > bestDistance) { bestDistance = ringsPassed; newBestThisRun = true; }
+  saveBests();
+  GF.gameEnded();
+  if (newBestThisRun) GF.happytime();
+  GF.saveRun();
+}
+
+function onCleanPass(ring) {
+  ringsPassed += 1;
+  combo += 1;
+  comboMult = Math.min(MAX_COMBO_MULT, 1 + Math.floor(combo / 3));
+  var gain = PASS_SCORE * comboMult;
+  score += gain;
+  var mx = GF.cx + Math.cos(marbleAngle) * ORBIT_RADIUS * GF.S;
+  var my = GF.cy + Math.sin(marbleAngle) * ORBIT_RADIUS * GF.S;
+  GF.spawnParticles(mx, my, pal().ring, 8);
+  GF.spawnFloat(mx, my - 14 * GF.S, '+' + gain, pal().accent);
+  // tier-up?
+  if (ringsPassed % TIER_RINGS === 0) {
+    tier += 1;
+    tierBanner = 1.4;
+    GF.setShake(0.3);
+  }
+  GF.saveRun();
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────────
+function flip() {
+  if (gs !== 'PLAYING') return;
+  spinDir = -spinDir;
+  hintFade = 0;
+}
+
+function uiHit(px, py) {
+  for (var i = 0; i < uiButtons.length; i++) {
+    var b = uiButtons[i];
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) {
+      uiLockUntil = Date.now() + 420;
+      b.fn();
+      return true;
+    }
+  }
+  return false;
+}
+function hitBtn(b, px, py) { return b && px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h; }
+
+function pressDown(px, py) {
+  pulseT = 0;
+  if (gs === 'MENU') {
+    if (tutorialOpen) { tutorialOpen = false; saveTutorialSeen(); return; }
+    if (Date.now() < uiLockUntil) return;
+    // Whole overlay is live: PLAY button OR anywhere starts the game.
+    if (!uiHit(px, py)) startGame();
+    return;
+  }
+  if (gs === 'GAMEOVER') {
+    if (Date.now() < uiLockUntil) return;
+    if (!uiHit(px, py)) startGame();   // tap anywhere retries
+    return;
+  }
+  if (gs === 'PLAYING') {
+    if (tutorialOpen) { tutorialOpen = false; return; }            // tap closes help
+    if (hitBtn(helpBtn, px, py)) { tutorialOpen = true; return; }  // ? opens help
+    flip();                                                        // anywhere else flips
+    return;
+  }
+}
+
+var _canvas = document.getElementById('c');
+_canvas.addEventListener('pointerdown', function(e) { pressDown(e.clientX, e.clientY); }, { passive: true });
+// Guarded click fallback for synthesized clicks on overlay states.
+_canvas.addEventListener('click', function(e) {
+  if (gs === 'MENU' || gs === 'GAMEOVER') {
+    if (Date.now() < uiLockUntil) return;
+    if (gs === 'MENU' && tutorialOpen) return;
+    if (!uiHit(e.clientX, e.clientY)) startGame();
+  }
+});
+document.addEventListener('keydown', function(e) {
+  var c = e.code;
+  if (c === 'Space' || c === 'Enter' || c === 'ArrowUp' || c === 'ArrowDown') {
+    if (gs === 'PLAYING') { if (tutorialOpen) tutorialOpen = false; else flip(); }
+    else if (gs === 'MENU') { if (tutorialOpen) { tutorialOpen = false; saveTutorialSeen(); } else startGame(); }
+    else if (gs === 'GAMEOVER') startGame();
+    e.preventDefault();
+  }
+});
+
+// ── UPDATE ───────────────────────────────────────────────────────────────────
+function update(dt) {
+  pulseT += dt;
+  if (deathFlash > 0) deathFlash = Math.max(0, deathFlash - dt);
+  if (tierBanner > 0) tierBanner = Math.max(0, tierBanner - dt);
+  if (gs !== 'PLAYING') return;
+  if (tutorialOpen) return;   // freeze world while help panel is up
+
+  // marble orbit
+  marbleAngle += spinDir * tierOrbitSpeed() * dt;
+  if (marbleAngle > TAU) marbleAngle -= TAU;
+  if (marbleAngle < 0) marbleAngle += TAU;
+
+  // trail
+  trail.push({ a: marbleAngle, life: 1 });
+  if (trail.length > 18) trail.shift();
+  for (var ti = trail.length - 1; ti >= 0; ti--) {
+    trail[ti].life -= dt * 2.6;
+    if (trail[ti].life <= 0) trail.splice(ti, 1);
+  }
+
+  if (hintFade > 0 && ringsPassed === 0) hintFade = Math.max(0, hintFade - dt * 0.35);
+
+  // spawn
+  spawnTimer -= dt * 1000;
+  if (spawnTimer <= 0) { spawnRing(); spawnTimer += tierSpawnMs(); }
+
+  // rings
+  var bandTol = (MARBLE_RADIUS + RING_THICK / 2);
+  for (var i = rings.length - 1; i >= 0; i--) {
+    var ring = rings[i];
+    ring.r -= tierCloseSpeed() * dt;
+    if (ring.rot) for (var g = 0; g < ring.gaps.length; g++) ring.gaps[g] += ring.rot * dt;
+
+    // Evaluate the crossing exactly once, when the ring's radius enters the
+    // orbit band. If the marble is not in a gap at that moment -> death.
+    if (!ring.crossed && Math.abs(ring.r - ORBIT_RADIUS) <= bandTol) {
+      ring.crossed = true;
+      if (!inGap(ring)) { gameOver(); return; }
+      else { ring.scored = true; onCleanPass(ring); }
+    }
+    // recycle once it shrinks past the core
+    if (ring.r <= CORE_RADIUS - 4) {
+      // if it somehow reached here without being evaluated (very fast), treat as passed
+      if (!ring.crossed) { ring.crossed = true; if (!ring.scored) onCleanPass(ring); }
+      rings.splice(i, 1);
+    }
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var p = pal();
+  // background with subtle radial vignette + tier tint
+  ctx.fillStyle = p.bg;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var vg = ctx.createRadialGradient(GF.cx, GF.cy, 10, GF.cx, GF.cy, Math.max(GF.W, GF.H) * 0.75);
+  vg.addColorStop(0, 'rgba(255,255,255,0.05)');
+  vg.addColorStop(0.5, 'rgba(255,255,255,0.012)');
+  vg.addColorStop(1, 'rgba(0,0,0,0.55)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  drawStars(ctx);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawRings(ctx);
+    drawOrbitGuide(ctx);
+    drawCore(ctx);
+    drawMarble(ctx);
+  }
+  if (gs === 'PLAYING') {
+    drawHUD(ctx);
+    if (tierBanner > 0) drawTierBanner(ctx);
+    if (hintFade > 0 && !_ssMode) drawFlipHint(ctx);
+    if (tutorialOpen) drawTutorialPanel(ctx);
+  }
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+}
+
+// faint static starfield (seeded deterministically so it doesn't shimmer)
+var _stars = null;
+function drawStars(ctx) {
+  if (!_stars || _stars._w !== GF.W || _stars._h !== GF.H) {
+    _stars = []; _stars._w = GF.W; _stars._h = GF.H;
+    var seed = 1337;
+    function rnd() { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; }
+    var n = Math.round((GF.W * GF.H) / 26000);
+    for (var i = 0; i < n; i++) _stars.push({ x: rnd() * GF.W, y: rnd() * GF.H, r: rnd() * 1.3 + 0.3, a: rnd() * 0.5 + 0.15 });
+  }
+  for (var j = 0; j < _stars.length; j++) {
+    var s = _stars[j];
+    ctx.globalAlpha = s.a;
+    ctx.fillStyle = '#cfe8ff';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function fx(rDesign, ang) { return GF.cx + Math.cos(ang) * rDesign * GF.S; }
+function fy(rDesign, ang) { return GF.cy + Math.sin(ang) * rDesign * GF.S; }
+
+function drawOrbitGuide(ctx) {
+  // faint dashed ring showing the marble's path
+  ctx.save();
+  ctx.setLineDash([4 * GF.S, 8 * GF.S]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+  ctx.lineWidth = 1.2 * GF.S;
+  ctx.beginPath();
+  ctx.arc(GF.cx, GF.cy, ORBIT_RADIUS * GF.S, 0, TAU);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRings(ctx) {
+  var p = pal();
+  ctx.lineCap = 'round';
+  for (var i = 0; i < rings.length; i++) {
+    var ring = rings[i];
+    var rr = ring.r * GF.S;
+    if (rr < 2) continue;
+    var half = (ring.gapDeg * PI / 180) / 2;
+    // proximity glow: rings near the orbit band burn brighter
+    var prox = 1 - GF.clamp(Math.abs(ring.r - ORBIT_RADIUS) / 220, 0, 1);
+    ctx.save();
+    ctx.shadowColor = p.glow;
+    ctx.shadowBlur = (6 + prox * 16) * GF.S;
+    ctx.strokeStyle = p.ring;
+    ctx.globalAlpha = 0.55 + prox * 0.45;
+    ctx.lineWidth = RING_THICK * GF.S;
+    // draw the ring as arcs between gaps
+    var gaps = ring.gaps.slice().map(function(a) { return ((a % TAU) + TAU) % TAU; }).sort(function(a, b) { return a - b; });
+    for (var s = 0; s < gaps.length; s++) {
+      var gapStart = gaps[s] + half;             // wall begins after this gap
+      var gapEnd = gaps[(s + 1) % gaps.length] - half; // wall ends before next gap
+      if (s === gaps.length - 1) gapEnd += TAU;   // wrap
+      if (gapEnd <= gapStart) continue;
+      ctx.beginPath();
+      ctx.arc(GF.cx, GF.cy, rr, gapStart, gapEnd);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCore(ctx) {
+  var p = pal();
+  var pulse = 0.5 + 0.5 * Math.sin(pulseT * 2.2);
+  var cr = CORE_RADIUS * GF.S * (1 + pulse * 0.05);
+  ctx.save();
+  ctx.shadowColor = p.glow;
+  ctx.shadowBlur = (18 + pulse * 10) * GF.S;
+  var grad = ctx.createRadialGradient(GF.cx, GF.cy, 2, GF.cx, GF.cy, cr);
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.45, p.accent);
+  grad.addColorStop(1, p.glow);
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(GF.cx, GF.cy, cr, 0, TAU); ctx.fill();
+  ctx.restore();
+
+  // distance count + tier badge on the core (center HUD)
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(8,10,20,0.92)';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 26) + 'px sans-serif';
+  ctx.fillText(String(ringsPassed), GF.cx, GF.cy + 2 * GF.S);
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(9 * GF.S, 8, 12) + 'px sans-serif';
+  ctx.fillStyle = 'rgba(8,10,20,0.7)';
+  ctx.fillText(S0().tier + ' ' + (tier + 1), GF.cx, GF.cy - CORE_RADIUS * GF.S * 0.42);
+}
+
+function drawMarble(ctx) {
+  var p = pal();
+  // trail
+  for (var i = 0; i < trail.length; i++) {
+    var tx = fx(ORBIT_RADIUS, trail[i].a), ty = fy(ORBIT_RADIUS, trail[i].a);
+    ctx.globalAlpha = trail[i].life * 0.4;
+    ctx.fillStyle = p.accent;
+    ctx.beginPath(); ctx.arc(tx, ty, MARBLE_RADIUS * GF.S * 0.7 * trail[i].life, 0, TAU); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+
+  var mx = fx(ORBIT_RADIUS, marbleAngle), my = fy(ORBIT_RADIUS, marbleAngle);
+  var dying = deathFlash > 0;
+  ctx.save();
+  ctx.shadowColor = dying ? '#ff5252' : p.glow;
+  ctx.shadowBlur = 16 * GF.S;
+  var mr = MARBLE_RADIUS * GF.S;
+  var grad = ctx.createRadialGradient(mx - mr * 0.3, my - mr * 0.3, 1, mx, my, mr);
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.5, dying ? '#ff8a80' : '#eafcff');
+  grad.addColorStop(1, dying ? '#ff1744' : p.ring);
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.arc(mx, my, mr, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function drawHUD(ctx) {
+  var s = S0();
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+  ctx.fillText(s.score + ' ' + score, 14 * GF.S, 14 * GF.S);
+
+  // best (smaller, under score)
+  ctx.font = GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+  ctx.fillStyle = '#7a86a0';
+  ctx.fillText(s.best + ' ' + bestScore, 14 * GF.S, 14 * GF.S + GF.clamp(20 * GF.S, 16, 28));
+
+  // combo multiplier (center-top, when active)
+  if (comboMult >= 2) {
+    ctx.textAlign = 'center';
+    ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 21) + 'px sans-serif';
+    ctx.fillStyle = pal().accent;
+    ctx.fillText('x' + comboMult, GF.cx, 14 * GF.S);
+  }
+
+  // help (?) button top-right
+  var btn = GF.clamp(32 * GF.S, 26, 42);
+  var pad = 12 * GF.S;
+  helpBtn = { x: GF.W - pad - btn, y: 12 * GF.S, w: btn, h: btn };
+  drawIconBtn(ctx, helpBtn, '?');
+}
+
+function drawIconBtn(ctx, b, glyph) {
+  GF.rr(ctx, b.x, b.y, b.w, b.h, 7 * GF.S);
+  ctx.fillStyle = 'rgba(40,48,64,0.85)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(160,180,210,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#cfe';
+  ctx.font = 'bold ' + (b.h * 0.55) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(glyph, b.x + b.w / 2, b.y + b.h / 2 + 1);
+  ctx.textBaseline = 'top';
+}
+
+function drawTierBanner(ctx) {
+  var a = Math.min(1, tierBanner / 0.4) * Math.min(1, (1.4 - tierBanner) / 0.2 + 0.2);
+  ctx.save();
+  ctx.globalAlpha = GF.clamp(a, 0, 1);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = pal().glow; ctx.shadowBlur = 22 * GF.S;
+  ctx.fillStyle = pal().accent;
+  ctx.font = 'bold ' + GF.clamp(34 * GF.S, 22, 50) + 'px sans-serif';
+  ctx.fillText(S0().tier + ' ' + (tier + 1), GF.cx, GF.H * 0.26);
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawFlipHint(ctx) {
+  ctx.save();
+  ctx.globalAlpha = hintFade * (0.6 + 0.4 * Math.sin(pulseT * 4));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#dfe9ff';
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  ctx.fillText(S0().tapflip, GF.cx, GF.H * 0.78);
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── TEXT WRAP (measured block layout for the tutorial) ──────────────────────
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/);
+  var lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+// Returns the y after drawing so the next block starts after this one.
+function drawTutorialBlock(ctx, items, topY, maxW, lineH, gap) {
+  var y = topY;
+  for (var i = 0; i < items.length; i++) {
+    var lines = wrapLines(ctx, items[i], maxW);
+    for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], GF.cx, y); y += lineH; }
+    y += gap;
+  }
+  return y;
+}
+function tutorialItems() {
+  var s = S0();
+  return [s.tut_goal, s.tut_controls, s.tut_win, s.tut_lose, s.tut_tip];
+}
+
+// ── MENU ─────────────────────────────────────────────────────────────────────
+function drawMenu(ctx) {
+  uiButtons = [];
+  ctx.fillStyle = 'rgba(6,8,16,0.93)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var titleFs = GF.clamp(40 * GF.S, 26, 58);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(77,208,225,0.55)'; ctx.shadowBlur = 24 * GF.S;
+  var titleY = GF.H * 0.15;
+  ctx.fillText(S0().title, GF.cx, titleY);
+  ctx.shadowBlur = 0;
+  var subFs = GF.clamp(15 * GF.S, 12, 20);
+  ctx.font = subFs + 'px sans-serif';
+  ctx.fillStyle = '#8fb6c4';
+  ctx.fillText(S0().sub, GF.cx, titleY + subFs + 10 * GF.S);
+
+  // tutorial block (measured, wrapped) — single screen, no scroll
+  var bodyFs = GF.clamp(13.5 * GF.S, 11, 17);
+  ctx.font = bodyFs + 'px sans-serif';
+  ctx.fillStyle = '#cdd6e3';
+  ctx.textBaseline = 'top';
+  var maxW = Math.min(GF.W * 0.86, 460 * GF.S);
+  var topY = titleY + subFs + 34 * GF.S;
+  var endY = drawTutorialBlock(ctx, tutorialItems(), topY, maxW, bodyFs + 5 * GF.S, 8 * GF.S);
+
+  // PLAY button under the tutorial block
+  var btnW = GF.clamp(220 * GF.S, 150, 300), btnH = GF.clamp(54 * GF.S, 42, 66);
+  var btnY = Math.min(endY + 14 * GF.S, GF.H - btnH - 26 * GF.S);
+  var btnX = GF.cx - btnW / 2;
+  drawPrimaryBtn(ctx, btnX, btnY, btnW, btnH, S0().play);
+  uiButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame });
+
+  // best line
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  ctx.fillStyle = '#667';
+  if (bestScore > 0 || bestDistance > 0) {
+    ctx.fillText(S0().best + ' ' + bestScore + '   ·   ' + S0().dist + ' ' + bestDistance,
+      GF.cx, btnY + btnH + 24 * GF.S);
+  }
+}
+
+function drawPrimaryBtn(ctx, x, y, w, h, label) {
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, '#4dd0e1'); grad.addColorStop(1, '#1f9fb3');
+  GF.rr(ctx, x, y, w, h, h / 2);
+  ctx.save();
+  ctx.shadowColor = 'rgba(77,208,225,0.5)'; ctx.shadowBlur = 18 * GF.S;
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#04222a';
+  ctx.font = 'bold ' + GF.clamp(20 * GF.S, 15, 26) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w / 2, y + h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── GAME OVER ────────────────────────────────────────────────────────────────
+function drawGameOver(ctx) {
+  uiButtons = [];
+  ctx.fillStyle = 'rgba(6,8,16,0.86)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  var s = S0();
+  ctx.textAlign = 'center';
+  var titleFs = GF.clamp(38 * GF.S, 24, 54);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#ff6b7a';
+  ctx.shadowColor = 'rgba(255,82,82,0.5)'; ctx.shadowBlur = 20 * GF.S;
+  var titleY = GF.H * 0.3;
+  ctx.fillText(s.gameover, GF.cx, titleY);
+  ctx.shadowBlur = 0;
+
+  // score + distance
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(22 * GF.S, 16, 30) + 'px sans-serif';
+  ctx.fillText(s.score + ' ' + score, GF.cx, titleY + GF.clamp(46 * GF.S, 34, 58));
+  ctx.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  ctx.fillStyle = '#9fb0c4';
+  ctx.fillText(s.dist + ' ' + ringsPassed + '   ·   ' + s.tier + ' ' + (tier + 1),
+    GF.cx, titleY + GF.clamp(74 * GF.S, 56, 92));
+
+  if (newBestThisRun) {
+    ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+    ctx.fillStyle = '#ffd24a';
+    ctx.fillText(s.newbest, GF.cx, titleY + GF.clamp(100 * GF.S, 78, 122));
+  } else {
+    ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#667';
+    ctx.fillText(s.best + ' ' + bestScore + '   ·   ' + s.dist + ' ' + bestDistance,
+      GF.cx, titleY + GF.clamp(100 * GF.S, 78, 122));
+  }
+
+  // RETRY button
+  var btnW = GF.clamp(220 * GF.S, 150, 300), btnH = GF.clamp(54 * GF.S, 42, 66);
+  var btnX = GF.cx - btnW / 2, btnY = titleY + GF.clamp(140 * GF.S, 110, 170);
+  drawPrimaryBtn(ctx, btnX, btnY, btnW, btnH, s.retry);
+  uiButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: startGame });
+}
+
+// ── TUTORIAL PANEL (in-game, via ? button) ───────────────────────────────────
+function drawTutorialPanel(ctx) {
+  ctx.fillStyle = 'rgba(6,8,16,0.93)';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+  var s = S0();
+  ctx.textAlign = 'center';
+  var titleFs = GF.clamp(26 * GF.S, 18, 36);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textBaseline = 'top';
+  var topY = GF.H * 0.16;
+  ctx.fillText(s.title, GF.cx, topY);
+
+  var bodyFs = GF.clamp(14 * GF.S, 11, 18);
+  ctx.font = bodyFs + 'px sans-serif';
+  ctx.fillStyle = '#cdd6e3';
+  var maxW = Math.min(GF.W * 0.86, 460 * GF.S);
+  var endY = drawTutorialBlock(ctx, tutorialItems(), topY + titleFs + 18 * GF.S, maxW, bodyFs + 6 * GF.S, 10 * GF.S);
+
+  ctx.fillStyle = '#7fe9f5';
+  ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.lang === 'ru' ? 'нажми, чтобы продолжить' : 'tap to resume', GF.cx, Math.min(endY + 12 * GF.S, GF.H - 40 * GF.S));
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── SCREENSHOT / GATE HOOKS ──────────────────────────────────────────────────
+// Land in a populated mid-game PLAYING state for Yandex 5.1.1 screenshots:
+// multiple rings closing in, a visible combo, marble mid-orbit.
+window._setupForScreenshot = function(level) {
+  startGame();
+  _ssMode = true;
+  hintFade = 0;
+  tier = Math.max(0, Math.min(5, (level || 3) - 1));
+  ringsPassed = tier * TIER_RINGS + 4;
+  combo = 9; comboMult = Math.min(MAX_COMBO_MULT, 1 + Math.floor(combo / 3));
+  score = ringsPassed * PASS_SCORE * comboMult;
+  marbleAngle = -PI / 2 + 0.5;
+  spinDir = 1;
+  // populate several rings at staggered radii, with the nearest just outside
+  // the orbit band so the frame reads as an active near-miss.
+  rings = [];
+  var radii = [ORBIT_RADIUS + 34, ORBIT_RADIUS + 120, ORBIT_RADIUS + 220, spawnRadius() - 60];
+  for (var i = 0; i < radii.length; i++) {
+    var count = tierGapCount();
+    var gaps = [];
+    var base = (i === 0) ? (marbleAngle - 0.05) : (Math.random() * TAU);
+    for (var g = 0; g < count; g++) gaps.push(base + g * (TAU / count));
+    rings.push({ r: radii[i], gaps: gaps, gapDeg: tierGapDeg(), rot: tierRotSpeed() * (i % 2 ? 1 : -1), crossed: (i === 0), scored: (i === 0) });
+  }
+  // a short trail behind the marble
+  trail = [];
+  for (var k = 0; k < 12; k++) trail.push({ a: marbleAngle - spinDir * k * 0.05, life: 1 - k / 14 });
+  spawnTimer = tierSpawnMs();
+};
+window._jumpLevel = function(n) {
+  if (n >= 99) {
+    // drive into the terminal GAMEOVER state for the runtime gate
+    if (gs !== 'PLAYING') startGame();
+    score = Math.max(score, 120);
+    gameOver();
+    return;
+  }
+  window._setupForScreenshot(n || 3);
+};
+
+// ── BOOT ─────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 393,
+  designH: 852,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'orbit_dodge',
+  onReady: function() {
+    try {
+      bestScore = parseInt(localStorage.getItem('orbit_dodge_best_score') || '0') || 0;
+      bestDistance = parseInt(localStorage.getItem('orbit_dodge_best_dist') || '0') || 0;
+    } catch (e) {}
+    // Yandex 1.9 — persist run state; on a refresh we bounce to MENU (best
+    // practice for a one-life reflex game rather than resuming mid-fall).
+    GF.persist('orbit_dodge_run_v1',
+      function() {
+        return { gs: (gs === 'PLAYING') ? 'MENU' : gs, bestScore: bestScore, bestDistance: bestDistance };
+      },
+      function(s) {
+        if (!s) return;
+        if (typeof s.bestScore === 'number') bestScore = Math.max(bestScore, s.bestScore);
+        if (typeof s.bestDistance === 'number') bestDistance = Math.max(bestDistance, s.bestDistance);
+      }
+    );
+    if (gs === 'PLAYING' || gs === 'GAMEOVER') gs = 'MENU';
+    tutorialOpen = false;
+    marbleAngle = -PI / 2;
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// Persist bests alongside the lib's run save.
+var _origSaveRun = GF.saveRun;
+GF.saveRun = function() { saveBests(); _origSaveRun(); };
+
+// Expose state for the post-build-tester (DESIGN.md cross-check).
+GF.exposeState(function() {
+  return {
+    gs: gs, score: score, ringsPassed: ringsPassed, tier: tier,
+    combo: combo, comboMult: comboMult, spinDir: spinDir,
+    marbleAngle: Math.round(marbleAngle * 100) / 100,
+    ringCount: rings.length, bestScore: bestScore, bestDistance: bestDistance,
+    tutorialOpen: tutorialOpen,
+    ORBIT_RADIUS: ORBIT_RADIUS, ORBIT_SPEED: ORBIT_SPEED,
+    RING_CLOSE_SPEED: RING_CLOSE_SPEED, RING_SPAWN_MS: RING_SPAWN_MS,
+    GAP_ARC_DEG: GAP_ARC_DEG, RING_THICK: RING_THICK, MARBLE_RADIUS: MARBLE_RADIUS,
+    CORE_RADIUS: CORE_RADIUS, TIER_RINGS: TIER_RINGS, PASS_SCORE: PASS_SCORE,
+    MAX_COMBO_MULT: MAX_COMBO_MULT, START_SPAWN_DELAY: START_SPAWN_DELAY,
+    RING_ROT_SPEED: RING_ROT_SPEED,
+  };
+});
+
+// Test/automation hooks (safe to ship — platforms don't reject these).
+window._setLang = function(l) { GF.lang = l; };
+window._setState = function(s) { gs = s; };
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+window._flip = function() { flip(); };
+
+})();
+</script>
+</body>
+</html>
