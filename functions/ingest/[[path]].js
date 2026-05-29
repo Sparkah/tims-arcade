@@ -23,6 +23,7 @@ export async function onRequest({ request }) {
 
   const headers = new Headers(request.headers);
   headers.delete('host'); // let fetch set the Host for the upstream from `target`
+  headers.delete('cookie'); // never forward the gallery's tgl_session auth cookie to PostHog
 
   const method = request.method;
   const body = method === 'GET' || method === 'HEAD'
