@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Tile Trio</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #181028; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — both languages required) ───────────
+var STRINGS = {
+  en: {
+    title: 'Tile Trio',
+    sub: 'Tap - Tray - Triple-pop',
+    play: 'PLAY', retry: 'RETRY', next: 'NEXT LEVEL', resume: 'RESUME',
+    score: 'SCORE', best: 'BEST', level: 'Lv', tilesLeft: 'Tiles left',
+    gameover: 'BOARD JAMMED', win: 'LEVEL CLEARED!',
+    undo: 'Undo', shuffle: 'Shuffle', help: '?',
+    howto: 'How to play',
+    tut_goal: 'Goal: Clear the whole heap of tiles.',
+    tut_controls: 'Controls: Tap a tile on top to send it to your tray.',
+    tut_win: 'Win: Three identical tiles in the tray pop and vanish - clear every tile.',
+    tut_lose: 'Lose: If all 7 tray slots fill with no match, the board jams.',
+    tut_tip: 'Tip: Use Undo and Shuffle when stuck - pop a triple to free slots.',
+    seen_hint: 'Tap a top tile to the tray. 3 of a kind pop. Do not jam the 7 slots.',
+    noUndo: 'No undos left', noShuffle: 'No shuffles left',
+    tapClose: '(tap to close)',
+  },
+  ru: {
+    title: 'Трио Плиток',
+    sub: 'Жми - Лоток - Тройка',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', next: 'ДАЛЬШЕ', resume: 'ПРОДОЛЖИТЬ',
+    score: 'ОЧКИ', best: 'РЕКОРД', level: 'Ур', tilesLeft: 'Плиток',
+    gameover: 'ПОЛЕ ЗАСТРЯЛО', win: 'УРОВЕНЬ ПРОЙДЕН!',
+    undo: 'Отмена', shuffle: 'Микс', help: '?',
+    howto: 'Как играть',
+    tut_goal: 'Цель: Разберите всю стопку плиток.',
+    tut_controls: 'Управление: Нажмите верхнюю плитку - она уйдёт в лоток.',
+    tut_win: 'Победа: Три одинаковые плитки в лотке исчезают - уберите все.',
+    tut_lose: 'Поражение: Если все 7 ячеек заняты без совпадения - застрянет.',
+    tut_tip: 'Совет: Застряли - жмите Отмену и Микс; тройка освобождает ячейки.',
+    seen_hint: 'Жми верхнюю плитку в лоток. Три одинаковых - поп. Не забей 7 ячеек.',
+    noUndo: 'Отмены кончились', noShuffle: 'Миксы кончились',
+    tapClose: '(нажмите, чтобы закрыть)',
+  },
+};
+
+// AI sprites (procedural fallback if missing). Names align with kind ids.
+var SPRITE_NAMES = ['tile_apple','tile_lemon','tile_grape','tile_cherry',
+  'tile_frog','tile_fox','tile_owl','tile_gem'];
+
+// ── TUNABLES (mirror DESIGN.md — exposed via __gfState) ───────────────────
+var TRAY_SIZE = 7;
+var MATCH_COUNT = 3;
+var DESIGNED_LEVELS = 12;
+var TILE_KINDS_BY_LEVEL = [3,3,4,4,5,5,6,6,7,7,8,8];
+var LAYER_COUNT = 3;
+var LOCKED_TILE_START_LEVEL = 4;
+var UNDO_LIMIT = 3;
+var SHUFFLE_LIMIT = 2;
+var SPAWN_PADDING = 6;
+var TILE_SIZE = 64;
+var MIN_TAP_PX = 44;
+
+// Kind catalogue: id, glyph, base color. Index order = unlock order per level.
+var KINDS = [
+  { id: 'tile_apple',  glyph: '🍎', col: '#ff5a5f' }, // apple
+  { id: 'tile_lemon',  glyph: '🍋', col: '#ffd23f' }, // lemon
+  { id: 'tile_grape',  glyph: '🍇', col: '#9b59ff' }, // grapes
+  { id: 'tile_cherry', glyph: '🍒', col: '#ff3d7f' }, // cherries
+  { id: 'tile_frog',   glyph: '🐸', col: '#3ad17a' }, // frog
+  { id: 'tile_fox',    glyph: '🦊', col: '#ff8c42' }, // fox
+  { id: 'tile_owl',    glyph: '🦉', col: '#4db8ff' }, // owl
+  { id: 'tile_gem',    glyph: '💎', col: '#2ee6d6' }, // gem
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WIN
+var level = 1;
+var score = 0, best = 0;
+var tiles = [];             // heap tiles
+var tray = [];              // array of kind-index
+var tilesRemaining = 0;
+var undosLeft = UNDO_LIMIT;
+var shufflesLeft = SHUFFLE_LIMIT;
+var undoStack = [];         // stack of {tileId} for undo
+var popAnims = [];          // active pop bursts (visual only)
+var trayAnims = [];         // tiles flying from board into tray (visual only)
+var toast = { txt: '', t: 0 };
+var helpOpen = false;
+var seenTutorial = false;
+
+// Layout cache (recomputed each frame) in screen px
+var board = { x: 0, y: 0, w: 0, h: 0 };
+var traySlotSize = 0, trayY = 0, trayStartX = 0;
+var hudBtns = [];           // {id,x,y,w,h} undo/shuffle/help during PLAYING
+var overlayBtns = [];       // {x,y,w,h,fn} for MENU/WIN/GAMEOVER
+
+var BEST_KEY = 'tile_trio_best';
+var SEEN_KEY = 'tile_trio_seen_tutorial';
+
+// ── RNG (seeded so a level layout is stable across refresh/restore) ───────
+var _seed = 1;
+function srand() { _seed = (_seed * 1103515245 + 12345) & 0x7fffffff; return _seed / 0x7fffffff; }
+function seedFor(lv) { return (lv * 2654435761) % 0x7fffffff || 1; }
+
+// ── LEVEL GENERATION ──────────────────────────────────────────────────────
+function kindsForLevel(lv) {
+  if (lv <= TILE_KINDS_BY_LEVEL.length) return TILE_KINDS_BY_LEVEL[lv - 1];
+  return Math.min(KINDS.length, 8 + Math.floor((lv - TILE_KINDS_BY_LEVEL.length) / 2));
+}
+function layersForLevel(lv) { return LAYER_COUNT + Math.floor((lv - 1) / 3); }
+function tripletsForLevel(lv) { return Math.min(20, 4 + lv); }
+
+// Design board space used for tile coords (independent of viewport).
+var DBW = 540, DBH = 760;
+
+function buildLevel(lv) {
+  _seed = seedFor(lv);
+  var nKinds = kindsForLevel(lv);
+  var nLayers = layersForLevel(lv);
+  var nTrip = tripletsForLevel(lv);
+
+  // Multiset of kinds: nTrip groups of MATCH_COUNT identical kinds → always
+  // solvable in principle (every kind count is a multiple of MATCH_COUNT).
+  var bag = [];
+  for (var g = 0; g < nTrip; g++) {
+    var k = Math.floor(srand() * nKinds);
+    for (var m = 0; m < MATCH_COUNT; m++) bag.push(k);
+  }
+  for (var i = bag.length - 1; i > 0; i--) {
+    var j = Math.floor(srand() * (i + 1));
+    var tmp = bag[i]; bag[i] = bag[j]; bag[j] = tmp;
+  }
+  var totalTiles = bag.length;
+
+  var perLayer = Math.ceil(totalTiles / nLayers);
+  var cols = Math.max(3, Math.min(6, Math.ceil(Math.sqrt(perLayer * 1.05))));
+  var rows = Math.max(3, Math.ceil(perLayer / cols));
+
+  var marginX = 30, marginTop = 64;
+  var usableW = DBW - marginX * 2;
+  var usableH = DBH - marginTop - 22;
+  // Pack tiles tighter than the grid cell so neighbours overlap → heap feel.
+  var cellW = usableW / cols;
+  var cellH = usableH / rows;
+  var tsize = Math.min(cellW, cellH) * 1.18;   // tile bigger than cell → overlap
+  if (tsize > TILE_SIZE * 1.35) tsize = TILE_SIZE * 1.35;
+
+  var out = [];
+  var idCounter = 0;
+  var bagIdx = 0;
+  for (var layer = 0; layer < nLayers && bagIdx < bag.length; layer++) {
+    // each higher layer is offset half a cell diagonally so it sits clearly
+    // ON TOP of the layer below (covers it), building a stacked heap.
+    var ox = (layer % 2 ? 0.5 : 0) * cellW + (srand() - 0.5) * 6 + layer * 4;
+    var oy = (layer % 2 ? 0.5 : 0) * cellH + (srand() - 0.5) * 6 + layer * 6;
+    // upper layers are smaller caps so the silhouette tapers like a real pile
+    var inset = layer * 0.5; // skip outer ring columns/rows on higher layers
+    for (var r = 0; r < rows && bagIdx < bag.length; r++) {
+      for (var cc = 0; cc < cols && bagIdx < bag.length; cc++) {
+        if (layer > 0) {
+          // thin the top layers, biased toward the centre → tapered heap cap
+          var edge = Math.min(cc, cols - 1 - cc, r, rows - 1 - r);
+          if (edge < inset) continue;
+          if (srand() < 0.14) continue;
+        }
+        var px = marginX + cc * cellW + cellW / 2 + ox + (srand() - 0.5) * 8;
+        var py = marginTop + r * cellH + cellH / 2 + oy + (srand() - 0.5) * 8;
+        // keep inside the design board so nothing clips off-canvas
+        px = Math.max(marginX + tsize * 0.45, Math.min(DBW - marginX - tsize * 0.45, px));
+        py = Math.max(marginTop + tsize * 0.45, Math.min(DBH - 18 - tsize * 0.45, py));
+        out.push({ id: idCounter++, kind: bag[bagIdx++], layer: layer,
+          dx: px, dy: py, size: tsize, locked: false, removed: false });
+      }
+    }
+  }
+  while (bagIdx < bag.length) {
+    out.push({ id: idCounter++, kind: bag[bagIdx++], layer: nLayers,
+      dx: DBW/2 + (srand()-0.5)*80, dy: marginTop + 80 + (srand()-0.5)*80,
+      size: tsize, locked: false, removed: false });
+  }
+
+  // Locked / chained tiles from LOCKED_TILE_START_LEVEL.
+  if (lv >= LOCKED_TILE_START_LEVEL) {
+    var lockFrac = Math.min(0.22, 0.06 + (lv - LOCKED_TILE_START_LEVEL) * 0.03);
+    for (var t = 0; t < out.length; t++) {
+      if (out[t].layer === 0 && srand() < lockFrac) out[t].locked = true;
+    }
+  }
+  return out;
+}
+
+// ── COVER / TOP-TILE LOGIC ────────────────────────────────────────────────
+function rectsOverlap(a, b) {
+  var pad = -a.size * 0.18; // require real overlap, not just corner touch
+  return Math.abs(a.dx - b.dx) < (a.size + b.size) / 2 + pad &&
+         Math.abs(a.dy - b.dy) < (a.size + b.size) / 2 + pad;
+}
+function isCovered(tile) {
+  for (var i = 0; i < tiles.length; i++) {
+    var o = tiles[i];
+    if (o === tile || o.removed) continue;
+    if (o.layer > tile.layer && rectsOverlap(tile, o)) return true;
+  }
+  return false;
+}
+function lockStillHolds(tile) {
+  if (!tile.locked) return false;
+  var neighbors = 0;
+  for (var i = 0; i < tiles.length; i++) {
+    var o = tiles[i];
+    if (o === tile || o.removed) continue;
+    if (rectsOverlap(tile, o)) neighbors++;
+  }
+  return neighbors >= 3; // still surrounded → chained
+}
+function tileTappable(tile) {
+  if (tile.removed) return false;
+  if (isCovered(tile)) return false;
+  if (tile.locked && lockStillHolds(tile)) return false;
+  return true;
+}
+
+// ── COORDINATE MAPPING (design → screen) ──────────────────────────────────
+function layout() {
+  var W = GF.W, H = GF.H;
+  var hudH = Math.max(58, H * 0.085);
+  var traySize = GF.clamp(Math.min(W / (TRAY_SIZE + 1.0), H * 0.095), 34, 80);
+  traySlotSize = traySize;
+  var trayRowH = traySize + Math.max(MIN_TAP_PX + 14, traySize * 1.0);
+  board.x = 0; board.y = hudH; board.w = W; board.h = H - hudH - trayRowH;
+  trayY = board.y + board.h + 8;
+  var totalTrayW = TRAY_SIZE * traySize + (TRAY_SIZE - 1) * 6;
+  trayStartX = (W - totalTrayW) / 2;
+}
+
+function tileScreen(tile) {
+  var sc = Math.min(board.w / DBW, board.h / DBH);
+  var offX = board.x + (board.w - DBW * sc) / 2;
+  var offY = board.y + (board.h - DBH * sc) / 2;
+  return { x: offX + tile.dx * sc, y: offY + tile.dy * sc, s: tile.size * sc };
+}
+
+// ── GAME LIFECYCLE ─────────────────────────────────────────────────────────
+function startLevel(lv) {
+  level = lv;
+  tiles = buildLevel(lv);
+  tray = [];
+  popAnims = []; trayAnims = []; undoStack = [];
+  undosLeft = UNDO_LIMIT;
+  shufflesLeft = SHUFFLE_LIMIT;
+  tilesRemaining = tiles.length;
+  gs = 'PLAYING';
+  helpOpen = false;
+  GF.gameStarted();
+  GF.saveRun();
+}
+function startGame() { startLevel(level || 1); }
+
+function nextLevel() { fireAdThen(function() { startLevel(level + 1); }); }
+function retryLevel() { fireAdThen(function() { startLevel(level); }); }
+
+function winLevel() {
+  score += 50 + level * 10;
+  if (score > best) { best = score; saveBest(); }
+  gs = 'WIN';
+  _pendingAd = (level % 2 === 0);
+  GF.gameEnded();
+  if (score > 0) GF.happytime();
+  GF.saveRun();
+}
+function gameOver() {
+  if (score > best) { best = score; saveBest(); }
+  gs = 'GAMEOVER';
+  _pendingAd = true;
+  GF.gameEnded();
+  GF.saveRun();
+}
+function saveBest() { try { localStorage.setItem(BEST_KEY, best); } catch (e) {} }
+
+// ── CORE: tap a tile → tray ────────────────────────────────────────────────
+function tapTile(tile) {
+  if (gs !== 'PLAYING') return;
+  if (!tileTappable(tile)) { GF.setShake(0.15); return; }
+  tile.removed = true;
+  tilesRemaining--;
+  var sp = tileScreen(tile);
+  undoStack.push({ tileId: tile.id });
+  tray.push(tile.kind);
+  trayResort();
+  trayAnims.push({ kind: tile.kind, fromX: sp.x, fromY: sp.y, t: 0, dur: 0.2 });
+  GF.spawnParticles(sp.x, sp.y, KINDS[tile.kind].col, 6);
+  // unlock any tiles freed by this removal
+  for (var i = 0; i < tiles.length; i++) {
+    var o = tiles[i];
+    if (o.locked && !o.removed && !lockStillHolds(o)) {
+      o.locked = false;
+      var os = tileScreen(o);
+      GF.spawnParticles(os.x, os.y, '#ffd23f', 8);
+    }
+  }
+  resolveMatches();
+  GF.saveRun();
+  if (tilesRemaining <= 0 && tray.length === 0) { winLevel(); return; }
+  if (tray.length >= TRAY_SIZE && !hasTriple(tray)) { gameOver(); }
+}
+
+function trayResort() { tray.sort(function(a, b) { return a - b; }); }
+
+function hasTriple(arr) {
+  var counts = {};
+  for (var i = 0; i < arr.length; i++) {
+    counts[arr[i]] = (counts[arr[i]] || 0) + 1;
+    if (counts[arr[i]] >= MATCH_COUNT) return true;
+  }
+  return false;
+}
+
+function resolveMatches() {
+  var counts = {};
+  for (var i = 0; i < tray.length; i++) counts[tray[i]] = (counts[tray[i]] || 0) + 1;
+  var popped = false;
+  Object.keys(counts).forEach(function(k) {
+    if (counts[k] < MATCH_COUNT) return;
+    var kind = parseInt(k, 10);
+    var removedN = 0;
+    for (var j = tray.length - 1; j >= 0 && removedN < MATCH_COUNT; j--) {
+      if (tray[j] === kind) { tray.splice(j, 1); removedN++; }
+    }
+    popped = true;
+    score += 30;
+    if (score > best) { best = score; saveBest(); }
+    var sx = GF.W / 2, sy = trayY + traySlotSize / 2;
+    GF.spawnParticles(sx, sy, KINDS[kind].col, 22);
+    GF.spawnParticles(sx, sy, '#ffffff', 12);
+    GF.spawnFloat(sx, sy - 10, '+30', '#ffe066');
+    GF.setShake(0.4);
+    popAnims.push({ kind: kind, t: 0, dur: 0.4 });
+  });
+  return popped;
+}
+
+// ── UNDO / SHUFFLE BOOSTERS ─────────────────────────────────────────────────
+function doUndo() {
+  if (gs !== 'PLAYING') return;
+  if (undosLeft <= 0) { showToast(GF.t('noUndo')); return; }
+  if (undoStack.length === 0) return;
+  var last = undoStack[undoStack.length - 1];
+  for (var i = 0; i < tiles.length; i++) {
+    if (tiles[i].id !== last.tileId) continue;
+    var tile = tiles[i];
+    if (!tile.removed) { undoStack.pop(); return; }
+    var idx = tray.lastIndexOf(tile.kind);
+    if (idx === -1) { showToast(GF.t('noUndo')); return; } // already popped
+    undoStack.pop();
+    tray.splice(idx, 1);
+    tile.removed = false;
+    tile.locked = false;
+    tilesRemaining++;
+    undosLeft--;
+    var sp = tileScreen(tile);
+    GF.spawnParticles(sp.x, sp.y, '#9be7ff', 8);
+    GF.saveRun();
+    return;
+  }
+}
+
+function doShuffle() {
+  if (gs !== 'PLAYING') return;
+  if (shufflesLeft <= 0) { showToast(GF.t('noShuffle')); return; }
+  shufflesLeft--;
+  var live = tiles.filter(function(t) { return !t.removed; });
+  var coords = live.map(function(t) { return { dx: t.dx, dy: t.dy, layer: t.layer, size: t.size }; });
+  for (var i = coords.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = coords[i]; coords[i] = coords[j]; coords[j] = tmp;
+  }
+  for (var k = 0; k < live.length; k++) {
+    live[k].dx = coords[k].dx; live[k].dy = coords[k].dy;
+    live[k].layer = coords[k].layer; live[k].size = coords[k].size;
+  }
+  GF.setShake(0.3);
+  GF.spawnParticles(GF.W / 2, board.y + board.h / 2, '#ffd23f', 20);
+  GF.saveRun();
+}
+
+function showToast(txt) { toast.txt = txt; toast.t = 1.6; }
+
+// ── ADS (Yandex 4.4 — fired only inside user-click handlers) ─────────────────
+var _pendingAd = false;
+function fireAdThen(cb) {
+  if (_pendingAd) { _pendingAd = false; GF.showAd('midgame').then(function() { cb(); }); }
+  else { cb(); }
+}
+
+// ── INPUT: single tap dispatch (the ONE gameplay control) ───────────────────
+function onTap(px, py) {
+  if (helpOpen) { helpOpen = false; return; }
+  if (gs === 'PLAYING') {
+    for (var b = 0; b < hudBtns.length; b++) {
+      var bt = hudBtns[b];
+      if (px >= bt.x && px <= bt.x + bt.w && py >= bt.y && py <= bt.y + bt.h) {
+        if (bt.id === 'undo') doUndo();
+        else if (bt.id === 'shuffle') doShuffle();
+        else if (bt.id === 'help') helpOpen = true;
+        return;
+      }
+    }
+    var hit = null, hitLayer = -1;
+    for (var i = 0; i < tiles.length; i++) {
+      var t = tiles[i];
+      if (t.removed) continue;
+      var sp = tileScreen(t);
+      var half = sp.s / 2 + SPAWN_PADDING * GF.S * 0.5;
+      if (px >= sp.x - half && px <= sp.x + half && py >= sp.y - half && py <= sp.y + half) {
+        if (t.layer >= hitLayer) { hit = t; hitLayer = t.layer; }
+      }
+    }
+    if (hit) tapTile(hit);
+    return;
+  }
+  // overlay states (MENU / WIN / GAMEOVER)
+  for (var o = overlayBtns.length - 1; o >= 0; o--) {
+    var ob = overlayBtns[o];
+    if (px >= ob.x && px <= ob.x + ob.w && py >= ob.y && py <= ob.y + ob.h) { ob.fn(); return; }
+  }
+}
+
+// Tap-only input (no drag). Own listeners so gf-lib's joystick model doesn't
+// interfere with tile picking.
+(function wireTaps() {
+  var cv = GF.canvas;
+  var downX = 0, downY = 0, downT = 0, moved = false;
+  function pos(e) {
+    var r = cv.getBoundingClientRect();
+    var src = (e.changedTouches && e.changedTouches[0]) || e;
+    return { x: src.clientX - r.left, y: src.clientY - r.top };
+  }
+  cv.addEventListener('pointerdown', function(e) { var p = pos(e); downX = p.x; downY = p.y; downT = Date.now(); moved = false; });
+  cv.addEventListener('pointermove', function(e) { var p = pos(e); if (Math.abs(p.x - downX) > 14 || Math.abs(p.y - downY) > 14) moved = true; });
+  cv.addEventListener('pointerup', function(e) {
+    var p = pos(e);
+    if (!moved && (Date.now() - downT) < 800) onTap(p.x, p.y);
+  });
+})();
+
+// ── SCREENSHOT / TEST HOOKS ─────────────────────────────────────────────────
+window._setupForScreenshot = function(lv) {
+  lv = lv || 5;
+  seenTutorial = true;
+  startLevel(lv);
+  var taps = 0;
+  for (var pass = 0; pass < 60 && taps < 4; pass++) {
+    for (var i = 0; i < tiles.length; i++) {
+      var t = tiles[i];
+      if (t.removed || !tileTappable(t)) continue;
+      var c = 0; for (var q = 0; q < tray.length; q++) if (tray[q] === t.kind) c++;
+      if (c < 2) { tapTile(t); taps++; if (taps >= 4) break; }
+    }
+  }
+  if (gs !== 'PLAYING') gs = 'PLAYING';
+};
+window._jumpLevel = function(lvl) {
+  if (lvl >= 99) {
+    startLevel(1);
+    tray = [0, 1, 2, 3, 4, 5, 6].slice(0, TRAY_SIZE); // 7 distinct → no triple
+    gameOver();
+    return;
+  }
+  window._setupForScreenshot(lvl || 5);
+};
+// Test-only hooks (safe to ship — used by the solvability harness). They drive
+// the SAME tapTile path a player uses, so they validate real game logic.
+window._startLevelClean = function(lv) { startLevel(lv || 1); };
+window._tappable = function() {
+  var out = [];
+  for (var i = 0; i < tiles.length; i++) {
+    if (!tiles[i].removed && tileTappable(tiles[i])) out.push({ id: tiles[i].id, kind: tiles[i].kind });
+  }
+  return out;
+};
+window._tapById = function(id) {
+  for (var i = 0; i < tiles.length; i++) if (tiles[i].id === id) { tapTile(tiles[i]); return true; }
+  return false;
+};
+window._doUndo = function() { doUndo(); };
+window._doShuffle = function() { doShuffle(); };
+
+// ── UPDATE ───────────────────────────────────────────────────────────────────
+function update(dt) {
+  if (toast.t > 0) toast.t -= dt;
+  for (var i = trayAnims.length - 1; i >= 0; i--) { trayAnims[i].t += dt; if (trayAnims[i].t >= trayAnims[i].dur) trayAnims.splice(i, 1); }
+  for (var j = popAnims.length - 1; j >= 0; j--) { popAnims[j].t += dt; if (popAnims[j].t >= popAnims[j].dur) popAnims.splice(j, 1); }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  overlayBtns.length = 0; // rebuilt by whichever overlay draws this frame
+  layout();
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#241640'); g.addColorStop(0.55, '#1a1030'); g.addColorStop(1, '#120a22');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, GF.W, GF.H);
+
+  if (gs === 'PLAYING' || gs === 'WIN' || gs === 'GAMEOVER') {
+    drawBoardFrame(ctx);
+    drawTiles(ctx);
+    drawTray(ctx);
+    drawHUD(ctx);
+  }
+  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'WIN') drawWinOverlay(ctx);
+  if (gs === 'GAMEOVER') drawGameOverOverlay(ctx);
+  if (helpOpen) drawHelpPanel(ctx);
+  if (toast.t > 0) drawToast(ctx);
+}
+
+function drawBoardFrame(ctx) {
+  GF.rr(ctx, 6, board.y - 2, GF.W - 12, board.h + 4, 18);
+  ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fill();
+}
+
+function drawTile(ctx, x, y, s, kind, opts) {
+  opts = opts || {};
+  var k = KINDS[kind];
+  var r = s * 0.22;
+  ctx.save();
+  ctx.globalAlpha = opts.alpha != null ? opts.alpha : 1;
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = s * 0.18; ctx.shadowOffsetY = s * 0.08;
+  GF.rr(ctx, x - s/2, y - s/2, s, s, r);
+  var grad = ctx.createLinearGradient(x, y - s/2, x, y + s/2);
+  grad.addColorStop(0, lighten(k.col, 0.25)); grad.addColorStop(1, k.col);
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  GF.rr(ctx, x - s/2 + s*0.1, y - s/2 + s*0.08, s*0.8, s*0.32, r*0.7);
+  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fill();
+  GF.rr(ctx, x - s/2, y - s/2, s, s, r);
+  ctx.lineWidth = Math.max(1, s * 0.03); ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.stroke();
+  var drew = false;
+  if (GF.sprites && GF.sprites[k.id]) { GF.drawSprite(k.id, x, y, s * 0.78, null); drew = true; }
+  if (!drew) {
+    ctx.font = (s * 0.52) + 'px serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(k.glyph, x, y + s * 0.04);
+  }
+  if (opts.dim) { GF.rr(ctx, x - s/2, y - s/2, s, s, r); ctx.fillStyle = 'rgba(8,6,20,0.5)'; ctx.fill(); }
+  if (opts.locked) {
+    GF.rr(ctx, x - s/2, y - s/2, s, s, r); ctx.fillStyle = 'rgba(10,8,24,0.55)'; ctx.fill();
+    ctx.font = (s * 0.5) + 'px serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('🔒', x, y); // lock
+  }
+  ctx.restore();
+}
+
+function drawTiles(ctx) {
+  var sorted = tiles.slice().sort(function(a, b) { return a.layer - b.layer; });
+  for (var i = 0; i < sorted.length; i++) {
+    var t = sorted[i];
+    if (t.removed) continue;
+    var sp = tileScreen(t);
+    var locked = t.locked && lockStillHolds(t);
+    var tappable = tileTappable(t);
+    drawTile(ctx, sp.x, sp.y, sp.s, t.kind, { dim: !tappable && !locked, locked: locked });
+  }
+}
+
+function drawTray(ctx) {
+  var sz = traySlotSize;
+  var danger = tray.length >= TRAY_SIZE - 1;
+  for (var i = 0; i < TRAY_SIZE; i++) {
+    var sx = trayStartX + i * (sz + 6);
+    GF.rr(ctx, sx, trayY, sz, sz, sz * 0.18);
+    ctx.fillStyle = (i < tray.length) ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.035)';
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = danger ? 'rgba(255,90,95,0.85)' : 'rgba(255,255,255,0.14)';
+    ctx.stroke();
+  }
+  for (var j = 0; j < tray.length; j++) {
+    var tx = trayStartX + j * (sz + 6) + sz / 2;
+    drawTile(ctx, tx, trayY + sz / 2, sz * 0.92, tray[j], {});
+  }
+}
+
+function drawHUD(ctx) {
+  var W = GF.W;
+  var topY = board.y * 0.5;
+  ctx.textBaseline = 'middle';
+  var fs = GF.clamp(15 * GF.S, 12, 20);
+  ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#ffe066'; ctx.textAlign = 'left';
+  ctx.fillText(GF.t('level') + ' ' + level, 12, topY);
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'right';
+  ctx.fillText(GF.t('score') + ' ' + score, W - 58, topY);
+  // tiles left + progress (center)
+  ctx.textAlign = 'center'; ctx.fillStyle = '#cfe';
+  var ft = GF.clamp(13 * GF.S, 11, 17);
+  ctx.font = 'bold ' + ft + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('tilesLeft') + ': ' + tilesRemaining, W / 2, topY - ft * 0.6);
+  var total = tiles.length || 1, cleared = total - tilesRemaining;
+  var barW = Math.min(220, W * 0.42), barH = 5;
+  var barX = W / 2 - barW / 2, barY = topY + ft * 0.45;
+  GF.rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+  GF.rr(ctx, barX, barY, barW * (cleared / total), barH, barH / 2); ctx.fillStyle = '#2ee6a6'; ctx.fill();
+  // ? help button
+  var qs = Math.max(MIN_TAP_PX, 42);
+  var qx = W - qs - 6, qy = topY - qs / 2;
+  drawHudCircle(ctx, qx, qy, qs, '?');
+  // boosters row, under the tray
+  var byTop = trayY + traySlotSize + 10;
+  var bw = GF.clamp(126 * GF.S, 100, 156);
+  var bh = Math.max(MIN_TAP_PX, GF.clamp(48 * GF.S, 44, 56));
+  var undoX = trayStartX;
+  var shufX = trayStartX + (TRAY_SIZE * (traySlotSize + 6) - 6) - bw;
+  drawBoosterBtn(ctx, undoX, byTop, bw, bh, GF.t('undo'), undosLeft, undosLeft > 0, '↩');
+  drawBoosterBtn(ctx, shufX, byTop, bw, bh, GF.t('shuffle'), shufflesLeft, shufflesLeft > 0, '🔀');
+  hudBtns = [
+    { id: 'help', x: qx, y: qy, w: qs, h: qs },
+    { id: 'undo', x: undoX, y: byTop, w: bw, h: bh },
+    { id: 'shuffle', x: shufX, y: byTop, w: bw, h: bh },
+  ];
+}
+
+function drawHudCircle(ctx, x, y, s, txt) {
+  ctx.beginPath(); ctx.arc(x + s/2, y + s/2, s/2, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,255,255,0.3)'; ctx.stroke();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + (s * 0.5) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, x + s/2, y + s/2 + 1);
+}
+
+function drawBoosterBtn(ctx, x, y, w, h, label, count, enabled, icon) {
+  GF.rr(ctx, x, y, w, h, h * 0.3);
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  if (enabled) { grad.addColorStop(0, '#3a78ff'); grad.addColorStop(1, '#2a5bd0'); }
+  else { grad.addColorStop(0, '#3a3550'); grad.addColorStop(1, '#2a2740'); }
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = enabled ? '#fff' : '#8a86a0';
+  var fs = GF.clamp(14 * GF.S, 12, 18);
+  ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(icon + ' ' + label + '  ' + count, x + w / 2, y + h / 2 + 1);
+}
+
+// ── OVERLAYS ─────────────────────────────────────────────────────────────────
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/);
+  var lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+function drawTutorialBlock(ctx, keys, topY, fs, maxW) {
+  ctx.font = fs + 'px Inter, system-ui, sans-serif';
+  var lineH = fs * 1.32;
+  var leftX = GF.W / 2 - maxW / 2;
+  var y = topY;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  for (var b = 0; b < keys.length; b++) {
+    var grp = wrapLines(ctx, keys[b], maxW);
+    for (var l = 0; l < grp.length; l++) {
+      ctx.fillStyle = (l === 0) ? '#ffe066' : '#dfe8ff';
+      ctx.font = (l === 0 ? 'bold ' : '') + fs + 'px Inter, system-ui, sans-serif';
+      ctx.fillText(grp[l], leftX, y);
+      y += lineH;
+    }
+    y += lineH * 0.22;
+  }
+  return y; // bottom y
+}
+
+function drawMenu(ctx) {
+  var W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(10,8,22,0.84)'; ctx.fillRect(0, 0, W, H);
+  // tile-trio motif
+  var demoY = H * 0.15;
+  var ds = GF.clamp(46 * GF.S, 34, 58);
+  for (var i = 0; i < 3; i++) drawTile(ctx, W/2 + (i - 1) * (ds + 8), demoY, ds, 4, {});
+  // title
+  var titleFs = GF.clamp(40 * GF.S, 26, 54);
+  ctx.shadowColor = 'rgba(46,230,166,0.5)'; ctx.shadowBlur = 24;
+  ctx.font = 'bold ' + titleFs + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('title'), W/2, H * 0.25);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(16 * GF.S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#9be7c9';
+  ctx.fillText(GF.t('sub'), W/2, H * 0.25 + GF.clamp(26*GF.S,18,32));
+  // how-to (condensed for returning players)
+  var keys = seenTutorial ? [GF.t('seen_hint')]
+    : [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var maxW = Math.min(W * 0.84, 460);
+  var fs = GF.clamp(14.5 * GF.S, 12, 18);
+  var bottomY = drawTutorialBlock(ctx, keys, H * 0.34, fs, maxW);
+  // PLAY / RESUME
+  var btnW = GF.clamp(240 * GF.S, 180, 320), btnH = Math.max(MIN_TAP_PX + 8, GF.clamp(56 * GF.S, 50, 66));
+  var btnX = W/2 - btnW/2, btnY = Math.min(H - btnH - 22, bottomY + 16);
+  drawBigButton(ctx, btnX, btnY, btnW, btnH, savedHasProgress() ? GF.t('resume') : GF.t('play'));
+  overlayBtns.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: function() {
+    seenTutorial = true; try { localStorage.setItem(SEEN_KEY, '1'); } catch (e) {}
+    startGame();
+  }});
+  if (best > 0) {
+    ctx.fillStyle = '#7a86b6'; ctx.font = GF.clamp(13*GF.S,10,16) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText(GF.t('best') + ': ' + best, W/2, btnY + btnH + 12);
+  }
+}
+function savedHasProgress() { return level > 1; }
+
+function drawWinOverlay(ctx) {
+  var W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(8,18,14,0.8)'; ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(38 * GF.S, 24, 50);
+  ctx.shadowColor = 'rgba(46,230,166,0.6)'; ctx.shadowBlur = 26;
+  ctx.font = 'bold ' + titleFs + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#9be7c9'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('win'), W/2, H * 0.4);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(18*GF.S,14,24) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('score') + ': ' + score, W/2, H * 0.4 + GF.clamp(34*GF.S,24,40));
+  var btnW = GF.clamp(240 * GF.S, 180, 320), btnH = Math.max(MIN_TAP_PX + 8, GF.clamp(56 * GF.S, 50, 66));
+  var btnX = W/2 - btnW/2, btnY = H * 0.55;
+  drawBigButton(ctx, btnX, btnY, btnW, btnH, GF.t('next'));
+  overlayBtns.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: nextLevel });
+}
+
+function drawGameOverOverlay(ctx) {
+  var W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(22,8,12,0.82)'; ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(36 * GF.S, 22, 48);
+  ctx.shadowColor = 'rgba(255,90,95,0.55)'; ctx.shadowBlur = 24;
+  ctx.font = 'bold ' + titleFs + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#ff8a8f'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('gameover'), W/2, H * 0.4);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(17*GF.S,13,22) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText(GF.t('level') + ' ' + level + '  -  ' + GF.t('score') + ': ' + score, W/2, H * 0.4 + GF.clamp(34*GF.S,24,40));
+  var btnW = GF.clamp(240 * GF.S, 180, 320), btnH = Math.max(MIN_TAP_PX + 8, GF.clamp(56 * GF.S, 50, 66));
+  var btnX = W/2 - btnW/2, btnY = H * 0.55;
+  drawBigButton(ctx, btnX, btnY, btnW, btnH, GF.t('retry'));
+  overlayBtns.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: retryLevel });
+}
+
+function drawHelpPanel(ctx) {
+  var W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(8,8,20,0.92)'; ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(26 * GF.S, 20, 34);
+  ctx.font = 'bold ' + titleFs + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#ffe066'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('howto'), W/2, H * 0.15);
+  var keys = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var maxW = Math.min(W * 0.86, 480);
+  var fs = GF.clamp(15 * GF.S, 12, 19);
+  var bottomY = drawTutorialBlock(ctx, keys, H * 0.25, fs, maxW);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#9aa3c0';
+  ctx.font = GF.clamp(14*GF.S,11,18) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('tapClose'), W/2, Math.min(H - 40, bottomY + 14));
+}
+
+function drawToast(ctx) {
+  var W = GF.W;
+  ctx.globalAlpha = Math.min(1, toast.t);
+  var fs = GF.clamp(16*GF.S,13,20);
+  ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var tw = ctx.measureText(toast.txt).width + 34;
+  var bx = W/2 - tw/2, by = GF.H * 0.66;
+  GF.rr(ctx, bx, by, tw, fs + 18, (fs + 18) / 2);
+  ctx.fillStyle = 'rgba(20,16,30,0.92)'; ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText(toast.txt, W/2, by + (fs + 18) / 2);
+  ctx.globalAlpha = 1;
+}
+
+function drawBigButton(ctx, x, y, w, h, label) {
+  GF.rr(ctx, x, y, w, h, h / 2);
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, '#2ee6a6'); grad.addColorStop(1, '#27b07f');
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#06241a';
+  ctx.font = 'bold ' + GF.clamp(20*GF.S,16,26) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w/2, y + h/2 + 1);
+}
+
+function lighten(hex, amt) {
+  var c = hex.replace('#', '');
+  var r = parseInt(c.substr(0,2),16), g = parseInt(c.substr(2,2),16), b = parseInt(c.substr(4,2),16);
+  r = Math.min(255, Math.round(r + (255 - r) * amt));
+  g = Math.min(255, Math.round(g + (255 - g) * amt));
+  b = Math.min(255, Math.round(b + (255 - b) * amt));
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 540,
+  designH: 960,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'tile_trio',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem(BEST_KEY) || '0') || 0; } catch (e) {}
+    try { seenTutorial = localStorage.getItem(SEEN_KEY) === '1'; } catch (e) {}
+    // Yandex 1.9 — persist run progress across reload (level + live board).
+    GF.persist('tile_trio_run_v1',
+      function() {
+        return {
+          gs: gs, level: level, score: score,
+          tiles: tiles, tray: tray, tilesRemaining: tilesRemaining,
+          undosLeft: undosLeft, shufflesLeft: shufflesLeft, undoStack: undoStack,
+        };
+      },
+      function(s) {
+        if (!s) return;
+        level = s.level || 1;
+        score = s.score || 0;
+        if (s.gs === 'PLAYING' && s.tiles && s.tiles.length) {
+          tiles = s.tiles; tray = s.tray || [];
+          tilesRemaining = (typeof s.tilesRemaining === 'number') ? s.tilesRemaining
+            : tiles.filter(function(t){ return !t.removed; }).length;
+          undosLeft = (typeof s.undosLeft === 'number') ? s.undosLeft : UNDO_LIMIT;
+          shufflesLeft = (typeof s.shufflesLeft === 'number') ? s.shufflesLeft : SHUFFLE_LIMIT;
+          undoStack = s.undoStack || [];
+          gs = 'PLAYING';
+        } else { gs = 'MENU'; }
+      }
+    );
+    if (gs !== 'PLAYING') gs = 'MENU'; // safe entry
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── EXPOSE STATE (post-build-tester / yandex-testing gate) ──────────────────
+GF.exposeState(function() {
+  return {
+    gs: gs, level: level, score: score, best: best,
+    tilesRemaining: tilesRemaining,
+    trayLength: tray.length, tray: tray.slice(),
+    undosLeft: undosLeft, shufflesLeft: shufflesLeft,
+    TRAY_SIZE: TRAY_SIZE, MATCH_COUNT: MATCH_COUNT,
+    DESIGNED_LEVELS: DESIGNED_LEVELS, TILE_KINDS_BY_LEVEL: TILE_KINDS_BY_LEVEL,
+    LAYER_COUNT: LAYER_COUNT, LOCKED_TILE_START_LEVEL: LOCKED_TILE_START_LEVEL,
+    UNDO_LIMIT: UNDO_LIMIT, SHUFFLE_LIMIT: SHUFFLE_LIMIT,
+    SPAWN_PADDING: SPAWN_PADDING, TILE_SIZE: TILE_SIZE,
+    seenTutorial: seenTutorial, hasTriple: hasTriple(tray),
+  };
+});
+
+// ── YANDEX MUST-HAVES ──────────────────────────────────────────────────────
+// 1. All UI text via GF.t()/STRINGS (en+ru above).
+// 2. Run state persisted via GF.persist(); GF.saveRun() called on every
+//    mutation (tap, undo, shuffle, start/win/gameover).
+// 3. Fullscreen-exit / orientation resize handled by gf-lib listeners.
+// 4. Ads fire only inside user-click handlers (nextLevel / retryLevel via
+//    fireAdThen) — never auto-fired on a state transition.
+
+})();
+</script>
+</body>
+</html>
