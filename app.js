@@ -288,6 +288,9 @@ function paintAuthPill() {
   const initial = document.getElementById('auth-user-initial');
   const emailEl = document.getElementById('auth-user-email');
   if (!link || !user) return;
+  // Tag the body so the meta-pill (tokens/streak/board) drops BELOW the signed-in
+  // auth pill instead of overlapping it — both sit top-right. (Tim 2026-05-29)
+  document.body.classList.toggle('is-signed-in', !!(me && me.signed_in));
   if (me && me.signed_in) {
     link.style.display = 'none';
     user.style.display = 'inline-flex';
