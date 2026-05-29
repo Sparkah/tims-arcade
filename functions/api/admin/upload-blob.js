@@ -16,9 +16,14 @@ export async function onRequestGet({ request, env }) {
   const buf = await env.VOTES.get(`${kind === 'cover' ? 'uploadcover' : 'uploadblob'}:${id}`, { type: 'arrayBuffer' });
   if (!buf) return err('not_found', 404);
 
-  return new Response(buf, {
-    headers: { 'content-type': kind === 'cover' ? 'image/png' : 'application/zip' },
-  });
+  let ct = 'application/zip';
+  if (kind === 'cover') {
+    const b = new Uint8Array(buf.slice(0, 4));
+    ct = (b[0] === 0xFF && b[1] === 0xD8) ? 'image/jpeg'
+       : (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46) ? 'image/webp'
+       : 'image/png';
+  }
+  return new Response(buf, { headers: { 'content-type': ct } });
 }
 
 function err(msg, status) {
