@@ -30,10 +30,9 @@ export async function onRequest({ request }) {
     ? undefined
     : await request.arrayBuffer();
 
-  const upstream = await fetch(target, { method, headers, body, redirect: 'manual' });
-  return new Response(upstream.body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: upstream.headers,
-  });
+  // Return the upstream response directly. Re-wrapping it would copy stale
+  // content-encoding/content-length headers if the CF runtime auto-decompressed
+  // the body (the classic reverse-proxy footgun that corrupts array.js / capture
+  // responses). PostHog's own CF proxy guide returns the fetch response as-is.
+  return fetch(target, { method, headers, body, redirect: 'manual' });
 }
