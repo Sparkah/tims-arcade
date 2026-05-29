@@ -19,6 +19,12 @@ export async function onRequestPost({ request, env }) {
   const email = String(body.email || '').trim().toLowerCase();
   if (!isValidEmail(email)) return jsonError('bad_email', 400);
 
+  // Where to land the user AFTER they click the link. Same-origin path only
+  // (open-redirect-safe). Defaults to "/" in verify.js when absent. This is the
+  // fix for the /submit funnel: signing in from /submit used to dump the user on
+  // the gallery home with no upload form. (paveloid1982 report, 2026-05-29)
+  const next = sanitizeNext(body.next);
+
   // Rate limit by IP — soft cap, not security critical
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `authrate:${ip}:${Math.floor(Date.now() / 600000)}`;
@@ -33,7 +39,7 @@ export async function onRequestPost({ request, env }) {
   // Stash token → email mapping with 15-min TTL.
   await env.VOTES.put(
     `magiclink:${token}`,
-    JSON.stringify({ email, ts: Date.now() }),
+    JSON.stringify({ email, next, ts: Date.now() }),
     { expirationTtl: 900 }
   );
 
@@ -71,7 +77,23 @@ export async function onRequestPost({ request, env }) {
       headers: { 'content-type': 'application/json' },
     });
   }
+  // Surface a real send failure instead of a silent 204. Previously ANY outcome
+  // (Resend rejected the recipient, no RESEND_API_KEY set, network error) still
+  // returned 204, so the UI told the user "check your email" when nothing was
+  // ever delivered — exactly how paveloid1982 got stuck (2026-05-29). "resend-ok"
+  // is the only success; "logged-server-side" means Resend isn't configured.
+  if (delivery !== 'resend-ok') return jsonError('email_send_failed', 502);
   return new Response(null, { status: 204 });
+}
+
+// Same-origin path only ("/...", but not "//host" or "/\"), no control chars or
+// whitespace. Blocks open-redirect + javascript:/CRLF injection into Location.
+function sanitizeNext(v) {
+  const s = String(v == null ? '' : v);
+  if (s.length < 1 || s.length > 200) return null;
+  if (s[0] !== '/' || s[1] === '/' || s[1] === '\\') return null;
+  if (/[\x00-\x1f\s]/.test(s)) return null;
+  return s;
 }
 
 function isValidEmail(s) {

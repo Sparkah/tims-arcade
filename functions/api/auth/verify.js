@@ -23,6 +23,11 @@ export async function onRequestGet({ request, env }) {
   // One-shot: delete the token immediately so it can't be reused.
   await env.VOTES.delete(k);
 
+  // Land the user back where they started the sign-in (e.g. /submit), not always
+  // the gallery home. Re-validated here as defense-in-depth even though
+  // request.js already sanitized it. (paveloid1982 funnel fix, 2026-05-29)
+  const next = sanitizeNext(data.next) || '/';
+
   const email = String(data.email).toLowerCase();
   const uid = await emailToUid(email);
 
@@ -43,10 +48,21 @@ export async function onRequestGet({ request, env }) {
   return new Response(null, {
     status: 302,
     headers: {
-      'Location': `${url.origin}/`,
+      'Location': `${url.origin}${next}`,
       'Set-Cookie': `tgl_session=${cookie}; Path=/; Expires=${new Date(expTs).toUTCString()}; HttpOnly; Secure; SameSite=Lax`,
     },
   });
+}
+
+// Same-origin path only ("/...", not "//host" or "/\"), no control chars. Keeps
+// an attacker-supplied token payload from turning the post-login redirect into
+// an open redirect / header injection. Mirror of request.js's sanitizeNext.
+function sanitizeNext(v) {
+  const s = String(v == null ? '' : v);
+  if (s.length < 1 || s.length > 200) return null;
+  if (s[0] !== '/' || s[1] === '/' || s[1] === '\\') return null;
+  if (/[\x00-\x1f\s]/.test(s)) return null;
+  return s;
 }
 
 // ── helpers (also used by other auth endpoints) ─────────────────────────────
