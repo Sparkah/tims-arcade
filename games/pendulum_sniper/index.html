@@ -43,6 +43,8 @@ var STRINGS = {
     'tut_step3': 'Tap again to FIRE in the pendulum’s direction. The shot flies along the line.',
     'tut_step4': 'You have only 3 STOPS and limited ENERGY. Clear all 4 targets to win.',
     close: 'GOT IT',
+    rank: 'RANK', focus: 'FOCUS', loadout: 'Loadout', next: 'Next',
+    maxrank: 'Max rank reached', rankup: 'RANK UP →',
   },
   ru: {
     title: 'Маятник-Снайпер',
@@ -65,6 +67,8 @@ var STRINGS = {
     'tut_step3': 'Нажмите снова, чтобы ВЫСТРЕЛИТЬ в направлении маятника. Выстрел летит вдоль линии.',
     'tut_step4': 'У вас всего 3 ОСТАНОВКИ и ограниченная ЭНЕРГИЯ. Уничтожьте все 4 цели.',
     close: 'ПОНЯТНО',
+    rank: 'РАНГ', focus: 'ФОКУС', loadout: 'Снаряжение', next: 'След',
+    maxrank: 'Максимальный ранг', rankup: 'НОВЫЙ РАНГ →',
   },
 };
 
@@ -79,6 +83,59 @@ var TARGET_RADIUS       = 26;     // design units
 var TARGET_SPEED        = 110;    // base px/s
 var ARC_MOMENTUM_BONUS  = 8;      // refund on apex hit
 var STOP_RELEASE_DELAY  = 0.12;
+
+// ── META-PROGRESSION — "Marksman Ranks" (iteration #1, retention) ──────────
+// Persistent, owned progression that grows ACROSS sessions. Every run banks
+// FOCUS (soft currency from targets destroyed); accumulated Focus permanently
+// raises your RANK, and each rank reached grants ONE permanent perk applied to
+// every future run (+1 stop, or +energy budget). This is the reason to come
+// back tomorrow: you are always partway to the next rank, and the loadout you
+// have unlocked is YOURS forever. Self-contained & additive — the core loop
+// only reads owned perks at run start.
+var RANKS = [
+  { name: 'RECRUIT',      focus: 0,   perk: null,                    blurb: '' },
+  { name: 'MARKSMAN',     focus: 8,   perk: { type:'stop',   v: 1 }, blurb: '+1 STOP per round' },
+  { name: 'SHARPSHOOTER', focus: 22,  perk: { type:'energy', v: 25 },blurb: '+25 energy budget' },
+  { name: 'DEADEYE',      focus: 46,  perk: { type:'stop',   v: 1 }, blurb: '+1 STOP per round' },
+  { name: 'GHOST',        focus: 84,  perk: { type:'energy', v: 35 },blurb: '+35 energy budget' },
+  { name: 'LEGEND',       focus: 150, perk: { type:'stop',   v: 1 }, blurb: '+1 STOP per round' },
+];
+var metaFocus = 0;            // cumulative Focus, persisted across sessions
+var rankAtRunStart = 0;       // rank index when the current run began
+var lastFocusEarned = 0;      // Focus banked by the most recent run
+var rankedUpTo = null;        // RANKS entry if last run crossed a rank, else null
+
+function rankIndex() {
+  var idx = 0;
+  for (var i = 0; i < RANKS.length; i++) { if (metaFocus >= RANKS[i].focus) idx = i; }
+  return idx;
+}
+function perkTotal(type) {       // sum of owned perks of a type across reached ranks
+  var idx = rankIndex(), sum = 0;
+  for (var i = 0; i <= idx; i++) { var p = RANKS[i].perk; if (p && p.type === type) sum += p.v; }
+  return sum;
+}
+function bonusStops()  { return perkTotal('stop'); }
+function bonusEnergy() { return perkTotal('energy'); }
+// Focus earned from a finished run: targets destroyed + a small win/streak kicker.
+function focusFromRun() {
+  var f = targets_hit;
+  if (gs === 'WIN') f += 2;                       // clearing the arena pays a bonus
+  if (gs === 'WIN' && energy > 50) f += 1;        // clean clear pays a touch more
+  return Math.max(0, Math.round(f));
+}
+// Progress toward the next rank → {next, have, need, frac}. next=null at cap.
+function rankProgress() {
+  var idx = rankIndex();
+  if (idx >= RANKS.length - 1) return { next: null, have: metaFocus, need: 0, frac: 1 };
+  var cur = RANKS[idx].focus, nxt = RANKS[idx + 1].focus;
+  var have = metaFocus - cur, need = nxt - cur;
+  return { next: RANKS[idx + 1], have: have, need: need, frac: GF.clamp(have / need, 0, 1) };
+}
+function loadMeta() {
+  try { var v = parseInt(localStorage.getItem('pendulum_sniper_focus') || '0'); if (!isNaN(v) && v >= 0) metaFocus = v; } catch (e) {}
+}
+function saveMeta() { try { localStorage.setItem('pendulum_sniper_focus', String(metaFocus)); } catch (e) {} }
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WIN
@@ -234,6 +291,17 @@ function apexFactor() {
 }
 
 // ── SHOT ─────────────────────────────────────────────────────────────────
+// Bank Focus into the persistent meta when a run ends, and flag any rank-up
+// so the end overlay can celebrate it. Called from both terminal branches.
+function bankFocus() {
+  lastFocusEarned = focusFromRun();
+  metaFocus += lastFocusEarned;
+  saveMeta();
+  var nowRank = rankIndex();
+  rankedUpTo = (nowRank > rankAtRunStart) ? RANKS[nowRank] : null;
+  if (rankedUpTo) { GF.setShake && GF.setShake(0.6); }
+}
+
 function fireShot(forced) {
   var ch = crosshairPos();
   var hitRadius = (TARGET_RADIUS + 12) * GF.S;
@@ -278,6 +346,7 @@ function fireShot(forced) {
       best = targets_hit; bestEnergy = Math.floor(energy);
       saveBest();
     }
+    bankFocus();
     GF.gameEnded();
     GF.spawnParticles(GF.cx, GF.cy, '#2ecc71', 30);
     GF.saveRun && GF.saveRun();
@@ -286,6 +355,7 @@ function fireShot(forced) {
   if ((stops_left <= 0 || energy <= 0) && targets_alive > 0) {
     gs = 'GAMEOVER';
     if (targets_hit > best) { best = targets_hit; bestEnergy = Math.floor(energy); saveBest(); }
+    bankFocus();
     GF.gameEnded();
     GF.spawnParticles(GF.cx, GF.cy, '#e74c5e', 24);
     GF.saveRun && GF.saveRun();
@@ -406,8 +476,9 @@ function reopenTutorial() {
 
 // ── GAME LIFECYCLE ───────────────────────────────────────────────────────
 function startGame() {
-  stops_left = MAX_STOPS;
-  energy = ENERGY_BUDGET;
+  rankAtRunStart = rankIndex();
+  stops_left = MAX_STOPS + bonusStops();
+  energy = ENERGY_BUDGET + bonusEnergy();
   targets_hit = 0;
   targets_alive = TARGETS_PER_ROUND;
   resetPendulum();
@@ -677,6 +748,49 @@ function wrapText(c, text, x, y, maxW, lineH) {
   return y;
 }
 
+// Shared rank + Focus-progress renderer used by the menu and end overlay.
+// Draws a centered RANK label, owned loadout, and a progress bar to next rank.
+function drawRankPanel(c, topY) {
+  var W = GF.W;
+  var idx = rankIndex(), r = RANKS[idx], pr = rankProgress();
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#5ad1e6';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('rank') + ' · ' + r.name, W / 2, topY);
+  var y = topY + GF.clamp(20 * GF.S, 15, 26);
+  var lo = [];
+  if (bonusStops() > 0)  lo.push('+' + bonusStops() + ' ' + GF.t('stops'));
+  if (bonusEnergy() > 0) lo.push('+' + bonusEnergy() + ' ' + GF.t('energy'));
+  if (lo.length) {
+    c.fillStyle = '#9ab';
+    c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    c.fillText(GF.t('loadout') + ': ' + lo.join('  ·  '), W / 2, y);
+    y += GF.clamp(18 * GF.S, 14, 24);
+  }
+  var barW = Math.min(W * 0.6, 300 * GF.S);
+  var barH = GF.clamp(9 * GF.S, 7, 13);
+  var bx = (W - barW) / 2;
+  if (pr.next) {
+    c.fillStyle = '#7c8aa0';
+    c.font = GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+    c.fillText(GF.t('next') + ': ' + pr.next.name + ' — ' + pr.have + '/' + pr.need +
+      ' ' + GF.t('focus') + '  (' + pr.next.blurb + ')', W / 2, y);
+    y += GF.clamp(14 * GF.S, 11, 19);
+    GF.rr(c, bx, y, barW, barH, barH / 2);
+    c.fillStyle = '#1a2030'; c.fill();
+    c.strokeStyle = '#3a4458'; c.lineWidth = 1; c.stroke();
+    var fw = Math.max(barH, barW * pr.frac);
+    GF.rr(c, bx, y, fw, barH, barH / 2);
+    var pg = c.createLinearGradient(bx, y, bx + barW, y);
+    pg.addColorStop(0, '#5ad1e6'); pg.addColorStop(1, '#6ee7a8');
+    c.fillStyle = pg; c.fill();
+  } else {
+    c.fillStyle = '#6ee7a8';
+    c.font = GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+    c.fillText(GF.t('maxrank') + ' — ' + metaFocus + ' ' + GF.t('focus'), W / 2, y);
+  }
+}
+
 function drawMenu(c) {
   var W = GF.W, H = GF.H;
   c.fillStyle = '#0a0a14';
@@ -725,6 +839,7 @@ function drawMenu(c) {
       (bestEnergy > 0 ? '  ·  ' + GF.t('energy') + ' ' + bestEnergy : ''),
       W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
   }
+  drawRankPanel(c, by + bh + GF.clamp(best > 0 ? 50 : 30, 24, 70));
 }
 
 function drawEndOverlay(c) {
@@ -773,6 +888,19 @@ function drawEndOverlay(c) {
   c.strokeStyle = '#3a3a4a'; c.lineWidth = 2; c.stroke();
   c.fillStyle = '#cfd8e0';
   c.fillText(GF.t('menu'), bx + bw / 2, by2 + bh / 2);
+
+  // --- persistent meta: Focus earned this run + rank-up celebration ---
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#6ee7a8';
+  c.font = 'bold ' + GF.clamp(17 * GF.S, 13, 22) + 'px sans-serif';
+  c.fillText('+' + lastFocusEarned + ' ' + GF.t('focus'), W / 2, H * 0.555);
+  if (rankedUpTo) {
+    c.fillStyle = '#f6c453';
+    c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+    c.fillText(GF.t('rankup') + ' ' + rankedUpTo.name + '!  (' + rankedUpTo.blurb + ')', W / 2, H * 0.585);
+  }
+  // rank + progress panel below the two buttons
+  drawRankPanel(c, by2 + bh + GF.clamp(34 * GF.S, 24, 54));
 }
 
 function draw(c) {
@@ -808,6 +936,8 @@ GF.init({
   saveKey: 'pendulum_sniper',
   onReady: function() {
     loadBest();
+    loadMeta();
+    rankAtRunStart = rankIndex();
     resetPendulum();
     GF.persist('pendulum_sniper_run_v1',
       function() {
@@ -866,6 +996,11 @@ GF.exposeState(function() {
     TARGET_SPEED: TARGET_SPEED,
     ARC_MOMENTUM_BONUS: ARC_MOMENTUM_BONUS,
     STOP_RELEASE_DELAY: STOP_RELEASE_DELAY,
+    metaFocus: metaFocus,
+    rank: RANKS[rankIndex()].name,
+    bonusStops: bonusStops(),
+    bonusEnergy: bonusEnergy(),
+    lastFocusEarned: lastFocusEarned,
   };
 });
 

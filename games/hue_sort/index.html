@@ -89,6 +89,71 @@ function blend(a, b) {
 function isPrimary(c) { return c === 1 || c === 2 || c === 3; }
 function isMix(c) { return c === 4 || c === 5 || c === 6; }
 
+// ── PERSISTENT META (Lab Rank) ─────────────────────────────────────────────
+// The owned, cross-session progression: every PURE tube you ever complete adds
+// to a lifetime counter that climbs a named "Lab Rank" ladder. This is the meta
+// the player builds and keeps — it persists forever (hue_sort_purified), shows
+// on the menu with a progress bar to the next rank, and gives a long-horizon
+// goal on top of the 6 campaign levels (the "why come back tomorrow").
+var tubesPurified = 0;     // lifetime count of pure tubes completed (persisted)
+var RANKS = [
+  { at: 0,   name: 'Intern',        nameRu: 'Стажёр' },
+  { at: 10,  name: 'Lab Assistant', nameRu: 'Лаборант' },
+  { at: 25,  name: 'Chemist',       nameRu: 'Химик' },
+  { at: 50,  name: 'Colourist',     nameRu: 'Колорист' },
+  { at: 90,  name: 'Hue Master',    nameRu: 'Мастер цвета' },
+  { at: 150, name: 'Spectrum Sage', nameRu: 'Мудрец спектра' },
+  { at: 240, name: 'Prism Legend',  nameRu: 'Легенда призмы' },
+];
+function rankIndexFor(n) {
+  var idx = 0;
+  for (var i = 0; i < RANKS.length; i++) if (n >= RANKS[i].at) idx = i;
+  return idx;
+}
+// Robustly detect the active language without assuming a GF.lang field exists:
+// the PLAY string is 'ИГРАТЬ' in RU and 'PLAY' in EN.
+function isRu() { try { return GF.t('play') === STRINGS.ru.play; } catch (e) { return false; } }
+function rankName(i) {
+  var r = RANKS[i] || RANKS[0];
+  return isRu() ? r.nameRu : r.name;
+}
+// Progress {cur,need,frac,maxed} toward the NEXT rank from a lifetime count.
+function rankProgress(n) {
+  var i = rankIndexFor(n);
+  if (i >= RANKS.length - 1) return { cur: n - RANKS[i].at, need: 0, frac: 1, maxed: true };
+  var base = RANKS[i].at, next = RANKS[i + 1].at;
+  return { cur: n - base, need: next - base, frac: (n - base) / (next - base), maxed: false };
+}
+// Award purified tubes; persist; celebrate a rank-up. Returns true on rank-up.
+function awardPurified(count) {
+  if (!count) return false;
+  var before = rankIndexFor(tubesPurified);
+  tubesPurified += count;
+  try { localStorage.setItem('hue_sort_purified', String(tubesPurified)); } catch (e) {}
+  var after = rankIndexFor(tubesPurified);
+  if (after > before) {
+    var c = { x: GF.W / 2, y: GF.H * 0.30 };
+    GF.spawnFloat(c.x, c.y, 'RANK UP!', '#ffe27a');
+    GF.spawnParticles(c.x, c.y, '#ffe27a', 26);
+    GF.happytime();
+    return true;
+  }
+  return false;
+}
+// Count how many tubes are currently full & pure (used at level-clear).
+function countPureTubes() {
+  var n = 0;
+  for (var i = 0; i < tubes.length; i++) {
+    var a = tubes[i];
+    if (a.length === TUBE_CAP && isPrimary(a[0])) {
+      var pure = true;
+      for (var k = 1; k < a.length; k++) if (a[k] !== a[0]) { pure = false; break; }
+      if (pure) n++;
+    }
+  }
+  return n;
+}
+
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';           // MENU | PLAYING | LEVELEND | GAMEOVER | WIN
 var level = 1;
@@ -253,6 +318,9 @@ function applyPour() {
 function evaluate() {
   if (isSolved()) {
     if (level > bestLevel) { bestLevel = level; try { localStorage.setItem('hue_sort_best', bestLevel); } catch (e) {} }
+    // Persistent meta: bank every pure tube from this solved level into the
+    // lifetime Lab-Rank counter (the owned, cross-session progression).
+    awardPurified(countPureTubes());
     if (level >= WIN_LEVELS) { gs = 'WIN'; GF.gameEnded(); GF.happytime(); }
     else { gs = 'LEVELEND'; }
     GF.saveRun();
@@ -622,7 +690,11 @@ function drawMenu(ctx) {
   var tubeBlockY = titleY + GF.clamp(52 * S, 38, 68);
   drawTitleTubes(ctx, cx, tubeBlockY);
 
-  var y = tubeBlockY + GF.clamp(112 * S, 84, 158);
+  // ── Lab Rank meta panel (persistent, owned progression) ──
+  var rankBlockY = tubeBlockY + GF.clamp(108 * S, 80, 152);
+  var rankBlockH = drawRankPanel(ctx, cx, rankBlockY, maxW);
+
+  var y = rankBlockY + rankBlockH + GF.clamp(14 * S, 8, 22);
   var fs = GF.clamp(15 * S, 12, 19);
   var lineH = fs * 1.28;
   ctx.font = fs + 'px sans-serif';
@@ -671,6 +743,66 @@ function drawTitleTubes(ctx, cx, y) {
   }
 }
 
+// Lab Rank panel: rank name + lifetime tubes-purified + progress bar to next
+// rank. Returns the block height so the caller can flow the tutorial below it.
+function drawRankPanel(ctx, cx, y, maxW) {
+  var S = GF.S;
+  var w = Math.min(maxW, GF.W * 0.78);
+  var x = cx - w / 2;
+  var ri = rankIndexFor(tubesPurified);
+  var prog = rankProgress(tubesPurified);
+
+  var labelFs = GF.clamp(12 * S, 10, 16);
+  var nameFs = GF.clamp(19 * S, 15, 26);
+  var barH = GF.clamp(9 * S, 7, 13);
+  var pad = GF.clamp(6 * S, 4, 10);
+  var blockH = labelFs + nameFs + barH + GF.clamp(20 * S, 14, 30);
+
+  // small "LAB RANK" caption
+  ctx.font = 'bold ' + labelFs + 'px sans-serif';
+  ctx.fillStyle = '#7f93b5';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(isRu() ? 'РАНГ' : 'LAB RANK', cx, y);
+
+  // rank name (glows gold)
+  ctx.shadowColor = 'rgba(255,226,122,0.45)';
+  ctx.shadowBlur = 14 * S;
+  ctx.font = 'bold ' + nameFs + 'px sans-serif';
+  ctx.fillStyle = '#ffe27a';
+  ctx.fillText(rankName(ri), cx, y + labelFs + 2 * S);
+  ctx.shadowColor = 'transparent';
+  ctx.shadowBlur = 0;
+
+  // progress bar to next rank
+  var barY = y + labelFs + nameFs + GF.clamp(8 * S, 5, 13);
+  GF.rr(ctx, x, barY, w, barH, barH / 2);
+  ctx.fillStyle = 'rgba(120,140,170,0.22)';
+  ctx.fill();
+  var fillW = Math.max(barH, w * GF.clamp(prog.frac, 0, 1));
+  if (prog.frac > 0) {
+    GF.rr(ctx, x, barY, fillW, barH, barH / 2);
+    var g = ctx.createLinearGradient(x, barY, x + fillW, barY);
+    g.addColorStop(0, '#3fb86a');
+    g.addColorStop(1, '#5fd0ff');
+    ctx.fillStyle = g;
+    ctx.fill();
+  }
+
+  // count caption to the right / centered under the bar
+  ctx.font = GF.clamp(11 * S, 9, 15) + 'px sans-serif';
+  ctx.fillStyle = '#9fb6d8';
+  ctx.textAlign = 'center';
+  var caption = prog.maxed
+    ? (isRu() ? ('Чистых пробирок: ' + tubesPurified) : (tubesPurified + ' tubes purified — MAX'))
+    : (isRu()
+        ? ((prog.need - prog.cur) + ' до повышения')
+        : ((prog.need - prog.cur) + ' tubes to next rank'));
+  ctx.fillText(caption, cx, barY + barH + pad);
+
+  return blockH;
+}
+
 function drawLevelEnd(ctx) {
   drawScrim(ctx, 0.7);
   var S = GF.S, H = GF.H, cx = GF.W / 2;
@@ -707,6 +839,11 @@ function drawWin(ctx) {
   ctx.font = GF.clamp(16 * S, 12, 20) + 'px sans-serif';
   ctx.fillStyle = '#bcd';
   ctx.fillText(GF.t('best') + ': ' + bestLevel, cx, H * 0.28 + GF.clamp(54 * S, 40, 70));
+  // Persistent Lab Rank — the owned meta surfaced at the session-end moment.
+  ctx.fillStyle = '#ffe27a';
+  ctx.fillText(rankName(rankIndexFor(tubesPurified)) + ' · ' + tubesPurified +
+    (isRu() ? ' чистых' : ' pure'),
+    cx, H * 0.28 + GF.clamp(80 * S, 60, 104));
   _againBtn = drawButton(ctx, GF.t('again'), cx, H * 0.52);
   _winMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _againBtn.h + GF.clamp(18 * S, 12, 26));
 }
@@ -775,6 +912,8 @@ GF.exposeState(function() {
     solved: isSolved(),
     impure: boardImpure(),
     sel: sel,
+    tubesPurified: tubesPurified,
+    labRank: rankName(rankIndexFor(tubesPurified)),
     POUR_BUDGET: POUR_BUDGET,
     TUBE_CAP: TUBE_CAP,
     START_TUBES: START_TUBES,
@@ -804,6 +943,7 @@ GF.init({
   saveKey: 'hue_sort',
   onReady: function() {
     try { bestLevel = parseInt(localStorage.getItem('hue_sort_best') || '0') || 0; } catch (e) {}
+    try { tubesPurified = parseInt(localStorage.getItem('hue_sort_purified') || '0') || 0; } catch (e) {}
     GF.persist('hue_sort_run_v1',
       function() {
         return { gs: gs, level: level, pours: pours, undoLeft: undoLeft,
