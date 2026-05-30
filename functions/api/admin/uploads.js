@@ -1,13 +1,19 @@
 // GET  /api/admin/uploads?token=<ADMIN_TOKEN>[&status=pending|approved|rejected|live]
-// POST /api/admin/uploads?token=<ADMIN_TOKEN>  body: { id, action:'approve'|'reject'|'reset', reason? }
+//      -> { uploads[], failures[], counts }
+// POST /api/admin/uploads?token=<ADMIN_TOKEN>  body: { id, action, ... }
+//      actions: approve | reject(reason) | reset | review(scan/verdict) |
+//               live(sandboxUrl) | reassign(email) | request-review | worker
 //
 // Admin view of community game uploads (from /api/upload). Lists upload:* records
-// newest-first with their scan summary + AI verdict, and lets the admin approve
-// (queues it for the local deploy step) or reject (stores a reason for the
-// rejection email). Lifecycle:
-//   pending -> [local review writes scan + verdict] -> pending
-//   pending -> approve -> approved -> [local deploy] -> live
-//   pending -> reject  -> rejected -> [local emails the reason]
+// newest-first with scan + AI verdict, and drives the lifecycle. The local
+// background worker (Shared/tools/ugc-pipeline/ugc-worker.mjs) does the heavy
+// steps the website buttons can't (sandboxed scan + wrangler deploy):
+//   pending --request-review--> reviewRequested --(worker runs review)--> verdict
+//   pending --approve--> approved --(worker publishes)--> live + announced
+//   pending --reject--> rejected (emails the reason)
+// Worker-managed flags (set via action:'worker'): reviewRequested,
+// publishAttempted, publishError, workerNote. approve/reset clear the publish
+// flags so a failed deploy retries; a written verdict clears reviewRequested.
 // Metadata only — the raw zip lives under uploadblob:<id> and is never returned.
 
 import { emailToUid } from '../../_lib/uid.js';
@@ -65,22 +71,37 @@ export async function onRequestPost({ request, env }) {
   const action = String(body.action || '');
   const reason = body.reason ? String(body.reason).slice(0, 1000) : '';
   if (!id.startsWith('upload:')) return jsonError('bad_id', 400);
-  if (!['approve', 'reject', 'reset', 'review', 'live', 'reassign'].includes(action)) return jsonError('bad_action', 400);
+  if (!['approve', 'reject', 'reset', 'review', 'live', 'reassign', 'worker', 'request-review'].includes(action)) return jsonError('bad_action', 400);
 
   const raw = await env.VOTES.get(id);
   if (!raw) return jsonError('not_found', 404);
   const row = JSON.parse(raw);
 
-  if (action === 'approve') { row.status = 'approved'; row.approvedAt = Date.now(); }
+  if (action === 'approve') {
+    // Approving means "publish it": clear any prior publish failure so the
+    // background worker (re)attempts the deploy.
+    row.status = 'approved'; row.approvedAt = Date.now();
+    row.publishAttempted = false; row.publishError = '';
+  }
   else if (action === 'reject') {
     if (reason.length < 3) return jsonError('reason_required', 400);
     row.status = 'rejected'; row.rejectReason = reason; row.rejectedAt = Date.now();
     row.emailed = await sendRejectEmail(env, row, reason);
   }
-  else if (action === 'reset') { row.status = 'pending'; }
+  else if (action === 'reset') {
+    row.status = 'pending'; row.publishAttempted = false; row.publishError = ''; row.reviewRequested = false;
+  }
+  else if (action === 'request-review') {    // ⚡ AI check button -> worker runs the review
+    row.reviewRequested = true; row.reviewRequestedAt = Date.now();
+  }
+  else if (action === 'worker') {            // background worker sets its own flags
+    for (const k of ['reviewRequested', 'publishRequested', 'publishAttempted', 'publishError', 'workerNote']) {
+      if (k in body) row[k] = body[k];
+    }
+  }
   else if (action === 'review') {            // local pipeline writes scan + AI verdict back
     if (body.scan !== undefined) row.scan = body.scan;
-    if (body.verdict !== undefined) row.verdict = body.verdict;
+    if (body.verdict !== undefined) { row.verdict = body.verdict; row.reviewRequested = false; }
   }
   else if (action === 'live') {              // publish script confirms the deploy
     row.status = 'live'; row.liveAt = Date.now();
