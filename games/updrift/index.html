@@ -31,6 +31,11 @@ var STRINGS = {
     mode_dig: 'DIG', mode_brace: 'BRACE', mode_blast: 'BLAST',
     cause_oxy: 'Your air ran out', cause_crush: 'Crushed by falling rock',
     tap_mode: 'tap to switch mode',
+    best: 'BEST DEPTH', career_max: 'TANK',
+    goal_next: 'NEXT GOAL: reach Lvl {lv} to bank +{air} max air',
+    goal_done: 'CAREER COMPLETE — all depths mastered!',
+    air_banked: '+{air} MAX AIR BANKED!',
+    new_best: 'NEW BEST DEPTH!',
     tut_title: 'How to play',
     tut_goal: 'Goal: Carve a shaft straight UP and reach the bright surface before your air runs out.',
     tut_controls: 'Controls: Tap the rock above you to act. Tap the mode chip (or press B) to switch DIG / BRACE / BLAST. Arrows move you left-right to aim a column.',
@@ -48,6 +53,11 @@ var STRINGS = {
     mode_dig: 'КОПАТЬ', mode_brace: 'УПОР', mode_blast: 'ВЗРЫВ',
     cause_oxy: 'Кончился воздух', cause_crush: 'Раздавлен породой',
     tap_mode: 'тап — смена режима',
+    best: 'РЕКОРД ГЛУБИНЫ', career_max: 'БАК',
+    goal_next: 'ЦЕЛЬ: дойдите до ур. {lv}, чтобы получить +{air} к запасу воздуха',
+    goal_done: 'КАРЬЕРА ПРОЙДЕНА — все глубины покорены!',
+    air_banked: '+{air} К ЗАПАСУ ВОЗДУХА!',
+    new_best: 'НОВЫЙ РЕКОРД ГЛУБИНЫ!',
     tut_title: 'Как играть',
     tut_goal: 'Цель: Прорубите шахту прямо ВВЕРХ и доберитесь до светлой поверхности, пока не кончился воздух.',
     tut_controls: 'Управление: Тапайте по камню над собой. Меняйте режим (или клавиша B): КОПАТЬ / УПОР / ВЗРЫВ. Стрелки двигают влево-вправо для выбора колонны.',
@@ -98,6 +108,61 @@ var tutorialOpen = false;
 var lastAct = null;
 var hitFlashT = 0;
 
+// ── PERSISTENT META — "Career Depth" (iteration #1, retention pass) ─────────
+// The single cross-session progression the player OWNS: the deepest level ever
+// surfaced from. Each new depth milestone permanently grows the starting air
+// tank, so every career advance makes future runs easier. bestLevel persists
+// across sessions in its own localStorage key (updrift_meta_v1), separate from
+// the per-run GF.persist slot; careerO2Bonus is derived from it. The MENU +
+// GAMEOVER screens show a concrete NEXT-GOAL line built from this — which also
+// fixes the loudest player complaint ("very unclear what to aim for").
+var bestLevel = 0;            // max level ever REACHED (cleared up to)
+// O2 banked per milestone level reached: L2→+10, L3→+20, L4→+30, L5→+40.
+var O2_MILESTONE = [0, 0, 10, 20, 30, 40];  // index by level (1..5)
+var bestBeatenThisRun = false;  // banner latch: hit a new best this run
+var lastBankedAir = 0;          // air newly banked on the level just cleared (for WON banner)
+
+var META_KEY = 'updrift_meta_v1';
+function loadMeta() {
+  try {
+    var raw = localStorage.getItem(META_KEY);
+    if (!raw) return;
+    var m = JSON.parse(raw);
+    if (m && typeof m.bestLevel === 'number') bestLevel = Math.max(0, Math.min(MAX_LEVEL, m.bestLevel | 0));
+  } catch (e) {}
+}
+function saveMeta() {
+  try { localStorage.setItem(META_KEY, JSON.stringify({ bestLevel: bestLevel })); } catch (e) {}
+}
+function careerO2Bonus() {
+  return (bestLevel >= 1 && bestLevel <= MAX_LEVEL) ? O2_MILESTONE[bestLevel] : 0;
+}
+function effectiveStartOxy() { return START_OXY + careerO2Bonus(); }
+// Record reaching/clearing `lv`; returns the bonus newly banked (0 if none).
+function recordDepth(lv) {
+  if (lv <= bestLevel) return 0;
+  var before = careerO2Bonus();
+  bestLevel = Math.min(lv, MAX_LEVEL);
+  var gained = careerO2Bonus() - before;
+  bestBeatenThisRun = true;
+  saveMeta();
+  return gained;
+}
+function subst(str, map) {
+  return String(str).replace(/\{(\w+)\}/g, function (_, k) { return (k in map) ? map[k] : '{' + k + '}'; });
+}
+// The concrete cross-session pull, shown on MENU + GAMEOVER. Tells the player
+// exactly which depth to aim for next and what air it banks (clarity + goal).
+function nextGoalText() {
+  if (bestLevel >= MAX_LEVEL) return GF.t('goal_done');
+  // Aim at the next level that actually banks air (L1 grants 0), so the goal is
+  // always a concrete reward and never reads "+0".
+  var nextLv = bestLevel + 1;
+  while (nextLv < MAX_LEVEL && O2_MILESTONE[nextLv] - careerO2Bonus() <= 0) nextLv++;
+  var air = O2_MILESTONE[Math.min(nextLv, MAX_LEVEL)] - careerO2Bonus();
+  return subst(GF.t('goal_next'), { lv: nextLv, air: air });
+}
+
 var MODES = ['dig', 'brace', 'blast'];
 
 function rnd() { return Math.random(); }
@@ -145,10 +210,12 @@ function isEmpty(r, c) {
 // ── LIFECYCLE ────────────────────────────────────────────────────────────
 function startGame() {
   level = 1;
-  oxygen = START_OXY;
+  oxygen = effectiveStartOxy();
   crushLives = MAX_CRUSH_LIVES;
   mode = 'dig';
   fullWin = false;
+  bestBeatenThisRun = false;
+  lastBankedAir = 0;
   buildLevel(1);
   gs = 'PLAYING';
   GF.gameStarted();
@@ -156,7 +223,7 @@ function startGame() {
 }
 function nextLevel() {
   if (level >= MAX_LEVEL) { fullWin = true; gs = 'WON'; GF.saveRun(); return; }
-  oxygen = Math.min(START_OXY, oxygen + 30);
+  oxygen = Math.min(effectiveStartOxy(), oxygen + 30);
   buildLevel(level + 1);
   gs = 'PLAYING';
   GF.gameStarted();
@@ -172,6 +239,8 @@ function loseGame(cause) {
 function winLevel() {
   gs = 'WON';
   fullWin = (level >= MAX_LEVEL);
+  // Clearing level `level` banks the depth milestone for `level` (you reached it).
+  lastBankedAir = recordDepth(level);
   GF.spawnParticles(GF.cx, GF.H * 0.3, '#ffe06a', 56);
   GF.gameEnded();
   GF.saveRun();
@@ -420,7 +489,7 @@ function onPress(x, y) {
   }
   if (gs === 'WON') {
     var bw2 = GF.clamp(240 * GF.S, 170, 320), bh2 = GF.clamp(52 * GF.S, 40, 64);
-    var bx2 = (GF.W - bw2) / 2, by2 = GF.H * 0.62;
+    var bx2 = (GF.W - bw2) / 2, by2 = GF.H * 0.72;
     if (x >= bx2 && x <= bx2 + bw2 && y >= by2 && y <= by2 + bh2) {
       if (fullWin) startGame(); else nextLevel();
     }
@@ -428,7 +497,7 @@ function onPress(x, y) {
   }
   if (gs === 'GAMEOVER') {
     var bw3 = GF.clamp(240 * GF.S, 170, 320), bh3 = GF.clamp(52 * GF.S, 40, 64);
-    var bx3 = (GF.W - bw3) / 2, by3 = GF.H * 0.62;
+    var bx3 = (GF.W - bw3) / 2, by3 = GF.H * 0.72;
     if (x >= bx3 && x <= bx3 + bw3 && y >= by3 && y <= by3 + bh3) startGame();
     return;
   }
@@ -761,8 +830,35 @@ function drawMenu(c) {
     for (var k = 0; k < tl.length; k++) c.fillText(tl[k], W / 2, H * 0.30 + k * GF.clamp(18 * GF.S, 14, 22));
   }
 
+  // Persistent meta: BEST DEPTH + NEXT GOAL — the cross-session pull, anchored
+  // just above PLAY so it never collides with the variable-height tutorial block.
+  drawMetaBlock(c, W / 2, H * 0.665, maxW);
+
   var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(54 * GF.S, 42, 66);
   drawButton(c, (W - bw) / 2, H * 0.80, bw, bh, GF.t('play'), true);
+}
+
+// BEST DEPTH chip + NEXT GOAL line. Shared by MENU + GAMEOVER. Returns next free Y.
+function drawMetaBlock(c, cx, y, maxW) {
+  c.textAlign = 'center';
+  c.textBaseline = 'top';
+  var fsHead = GF.clamp(14 * GF.S, 11, 18);
+  // BEST DEPTH: Ln/5  ·  TANK 100→140
+  c.font = 'bold ' + fsHead + 'px sans-serif';
+  c.fillStyle = '#ffe06a';
+  var bonus = careerO2Bonus();
+  var bestStr = GF.t('best') + ': ' + (bestLevel > 0 ? bestLevel : 0) + '/' + MAX_LEVEL;
+  if (bonus > 0) bestStr += '   ·   ' + GF.t('career_max') + ' ' + START_OXY + '→' + (START_OXY + bonus);
+  c.fillText(bestStr, cx, y);
+  y += fsHead + GF.clamp(7 * GF.S, 4, 11);
+  // NEXT GOAL line (wrapped) — the concrete "what to aim for".
+  var fsGoal = GF.clamp(13 * GF.S, 11, 17);
+  c.font = (bestLevel >= MAX_LEVEL ? 'bold ' : '') + fsGoal + 'px sans-serif';
+  c.fillStyle = bestLevel >= MAX_LEVEL ? '#7af5ff' : '#bfe8f0';
+  var lines = wrapLines(c, nextGoalText(), maxW);
+  var lh = GF.clamp(17 * GF.S, 13, 21);
+  for (var i = 0; i < lines.length; i++) { c.fillText(lines[i], cx, y); y += lh; }
+  return y;
 }
 
 function drawEnd(c) {
@@ -788,10 +884,29 @@ function drawEnd(c) {
   var line2;
   if (win) line2 = GF.t('lvl') + ' ' + level + '/' + MAX_LEVEL + '  ·  ' + GF.t('o2') + ' ' + Math.ceil(oxygen);
   else line2 = (loseCause === 'oxy' ? GF.t('cause_oxy') : GF.t('cause_crush'));
-  c.fillText(line2, W / 2, H * 0.48);
+  c.fillText(line2, W / 2, H * 0.475);
+
+  // Reward feedback: a freshly-banked air milestone this run gets a gold banner
+  // (and NEW BEST if the depth itself advanced) — makes the persistent meta payoff
+  // legible at the exact moment it happens.
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  if (win && lastBankedAir > 0) {
+    c.fillStyle = '#ffe06a';
+    c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 21) + 'px sans-serif';
+    c.fillText(subst(GF.t('air_banked'), { air: lastBankedAir }), W / 2, H * 0.525);
+  } else if (!win && bestBeatenThisRun) {
+    c.fillStyle = '#7af5ff';
+    c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+    c.fillText(GF.t('new_best'), W / 2, H * 0.525);
+  }
+
+  // Persistent meta line: BEST DEPTH + the concrete NEXT GOAL to chase next run.
+  var maxW = Math.min(W * 0.86, 520 * GF.S);
+  drawMetaBlock(c, W / 2, H * 0.565, maxW);
+
   var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
   var label = win ? (fullWin ? GF.t('retry') : GF.t('cont')) : GF.t('retry');
-  drawButton(c, (W - bw) / 2, H * 0.62, bw, bh, label, true);
+  drawButton(c, (W - bw) / 2, H * 0.72, bw, bh, label, true);
 }
 
 function drawTutorialPanel(c) {
@@ -840,6 +955,7 @@ GF.init({
   saveKey: 'updrift',
   onReady: function () {
     recomputeLayout();
+    loadMeta();
     GF.persist('updrift_run_v1',
       function () {
         return { gs: gs, level: level, oxygen: oxygen, crushLives: crushLives,
@@ -882,6 +998,9 @@ GF.exposeState(function () {
     diverCol: diverCol,
     mode: mode,
     chunks: chunks.length,
+    bestLevel: bestLevel,
+    careerO2Bonus: careerO2Bonus(),
+    effectiveStartOxy: effectiveStartOxy(),
     GRID_W: GRID_W,
     GRID_H: GRID_H,
     START_OXY: START_OXY,
