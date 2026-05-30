@@ -24,11 +24,22 @@ import { listZipEntries, validateGameZip } from '../_lib/zipInspect.js';
 const MAX_ZIP = 24 * 1024 * 1024;
 const MAX_COVER = 2 * 1024 * 1024;
 const DAILY_CAP = 5;
+const ATTEMPT_CAP = 30;               // total upload attempts/day/uid (accepted + rejected)
 const BLOB_TTL = 60 * 60 * 24 * 45;
+const FAIL_TTL = 60 * 60 * 24 * 14;   // rejected-upload debug records (shorter)
 
 export async function onRequestPost({ request, env }) {
   const session = await readSession(request, env);
   if (!session) return jsonError('sign_in_required', 401);
+
+  // Bound total upload ATTEMPTS per user per day (accepted + rejected), checked
+  // up front so malformed-upload spam can't burn the shared free-tier KV write
+  // budget via the failure-capture path below. checkRate stops writing once the
+  // cap is hit, so past-cap spam costs only a read. Generous vs DAILY_CAP
+  // (accepted uploads, 5) so iterating on a rejected zip isn't locked out.
+  const day = new Date().toISOString().slice(0, 10);
+  if (!await checkRate(env, `uploadtry:${session.uid}:${day}`, ATTEMPT_CAP, 60 * 60 * 26))
+    return jsonError('daily_limit_reached', 429);
 
   let form;
   try { form = await request.formData(); } catch { return jsonError('invalid_form', 400); }
@@ -44,12 +55,17 @@ export async function onRequestPost({ request, env }) {
 
   const game = form.get('game');
   if (!game || typeof game === 'string') return jsonError('no_game_file', 400);
-  if (game.size > MAX_ZIP) return jsonError('game_too_large', 413);
+  if (game.size > MAX_ZIP) {
+    await recordFailure(env, session, game, title, 'game_too_large');
+    return jsonError('game_too_large', 413);
+  }
   if (game.size < 64) return jsonError('game_too_small', 400);
   const bytes = new Uint8Array(await game.arrayBuffer());
   // zip local-file-header magic PK\x03\x04, or empty-archive PK\x05\x06
-  if (!(bytes[0] === 0x50 && bytes[1] === 0x4B && (bytes[2] === 0x03 || bytes[2] === 0x05)))
+  if (!(bytes[0] === 0x50 && bytes[1] === 0x4B && (bytes[2] === 0x03 || bytes[2] === 0x05))) {
+    await recordFailure(env, session, game, title, 'not_a_zip');
     return jsonError('not_a_zip', 400);
+  }
 
   // Cheap structural gate (central-directory read only — never decompressed, so
   // zip-bomb-safe). Deep behavioral vetting is the sandboxed review pipeline.
@@ -57,15 +73,24 @@ export async function onRequestPost({ request, env }) {
   try {
     zipEntries = listZipEntries(bytes);
   } catch {
+    await recordFailure(env, session, game, title, 'zip_unreadable');
     return jsonError('zip_unreadable', 400);
   }
   const zv = validateGameZip(zipEntries);
-  if (!zv.ok) return jsonError(zv.error, 400);
+  if (!zv.ok) {
+    // Capture the rejection so the admin can debug it without the user's copy:
+    // the error code, the offending file (zv.detail), and the full file list —
+    // exactly what was missing when AGKPlayer.html.mem got rejected (2026-05-30).
+    await recordFailure(env, session, game, title, zv.error, {
+      detail: zv.detail || null,
+      files: zipEntries.filter(e => !e.name.endsWith('/')).map(e => e.name).slice(0, 80),
+    });
+    return jsonError(zv.error, 400);
+  }
 
-  // Rate-limit only AFTER validation passes, so a developer iterating on a
-  // rejected zip isn't locked out by fumbled attempts (uploads are already gated
-  // behind a signed-in session). 5 accepted uploads/day/uid.
-  const day = new Date().toISOString().slice(0, 10);
+  // Separate cap on ACCEPTED uploads (5/day/uid), checked only after validation
+  // passes so a developer iterating on a rejected zip isn't locked out of a real
+  // upload by fumbled attempts. `day` is declared at the attempt-cap check above.
   if (!await checkRate(env, `uploadrate:${session.uid}:${day}`, DAILY_CAP, 60 * 60 * 26))
     return jsonError('daily_limit_reached', 429);
 
@@ -100,4 +125,24 @@ export async function onRequestPost({ request, env }) {
 
 function slugify(s) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'game';
+}
+
+// Store a small debug record for a rejected upload under uploadfail:<id> (14-day
+// TTL). The raw zip is NOT kept — just who/what/why + the zip's file list, which
+// is enough to diagnose disallowed_filetype / no_root_index / size rejections
+// without the submitter re-sending the file. Best-effort: a capture failure must
+// never change the error the user sees, so it is wrapped in try/catch.
+async function recordFailure(env, session, game, title, error, extra = {}) {
+  try {
+    const ts = Date.now();
+    const id = ts.toString(36) + Math.random().toString(36).slice(2, 6);
+    await env.VOTES.put(`uploadfail:${id}`, JSON.stringify({
+      id, ts, status: 'rejected', error,
+      uid: session.uid, email: session.email,
+      title: String(title || '').slice(0, 80),
+      filename: String((game && game.name) || '').slice(0, 200),
+      sizeBytes: (game && game.size) || 0,
+      ...extra,
+    }), { expirationTtl: FAIL_TTL });
+  } catch { /* capture is best-effort; never block the user's response */ }
 }

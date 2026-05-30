@@ -35,7 +35,23 @@ export async function onRequestGet({ request, env }) {
   out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
   const counts = Object.fromEntries(STATUSES.map(s => [s, out.filter(u => u.status === s).length]));
 
-  return json({ generated_at: new Date().toISOString(), count: out.length, counts, uploads: out });
+  // Rejected-at-the-gate uploads (validation failures) — debug aid, separate
+  // prefix so they never mix into the review queue. Written by /api/upload.
+  const failures = [];
+  let fcursor;
+  do {
+    const list = await env.VOTES.list({ prefix: 'uploadfail:', cursor: fcursor });
+    for (const k of list.keys) {
+      const raw = await env.VOTES.get(k.name);
+      if (!raw) continue;
+      let row; try { row = JSON.parse(raw); } catch { continue; }
+      failures.push({ key: k.name, ...row });
+    }
+    fcursor = list.list_complete ? null : list.cursor;
+  } while (fcursor);
+  failures.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+  return json({ generated_at: new Date().toISOString(), count: out.length, counts, uploads: out, failures });
 }
 
 export async function onRequestPost({ request, env }) {
