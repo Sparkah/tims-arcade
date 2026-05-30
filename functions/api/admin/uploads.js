@@ -10,6 +10,8 @@
 //   pending -> reject  -> rejected -> [local emails the reason]
 // Metadata only — the raw zip lives under uploadblob:<id> and is never returned.
 
+import { emailToUid } from '../../_lib/uid.js';
+
 const STATUSES = ['pending', 'approved', 'rejected', 'live'];
 const RECORD_TTL = 60 * 60 * 24 * 45;
 
@@ -63,7 +65,7 @@ export async function onRequestPost({ request, env }) {
   const action = String(body.action || '');
   const reason = body.reason ? String(body.reason).slice(0, 1000) : '';
   if (!id.startsWith('upload:')) return jsonError('bad_id', 400);
-  if (!['approve', 'reject', 'reset', 'review', 'live'].includes(action)) return jsonError('bad_action', 400);
+  if (!['approve', 'reject', 'reset', 'review', 'live', 'reassign'].includes(action)) return jsonError('bad_action', 400);
 
   const raw = await env.VOTES.get(id);
   if (!raw) return jsonError('not_found', 404);
@@ -83,6 +85,15 @@ export async function onRequestPost({ request, env }) {
   else if (action === 'live') {              // publish script confirms the deploy
     row.status = 'live'; row.liveAt = Date.now();
     if (body.sandboxUrl) row.sandboxUrl = String(body.sandboxUrl).slice(0, 300);
+  }
+  else if (action === 'reassign') {          // hand the upload to its real owner
+    const email = String(body.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) || email.length > 200) return jsonError('bad_email', 400);
+    // uid MUST match what verify.js derives on login, so the new owner sees this
+    // game in their account (sha256(lowercased email), first 8 bytes -> 16 hex).
+    row.email = email; row.contact = email;
+    row.uid = await emailToUid(email);
+    row.reassignedAt = Date.now();
   }
 
   await env.VOTES.put(id, JSON.stringify(row), { expirationTtl: RECORD_TTL });

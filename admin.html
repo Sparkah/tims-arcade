@@ -467,10 +467,12 @@ function uploadCard(u) {
     ? `<div style="font-size:12px;margin-top:4px;">AI verdict: <b style="color:${vColor}">${escapeHtml(v.decision || '?')}</b>${v.notes && v.notes.length ? ' — ' + escapeHtml(String(v.notes[0]).slice(0, 180)) : ''}</div>`
     : '<div style="font-size:12px;margin-top:4px;opacity:0.5;">AI verdict: pending review</div>';
   const btn = 'font-size:11px;padding:4px 10px;margin-right:6px;border:1px solid var(--rule);background:transparent;color:var(--ink-soft);cursor:pointer;border-radius:4px;';
-  const actions = (u.status === 'pending' || u.status === 'approved')
+  const actions = ((u.status === 'pending' || u.status === 'approved')
     ? `<button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="approve" style="${btn}">approve</button>
-       <button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="reject" style="${btn}">reject</button>`
-    : `<button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="reset" style="${btn}">reopen</button>`;
+       <button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="reject" style="${btn}">reject</button>
+       <button class="upload-ai" data-id="${escapeHtml(u.id)}" style="${btn}">⚡ AI check</button>`
+    : `<button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="reset" style="${btn}">reopen</button>`)
+    + `<button class="upload-act" data-id="${escapeHtml(u.key)}" data-act="reassign" style="${btn}">reassign owner</button>`;
   const rej = u.status === 'rejected' && u.rejectReason
     ? `<div style="font-size:12px;margin-top:4px;color:#c88;">Rejected: ${escapeHtml(u.rejectReason)}${u.emailed ? '' : ' (email pending)'}</div>` : '';
   return `<div style="border:1px solid var(--rule);border-radius:6px;padding:14px 16px;margin-bottom:10px;background:var(--bg-card);">
@@ -483,6 +485,26 @@ function uploadCard(u) {
     ${verdictLine}
     ${rej}
     <div style="margin-top:10px;">${actions}</div>
+    ${aiPanel(u)}
+  </div>`;
+}
+
+// Review helper panel (toggled by the "AI check" button). The static scan must
+// run in local Node — the zip is unpacked in a sandbox there, never on the
+// server (zip-bomb safety) — so we surface the exact command. The verdict itself
+// is just a record write, so it's settable straight from these buttons.
+function aiPanel(u) {
+  if (u.status !== 'pending' && u.status !== 'approved') return '';
+  const cmd = `UGC_BASE=https://game-factory.tech UGC_TOKEN=$ADMIN_TOKEN node Shared/tools/ugc-pipeline/ugc-review.mjs fetch ${u.id}`;
+  const vb = 'font-size:11px;padding:3px 9px;margin-right:5px;border:1px solid var(--rule);background:transparent;color:var(--ink-soft);cursor:pointer;border-radius:4px;';
+  return `<div class="ai-panel" id="ai-${escapeHtml(u.id)}" style="display:none;margin-top:10px;padding:10px 12px;border:1px dashed var(--rule);border-radius:6px;">
+    <div style="font-size:11px;opacity:0.6;margin-bottom:6px;">1. Static scan runs locally (the zip is unpacked in a sandbox — never on the server). Paste in your terminal:</div>
+    <code style="display:block;background:var(--bg);padding:8px;border-radius:4px;word-break:break-all;font-size:11px;line-height:1.5;">${escapeHtml(cmd)}</code>
+    <button class="ai-copy" style="${vb}margin-top:6px;">copy command</button>
+    <div style="font-size:11px;opacity:0.6;margin:10px 0 6px;">2. After eyeballing the scan + game, record the verdict (no CLI):</div>
+    <button class="ai-verdict" data-id="${escapeHtml(u.key)}" data-decision="pass" style="${vb}">✓ pass</button>
+    <button class="ai-verdict" data-id="${escapeHtml(u.key)}" data-decision="needs_work" style="${vb}">~ needs work</button>
+    <button class="ai-verdict" data-id="${escapeHtml(u.key)}" data-decision="reject" style="${vb}">✗ reject</button>
   </div>`;
 }
 
@@ -506,20 +528,48 @@ function failCard(f) {
 
 document.addEventListener('click', async (e) => {
   const t = e.target;
+  if (t && t.classList && t.classList.contains('upload-ai')) {
+    const panel = document.getElementById('ai-' + t.dataset.id);
+    if (panel) panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+    return;
+  }
+  if (t && t.classList && t.classList.contains('ai-copy')) {
+    const code = t.previousElementSibling;   // the <code> command block
+    if (code && navigator.clipboard) navigator.clipboard.writeText(code.textContent)
+      .then(() => { t.textContent = 'copied'; setTimeout(() => { t.textContent = 'copy command'; }, 1200); })
+      .catch(() => {});
+    return;
+  }
+  if (t && t.classList && t.classList.contains('ai-verdict')) {
+    const note = prompt('Verdict note (optional, shown on the card):', '');
+    if (note === null) return;   // cancelled
+    t.disabled = true;
+    const r = await fetch('/api/admin/uploads?token=' + encodeURIComponent(token), {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: t.dataset.id, action: 'review',
+        verdict: { decision: t.dataset.decision, notes: note ? [note] : [], reviewedAt: Date.now() } }),
+    });
+    if (r.ok) loadUploads(); else { t.disabled = false; alert('Failed: ' + r.status); }
+    return;
+  }
   if (t && t.classList && t.classList.contains('upload-act')) {
     e.preventDefault();
     const id = t.dataset.id;
     const act = t.dataset.act;
-    let reason = null;
+    let reason = null, email = null;
     if (act === 'reject') {
       reason = prompt('Reject reason (will be emailed to the submitter):', '');
       if (reason === null || reason.trim().length < 3) return;
+    }
+    if (act === 'reassign') {
+      email = prompt('Reassign to which email? The game gets credited to this account and shows up when they sign in.', '');
+      if (email === null || !email.trim()) return;
     }
     t.disabled = true;
     const r = await fetch('/api/admin/uploads?token=' + encodeURIComponent(token), {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ id, action: act, reason }),
+      body: JSON.stringify({ id, action: act, reason, email }),
     });
     if (r.ok) loadUploads();
     else { t.disabled = false; alert('Failed: ' + r.status); }

@@ -8,6 +8,8 @@
 // payload = JSON: { email, uid, exp_ts }
 // 30-day TTL. uid = first 16 hex chars of sha256(email) — stable, not reversible.
 
+import { emailToUid } from '../../_lib/uid.js';
+
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const token = String(url.searchParams.get('token') || '');
@@ -66,13 +68,6 @@ function sanitizeNext(v) {
 }
 
 // ── helpers (also used by other auth endpoints) ─────────────────────────────
-
-async function emailToUid(email) {
-  const enc = new TextEncoder().encode(email);
-  const h = await crypto.subtle.digest('SHA-256', enc);
-  const bytes = Array.from(new Uint8Array(h));
-  return bytes.slice(0, 8).map(b => b.toString(16).padStart(2, '0')).join('');
-}
 
 async function signSessionCookie(payload, secret) {
   const body = b64url(new TextEncoder().encode(JSON.stringify(payload)));
