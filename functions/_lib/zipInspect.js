@@ -24,6 +24,10 @@ export class ZipError extends Error {}
 export const ALLOWED_EXT = new Set([
   // web
   'html', 'htm', 'js', 'mjs', 'css', 'json', 'map', 'txt', 'xml', 'csv', 'wasm',
+  // emscripten / asm.js runtime artifact — static memory image emitted by
+  // AppGameKit / Unity / older Emscripten HTML5 exports (inert binary blob,
+  // same class as .bin/.data/.wasm; the game won't boot without it).
+  'mem',
   // images
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'cur',
   // audio / video
