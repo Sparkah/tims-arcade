@@ -36,6 +36,19 @@ export async function onRequest({ params, env, request }) {
     );
   }
 
+  // Unpublished games (published:false) must NOT render a playable share card —
+  // they've been pulled from the gallery (e.g. a broken/stub build). Treat like
+  // not-found so /p/<slug> can't be used to reach the game. (Tim 2026-05-31:
+  // critter_keep shipped as a template stub, was unpublished, but /p/ kept
+  // serving it because this page rendered any slug found in games.json.)
+  if (game.published === false) {
+    return new Response(
+      `<!DOCTYPE html><meta charset="utf-8"><title>Unavailable</title>
+       <p>This game is no longer available. <a href="/">Back to gallery →</a></p>`,
+      { status: 404, headers: { 'content-type': 'text/html; charset=utf-8' } }
+    );
+  }
+
   // Pick language from Accept-Language; ru-* gets Russian copy, else English.
   // Yandex's crawlers honour Accept-Language so this gives clean per-language
   // OG meta when shared in Russian / English contexts.
