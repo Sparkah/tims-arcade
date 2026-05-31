@@ -407,6 +407,65 @@ function renderGenres() {
 }
 
 // ── Filtering / sorting ───────────────────────────────────────────────────
+
+// TikTok-style EXPLORATION INJECTION (Tim 2026-05-31).
+// The Top feed used to be strict engagement-desc order, so a brand-new game
+// (seconds≈0, no votes → engagementScore≈0) sank to the bottom and never got
+// the impressions it needs to EARN engagement — a rich-get-richer cold start.
+// TikTok solves this by spending impressions to TEST fresh content: between
+// proven hits it injects under-exposed items, rotated per viewer, and promotes
+// whatever converts. We mirror that on the Top feed: every EXPLORE_CADENCE-th
+// grid slot is an under-seen game (plays < EXPLORE_PLAY_CAP), shuffled per
+// pageview so different fresh games get a "test audience" slot. Pattern at
+// cadence 3 → [proven, proven, explore, proven, proven, explore, …].
+// Kill switch: append ?feed=classic to fall back to pure engagement order.
+const EXPLORE_CADENCE  = 3;    // 1 explore slot per (CADENCE-1) proven → "2 good + 1 new"
+const EXPLORE_PLAY_CAP = 15;   // < this many plays = hasn't had its test audience yet
+const EXPLORE_FEED = new URLSearchParams(location.search).get('feed') !== 'classic';
+// One seed per pageview: keeps the rotation STABLE across the many re-renders
+// (counts / trending / featured each trigger render()) but fresh on each visit.
+const _exploreSeed = Math.floor(Math.random() * 4294967296) >>> 0;
+function _seededShuffle(arr, seed) {
+  let a = seed >>> 0;                        // mulberry32 → deterministic per seed
+  const rnd = () => {
+    a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+// Reorder a by-engagement list into explore-injected order. Pure function of
+// (ranked, counts, seed). Flagship link-outs are left for the flagship splice
+// below, so they're excluded from the explore pool here.
+function interleaveExploration(ranked) {
+  // Before /api/counts lands, every play count is 0 → don't shuffle the whole
+  // feed on first paint; show the base order and let the re-render (once counts
+  // arrive) inject exploration.
+  if (Object.keys(counts).length === 0) return ranked;
+  const plays = g => (counts[g.slug] || {}).plays || 0;
+  const explore = _seededShuffle(
+    ranked.filter(g => !g.flagship && plays(g) < EXPLORE_PLAY_CAP), _exploreSeed);
+  if (explore.length === 0) return ranked;           // nothing under-seen → unchanged
+  const exploreSet = new Set(explore.map(g => g.slug));
+  const proven = ranked.filter(g => !exploreSet.has(g.slug));
+  if (proven.length === 0) return explore;           // everything under-seen → just rotate
+  const out = [];
+  let pi = 0, ei = 0;
+  for (let slot = 0; pi < proven.length || ei < explore.length; slot++) {
+    const exploreSlot = (slot + 1) % EXPLORE_CADENCE === 0;
+    if (exploreSlot && ei < explore.length) out.push(explore[ei++]);
+    else if (pi < proven.length)            out.push(proven[pi++]);
+    else                                    out.push(explore[ei++]);  // proven exhausted
+  }
+  return out;
+}
+
 function visible() {
   let list = games.filter(g => g.published !== false);
 
@@ -452,6 +511,15 @@ function visible() {
   // them deeper instead — ~position 5, then 15 — so local games lead but the
   // showcases still get prominent exposure. Personal tabs (liked/myplayed) and
   // the date-filtered 'recent' tab are left alone.
+
+  // TikTok-style exploration injection on the Top feed (helpers above). Only the
+  // Top tab (the default landing) is strict-ranked and needs it; All is already
+  // newest-first and search wants relevance. Runs BEFORE the flagship splice so
+  // flagships still land at pos 5/15.
+  if (activeTab === 'top' && !searchTerm && EXPLORE_FEED) {
+    list = interleaveExploration(list);
+  }
+
   if (activeTab === 'all' || activeTab === 'top') {
     const flags = list.filter(g => g.flagship);
     if (flags.length) {
