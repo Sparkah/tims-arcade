@@ -330,6 +330,10 @@ const STRINGS = {
     streak_milestone3_sub: 'Creature Hunter Badge',
     streak_milestone7_sub: 'Veteran Survivor Badge',
     streak_keep_going: 'Keep coming back!',
+    locked_skins_label: 'Locked skins:',
+    watch_ad_unlock: 'Watch Ad to unlock',
+    ad_unlocked: 'Unlocked!',
+    ad_unavailable: 'Ad not available — try again',
   },
   ru: {
     title: 'Creature Hunt',
@@ -452,6 +456,10 @@ const STRINGS = {
     streak_milestone3_sub: 'Значок охотника за существами',
     streak_milestone7_sub: 'Значок ветерана выжившего',
     streak_keep_going: 'Возвращайся каждый день!',
+    locked_skins_label: 'Заблокированные скины:',
+    watch_ad_unlock: 'Реклама за разблокировку',
+    ad_unlocked: 'Разблокировано!',
+    ad_unavailable: 'Реклама недоступна — повторите',
   }
 };
 
@@ -780,11 +788,24 @@ const UnlockSystem = (function() {
     savePrefs(prefs);
   }
 
+  // iter#11: grant a skin via the rewarded-ad path. Marks the skin earned
+  // (persisted) and auto-equips it for its role so the player immediately
+  // sees the payoff. Returns true if it was a fresh unlock, false if the
+  // id is unknown or already owned. Cosmetic-only — never affects gameplay.
+  function grantUnlock(id) {
+    const def = DEFS.find(d => d.id === id);
+    if (!def || earned[id]) return false;
+    earned[id] = true;
+    saveEarned(earned);
+    setActiveSkin(def.role, id);
+    return true;
+  }
+
   function getDefs() { return DEFS; }
   function getEarned() { return Object.assign({}, earned); }
   function getPrefs() { return Object.assign({}, prefs); }
 
-  return { checkAfterRound, applySkin, resetColors, setActiveSkin, getDefs, getEarned, getPrefs,
+  return { checkAfterRound, grantUnlock, applySkin, resetColors, setActiveSkin, getDefs, getEarned, getPrefs,
            DEFAULT_PLAYER_COLOR, DEFAULT_CREATURE_COLOR };
 })();
 
@@ -891,6 +912,33 @@ function renderLeaderboard(role, myScore, result) {
   el.innerHTML = html;
 }
 
+// iter#11 (monetization rung): player taps "Watch Ad" next to a locked skin
+// to unlock it instantly. Player-initiated, fully optional — every skin
+// stays earnable for free via its milestone, so this never gates content.
+let _adUnlockBusy = false;
+function unlockSkinViaAd(id) {
+  if (_adUnlockBusy) return;
+  _adUnlockBusy = true;
+  try { AudioManager.playClick && AudioManager.playClick(); } catch(_) {}
+  // Disable the row visually while the ad is in flight.
+  const btn = document.getElementById('ad-unlock-' + id);
+  if (btn) btn.textContent = '…';
+  Platform.showRewardedAd(
+    function onReward() {
+      const ok = UnlockSystem.grantUnlock(id);
+      const b = document.getElementById('ad-unlock-' + id);
+      if (b) b.textContent = t(ok ? 'ad_unlocked' : 'ad_unavailable');
+    },
+    function onDone() {
+      _adUnlockBusy = false;
+      // Re-render so the newly-earned skin moves to the active-skins row
+      // and disappears from the locked list.
+      try { renderMenuStats(); } catch(_) {}
+    }
+  );
+}
+window.unlockSkinViaAd = unlockSkinViaAd;
+
 function renderMenuStats() {
   const el = document.getElementById('menu-stats');
   if (!el) return;
@@ -955,6 +1003,22 @@ function renderMenuStats() {
     if (prefs.creature !== 'default') {
       html += '<span style="font-size:11px;color:#666;cursor:pointer;margin-left:4px" '
         + 'onclick="UnlockSystem.setActiveSkin(\'creature\',\'default\');renderMenuStats()">&#x21BA;</span>';
+    }
+  }
+
+  // iter#11 (monetization rung): offer locked skins via a player-initiated
+  // rewarded ad. Each locked skin still earns for free via its milestone —
+  // the ad is just an optional shortcut, so no content is paywalled.
+  const lockedDefs = defs.filter(d => !earned[d.id]);
+  if (lockedDefs.length) {
+    html += '<br><span style="color:#aaa;font-size:11px">' + t('locked_skins_label') + '</span> ';
+    for (const def of lockedDefs) {
+      html += '<span style="display:inline-block;width:14px;height:14px;border-radius:50%;background:' + def.color + ';'
+        + 'opacity:0.4;border:2px solid rgba(255,255,255,0.15);vertical-align:middle;margin:0 3px"></span>'
+        + '<span id="ad-unlock-' + def.id + '" title="' + t(def.nameKey) + ': ' + t(def.descKey) + '" '
+        + 'style="font-size:11px;color:#7c5;cursor:pointer;border:1px solid rgba(120,200,90,0.4);'
+        + 'border-radius:3px;padding:1px 6px;margin-right:6px" '
+        + 'onclick="unlockSkinViaAd(\'' + def.id + '\')">&#9654; ' + t('watch_ad_unlock') + '</span> ';
     }
   }
 
@@ -1767,6 +1831,47 @@ const Platform = {
     } else {
       this._adShowing = false;
       if (callback) callback();
+    }
+  },
+
+  // ── Rewarded ad (iter#11 — player-initiated monetization) ──
+  // onReward fires ONLY when the player completes the ad (grant the
+  // reward here). onDone always fires afterward to re-enable the UI.
+  // Yandex §1.15: this is purely optional — the reward (a cosmetic skin)
+  // is always earnable for free via milestones, so there's never a
+  // dead-broke state and never any pay-to-win. The triggering button is
+  // explicitly labelled "Watch Ad"/"Реклама" per Yandex п.1.x.
+  showRewardedAd(onReward, onDone) {
+    var done = false;
+    var finish = () => { if (done) return; done = true; this._adShowing = false; if (onDone) try { onDone(); } catch(_) {} };
+    if (this._adShowing) { finish(); return; }
+    this._adShowing = true;
+    if (this.name === 'yandex' && this._sdk) {
+      var rewarded = false;
+      try {
+        this._sdk.adv.showRewardedVideo({
+          callbacks: {
+            onOpen: () => { try { AudioManager.stopAll(); } catch(_) {} this.gameplayStop(); },
+            onRewarded: () => { rewarded = true; if (onReward) try { onReward(); } catch(_) {} },
+            onClose: () => { finish(); },
+            onError: () => { finish(); }
+          }
+        });
+      } catch(_) { finish(); }
+    } else if (this.name === 'crazygames' && this._sdk) {
+      var cgRewarded = false;
+      try {
+        this._sdk.ad.requestAd('rewarded', {
+          adStarted: () => { try { AudioManager.stopAll(); } catch(_) {} this.gameplayStop(); },
+          adFinished: () => { cgRewarded = true; if (onReward) try { onReward(); } catch(_) {} finish(); },
+          adError: () => { finish(); }
+        });
+      } catch(_) { finish(); }
+    } else {
+      // No SDK (local dev / gallery): grant immediately so the reward
+      // path is testable without a live ad network.
+      if (onReward) try { onReward(); } catch(_) {}
+      finish();
     }
   },
 
