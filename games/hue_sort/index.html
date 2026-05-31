@@ -41,6 +41,14 @@ var STRINGS = {
     streak: 'STREAK', day: 'day', days: 'days',
     come_back: 'Come back tomorrow for a new puzzle!',
     best_streak: 'Best streak',
+    // Daily bonus (session-end hook)
+    bonus_claim: 'CLAIM BONUS', bonus_ready: 'Daily bonus ready!',
+    bonus_tubes: 'pure tubes',
+    bonus_tease_ready: 'A daily bonus is waiting on the menu — tap MENU to claim.',
+    bonus_tease_next: 'Daily bonus claimed — come back tomorrow for',
+    bonus_tomorrow: 'Tomorrow', bonus_today: 'Today',
+    bonus_banked: 'Banked into your Lab Rank',
+    bonus_streak_boost: 'Streak bonus',
   },
   ru: {
     title: 'Слей по цвету',
@@ -61,6 +69,14 @@ var STRINGS = {
     streak: 'СЕРИЯ', day: 'день', days: 'дн.',
     come_back: 'Возвращайся завтра за новой задачей!',
     best_streak: 'Лучшая серия',
+    // Daily bonus (session-end hook)
+    bonus_claim: 'ЗАБРАТЬ БОНУС', bonus_ready: 'Бонус дня готов!',
+    bonus_tubes: 'чистых пробирок',
+    bonus_tease_ready: 'В меню ждёт бонус дня — нажми МЕНЮ, чтобы забрать.',
+    bonus_tease_next: 'Бонус дня забран — возвращайся завтра за',
+    bonus_tomorrow: 'Завтра', bonus_today: 'Сегодня',
+    bonus_banked: 'Зачислено в твой ранг',
+    bonus_streak_boost: 'Бонус за серию',
   },
 };
 
@@ -243,6 +259,70 @@ function recordDailyWin() {
   dailyLastDay = tk;
   dailyDoneToday = true;
   saveDaily();
+}
+
+// ── DAILY BONUS — SESSION-END HOOK (retention mechanic #4, 2026-05-31) ──────
+// A claimable login bonus that banks PURE TUBES straight into the lifetime
+// Lab-Rank meta once per UTC day. The hook is two-sided:
+//   • the SESSION-END screens (GAMEOVER / WIN / DAILYDONE) tease it — "a bonus is
+//     waiting on the menu" if unclaimed, or PREVIEW TOMORROW'S (bigger) bonus once
+//     claimed — so leaving plants a concrete, dated reason to return;
+//   • the MENU shows a claimable chest button when a bonus is available; claiming
+//     it pours a streak-scaled pile of pure tubes into tubesPurified (compounding
+//     with both Lab Rank AND the day-streak the player already grows).
+// The reward SCALES with the day-streak (longer streak → bigger daily payout), so
+// the streak becomes materially rewarding, not just a number — and the "tomorrow"
+// preview is the carrot that arms the next session.
+var bonusLastClaim = '';     // YYYYMMDD of the last day the bonus was claimed
+var bonusClaimedToday = false; // derived on load — already claimed today?
+var BONUS_BASE = 3;          // base pure tubes from the daily bonus
+var BONUS_PER_STREAK = 1;    // +1 tube per day of current streak
+var BONUS_STREAK_CAP = 12;   // streak contribution caps here (the value, not days)
+
+// Bonus value for a GIVEN streak length (used for both today and the tomorrow
+// preview). Streak 0 → base; each streak-day adds 1, capped so it can't blow up.
+function bonusValueFor(streak) {
+  var boost = Math.min(BONUS_PER_STREAK * Math.max(streak, 0), BONUS_STREAK_CAP);
+  return BONUS_BASE + boost;
+}
+// Today's claimable bonus = scaled by the CURRENT surfaced streak.
+function bonusValueToday() { return bonusValueFor(dailyStreak); }
+// Tomorrow's preview = assume the streak is +1 (the carrot for returning). If the
+// chain would break (no daily solved yet today) the preview is honest: base only,
+// but framed as "keep your streak alive".
+function bonusValueTomorrow() {
+  // If they already solved today's daily, tomorrow can extend the streak by 1;
+  // otherwise the streak might reset, so preview the conservative streak+1 value
+  // they'd get by keeping the chain — this is the motivating number either way.
+  return bonusValueFor(dailyStreak + 1);
+}
+function loadBonus() {
+  try {
+    var raw = localStorage.getItem('hue_sort_bonus');
+    if (raw) { var o = JSON.parse(raw); bonusLastClaim = o.lastClaim || ''; }
+  } catch (e) {}
+  bonusClaimedToday = (bonusLastClaim === todayKey());
+}
+function saveBonus() {
+  try { localStorage.setItem('hue_sort_bonus', JSON.stringify({ lastClaim: bonusLastClaim })); } catch (e) {}
+}
+function bonusAvailable() { return !bonusClaimedToday; }
+// Claim today's bonus: pour the streak-scaled pile into the Lab-Rank meta, mark
+// the day done, and celebrate. Idempotent per UTC day.
+function claimBonus() {
+  if (bonusClaimedToday) return false;
+  var amt = bonusValueToday();
+  bonusLastClaim = todayKey();
+  bonusClaimedToday = true;
+  saveBonus();
+  // Bank into the SAME lifetime counter Lab Rank + the daily already feed (this
+  // can itself trigger a RANK UP! via awardPurified's tier check).
+  awardPurified(amt);
+  var c = { x: GF.W / 2, y: GF.H * 0.30 };
+  GF.spawnFloat(c.x, c.y, '+' + amt, '#ffe27a');
+  GF.spawnParticles(c.x, c.y, '#ffe27a', 24);
+  GF.happytime();
+  return true;
 }
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
@@ -589,7 +669,8 @@ function update(dt) {
 // ── DRAW ──────────────────────────────────────────────────────────────────
 var _playBtn = null, _retryBtn = null, _againBtn = null, _dailyBtn = null;
 var _hudMenuBtn = null, _hudHelpBtn = null, _undoBtn = null, _gmMenuBtn = null, _winMenuBtn = null;
-var _dailyMenuBtn = null;
+var _dailyMenuBtn = null, _bonusBtn = null;
+var _bonusPulse = 0; // cosmetic pulse phase for the claimable chest
 
 function draw(ctx) {
   drawBg(ctx);
@@ -893,8 +974,17 @@ function drawMenu(ctx) {
     dailyDoneToday ? GF.t('daily_done_btn') : GF.t('daily'),
     leftX + bw + midGap, btnY, bw, bh, 'daily', dailyDoneToday);
 
-  // Streak + best-level caption line under the buttons.
+  // Claimable daily-bonus chest (session-end hook): only when a bonus is waiting.
+  // Sits in the caption gap under the PLAY|DAILY row so it costs no fixed extra
+  // height — when there's nothing to claim the area collapses back to captions.
+  _bonusBtn = null;
   var capY = btnY + bh + GF.clamp(12 * S, 8, 18);
+  if (bonusAvailable()) {
+    _bonusBtn = drawBonusButton(ctx, cx, capY, rowW);
+    capY = _bonusBtn.y + _bonusBtn.h + GF.clamp(10 * S, 7, 16);
+  }
+
+  // Streak + best-level caption line under the buttons / chest.
   ctx.font = 'bold ' + GF.clamp(13 * S, 10, 17) + 'px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   if (dailyStreak > 0) {
@@ -908,6 +998,35 @@ function drawMenu(ctx) {
     ctx.fillStyle = '#7f93b5';
     ctx.fillText(GF.t('best') + ': ' + bestLevel + '/' + WIN_LEVELS, cx, capY);
   }
+}
+
+// The claimable daily-bonus chest button on the MENU. A warm gold pill with a
+// gift glyph, a gentle pulse, and the streak-scaled reward amount baked into the
+// label so the player sees exactly what claiming gives.
+function drawBonusButton(ctx, cx, y, rowW) {
+  var S = GF.S;
+  _bonusPulse += 0.05;
+  var pulse = 0.5 + 0.5 * Math.sin(_bonusPulse);
+  var bw = Math.min(rowW, GF.clamp(300 * S, 220, 380));
+  var bh = GF.clamp(46 * S, 38, 58);
+  var bx = cx - bw / 2;
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,210,90,' + (0.35 + 0.35 * pulse) + ')';
+  ctx.shadowBlur = (14 + 10 * pulse) * S;
+  var g = ctx.createLinearGradient(bx, y, bx, y + bh);
+  g.addColorStop(0, '#ffd24a');
+  g.addColorStop(1, '#e8932a');
+  GF.rr(ctx, bx, y, bw, bh, bh / 2);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = Math.max(1.6 * S, 1.2);
+  ctx.strokeStyle = 'rgba(255,245,210,0.6)'; ctx.stroke();
+  ctx.font = 'bold ' + GF.clamp(16 * S, 13, 21) + 'px sans-serif';
+  ctx.fillStyle = '#3a230a';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('🎁 ' + GF.t('bonus_claim') + ' +' + bonusValueToday(), cx, y + bh / 2);
+  ctx.textBaseline = 'top';
+  return { x: bx, y: y, w: bw, h: bh };
 }
 
 function drawTitleTubes(ctx, cx, y) {
@@ -1008,6 +1127,31 @@ function drawLevelEnd(ctx) {
   ctx.textBaseline = 'top';
 }
 
+// Session-end hook line, drawn near the bottom of every terminal screen
+// (GAMEOVER / WIN / DAILYDONE). If a daily bonus is unclaimed → tease it ("waiting
+// on the menu"). If already claimed → preview TOMORROW'S (bigger) bonus, the
+// concrete dated carrot that arms the next session. `botY` is the baseline Y to
+// draw above the menu button; returns nothing (purely additive overlay text).
+function drawSessionEndHook(ctx, botY) {
+  var S = GF.S, cx = GF.W / 2;
+  var maxW = Math.min(GF.W * 0.84, 400);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+  var txt, col;
+  if (bonusAvailable()) {
+    col = '#ffd24a';
+    txt = '🎁 ' + GF.t('bonus_tease_ready');
+  } else {
+    col = '#9fb6d8';
+    txt = GF.t('bonus_tease_next') + ' +' + bonusValueTomorrow() + ' ' + GF.t('bonus_tubes') + '.';
+  }
+  ctx.fillStyle = col;
+  var lines = wrapLines(ctx, txt, maxW);
+  var lh = GF.clamp(18 * S, 14, 24);
+  var y = botY - lines.length * lh;
+  for (var i = 0; i < lines.length; i++) { ctx.fillText(lines[i], cx, y); y += lh; }
+}
+
 function drawGameOver(ctx) {
   drawScrim(ctx, 0.9);
   var S = GF.S, H = GF.H, cx = GF.W / 2;
@@ -1019,6 +1163,8 @@ function drawGameOver(ctx) {
   ctx.fillText(GF.t('level') + ' ' + level + '/' + WIN_LEVELS, cx, H * 0.30 + GF.clamp(50 * S, 38, 66));
   _retryBtn = drawButton(ctx, GF.t('retry'), cx, H * 0.52, '#e88a3a');
   _gmMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _retryBtn.h + GF.clamp(18 * S, 12, 26));
+  // Session-end hook: tease the claimable daily bonus / preview tomorrow's.
+  drawSessionEndHook(ctx, H - GF.clamp(20 * S, 14, 28));
 }
 
 function drawWin(ctx) {
@@ -1039,6 +1185,8 @@ function drawWin(ctx) {
     cx, H * 0.28 + GF.clamp(80 * S, 60, 104));
   _againBtn = drawButton(ctx, GF.t('again'), cx, H * 0.52);
   _winMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _againBtn.h + GF.clamp(18 * S, 12, 26));
+  // Session-end hook: tease the claimable daily bonus / preview tomorrow's.
+  drawSessionEndHook(ctx, H - GF.clamp(20 * S, 14, 28));
 }
 
 // Daily-challenge solved screen: the streak is the headline (the return hook),
@@ -1078,7 +1226,14 @@ function drawDailyDone(ctx) {
   var cbY = H * 0.55;
   for (var i = 0; i < cbLines.length; i++) { ctx.fillText(cbLines[i], cx, cbY); cbY += GF.clamp(20 * S, 15, 26); }
 
-  _dailyMenuBtn = drawButton(ctx, GF.t('menu'), cx, Math.min(cbY + GF.clamp(18 * S, 12, 26), H - GF.clamp(80 * S, 60, 104)));
+  // Reserve room for the session-end hook line between the come-back copy and the
+  // MENU button so nothing overlaps on the (content-heavy) daily-done screen.
+  var hookH = GF.clamp(40 * S, 30, 54);
+  var menuY = Math.min(cbY + hookH + GF.clamp(14 * S, 10, 22), H - GF.clamp(80 * S, 60, 104));
+  // Session-end hook: tease the claimable daily bonus / preview tomorrow's,
+  // drawn just above the MENU button.
+  drawSessionEndHook(ctx, menuY - GF.clamp(8 * S, 6, 12));
+  _dailyMenuBtn = drawButton(ctx, GF.t('menu'), cx, menuY);
 }
 
 // ── INPUT ──────────────────────────────────────────────────────────────────
@@ -1100,6 +1255,7 @@ function onTap(x, y) {
   if (GF.tutorial.active) { if (GF.tutorial.handleClick(x, y)) return; }
 
   if (gs === 'MENU') {
+    if (hit(_bonusBtn, x, y)) { claimBonus(); return; }
     if (hit(_playBtn, x, y)) { startGame(); return; }
     if (hit(_dailyBtn, x, y)) { startDaily(); return; }
     return;
@@ -1159,6 +1315,10 @@ GF.exposeState(function() {
     dailyStreak: dailyStreak,
     dailyBest: dailyBest,
     dailyDoneToday: dailyDoneToday,
+    bonusClaimedToday: bonusClaimedToday,
+    bonusAvailable: bonusAvailable(),
+    bonusValueToday: bonusValueToday(),
+    bonusValueTomorrow: bonusValueTomorrow(),
     POUR_BUDGET: POUR_BUDGET,
     TUBE_CAP: TUBE_CAP,
     START_TUBES: START_TUBES,
@@ -1190,6 +1350,7 @@ GF.init({
     try { bestLevel = parseInt(localStorage.getItem('hue_sort_best') || '0') || 0; } catch (e) {}
     try { tubesPurified = parseInt(localStorage.getItem('hue_sort_purified') || '0') || 0; } catch (e) {}
     loadDaily(); // restore day-streak + whether today's daily is already solved
+    loadBonus(); // restore whether today's daily login bonus is still claimable
     GF.persist('hue_sort_run_v1',
       function() {
         return { gs: gs, mode: mode, level: level, pours: pours, undoLeft: undoLeft,
