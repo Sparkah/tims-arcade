@@ -25,7 +25,16 @@ export async function onRequestGet({ request, env }) {
   const guard = auth(request, env);
   if (guard) return guard;
 
-  const statusFilter = new URL(request.url).searchParams.get('status') || '';
+  const url = new URL(request.url);
+  // Cheap single-key READ so the background worker can poll without LIST ops
+  // (KV free tier = 1000 list/day; a 15s list-poll blows it). `ugc:work` is
+  // bumped by request-review + approve; the worker only does a full list when
+  // this value changes. Reads are 100k/day — plenty.
+  if (url.searchParams.get('signal') === '1') {
+    return json({ work: (await env.VOTES.get('ugc:work')) || '0' });
+  }
+
+  const statusFilter = url.searchParams.get('status') || '';
   const out = [];
   let cursor;
   do {
@@ -82,6 +91,7 @@ export async function onRequestPost({ request, env }) {
     // background worker (re)attempts the deploy.
     row.status = 'approved'; row.approvedAt = Date.now();
     row.publishAttempted = false; row.publishError = '';
+    await env.VOTES.put('ugc:work', String(Date.now()));   // wake the worker
   }
   else if (action === 'reject') {
     if (reason.length < 3) return jsonError('reason_required', 400);
@@ -93,6 +103,7 @@ export async function onRequestPost({ request, env }) {
   }
   else if (action === 'request-review') {    // ⚡ AI check button -> worker runs the review
     row.reviewRequested = true; row.reviewRequestedAt = Date.now();
+    await env.VOTES.put('ugc:work', String(Date.now()));   // wake the worker
   }
   else if (action === 'worker') {            // background worker sets its own flags
     for (const k of ['reviewRequested', 'publishRequested', 'publishAttempted', 'publishError', 'workerNote']) {
