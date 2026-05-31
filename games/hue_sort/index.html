@@ -36,6 +36,11 @@ var STRINGS = {
     tut_win: 'Win: every tube is a single pure colour before pours run out.',
     tut_lose: 'Lose: your pour budget hits zero while a tube is still mixed.',
     tut_tip: 'Tip: pouring onto a DIFFERENT colour BLENDS them (blue+yellow=green) — plan ahead.',
+    daily: 'DAILY', daily_done_btn: "TODAY'S DONE",
+    daily_solved: 'DAILY SOLVED!', daily_tag: 'DAILY',
+    streak: 'STREAK', day: 'day', days: 'days',
+    come_back: 'Come back tomorrow for a new puzzle!',
+    best_streak: 'Best streak',
   },
   ru: {
     title: 'Слей по цвету',
@@ -51,6 +56,11 @@ var STRINGS = {
     tut_win: 'Победа: в каждой пробирке один чистый цвет, пока есть переливания.',
     tut_lose: 'Поражение: запас переливаний кончился, а где-то остался смешанный цвет.',
     tut_tip: 'Совет: лить на ДРУГОЙ цвет — значит смешать (синий+жёлтый=зелёный). Планируй.',
+    daily: 'ДЕНЬ', daily_done_btn: 'НА СЕГОДНЯ ВСЁ',
+    daily_solved: 'ЗАДАЧА ДНЯ РЕШЕНА!', daily_tag: 'ЗАДАЧА ДНЯ',
+    streak: 'СЕРИЯ', day: 'день', days: 'дн.',
+    come_back: 'Возвращайся завтра за новой задачей!',
+    best_streak: 'Лучшая серия',
   },
 };
 
@@ -154,8 +164,90 @@ function countPureTubes() {
   return n;
 }
 
+// ── DAILY CHALLENGE + STREAK (retention mechanic, 2026-05-31) ──────────────
+// A single deterministic puzzle per calendar day (same for everyone, seeded by
+// the UTC date) plus a day-streak counter that rewards returning each day. The
+// habit scaffold that pulls the player back daily; it banks its pure tubes into
+// the same lifetime Lab-Rank meta, and gives infinite fresh content on top of
+// the finite 6-level campaign (directly serving the "build more levels" ask).
+var dailyStreak = 0;       // consecutive days the daily was solved (persisted)
+var dailyBest = 0;         // longest streak ever (persisted)
+var dailyLastDay = '';     // YYYYMMDD of the last day the daily was SOLVED
+var dailyDoneToday = false;// solved today's daily already? (derived on load)
+var DAILY_LEVEL = 5;       // daily uses a fixed mid-hard difficulty (3 colours)
+
+// UTC day key 'YYYYMMDD' — UTC so the puzzle flips at a single global instant.
+function todayKey() {
+  var d = new Date();
+  var y = d.getUTCFullYear();
+  var m = ('0' + (d.getUTCMonth() + 1)).slice(-2);
+  var da = ('0' + d.getUTCDate()).slice(-2);
+  return '' + y + m + da;
+}
+// Yesterday's key, for "was the streak consecutive?" checks.
+function yesterdayKey() {
+  var d = new Date(Date.now() - 86400000);
+  var y = d.getUTCFullYear();
+  var m = ('0' + (d.getUTCMonth() + 1)).slice(-2);
+  var da = ('0' + d.getUTCDate()).slice(-2);
+  return '' + y + m + da;
+}
+function dailySeed() {
+  var k = todayKey(), h = 1779033703 ^ k.length;
+  for (var i = 0; i < k.length; i++) {
+    h = Math.imul(h ^ k.charCodeAt(i), 3432918353);
+    h = (h << 13) | (h >>> 19);
+  }
+  return (h >>> 0);
+}
+// mulberry32 — small, fast, deterministic PRNG so the daily board is identical
+// for every player on a given day (no Math.random in the daily scramble).
+function makeRng(seed) {
+  var a = seed >>> 0;
+  return function() {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function loadDaily() {
+  try {
+    var raw = localStorage.getItem('hue_sort_daily');
+    if (raw) {
+      var o = JSON.parse(raw);
+      dailyStreak = o.streak || 0;
+      dailyBest = o.best || 0;
+      dailyLastDay = o.lastDay || '';
+    }
+  } catch (e) {}
+  // If the last solved day was neither today nor yesterday, the chain is broken:
+  // surface streak 0 until they solve again today (don't mutate stored 'best').
+  if (dailyLastDay && dailyLastDay !== todayKey() && dailyLastDay !== yesterdayKey()) {
+    dailyStreak = 0;
+  }
+  dailyDoneToday = (dailyLastDay === todayKey());
+}
+function saveDaily() {
+  try {
+    localStorage.setItem('hue_sort_daily', JSON.stringify(
+      { streak: dailyStreak, best: dailyBest, lastDay: dailyLastDay }));
+  } catch (e) {}
+}
+// Called once when today's daily is solved: extend or restart the streak.
+function recordDailyWin() {
+  if (dailyDoneToday) return; // already counted today
+  var tk = todayKey();
+  dailyStreak = (dailyLastDay === yesterdayKey()) ? (dailyStreak + 1) : 1;
+  if (dailyStreak > dailyBest) dailyBest = dailyStreak;
+  dailyLastDay = tk;
+  dailyDoneToday = true;
+  saveDaily();
+}
+
 // ── GAME STATE ───────────────────────────────────────────────────────────
-var gs = 'MENU';           // MENU | PLAYING | LEVELEND | GAMEOVER | WIN
+var gs = 'MENU';           // MENU | PLAYING | LEVELEND | GAMEOVER | WIN | DAILYDONE
+var mode = 'campaign';     // 'campaign' | 'daily' — which loop the player is in
 var level = 1;
 var bestLevel = 0;
 var tubes = [];            // array of arrays (bottom->top), each <= TUBE_CAP
@@ -199,17 +291,44 @@ function topRunLen(arr) {
   return n;
 }
 
-// scramble with single-unit moves so the start state is all-primary & solvable
-function scrambleMove(t) {
+// scramble with single-unit moves so the start state is all-primary & solvable.
+// Optional `rng` (returns 0..1) makes the scramble deterministic for the daily
+// challenge; campaign callers pass nothing and fall back to Math.random.
+function scrambleMove(t, rng) {
+  var rnd = rng || Math.random;
   var srcs = [];
   for (var i = 0; i < t.length; i++) if (t[i].length > 1) srcs.push(i);
   if (!srcs.length) return;
-  var s = srcs[(Math.random() * srcs.length) | 0];
+  var s = srcs[(rnd() * srcs.length) | 0];
   var dsts = [];
   for (var j = 0; j < t.length; j++) if (j !== s && t[j].length < TUBE_CAP) dsts.push(j);
   if (!dsts.length) return;
-  var d = dsts[(Math.random() * dsts.length) | 0];
+  var d = dsts[(rnd() * dsts.length) | 0];
   t[d].push(t[s].pop());
+}
+
+// Build today's DAILY puzzle: same geometry as a level-5 board (3 colours), but
+// scrambled with a date-seeded RNG so every player gets the identical board.
+function buildDailyLevel() {
+  var lvl = DAILY_LEVEL;
+  var rng = makeRng(dailySeed());
+  var nColors = 3; // daily is always the full 3-colour board
+  var t = [];
+  for (var ci = 0; ci < nColors; ci++) {
+    var col = PRIMARIES[ci];
+    t.push([col, col, col, col].slice(0, TUBE_CAP));
+  }
+  for (var e = 0; e < 2; e++) t.push([]);
+  var moves = 6 + lvl * 3;
+  for (var m = 0; m < moves; m++) scrambleMove(t, rng);
+  if (solvedState(t)) { scrambleMove(t, rng); scrambleMove(t, rng); }
+  tubes = t;
+  pours = poursForLevel(lvl);
+  undoLeft = UNDO_MAX;
+  stuck = false;
+  sel = -1;
+  history = [];
+  anim = null;
 }
 
 function solvedState(t) {
@@ -317,10 +436,20 @@ function applyPour() {
 
 function evaluate() {
   if (isSolved()) {
-    if (level > bestLevel) { bestLevel = level; try { localStorage.setItem('hue_sort_best', bestLevel); } catch (e) {} }
-    // Persistent meta: bank every pure tube from this solved level into the
+    // Persistent meta: bank every pure tube from this solved board into the
     // lifetime Lab-Rank counter (the owned, cross-session progression).
     awardPurified(countPureTubes());
+    if (mode === 'daily') {
+      // Daily challenge solved → extend the day-streak and show the daily-done
+      // screen (don't touch campaign bestLevel / WIN flow).
+      recordDailyWin();
+      gs = 'DAILYDONE';
+      GF.gameEnded();
+      GF.happytime();
+      GF.saveRun();
+      return;
+    }
+    if (level > bestLevel) { bestLevel = level; try { localStorage.setItem('hue_sort_best', bestLevel); } catch (e) {} }
     if (level >= WIN_LEVELS) { gs = 'WIN'; GF.gameEnded(); GF.happytime(); }
     else { gs = 'LEVELEND'; }
     GF.saveRun();
@@ -336,8 +465,17 @@ function evaluate() {
 
 // ── LIFECYCLE ──────────────────────────────────────────────────────────────
 function startGame() {
+  mode = 'campaign';
   level = 1;
   buildLevel(level);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function startDaily() {
+  mode = 'daily';
+  level = DAILY_LEVEL;       // for the LVL/budget HUD only; daily board is seeded
+  buildDailyLevel();
   gs = 'PLAYING';
   GF.gameStarted();
   GF.saveRun();
@@ -351,12 +489,15 @@ function nextLevel() {
   GF.saveRun();
 }
 function retryLevel() {
-  buildLevel(level);
+  // Re-deal the SAME board the player just lost: daily re-seeds today's puzzle,
+  // campaign re-scrambles its level. (Daily streak is only banked on a win.)
+  if (mode === 'daily') buildDailyLevel();
+  else buildLevel(level);
   gs = 'PLAYING';
   GF.gameStarted();
   GF.saveRun();
 }
-function toMenu() { gs = 'MENU'; GF.saveRun(); }
+function toMenu() { gs = 'MENU'; mode = 'campaign'; GF.saveRun(); }
 
 window._jumpLevel = function(n) {
   GF.tutorial.active = false; // don't let the tutorial overlay cover screenshots
@@ -438,7 +579,7 @@ function tubeRectCenter(i) {
 // ── UPDATE ──────────────────────────────────────────────────────────────────
 function update(dt) {
   GF.tutorial.update(dt);
-  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WIN') computeLayout();
+  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WIN' || gs === 'DAILYDONE') computeLayout();
   if (anim) {
     anim.t += dt / POUR_ANIM_SEC;
     if (anim.t >= 1) applyPour();
@@ -446,20 +587,22 @@ function update(dt) {
 }
 
 // ── DRAW ──────────────────────────────────────────────────────────────────
-var _playBtn = null, _retryBtn = null, _againBtn = null;
+var _playBtn = null, _retryBtn = null, _againBtn = null, _dailyBtn = null;
 var _hudMenuBtn = null, _hudHelpBtn = null, _undoBtn = null, _gmMenuBtn = null, _winMenuBtn = null;
+var _dailyMenuBtn = null;
 
 function draw(ctx) {
   drawBg(ctx);
-  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WIN') {
+  if (gs === 'PLAYING' || gs === 'LEVELEND' || gs === 'GAMEOVER' || gs === 'WIN' || gs === 'DAILYDONE') {
     if (!tubeRects.length) computeLayout();
     drawBoard(ctx);
     drawHUD(ctx);
   }
-  if (gs === 'MENU')     drawMenu(ctx);
-  if (gs === 'LEVELEND') drawLevelEnd(ctx);
-  if (gs === 'GAMEOVER') drawGameOver(ctx);
-  if (gs === 'WIN')      drawWin(ctx);
+  if (gs === 'MENU')      drawMenu(ctx);
+  if (gs === 'LEVELEND')  drawLevelEnd(ctx);
+  if (gs === 'GAMEOVER')  drawGameOver(ctx);
+  if (gs === 'WIN')       drawWin(ctx);
+  if (gs === 'DAILYDONE') drawDailyDone(ctx);
   GF.tutorial.draw(ctx);
 }
 
@@ -550,9 +693,17 @@ function drawHUD(ctx) {
   var fs = GF.clamp(17 * S, 13, 24);
   ctx.textBaseline = 'top';
   ctx.font = 'bold ' + fs + 'px sans-serif';
-  ctx.fillStyle = '#cfe0ff';
   ctx.textAlign = 'left';
-  ctx.fillText(GF.t('level') + ' ' + level + '/' + WIN_LEVELS, pad, pad);
+  if (mode === 'daily') {
+    // Daily mode: show the DAILY tag (+ current streak) instead of LVL n/6.
+    ctx.fillStyle = '#ffb454';
+    var tag = GF.t('daily_tag');
+    if (dailyStreak > 0) tag += '  🔥' + dailyStreak;
+    ctx.fillText(tag, pad, pad);
+  } else {
+    ctx.fillStyle = '#cfe0ff';
+    ctx.fillText(GF.t('level') + ' ' + level + '/' + WIN_LEVELS, pad, pad);
+  }
 
   var maxP = poursForLevel(level);
   var pipR = GF.clamp(5 * S, 4, 8);
@@ -677,6 +828,25 @@ function drawSmallButton(ctx, label, cx, y) {
   return { x: bx, y: y, w: bw, h: bh };
 }
 
+// A pill button sized to fit half a row (used for the PLAY | DAILY menu pair so
+// the daily entry adds NO vertical height vs. the old single-PLAY layout).
+function drawPairButton(ctx, label, bx, y, bw, bh, accent, dim) {
+  var S = GF.S;
+  var g = ctx.createLinearGradient(bx, y, bx, y + bh);
+  if (dim) { g.addColorStop(0, '#37506e'); g.addColorStop(1, '#26384e'); }
+  else if (accent === 'play') { g.addColorStop(0, '#3fb86a'); g.addColorStop(1, '#2a8a4c'); }
+  else { g.addColorStop(0, '#ef9b3a'); g.addColorStop(1, '#c46410'); } // daily = warm
+  GF.rr(ctx, bx, y, bw, bh, bh / 2);
+  ctx.fillStyle = g; ctx.fill();
+  if (dim) { ctx.lineWidth = Math.max(1.5 * S, 1.2); ctx.strokeStyle = 'rgba(150,180,230,0.4)'; ctx.stroke(); }
+  ctx.font = 'bold ' + GF.clamp(17 * S, 13, 22) + 'px sans-serif';
+  ctx.fillStyle = dim ? '#bcd' : '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, bx + bw / 2, y + bh / 2);
+  ctx.textBaseline = 'top';
+  return { x: bx, y: y, w: bw, h: bh };
+}
+
 function drawMenu(ctx) {
   drawScrim(ctx, 0.92);
   var S = GF.S, W = GF.W, H = GF.H, cx = W / 2;
@@ -708,12 +878,35 @@ function drawMenu(ctx) {
     for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], lx, y); y += lineH; }
     y += lineH * 0.28;
   }
-  var btnY = Math.min(y + GF.clamp(14 * S, 8, 22), H - GF.clamp(86 * S, 64, 116));
-  _playBtn = drawButton(ctx, GF.t('play'), cx, btnY);
+  // PLAY (campaign) | DAILY pair — same row, so the new daily entry costs no
+  // extra menu height (keeps the portrait menu inside the viewport).
+  var btnY = Math.min(y + GF.clamp(14 * S, 8, 22), H - GF.clamp(96 * S, 72, 128));
+  var bh = GF.clamp(56 * S, 44, 70);
+  var rowW = Math.min(W * 0.92, GF.clamp(360 * S, 280, 440));
+  var midGap = GF.clamp(12 * S, 8, 18);
+  var bw = (rowW - midGap) / 2;
+  var leftX = cx - rowW / 2;
+  _playBtn = drawPairButton(ctx, GF.t('play'), leftX, btnY, bw, bh, 'play', false);
+  // Daily: dim when today's puzzle is already solved (still tappable to replay,
+  // but visually signals "done" — the FOMO is in the streak, not a hard lock).
+  _dailyBtn = drawPairButton(ctx,
+    dailyDoneToday ? GF.t('daily_done_btn') : GF.t('daily'),
+    leftX + bw + midGap, btnY, bw, bh, 'daily', dailyDoneToday);
+
+  // Streak + best-level caption line under the buttons.
+  var capY = btnY + bh + GF.clamp(12 * S, 8, 18);
+  ctx.font = 'bold ' + GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  if (dailyStreak > 0) {
+    ctx.fillStyle = '#ffb454';
+    var unit = dailyStreak === 1 ? GF.t('day') : GF.t('days');
+    ctx.fillText('🔥 ' + dailyStreak + ' ' + unit + ' ' + GF.t('streak'), cx, capY);
+    capY += GF.clamp(18 * S, 13, 24);
+  }
   if (bestLevel > 0) {
-    ctx.font = GF.clamp(13 * S, 10, 16) + 'px sans-serif';
-    ctx.fillStyle = '#7f93b5'; ctx.textAlign = 'center';
-    ctx.fillText(GF.t('best') + ': ' + bestLevel, cx, btnY + _playBtn.h + 14 * S);
+    ctx.font = GF.clamp(12 * S, 9, 15) + 'px sans-serif';
+    ctx.fillStyle = '#7f93b5';
+    ctx.fillText(GF.t('best') + ': ' + bestLevel + '/' + WIN_LEVELS, cx, capY);
   }
 }
 
@@ -848,6 +1041,46 @@ function drawWin(ctx) {
   _winMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _againBtn.h + GF.clamp(18 * S, 12, 26));
 }
 
+// Daily-challenge solved screen: the streak is the headline (the return hook),
+// with the "come back tomorrow" line making the next-day pull explicit.
+function drawDailyDone(ctx) {
+  drawScrim(ctx, 0.92);
+  var S = GF.S, H = GF.H, cx = GF.W / 2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.shadowColor = 'rgba(255,180,84,0.55)'; ctx.shadowBlur = 28 * S;
+  ctx.font = 'bold ' + GF.clamp(34 * S, 22, 48) + 'px sans-serif';
+  ctx.fillStyle = '#ffb454';
+  ctx.fillText(GF.t('daily_solved'), cx, H * 0.20);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  // Big streak count — the headline retention payload.
+  var unit = dailyStreak === 1 ? GF.t('day') : GF.t('days');
+  ctx.font = 'bold ' + GF.clamp(48 * S, 32, 64) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
+  ctx.fillText('🔥 ' + dailyStreak, cx, H * 0.31);
+  ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif';
+  ctx.fillStyle = '#ffb454';
+  ctx.fillText(unit + ' ' + GF.t('streak'), cx, H * 0.31 + GF.clamp(56 * S, 40, 74));
+
+  ctx.font = GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+  ctx.fillStyle = '#9fb6d8';
+  ctx.fillText(GF.t('best_streak') + ': ' + dailyBest, cx, H * 0.31 + GF.clamp(80 * S, 58, 104));
+
+  // Lab Rank line (same owned meta the daily feeds into).
+  ctx.fillStyle = '#ffe27a';
+  ctx.fillText(rankName(rankIndexFor(tubesPurified)) + ' · ' + tubesPurified +
+    (isRu() ? ' чистых' : ' pure'), cx, H * 0.31 + GF.clamp(102 * S, 74, 132));
+
+  // The explicit next-day hook.
+  ctx.font = GF.clamp(14 * S, 11, 18) + 'px sans-serif';
+  ctx.fillStyle = '#cfe0ff';
+  var cbLines = wrapLines(ctx, GF.t('come_back'), Math.min(GF.W * 0.8, 380));
+  var cbY = H * 0.55;
+  for (var i = 0; i < cbLines.length; i++) { ctx.fillText(cbLines[i], cx, cbY); cbY += GF.clamp(20 * S, 15, 26); }
+
+  _dailyMenuBtn = drawButton(ctx, GF.t('menu'), cx, Math.min(cbY + GF.clamp(18 * S, 12, 26), H - GF.clamp(80 * S, 60, 104)));
+}
+
 // ── INPUT ──────────────────────────────────────────────────────────────────
 function hit(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
 
@@ -866,7 +1099,15 @@ function tubeHit(x, y) {
 function onTap(x, y) {
   if (GF.tutorial.active) { if (GF.tutorial.handleClick(x, y)) return; }
 
-  if (gs === 'MENU') { if (hit(_playBtn, x, y)) startGame(); return; }
+  if (gs === 'MENU') {
+    if (hit(_playBtn, x, y)) { startGame(); return; }
+    if (hit(_dailyBtn, x, y)) { startDaily(); return; }
+    return;
+  }
+  if (gs === 'DAILYDONE') {
+    if (hit(_dailyMenuBtn, x, y)) { toMenu(); return; }
+    return;
+  }
   if (gs === 'LEVELEND') { nextLevel(); return; }
   if (gs === 'GAMEOVER') {
     if (hit(_retryBtn, x, y)) { retryLevel(); return; }
@@ -912,8 +1153,12 @@ GF.exposeState(function() {
     solved: isSolved(),
     impure: boardImpure(),
     sel: sel,
+    mode: mode,
     tubesPurified: tubesPurified,
     labRank: rankName(rankIndexFor(tubesPurified)),
+    dailyStreak: dailyStreak,
+    dailyBest: dailyBest,
+    dailyDoneToday: dailyDoneToday,
     POUR_BUDGET: POUR_BUDGET,
     TUBE_CAP: TUBE_CAP,
     START_TUBES: START_TUBES,
@@ -944,13 +1189,15 @@ GF.init({
   onReady: function() {
     try { bestLevel = parseInt(localStorage.getItem('hue_sort_best') || '0') || 0; } catch (e) {}
     try { tubesPurified = parseInt(localStorage.getItem('hue_sort_purified') || '0') || 0; } catch (e) {}
+    loadDaily(); // restore day-streak + whether today's daily is already solved
     GF.persist('hue_sort_run_v1',
       function() {
-        return { gs: gs, level: level, pours: pours, undoLeft: undoLeft,
+        return { gs: gs, mode: mode, level: level, pours: pours, undoLeft: undoLeft,
                  tubes: tubes.map(function(a){ return a.slice(); }) };
       },
       function(s) {
         if (!s) return;
+        mode = (s.mode === 'daily') ? 'daily' : 'campaign';
         level = s.level || 1;
         pours = (typeof s.pours === 'number') ? s.pours : POUR_BUDGET;
         undoLeft = (typeof s.undoLeft === 'number') ? s.undoLeft : UNDO_MAX;

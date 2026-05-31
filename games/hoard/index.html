@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Hoard</title>
+  <script src="/sdk.js"></script>
+  <!-- build_platforms.sh substitutes the line above with the SDK <script>
+       for the chosen platform (yandex / crazygames / gamedistribution / gamepush). -->
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (EN + RU — Yandex 8.2.3) ────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Hoard',
+    sub:   'Catch the loot. Bank it before it spills.',
+    play: 'PLAY', retry: 'PLAY AGAIN',
+    score: 'SCORE', best: 'BEST',
+    gameover: 'GAME OVER', bank: 'BANK', tier: 'TIER',
+    combo_best: 'Best combo', help: 'HOW TO PLAY', tap_close: 'tap to close',
+    tut_goal:     'GOAL   Catch falling treasure, then bank the bowl before it overflows.',
+    tut_controls: 'MOVE   drag to slide the bowl.   BANK   tap the bottom bar (or Space).',
+    tut_win:      'ENDLESS   push your best score and your biggest combo.',
+    tut_lose:     '3 STRIKES   an overflow OR catching a bomb costs you a strike.',
+    tut_tip:      'TIP   a fuller bowl banks a bigger combo — dodge rocks & bombs, grab gems.',
+  },
+  ru: {
+    title: 'Клад',
+    sub:   'Лови добычу. Сдай чашу, пока не переполнилась.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'ИГРА ОКОНЧЕНА', bank: 'СДАТЬ', tier: 'УРОВЕНЬ',
+    combo_best: 'Лучшее комбо', help: 'КАК ИГРАТЬ', tap_close: 'нажмите, чтобы закрыть',
+    tut_goal:     'ЦЕЛЬ   Лови сокровища и сдавай чашу, пока она не переполнилась.',
+    tut_controls: 'ДВИГАТЬ   тяни, чтобы двигать чашу.   СДАТЬ   жми нижнюю панель (или Пробел).',
+    tut_win:      'БЕЗ КОНЦА   бей свой рекорд и самое большое комбо.',
+    tut_lose:     '3 ПРОМАХА   переполнение чаши ИЛИ пойманная бомба — это промах.',
+    tut_tip:      'СОВЕТ   полная чаша даёт больше комбо — уклоняйся от камней и бомб, лови самоцветы.',
+  },
+};
+var TUT_KEYS = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+
+var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
+var SPRITE_NAMES = []; // v0.1 art is procedural (crisp glossy coins/gems)
+
+// ── TUNABLES (mirror DESIGN.md) ───────────────────────────────────────────
+var MAX_STRIKES    = 3;
+var BOWL_CAP_UNITS = 12;
+var BOWL_W         = 116;
+var ITEM_FALL_BASE = 150;
+var ITEM_FALL_STEP = 26;
+var SPAWN_BASE_MS  = 820;
+var SPAWN_MIN_MS   = 300;
+var TIER_SCORE     = 45;
+var SPEED_TIER_CAP = 10;   // fall-speed/spawn ramp flattens past this tier (stays playable)
+var COMBO_GOOD_FRAC= 0.6;
+var COMBO_WEAK_FRAC= 0.3;
+var COMBO_MAX      = 9;
+var COIN_VALUE     = 1;
+var GEM_VALUE      = 5;
+var ROCK_VALUE     = 0;
+var COIN_R = 13, GEM_R = 12, ROCK_R = 16, BOMB_R = 15;
+var BOWL_CATCH_H = 20;
+var SURGE_PERIOD = 17,  SURGE_DUR = 4.5; // seconds (tier 5+)
+
+// ── GAME STATE ────────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | GAMEOVER
+var score = 0, best = 0, bestCombo = 0;
+var tier = 1, strikes = 0;
+var pileUnits = 0, pileValue = 0, pileTypes = [];
+var combo = 0, mult = 1;
+var items = [];
+var bowl = { x: 0, targetX: 0 };
+var spawnAcc = 0, gameTime = 0;
+var surgeUntil = -999, nextSurgeAt = SURGE_PERIOD;
+var flash = 0;                   // brief screen flash on tier-up / surge
+var helpOpen = false;
+var UI = {};                     // live interactive rects, read by the locale/overlap audit
+
+// Layout (recomputed each frame from live viewport)
+var L = {};
+function layout() {
+  var S = GF.S, W = GF.W, H = GF.H;
+  L.fieldW = Math.min(W * 0.98, H * 0.62);
+  L.x0 = GF.cx - L.fieldW / 2;
+  L.x1 = GF.cx + L.fieldW / 2;
+  L.hudH = GF.clamp(68 * S, 52, 92);
+  L.bankH = GF.clamp(90 * S, 70, 124);
+  L.bankTop = H - L.bankH;
+  L.bowlH = GF.clamp(62 * S, 44, 82);
+  L.bowlTopY = L.bankTop - 10 * S - L.bowlH;
+  L.spawnY = L.hudH + 12 * S;
+  L.mouthW = BOWL_W * S;
+  L.bankMargin = GF.clamp(14 * S, 8, 26);
+}
+function clampBowlX(x) {
+  return GF.clamp(x, L.x0 + L.mouthW / 2, L.x1 - L.mouthW / 2);
+}
+
+// ── LIFECYCLE ──────────────────────────────────────────────────────────────
+function startGame() {
+  score = 0; tier = 1; strikes = 0;
+  pileUnits = 0; pileValue = 0; pileTypes = [];
+  combo = 0; mult = 1; bestCombo = 0;
+  items = []; spawnAcc = 0; gameTime = 0;
+  surgeUntil = -999; nextSurgeAt = SURGE_PERIOD;
+  flash = 0; helpOpen = false;
+  layout();
+  bowl.x = GF.cx; bowl.targetX = GF.cx;
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem('hoard_best', best); } catch (e) {}
+  }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+  GF.saveRun();
+  if (score >= best && best > 0) GF.happytime();
+}
+
+function addStrike(x, y, kind) {
+  strikes++;
+  combo = 0; mult = 1;
+  pileUnits = 0; pileValue = 0; pileTypes = [];
+  GF.setShake(1.0);
+  GF.spawnParticles(x, y, kind === 'bomb' ? '#ff5a3c' : '#ff8a3c', 22);
+  GF.spawnFloat(x, y - 16 * GF.S, kind === 'bomb' ? 'BOOM!' : 'SPILL!', '#ff7a5a');
+  if (strikes >= MAX_STRIKES) gameOver();
+  else GF.saveRun();
+}
+
+function bank() {
+  if (pileUnits <= 0) return;
+  var frac = pileUnits / BOWL_CAP_UNITS;
+  if (frac >= COMBO_GOOD_FRAC) combo = Math.min(combo + 1, COMBO_MAX - 1);
+  else if (frac < COMBO_WEAK_FRAC) combo = 0;
+  mult = GF.clamp(1 + combo, 1, COMBO_MAX);
+  if (mult > bestCombo) bestCombo = mult;
+  var gain = Math.round(pileValue * mult);
+  score += gain;
+  var by = L.bowlTopY - 18 * GF.S;
+  GF.spawnFloat(bowl.x, by, '+' + gain + (mult > 1 ? '  ×' + mult : ''), '#ffd86b');
+  GF.spawnParticles(bowl.x, L.bowlTopY, '#ffd86b', 14 + Math.min(pileUnits, 14));
+  GF.setShake(0.45);
+  pileUnits = 0; pileValue = 0; pileTypes = [];
+  var prevTier = tier;
+  tier = 1 + Math.floor(score / TIER_SCORE);
+  if (tier > prevTier) { flash = 0.6; GF.spawnFloat(GF.cx, L.hudH + 26 * GF.S, (GF.t('tier') + ' ' + tier).toUpperCase(), '#7fe0ff'); }
+  GF.saveRun();
+}
+
+// ── SPAWNING ───────────────────────────────────────────────────────────────
+function pickType() {
+  var r = Math.random();
+  if (tier <= 1) return 'coin';
+  if (tier === 2) return r < 0.78 ? 'coin' : 'gem';
+  if (tier === 3) return r < 0.62 ? 'coin' : r < 0.80 ? 'gem' : 'rock';
+  // tier 4+
+  var surge = gameTime < surgeUntil;
+  if (surge) return r < 0.66 ? 'coin' : r < 0.92 ? 'gem' : 'rock'; // no bombs mid-surge (pure greed window)
+  return r < 0.50 ? 'coin' : r < 0.66 ? 'gem' : r < 0.82 ? 'rock' : 'bomb';
+}
+function makeItem(type, x, y) {
+  var S = GF.S, it = { type: type, x: x, y: y, rot: Math.random() * Math.PI, seed: Math.random() };
+  if (type === 'coin') { it.r = COIN_R * S; it.value = COIN_VALUE; it.units = 1; }
+  else if (type === 'gem') { it.r = GEM_R * S; it.value = GEM_VALUE; it.units = 1; }
+  else if (type === 'rock') { it.r = ROCK_R * S; it.value = ROCK_VALUE; it.units = 2; }
+  else { it.r = BOMB_R * S; it.value = 0; it.units = 0; } // bomb
+  return it;
+}
+function spawnItem() {
+  var type = pickType();
+  var r = (type === 'rock' ? ROCK_R : type === 'bomb' ? BOMB_R : COIN_R) * GF.S;
+  var pad = r + 6 * GF.S;
+  var x = L.x0 + pad + Math.random() * (L.fieldW - pad * 2);
+  var it = makeItem(type, x, L.spawnY - r);
+  var dtf = Math.min(tier, SPEED_TIER_CAP);
+  it.vy = (ITEM_FALL_BASE + (dtf - 1) * ITEM_FALL_STEP) * GF.S * (0.92 + Math.random() * 0.22);
+  items.push(it);
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────────
+function update(dt) {
+  if (gs !== 'PLAYING' || helpOpen) return;
+  if (window.__ssFreeze) { layout(); return; } // screenshot freeze: hold the composed frame
+  layout();
+  gameTime += dt;
+  if (flash > 0) flash = Math.max(0, flash - dt * 1.6);
+
+  // Keyboard steering (desktop)
+  var S = GF.S, kx = 0;
+  if (GF.keys['ArrowLeft'] || GF.keys['KeyA']) kx -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) kx += 1;
+  if (kx !== 0) bowl.targetX = clampBowlX(bowl.targetX + kx * 620 * S * dt);
+
+  // Bowl easing toward target
+  bowl.targetX = clampBowlX(bowl.targetX);
+  bowl.x += (bowl.targetX - bowl.x) * Math.min(1, dt * 18);
+
+  // Surge scheduling (tier 5+)
+  if (tier >= 5 && gameTime >= nextSurgeAt && gameTime >= surgeUntil) {
+    surgeUntil = gameTime + SURGE_DUR;
+    nextSurgeAt = gameTime + SURGE_PERIOD + Math.random() * 6;
+    flash = 0.5;
+  }
+  var surge = gameTime < surgeUntil;
+
+  // Spawn cadence
+  var interval = Math.max(SPAWN_MIN_MS, SPAWN_BASE_MS - (Math.min(tier, SPEED_TIER_CAP) - 1) * 58);
+  if (surge) interval *= 0.5;
+  spawnAcc += dt * 1000;
+  if (spawnAcc >= interval) { spawnAcc -= interval; spawnItem(); }
+
+  // Fall + catch + despawn
+  var rimY = L.bowlTopY, halfMouth = L.mouthW / 2, catchH = BOWL_CATCH_H * S;
+  for (var i = items.length - 1; i >= 0; i--) {
+    var it = items[i];
+    it.y += it.vy * dt;
+    if (it.type === 'bomb') it.rot += dt * 1.5;
+    // catch when entering the rim band within the mouth
+    if (it.y + it.r >= rimY && it.y <= rimY + catchH && Math.abs(it.x - bowl.x) <= halfMouth) {
+      items.splice(i, 1);
+      if (it.type === 'bomb') { addStrike(bowl.x, rimY, 'bomb'); continue; }
+      var award = it.value * (surge ? 2 : 1);
+      pileUnits += it.units; pileValue += award;
+      if (it.units > 0) pileTypes.push(it.type);
+      GF.spawnParticles(it.x, rimY, it.type === 'gem' ? '#7fe0ff' : it.type === 'rock' ? '#9aa0aa' : '#ffd86b', it.type === 'gem' ? 10 : 6);
+      if (it.type === 'gem') GF.spawnFloat(bowl.x, rimY - 10 * S, '+' + award, '#7fe0ff');
+      if (pileUnits > BOWL_CAP_UNITS) addStrike(bowl.x, rimY, 'spill');
+      continue;
+    }
+    if (it.y - it.r > L.bowlTopY + L.bowlH + 6 * S) items.splice(i, 1); // missed → vanish above bank bar
+  }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────────
+function bgColors() {
+  // warm the vault as tiers climb
+  var t = Math.min(tier, 7) / 7;
+  return {
+    top: 'rgb(' + Math.round(13 + t * 22) + ',' + Math.round(16 + t * 6) + ',' + Math.round(34 + t * 4) + ')',
+    mid: 'rgb(' + Math.round(26 + t * 30) + ',' + Math.round(19 + t * 8) + ',' + Math.round(38 - t * 6) + ')',
+    bot: 'rgb(' + Math.round(42 + t * 50) + ',' + Math.round(29 + t * 14) + ',' + Math.round(16 + t * 4) + ')',
+  };
+}
+function draw(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  layout();
+  // Background
+  var bc = bgColors();
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, bc.top); g.addColorStop(0.55, bc.mid); g.addColorStop(1, bc.bot);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // Field column framing
+  ctx.fillStyle = 'rgba(255,255,255,0.025)';
+  GF.rr(ctx, L.x0, 0, L.fieldW, H, 0); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,220,140,0.10)'; ctx.lineWidth = 2 * S;
+  ctx.beginPath(); ctx.moveTo(L.x0, 0); ctx.lineTo(L.x0, H); ctx.moveTo(L.x1, 0); ctx.lineTo(L.x1, H); ctx.stroke();
+  // surge tint
+  if (gameTime < surgeUntil && gs === 'PLAYING') {
+    ctx.fillStyle = 'rgba(255,196,60,' + (0.10 + 0.05 * Math.sin(gameTime * 10)) + ')';
+    ctx.fillRect(L.x0, 0, L.fieldW, H);
+  }
+  if (flash > 0) { ctx.fillStyle = 'rgba(127,224,255,' + (flash * 0.18) + ')'; ctx.fillRect(0, 0, W, H); }
+  // vignette
+  var vg = ctx.createRadialGradient(GF.cx, GF.cy, Math.min(W, H) * 0.3, GF.cx, GF.cy, Math.max(W, H) * 0.72);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.45)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawChute(ctx);
+    for (var i = 0; i < items.length; i++) drawItem(ctx, items[i]);
+    drawBowl(ctx);
+    drawBankBar(ctx);
+    drawHUD(ctx);
+    drawHelpButton(ctx);
+  }
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if (helpOpen)          drawHelpPanel(ctx);
+}
+
+function drawChute(ctx) {
+  var S = GF.S, y = L.hudH + 2 * S, w = L.mouthW * 1.4, x = GF.cx - w / 2;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  GF.rr(ctx, x, y - 8 * S, w, 12 * S, 6 * S); ctx.fill();
+  ctx.fillStyle = 'rgba(255,220,150,0.10)';
+  GF.rr(ctx, x, y - 8 * S, w, 4 * S, 2 * S); ctx.fill();
+}
+
+function drawItem(ctx, it) {
+  var x = it.x, y = it.y, r = it.r;
+  if (it.type === 'coin') {
+    var g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+    g.addColorStop(0, '#fff1bf'); g.addColorStop(0.5, '#f6c233'); g.addColorStop(1, '#b9790f');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,70,0,0.55)'; ctx.lineWidth = Math.max(1, r * 0.12); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.beginPath(); ctx.ellipse(x - r * 0.32, y - r * 0.38, r * 0.28, r * 0.16, -0.6, 0, Math.PI * 2); ctx.fill();
+  } else if (it.type === 'gem') {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(it.rot * 0.15);
+    ctx.beginPath();
+    ctx.moveTo(0, -r); ctx.lineTo(r * 0.82, 0); ctx.lineTo(0, r); ctx.lineTo(-r * 0.82, 0); ctx.closePath();
+    var gg = ctx.createLinearGradient(0, -r, 0, r);
+    gg.addColorStop(0, '#d6fbff'); gg.addColorStop(0.45, '#4fd6ff'); gg.addColorStop(1, '#1f7fd6');
+    ctx.fillStyle = gg; ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.65)'; ctx.lineWidth = Math.max(1, r * 0.1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -r); ctx.lineTo(r * 0.82, 0); ctx.lineTo(0, 0); ctx.closePath();
+    ctx.fillStyle = 'rgba(255,255,255,0.32)'; ctx.fill();
+    ctx.restore();
+  } else if (it.type === 'rock') {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(it.rot);
+    ctx.beginPath();
+    var n = 7;
+    for (var k = 0; k < n; k++) {
+      var a = (k / n) * Math.PI * 2;
+      var rr2 = r * (0.78 + ((Math.sin(it.seed * 99 + k * 3.1) + 1) / 2) * 0.3);
+      var px = Math.cos(a) * rr2, py = Math.sin(a) * rr2;
+      if (k === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    var rg = ctx.createLinearGradient(-r, -r, r, r);
+    rg.addColorStop(0, '#8a909c'); rg.addColorStop(1, '#565b66');
+    ctx.fillStyle = rg; ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.arc(r * 0.2, r * 0.1, r * 0.16, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  } else { // bomb
+    var bg = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+    bg.addColorStop(0, '#4a4e58'); bg.addColorStop(0.5, '#23262e'); bg.addColorStop(1, '#0d0f14');
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,80,60,0.5)'; ctx.lineWidth = Math.max(1, r * 0.14);
+    ctx.beginPath(); ctx.arc(x, y, r * 1.05, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.beginPath(); ctx.arc(x - r * 0.32, y - r * 0.34, r * 0.18, 0, Math.PI * 2); ctx.fill();
+    // fuse spark
+    ctx.strokeStyle = '#caa'; ctx.lineWidth = Math.max(1, r * 0.12);
+    ctx.beginPath(); ctx.moveTo(x, y - r); ctx.quadraticCurveTo(x + r * 0.4, y - r * 1.5, x + r * 0.2, y - r * 1.7); ctx.stroke();
+    var fl = 0.5 + 0.5 * Math.sin(it.rot * 9);
+    ctx.fillStyle = 'rgba(255,' + Math.round(120 + fl * 120) + ',40,' + (0.7 + fl * 0.3) + ')';
+    ctx.beginPath(); ctx.arc(x + r * 0.2, y - r * 1.7, r * (0.18 + fl * 0.12), 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawBowl(ctx) {
+  var S = GF.S, bx = bowl.x, topY = L.bowlTopY, h = L.bowlH;
+  var halfTop = L.mouthW / 2, halfBot = L.mouthW * 0.34;
+  var ratio = GF.clamp(pileUnits / BOWL_CAP_UNITS, 0, 1);
+  // mouth shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.beginPath(); ctx.ellipse(bx, topY, halfTop, 7 * S, 0, 0, Math.PI * 2); ctx.fill();
+  // cup body
+  ctx.beginPath();
+  ctx.moveTo(bx - halfTop, topY);
+  ctx.lineTo(bx + halfTop, topY);
+  ctx.lineTo(bx + halfBot, topY + h);
+  ctx.quadraticCurveTo(bx, topY + h + 8 * S, bx - halfBot, topY + h);
+  ctx.closePath();
+  var g = ctx.createLinearGradient(bx - halfTop, topY, bx + halfTop, topY + h);
+  g.addColorStop(0, '#ffe08a'); g.addColorStop(0.5, '#dca12c'); g.addColorStop(1, '#8f6313');
+  ctx.save(); ctx.fillStyle = g; ctx.fill();
+  // pile fill (clipped to cup)
+  ctx.clip();
+  if (ratio > 0) {
+    var fillTop = topY + h - h * ratio;
+    var pg = ctx.createLinearGradient(0, fillTop, 0, topY + h);
+    pg.addColorStop(0, '#fff3c0'); pg.addColorStop(1, '#f4c63a');
+    ctx.fillStyle = pg; ctx.fillRect(bx - halfTop, fillTop, L.mouthW, h);
+    // a few coin/gem bumps on the pile surface
+    var bumps = Math.min(Math.round(pileUnits), 6);
+    for (var i = 0; i < bumps; i++) {
+      var bxp = bx - halfTop * 0.6 + (i / Math.max(1, bumps - 1)) * halfTop * 1.2;
+      var typ = pileTypes[pileTypes.length - 1 - i] || 'coin';
+      ctx.fillStyle = typ === 'gem' ? '#7fe0ff' : typ === 'rock' ? '#8a909c' : '#ffe49a';
+      ctx.beginPath(); ctx.arc(bxp, fillTop + 3 * S, 4.5 * S, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+  // rim (colour by danger)
+  var rimCol = ratio < 0.55 ? '#5fe08a' : ratio < 0.8 ? '#ffd24a' : '#ff5a4a';
+  var lw = 3 * S;
+  if (ratio >= 0.8) { var p = 0.5 + 0.5 * Math.sin(gameTime * 12); lw = (3 + p * 2.5) * S; ctx.shadowColor = '#ff5a4a'; ctx.shadowBlur = 12 * S; }
+  ctx.strokeStyle = rimCol; ctx.lineWidth = lw;
+  ctx.beginPath(); ctx.ellipse(bx, topY, halfTop, 7 * S, 0, 0, Math.PI * 2); ctx.stroke();
+  ctx.shadowBlur = 0;
+  // combo tag above bowl
+  if (mult > 1 && gs === 'PLAYING') {
+    ctx.fillStyle = '#ffd86b'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+    ctx.font = 'bold ' + GF.clamp(18 * S, 13, 24) + 'px ' + FONT;
+    ctx.fillText('×' + mult, bx, topY - 16 * S);
+  }
+}
+
+function drawBankBar(ctx) {
+  var S = GF.S, x = L.bankMargin, y = L.bankTop + GF.clamp(10 * S, 6, 16);
+  var w = GF.W - L.bankMargin * 2, h = L.bankH - GF.clamp(20 * S, 12, 30);
+  var big = pileUnits / BOWL_CAP_UNITS >= COMBO_GOOD_FRAC && gs === 'PLAYING';
+  var pulse = big ? 0.5 + 0.5 * Math.sin(gameTime * 8) : 0;
+  ctx.save();
+  if (big) { ctx.shadowColor = '#ffd24a'; ctx.shadowBlur = (10 + pulse * 14) * S; }
+  var g = ctx.createLinearGradient(x, y, x, y + h);
+  if (gs === 'PLAYING' && pileUnits > 0) { g.addColorStop(0, '#ffd86b'); g.addColorStop(1, '#d99a1f'); }
+  else { g.addColorStop(0, '#4a4030'); g.addColorStop(1, '#2c2519'); }
+  GF.rr(ctx, x, y, w, h, h * 0.32); ctx.fillStyle = g; ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = (gs === 'PLAYING' && pileUnits > 0) ? '#3a2400' : '#9a8a66';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(22 * S, 15, 30) + 'px ' + FONT;
+  var label = GF.t('bank');
+  if (gs === 'PLAYING' && pileValue > 0) label += '  +' + Math.round(pileValue * GF.clamp(1 + combo, 1, COMBO_MAX));
+  UI.bank = { rect: { x: x, y: y, w: w, h: h }, label: label };
+  ctx.fillText(label, GF.cx, y + h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawHUD(ctx) {
+  var S = GF.S, pad = GF.clamp(12 * S, 8, 18);
+  // tier progress bar (thin, top of field)
+  var barY = 5 * S, barH = 5 * S, bw = L.fieldW - pad * 2, bx = L.x0 + pad;
+  var prog = (score % TIER_SCORE) / TIER_SCORE;
+  ctx.fillStyle = 'rgba(255,255,255,0.12)'; GF.rr(ctx, bx, barY, bw, barH, barH / 2); ctx.fill();
+  ctx.fillStyle = '#7fe0ff'; GF.rr(ctx, bx, barY, bw * prog, barH, barH / 2); ctx.fill();
+  ctx.fillStyle = '#9fd8ee'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px ' + FONT;
+  ctx.fillText((GF.t('tier') + ' ' + tier).toUpperCase(), GF.cx, barY + barH + 3 * S);
+  // score (left, with coin)
+  var rowY = barY + barH + GF.clamp(20 * S, 14, 28);
+  var cr = GF.clamp(9 * S, 7, 12), sx = L.x0 + pad + GF.clamp(30 * S, 22, 40);
+  var coinCx = sx - GF.clamp(16 * S, 12, 22);
+  ctx.beginPath(); ctx.arc(coinCx, rowY + cr, cr, 0, Math.PI * 2);
+  ctx.fillStyle = '#f6c233'; ctx.fill();
+  UI.coin = { rect: { x: coinCx - cr, y: rowY, w: cr * 2, h: cr * 2 } };
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(20 * S, 14, 28) + 'px ' + FONT;
+  ctx.fillText('' + score, sx, rowY + cr);
+  // strikes (right pips: remaining bright, lost dim)
+  var pr = GF.clamp(7 * S, 5, 10), gap = GF.clamp(20 * S, 14, 26), rx = L.x1 - pad - GF.clamp(26 * S, 18, 34);
+  for (var i = 0; i < MAX_STRIKES; i++) {
+    var lost = i < strikes;
+    ctx.beginPath(); ctx.arc(rx - i * gap, rowY + cr, pr, 0, Math.PI * 2);
+    ctx.fillStyle = lost ? 'rgba(255,255,255,0.16)' : '#ff5a4a'; ctx.fill();
+    if (!lost) { ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1; ctx.stroke(); }
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function helpBtnRect() {
+  var S = GF.S, r = GF.clamp(15 * S, 12, 20);
+  return { x: L.x1 - GF.clamp(12 * S, 8, 18) - r, y: 4 * S + GF.clamp(11 * S, 9, 14) + GF.clamp(20 * S, 14, 28) - r, r: r };
+}
+function drawHelpButton(ctx) {
+  if (gs !== 'PLAYING') return;
+  var b = helpBtnRect();
+  UI.help = { rect: { x: b.x, y: b.y, w: b.r * 2, h: b.r * 2 } };
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.beginPath(); ctx.arc(b.x + b.r, b.y + b.r, b.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#dfe7ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px ' + FONT;
+  ctx.fillText('?', b.x + b.r, b.y + b.r + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── Text wrapping (measured physical lines, returns next y) ──────────────────
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/), lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function drawTutorialBlock(ctx, cxp, yTop, maxW) {
+  var S = GF.S, lineH = GF.clamp(16 * S, 13, 19), gap = GF.clamp(7 * S, 4, 11);
+  var fs = GF.clamp(13 * S, 11, 16);
+  ctx.font = fs + 'px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var y = yTop;
+  for (var k = 0; k < TUT_KEYS.length; k++) {
+    var lines = wrapLines(ctx, GF.t(TUT_KEYS[k]), maxW);
+    ctx.fillStyle = '#d7deea';
+    for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], cxp, y); y += lineH; }
+    y += gap;
+  }
+  ctx.textBaseline = 'alphabetic';
+  return y;
+}
+
+// ── Overlays ─────────────────────────────────────────────────────────────────
+var playBtn = null, retryBtn = null;
+function drawButton(ctx, label, cyp) {
+  var S = GF.S, w = GF.clamp(240 * S, 170, 320), h = GF.clamp(56 * S, 44, 68);
+  var x = GF.cx - w / 2, y = cyp - h / 2;
+  var g = ctx.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, '#ffd86b'); g.addColorStop(1, '#d99a1f');
+  ctx.save(); ctx.shadowColor = 'rgba(255,200,80,0.5)'; ctx.shadowBlur = 22 * S;
+  GF.rr(ctx, x, y, w, h, h / 2); ctx.fillStyle = g; ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#3a2400'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(20 * S, 15, 26) + 'px ' + FONT;
+  ctx.fillText(label, GF.cx, y + h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+  return { x: x, y: y, w: w, h: h };
+}
+function drawTitle(ctx, yp) {
+  var S = GF.S;
+  ctx.save(); ctx.shadowColor = 'rgba(255,200,80,0.55)'; ctx.shadowBlur = 30 * S;
+  ctx.fillStyle = '#ffe08a'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(54 * S, 30, 76) + 'px ' + FONT;
+  ctx.fillText(GF.t('title').toUpperCase(), GF.cx, yp); ctx.restore(); // stylised caps logo; STRINGS keep proper case (Yandex 8.2.1)
+}
+function drawMenu(ctx) {
+  var S = GF.S, H = GF.H;
+  ctx.fillStyle = 'rgba(8,8,18,0.84)'; ctx.fillRect(0, 0, GF.W, H);
+  drawTitle(ctx, H * 0.155);
+  ctx.fillStyle = '#c9b27a'; ctx.textAlign = 'center';
+  ctx.font = GF.clamp(15 * S, 12, 19) + 'px ' + FONT;
+  ctx.fillText(GF.t('sub'), GF.cx, H * 0.155 + GF.clamp(26 * S, 18, 34));
+  var maxW = Math.min(L.fieldW - 36 * S, 460 * S);
+  var blockTop = H * 0.27;
+  var afterBlock = drawTutorialBlock(ctx, GF.cx, blockTop, maxW);
+  var btnY = Math.max(afterBlock + GF.clamp(26 * S, 18, 40), H * 0.72);
+  btnY = Math.min(btnY, H - GF.clamp(70 * S, 50, 96));
+  playBtn = drawButton(ctx, GF.t('play'), btnY);
+  UI.play = { rect: playBtn, label: GF.t('play') };
+  if (best > 0) {
+    ctx.fillStyle = '#9a8a66'; ctx.textAlign = 'center';
+    ctx.font = GF.clamp(13 * S, 10, 17) + 'px ' + FONT;
+    ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + playBtn.h / 2 + GF.clamp(26 * S, 18, 34));
+  }
+}
+function drawGameOver(ctx) {
+  var S = GF.S, H = GF.H;
+  ctx.fillStyle = 'rgba(8,8,18,0.86)'; ctx.fillRect(0, 0, GF.W, H);
+  ctx.save(); ctx.shadowColor = 'rgba(255,120,80,0.5)'; ctx.shadowBlur = 26 * S;
+  ctx.fillStyle = '#ffd0a0'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(40 * S, 24, 56) + 'px ' + FONT;
+  ctx.fillText(GF.t('gameover'), GF.cx, H * 0.30); ctx.restore();
+  ctx.fillStyle = '#ffe08a'; ctx.font = 'bold ' + GF.clamp(30 * S, 20, 42) + 'px ' + FONT;
+  ctx.fillText(GF.t('score') + ' ' + score, GF.cx, H * 0.30 + GF.clamp(50 * S, 34, 66));
+  ctx.fillStyle = '#9ab'; ctx.font = GF.clamp(15 * S, 12, 19) + 'px ' + FONT;
+  ctx.fillText(GF.t('best') + ': ' + best + '    ' + GF.t('combo_best') + ': ×' + bestCombo, GF.cx, H * 0.30 + GF.clamp(84 * S, 56, 104));
+  retryBtn = drawButton(ctx, GF.t('retry'), Math.max(H * 0.62, H * 0.30 + GF.clamp(140 * S, 96, 180)));
+  UI.retry = { rect: retryBtn, label: GF.t('retry') };
+}
+function drawHelpPanel(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(6,8,16,0.92)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffe08a'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(26 * S, 18, 36) + 'px ' + FONT;
+  ctx.fillText(GF.t('help'), GF.cx, H * 0.2);
+  var maxW = Math.min(L.fieldW - 36 * S, 460 * S);
+  drawTutorialBlock(ctx, GF.cx, H * 0.28, maxW);
+  ctx.fillStyle = '#8aa'; ctx.font = GF.clamp(13 * S, 11, 16) + 'px ' + FONT; ctx.textAlign = 'center';
+  ctx.fillText('(' + GF.t('tap_close') + ')', GF.cx, H * 0.9);
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────────
+var cvs = document.getElementById('c');
+function evtPos(e) {
+  var rect = cvs.getBoundingClientRect();
+  var sx = rect.width ? cvs.width / rect.width : 1, sy = rect.height ? cvs.height / rect.height : 1;
+  return { x: (e.clientX - rect.left) * sx, y: (e.clientY - rect.top) * sy };
+}
+// Banking is the BOTTOM BAR (or Space) only — never tap-anywhere. The pointer
+// steers the bowl while ABOVE the bank bar, so tapping BANK can't yank the bowl
+// and ignoring the game still overflows into a loss (DESIGN lose condition).
+var _down = false, _dx = 0, _dy = 0, _dt = 0, _moved = false;
+function nearCenter(x, y) { var d = GF.clamp(70 * GF.S, 48, 110); return Math.abs(x - GF.cx) < d && Math.abs(y - GF.cy) < d; }
+function inRect(x, y, r) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+function onDown(p) {
+  _down = true; _dx = p.x; _dy = p.y; _dt = performance.now(); _moved = false;
+  if (gs === 'PLAYING' && !helpOpen) {
+    var b = helpBtnRect();
+    var ddx = p.x - (b.x + b.r), ddy = p.y - (b.y + b.r);
+    if (ddx * ddx + ddy * ddy <= (b.r + 12 * GF.S) * (b.r + 12 * GF.S)) { helpOpen = true; return; }
+    if (p.y >= L.bankTop) { bank(); return; }       // bottom band = BANK
+    bowl.targetX = clampBowlX(p.x);                  // play area = grab the bowl
+  }
+}
+function onMove(p) {
+  if (_down) { var dx = p.x - _dx, dy = p.y - _dy; if (dx * dx + dy * dy > (10 * GF.S) * (10 * GF.S)) _moved = true; }
+  if (gs === 'PLAYING' && !helpOpen && p.y < L.bankTop) bowl.targetX = clampBowlX(p.x);
+}
+function onUp(p) {
+  if (!_down) return; _down = false;
+  var isTap = !_moved && (performance.now() - _dt) < 320;
+  if (helpOpen) { if (isTap) helpOpen = false; return; }
+  if (gs === 'MENU') { if (isTap && (inRect(p.x, p.y, playBtn) || nearCenter(p.x, p.y))) startGame(); }
+  else if (gs === 'GAMEOVER') { if (isTap && (inRect(p.x, p.y, retryBtn) || nearCenter(p.x, p.y))) startGame(); }
+}
+if (window.PointerEvent) {
+  cvs.addEventListener('pointerdown', function (e) { onDown(evtPos(e)); }, { passive: true });
+  window.addEventListener('pointermove', function (e) { onMove(evtPos(e)); }, { passive: true });
+  window.addEventListener('pointerup', function (e) { onUp(evtPos(e)); }, { passive: true });
+  window.addEventListener('pointercancel', function () { _down = false; }, { passive: true });
+} else {
+  cvs.addEventListener('mousedown', function (e) { onDown(evtPos(e)); });
+  window.addEventListener('mousemove', function (e) { onMove(evtPos(e)); });
+  window.addEventListener('mouseup', function (e) { onUp(evtPos(e)); });
+  cvs.addEventListener('touchstart', function (e) { onDown(evtPos(e.changedTouches[0])); }, { passive: true });
+  window.addEventListener('touchmove', function (e) { onMove(evtPos(e.changedTouches[0])); }, { passive: true });
+  window.addEventListener('touchend', function (e) { onUp(evtPos(e.changedTouches[0])); }, { passive: true });
+}
+var _space = false;
+window.addEventListener('keydown', function (e) {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    if (_space) return; _space = true;
+    if (helpOpen) { helpOpen = false; return; }
+    if (gs === 'PLAYING') bank();
+    else startGame();
+  } else if (e.code === 'KeyH' || e.code === 'Slash') {
+    if (gs === 'PLAYING') helpOpen = !helpOpen;
+  }
+});
+window.addEventListener('keyup', function (e) { if (e.code === 'Space' || e.code === 'Enter') _space = false; });
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 450,
+  designH: 800,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'hoard',
+  onReady: function () {
+    try { best = parseInt(localStorage.getItem('hoard_best') || '0') || 0; } catch (e) {}
+    layout();
+    bowl.x = GF.cx; bowl.targetX = GF.cx;
+    // Yandex 1.9 — run progress persists across reload. Save meta; on reload
+    // resume the run with a fresh field (items are transient).
+    GF.persist('hoard_run_v1',
+      function () { return { gs: gs, score: score, best: best, tier: tier, strikes: strikes, combo: combo, mult: mult, bestCombo: bestCombo }; },
+      function (s) {
+        if (!s) return;
+        score = s.score || 0; best = Math.max(best, s.best || 0); tier = s.tier || 1;
+        strikes = s.strikes || 0; combo = s.combo || 0; mult = s.mult || 1; bestCombo = s.bestCombo || 0;
+        gs = (s.gs === 'PLAYING' || s.gs === 'GAMEOVER') ? s.gs : 'MENU';
+        items = []; pileUnits = 0; pileValue = 0; pileTypes = [];
+      }
+    );
+    // Gate hook: expose state for post-build-tester
+    GF.exposeState(function () {
+      return { gs: gs, score: score, best: best, tier: tier, strikes: strikes, pileUnits: pileUnits, pileValue: pileValue, mult: mult, items: items.length };
+    });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── EXTERNAL TOOLING HOOKS ─────────────────────────────────────────────────────
+// Screenshot: land directly on a busy, populated mid-game state.
+window._setupForScreenshot = function (level) {
+  startGame();
+  var t = Math.max(2, level || 5);
+  score = (t - 1) * TIER_SCORE + 18;
+  tier = 1 + Math.floor(score / TIER_SCORE);
+  combo = 5; mult = GF.clamp(1 + combo, 1, COMBO_MAX); bestCombo = mult;
+  pileUnits = Math.round(BOWL_CAP_UNITS * 0.58); pileValue = 40;
+  pileTypes = ['coin', 'gem', 'coin', 'coin', 'gem', 'coin'];
+  bowl.x = GF.cx; bowl.targetX = GF.cx;
+  items = [];
+  // a rich treasure field for promos (no bombs — promos should look rewarding)
+  var comp = ['coin', 'gem', 'coin', 'coin', 'gem', 'coin', 'coin', 'rock', 'coin', 'gem', 'coin', 'coin', 'gem', 'coin', 'coin', 'rock'];
+  for (var i = 0; i < comp.length; i++) {
+    var pad = 26 * GF.S;
+    var x = L.x0 + pad + Math.random() * (L.fieldW - pad * 2);
+    var y = L.spawnY + 16 * GF.S + Math.random() * (L.bowlTopY - L.spawnY - 40 * GF.S);
+    var it = makeItem(comp[i], x, y);
+    it.vy = (ITEM_FALL_BASE + (Math.min(tier, SPEED_TIER_CAP) - 1) * ITEM_FALL_STEP) * GF.S;
+    items.push(it);
+  }
+};
+window._jumpLevel = function (n) { window._setupForScreenshot(n || 5); };
+
+// Locale / overlap audit hooks (locale_overflow_check.js)
+window._setLang = function (l) { GF.lang = (l === 'ru' ? 'ru' : 'en'); };
+window._setState = function (s) {
+  if (s === 'PLAYING') { if (gs !== 'PLAYING') window._setupForScreenshot(3); }
+  else { gs = (s === 'GAMEOVER') ? 'GAMEOVER' : 'MENU'; }
+};
+window._getI18N = function () { return STRINGS; };
+window._getFontBody = function () { return FONT; };
+window._getUIRects = function () { return UI; }; // live button/icon rects for the locale audit
+
+// ── YANDEX MUST-HAVES (see template notes) ─────────────────────────────────────
+// 1. All UI text via GF.t()/STRINGS (EN+RU)  ✓  2. GF.persist + GF.saveRun ✓
+// 3. Fullscreen-exit resize handled in gf-lib ✓  4. No ads in v0.1 (so 4.4 vacuous) ✓
+})();
+</script>
+</body>
+</html>

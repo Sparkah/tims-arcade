@@ -95,8 +95,13 @@ export async function onRequestPost({ request, env }) {
   }
   else if (action === 'reject') {
     if (reason.length < 3) return jsonError('reason_required', 400);
+    // If the card is already LIVE, flag the worker to UNPUBLISH the public
+    // Gallery card (published:false -> sync -> push -> /p/<slug> 404). A reject
+    // that only flips KV would leave the rejected game live on the site.
+    if (row.status === 'live') { row.unpublishRequested = true; row.unpublishAttempted = false; }
     row.status = 'rejected'; row.rejectReason = reason; row.rejectedAt = Date.now();
     row.emailed = await sendRejectEmail(env, row, reason);
+    await env.VOTES.put('ugc:work', String(Date.now()));   // wake the worker (unpublish + email already sent)
   }
   else if (action === 'reset') {
     row.status = 'pending'; row.publishAttempted = false; row.publishError = ''; row.reviewRequested = false;
@@ -106,13 +111,22 @@ export async function onRequestPost({ request, env }) {
     await env.VOTES.put('ugc:work', String(Date.now()));   // wake the worker
   }
   else if (action === 'worker') {            // background worker sets its own flags
-    for (const k of ['reviewRequested', 'publishRequested', 'publishAttempted', 'publishError', 'workerNote']) {
+    for (const k of ['reviewRequested', 'publishRequested', 'publishAttempted', 'publishError', 'workerNote',
+                     'unpublishRequested', 'unpublishAttempted', 'unpublishError']) {
       if (k in body) row[k] = body[k];
     }
   }
   else if (action === 'review') {            // local pipeline writes scan + AI verdict back
     if (body.scan !== undefined) row.scan = body.scan;
-    if (body.verdict !== undefined) { row.verdict = body.verdict; row.reviewRequested = false; }
+    if (body.verdict !== undefined) {
+      row.verdict = body.verdict; row.reviewRequested = false;
+      // A reject/needs_work verdict on a card that's already LIVE must pull it.
+      const d = body.verdict && body.verdict.decision;
+      if (row.status === 'live' && (d === 'reject' || d === 'needs_work')) {
+        row.unpublishRequested = true; row.unpublishAttempted = false;
+        await env.VOTES.put('ugc:work', String(Date.now()));   // wake the worker to unpublish
+      }
+    }
   }
   else if (action === 'live') {              // publish script confirms the deploy
     row.status = 'live'; row.liveAt = Date.now();
