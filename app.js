@@ -419,8 +419,13 @@ function renderGenres() {
 // pageview so different fresh games get a "test audience" slot. Pattern at
 // cadence 3 → [proven, proven, explore, proven, proven, explore, …].
 // Kill switch: append ?feed=classic to fall back to pure engagement order.
-const EXPLORE_CADENCE  = 3;    // 1 explore slot per (CADENCE-1) proven → "2 good + 1 new"
-const EXPLORE_PLAY_CAP = 15;   // < this many plays = hasn't had its test audience yet
+const EXPLORE_CADENCE  = 3;    // inject at every 3rd grid slot → "2 proven + 1 fresh"
+const EXPLORE_PLAY_CAP = 15;   // < this many plays = under-seen, hasn't had its test
+const EXPLORE_MAX      = 5;    // CAP exploration at 5 slots so the rest of the feed
+                               // stays proven engagement-ranked content, NOT a random
+                               // low-rated tail (95 games / 91 under-cap / 42 net-neg)
+const EXPLORE_WINDOW   = 12;   // rotate fresh slots among the 12 NEWEST eligible games
+                               // so exploration prefers new over stale long-tail
 const EXPLORE_FEED = new URLSearchParams(location.search).get('feed') !== 'classic';
 // One seed per pageview: keeps the rotation STABLE across the many re-renders
 // (counts / trending / featured each trigger render()) but fresh on each visit.
@@ -444,24 +449,31 @@ function _seededShuffle(arr, seed) {
 // (ranked, counts, seed). Flagship link-outs are left for the flagship splice
 // below, so they're excluded from the explore pool here.
 function interleaveExploration(ranked) {
-  // Before /api/counts lands, every play count is 0 → don't shuffle the whole
-  // feed on first paint; show the base order and let the re-render (once counts
-  // arrive) inject exploration.
+  // Before /api/counts lands, every play count is 0 → don't reshuffle on first
+  // paint; show the base order and let the re-render (once counts arrive) inject.
   if (Object.keys(counts).length === 0) return ranked;
-  const plays = g => (counts[g.slug] || {}).plays || 0;
-  const explore = _seededShuffle(
-    ranked.filter(g => !g.flagship && plays(g) < EXPLORE_PLAY_CAP), _exploreSeed);
-  if (explore.length === 0) return ranked;           // nothing under-seen → unchanged
-  const exploreSet = new Set(explore.map(g => g.slug));
-  const proven = ranked.filter(g => !exploreSet.has(g.slug));
-  if (proven.length === 0) return explore;           // everything under-seen → just rotate
+  const stat  = g => counts[g.slug] || {};
+  const plays = g => stat(g).plays || 0;
+  const net   = g => (stat(g).likes || 0) - (stat(g).dislikes || 0);
+  // Exploration pool: under-seen AND NOT net-negative — never PROMOTE a disliked
+  // game into a prime slot (it still appears in its low ranked position in the
+  // backbone). Newest first so fresh games beat stale long-tail; then rotate per
+  // pageview within the newest window and CAP the count, so the rest of the feed
+  // stays proven engagement-ranked content rather than a random low-rated tail.
+  const pool = ranked
+    .filter(g => !g.flagship && plays(g) < EXPLORE_PLAY_CAP && net(g) >= 0)
+    .sort((a, b) => new Date(b.addedDate || 0) - new Date(a.addedDate || 0));
+  const fresh = _seededShuffle(pool.slice(0, EXPLORE_WINDOW), _exploreSeed).slice(0, EXPLORE_MAX);
+  if (fresh.length === 0) return ranked;             // nothing fresh + non-negative → unchanged
+  const freshSet = new Set(fresh.map(g => g.slug));
+  const backbone = ranked.filter(g => !freshSet.has(g.slug));  // full ranked order, minus injected
   const out = [];
-  let pi = 0, ei = 0;
-  for (let slot = 0; pi < proven.length || ei < explore.length; slot++) {
+  let bi = 0, ei = 0;
+  for (let slot = 0; bi < backbone.length || ei < fresh.length; slot++) {
     const exploreSlot = (slot + 1) % EXPLORE_CADENCE === 0;
-    if (exploreSlot && ei < explore.length) out.push(explore[ei++]);
-    else if (pi < proven.length)            out.push(proven[pi++]);
-    else                                    out.push(explore[ei++]);  // proven exhausted
+    if (exploreSlot && ei < fresh.length) out.push(fresh[ei++]);
+    else if (bi < backbone.length)        out.push(backbone[bi++]);
+    else                                  out.push(fresh[ei++]);  // backbone exhausted (tiny catalog)
   }
   return out;
 }
