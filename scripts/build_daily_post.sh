@@ -28,9 +28,11 @@
 #                Changed from comma: an iteration feature like
 #                "golden sprinkles (+3s, x5 combo)" contains a comma and
 #                broke the comma-split parser, causing the 2026-05-20
-#                public-post abort. Falls back to comma split if no pipe
-#                is found, for backward compat with callers that haven't
-#                migrated yet.
+#                public-post abort. A NO-pipe string is a SINGLE pair and is
+#                NOT comma-split (2026-06-01 fix): under the 1-new+1-iteration
+#                run shape every run has exactly one pair / no pipe, and the
+#                old comma fallback shredded its feature commas into bogus
+#                slugs and aborted EVERY iteration post.
 
 set -uo pipefail
 
@@ -107,12 +109,17 @@ fi
 
 # ── iteration section ──────────────────────────────────────────────────────
 if [[ -n "$ITER_PAIRS" ]]; then
-  # Prefer pipe separator (safe for feature text containing commas); fall back
-  # to comma split for callers that haven't migrated yet (2026-05-20 fix).
+  # Pairs are pipe-delimited (a feature text routinely contains commas, e.g.
+  # "a streak, idle rewards, and a mission"). With >1 iteration there's a pipe;
+  # with exactly ONE iteration there is none, so a NO-pipe string is a SINGLE
+  # pair and must NOT be comma-split. The old comma fallback shredded every
+  # one-iteration feature into bogus slugs and ABORTED the post on EVERY run
+  # once the shape became 1-new+1-iteration (Tim 2026-06-01). finalize_run.sh
+  # is the only caller and always pipe-joins, so nothing relies on comma-split.
   if [[ "$ITER_PAIRS" == *"|"* ]]; then
     IFS='|' read -ra iter_arr <<< "$ITER_PAIRS"
   else
-    IFS=',' read -ra iter_arr <<< "$ITER_PAIRS"
+    iter_arr=("$ITER_PAIRS")
   fi
   if [[ ${#iter_arr[@]} -gt 0 ]]; then
     MSG_LINES+=("🔧 UPDATED (${#iter_arr[@]}):")
