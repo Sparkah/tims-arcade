@@ -45,6 +45,9 @@ var STRINGS = {
     close: 'GOT IT',
     rank: 'RANK', focus: 'FOCUS', loadout: 'Loadout', next: 'Next',
     maxrank: 'Max rank reached', rankup: 'RANK UP →',
+    collect: 'COLLECT', daily_reward: 'Daily report', day_streak: 'DAY STREAK',
+    idle_banked: 'Range banked', come_back: 'Come back daily — your range banks Focus while away.',
+    mission: 'TODAY', mission_done: 'DONE', objective_paid: 'MISSION',
   },
   ru: {
     title: 'Маятник-Снайпер',
@@ -69,6 +72,9 @@ var STRINGS = {
     close: 'ПОНЯТНО',
     rank: 'РАНГ', focus: 'ФОКУС', loadout: 'Снаряжение', next: 'След',
     maxrank: 'Максимальный ранг', rankup: 'НОВЫЙ РАНГ →',
+    collect: 'ЗАБРАТЬ', daily_reward: 'Сводка дня', day_streak: 'ДНЕЙ ПОДРЯД',
+    idle_banked: 'Тир накопил', come_back: 'Заходите каждый день — тир копит Фокус, пока вас нет.',
+    mission: 'СЕГОДНЯ', mission_done: 'ГОТОВО', objective_paid: 'МИССИЯ',
   },
 };
 
@@ -136,6 +142,159 @@ function loadMeta() {
   try { var v = parseInt(localStorage.getItem('pendulum_sniper_focus') || '0'); if (!isNaN(v) && v >= 0) metaFocus = v; } catch (e) {}
 }
 function saveMeta() { try { localStorage.setItem('pendulum_sniper_focus', String(metaFocus)); } catch (e) {} }
+
+// ── M2 — REASON TO RETURN — "Daily Range Report" (milestone#2) ─────────────
+// One coherent return loop layered on top of Marksman Ranks (M1). All of it
+// banks straight into metaFocus so coming back literally advances your RANK —
+// no parallel currency, no new gameplay verb. Surfaced as ONE "COLLECT" button
+// on the MENU; physics & controls are untouched.
+//   1. DAILY STREAK    — first launch each calendar day bumps a consecutive-day
+//                        streak; a skipped day resets it to 1. Longer streak →
+//                        bigger daily reward (7-day streak → ~2.3x engagement).
+//   2. DAILY LOGIN FOCUS — base + streak-scaled Focus, collected with one tap.
+//   3. OVERNIGHT IDLE  — the range banks Focus passively while away, CAPPED at
+//                        IDLE_CAP_H hours (the cap IS the return trigger — come
+//                        back before it fills or you waste accrual).
+//   4. DAILY OBJECTIVE — a date-seeded "today's mission" on the core loop that
+//                        pays a one-time Focus bonus the day you complete it.
+var IDLE_RATE_PER_H   = 0.9;   // Focus banked per real hour away
+var IDLE_CAP_H        = 10;    // accrual stops after this many hours (return trigger)
+var DAILY_BASE        = 3;     // base daily-login Focus
+var DAILY_STREAK_STEP = 1;     // extra daily Focus per consecutive-day streak
+var DAILY_STREAK_MAX  = 7;     // streak length where the daily bonus tops out
+
+// Daily objectives rotate by day-of-stream; each pays its Focus bonus once/day.
+// `check(ctx)` runs at run-end with {win, energy, apexHits, targets_hit}.
+var DAILY_OBJECTIVES = [
+  { id: 'clear',  reward: 4, blurb_en: 'Clear the arena',            blurb_ru: 'Очистить арену',
+    check: function(x){ return x.win; } },
+  { id: 'apex2',  reward: 5, blurb_en: 'Land 2 apex-bonus hits',     blurb_ru: 'Сделать 2 апекс-попадания',
+    check: function(x){ return x.apexHits >= 2; } },
+  { id: 'energy', reward: 5, blurb_en: 'Win with 60+ energy left',   blurb_ru: 'Победа с 60+ энергии',
+    check: function(x){ return x.win && x.energy >= 60; } },
+  { id: 'flaw',   reward: 6, blurb_en: 'Win using only 2 stops',     blurb_ru: 'Победа за 2 остановки',
+    check: function(x){ return x.win && x.stopsUsed <= 2; } },
+];
+
+var daily = {
+  streak: 0,        // consecutive-day login streak
+  lastDay: 0,       // day-number of the last collected login
+  lastSeen: 0,      // ms timestamp when we last saved (for idle accrual)
+  objDay: -1,       // day-number the current objective was assigned for
+  objDone: false,   // today's objective already paid?
+};
+// Pending collectables computed at boot, cleared by the COLLECT tap.
+var pendingDaily = 0;     // streak-login Focus waiting to collect
+var pendingIdle = 0;      // overnight idle Focus waiting to collect
+var pendingStreak = 0;    // streak value the pending login would set
+var collectFlash = 0;     // celebrate-on-collect timer
+var apexHitsThisRun = 0;  // apex-bonus hits in the current run (for objectives)
+
+function dayNumber(ms) { return Math.floor((ms - (new Date(ms)).getTimezoneOffset() * 60000) / 86400000); }
+function todayObjective() {
+  // Date-seeded pick so everyone shares the same daily mission, rotating daily.
+  return DAILY_OBJECTIVES[dayNumber(Date.now()) % DAILY_OBJECTIVES.length];
+}
+function objBlurb(o) { return GF.lang === 'ru' ? o.blurb_ru : o.blurb_en; }
+
+function loadDaily() {
+  try {
+    var raw = localStorage.getItem('pendulum_sniper_daily_v1');
+    if (raw) { var d = JSON.parse(raw); if (d && typeof d === 'object') {
+      // NB: never bitwise-truncate lastSeen — it's a ms timestamp (~1.7e12) and
+      // `| 0` would overflow 32-bit and corrupt the overnight-idle calculation.
+      daily.streak  = (typeof d.streak  === 'number') ? d.streak  : 0;
+      daily.lastDay = (typeof d.lastDay === 'number') ? d.lastDay : 0;
+      daily.lastSeen= (typeof d.lastSeen=== 'number') ? d.lastSeen: 0;
+      daily.objDay  = (typeof d.objDay  === 'number') ? d.objDay  : -1;
+      daily.objDone = !!d.objDone;
+    } }
+  } catch (e) {}
+}
+function saveDaily() {
+  try { localStorage.setItem('pendulum_sniper_daily_v1', JSON.stringify(daily)); } catch (e) {}
+}
+
+// Called once at boot: works out today's streak-login + overnight idle, and
+// rolls the daily objective over to a new day. Does NOT bank yet — the player
+// banks by tapping COLLECT (so the reward is an action, not a silent number).
+function computeDailyOnBoot() {
+  var now = Date.now();
+  var today = dayNumber(now);
+
+  // Overnight idle accrual since we last saw the player, capped at IDLE_CAP_H.
+  if (daily.lastSeen > 0) {
+    var hoursAway = GF.clamp((now - daily.lastSeen) / 3600000, 0, IDLE_CAP_H);
+    pendingIdle = Math.floor(hoursAway * IDLE_RATE_PER_H);
+  } else {
+    pendingIdle = 0;
+  }
+
+  // Daily streak login. First ever day, or returned the very next day → extend;
+  // a gap of >1 day → streak resets to 1.
+  if (daily.lastDay === 0) {
+    pendingStreak = 1;
+    pendingDaily = DAILY_BASE;
+  } else if (today > daily.lastDay) {
+    var gap = today - daily.lastDay;
+    pendingStreak = (gap === 1) ? Math.min(DAILY_STREAK_MAX, daily.streak + 1) : 1;
+    pendingDaily = DAILY_BASE + (pendingStreak - 1) * DAILY_STREAK_STEP;
+  } else {
+    // Already logged in today — nothing new to claim for the streak.
+    pendingStreak = daily.streak;
+    pendingDaily = 0;
+  }
+
+  // Roll the objective to a new day (resets the once-a-day completion flag).
+  if (daily.objDay !== today) { daily.objDay = today; daily.objDone = false; }
+
+  daily.lastSeen = now;       // mark presence; saved below
+  saveDaily();
+}
+
+function hasCollectable() { return (pendingDaily + pendingIdle) > 0; }
+
+// COLLECT tap on the MENU: bank pending daily + idle Focus into the M1 meta,
+// commit the new streak, and celebrate (with a rank-up flag if it crossed one).
+function collectDaily() {
+  if (!hasCollectable()) return;
+  var gained = pendingDaily + pendingIdle;
+  var preRank = rankIndex();
+  metaFocus += gained;
+  saveMeta();
+  if (pendingDaily > 0) {        // only advance the streak/day when a login was actually claimed
+    daily.streak = pendingStreak;
+    daily.lastDay = dayNumber(Date.now());
+  }
+  daily.lastSeen = Date.now();
+  saveDaily();
+  collectFlash = 1.6;
+  pendingDaily = 0; pendingIdle = 0;
+  var postRank = rankIndex();
+  if (postRank > preRank) { rankedUpTo = RANKS[postRank]; GF.setShake && GF.setShake(0.6); }
+  GF.spawnFloat && GF.spawnFloat(GF.W / 2, GF.H * 0.5, '+' + gained + ' ' + GF.t('focus'), '#6ee7a8');
+}
+
+// Run-end hook: pay today's objective once if its condition was met this run.
+function checkDailyObjective(win) {
+  if (daily.objDone) return;
+  var o = todayObjective();
+  var ok = o.check({
+    win: win,
+    energy: Math.ceil(energy),
+    apexHits: apexHitsThisRun,
+    targets_hit: targets_hit,
+    stopsUsed: (MAX_STOPS + bonusStops()) - stops_left,
+  });
+  if (ok) {
+    daily.objDone = true;
+    metaFocus += o.reward;
+    saveMeta();
+    saveDaily();
+    objectiveJustPaid = o.reward;     // flagged for the end overlay
+  }
+}
+var objectiveJustPaid = 0;            // Focus paid by today's objective this run
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WIN
@@ -297,6 +456,10 @@ function bankFocus() {
   lastFocusEarned = focusFromRun();
   metaFocus += lastFocusEarned;
   saveMeta();
+  // M2: pay today's daily objective (once) before reading the final rank, so a
+  // rank-up triggered by the objective bonus is celebrated too.
+  objectiveJustPaid = 0;
+  checkDailyObjective(gs === 'WIN');
   var nowRank = rankIndex();
   rankedUpTo = (nowRank > rankAtRunStart) ? RANKS[nowRank] : null;
   if (rankedUpTo) { GF.setShake && GF.setShake(0.6); }
@@ -323,6 +486,7 @@ function fireShot(forced) {
       if (af > 0.55) {
         energy = Math.min(ENERGY_BUDGET, energy + ARC_MOMENTUM_BONUS);
         apexBonusFlash = 1;
+        apexHitsThisRun += 1;
         GF.spawnFloat(t.x, t.y - 26 * GF.S, '+' + ARC_MOMENTUM_BONUS + ' ' + GF.t('bonus_apex'), '#4dd0e1');
       } else {
         GF.spawnFloat(t.x, t.y - 26 * GF.S, '+1', '#f5d020');
@@ -390,6 +554,12 @@ function recomputeHelp() {
   helpBtn.x = GF.W - helpBtn.s - GF.clamp(14 * GF.S, 8, 22);
   helpBtn.y = GF.clamp(14 * GF.S, 8, 22);
 }
+// M2: COLLECT button on the MENU daily banner (rect filled by drawMenu so the
+// hit-test always matches what was last rendered).
+var collectBtn = { x: 0, y: 0, w: 0, h: 0, shown: false };
+function hitCollect(x, y) {
+  return collectBtn.shown && pointInRect(x, y, collectBtn.x, collectBtn.y, collectBtn.w, collectBtn.h);
+}
 function hitHelp(x, y) {
   return pointInRect(x, y, helpBtn.x, helpBtn.y, helpBtn.s, helpBtn.s);
 }
@@ -398,6 +568,7 @@ function onPress(x, y) {
   // Interactive tutorial consumes clicks first
   if (GF.tutorial.handleClick(x, y)) return;
   if (gs === 'MENU') {
+    if (hitCollect(x, y)) { collectDaily(); return; }   // M2: claim daily + idle Focus
     var bwm = GF.clamp(240 * GF.S, 170, 320), bhm = GF.clamp(52 * GF.S, 40, 64);
     var bxm = (GF.W - bwm) / 2, bym = GF.H * 0.78;
     if (pointInRect(x, y, bxm, bym, bwm, bhm)) { startGame(); return; }
@@ -481,6 +652,7 @@ function startGame() {
   energy = ENERGY_BUDGET + bonusEnergy();
   targets_hit = 0;
   targets_alive = TARGETS_PER_ROUND;
+  apexHitsThisRun = 0;
   resetPendulum();
   spawnTargets();
   phase = 'SWING';
@@ -544,6 +716,7 @@ function update(dt) {
   recomputeHelp();
   animT += dt;
   GF.tutorial.update(dt);
+  if (collectFlash > 0) collectFlash -= dt;   // M2 collect celebration (runs on MENU too)
   if (GF.tutorial.active) return;  // world frozen during tutorial
   if (apexBonusFlash > 0) apexBonusFlash -= dt;
   if (lastShot) { lastShot.life -= dt; if (lastShot.life <= 0) lastShot = null; }
@@ -791,6 +964,85 @@ function drawRankPanel(c, topY) {
   }
 }
 
+// M2 — daily "Range Report" banner on the MENU. Returns the Y the tutorial
+// list should start at (pushed down when the banner is drawn) so nothing
+// overlaps and the COLLECT button always sits in the safe upper-middle band.
+function drawDailyBanner(c, topY) {
+  var W = GF.W;
+  collectBtn.shown = false;
+  var streakNow = hasCollectable() && pendingDaily > 0 ? pendingStreak : daily.streak;
+  var o = todayObjective();
+  var fs   = GF.clamp(13 * GF.S, 11, 17);
+  var fsSm = GF.clamp(11 * GF.S, 9, 15);
+  var panW = Math.min(W * 0.86, 460 * GF.S);
+  var panX = (W - panW) / 2;
+  var panH = GF.clamp(58 * GF.S, 46, 76);
+  var panY = topY;
+  GF.rr(c, panX, panY, panW, panH, GF.clamp(12 * GF.S, 8, 16));
+  c.fillStyle = 'rgba(20, 30, 44, 0.85)'; c.fill();
+  // brief green glow on the just-collected frame so the payout registers
+  if (collectFlash > 0) { c.save(); c.shadowColor = '#6ee7a8'; c.shadowBlur = 22 * GF.S * Math.min(1, collectFlash); }
+  c.strokeStyle = (hasCollectable() || collectFlash > 0) ? '#6ee7a8' : '#26344a';
+  c.lineWidth = (hasCollectable() || collectFlash > 0) ? 2 : 1; c.stroke();
+  if (collectFlash > 0) c.restore();
+
+  var innerL = panX + GF.clamp(14 * GF.S, 10, 20);
+  var midY = panY + panH / 2;
+
+  // Where the left text column must stop (left of the COLLECT button / hint).
+  var rightLimit = panX + panW - GF.clamp(14 * GF.S, 10, 20);
+  if (hasCollectable()) rightLimit = panX + panW - GF.clamp(120 * GF.S, 92, 150);
+  var maxTxtW = rightLimit - innerL;
+
+  // ellipsis-clip helper so neither row can run under the right-side element.
+  function clipTxt(s) {
+    if (c.measureText(s).width <= maxTxtW) return s;
+    var t = s;
+    while (t.length > 2 && c.measureText(t + '…').width > maxTxtW) t = t.slice(0, -1);
+    return t + '…';
+  }
+
+  // Left column: streak + today's mission.
+  c.textAlign = 'left'; c.textBaseline = 'middle';
+  c.fillStyle = '#f6c453';
+  c.font = 'bold ' + fs + 'px sans-serif';
+  c.fillText(clipTxt('🔥 ' + streakNow + '  ' + GF.t('day_streak')), innerL, panY + panH * 0.30);
+  // mission line, with a DONE tick when today's objective is already paid
+  var missDone = daily.objDone;
+  c.font = fsSm + 'px sans-serif';
+  c.fillStyle = missDone ? '#6ee7a8' : '#9ab';
+  var missTxt = GF.t('mission') + ': ' + objBlurb(o) + (missDone ? '  ✓' : '  +' + o.reward);
+  c.fillText(clipTxt(missTxt), innerL, panY + panH * 0.70);
+
+  // Right column: COLLECT button if something to claim, else a quiet hint.
+  if (hasCollectable()) {
+    var total = pendingDaily + pendingIdle;
+    var bw = GF.clamp(108 * GF.S, 84, 138);
+    var bh = GF.clamp(38 * GF.S, 32, 48);
+    var bx = panX + panW - bw - GF.clamp(10 * GF.S, 7, 14);
+    var by = midY - bh / 2;
+    var pulse = 1 + 0.04 * Math.sin(animT * 5);
+    c.save();
+    c.translate(bx + bw / 2, by + bh / 2); c.scale(pulse, pulse); c.translate(-(bx + bw / 2), -(by + bh / 2));
+    GF.rr(c, bx, by, bw, bh, bh / 2);
+    var pg = c.createLinearGradient(bx, by, bx, by + bh);
+    pg.addColorStop(0, '#2ecc71'); pg.addColorStop(1, '#1f9d57');
+    c.fillStyle = pg; c.fill();
+    c.restore();
+    c.fillStyle = '#06210f';
+    c.font = 'bold ' + GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(GF.t('collect') + ' +' + total, bx + bw / 2, by + bh / 2);
+    collectBtn.x = bx; collectBtn.y = by; collectBtn.w = bw; collectBtn.h = bh; collectBtn.shown = true;
+  } else {
+    c.textAlign = 'right'; c.textBaseline = 'middle';
+    c.fillStyle = '#5f7088';
+    c.font = fsSm + 'px sans-serif';
+    c.fillText('✓', rightLimit, midY);
+  }
+  return panY + panH + GF.clamp(14 * GF.S, 10, 20);
+}
+
 function drawMenu(c) {
   var W = GF.W, H = GF.H;
   c.fillStyle = '#0a0a14';
@@ -809,6 +1061,9 @@ function drawMenu(c) {
   c.fillStyle = '#9ab';
   c.font = GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
   c.fillText(GF.t('sub'), W / 2, H * 0.24);
+  // M2 daily banner sits between the subtitle and the how-to-play list; it
+  // returns the Y the list should start at so nothing overlaps.
+  var listTop = drawDailyBanner(c, H * 0.275);
   c.fillStyle = '#cfd8e0';
   c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
   c.textAlign = 'left';
@@ -816,7 +1071,7 @@ function drawMenu(c) {
   var leftEdge = W * 0.10;
   var boxW = W * 0.80;
   var lh = GF.clamp(22 * GF.S, 16, 28);
-  var yy = H * 0.32;
+  var yy = listTop;
   for (var i = 0; i < ll.length; i++) {
     yy = wrapText(c, ll[i], leftEdge, yy, boxW, lh - 2) + lh;
   }
@@ -893,7 +1148,9 @@ function drawEndOverlay(c) {
   c.textAlign = 'center'; c.textBaseline = 'alphabetic';
   c.fillStyle = '#6ee7a8';
   c.font = 'bold ' + GF.clamp(17 * GF.S, 13, 22) + 'px sans-serif';
-  c.fillText('+' + lastFocusEarned + ' ' + GF.t('focus'), W / 2, H * 0.555);
+  var focusLine = '+' + lastFocusEarned + ' ' + GF.t('focus');
+  if (objectiveJustPaid > 0) focusLine += '   +' + objectiveJustPaid + ' ' + GF.t('objective_paid');  // M2 daily objective payout
+  c.fillText(focusLine, W / 2, H * 0.555);
   if (rankedUpTo) {
     c.fillStyle = '#f6c453';
     c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
@@ -937,6 +1194,8 @@ GF.init({
   onReady: function() {
     loadBest();
     loadMeta();
+    loadDaily();
+    computeDailyOnBoot();   // M2: work out today's streak-login + overnight idle
     rankAtRunStart = rankIndex();
     resetPendulum();
     GF.persist('pendulum_sniper_run_v1',
@@ -1001,6 +1260,12 @@ GF.exposeState(function() {
     bonusStops: bonusStops(),
     bonusEnergy: bonusEnergy(),
     lastFocusEarned: lastFocusEarned,
+    dailyStreak: daily.streak,
+    pendingDaily: pendingDaily,
+    pendingIdle: pendingIdle,
+    hasCollectable: hasCollectable(),
+    objectiveDone: daily.objDone,
+    objectivePaid: objectiveJustPaid,
   };
 });
 
