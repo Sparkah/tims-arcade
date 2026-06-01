@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Pre-push: three-stage gate before Cloudflare Pages auto-deploy.
+#   Stage 0: cover-art gate           (Gallery/scripts/check_art.sh)
+#   Stage 1: mechanical Yandex check  (Shared/skills/yandex-presubmit/check.sh --gallery)
+#   Stage 2: 6-axis AI scorecard      (Gallery/scripts/pre_push_review.sh)
+# Bypass entirely: `git push --no-verify`.
+# Tune stage 2: REVIEW_THRESHOLD=4.5 git push   (default 5.0 — strict)
+set -uo pipefail
+
+# Stage -1: Gallery push lock - serialise concurrent pushes (scripts + agents) so
+# they stop racing on the working tree / the main ref (the 2026-05-30/31 collisions:
+# one agent's commit swallowing another's files; two pushes fighting refs/heads/main).
+# If the invoking script already holds the lock (GF_PUSH_LOCK_TOKEN == holder token)
+# we proceed and let IT release; otherwise acquire for the gate + release on exit.
+# If ANOTHER agent holds it, DEFER cleanly (abort - retry once they finish), no race.
+PUSH_LOCK="/Users/timmarkin/Agents/Gallery/scripts/push_lock.sh"
+if [[ -x "$PUSH_LOCK" ]]; then
+  _held="$(bash "$PUSH_LOCK" holder 2>/dev/null | sed -n 's/^token=//p')"
+  if [[ -n "${GF_PUSH_LOCK_TOKEN:-}" && "$GF_PUSH_LOCK_TOKEN" == "$_held" ]]; then
+    :  # the script that invoked this push holds the lock; it will release.
+  else
+    _hooktok="$(bash "$PUSH_LOCK" acquire "pre-push:$(whoami)" 2>/dev/null)" || {
+      echo "" >&2
+      echo "🔒 Gallery push DEFERRED - another agent holds the push lock:" >&2
+      bash "$PUSH_LOCK" holder 2>/dev/null | sed 's/^/     /' >&2
+      echo "   Retry shortly; the holder releases when its push finishes." >&2
+      exit 1
+    }
+    trap 'bash "$PUSH_LOCK" release "$_hooktok" 2>/dev/null' EXIT
+  fi
+fi
+
+ART_CHECK="/Users/timmarkin/Desktop/Agents/Gallery/scripts/check_art.sh"
+if [[ -x "$ART_CHECK" ]]; then
+  if ! "$ART_CHECK" --quiet; then
+    echo "" >&2
+    echo "🚫 Push aborted by stage-0 cover-art gate." >&2
+    echo "   Generate the missing covers OR re-push with --no-verify." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: $ART_CHECK missing — skipping stage 0" >&2
+fi
+
+# Stage 0.5: every Gallery/thumbs/*.png MUST have a matching .webp sibling.
+# <picture> picks WebP first; missing webp → CF serves SPA index.html with
+# HTTP 200 → broken-image cards. (Third strike: 2026-05-13, 2026-05-15,
+# 2026-05-19.)
+THUMBS_DIR="/Users/timmarkin/Desktop/Agents/Gallery/thumbs"
+if [[ -d "$THUMBS_DIR" ]]; then
+  shopt -s nullglob
+  missing=()
+  for png in "$THUMBS_DIR"/*.png; do
+    webp="${png%.png}.webp"
+    [[ -f "$webp" ]] || missing+=("$(basename "$png")")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    echo "" >&2
+    echo "🚫 Push aborted by stage-0.5 webp gate — ${#missing[@]} thumb(s) missing .webp:" >&2
+    printf "   - %s\n" "${missing[@]}" >&2
+    echo "   Fix: bash Gallery/scripts/build_webp_thumbs.sh" >&2
+    exit 1
+  fi
+fi
+
+CHECKER="/Users/timmarkin/Desktop/Agents/Shared/skills/yandex-presubmit/check.sh"
+if [[ -x "$CHECKER" ]]; then
+  if ! "$CHECKER" --gallery; then
+    echo "" >&2
+    echo "🚫 Push aborted by stage-1 Yandex pre-submit gate." >&2
+    echo "   Fix violations above OR re-push with --no-verify." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: $CHECKER missing — skipping stage 1" >&2
+fi
+
+REVIEW_SCRIPT="/Users/timmarkin/Desktop/Agents/Gallery/scripts/pre_push_review.sh"
+if [[ -x "$REVIEW_SCRIPT" ]]; then
+  if ! bash "$REVIEW_SCRIPT"; then
+    echo "" >&2
+    echo "🚫 Push aborted by stage-2 AI scorecard gate." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: $REVIEW_SCRIPT missing — skipping stage 2" >&2
+fi
+
+exit 0

@@ -38,7 +38,28 @@ if ! git revert --no-edit HEAD; then
   exit 2
 fi
 
-# Use --no-verify so the pre-push hooks don't re-run on a known-good revert
+# --no-verify skips the pre-push hook (the original commit already passed the
+# gates) - but that ALSO skips the hook's push lock. Acquire it manually here so a
+# rollback can't SILENTLY race a concurrent agent push (Tim 2026-06-01). Defer if
+# another agent holds it, unless ROLLBACK_FORCE=1 (the intentional emergency steal).
+LOCK="$(cd "$(dirname "$0")" && pwd)/push_lock.sh"
+if [[ -x "$LOCK" ]]; then
+  if [[ "${ROLLBACK_FORCE:-0}" == "1" ]]; then
+    bash "$LOCK" release "" >/dev/null 2>&1
+    RB_TOKEN="$(bash "$LOCK" acquire "rollback-FORCE" "$BAD_HASH" $$)"
+    echo "⚠️  ROLLBACK_FORCE=1 - stole the Gallery push lock (intentional override)"
+  else
+    RB_TOKEN="$(bash "$LOCK" acquire "rollback" "$BAD_HASH" $$)" || {
+      echo "🔒 Gallery push lock held by another agent - rollback DEFERRED (not racing):" >&2
+      bash "$LOCK" holder 2>/dev/null | sed 's/^/     /' >&2
+      echo "   Wait, then re-run; or force NOW: ROLLBACK_FORCE=1 bash rollback.sh" >&2
+      exit 3
+    }
+  fi
+  trap 'bash "$LOCK" release "$RB_TOKEN" 2>/dev/null' EXIT
+fi
+
+# We hold the lock manually (above), so this push still cannot race a concurrent one.
 git push --no-verify
 
 echo "✓ revert pushed. CF will rebuild ~45-90s. Smoke-checking in 60s..."
