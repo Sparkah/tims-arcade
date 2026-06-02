@@ -254,6 +254,13 @@ const STRINGS = {
     was_caught: ' was caught!',
     caught_suffix: ' caught!',
     grows_stronger: 'The creature grows stronger...',
+    overtime_begin: 'OVERTIME! The hunt never ends now—survive as long as you can.',
+    overtime_wave: 'WAVE',
+    overtime_wave_up: 'WAVE {n} — the creature is faster!',
+    overtime_label: 'OVERTIME',
+    overtime_reached: 'You reached OVERTIME',
+    best_wave_label: 'Best wave:',
+    new_best_wave: 'DEEPEST WAVE YET!',
     found_you: 'FOUND YOU!',
     cant_hide_yet: 'Too scared to hide!',
     paused: 'PAUSED',
@@ -380,6 +387,13 @@ const STRINGS = {
     was_caught: ' пойман!',
     caught_suffix: ' пойман!',
     grows_stronger: 'Существо становится сильнее...',
+    overtime_begin: 'ОВЕРТАЙМ! Охота больше не кончится — выживай как можно дольше.',
+    overtime_wave: 'ВОЛНА',
+    overtime_wave_up: 'ВОЛНА {n} — существо стало быстрее!',
+    overtime_label: 'ОВЕРТАЙМ',
+    overtime_reached: 'Вы дошли до ОВЕРТАЙМА',
+    best_wave_label: 'Лучшая волна:',
+    new_best_wave: 'РЕКОРД ГЛУБИНЫ!',
     found_you: 'НАШЁЛ!',
     cant_hide_yet: 'Слишком напуган, чтобы прятаться!',
     paused: 'ПАУЗА',
@@ -504,10 +518,11 @@ const PersonalBest = (function() {
           bestSurvivalSec: Number(o.bestSurvivalSec) || 0,
           bestCaught: Number(o.bestCaught) || 0,
           roundsPlayed: Number(o.roundsPlayed) || 0,
+          bestOvertimeWave: Number(o.bestOvertimeWave) || 0, // iter#12
         };
       }
     } catch(_) {}
-    return { bestSurvivalSec: 0, bestCaught: 0, roundsPlayed: 0 };
+    return { bestSurvivalSec: 0, bestCaught: 0, roundsPlayed: 0, bestOvertimeWave: 0 };
   }
   function save(state) {
     try { localStorage.setItem(BEST_KEY, JSON.stringify(state)); } catch(_) {}
@@ -516,13 +531,19 @@ const PersonalBest = (function() {
   function get() { return Object.assign({}, cache); }
   // Returns object describing what was beaten this round:
   //   { newBestTime: bool, newBestCaught: bool }
-  function recordRound(role, survivalSec, caughtCount) {
+  function recordRound(role, survivalSec, caughtCount, otWave) {
     cache.roundsPlayed = (cache.roundsPlayed || 0) + 1;
-    let newBestTime = false, newBestCaught = false;
+    let newBestTime = false, newBestCaught = false, newBestWave = false;
     if (role === 'human') {
       if (survivalSec > cache.bestSurvivalSec) {
         cache.bestSurvivalSec = survivalSec;
         newBestTime = true;
+      }
+      // iter#12: deepest overtime wave reached (endless mode high score)
+      const w = Number(otWave) || 0;
+      if (w > (cache.bestOvertimeWave || 0)) {
+        cache.bestOvertimeWave = w;
+        newBestWave = true;
       }
     } else if (role === 'creature') {
       if (caughtCount > cache.bestCaught) {
@@ -531,7 +552,7 @@ const PersonalBest = (function() {
       }
     }
     save(cache);
-    return { newBestTime, newBestCaught };
+    return { newBestTime, newBestCaught, newBestWave };
   }
   function fmtTime(sec) {
     sec = Math.max(0, Math.floor(sec));
@@ -975,6 +996,10 @@ function renderMenuStats() {
   parts.push(t('rounds_played_label') + ' <span style="color:#ddd">' + pb.roundsPlayed + '</span>');
   if (pb.bestSurvivalSec > 0) {
     parts.push(t('best_time_label') + ' <span style="color:#5e5">' + PersonalBest.fmtTime(pb.bestSurvivalSec) + '</span>');
+  }
+  if ((pb.bestOvertimeWave || 0) > 0) {
+    // iter#12: deepest overtime wave chip — the endless-mode high score to beat.
+    parts.push('&#x1F525; ' + t('best_wave_label') + ' <span style="color:#ffb300">' + pb.bestOvertimeWave + '</span>');
   }
   if (pb.bestCaught > 0) {
     parts.push(t('best_caught_label') + ' <span style="color:#f88">' + pb.bestCaught + '/10</span>');
@@ -1968,6 +1993,12 @@ const CATCH_DIST = 20;
 const CREATURE_SPAWN_DELAY = 8000;
 const GAME_DURATION = 60000;   // 60s hunt countdown
 const KILL_TIME_BONUS = 30000; // +30s per catch
+// iter#12: Endless "Overtime" second act for solo human survivors. Surviving the
+// base 60s no longer ends the round — it opens OVERTIME, where the creature gets
+// faster every OVERTIME_WAVE_MS and the run continues until you're finally caught.
+// Turns the flat 60s win-cap into an open-ended deep-survival score chase.
+const OVERTIME_WAVE_MS = 20000;      // a new (harder) wave every 20s of overtime
+const OVERTIME_SPEED_PER_WAVE = 0.05; // creature speed added per overtime wave
 const TICK_MS = 50;            // server tick interval (must match server)
 const SPRINT_MULT = 1.55;
 const SPRINT_MAX = 180;
@@ -2400,6 +2431,13 @@ function updateFirstRunTip(dt) {
 
 // ── Feature: Creature Evolves ──
 let creatureEvo = 0; // evolution level, max 10
+// iter#12: Overtime (endless) state — solo human only. inOvertime flips once the
+// base 60s hunt is survived; overtimeWave counts the escalating difficulty steps;
+// overtimeBoost feeds the creature speed formula so it ramps each wave.
+let inOvertime = false;
+let overtimeWave = 0;
+let overtimeBoost = 0;
+let _overtimeStartTime = 0; // gameTime when overtime began (for wave pacing)
 
 function getCreatureTorch() {
   return CREATURE_TORCH + creatureEvo * 8;
@@ -3001,7 +3039,7 @@ function updateCreatureAI(c, dt) {
 
   sensedTargets.sort((a, b) => a.dist - b.dist);
 
-  let sp = c.speed + caught.length * 0.02;
+  let sp = c.speed + caught.length * 0.02 + overtimeBoost;
   let goalX, goalY;
   let recomputePath = false;
 
@@ -3274,7 +3312,7 @@ function catchEntity(ent) {
       showAlert(t('grows_stronger'));
     }
   }
-  if (creature) creature.speed = SPEEDS.creature + creatureEvo * 0.04 + caught.length * 0.03;
+  if (creature) creature.speed = SPEEDS.creature + creatureEvo * 0.04 + caught.length * 0.03 + overtimeBoost;
 
   // Extend hunt timer
   huntTimeLimit += KILL_TIME_BONUS;
@@ -3343,7 +3381,7 @@ function updatePlayer(dt) {
   if (playerRole === 'creature') {
     // v6.1: per-catch bonus 0.02 → 0.03. At 9 catches + 9 evo:
     //   sp = 0.83 + 9*0.04 + 9*0.03 = 1.46 → ratio 2.0× vs player 0.73.
-    sp = SPEEDS.creature + creatureEvo * 0.04 + caught.length * 0.03;
+    sp = SPEEDS.creature + creatureEvo * 0.04 + caught.length * 0.03 + overtimeBoost;
   } else {
     const sprinting = keys['ShiftLeft'] || keys['ShiftRight'];
     sp = SPEEDS.player;
@@ -3984,7 +4022,11 @@ function renderHUD() {
     html += `<div>${t('rocks')} <span style="color:#ccc">${rocksLeft}</span></div>`;
   }
 
-  if (creatureSpawned) {
+  if (creatureSpawned && inOvertime) {
+    // iter#12: overtime replaces the countdown with a pulsing gold WAVE badge.
+    const _otCol = Math.sin(gameTime * 0.01) > 0 ? '#ffd700' : '#ffb300';
+    html += `<div style="font-weight:bold;letter-spacing:1px;color:${_otCol}">&#x1F525; ${t('overtime_label')} &middot; ${t('overtime_wave')} ${overtimeWave}</div>`;
+  } else if (creatureSpawned) {
     const timerColor = remaining <= 10 ? '#f44' : remaining <= 30 ? '#fa4' : '#5e5';
     html += `<div>${t('time_left')} <span style="color:${timerColor}">${rMins}:${rSecs < 10 ? '0' : ''}${rSecs}</span></div>`;
   }
@@ -4292,6 +4334,11 @@ function initGame() {
   flyingRocks = [];
   rocksLeft = 3;
   creatureEvo = 0;
+  // iter#12: reset overtime (endless) state each round
+  inOvertime = false;
+  overtimeWave = 0;
+  overtimeBoost = 0;
+  _overtimeStartTime = 0;
   // iter#6: reset survival milestone tracker each round
   survivalMilestonesShown = new Set();
   // iter#9: reset daily quest per-round scratch state
@@ -4423,7 +4470,37 @@ function _gameLoopInner(timestamp) {
       }
     }
 
-    if (creatureSpawned && (gameTime - CREATURE_SPAWN_DELAY) >= huntTimeLimit) {
+    // iter#12: Endless OVERTIME for solo human survivors. When a still-alive human
+    // reaches the base 60s hunt, the round does NOT end — it opens overtime, where
+    // the creature accelerates every wave and the run continues until they're caught.
+    const _soloHuman = mpState !== 'playing' && playerRole === 'human' && player.alive;
+    const _huntElapsed = creatureSpawned ? (gameTime - CREATURE_SPAWN_DELAY) : 0;
+    if (_soloHuman && creatureSpawned && !inOvertime && _huntElapsed >= GAME_DURATION) {
+      inOvertime = true;
+      overtimeWave = 1;
+      overtimeBoost = OVERTIME_SPEED_PER_WAVE; // first wave already bumps the creature
+      _overtimeStartTime = gameTime;
+      showAlert(t('overtime_begin'));
+      AudioManager.playMilestone && AudioManager.playMilestone();
+    }
+
+    if (inOvertime && _soloHuman && creatureSpawned) {
+      // Escalate: every OVERTIME_WAVE_MS, advance a wave and speed the creature up.
+      const _otElapsed = gameTime - _overtimeStartTime;
+      const _wantWave = 1 + Math.floor(_otElapsed / OVERTIME_WAVE_MS);
+      if (_wantWave > overtimeWave) {
+        overtimeWave = _wantWave;
+        overtimeBoost = overtimeWave * OVERTIME_SPEED_PER_WAVE;
+        showAlert(t('overtime_wave_up').replace('{n}', overtimeWave));
+        AudioManager.playMilestone && AudioManager.playMilestone();
+      }
+    }
+
+    // Hard time-limit end — original behaviour for every NON-overtime path (creature
+    // role, multiplayer). Once a human is in overtime the round only ends on catch
+    // (handled by catchEntity's death sequence), so the timer end is suppressed —
+    // otherwise it would race the death-cam and cut the ending short.
+    if (!inOvertime && creatureSpawned && _huntElapsed >= huntTimeLimit) {
       endGame(playerRole === 'human' && player.alive);
       return;
     }
@@ -4776,7 +4853,12 @@ function endGame(won) {
     ? (player.alive ? time : Math.max(0, time))
     : 0;
   const caughtCount = (playerRole === 'creature') ? caught.length : 0;
-  const bestResult = PersonalBest.recordRound(playerRole, survivalSec, caughtCount);
+  // iter#12: capture overtime depth reached this round (solo human only)
+  const otWaveReached = (playerRole === 'human' && inOvertime) ? overtimeWave : 0;
+  // Reaching overtime is a high-satisfaction beat — a good moment to ask for a rating
+  // (the base-60s timer win that used to gate this no longer fires for solo humans).
+  if (otWaveReached > 0 && !won) { try { Platform.tryRequestRating(); } catch(_) {} }
+  const bestResult = PersonalBest.recordRound(playerRole, survivalSec, caughtCount, otWaveReached);
   const pb = PersonalBest.get();
   // Iter#3: check for newly-earned cosmetic unlocks (runs after PB so
   // roundsPlayed is already incremented).
@@ -4805,8 +4887,11 @@ function endGame(won) {
     }
     stats += `<br><span style="color:#888;font-size:13px">${t('best_caught_label')} <span style="color:#f88">${pb.bestCaught}/10</span> &middot; ${t('rounds_played_label')} <span style="color:#ccc">${pb.roundsPlayed}</span></span>`;
   } else {
-    title = won ? t('you_survived') : t('game_over');
-    titleColor = won ? '#5e5' : '#f44';
+    // iter#12: reaching overtime is itself a win (you beat the base 60s hunt), so
+    // even if the creature finally catches you in overtime the screen stays positive.
+    const _otWin = won || otWaveReached > 0;
+    title = _otWin ? t('you_survived') : t('game_over');
+    titleColor = _otWin ? '#5e5' : '#f44';
     stats = `${t('time_survived')} ${mins}:${secs < 10 ? '0' : ''}${secs}<br>`;
     stats += `${t('players_caught')} ${caught.length}/10<br>`;
     stats += player.alive
@@ -4815,7 +4900,17 @@ function endGame(won) {
     if (bestResult.newBestTime) {
       stats += `<br><span style="color:#fa4;font-weight:bold;letter-spacing:1px">${t('new_best')}</span>`;
     }
+    // iter#12: overtime achievement line — surface the endless-mode depth reached.
+    if (otWaveReached > 0) {
+      stats += `<br><span style="color:#ffb300;font-weight:bold;letter-spacing:1px">&#x1F525; ${t('overtime_reached')} &middot; ${t('overtime_wave')} ${otWaveReached}</span>`;
+      if (bestResult.newBestWave) {
+        stats += `<br><span style="color:#ffd700;font-weight:bold;letter-spacing:1px">${t('new_best_wave')}</span>`;
+      }
+    }
     stats += `<br><span style="color:#888;font-size:13px">${t('best_time_label')} <span style="color:#5e5">${PersonalBest.fmtTime(pb.bestSurvivalSec)}</span> &middot; ${t('rounds_played_label')} <span style="color:#ccc">${pb.roundsPlayed}</span></span>`;
+    if ((pb.bestOvertimeWave || 0) > 0) {
+      stats += `<br><span style="color:#888;font-size:13px">${t('best_wave_label')} <span style="color:#ffb300">${pb.bestOvertimeWave}</span></span>`;
+    }
   }
   // Append unlock badge(s) if earned this round.
   if (newlyUnlocked.length) {
