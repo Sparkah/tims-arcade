@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Coin Cascade</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0c0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — both languages) ────────────────────
+var STRINGS = {
+  en: {
+    title: 'Coin Cascade',
+    sub: 'Drop · fuse · cascade · climb to the crown',
+    play: 'PLAY', retry: 'PLAY AGAIN',
+    score: 'SCORE', best: 'BEST', wallet: 'COINS',
+    gameover: 'WELL OVERFLOWED!', overflow_sub: 'A column stacked past the top.',
+    nexttier: 'Next', toptier: 'Tier',
+    reached: 'Reached', newtier: 'NEW COIN!',
+    b_hammer: 'Hammer', b_swap: 'Swap', b_cyclone: 'Cyclone',
+    hammer_pick: 'Tap a coin to smash',
+    tut_goal: 'Goal: Drop coins into the well and fuse two of a kind into a richer, doubled coin.',
+    tut_controls: 'Controls: Tap a column to drop the next coin (or aim with the arrow keys and press Space). Tap a boost button at the bottom to spend your coins.',
+    tut_win: 'Win: Endless — chain fuses to climb from Copper up through Gold and Ruby to the Crown and the Vault, and beat your best score.',
+    tut_lose: 'Lose: If a column fills to the very top and a coin overflows it, the run ends. Space is your only enemy — no timer.',
+    tut_tip: 'Tip: Land a coin on a matching one to FUSE — and a fused coin can chain-fuse downward for a huge payout. Rusty junk coins cannot fuse; Hammer them or build around them.',
+  },
+  ru: {
+    title: 'Монетопад',
+    sub: 'Бросай · сливай · цепляй · к короне',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД', wallet: 'МОНЕТЫ',
+    gameover: 'КОЛОДЕЦ ПЕРЕПОЛНЕН!', overflow_sub: 'Колонка переполнилась через край.',
+    nexttier: 'Дальше', toptier: 'Уровень',
+    reached: 'Достигнут', newtier: 'НОВАЯ МОНЕТА!',
+    b_hammer: 'Молот', b_swap: 'Замена', b_cyclone: 'Циклон',
+    hammer_pick: 'Нажми на монету, чтобы разбить',
+    tut_goal: 'Цель: Бросай монеты в колодец и сливай две одинаковые в монету богаче и вдвое дороже.',
+    tut_controls: 'Управление: Нажми на колонку, чтобы бросить монету (или целься стрелками и жми пробел). Жми кнопку усиления внизу, чтобы потратить монеты.',
+    tut_win: 'Победа: Бесконечно — устраивай цепочки слияний от Меди через Золото и Рубин к Короне и Хранилищу и бей свой рекорд.',
+    tut_lose: 'Поражение: Если колонка заполнится до самого верха и монета переполнит её — конец. Место — твой единственный враг, таймера нет.',
+    tut_tip: 'Совет: Урони монету на такую же, чтобы СЛИТЬ — а слитая монета может пойти цепочкой вниз ради большого куша. Ржавые монеты не сливаются: разбей их молотом или обходи.',
+  },
+};
+
+// ── TIER LADDER (DESIGN.md §Win — copper→vault, nine names) ────────────────
+var TIERS = {
+  en: ['Copper','Silver','Gold','Sapphire','Ruby','Emerald','Amethyst','Crown','Vault'],
+  ru: ['Медь','Серебро','Золото','Сапфир','Рубин','Изумруд','Аметист','Корона','Хранилище'],
+};
+// per-tier coin palette {a:rim/hi, b:face, d:shadow}
+var TIER_COL = [
+  { a:'#f0a878', b:'#c47a4a', d:'#7e4a26' }, // 0 copper
+  { a:'#f2f5fa', b:'#c2cbd6', d:'#8a93a0' }, // 1 silver
+  { a:'#ffe27a', b:'#f4c020', d:'#b88a08' }, // 2 gold
+  { a:'#9fc6ff', b:'#3f7fe0', d:'#234f96' }, // 3 sapphire
+  { a:'#ff9aa0', b:'#e23b4a', d:'#962026' }, // 4 ruby
+  { a:'#9af4b0', b:'#34c96a', d:'#1f8a45' }, // 5 emerald
+  { a:'#d79aff', b:'#9a44e0', d:'#642a96' }, // 6 amethyst
+  { a:'#ffeaa0', b:'#ffc24d', d:'#c98a1f' }, // 7 crown
+  { a:'#9af4ec', b:'#46c9c0', d:'#2a8a83' }, // 8 vault
+];
+var JUNK_COL = { a:'#9a8a72', b:'#6a5a44', d:'#3e3324' }; // rust
+function tierName(t) {
+  var arr = TIERS[GF.lang] || TIERS.en;
+  return arr[GF.clamp(t, 0, arr.length - 1)] || ('Tier ' + t);
+}
+function tierValue(t) { return Math.pow(2, t + 1); } // tier 0 = "2", tier 1 = "4" ...
+
+// AI sprites — per-tier coin faces + junk + boost icons. Procedural fallback
+// always draws the number on top so the merge rule stays legible if missing.
+var SPRITE_NAMES = ['coin0','coin1','coin2','coin3','coin4','coin5','coin6','coin7','coin8',
+  'junk','hammer','swap','cyclone'];
+
+// ── TUNABLES (DESIGN.md §Tunables) ───────────────────────────────────────
+var COLS            = 5;
+var ROWS            = 9;
+var START_TIER_POOL = 3;     // distinct low tiers the spawner draws at run start (idx 0..2)
+var spawnTierCap    = 2;     // current max tier index the spawner may roll (widens w/ highTier)
+var junkThreshold   = 1200;  // score at which rust/junk coins begin appearing
+var junkChance      = 0.14;  // chance a spawn is junk (after threshold)
+var hammerCost      = 40;    // run-coins to delete any one coin (scales each use)
+var swapCost        = 25;    // run-coins to reroll the next coin (scales each use)
+var cycloneCost     = 90;    // run-coins for a gravity-settle + equal-adjacent collapse
+var payoutMult      = 1.0;   // run-coins per fuse = resulting tierValue × payoutMult
+var chainBonusMult  = 0.5;   // extra coins per chain link = tierValue × this × linkIndex
+
+// derived spawn floor (lowest tier the spawner may roll; rises late so low coins thin out)
+var SPAWN_FLOOR = 0;
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';             // MENU | PLAYING | GAMEOVER
+var score = 0, best = 0;
+var wallet = 0;              // run-coins (IN-SESSION ONLY — not saved cross-session)
+var grid = [];               // grid[col] = array of cell-tiers bottom→top; -1 = junk
+for (var _ic = 0; _ic < COLS; _ic++) grid.push([]); // init COLS empty columns so state-readers are safe pre-PLAY
+var nextTier = 0;            // tier of the coin about to drop (-1 = junk)
+var aimCol = 2;              // currently aimed column (desktop cursor)
+var highTier = 0;            // highest tier currently on the board (drives spawn widening)
+var maxTierReached = 0;      // highest tier ever fused this run (progression metric)
+var drops = 0;               // coins dropped this run
+var dropLock = false;        // brief input lock while a drop animates/resolves
+var hammerArmed = false;     // Hammer boost: waiting for the player to pick a coin
+var hammerUses = 0, swapUses = 0, cycloneUses = 0; // for price scaling
+var tierBanner = 0;          // tier-up flourish timer
+var bannerTier = 0;          // which tier the banner is celebrating
+var firstDrop = false;       // hides the aim hint after the first drop
+
+// falling-coin animation (pure VFX over the resolved grid)
+var fall = null;             // { col, tier, y (px from top of well) , row }
+var FALL_SPEED = 2600;       // px/sec the dropping coin descends (×S at use)
+
+// layout (recomputed each draw)
+var L = { wellX:0, wellY:0, wellW:0, wellH:0, cell:0, topH:0, boostY:0, boostH:0 };
+var helpBtn = { x:0, y:0, w:0, h:0 };
+var boostRects = [];         // {kind,x,y,w,h,cost,enabled}
+var playBtnRect = null;
+var keyPrev = { left: false, right: false };
+
+// ── NUMBER FORMAT (coins can get large) ───────────────────────────────────
+function fmt(n) {
+  n = Math.floor(n);
+  if (n < 1000) return '' + n;
+  var units = ['', 'K', 'M', 'B', 'T'];
+  var u = 0;
+  while (n >= 1000 && u < units.length - 1) { n /= 1000; u++; }
+  return (n >= 100 ? n.toFixed(0) : n.toFixed(1)) + units[u];
+}
+
+// ── ECONOMY / PRICING ──────────────────────────────────────────────────────
+function curHammerCost()  { return Math.ceil(hammerCost  * Math.pow(1.5, hammerUses)); }
+function curSwapCost()    { return Math.ceil(swapCost    * Math.pow(1.4, swapUses)); }
+function curCycloneCost() { return Math.ceil(cycloneCost * Math.pow(1.6, cycloneUses)); }
+
+// derived fill metric (0..1) — how full the well is (for exposeState + danger)
+function fillFrac() {
+  var total = 0;
+  for (var c = 0; c < COLS; c++) total += (grid[c] ? grid[c].length : 0);
+  return total / (COLS * ROWS);
+}
+function colDanger(c) { return (grid[c] ? grid[c].length : 0) / ROWS; } // 1 = at the brim
+
+// ── SPAWN ─────────────────────────────────────────────────────────────────
+function recomputeHighTier() {
+  var h = 0;
+  for (var c = 0; c < COLS; c++)
+    for (var r = 0; r < grid[c].length; r++)
+      if (grid[c][r] > h) h = grid[c][r];
+  highTier = h;
+  // widen the spawn pool as the player climbs (DESIGN.md escalation):
+  // cap rises ~1 tier for every 2 tiers reached, clamped so it never outpaces
+  // what the player can fuse.
+  spawnTierCap = GF.clamp(2 + Math.floor(highTier / 2), 2, TIER_COL.length - 2);
+  // late game: stop spawning the very lowest tier so the board doesn't clog
+  // with coppers (keeps escalation honest past ~tier 5 reached).
+  SPAWN_FLOOR = maxTierReached >= 5 ? 1 : 0;
+}
+function rollNextTier() {
+  // junk coins past the threshold (the mid-run pressure twist)
+  if (score >= junkThreshold && Math.random() < junkChance) return -1;
+  var lo = SPAWN_FLOOR;
+  var hi = Math.max(lo, spawnTierCap);
+  var span = hi - lo;
+  var r = Math.random();
+  var t = lo + Math.floor(r * r * (span + 1)); // r² bias toward lo (pairs reachable)
+  return GF.clamp(t, lo, hi);
+}
+
+// ── DROP + FUSE (the core mechanic) ─────────────────────────────────────────
+function dropInto(col) {
+  if (gs !== 'PLAYING' || dropLock || fall) return;
+  if (hammerArmed) return; // hammer mode consumes the tap elsewhere
+  // overflow check — column already at the brim ⇒ lose
+  if (grid[col].length >= ROWS) { overflowGameOver(col); return; }
+  // begin the falling-coin animation; resolution happens when it lands
+  var landRow = grid[col].length; // 0-based row it will occupy
+  fall = { col: col, tier: nextTier, row: landRow, y: 0 };
+  dropLock = true;
+  drops++;
+  if (!firstDrop) firstDrop = true;
+  GF.saveRun();
+}
+
+function landFallingCoin() {
+  var col = fall.col, tier = fall.tier;
+  fall = null;
+  grid[col].push(tier);
+  GF.spawnParticles(cellCX(col), cellCY(col, grid[col].length - 1), tier < 0 ? JUNK_COL.b : TIER_COL[tier].a, 6);
+  // resolve fuses in this column (chain), then refill the next coin
+  resolveColumn(col, 0);
+  recomputeHighTier();
+  // safety: any column already overflowing after settle ends the run
+  for (var c = 0; c < COLS; c++) {
+    if (grid[c].length > ROWS) { overflowGameOver(c); return; }
+  }
+  spawnNext();
+  dropLock = false;
+  GF.saveRun();
+}
+
+// Fuse the top of `col` with the coin beneath it if equal; chain downward.
+// chainIdx grows per consecutive fuse for the combo bonus + juice.
+function resolveColumn(col, chainIdx) {
+  var stack = grid[col];
+  if (stack.length < 2) return;
+  var topI = stack.length - 1;
+  var a = stack[topI], b = stack[topI - 1];
+  // junk never fuses; unequal never fuses
+  if (a < 0 || b < 0 || a !== b) return;
+  // FUSE: remove the two, push one tier+1 into the lower cell
+  var nt = a + 1;
+  stack.splice(topI - 1, 2, nt);
+  // payout
+  var val = tierValue(nt);
+  var pay = Math.ceil(val * payoutMult + val * chainBonusMult * chainIdx);
+  wallet += pay; score += val * (1 + chainIdx);
+  if (nt > maxTierReached) { maxTierReached = nt; fireTierBanner(nt); }
+  // juice — bigger with the chain
+  var cxp = cellCX(col), cyp = cellCY(col, topI - 1);
+  GF.spawnParticles(cxp, cyp, TIER_COL[GF.clamp(nt,0,8)].a, 10 + chainIdx * 4);
+  GF.spawnFloat(cxp, cyp - L.cell * 0.4, '+' + fmt(pay), '#ffe27a');
+  if (chainIdx >= 1) GF.spawnFloat(cxp, cyp - L.cell * 0.9, 'CHAIN x' + (chainIdx + 1), '#7af0c0');
+  GF.setShake(0.12 + Math.min(0.5, chainIdx * 0.12));
+  // recurse — the new fused coin may now equal the coin beneath it
+  resolveColumn(col, chainIdx + 1);
+}
+
+function spawnNext() { nextTier = rollNextTier(); }
+
+function fireTierBanner(t) { tierBanner = 1.5; bannerTier = t; GF.setShake(0.4); }
+
+// ── BOOSTS (spend run-coins) ────────────────────────────────────────────────
+function tryHammer() {
+  if (gs !== 'PLAYING' || dropLock || fall) return;
+  if (wallet < curHammerCost()) return;
+  hammerArmed = true; // next tap on a coin smashes it (cost charged on use)
+}
+function hammerAt(x, y) {
+  var hit = cellAtPoint(x, y);
+  if (!hit) { hammerArmed = false; return; }
+  var col = hit.col, row = hit.row;
+  if (row >= grid[col].length) { hammerArmed = false; return; } // empty cell tapped
+  wallet -= curHammerCost(); hammerUses++;
+  var smashedTier = grid[col][row];
+  grid[col].splice(row, 1); // remove that cell; gravity = array collapses above it
+  GF.spawnParticles(cellCX(col), cellCY(col, row), smashedTier < 0 ? JUNK_COL.a : TIER_COL[GF.clamp(smashedTier,0,8)].a, 16);
+  GF.setShake(0.3);
+  hammerArmed = false;
+  resolveColumn(col, 0); // a removal can let the column re-settle into a fuse
+  recomputeHighTier();
+  GF.saveRun();
+}
+function trySwap() {
+  if (gs !== 'PLAYING' || dropLock || fall || hammerArmed) return;
+  if (wallet < curSwapCost()) return;
+  wallet -= curSwapCost(); swapUses++;
+  var old = nextTier;
+  var tries = 0;
+  do { nextTier = rollNextTier(); tries++; } while (nextTier === old && tries < 6);
+  if (nextTier < 0) nextTier = SPAWN_FLOOR; // never reroll INTO junk
+  GF.spawnFloat(GF.cx, L.topH + L.cell, 'reroll', '#9fd0ff');
+  GF.saveRun();
+}
+function tryCyclone() {
+  if (gs !== 'PLAYING' || dropLock || fall || hammerArmed) return;
+  if (wallet < curCycloneCost()) return;
+  wallet -= curCycloneCost(); cycloneUses++;
+  // one full settle pass: in every column repeatedly fuse equal-adjacent pairs
+  // bottom→top until none remain.
+  for (var c = 0; c < COLS; c++) cycloneColumn(c);
+  recomputeHighTier();
+  GF.setShake(0.6);
+  GF.spawnParticles(GF.cx, L.wellY + L.wellH * 0.4, '#9af4ec', 30);
+  GF.saveRun();
+}
+function cycloneColumn(col) {
+  var changed = true;
+  while (changed) {
+    changed = false;
+    var stack = grid[col];
+    for (var r = 0; r + 1 < stack.length; r++) {
+      var a = stack[r], b = stack[r + 1];
+      if (a >= 0 && b >= 0 && a === b) {
+        var nt = a + 1;
+        stack.splice(r, 2, nt);
+        var val = tierValue(nt);
+        wallet += Math.ceil(val * payoutMult); score += val;
+        if (nt > maxTierReached) { maxTierReached = nt; fireTierBanner(nt); }
+        GF.spawnParticles(cellCX(col), cellCY(col, r), TIER_COL[GF.clamp(nt,0,8)].a, 8);
+        changed = true;
+        break;
+      }
+    }
+  }
+}
+
+// ── LOSE ────────────────────────────────────────────────────────────────────
+function overflowGameOver(col) {
+  if (gs === 'GAMEOVER') return;
+  var newBest = score > best;
+  if (newBest) { best = score; try { localStorage.setItem('coin_cascade_best', Math.floor(best)); } catch (e) {} }
+  gs = 'GAMEOVER';
+  fall = null; dropLock = false; hammerArmed = false;
+  GF.setShake(1.0);
+  if (col != null) GF.spawnParticles(cellCX(col), L.wellY, '#ff6b4b', 40);
+  GF.gameEnded();
+  GF.saveRun();
+  if (newBest && best > 0) GF.happytime();
+}
+
+// ── GAME LIFECYCLE ───────────────────────────────────────────────────────────
+function startGame() {
+  score = 0; wallet = 0;
+  grid = [];
+  for (var c = 0; c < COLS; c++) grid[c] = [];
+  spawnTierCap = 2; SPAWN_FLOOR = 0; highTier = 0; maxTierReached = 0;
+  drops = 0; aimCol = Math.floor(COLS / 2);
+  hammerArmed = false; hammerUses = 0; swapUses = 0; cycloneUses = 0;
+  tierBanner = 0; firstDrop = false; fall = null; dropLock = false;
+  nextTier = rollNextTier();
+  gs = 'PLAYING';
+  startTutorial();
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+// ── TUTORIAL (point at the well first) ────────────────────────────────────
+function startTutorial() {
+  var seen = false;
+  try { seen = !!localStorage.getItem('coin_cascade_seen_tutorial'); } catch (e) {}
+  var steps = [
+    { text: (GF.lang === 'ru' ? 'Нажми на колонку, чтобы бросить монету в колодец!' : 'Tap a column to drop the coin into the well!'),
+      target: function () { return { x: cellCX(aimCol), y: L.wellY + L.cell, r: L.cell * 0.8 }; }, advance: 'click_any' },
+    { text: (GF.lang === 'ru' ? 'Урони монету на такую же — они сольются в монету богаче!' : 'Land a coin on a matching one — they FUSE into a richer coin!'),
+      target: function () { return { x: GF.cx, y: L.wellY + L.wellH * 0.6, r: L.cell }; }, advance: 'click_any' },
+  ];
+  // Always register (force) so the ? button reopens it for returning players.
+  GF.tutorial.start(steps, { storageKey: 'coin_cascade_seen_tutorial', force: true });
+  if (seen) GF.tutorial.active = false;
+  try { localStorage.setItem('coin_cascade_seen_tutorial', '1'); } catch (e) {}
+}
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+function layout() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  L.topH = GF.clamp(64 * S, 52, 96);           // wallet/score + next-coin band
+  L.boostH = GF.clamp(74 * S, 58, 104);        // bottom boost row
+  var pad = GF.clamp(10 * S, 6, 16);
+  L.boostY = H - L.boostH - pad;
+  // the well fills the band between the top strip and the boosts
+  var bandTop = L.topH;
+  var bandBot = L.boostY - pad;
+  var bandH = bandBot - bandTop;
+  var bandW = W - pad * 2;
+  // cell size: fit COLS across and ROWS down, take the smaller
+  var cellW = bandW / COLS;
+  var cellH = bandH / ROWS;
+  L.cell = Math.max(8, Math.min(cellW, cellH));
+  L.wellW = L.cell * COLS;
+  L.wellH = L.cell * ROWS;
+  L.wellX = (W - L.wellW) / 2;
+  L.wellY = bandTop + (bandH - L.wellH) / 2;
+  var hb = GF.clamp(34 * S, 28, 44);
+  helpBtn = { x: W - hb - pad, y: pad * 0.7, w: hb, h: hb };
+}
+// cell center helpers (row 0 = bottom)
+function cellCX(col) { return L.wellX + col * L.cell + L.cell / 2; }
+function cellCY(col, row) { return L.wellY + L.wellH - (row + 0.5) * L.cell; }
+function colAtX(x) {
+  if (x < L.wellX || x > L.wellX + L.wellW) return -1;
+  var c = Math.floor((x - L.wellX) / L.cell);
+  return GF.clamp(c, 0, COLS - 1);
+}
+function cellAtPoint(x, y) {
+  var col = colAtX(x);
+  if (col < 0) return null;
+  var fromBottom = (L.wellY + L.wellH - y) / L.cell;
+  var row = Math.floor(fromBottom);
+  if (row < 0 || row >= ROWS) return null;
+  return { col: col, row: row };
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  if (tierBanner > 0) tierBanner = Math.max(0, tierBanner - dt);
+  GF.tutorial.update(dt);
+  if (gs !== 'PLAYING') return;
+
+  // desktop aim via arrow keys — edge-triggered move
+  if (GF.keys['ArrowLeft']  && !keyPrev.left)  { aimCol = GF.clamp(aimCol - 1, 0, COLS - 1); }
+  if (GF.keys['ArrowRight'] && !keyPrev.right) { aimCol = GF.clamp(aimCol + 1, 0, COLS - 1); }
+  keyPrev.left  = !!GF.keys['ArrowLeft'];
+  keyPrev.right = !!GF.keys['ArrowRight'];
+
+  // animate the falling coin
+  if (fall) {
+    var targetY = L.wellH - (fall.row + 1) * L.cell; // top edge of the target cell (px from well top)
+    fall.y += FALL_SPEED * GF.S * dt;
+    if (fall.y >= targetY) { fall.y = targetY; landFallingCoin(); }
+  }
+}
+
+// ── INPUT ────────────────────────────────────────────────────────────────
+function onDown(x, y) {
+  if (gs !== 'PLAYING') return;
+  // tutorial swallows taps first
+  if (GF.tutorial.active) { GF.tutorial.handleClick(x, y); return; }
+  // help button
+  if (x >= helpBtn.x && x <= helpBtn.x + helpBtn.w && y >= helpBtn.y && y <= helpBtn.y + helpBtn.h) {
+    GF.tutorial.reopen(); return;
+  }
+  // hammer mode: a tap picks the coin to smash (only inside the well)
+  if (hammerArmed) {
+    if (y >= L.wellY && y <= L.wellY + L.wellH && x >= L.wellX && x <= L.wellX + L.wellW) { hammerAt(x, y); }
+    else { hammerArmed = false; } // tap outside = cancel
+    return;
+  }
+  // boost buttons
+  for (var i = 0; i < boostRects.length; i++) {
+    var b = boostRects[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { doBoost(b.kind); return; }
+  }
+  // drop into a column (tap anywhere in/above the well over a column)
+  var col = colAtX(x);
+  if (col >= 0 && y < L.boostY) { aimCol = col; dropInto(col); }
+}
+function doBoost(kind) {
+  if (kind === 'hammer') tryHammer();
+  else if (kind === 'swap') trySwap();
+  else if (kind === 'cyclone') tryCyclone();
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  layout();
+
+  // vault background — dark with a warm gold glow behind the well
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c0a14'); g.addColorStop(0.55, '#141026'); g.addColorStop(1, '#1c1430');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  var glow = ctx.createRadialGradient(W / 2, L.wellY + L.wellH * 0.6, L.cell, W / 2, L.wellY + L.wellH * 0.6, L.wellH * 0.9);
+  glow.addColorStop(0, 'rgba(255,200,70,0.10)'); glow.addColorStop(1, 'rgba(255,200,70,0)');
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawWell(ctx);
+    drawCoins(ctx);
+    if (fall) drawFallingCoin(ctx);
+    drawTopStrip(ctx);
+    drawBoosts(ctx);
+    drawHelpButton(ctx);
+    if (tierBanner > 0) drawTierBanner(ctx);
+    if (hammerArmed) drawHammerHint(ctx);
+  }
+
+  if (gs === 'MENU') drawMenu(ctx);
+  else if (gs === 'GAMEOVER') drawGameOver(ctx);
+
+  GF.tutorial.draw(ctx); // overlay last
+}
+
+function drawWell(ctx) {
+  var S = GF.S;
+  // well frame
+  ctx.save();
+  GF.rr(ctx, L.wellX - 4 * S, L.wellY - 4 * S, L.wellW + 8 * S, L.wellH + 8 * S, 10 * S);
+  ctx.fillStyle = 'rgba(8,6,16,0.6)'; ctx.fill();
+  ctx.lineWidth = GF.clamp(3 * S, 2, 5); ctx.strokeStyle = 'rgba(255,210,90,0.35)';
+  GF.rr(ctx, L.wellX - 4 * S, L.wellY - 4 * S, L.wellW + 8 * S, L.wellH + 8 * S, 10 * S); ctx.stroke();
+  ctx.restore();
+  // column separators + per-column danger glow near the brim
+  for (var c = 0; c < COLS; c++) {
+    var cx = L.wellX + c * L.cell;
+    if (c > 0) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(cx, L.wellY); ctx.lineTo(cx, L.wellY + L.wellH); ctx.stroke();
+    }
+    var d = colDanger(c);
+    if (d >= 0.78 && gs === 'PLAYING') {
+      var pulse = 0.10 + 0.10 * Math.sin(Date.now() / 140);
+      ctx.fillStyle = 'rgba(255,50,30,' + ((d - 0.78) / 0.22 * pulse + 0.04).toFixed(3) + ')';
+      ctx.fillRect(cx, L.wellY, L.cell, L.wellH);
+    }
+  }
+  // top "brim" line — the overflow boundary
+  ctx.strokeStyle = 'rgba(255,90,60,0.45)'; ctx.lineWidth = GF.clamp(2 * S, 1.5, 3);
+  ctx.setLineDash([6 * S, 5 * S]);
+  ctx.beginPath(); ctx.moveTo(L.wellX, L.wellY); ctx.lineTo(L.wellX + L.wellW, L.wellY); ctx.stroke();
+  ctx.setLineDash([]);
+  // aim marker (which column the next drop targets)
+  if (gs === 'PLAYING' && !GF.tutorial.active) {
+    var ax = cellCX(aimCol);
+    ctx.fillStyle = 'rgba(255,225,120,0.85)';
+    var ty = L.wellY - 6 * S;
+    ctx.beginPath(); ctx.moveTo(ax, ty); ctx.lineTo(ax - 8 * S, ty - 12 * S); ctx.lineTo(ax + 8 * S, ty - 12 * S); ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawCoins(ctx) {
+  for (var c = 0; c < COLS; c++)
+    for (var r = 0; r < grid[c].length; r++)
+      drawCoin(ctx, cellCX(c), cellCY(c, r), L.cell * 0.42, grid[c][r]);
+}
+
+function drawFallingCoin(ctx) {
+  var x = cellCX(fall.col);
+  var y = L.wellY + fall.y + L.cell / 2;
+  drawCoin(ctx, x, y, L.cell * 0.42, fall.tier);
+}
+
+// a coin: sprite if present, else procedural metal disc + tier number on top
+function drawCoin(ctx, x, y, r, tier) {
+  if (tier < 0) {
+    if (GF.sprites['junk']) { GF.drawSprite('junk', x, y, r * 2.2); }
+    else {
+      var jg = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.1, x, y, r);
+      jg.addColorStop(0, JUNK_COL.a); jg.addColorStop(0.6, JUNK_COL.b); jg.addColorStop(1, JUNK_COL.d);
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = jg; ctx.fill();
+      ctx.lineWidth = Math.max(1, r * 0.14); ctx.strokeStyle = '#3e3324'; ctx.stroke();
+      // cracked X so it reads "no fuse"
+      ctx.strokeStyle = 'rgba(30,24,16,0.8)'; ctx.lineWidth = Math.max(1.5, r * 0.16);
+      ctx.beginPath();
+      ctx.moveTo(x - r * 0.4, y - r * 0.4); ctx.lineTo(x + r * 0.4, y + r * 0.4);
+      ctx.moveTo(x + r * 0.4, y - r * 0.4); ctx.lineTo(x - r * 0.4, y + r * 0.4);
+      ctx.stroke();
+    }
+    return;
+  }
+  var ti = GF.clamp(tier, 0, 8);
+  var col = TIER_COL[ti];
+  var name = 'coin' + ti;
+  if (GF.sprites[name]) {
+    GF.drawSprite(name, x, y, r * 2.25);
+  } else {
+    var g = ctx.createRadialGradient(x - r * 0.32, y - r * 0.32, r * 0.1, x, y, r);
+    g.addColorStop(0, col.a); g.addColorStop(0.55, col.b); g.addColorStop(1, col.d);
+    ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = g; ctx.fill();
+    ctx.lineWidth = Math.max(1, r * 0.13); ctx.strokeStyle = col.d; ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, r * 0.74, 0, Math.PI * 2);
+    ctx.lineWidth = Math.max(1, r * 0.06); ctx.strokeStyle = 'rgba(255,255,255,0.28)'; ctx.stroke();
+  }
+  // value number ALWAYS on top (merge rule legible even with sprites)
+  var label = '' + tierValue(tier);
+  var fs = r * (label.length >= 4 ? 0.62 : label.length === 3 ? 0.78 : 0.95);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = Math.max(1.5, r * 0.14); ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.strokeText(label, x, y + r * 0.02);
+  ctx.fillStyle = '#fff7e0';
+  ctx.fillText(label, x, y + r * 0.02);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawTopStrip(ctx) {
+  var W = GF.W, S = GF.S;
+  ctx.fillStyle = 'rgba(10,8,18,0.72)'; ctx.fillRect(0, 0, W, L.topH);
+  ctx.fillStyle = 'rgba(255,210,90,0.25)'; ctx.fillRect(0, L.topH - 2, W, 2);
+  var pad = GF.clamp(12 * S, 8, 18);
+  // wallet (left, big) + score below
+  var cFs = GF.clamp(22 * S, 16, 30);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  drawCoin(ctx, pad + cFs * 0.5, L.topH * 0.38, cFs * 0.52, 2); // gold coin icon
+  ctx.font = 'bold ' + cFs + 'px sans-serif'; ctx.fillStyle = '#ffe27a';
+  ctx.fillText(fmt(wallet), pad + cFs * 1.05, L.topH * 0.38);
+  var sFs = GF.clamp(12 * S, 9, 16);
+  ctx.font = sFs + 'px sans-serif'; ctx.fillStyle = '#aeb6c8';
+  ctx.fillText(GF.t('score') + ' ' + fmt(score), pad, L.topH * 0.74);
+  // right: current top tier + next-goal tier
+  var rPad = pad + GF.clamp(40 * S, 30, 52);
+  ctx.textAlign = 'right';
+  var tFs = GF.clamp(14 * S, 11, 19);
+  ctx.font = 'bold ' + tFs + 'px sans-serif'; ctx.fillStyle = TIER_COL[GF.clamp(maxTierReached,0,8)].a;
+  ctx.fillText(GF.t('toptier') + ': ' + tierName(maxTierReached), W - rPad, L.topH * 0.36);
+  var ng = Math.min(maxTierReached + 1, TIER_COL.length - 1);
+  ctx.font = sFs + 'px sans-serif'; ctx.fillStyle = '#9fb0c0';
+  ctx.fillText(GF.t('nexttier') + ': ' + tierName(ng), W - rPad, L.topH * 0.70);
+  ctx.textBaseline = 'alphabetic';
+
+  // NEXT coin preview (centered, just under the strip)
+  if (gs === 'PLAYING') {
+    var pr = GF.clamp(L.cell * 0.34, 12, 30);
+    var py = L.topH - pr - 4 * S;
+    var px = GF.clamp(GF.cx, L.wellX + pr, L.wellX + L.wellW - pr);
+    drawCoin(ctx, px, GF.clamp(py, pr + 2, L.topH - pr), pr, nextTier);
+  }
+}
+
+function drawBoosts(ctx) {
+  var W = GF.W, S = GF.S;
+  var pad = GF.clamp(10 * S, 6, 16);
+  var gap = GF.clamp(8 * S, 5, 12);
+  var n = 3;
+  var bw = (W - pad * 2 - gap * (n - 1)) / n;
+  var bh = L.boostH;
+  var defs = [
+    { kind: 'hammer',  label: GF.t('b_hammer'),  cost: curHammerCost(),  col: '#ff9a4b', icon: 'hammer' },
+    { kind: 'swap',    label: GF.t('b_swap'),    cost: curSwapCost(),    col: '#6fd0ff', icon: 'swap' },
+    { kind: 'cyclone', label: GF.t('b_cyclone'), cost: curCycloneCost(), col: '#9af4ec', icon: 'cyclone' },
+  ];
+  boostRects = [];
+  for (var i = 0; i < n; i++) {
+    var d = defs[i];
+    var x = pad + i * (bw + gap), y = L.boostY;
+    var affordable = gs === 'PLAYING' && wallet >= d.cost && !dropLock;
+    var armed = d.kind === 'hammer' && hammerArmed;
+    drawBoostBtn(ctx, d, x, y, bw, bh, affordable, armed);
+    boostRects.push({ kind: d.kind, x: x, y: y, w: bw, h: bh, cost: d.cost, enabled: affordable });
+  }
+}
+function drawBoostBtn(ctx, d, x, y, w, h, affordable, armed) {
+  var S = GF.S;
+  var bg = ctx.createLinearGradient(x, y, x, y + h);
+  bg.addColorStop(0, affordable ? 'rgba(40,34,54,0.96)' : 'rgba(22,20,30,0.9)');
+  bg.addColorStop(1, affordable ? 'rgba(28,24,42,0.96)' : 'rgba(16,14,22,0.9)');
+  GF.rr(ctx, x, y, w, h, GF.clamp(12 * S, 8, 16)); ctx.fillStyle = bg; ctx.fill();
+  if (affordable || armed) {
+    ctx.lineWidth = GF.clamp(2 * S, 1.5, 3); ctx.strokeStyle = armed ? '#fff' : d.col;
+    GF.rr(ctx, x, y, w, h, GF.clamp(12 * S, 8, 16)); ctx.stroke();
+  }
+  // icon
+  var ir = GF.clamp(h * 0.26, 12, 28);
+  drawBoostIcon(ctx, d.icon, x + w / 2, y + h * 0.34, ir, d.col, affordable);
+  // label
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var lFs = GF.clamp(12 * S, 9, 16);
+  ctx.font = 'bold ' + lFs + 'px sans-serif'; ctx.fillStyle = affordable ? '#fff' : '#8a8298';
+  ctx.fillText(d.label, x + w / 2, y + h * 0.64);
+  // cost (coin + number)
+  var cFs = GF.clamp(12 * S, 9, 16);
+  ctx.font = 'bold ' + cFs + 'px sans-serif';
+  var costStr = fmt(d.cost);
+  var tw = ctx.measureText(costStr).width;
+  var ccx = x + w / 2 + cFs * 0.4;
+  drawCoin(ctx, ccx - tw / 2 - cFs * 0.55, y + h * 0.85, cFs * 0.42, 2);
+  ctx.fillStyle = affordable ? '#ffe27a' : '#8a7a58';
+  ctx.fillText(costStr, ccx, y + h * 0.85);
+  ctx.textBaseline = 'alphabetic';
+}
+function drawBoostIcon(ctx, icon, x, y, r, col, on) {
+  if (GF.sprites[icon]) { GF.drawSprite(icon, x, y, r * 2.1); return; }
+  ctx.save();
+  if (on) { ctx.shadowColor = col; ctx.shadowBlur = r * 0.7; }
+  ctx.strokeStyle = col; ctx.fillStyle = col;
+  ctx.lineWidth = Math.max(2, r * 0.22); ctx.lineCap = 'round';
+  if (icon === 'hammer') {
+    ctx.fillRect(x - r * 0.7, y - r * 0.7, r * 1.4, r * 0.5);
+    ctx.beginPath(); ctx.moveTo(x, y - r * 0.2); ctx.lineTo(x - r * 0.2, y + r * 0.8); ctx.stroke();
+  } else if (icon === 'swap') {
+    ctx.beginPath(); ctx.arc(x, y, r * 0.62, Math.PI * 0.25, Math.PI * 1.5); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + r * 0.45, y - r * 0.55); ctx.lineTo(x + r * 0.72, y - r * 0.15); ctx.lineTo(x + r * 0.2, y - r * 0.25); ctx.closePath(); ctx.fill();
+  } else { // cyclone — spiral
+    ctx.beginPath();
+    for (var a = 0; a < Math.PI * 3.2; a += 0.25) {
+      var rad = r * 0.18 + a * r * 0.12;
+      var px = x + Math.cos(a) * rad, py = y + Math.sin(a) * rad;
+      if (a === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawHelpButton(ctx) {
+  var b = helpBtn, S = GF.S;
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.w * 0.28); ctx.fillStyle = 'rgba(18,14,26,0.72)'; ctx.fill();
+  ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(255,210,110,0.5)';
+  GF.rr(ctx, b.x, b.y, b.w, b.h, b.w * 0.28); ctx.stroke();
+  ctx.fillStyle = '#ffd98a'; ctx.font = 'bold ' + GF.clamp(20 * S, 15, 26) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', b.x + b.w / 2, b.y + b.h / 2 + 1);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawTierBanner(ctx) {
+  var S = GF.S, a = Math.min(1, tierBanner / 1.5);
+  var col = TIER_COL[GF.clamp(bannerTier, 0, 8)];
+  ctx.save();
+  ctx.globalAlpha = a * 0.92;
+  var by = GF.cy - L.cell;
+  ctx.fillStyle = 'rgba(10,8,18,0.55)'; ctx.fillRect(0, by - 30 * S, GF.W, 60 * S);
+  ctx.shadowColor = col.a; ctx.shadowBlur = 24 * S;
+  ctx.font = 'bold ' + GF.clamp(26 * S, 18, 38) + 'px sans-serif';
+  ctx.fillStyle = col.a; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('newtier') + '  ' + tierName(bannerTier), GF.cx, by);
+  ctx.restore();
+}
+
+function drawHammerHint(ctx) {
+  var S = GF.S;
+  ctx.fillStyle = 'rgba(255,154,75,0.95)';
+  ctx.font = 'bold ' + GF.clamp(15 * S, 11, 20) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('hammer_pick'), GF.cx, L.wellY - 30 * S);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── TUTORIAL BLOCK (wrapped, measured) ────────────────────────────────────
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/), lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function drawTutorialBlock(ctx, topY, maxW) {
+  var S = GF.S;
+  var keys = ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
+  var fs = GF.clamp(13 * S, 10, 16);
+  var lineH = fs * 1.32;
+  ctx.font = fs + 'px sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  var y = topY;
+  for (var k = 0; k < keys.length; k++) {
+    var lines = wrapLines(ctx, GF.t(keys[k]), maxW);
+    ctx.fillStyle = (k === 3) ? '#ff9a7a' : (k === 4 ? '#ffd166' : '#dfe0ee');
+    for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], GF.cx - maxW / 2, y); y += lineH; }
+    y += lineH * 0.28;
+  }
+  ctx.textBaseline = 'alphabetic';
+  return y - topY;
+}
+
+function drawMenu(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(10,8,18,0.93)'; ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(34 * S, 22, 50);
+  ctx.shadowColor = 'rgba(255,210,90,0.55)'; ctx.shadowBlur = 26 * S;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  var titleY = GF.clamp(H * 0.13, 46 * S, H * 0.2);
+  ctx.fillText(GF.t('title'), GF.cx, titleY);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(13 * S, 10, 18) + 'px sans-serif'; ctx.fillStyle = '#ffce6a';
+  ctx.fillText(GF.t('sub'), GF.cx, titleY + 26 * S);
+  // a little fusing-coin illustration: two coppers → a gold
+  var iz = GF.clamp(40 * S, 26, 58);
+  var iy = titleY + 60 * S;
+  drawCoin(ctx, GF.cx - iz * 1.15, iy, iz * 0.5, 0);
+  drawCoin(ctx, GF.cx - iz * 0.5, iy, iz * 0.5, 0);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + iz * 0.55 + 'px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('>', GF.cx + iz * 0.25, iy);
+  drawCoin(ctx, GF.cx + iz * 1.05, iy, iz * 0.6, 2);
+  ctx.textBaseline = 'alphabetic';
+  // tutorial block
+  var maxW = Math.min(W - 36 * S, 470 * S);
+  var blockY = iy + iz * 0.9;
+  var blockH = drawTutorialBlock(ctx, blockY, maxW);
+  // PLAY
+  var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
+  var btnY = Math.min(blockY + blockH + 14 * S, H - btnH - 16 * S);
+  drawPlayButton(ctx, btnW, btnH, btnY, GF.t('play'));
+  if (best > 0) {
+    ctx.fillStyle = '#bcd'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(GF.t('best') + ': ' + fmt(best), GF.cx, btnY + btnH + 22 * S);
+  }
+}
+
+function drawGameOver(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(20,8,18,0.9)'; ctx.fillRect(0, 0, W, H);
+  var titleFs = GF.clamp(34 * S, 22, 50);
+  ctx.shadowColor = 'rgba(255,90,60,0.5)'; ctx.shadowBlur = 26 * S;
+  ctx.font = 'bold ' + titleFs + 'px sans-serif'; ctx.fillStyle = '#ff7b5b'; ctx.textAlign = 'center';
+  var ty = H * 0.26;
+  ctx.fillText(GF.t('gameover'), GF.cx, ty);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.fillStyle = '#e6b0a8'; ctx.font = GF.clamp(13 * S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('overflow_sub'), GF.cx, ty + 28 * S);
+  var sy = ty + 66 * S;
+  ctx.fillStyle = '#ffe27a'; ctx.font = 'bold ' + GF.clamp(24 * S, 16, 34) + 'px sans-serif';
+  ctx.fillText(GF.t('score') + ': ' + fmt(score), GF.cx, sy);
+  ctx.fillStyle = '#bcd'; ctx.font = GF.clamp(13 * S, 11, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('best') + ': ' + fmt(best), GF.cx, sy + 26 * S);
+  ctx.fillStyle = TIER_COL[GF.clamp(maxTierReached,0,8)].a; ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif';
+  ctx.fillText(GF.t('reached') + ': ' + tierName(maxTierReached), GF.cx, sy + 52 * S);
+  var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
+  var btnY = Math.min(sy + 90 * S, H - btnH - 20 * S);
+  drawPlayButton(ctx, btnW, btnH, btnY, GF.t('retry'));
+}
+
+function drawPlayButton(ctx, w, h, y, label) {
+  var x = GF.cx - w / 2;
+  var grad = ctx.createLinearGradient(x, y, x, y + h);
+  grad.addColorStop(0, '#ffce5a'); grad.addColorStop(1, '#f4a32a');
+  ctx.save(); ctx.shadowColor = 'rgba(255,180,40,0.5)'; ctx.shadowBlur = 18 * GF.S;
+  GF.rr(ctx, x, y, w, h, h / 2); ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#2a1808'; ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, GF.cx, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+  playBtnRect = { x: x, y: y, w: w, h: h };
+}
+
+// ── UNIFIED POINTER (mouse + touch) ───────────────────────────────────────
+function evtXY(e) {
+  if (e.touches && e.touches.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  if (e.changedTouches && e.changedTouches.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  return { x: e.clientX, y: e.clientY };
+}
+function overlayDown(x, y) {
+  if ((gs === 'MENU' || gs === 'GAMEOVER') && playBtnRect) {
+    if (x >= playBtnRect.x && x <= playBtnRect.x + playBtnRect.w && y >= playBtnRect.y && y <= playBtnRect.y + playBtnRect.h) {
+      startGame(); return true;
+    }
+  }
+  return false;
+}
+var cv = document.getElementById('c');
+cv.addEventListener('mousedown', function (e) { var p = evtXY(e); if (!overlayDown(p.x, p.y)) onDown(p.x, p.y); });
+cv.addEventListener('mousemove', function (e) {
+  if (gs !== 'PLAYING' || GF.tutorial.active) return;
+  var col = colAtX(e.clientX); if (col >= 0) aimCol = col;
+});
+cv.addEventListener('touchstart', function (e) { e.preventDefault(); var p = evtXY(e); if (!overlayDown(p.x, p.y)) onDown(p.x, p.y); }, { passive: false });
+cv.addEventListener('touchend', function (e) { e.preventDefault(); }, { passive: false });
+// desktop: Space drops into the aimed column
+document.addEventListener('keydown', function (e) {
+  if (gs === 'PLAYING' && e.code === 'Space') {
+    e.preventDefault();
+    if (GF.tutorial.active) { GF.tutorial.next(); return; }
+    if (!hammerArmed) dropInto(aimCol);
+  }
+});
+
+// ── SCREENSHOT HATCH (Yandex 5.1.1 — populated mid-run, ≥70% gameplay) ────
+function buildBoard(spec) {
+  // spec.cols = array of arrays of tiers (bottom→top), -1 for junk
+  grid = [];
+  for (var c = 0; c < COLS; c++) grid[c] = spec.cols[c] ? spec.cols[c].slice() : [];
+  recomputeHighTier();
+}
+window._setupForScreenshot = function (level) {
+  startGame();
+  GF.tutorial.active = false; firstDrop = true;
+  try { localStorage.setItem('coin_cascade_seen_tutorial', '1'); } catch (e) {}
+  // A healthy mid-run well: several tiers visible, fuses set up, fat wallet,
+  // no overlay. (rows are bottom→top)
+  buildBoard({ cols: [
+    [2, 1, 0],          // gold, silver, copper
+    [3, 2, 1, 1],       // sapphire, gold, silver, silver (silver pair ready)
+    [4, 3, 2],          // ruby, sapphire, gold
+    [2, 2, 1, 0, 0],    // gold pair at base + coppers
+    [1, 0],             // silver, copper
+  ]});
+  maxTierReached = 4; wallet = 860; score = 1340;
+  nextTier = 1; aimCol = 1;
+  recomputeHighTier();
+  if (level === 2) {
+    // a deeper, richer well: higher tiers, junk present, big wallet, dense
+    buildBoard({ cols: [
+      [5, 4, 3, 2, 1],        // emerald → silver
+      [6, 5, 4, 3, 3],        // amethyst → sapphire (sapphire pair ready)
+      [4, 4, -1, 2, 1, 0],    // ruby pair + a junk rust coin buried, dense
+      [5, 3, 2, 2],           // emerald, sapphire, gold pair
+      [3, 2, 1, -1, 0, 0],    // junk + coppers, tall
+    ]});
+    maxTierReached = 6; wallet = 12400; score = 18600;
+    nextTier = 3; aimCol = 1;
+    recomputeHighTier();
+  }
+  gs = 'PLAYING';
+};
+// Test seam — returns boost-button rects + well geometry so a harness can
+// compute exact tap coords. No console output; does not mutate state.
+window._btnInfo = function () {
+  return {
+    gs: gs, well: { x: L.wellX, y: L.wellY, w: L.wellW, h: L.wellH, cell: L.cell, cols: COLS, rows: ROWS },
+    help: { x: helpBtn.x, y: helpBtn.y, w: helpBtn.w, h: helpBtn.h },
+    boosts: boostRects.map(function (r) { return { kind: r.kind, x: r.x, y: r.y, w: r.w, h: r.h, enabled: r.enabled, cx: r.x + r.w / 2, cy: r.y + r.h / 2 }; }),
+    aimCol: aimCol,
+  };
+};
+// take_screenshots.js calls _jumpLevel; webapp_gate calls _jumpLevel(1)/(99)
+window._jumpLevel = function (n) {
+  if (n >= 99) {
+    // force a guaranteed overflow → GAMEOVER
+    startGame();
+    grid[2] = [];
+    for (var i = 0; i < ROWS; i++) grid[2].push(0); // fill a column to the brim
+    nextTier = 0;
+    overflowGameOver(2);
+    return;
+  }
+  window._setupForScreenshot(n || 1);
+};
+// locale_overflow_check hooks
+window._setState = function (s) { gs = (s === 'PLAYING' || s === 'GAMEOVER' || s === 'MENU') ? s : gs; };
+window._getI18N = function () { return STRINGS; };
+window._getFontBody = function () { return 'sans-serif'; };
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 420,
+  designH: 760,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'coin_cascade',
+  onReady: function () {
+    try { best = parseInt(localStorage.getItem('coin_cascade_best') || '0') || 0; } catch (e) {}
+    // Yandex 1.9 — persist run across reload (in-run only; no cross-session currency)
+    GF.persist('coin_cascade_run_v1',
+      function () {
+        if (gs !== 'PLAYING') return { gs: gs };
+        return {
+          gs: gs, score: score, wallet: wallet, grid: grid, nextTier: nextTier,
+          maxTierReached: maxTierReached, drops: drops, aimCol: aimCol,
+          hammerUses: hammerUses, swapUses: swapUses, cycloneUses: cycloneUses,
+        };
+      },
+      function (s) {
+        if (!s || s.gs !== 'PLAYING' || !s.grid) { gs = 'MENU'; return; }
+        score = s.score || 0; wallet = s.wallet || 0;
+        grid = []; for (var c = 0; c < COLS; c++) grid[c] = (s.grid[c] || []).slice();
+        nextTier = (typeof s.nextTier === 'number') ? s.nextTier : 0;
+        maxTierReached = s.maxTierReached || 0; drops = s.drops || 0;
+        aimCol = (typeof s.aimCol === 'number') ? s.aimCol : Math.floor(COLS / 2);
+        hammerUses = s.hammerUses || 0; swapUses = s.swapUses || 0; cycloneUses = s.cycloneUses || 0;
+        firstDrop = drops > 0; fall = null; dropLock = false; hammerArmed = false;
+        recomputeHighTier();
+        gs = 'PLAYING';
+      }
+    );
+    if (gs !== 'PLAYING') gs = 'MENU';
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── EXPOSE STATE (post-build-tester cross-checks vs DESIGN.md) ────────────
+GF.exposeState(function () {
+  return {
+    gs: gs, score: score, best: best, wallet: wallet,
+    highTier: highTier, maxTierReached: maxTierReached,
+    topTierName: tierName(maxTierReached), nextTier: nextTier,
+    fillFrac: fillFrac(), drops: drops, aimCol: aimCol,
+    hammerCostNow: curHammerCost(), swapCostNow: curSwapCost(), cycloneCostNow: curCycloneCost(),
+    // tunables (DESIGN.md §Tunables)
+    COLS: COLS, ROWS: ROWS, START_TIER_POOL: START_TIER_POOL, spawnTierCap: spawnTierCap,
+    junkThreshold: junkThreshold, junkChance: junkChance,
+    hammerCost: hammerCost, swapCost: swapCost, cycloneCost: cycloneCost,
+    payoutMult: payoutMult, chainBonusMult: chainBonusMult,
+  };
+});
+
+})();
+</script>
+</body>
+</html>

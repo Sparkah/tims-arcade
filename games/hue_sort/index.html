@@ -49,6 +49,8 @@ var STRINGS = {
     bonus_tomorrow: 'Tomorrow', bonus_today: 'Today',
     bonus_banked: 'Banked into your Lab Rank',
     bonus_streak_boost: 'Streak bonus',
+    // Endless mode (playtime depth)
+    endless: 'ENDLESS', endless_tag: '∞ LVL', go_deeper: 'tap to go deeper',
   },
   ru: {
     title: 'Слей по цвету',
@@ -77,6 +79,8 @@ var STRINGS = {
     bonus_tomorrow: 'Завтра', bonus_today: 'Сегодня',
     bonus_banked: 'Зачислено в твой ранг',
     bonus_streak_boost: 'Бонус за серию',
+    // Endless mode (playtime depth)
+    endless: 'БЕЗ КОНЦА', endless_tag: '∞ УР', go_deeper: 'жми, чтобы углубиться',
   },
 };
 
@@ -339,6 +343,62 @@ var history = [];          // undo snapshots
 var anim = null;           // active pour animation
 var tubeRects = [];        // computed layout per frame
 
+// ── ENDLESS DEPTH (retention milestone #3 — playtime depth, 2026-06-02) ─────
+// The campaign caps at 6 levels (a ~2-minute session). Endless mode is the
+// playtime-depth answer to the player's #1 ask ("Build more levels"): after
+// clearing the campaign, the player can keep going into procedurally harder
+// boards forever. Depth comes NOT from new colours (only 3 primaries exist) but
+// from MORE tubes (duplicate colour stacks + extra empties) + deeper scrambles +
+// a tighter relative pour budget. Every pure tube still banks into the lifetime
+// Lab-Rank meta, so the longer endless run compounds the existing progression —
+// the concrete reason the session keeps going past WIN toward the ~15-min target.
+var endlessLevel = 0;        // current endless level (1.. ), 0 = not in endless
+var endlessBest = 0;         // deepest endless level ever reached (persisted)
+var ENDLESS_MAX_FILLED = 7;  // cap on filled colour-tubes so the rack stays sane
+function loadEndless() {
+  try { endlessBest = parseInt(localStorage.getItem('hue_sort_endless') || '0') || 0; } catch (e) {}
+}
+function saveEndlessBest() {
+  if (endlessLevel > endlessBest) {
+    endlessBest = endlessLevel;
+    try { localStorage.setItem('hue_sort_endless', String(endlessBest)); } catch (e) {}
+  }
+}
+// How many FILLED colour-tubes an endless level has: starts at the full 3-colour
+// board and adds a duplicate primary stack every 2 endless levels, capped.
+function endlessFilledTubes(e) {
+  return Math.min(3 + Math.floor((e - 1) / 2), ENDLESS_MAX_FILLED);
+}
+// Endless pour budget: scarcer than campaign relative to board size — fewer free
+// pours per extra tube so deeper boards demand cleaner play (the pressure axis,
+// still a moves budget, never a timer).
+function poursForEndless(e) {
+  var filled = endlessFilledTubes(e);
+  return 14 + filled * 3 + Math.floor(e / 3) * 2;
+}
+// Build an endless board: `filled` full tubes drawn from the 3 primaries (cycling,
+// so duplicates appear past 3), 2 empties, scrambled deep with legal inverse pours
+// (guaranteed solvable). Additive — does not touch buildLevel / buildDailyLevel.
+function buildEndlessLevel(e) {
+  var filled = endlessFilledTubes(e);
+  var t = [];
+  for (var ci = 0; ci < filled; ci++) {
+    var col = PRIMARIES[ci % 3];
+    t.push([col, col, col, col].slice(0, TUBE_CAP));
+  }
+  for (var em = 0; em < 2; em++) t.push([]);
+  var moves = 10 + filled * 2 + e * 2;   // deeper scramble than campaign
+  for (var m = 0; m < moves; m++) scrambleMove(t);
+  if (solvedState(t)) { scrambleMove(t); scrambleMove(t); }
+  tubes = t;
+  pours = poursForEndless(e);
+  undoLeft = UNDO_MAX;
+  stuck = false;
+  sel = -1;
+  history = [];
+  anim = null;
+}
+
 // ── LEVEL GENERATION ───────────────────────────────────────────────────────
 function poursForLevel(lvl) { return POUR_BUDGET + (lvl - 1) * 2; }
 
@@ -529,6 +589,16 @@ function evaluate() {
       GF.saveRun();
       return;
     }
+    if (mode === 'endless') {
+      // Endless board solved → bank the new depth and roll straight into the next
+      // (harder) endless level via the brief LEVELEND beat. No WIN ceiling here:
+      // the run continues as long as the player keeps clearing boards.
+      saveEndlessBest();
+      gs = 'LEVELEND';
+      GF.happytime();
+      GF.saveRun();
+      return;
+    }
     if (level > bestLevel) { bestLevel = level; try { localStorage.setItem('hue_sort_best', bestLevel); } catch (e) {} }
     if (level >= WIN_LEVELS) { gs = 'WIN'; GF.gameEnded(); GF.happytime(); }
     else { gs = 'LEVELEND'; }
@@ -568,10 +638,29 @@ function nextLevel() {
   GF.gameStarted();
   GF.saveRun();
 }
+function startEndless() {
+  // Begin (or continue) the post-campaign endless run from level 1.
+  mode = 'endless';
+  endlessLevel = 1;
+  buildEndlessLevel(endlessLevel);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+function nextEndless() {
+  endlessLevel++;
+  saveEndlessBest();
+  buildEndlessLevel(endlessLevel);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
 function retryLevel() {
-  // Re-deal the SAME board the player just lost: daily re-seeds today's puzzle,
-  // campaign re-scrambles its level. (Daily streak is only banked on a win.)
+  // Re-deal the SAME-difficulty board the player just lost: daily re-seeds today's
+  // puzzle, endless re-rolls the current endless level, campaign re-scrambles its
+  // level. (Daily streak / endless best are only banked on a win.)
   if (mode === 'daily') buildDailyLevel();
+  else if (mode === 'endless') buildEndlessLevel(endlessLevel);
   else buildLevel(level);
   gs = 'PLAYING';
   GF.gameStarted();
@@ -669,7 +758,7 @@ function update(dt) {
 // ── DRAW ──────────────────────────────────────────────────────────────────
 var _playBtn = null, _retryBtn = null, _againBtn = null, _dailyBtn = null;
 var _hudMenuBtn = null, _hudHelpBtn = null, _undoBtn = null, _gmMenuBtn = null, _winMenuBtn = null;
-var _dailyMenuBtn = null, _bonusBtn = null;
+var _dailyMenuBtn = null, _bonusBtn = null, _winEndlessBtn = null, _menuEndlessBtn = null;
 var _bonusPulse = 0; // cosmetic pulse phase for the claimable chest
 
 function draw(ctx) {
@@ -753,7 +842,9 @@ function drawPourStream(ctx) {
   if (!sr || !dr) return;
   var sx = sr.x + sr.w / 2, sy = sr.y;
   var dx = dr.x + dr.w / 2, dy = dr.y;
-  var p = a.t;
+  // Ease-in on the stream progress so the droplets accelerate as they fall, like
+  // real liquid (the player asked to "improve animation"); cosmetic only, no logic.
+  var p = a.t * a.t * (3 - 2 * a.t); // smoothstep
   var col = COL_HEX[a.color];
   ctx.save();
   ctx.globalAlpha = 0.9;
@@ -781,12 +872,17 @@ function drawHUD(ctx) {
     var tag = GF.t('daily_tag');
     if (dailyStreak > 0) tag += '  🔥' + dailyStreak;
     ctx.fillText(tag, pad, pad);
+  } else if (mode === 'endless') {
+    // Endless mode: show the endless-depth tag (∞ N) instead of the finite LVL n/6.
+    ctx.fillStyle = '#9fe8b5';
+    ctx.fillText(GF.t('endless_tag') + ' ' + endlessLevel, pad, pad);
   } else {
     ctx.fillStyle = '#cfe0ff';
     ctx.fillText(GF.t('level') + ' ' + level + '/' + WIN_LEVELS, pad, pad);
   }
 
-  var maxP = poursForLevel(level);
+  // Pour budget depends on the active loop's generator (campaign / daily / endless).
+  var maxP = (mode === 'endless') ? poursForEndless(endlessLevel) : poursForLevel(level);
   var pipR = GF.clamp(5 * S, 4, 8);
   var pipGap = pipR * 2.6;
   var shown = Math.min(maxP, 14);
@@ -916,6 +1012,7 @@ function drawPairButton(ctx, label, bx, y, bw, bh, accent, dim) {
   var g = ctx.createLinearGradient(bx, y, bx, y + bh);
   if (dim) { g.addColorStop(0, '#37506e'); g.addColorStop(1, '#26384e'); }
   else if (accent === 'play') { g.addColorStop(0, '#3fb86a'); g.addColorStop(1, '#2a8a4c'); }
+  else if (accent === 'endless_blue') { g.addColorStop(0, '#4f8bf0'); g.addColorStop(1, '#2a56b0'); } // endless = blue
   else { g.addColorStop(0, '#ef9b3a'); g.addColorStop(1, '#c46410'); } // daily = warm
   GF.rr(ctx, bx, y, bw, bh, bh / 2);
   ctx.fillStyle = g; ctx.fill();
@@ -997,8 +1094,25 @@ function drawMenu(ctx) {
     ctx.font = GF.clamp(12 * S, 9, 15) + 'px sans-serif';
     ctx.fillStyle = '#7f93b5';
     ctx.fillText(GF.t('best') + ': ' + bestLevel + '/' + WIN_LEVELS, cx, capY);
+    capY += GF.clamp(18 * S, 13, 24);
+  }
+  // ENDLESS entry on the MENU — unlocked once the campaign has been cleared (or an
+  // endless run already started). Gated so it never clutters the first-run menu;
+  // when shown it sits below the captions (only after the player has the screen
+  // room budget freed by having finished the tutorial-era first run).
+  _menuEndlessBtn = null;
+  if (endlessUnlocked()) {
+    var ebh = GF.clamp(40 * S, 34, 52);
+    var ebw = Math.min(W * 0.7, GF.clamp(240 * S, 180, 300));
+    var eby = Math.min(capY + GF.clamp(4 * S, 2, 8), H - ebh - GF.clamp(10 * S, 8, 16));
+    _menuEndlessBtn = drawPairButton(ctx, GF.t('endless') +
+      (endlessBest > 0 ? ('  ∞' + endlessBest) : ''),
+      cx - ebw / 2, eby, ebw, ebh, 'endless_blue', false);
   }
 }
+// Endless is unlocked after the player has cleared the finite campaign at least
+// once (bestLevel hit the cap) or already has an endless run on record.
+function endlessUnlocked() { return endlessBest > 0 || bestLevel >= WIN_LEVELS; }
 
 // The claimable daily-bonus chest button on the MENU. A warm gold pill with a
 // gift glyph, a gentle pulse, and the streak-scaled reward amount baked into the
@@ -1120,10 +1234,15 @@ function drawLevelEnd(ctx) {
   var S = GF.S, H = GF.H, cx = GF.W / 2;
   ctx.font = 'bold ' + GF.clamp(34 * S, 22, 48) + 'px sans-serif';
   ctx.fillStyle = '#9fe8b5'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(GF.t('levelsolved') + ' ' + level + ' ' + GF.t('solved'), cx, H * 0.42);
+  // Endless boards have no fixed number — celebrate the depth reached + "go deeper".
+  var head = (mode === 'endless')
+    ? (GF.t('endless_tag') + ' ' + endlessLevel + ' ' + GF.t('solved'))
+    : (GF.t('levelsolved') + ' ' + level + ' ' + GF.t('solved'));
+  ctx.fillText(head, cx, H * 0.42);
   ctx.font = GF.clamp(16 * S, 12, 20) + 'px sans-serif';
   ctx.fillStyle = '#bcd';
-  ctx.fillText(GF.t('tap_next'), cx, H * 0.42 + GF.clamp(44 * S, 32, 60));
+  ctx.fillText(mode === 'endless' ? GF.t('go_deeper') : GF.t('tap_next'),
+    cx, H * 0.42 + GF.clamp(44 * S, 32, 60));
   ctx.textBaseline = 'top';
 }
 
@@ -1183,10 +1302,14 @@ function drawWin(ctx) {
   ctx.fillText(rankName(rankIndexFor(tubesPurified)) + ' · ' + tubesPurified +
     (isRu() ? ' чистых' : ' pure'),
     cx, H * 0.28 + GF.clamp(80 * S, 60, 104));
-  _againBtn = drawButton(ctx, GF.t('again'), cx, H * 0.52);
-  _winMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _againBtn.h + GF.clamp(18 * S, 12, 26));
+  // Endless mode is the playtime-depth runway past the finite campaign: clearing
+  // the 6 levels unlocks an infinite, progressively-harder run (the "build more
+  // levels" answer). Lead with it on WIN so the session continues instead of ending.
+  _winEndlessBtn = drawButton(ctx, GF.t('endless'), cx, H * 0.50, '#3a78e8');
+  _againBtn = drawSmallButton(ctx, GF.t('again'), cx, H * 0.50 + _winEndlessBtn.h + GF.clamp(14 * S, 10, 22));
+  _winMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.50 + _winEndlessBtn.h + _againBtn.h + GF.clamp(26 * S, 18, 40));
   // Session-end hook: tease the claimable daily bonus / preview tomorrow's.
-  drawSessionEndHook(ctx, H - GF.clamp(20 * S, 14, 28));
+  drawSessionEndHook(ctx, H - GF.clamp(16 * S, 12, 24));
 }
 
 // Daily-challenge solved screen: the streak is the headline (the return hook),
@@ -1256,6 +1379,7 @@ function onTap(x, y) {
 
   if (gs === 'MENU') {
     if (hit(_bonusBtn, x, y)) { claimBonus(); return; }
+    if (hit(_menuEndlessBtn, x, y)) { startEndless(); return; }
     if (hit(_playBtn, x, y)) { startGame(); return; }
     if (hit(_dailyBtn, x, y)) { startDaily(); return; }
     return;
@@ -1264,13 +1388,14 @@ function onTap(x, y) {
     if (hit(_dailyMenuBtn, x, y)) { toMenu(); return; }
     return;
   }
-  if (gs === 'LEVELEND') { nextLevel(); return; }
+  if (gs === 'LEVELEND') { if (mode === 'endless') nextEndless(); else nextLevel(); return; }
   if (gs === 'GAMEOVER') {
     if (hit(_retryBtn, x, y)) { retryLevel(); return; }
     if (hit(_gmMenuBtn, x, y)) { toMenu(); return; }
     return;
   }
   if (gs === 'WIN') {
+    if (hit(_winEndlessBtn, x, y)) { startEndless(); return; }
     if (hit(_againBtn, x, y)) { startGame(); return; }
     if (hit(_winMenuBtn, x, y)) { toMenu(); return; }
     return;
@@ -1319,6 +1444,9 @@ GF.exposeState(function() {
     bonusAvailable: bonusAvailable(),
     bonusValueToday: bonusValueToday(),
     bonusValueTomorrow: bonusValueTomorrow(),
+    endlessLevel: endlessLevel,
+    endlessBest: endlessBest,
+    endlessUnlocked: endlessUnlocked(),
     POUR_BUDGET: POUR_BUDGET,
     TUBE_CAP: TUBE_CAP,
     START_TUBES: START_TUBES,
@@ -1349,17 +1477,20 @@ GF.init({
   onReady: function() {
     try { bestLevel = parseInt(localStorage.getItem('hue_sort_best') || '0') || 0; } catch (e) {}
     try { tubesPurified = parseInt(localStorage.getItem('hue_sort_purified') || '0') || 0; } catch (e) {}
-    loadDaily(); // restore day-streak + whether today's daily is already solved
-    loadBonus(); // restore whether today's daily login bonus is still claimable
+    loadDaily();    // restore day-streak + whether today's daily is already solved
+    loadBonus();    // restore whether today's daily login bonus is still claimable
+    loadEndless();  // restore deepest endless level ever reached (the unlock + best)
     GF.persist('hue_sort_run_v1',
       function() {
-        return { gs: gs, mode: mode, level: level, pours: pours, undoLeft: undoLeft,
+        return { gs: gs, mode: mode, level: level, endlessLevel: endlessLevel,
+                 pours: pours, undoLeft: undoLeft,
                  tubes: tubes.map(function(a){ return a.slice(); }) };
       },
       function(s) {
         if (!s) return;
-        mode = (s.mode === 'daily') ? 'daily' : 'campaign';
+        mode = (s.mode === 'daily') ? 'daily' : (s.mode === 'endless') ? 'endless' : 'campaign';
         level = s.level || 1;
+        endlessLevel = (typeof s.endlessLevel === 'number') ? s.endlessLevel : 0;
         pours = (typeof s.pours === 'number') ? s.pours : POUR_BUDGET;
         undoLeft = (typeof s.undoLeft === 'number') ? s.undoLeft : UNDO_MAX;
         if (s.tubes && s.tubes.length) tubes = s.tubes.map(function(a){ return a.slice(); });
