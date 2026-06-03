@@ -43,6 +43,20 @@ var STRINGS = {
     tut_lose: 'Lose: Your oxygen tank hits 0, or falling debris crushes you 3 times.',
     tut_tip: 'Tip: Every dig loosens the rock above — BRACE a column for cheap air before it rains down on your head.',
     close: 'GOT IT',
+    daily_title: 'DAILY AIR SUPPLY',
+    daily_streak: 'Day {n} streak',
+    daily_collect: 'COLLECT +{air} AIR',
+    daily_collected: 'Air supply loaded for your next dive',
+    daily_next: 'Come back tomorrow — Day {n} gives +{air}',
+    daily_cache: 'Overnight cache +{air}',
+    daily_quest: 'TODAY: {q}',
+    daily_quest_done: 'TODAY: {q}  ✓',
+    quest_depth: 'reach Lvl {n}',
+    quest_air: 'bank {n} air this run',
+    quest_survive: 'clear {n} levels in one dive',
+    quest_pockets: 'grab {n} air pockets',
+    quest_bonus: 'quest done: +{air} bonus air',
+    run_bonus: '+{air} SUPPLY AIR',
   },
   ru: {
     title: 'Всплытие',
@@ -65,6 +79,20 @@ var STRINGS = {
     tut_lose: 'Поражение: Кислород на нуле или падающие обломки раздавили вас 3 раза.',
     tut_tip: 'Совет: Каждый удар расшатывает камень сверху — поставьте УПОР за дёшево, пока он не обрушился на голову.',
     close: 'ПОНЯТНО',
+    daily_title: 'ДНЕВНОЙ ЗАПАС ВОЗДУХА',
+    daily_streak: 'Серия: день {n}',
+    daily_collect: 'ЗАБРАТЬ +{air} ВОЗДУХА',
+    daily_collected: 'Запас воздуха загружен в следующий заплыв',
+    daily_next: 'Возвращайтесь завтра — день {n} даёт +{air}',
+    daily_cache: 'Ночной запас +{air}',
+    daily_quest: 'СЕГОДНЯ: {q}',
+    daily_quest_done: 'СЕГОДНЯ: {q}  ✓',
+    quest_depth: 'дойдите до ур. {n}',
+    quest_air: 'наберите {n} воздуха за заплыв',
+    quest_survive: 'пройдите {n} уровня за один заплыв',
+    quest_pockets: 'соберите {n} пузырей воздуха',
+    quest_bonus: 'задание выполнено: +{air} воздуха',
+    run_bonus: '+{air} ЗАПАСНОГО ВОЗДУХА',
   },
 };
 
@@ -100,6 +128,7 @@ var chunks = [];            // { col, row } falling debris
 var diverCol = 0, diverRow = GRID_H - 1;
 var mode = 'dig';           // dig | brace | blast
 var fallTimer = 0;
+var actionsThisRun = 0;     // total dig/brace/blast actions this run (progression proxy)
 var hardnessBias = 0;
 var fallChance = FALL_CHANCE_BASE;
 var loseCause = 'oxy';
@@ -122,6 +151,135 @@ var O2_MILESTONE = [0, 0, 10, 20, 30, 40];  // index by level (1..5)
 var bestBeatenThisRun = false;  // banner latch: hit a new best this run
 var lastBankedAir = 0;          // air newly banked on the level just cleared (for WON banner)
 
+// ── M2 — REASON TO RETURN (iteration #2, the habit engine) ──────────────────
+// Three mechanics designed as ONE loop, all feeding the existing AIR economy so
+// no new currency confuses the player (the comment asked for *less* friction):
+//   1. Daily login + streak — first dive of each calendar day grants a one-run
+//      "supply air" bonus that grows with the consecutive-day streak (capped).
+//   2. Overnight Air Cache — a capped idle accrual that fills while away; the cap
+//      IS the return trigger (open tomorrow to a topped-up cache to collect).
+//   3. Daily Quest — one seeded daily objective; completing it banks a bonus that
+//      sweetens tomorrow's supply (momentum transfer).
+// Unlike the M1 career bonus (a permanent stat applied every level-refill), the
+// M2 air is a ONE-RUN kick applied only at run START — a true daily reason to
+// come back, not a power creep.
+var DAILY_BASE = 12;            // day-1 supply air
+var DAILY_STEP = 6;            // +air per extra streak day
+var DAILY_MAX_DAYS = 7;        // streak caps here (day 7 = max supply)
+var CACHE_RATE_PER_HR = 4;     // overnight cache air accrued per hour away
+var CACHE_CAP = 40;           // cache cap (the return trigger — fills in ~10h)
+var QUEST_BONUS_AIR = 14;      // bonus supply banked for tomorrow on quest done
+
+var dayStreak = 0;             // consecutive days played
+var lastPlayDay = 0;          // day-index (floor(epoch/86400000)) of last claim
+var dailyAvailable = false;   // a fresh daily supply is waiting to be collected
+var dailyClaimedToday = false;// already collected today's supply
+var overnightCache = 0;       // idle-accrued air waiting in the cache
+var lastSeenMs = 0;           // wall-clock of last MENU visit (for cache accrual)
+var questBankedAir = 0;       // bonus air carried into the NEXT run from a done quest
+var dailyRunBonus = 0;        // one-run supply air to add at the next run start
+var questId = 0;              // which daily quest is active (seeded by day)
+var questTarget = 0;          // quest goal value
+var questDoneToday = false;   // today's quest already completed
+// per-run quest progress trackers
+var runAirGained = 0;         // O2 picked up from pockets this run (for air/pocket quests)
+var runPockets = 0;           // air pockets grabbed this run
+var questProgressDepth = 0;   // deepest level reached this run (for depth/survive quests)
+var runStartBonus = 0;        // supply air actually granted at this run's start (HUD/feedback)
+var questJustDone = false;    // latch: the quest completed during the current run
+
+var QUESTS = ['depth', 'air', 'survive', 'pockets'];
+function dayIndex(ms) { return Math.floor((ms != null ? ms : Date.now()) / 86400000); }
+// Deterministic daily seed so the quest is the same all day (and reproducible).
+function questForDay(di) {
+  var h = (di * 2654435761) % 2147483647; if (h < 0) h += 2147483647;
+  var id = h % QUESTS.length;
+  var kind = QUESTS[id];
+  var tgt;
+  if (kind === 'depth')   tgt = 2 + (h % 3);          // reach Lvl 2..4
+  else if (kind === 'air') tgt = 30 + (h % 4) * 10;    // bank 30..60 air
+  else if (kind === 'survive') tgt = 2 + (h % 2);      // clear 2..3 levels
+  else                    tgt = 2 + (h % 3);            // grab 2..4 pockets
+  return { id: id, kind: kind, target: tgt };
+}
+function questText() {
+  var k = QUESTS[questId];
+  if (k === 'depth')   return subst(GF.t('quest_depth'),   { n: questTarget });
+  if (k === 'air')     return subst(GF.t('quest_air'),     { n: questTarget });
+  if (k === 'survive') return subst(GF.t('quest_survive'), { n: questTarget });
+  return subst(GF.t('quest_pockets'), { n: questTarget });
+}
+// Supply air the streak grants for `day` (1-based, capped at DAILY_MAX_DAYS).
+function streakAir(day) {
+  var d = Math.max(1, Math.min(DAILY_MAX_DAYS, day));
+  return DAILY_BASE + (d - 1) * DAILY_STEP;
+}
+// Refresh daily/streak/cache/quest state for the current wall-clock. Called on
+// load and whenever the MENU is shown so the cache keeps filling between visits.
+function refreshDaily() {
+  var now = Date.now();
+  var di = dayIndex(now);
+  // Overnight cache accrual since we last saw the player (capped — the cap is
+  // the whole point: it stops rewarding indefinite absence, so coming back
+  // *tomorrow* collects a full cache rather than a trickle).
+  if (lastSeenMs > 0) {
+    var hrs = (now - lastSeenMs) / 3600000;
+    if (hrs > 0) overnightCache = Math.min(CACHE_CAP, overnightCache + hrs * CACHE_RATE_PER_HR);
+  }
+  lastSeenMs = now;
+  // New calendar day → a fresh daily supply + (maybe) streak advance is waiting.
+  if (di !== lastPlayDay) {
+    if (lastPlayDay === di - 1) dayStreak = Math.min(DAILY_MAX_DAYS, dayStreak + 1); // consecutive
+    else dayStreak = 1;                                                              // streak broke / first ever
+    dailyClaimedToday = false;
+    dailyAvailable = true;
+    // Roll today's quest fresh.
+    var q = questForDay(di);
+    questId = q.id; questTarget = q.target; questDoneToday = false;
+    lastPlayDay = di;
+    saveMeta();
+  } else {
+    dailyAvailable = !dailyClaimedToday;
+    // Ensure quest is populated even on same-day reloads (first-ever boot).
+    if (questTarget === 0) { var q2 = questForDay(di); questId = q2.id; questTarget = q2.target; }
+  }
+}
+// Player taps COLLECT on the MENU: hand the daily supply + cache + any banked
+// quest bonus to the NEXT run as one-shot supply air, then reset the cache.
+function collectDaily() {
+  if (!dailyAvailable) return 0;
+  var supply = streakAir(dayStreak);
+  var cache = Math.round(overnightCache);
+  var bonus = questBankedAir;
+  dailyRunBonus = supply + cache + bonus;
+  overnightCache = 0;
+  questBankedAir = 0;
+  dailyClaimedToday = true;
+  dailyAvailable = false;
+  saveMeta();
+  return dailyRunBonus;
+}
+// Evaluate today's quest against current run progress. Completing it banks a
+// bonus that is collected with TOMORROW's daily supply (momentum transfer) and
+// pops a float so the win is legible the moment it lands. Idempotent per day.
+function checkQuest() {
+  if (questDoneToday || questTarget === 0) return;
+  var k = QUESTS[questId];
+  var done = false;
+  if (k === 'depth')   done = (questProgressDepth >= questTarget);
+  else if (k === 'air') done = (runAirGained >= questTarget);
+  else if (k === 'survive') done = (questProgressDepth >= questTarget); // levels cleared in one dive
+  else if (k === 'pockets') done = (runPockets >= questTarget);
+  if (done) {
+    questDoneToday = true;
+    questJustDone = true;
+    questBankedAir += QUEST_BONUS_AIR;
+    saveMeta();
+    GF.spawnFloat(GF.cx, GF.H * 0.5, subst(GF.t('quest_bonus'), { air: QUEST_BONUS_AIR }), '#ffe06a');
+    GF.spawnParticles(GF.cx, GF.H * 0.5, '#ffe06a', 28);
+  }
+}
+
 var META_KEY = 'updrift_meta_v1';
 function loadMeta() {
   try {
@@ -129,10 +287,28 @@ function loadMeta() {
     if (!raw) return;
     var m = JSON.parse(raw);
     if (m && typeof m.bestLevel === 'number') bestLevel = Math.max(0, Math.min(MAX_LEVEL, m.bestLevel | 0));
+    if (typeof m.dayStreak === 'number') dayStreak = Math.max(0, Math.min(DAILY_MAX_DAYS, m.dayStreak | 0));
+    if (typeof m.lastPlayDay === 'number') lastPlayDay = m.lastPlayDay | 0;
+    if (typeof m.dailyClaimedToday === 'boolean') dailyClaimedToday = m.dailyClaimedToday;
+    if (typeof m.overnightCache === 'number') overnightCache = Math.max(0, Math.min(CACHE_CAP, m.overnightCache));
+    if (typeof m.lastSeenMs === 'number') lastSeenMs = m.lastSeenMs;
+    if (typeof m.questBankedAir === 'number') questBankedAir = Math.max(0, m.questBankedAir | 0);
+    if (typeof m.questDoneToday === 'boolean') questDoneToday = m.questDoneToday;
   } catch (e) {}
 }
 function saveMeta() {
-  try { localStorage.setItem(META_KEY, JSON.stringify({ bestLevel: bestLevel })); } catch (e) {}
+  try {
+    localStorage.setItem(META_KEY, JSON.stringify({
+      bestLevel: bestLevel,
+      dayStreak: dayStreak,
+      lastPlayDay: lastPlayDay,
+      dailyClaimedToday: dailyClaimedToday,
+      overnightCache: overnightCache,
+      lastSeenMs: lastSeenMs,
+      questBankedAir: questBankedAir,
+      questDoneToday: questDoneToday,
+    }));
+  } catch (e) {}
 }
 function careerO2Bonus() {
   return (bestLevel >= 1 && bestLevel <= MAX_LEVEL) ? O2_MILESTONE[bestLevel] : 0;
@@ -210,14 +386,28 @@ function isEmpty(r, c) {
 // ── LIFECYCLE ────────────────────────────────────────────────────────────
 function startGame() {
   level = 1;
-  oxygen = effectiveStartOxy();
+  // Run START gets the permanent career tank PLUS any one-run daily/cache/quest
+  // supply the player collected on the MENU (M2). The supply is consumed here so
+  // it applies once per dive, not on every level refill (that stays career-only).
+  oxygen = effectiveStartOxy() + (dailyRunBonus || 0);
+  runStartBonus = dailyRunBonus || 0;
+  dailyRunBonus = 0;
   crushLives = MAX_CRUSH_LIVES;
   mode = 'dig';
   fullWin = false;
   bestBeatenThisRun = false;
   lastBankedAir = 0;
+  // Reset per-run quest progress trackers (M2).
+  runAirGained = 0;
+  runPockets = 0;
+  questProgressDepth = 0;
+  actionsThisRun = 0;
   buildLevel(1);
   gs = 'PLAYING';
+  if (runStartBonus > 0) {
+    GF.spawnFloat(GF.cx, GF.H * 0.42, subst(GF.t('run_bonus'), { air: runStartBonus }), '#7af5ff');
+  }
+  checkQuest();
   GF.gameStarted();
   GF.saveRun();
 }
@@ -241,6 +431,10 @@ function winLevel() {
   fullWin = (level >= MAX_LEVEL);
   // Clearing level `level` banks the depth milestone for `level` (you reached it).
   lastBankedAir = recordDepth(level);
+  // M2 quest progress: cleared levels this dive = `level` (run always starts at 1
+  // and rises monotonically). Drives both the depth and survive quests.
+  questProgressDepth = Math.max(questProgressDepth, level);
+  checkQuest();
   GF.spawnParticles(GF.cx, GF.H * 0.3, '#ffe06a', 56);
   GF.gameEnded();
   GF.saveRun();
@@ -261,6 +455,7 @@ function digUp() {
     if (cell.hp <= 0) {
       if (cell.o2) {
         oxygen = Math.min(START_OXY, oxygen + O2_POCKET_REFILL);
+        runAirGained += O2_POCKET_REFILL; runPockets += 1; checkQuest();
         GF.spawnParticles(px, py, '#34e1ff', 18);
         GF.spawnFloat(px, py, '+' + O2_POCKET_REFILL + ' ' + GF.t('o2'), '#34e1ff');
       } else {
@@ -297,12 +492,12 @@ function blast() {
     var px = layout.gx + (tc + 0.5) * layout.cell;
     var py = layout.gy + (tr + 0.5) * layout.cell;
     if (cell) {
-      if (cell.o2) gained += O2_POCKET_REFILL;
+      if (cell.o2) { gained += O2_POCKET_REFILL; runPockets += 1; }
       GF.spawnParticles(px, py, '#ff7a3a', 14);
       setCell(tr, tc, null);
     }
   }
-  if (gained) oxygen = Math.min(START_OXY, oxygen + gained);
+  if (gained) { oxygen = Math.min(START_OXY, oxygen + gained); runAirGained += gained; checkQuest(); }
   GF.setShake(0.6);
   afterAction();
 }
@@ -326,6 +521,7 @@ function moveDiver(dx) {
 }
 
 function afterAction() {
+  actionsThisRun++;
   tryRise();
   if (oxygen <= 0) { oxygen = 0; loseGame('oxy'); return; }
   if (diverRow <= SURFACE_ROW) { winLevel(); return; }
@@ -444,7 +640,7 @@ window._getI18N = function () { return STRINGS; };
 window._getFontBody = function () { return 'sans-serif'; };
 
 // ── LAYOUT ───────────────────────────────────────────────────────────────
-var layout = { gx: 0, gy: 0, cell: 0, gw: 0, gh: 0, topPad: 0, botPad: 0, helpBtn: null, modeChip: null };
+var layout = { gx: 0, gy: 0, cell: 0, gw: 0, gh: 0, topPad: 0, botPad: 0, helpBtn: null, modeChip: null, dailyBtn: null };
 function recomputeLayout() {
   var W = GF.W, H = GF.H;
   layout.topPad = GF.clamp(74 * GF.S, 52, 104);
@@ -482,6 +678,9 @@ function onPress(x, y) {
     return;
   }
   if (gs === 'MENU') {
+    // M2: COLLECT the daily air supply (load it onto the next dive) — checked
+    // before PLAY so the tap lands on the button drawn above it.
+    if (inRect(x, y, layout.dailyBtn)) { collectDaily(); return; }
     var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(54 * GF.S, 42, 66);
     var bx = (GF.W - bw) / 2, by = GF.H * 0.80;
     if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) startGame();
@@ -531,10 +730,38 @@ function handleKeys() {
 }
 
 // ── UPDATE ───────────────────────────────────────────────────────────────
+// Space/Enter starts or advances from non-playing screens (keyboard parity with
+// the tap affordances). Latched so a held key fires once per press.
+function handleMenuKeys() {
+  var pressed = GF.keys['Space'] || GF.keys['Enter'] || GF.keys['NumpadEnter'];
+  if (pressed && !keyLatch.start) {
+    keyLatch.start = true;
+    if (tutorialOpen) {
+      tutorialOpen = false;
+      try { localStorage.setItem('updrift_seen_tutorial', '1'); } catch (e) {}
+    } else if (gs === 'MENU') {
+      if (dailyAvailable) collectDaily();   // auto-load the waiting daily supply
+      startGame();
+    } else if (gs === 'WON') {
+      if (fullWin) startGame(); else nextLevel();
+    } else if (gs === 'GAMEOVER') {
+      startGame();
+    }
+  }
+  if (!pressed) keyLatch.start = false;
+}
+
+var dailyRefreshAccum = 0;
 function update(dt) {
   recomputeLayout();
   if (hitFlashT > 0) hitFlashT = Math.max(0, hitFlashT - dt);
-  if (gs !== 'PLAYING') return;
+  // M2: while sitting on the MENU, keep the overnight cache filling and re-roll
+  // the daily if the player crosses midnight with the tab open (throttled ~5s).
+  if (gs === 'MENU') {
+    dailyRefreshAccum += dt;
+    if (dailyRefreshAccum >= 5) { dailyRefreshAccum = 0; refreshDaily(); }
+  }
+  if (gs !== 'PLAYING') { handleMenuKeys(); return; }
   handleKeys();
   fallTimer += dt * 1000;
   if (fallTimer >= FALL_TICK_MS) {
@@ -830,12 +1057,76 @@ function drawMenu(c) {
     for (var k = 0; k < tl.length; k++) c.fillText(tl[k], W / 2, H * 0.30 + k * GF.clamp(18 * GF.S, 14, 22));
   }
 
+  // M2 daily panel — shown only to returning players (tutorial already seen) so
+  // a first-time player gets the uncluttered learn-to-play MENU (the comment asked
+  // for *less* friction), while returners get the come-back-tomorrow hook.
+  layout.dailyBtn = null;
+  if (seen) drawDailyPanel(c, W / 2, H * 0.40, maxW);
+
   // Persistent meta: BEST DEPTH + NEXT GOAL — the cross-session pull, anchored
   // just above PLAY so it never collides with the variable-height tutorial block.
   drawMetaBlock(c, W / 2, H * 0.665, maxW);
 
   var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(54 * GF.S, 42, 66);
   drawButton(c, (W - bw) / 2, H * 0.80, bw, bh, GF.t('play'), true);
+}
+
+// M2 — DAILY AIR SUPPLY panel (login reward + streak + overnight cache + quest).
+// Draws a compact card: title, streak line, quest line, and either a COLLECT
+// button (supply waiting) or a "come back tomorrow" line (already claimed).
+function drawDailyPanel(c, cx, y, maxW) {
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  var fsHead = GF.clamp(14 * GF.S, 11, 18);
+  var fsBody = GF.clamp(12 * GF.S, 10, 16);
+  var lh = GF.clamp(16 * GF.S, 12, 20);
+
+  // Title
+  c.font = 'bold ' + fsHead + 'px sans-serif';
+  c.fillStyle = '#7af5ff';
+  c.fillText(GF.t('daily_title'), cx, y);
+  y += fsHead + GF.clamp(5 * GF.S, 3, 8);
+
+  // Streak line
+  c.font = fsBody + 'px sans-serif';
+  c.fillStyle = '#bfe8f0';
+  c.fillText(subst(GF.t('daily_streak'), { n: Math.max(1, dayStreak) }), cx, y);
+  y += lh;
+
+  // Quest line (✓ when done)
+  var qStr = subst(questDoneToday ? GF.t('daily_quest_done') : GF.t('daily_quest'), { q: questText() });
+  c.fillStyle = questDoneToday ? '#ffe06a' : '#bfe8f0';
+  var qLines = wrapLines(c, qStr, maxW);
+  for (var i = 0; i < qLines.length; i++) { c.fillText(qLines[i], cx, y); y += lh; }
+  y += GF.clamp(4 * GF.S, 2, 7);
+
+  if (dailyAvailable) {
+    // Show the total the player is about to collect (supply + cache + quest bank).
+    var supply = streakAir(dayStreak);
+    var cache = Math.round(overnightCache);
+    var total = supply + cache + questBankedAir;
+    var bw = GF.clamp(230 * GF.S, 160, 300), bh = GF.clamp(46 * GF.S, 38, 56);
+    var bx = cx - bw / 2;
+    drawButton(c, bx, y, bw, bh, subst(GF.t('daily_collect'), { air: total }), true);
+    layout.dailyBtn = { x: bx, y: y, w: bw, h: bh };
+    y += bh + GF.clamp(4 * GF.S, 2, 7);
+    if (cache > 0) {
+      c.font = fsBody + 'px sans-serif';
+      c.fillStyle = '#8fb6c2';
+      c.fillText(subst(GF.t('daily_cache'), { air: cache }), cx, y);
+      y += lh;
+    }
+  } else {
+    // Already claimed today → point at tomorrow's (bigger) reward to seed return.
+    c.font = fsBody + 'px sans-serif';
+    c.fillStyle = '#7af5ff';
+    c.fillText(GF.t('daily_collected'), cx, y);
+    y += lh;
+    var nextDay = Math.min(DAILY_MAX_DAYS, dayStreak + 1);
+    c.fillStyle = '#8fb6c2';
+    var nx = wrapLines(c, subst(GF.t('daily_next'), { n: nextDay, air: streakAir(nextDay) }), maxW);
+    for (var j = 0; j < nx.length; j++) { c.fillText(nx[j], cx, y); y += lh; }
+  }
+  return y;
 }
 
 // BEST DEPTH chip + NEXT GOAL line. Shared by MENU + GAMEOVER. Returns next free Y.
@@ -956,6 +1247,7 @@ GF.init({
   onReady: function () {
     recomputeLayout();
     loadMeta();
+    refreshDaily();   // M2: roll today's daily/streak/quest + accrue overnight cache
     GF.persist('updrift_run_v1',
       function () {
         return { gs: gs, level: level, oxygen: oxygen, crushLives: crushLives,
@@ -991,6 +1283,9 @@ GF.init({
 GF.exposeState(function () {
   return {
     gs: gs,
+    // Progression proxy for the runtime gate: digging IS the core advance act,
+    // so total actions this run is a monotone "score" the tester can track.
+    score: actionsThisRun,
     oxygen: oxygen,
     crushLives: crushLives,
     level: level,
@@ -1001,6 +1296,24 @@ GF.exposeState(function () {
     bestLevel: bestLevel,
     careerO2Bonus: careerO2Bonus(),
     effectiveStartOxy: effectiveStartOxy(),
+    // M2 — reason to return (daily/streak/cache/quest)
+    dayStreak: dayStreak,
+    dailyAvailable: dailyAvailable,
+    dailyClaimedToday: dailyClaimedToday,
+    overnightCache: Math.round(overnightCache),
+    dailyRunBonus: dailyRunBonus,
+    runStartBonus: runStartBonus,
+    questId: questId,
+    questKind: QUESTS[questId],
+    questTarget: questTarget,
+    questDoneToday: questDoneToday,
+    questBankedAir: questBankedAir,
+    DAILY_BASE: DAILY_BASE,
+    DAILY_STEP: DAILY_STEP,
+    DAILY_MAX_DAYS: DAILY_MAX_DAYS,
+    CACHE_RATE_PER_HR: CACHE_RATE_PER_HR,
+    CACHE_CAP: CACHE_CAP,
+    QUEST_BONUS_AIR: QUEST_BONUS_AIR,
     GRID_W: GRID_W,
     GRID_H: GRID_H,
     START_OXY: START_OXY,
