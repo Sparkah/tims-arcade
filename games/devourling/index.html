@@ -289,6 +289,32 @@ function loadMeta() {
     }
   } catch (e) {}
 }
+function utcDayIdx() { return Math.floor(Date.now() / 86400000); }
+// Called when the MENU is (re)entered: award idle Essence (the devourling kept
+// feeding while away) + the daily login bonus that grows with the streak. THIS
+// is the reason-to-return loop. Sets pendingIdleEssence + lastStreakBonus for
+// the menu banners.
+function claimOnOpen() {
+  pendingIdleEssence = 0; lastStreakBonus = 0;
+  var now = Date.now();
+  if (meta.lastSeenMs > 0) {
+    var hrs = Math.min(8, (now - meta.lastSeenMs) / 3600000);
+    if (hrs >= 0.05) {
+      pendingIdleEssence = Math.round(hrs * 5 * (1 + metaVal('greed') / 100));
+      if (pendingIdleEssence > 0) meta.essence += pendingIdleEssence;
+    }
+  }
+  var today = utcDayIdx();
+  if (meta.loginClaimedDay !== today) {
+    if (meta.lastPlayedDay === today - 1) meta.streak = (meta.streak || 0) + 1;
+    else meta.streak = 1;
+    meta.loginClaimedDay = today; meta.lastPlayedDay = today;
+    lastStreakBonus = 15 + meta.streak * 10;
+    meta.essence += lastStreakBonus;
+  } else { meta.lastPlayedDay = today; }
+  meta.lastSeenMs = now;
+  saveMeta();
+}
 
 // ── DIFFICULTY SCALING ─────────────────────────────────────────────────────
 function enemyHpScale() { return 1 + survivalSec / 75; }          // grows ~+1x/75s
@@ -617,7 +643,7 @@ function applyChoice(ch) {
 // ── GAME LIFECYCLE ───────────────────────────────────────────────────────
 function resetRun() {
   survivalSec = 0; kills = 0; score = 0;
-  maxHp = MAX_HP; hp = MAX_HP; level = 1; xp = 0; xpNeed = XP_BASE; form = 0;
+  maxHp = MAX_HP + metaVal('vigor'); hp = maxHp; level = 1; xp = 0; xpNeed = XP_BASE; form = 0;  // vigor = permanent +HP
   HERO_RADIUS = FORM_RADIUS[0];
   hero.x = GF.cx; hero.y = GF.cy; hero.vx = 0; hero.vy = 0; hero.hitFlash = 0; hero.faceX = 1; hero.faceY = 0;
   enemies.length = 0; motes.length = 0; bullets.length = 0; slashes.length = 0;
@@ -625,7 +651,7 @@ function resetRun() {
   miniboss = null; boss = null;
   minibossSpawned = false; bossSpawned = false; secondMiniSpawned = false;
   bannerT = 0; enemyTypesSeen = {}; firstKillDone = false;
-  dmgMul = 1; rateMul = 1; speedMul = 1; magnetMul = 1; regenPerSec = 0; devourHeal = 0;
+  dmgMul = 1 + metaVal('predator') / 100; rateMul = 1; speedMul = 1; magnetMul = 1 + metaVal('hunger') / 100; regenPerSec = 0; devourHeal = 0;  // predator/hunger = permanent Den perks
   weapons = { bite: 1 }; weaponTimers = {}; orbitAngle = 0;
   spareUpgrades = 0; levelChoices = [];
   reviveUsed = false; reviveLoading = false; evoFlash = 0; justEvolved = false;
@@ -647,7 +673,13 @@ function gameOver() {
   score = Math.floor(survivalSec) * 2 + kills * 5;
   var newBest = score > best;
   if (newBest) { best = score; try { localStorage.setItem('devourling_best', best); } catch (e) {} }
-  gs = 'GAMEOVER'; GF.gameEnded(); GF.saveRun();
+  gs = 'GAMEOVER';
+  // bank Essence from this run (greed upgrade boosts it) — the permanent payoff
+  essenceEarned = Math.max(1, Math.floor((kills / 3 + survivalSec / 6 + level * 2) * (1 + metaVal('greed') / 100)));
+  lastGameOverEssence = essenceEarned;
+  meta.essence += essenceEarned;
+  saveMeta();
+  GF.gameEnded(); GF.saveRun();
   if (newBest && best > 0) GF.happytime();
 }
 
@@ -730,6 +762,14 @@ window._jumpLevel = function(n) {
     return;
   }
   window._setupForScreenshot(n || 6);
+};
+// Test seam (same category as _jumpLevel): live meta + menu button rects so a
+// harness can verify the Den loop + tap upgrades. No console output; no mutation.
+window._devInfo = function() {
+  return { gs: gs, essence: meta.essence | 0, streak: meta.streak | 0,
+           lastStreakBonus: lastStreakBonus, pendingIdleEssence: pendingIdleEssence,
+           up: { vigor: meta.up.vigor, predator: meta.up.predator, greed: meta.up.greed, hunger: meta.up.hunger },
+           buttons: uiButtons.map(function(b){ return { x: b.x, y: b.y, w: b.w, h: b.h }; }) };
 };
 
 // ── INPUT ────────────────────────────────────────────────────────────────
@@ -1217,6 +1257,63 @@ function _wrapTextLines(ctx, text, maxW) {
 }
 
 // ── MENU ───────────────────────────────────────────────────────────────────
+// THE DEN — owned progression panel on the menu: banked Essence, the
+// reason-to-return payoff (idle + daily streak), a clear goal, and 4 buyable
+// permanent upgrades. Registers tap targets in uiButtons. Returns bottom Y.
+function drawDenPanel(ctx, topY, maxW) {
+  var S = GF.S, ru = (GF.lang === 'ru');
+  var x = GF.cx - maxW / 2, pad = 12 * S;
+  var btnH = GF.clamp(50 * S, 42, 60), gap = 8 * S, rowH = btnH + gap;
+  var hasBanner = (pendingIdleEssence > 0 || lastStreakBonus > 0);
+  var panelH = pad + 26 * S + (hasBanner ? 18 * S : 0) + 16 * S + rowH * 2 - gap + pad;
+  GF.rr(ctx, x, topY, maxW, panelH, 14 * S); ctx.fillStyle = 'rgba(18,10,30,0.95)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(155,77,255,0.32)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+  var cy = topY + pad;
+  // banked Essence (the owned currency)
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(21 * S, 16, 27) + 'px sans-serif'; ctx.fillStyle = '#ffca28';
+  ctx.fillText((meta.essence | 0) + ' ' + GF.t('essence'), x + pad, cy);
+  ctx.font = GF.clamp(10.5 * S, 9, 14) + 'px sans-serif'; ctx.fillStyle = '#b39ddb'; ctx.textAlign = 'right';
+  ctx.fillText(GF.t('den'), x + maxW - pad, cy + 6 * S);
+  cy += 26 * S;
+  // return-to-play payoff banner (idle + daily streak)
+  if (hasBanner) {
+    var parts = [];
+    if (pendingIdleEssence > 0) parts.push('+' + pendingIdleEssence + ' ' + (ru ? 'пока вас не было' : 'fed while away'));
+    if (lastStreakBonus > 0) parts.push((ru ? 'День' : 'Day') + ' ' + meta.streak + ': +' + lastStreakBonus);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#7CFC9A'; ctx.font = GF.clamp(10.5 * S, 8.5, 13.5) + 'px sans-serif';
+    ctx.fillText(parts.join('   •   '), x + pad, cy); cy += 18 * S;
+  }
+  // goal line
+  ctx.textAlign = 'center'; ctx.fillStyle = '#8a7fb0'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+  ctx.fillText(ru ? 'Трать Эссенцию на постоянные улучшения рода' : 'Spend Essence on permanent bloodline upgrades', GF.cx, cy);
+  cy += 16 * S;
+  // 4 permanent-upgrade buttons (2x2)
+  var keys = ['vigor', 'predator', 'greed', 'hunger'];
+  var labels = ru ? { vigor: 'Мощь +ОЗ', predator: 'Хищник +урон', greed: 'Жадность +эсс', hunger: 'Голод +магнит' }
+                  : { vigor: 'Vigor +HP', predator: 'Predator +dmg', greed: 'Greed +essence', hunger: 'Hunger +magnet' };
+  var bw = (maxW - pad * 2 - gap) / 2;
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i], col = i % 2, row = (i / 2) | 0;
+    var bx = x + pad + col * (bw + gap), by = cy + row * rowH;
+    var lv = metaRank(key), maxed = metaIsMax(key), cost = metaCost(key);
+    var afford = !maxed && meta.essence >= cost;
+    GF.rr(ctx, bx, by, bw, btnH, 9 * S);
+    ctx.fillStyle = maxed ? 'rgba(124,252,154,0.16)' : (afford ? 'rgba(255,202,40,0.16)' : 'rgba(255,255,255,0.05)'); ctx.fill();
+    ctx.strokeStyle = afford ? '#ffca28' : 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillStyle = (afford || maxed) ? '#fff' : '#8a8098'; ctx.font = 'bold ' + GF.clamp(10.5 * S, 8.5, 13) + 'px sans-serif';
+    ctx.fillText(labels[key], bx + bw / 2, by + 6 * S);
+    ctx.font = GF.clamp(9 * S, 7.5, 11.5) + 'px sans-serif'; ctx.fillStyle = '#b39ddb';
+    ctx.fillText('Lv ' + lv + '/' + META_DEFS[key].max, bx + bw / 2, by + btnH * 0.44);
+    ctx.fillStyle = maxed ? '#7CFC9A' : (afford ? '#ffca28' : '#8a8098'); ctx.font = 'bold ' + GF.clamp(10 * S, 8, 12.5) + 'px sans-serif';
+    ctx.fillText(maxed ? (ru ? 'МАКС' : 'MAX') : ('' + cost), bx + bw / 2, by + btnH - 14 * S);
+    if (afford) (function (k) { uiButtons.push({ x: bx, y: by, w: bw, h: btnH, fn: function () { if (metaBuy(k) && GF.happytime) GF.happytime(); } }); })(key);
+    ctx.textBaseline = 'alphabetic';
+  }
+  return topY + panelH;
+}
+
 function drawMenu(ctx) {
   uiButtons = [];
   ctx.fillStyle = 'rgba(4,4,14,0.9)'; ctx.fillRect(0, 0, GF.W, GF.H);
@@ -1230,22 +1327,18 @@ function drawMenu(ctx) {
   ctx.font = GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif'; ctx.fillStyle = '#b39ddb';
   ctx.fillText(GF.t('sub'), GF.cx, topY + titleFs * 0.6);
 
-  var seen = loadTutorialSeen();
-  var bodyFs = GF.clamp(12.5 * GF.S, 10, 15);
-  ctx.font = bodyFs + 'px sans-serif';
-  var maxW = Math.min(GF.W * 0.88, 470 * GF.S), lineH = bodyFs * 1.32, blockGap = bodyFs * 0.5;
-  var keys = seen ? ['tut_goal', 'tut_controls'] : ['tut_goal', 'tut_controls', 'tut_win', 'tut_lose', 'tut_tip'];
-  var y = topY + titleFs * 0.6 + GF.clamp(20 * GF.S, 14, 32);
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  for (var k = 0; k < keys.length; k++) {
-    var lines = _wrapTextLines(ctx, GF.t(keys[k]), maxW);
-    ctx.fillStyle = (keys[k] === 'tut_tip') ? '#ffd54f' : '#cdd6ea';
-    for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], GF.cx, y); y += lineH; }
-    y += blockGap;
-  }
-
-  var btnW = GF.clamp(230 * GF.S, 170, 300), btnH = GF.clamp(56 * GF.S, 52, 66), btnX = GF.cx - btnW / 2;
-  var btnY = Math.min(y + 14 * GF.S, GF.H - btnH - 50 * GF.S);
+  // one-line control hint (NOT the old 5-line wall — survivor controls are near-zero-learning;
+  // the "?" help button still opens full how-to for anyone who wants it)
+  ctx.font = GF.clamp(11.5 * GF.S, 9.5, 15) + 'px sans-serif'; ctx.fillStyle = '#8a7fb0';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.lang === 'ru' ? 'Веди пальцем, челюсти бьют сами; ешь искры и расти'
+                                : 'Drag to move, jaws auto-attack; eat motes to evolve',
+               GF.cx, topY + titleFs * 0.6 + GF.clamp(20 * GF.S, 14, 30));
+  // THE DEN meta panel — Essence + return payoff + buyable permanent upgrades
+  var maxW = Math.min(GF.W * 0.9, 460 * GF.S);
+  var panelBottom = drawDenPanel(ctx, topY + titleFs * 0.6 + GF.clamp(40 * GF.S, 30, 56), maxW);
+  var btnW = GF.clamp(230 * GF.S, 170, 300), btnH = GF.clamp(54 * GF.S, 48, 64), btnX = GF.cx - btnW / 2;
+  var btnY = Math.min(panelBottom + 14 * GF.S, GF.H - btnH - 30 * GF.S);
   drawButton(ctx, btnX, btnY, btnW, btnH, GF.t('play'), function() { saveTutorialSeen(); startGame(); });
   if (best > 0) {
     ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif'; ctx.fillStyle = '#8a7fb0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -1381,6 +1474,8 @@ GF.init({
   saveKey: 'devourling',
   onReady: function() {
     try { best = parseInt(localStorage.getItem('devourling_best') || '0') || 0; } catch (e) {}
+    loadMeta();      // owned cross-session progression (Essence + Den upgrades)
+    claimOnOpen();   // idle "kept feeding" Essence + daily login streak bonus
     GF.persist('devourling_run_v1',
       function() {
         return { gs: gs, survivalSec: survivalSec, kills: kills, score: score,
