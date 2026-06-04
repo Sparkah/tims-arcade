@@ -192,6 +192,8 @@ var coins = 0, best = 0;
 var customersServed = 0;
 var strikes = 0;
 var combo = 0;
+var comboEarned = 0;        // combo built from REAL serves this run (NOT the seeded Regulars head-start) — drives the daily combo task (H2 fix)
+var runCountedThisRun = false; // the daily 'runs' task credits on the FIRST real serve, not at startGame (anti start-and-abandon farm, H1 fix)
 var elapsed = 0;            // seconds since rush start
 var spawnTimer = 0;
 var heat = 0;               // queue-overflow pressure 0..1
@@ -206,6 +208,8 @@ var nextCustomerId = 1;
 
 // upgrade levels (each an index into a small ladder)
 var up = { serve: 0, slot: 0, drain: 0, ice: 0, combo: 0 };
+// TOOL: Lucky Stamp — counts spawned customers; every Nth is an easy VIP.
+var stampCounter = 0;
 
 // derived multipliers from upgrades
 function serveSpeedMult() { return 1 + up.serve * 0.45; }     // affects serve-anim/coin pop only (cosmetic juice)
@@ -297,9 +301,16 @@ function spawnCustomer() {
     GF.setShake(0.3);
     return;
   }
-  var isVip = elapsed >= VIP_AT && Math.random() < 0.22;
-  var order = makeOrder(isVip);
-  var pat = BASE_PATIENCE * (isVip ? 1.25 : 1);
+  // TOOL: Lucky Stamp — every Nth guest (N = toolVal) is a guaranteed easy VIP
+  // (a plain order from a VIP = a fat, low-effort tip). N shrinks as the tool
+  // levels up. 0 = tool not equipped.
+  stampCounter++;
+  var stampN = toolVal('stamp');
+  var luckyGuest = stampN > 0 && (stampCounter % stampN === 0);
+  var isVip = luckyGuest || (elapsed >= VIP_AT && Math.random() < 0.22);
+  var order = luckyGuest ? { base: unlockedBases()[0].id, toppings: [] } : makeOrder(isVip);
+  // Comfy Seats (permanent café upgrade) raises every guest's patience window.
+  var pat = BASE_PATIENCE * (isVip ? 1.25 : 1) * permPatienceMult();
   // each creature gets a stable colour + bob phase for life
   var hueChoices = ['#ff9aa2', '#a0e7e5', '#ffd6a5', '#b5ead7', '#c7ceea', '#fdcb9e'];
   queue.push({
@@ -366,16 +377,26 @@ function serveCustomer(cust) {
   }
   if (cupMatchesOrder(currentCup, cust.order)) {
     // correct!
+    var perfect = cust.patience > 0.55;        // green ring = a "perfect" serve
     combo = Math.min(combo + 1, 99);
-    var mult = 1 + Math.min(combo - 1, COMBO_MAX_STEPS) * comboBonusMult();
+    comboEarned++;            // real earned streak (H2): the daily combo task tracks THIS, not the perk head-start
+    // TOOL: Combo Jar — fattens the combo coin bonus (+%/lvl on top of the
+    // in-run Loyalty Card upgrade). Applied as a multiplier on the combo step.
+    var jar = 1 + toolVal('combojar') / 100;
+    var mult = 1 + Math.min(combo - 1, COMBO_MAX_STEPS) * comboBonusMult() * jar;
     var pay = Math.round(COIN_PER_SERVE * mult);
     var tip = 0;
-    if (cust.patience > 0.55) tip = Math.round((cust.vip ? TIP_BONUS * 2 : TIP_BONUS) * mult);
+    if (perfect) tip = Math.round((cust.vip ? TIP_BONUS * 2 : TIP_BONUS) * mult);
     else if (cust.vip) tip = Math.round(TIP_BONUS * mult);
-    var gain = pay + tip;
+    // TOOL: Golden Straw — chance each serve pays a big bonus tip (50% of pay).
+    var strawChance = toolVal('straw');
+    var bigTip = 0;
+    if (strawChance > 0 && Math.random() * 100 < strawChance) bigTip = Math.round(pay * 0.5) + 2;
+    var gain = pay + tip + bigTip;
     coins += gain;
     customersServed++;
     servesSinceShop++;
+    if (!runCountedThisRun) { runCountedThisRun = true; taskProgress('runs', 1); }  // H1: credit the daily 'runs' task on the FIRST real serve
     cust.leaving = 1;
     cust.bounce = 1;
     var px = cust.sx || GF.cx, py = cust.sy || GF.cy;
@@ -383,10 +404,25 @@ function serveCustomer(cust) {
     GF.spawnParticles(px, py, '#fff', 10);
     GF.spawnFloat(px, py - 46 * GF.S, '+' + gain + ' 🪙', '#ffd24a');
     if (tip > 0) GF.spawnFloat(px + 24 * GF.S, py - 22 * GF.S, '+tip', '#7CFC9A');
+    if (bigTip > 0) GF.spawnFloat(px - 26 * GF.S, py - 22 * GF.S, '+' + bigTip + '!', '#ffe08a');
     if (combo >= 2) GF.spawnFloat(px - 18 * GF.S, py - 70 * GF.S, GF.t('combo') + ' x' + combo, '#ff8ad4');
     beep(660 + Math.min(combo, 8) * 40, 0.07);
     beep(880 + Math.min(combo, 8) * 40, 0.05, 0.04);
     GF.happytime && (combo >= 3) && GF.happytime();
+    // TOOL: Express Shaker — a snappy serve calms the line: refund a small % of
+    // patience to every OTHER waiting guest (keeps the rush survivable).
+    var shaker = toolVal('shaker');
+    if (shaker > 0) {
+      for (var qi = 0; qi < queue.length; qi++) {
+        var oc = queue[qi];
+        if (oc === cust || oc.leaving > 0 || oc.angry > 0) continue;
+        oc.patience = Math.min(1, oc.patience + shaker / 100);
+      }
+    }
+    // DAILY TASKS fed from this REAL serve event.
+    taskProgress('serve', 1);
+    taskProgress('combo', comboEarned);
+    if (perfect) taskProgress('perfect', 1);
     freshCup();
     if (iceStart()) currentCup.iceHint = true;
     // milestone
@@ -403,7 +439,7 @@ function serveCustomer(cust) {
     GF.saveRun();
   } else {
     // wrong — penalty, customer keeps waiting, cup trashed
-    combo = 0;
+    combo = 0; comboEarned = 0;
     cust.patience = Math.max(0.001, cust.patience - WRONG_TIME_LOSS / cust.patMax);
     var wx = cust.sx || GF.cx, wy = cust.sy || GF.cy;
     GF.spawnFloat(wx, wy - 40 * GF.S, GF.t('wrong'), '#ff6b6b');
@@ -424,7 +460,7 @@ function bumpMilestone() {
 // ── WALK-OUT ───────────────────────────────────────────────────────────────
 function walkOut(cust) {
   cust.angry = 1;
-  combo = 0;
+  combo = 0; comboEarned = 0;
   strikes++;
   var px = cust.sx || GF.cx, py = cust.sy || GF.cy;
   GF.spawnFloat(px, py - 40 * GF.S, GF.t('walkout'), '#ff5555');
@@ -456,8 +492,18 @@ function checkUnlocks() {
 function startGame() {
   coins = 0; customersServed = 0; strikes = 0; combo = 0;
   elapsed = 0; spawnTimer = 0.6; heat = 0; nextMilestone = 10;
-  queue = []; servesSinceShop = 0; maxQueue = MAX_QUEUE;
+  queue = []; servesSinceShop = 0;
   up = { serve: 0, slot: 0, drain: 0, ice: 0, combo: 0 };
+  // CROSS-SESSION CAFÉ META applied here (distinct from the in-run SHOP `up`):
+  // Prep Station permanently raises the counter baseline; Tip Jar seeds coins;
+  // Loyal Regulars seeds the combo streak. metaOpen never carries into a run.
+  maxQueue = MAX_QUEUE + permPrepSlots();
+  coins = permStartCoins();
+  combo = permStartCombo();
+  stampCounter = 0;                       // re-arm the Lucky Stamp every shift
+  runPlaySec = 0;
+  comboEarned = 0; runCountedThisRun = false;
+  metaOpen = false;
   screenshotMode = false;
   freshCup();
   prevBaseCount = unlockedBases().length;
@@ -466,11 +512,21 @@ function startGame() {
   gs = 'PLAYING';
   // first customer right away — wants a PLAIN tea (time-to-first-fun)
   var b0 = unlockedBases();
+  var firstPat = BASE_PATIENCE * permPatienceMult();
   queue.push({
     id: nextCustomerId++, order: { base: b0[0].id, toppings: [] },
-    patience: 1, patMax: BASE_PATIENCE, vip: false,
+    patience: 1, patMax: firstPat, vip: false,
     hue: '#ff9aa2', phase: 0, leaving: 0, angry: 0, bounce: 0, born: 0
   });
+  // TOOL: Regulars Book — open each shift with N customers already served
+  // (a head-start toward the next milestone) plus the free starting combo.
+  var book = toolVal('book');
+  if (book > 0) {
+    customersServed += book;
+    combo = Math.max(combo, 1);
+  }
+  if (meta) { meta.lastSeen = Date.now(); saveMeta(); }
+  // (the daily 'runs' task is credited on the first REAL serve — see serveCustomer — to prevent start-and-abandon farming, H1)
   GF.gameStarted();
   GF.saveRun();
 }
@@ -484,10 +540,29 @@ function closeShop() {
 }
 
 function gameOver() {
+  if (gs === 'GAMEOVER') return;   // re-entry guard (C1): >=2 walk-outs in ONE frame must bank Stars + the coins-task ONCE, not per walk-out
   var newBest = score() > best;
   if (newBest) {
     best = score();
     try { localStorage.setItem('boba_rush_best', best); } catch (e) {}
+  }
+  // ── BANK CAFÉ STARS (the reason to return to the café) ──────────────────
+  // Stars = floor(score/8) + customersServed, scaled up by the Loyalty Card
+  // tool (+%/lvl). Folded into the cross-session meta; lastStarsEarned drives
+  // the "+N Stars" line on the GAMEOVER screen.
+  lastStarsEarned = 0;
+  if (meta) {
+    var baseStars = Math.floor(score() / 8) + customersServed;
+    var loyalty = toolVal('loyalty');          // +%/lvl
+    var earned = Math.round(baseStars * (1 + loyalty / 100));
+    lastStarsEarned = Math.max(0, earned);
+    meta.stars += lastStarsEarned;
+    // DAILY TASK: coins earned across shifts today (count this shift's coins).
+    taskProgress('coins', coins);
+    bankRunPlaytime();                          // fold this run's real seconds in
+    meta.lastSeen = Date.now();
+    checkToolUnlocks();                         // a long final run may cross a tool milestone
+    saveMeta();
   }
   gs = 'GAMEOVER';
   GF.gameEnded();
@@ -510,7 +585,7 @@ function applyUpgrade(card) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// CROSS-SESSION CAFÉ META — a SEPARATE persistent layer (currency: ⭐ Stars)
+// CROSS-SESSION CAFÉ META — a SEPARATE persistent layer (currency: Stars, vector star)
 // ════════════════════════════════════════════════════════════════════════
 // This is wholly distinct from the in-run SHOP above (coins/up/SHOP reset every
 // run). The café meta persists across runs under its OWN key (boba_rush_meta_v1)
@@ -824,6 +899,7 @@ function claimOnOpen(showBanner) {
   if (!meta) return;
   meta.pendingIdle = 0; meta.lastLoginReward = 0; meta.lastStreakBonus = 0;
   var now = Date.now(), earned = 0;
+  if (meta.lastSeen > now) meta.lastSeen = now;   // M4: clock-rollback guard — don't mint idle Stars from a backwards clock
   if (meta.lastSeen > 0) {
     var mins = Math.min(IDLE_CAP / IDLE_PER_MIN, (now - meta.lastSeen) / 60000);
     var idle = Math.min(IDLE_CAP, Math.floor(mins * IDLE_PER_MIN));
@@ -900,21 +976,109 @@ window._jumpLevel = function(n) {
 // populated mid-rush state. Engages screenshotMode so the rings don't drain
 // to a walk-out during the capture delay.
 window._setupForScreenshot = function(lvl) {
+  window._silent = true;
+  metaOpen = false; bootBannerT = 0; toolToast = null; taskToast = null;
   screenshotMode = true;
   window._jumpLevel(lvl && lvl >= 2 ? lvl : 2);
 };
 
+// ── CAFÉ-META TEST HOOKS (drive the cross-session systems without real-time
+// waiting) — deep copy + derived fields so a harness can assert WIRING, not
+// just presence. No console output; the mutating hooks call saveMeta(). ──────
+window._meta = function() {
+  if (!meta) return null;
+  var ng = nextTool();
+  var copy = JSON.parse(JSON.stringify(meta));
+  copy.totalPlayMin = Math.floor(totalPlayMin());
+  copy.runPlaySec = Math.round(runPlaySec);
+  copy.nextTool = ng ? { id: ng.id, min: ng.min } : null;
+  copy.nextToolMin = ng ? Math.max(0, Math.ceil(ng.min - totalPlayMin())) : 0;
+  copy.claimableTasks = claimableTasks();
+  copy.ownedToolCount = Object.keys(meta.tools.owned).length;
+  copy.lastStarsEarned = lastStarsEarned;
+  copy.metaOpen = metaOpen; copy.metaTab = metaTab;
+  // derived run-perk values so a test can confirm perm upgrades resolve
+  copy.derived = {
+    startCoins: permStartCoins(), patienceMult: permPatienceMult(),
+    prepSlots: permPrepSlots(), startCombo: permStartCombo(), signature: permSignature()
+  };
+  return copy;
+};
+// Force cumulative playtime (seconds) and run the SAME unlock path update() uses.
+window._addPlaytime = function(sec) {
+  if (!meta) return 0;
+  meta.totalPlaySec = Math.max(0, meta.totalPlaySec + (+sec || 0));
+  var fresh = checkToolUnlocks();
+  if (fresh.length) { toolToast = { def: fresh[fresh.length - 1], t: 3.4 }; }
+  saveMeta();
+  return Object.keys(meta.tools.owned).length;
+};
+// Claim daily task i if complete; returns Stars granted (0 if not claimable).
+window._claimQuest = function(i) { return claimTask(i); };
+// Force-complete task i so the CLAIM path can be exercised without grinding.
+window._winQuest = function(i) {
+  var q = meta && meta.tasks.list && meta.tasks.list[i];
+  if (!q) return false; q.prog = q.target; saveMeta(); return true;
+};
+// Buy a permanent café upgrade / upgrade a tool / equip-toggle a tool by id.
+window._buyPerm = function(key) { return buyPermUpgrade(key); };
+window._buyGear = function(id) { return buyToolUpgrade(id); };
+window._equipGear = function(id) { return toggleEquipTool(id); };
+// Grant Stars (exercise the buy paths). No console output.
+window._grantStars = function(n) { if (meta) { meta.stars += (+n || 0); saveMeta(); return meta.stars; } return 0; };
+window._openCafe = function(tab) { metaOpen = true; metaTab = (tab === 'tools' || tab === 'tasks') ? tab : 'up'; };
+// Read-only run probe so a harness can drive a REAL serve: the front customer's
+// screen position + order, and the on-screen rect of the base button it needs.
+window._dbgRun = function() {
+  var c = null;
+  for (var i = 0; i < queue.length; i++) { if (queue[i].leaving === 0 && queue[i].angry === 0) { c = queue[i]; break; } }
+  if (!c) return { gs: gs };
+  var br = null;
+  for (var b = 0; b < btnRects.length; b++) { if (btnRects[b].kind === 'base' && btnRects[b].id === c.order.base && !btnRects[b].locked) { br = btnRects[b]; break; } }
+  // topping button rects the order needs (in order)
+  var trects = [];
+  for (var k = 0; k < c.order.toppings.length; k++) {
+    for (var bb = 0; bb < btnRects.length; bb++) { if (btnRects[bb].kind === 'topping' && btnRects[bb].id === c.order.toppings[k] && !btnRects[bb].locked) { trects.push({ x: btnRects[bb].x + btnRects[bb].w / 2, y: btnRects[bb].y + btnRects[bb].h / 2 }); break; } }
+  }
+  return {
+    gs: gs, coins: coins, customersServed: customersServed,
+    cust: { sx: c.sx, sy: c.sy, base: c.order.base, toppings: c.order.toppings },
+    baseBtn: br ? { x: br.x + br.w / 2, y: br.y + br.h / 2 } : null,
+    topBtns: trects
+  };
+};
+
 // ── UPDATE ─────────────────────────────────────────────────────────────────
 function update(dt) {
+  // toasts + welcome-back banner advance regardless of state (they can fire on
+  // the MENU and must not freeze when the run is paused).
+  if (toolToast) { toolToast.t -= dt; if (toolToast.t <= 0) toolToast = null; }
+  if (taskToast) { taskToast.t -= dt; if (taskToast.t <= 0) taskToast = null; }
+  if (bootBannerT > 0) bootBannerT = Math.max(0, bootBannerT - dt);
+
   if (gs !== 'PLAYING') return;
   if (showTut) return; // pause world while the in-play help panel is open
+  if (metaOpen) return; // CAFÉ overlay open mid-run → fully paused (no drain/spawn/playtime)
   if (screenshotMode) return; // frozen for Yandex 5.1.1 capture (no drain/spawn/walk-out)
 
   elapsed += dt;
   checkUnlocks();
 
-  // spawn cadence (ramps faster over time)
-  var interval = Math.max(SPAWN_INTERVAL_MIN, SPAWN_INTERVAL - elapsed * SPAWN_RAMP);
+  // accrue REAL playtime toward the TOOL ladder; unlock any crossed milestone
+  // mid-run (non-blocking toast) so the boost is felt immediately.
+  runPlaySec += dt;
+  var freshTools = checkToolUnlocks();
+  if (freshTools.length) {
+    toolToast = { def: freshTools[freshTools.length - 1], t: 3.4 };
+    GF.setShake(0.25); beep(720, 0.1); beep(980, 0.09, 0.07);
+  }
+
+  // TOOL: Fresh Ice — gentler escalation (spawn cadence + patience ramp scale
+  // down by %/lvl), so the late-game rush ramps up more slowly.
+  var iceMul = 1 - GF.clamp(toolVal('ice'), 0, 60) / 100;
+
+  // spawn cadence (ramps faster over time; Fresh Ice softens the ramp)
+  var interval = Math.max(SPAWN_INTERVAL_MIN, SPAWN_INTERVAL - elapsed * SPAWN_RAMP * iceMul);
   spawnTimer -= dt;
   if (spawnTimer <= 0) {
     spawnCustomer();
@@ -924,8 +1088,10 @@ function update(dt) {
   // heat decays when there's room, persists while full
   if (freeSlots() > 0) heat = Math.max(0, heat - dt * 0.5);
 
-  // patience drain (global ramp + per-upgrade + heat)
-  var globalDecay = (PATIENCE_DECAY + elapsed * PATIENCE_RAMP) * drainMult();
+  // patience drain (global ramp + per-upgrade + heat). The permanent ramp is
+  // softened by Fresh Ice; the Patience Charm tool slows the whole drain.
+  var patienceTool = 1 - GF.clamp(toolVal('patience'), 0, 60) / 100;
+  var globalDecay = (PATIENCE_DECAY + elapsed * PATIENCE_RAMP * iceMul) * drainMult() * patienceTool;
   var heatMul = 1 + heat * (HEAT_DRAIN_MULT - 1);
   for (var i = queue.length - 1; i >= 0; i--) {
     var c = queue[i];
@@ -944,6 +1110,7 @@ function update(dt) {
     if (c.patience <= 0) {
       c.patience = 0;
       walkOut(c);
+      if (gs === 'GAMEOVER') break;   // stop processing further walk-outs once the run has ended (C1 defence)
     }
   }
 }
@@ -1001,6 +1168,17 @@ function draw(ctx) {
 
   if (gs === 'MENU')     drawMenu(ctx);
   if (gs === 'GAMEOVER') drawGameOver(ctx);
+
+  // CAFÉ overlay sits above MENU or a paused run (it owns input while open).
+  if (metaOpen && (gs === 'MENU' || gs === 'PLAYING')) drawMetaOverlay(ctx);
+
+  // welcome-back banner + non-blocking toasts on top of everything (suppressed
+  // while the overlay is open so they don't fight the modal).
+  if (!metaOpen) {
+    if (bootBannerT > 0 && gs === 'MENU') drawBootBanner(ctx);
+    if (toolToast) drawToolToast(ctx);
+    else if (taskToast) drawTaskToast(ctx);
+  }
 }
 
 function drawBackground(ctx) {
@@ -1454,6 +1632,32 @@ function drawHUD(ctx) {
   ctx.fillText('?', hx, hy + hr * 0.05);
   helpRect = { x: hx - hr * 1.5, y: hy - hr * 1.5, w: hr * 3, h: hr * 3 };
 
+  // CAFÉ pause-pill (left of "?") — pauses the rush + opens the café overlay so
+  // the meta is reachable mid-run (not just from the menu). A vector star marks
+  // it; a red badge shows claimable daily tasks.
+  var cpr = hr;
+  var cpx = hx - hr * 2 - 8 * S, cpy = hy;
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.beginPath(); ctx.arc(cpx, cpy, cpr, 0, 6.28); ctx.fill();
+  drawStarIcon(ctx, cpx, cpy, cpr * 0.74, '#ffb300');
+  cafePillRect = { x: cpx - cpr * 1.5, y: cpy - cpr * 1.5, w: cpr * 3, h: cpr * 3 };
+  var cqHud = claimableTasks();
+  if (cqHud > 0) drawBadge(ctx, cpx + cpr * 0.9, cpy - cpr * 0.9, cqHud);
+
+  // NEXT TOOL IN Nm — keep the playtime-reward goal visible mid-run (only while
+  // the next ladder tool is still locked). Left-anchored, under the coin pill.
+  var ng = nextTool();
+  if (ng) {
+    var leftMin = Math.max(1, Math.ceil(ng.min - totalPlayMin()));
+    var gy = 8 * S + (fs + 12 * S) + 8 * S, gr = GF.clamp(8 * S, 6, 11), gx = 8 * S + gr + 4 * S;
+    drawToolIcon(ctx, ng, gx, gy + gr, gr);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(122,74,32,0.92)';
+    ctx.font = 'bold ' + GF.clamp(10.5 * S, 9, 13) + 'px sans-serif';
+    ctx.fillText(GF.t('nextToolHud') + ' ' + leftMin + GF.t('minShort'), gx + gr + 6 * S, gy + gr);
+    ctx.textBaseline = 'top';
+  }
+
   // next-goal banner (just under queue) + combo pill
   var by = L.queueBottom + 30 * S;
   var bannerTxt = GF.t('next') + ' ' + nextMilestone + '  (' + customersServed + ')';
@@ -1616,6 +1820,19 @@ function drawTutPanel(ctx, isMenu) {
 
 // ── MENU ───────────────────────────────────────────────────────────────────
 var menuPlayRect = null;
+// CAFÉ-meta UI hit rects (rebuilt each draw frame)
+var menuCafeRect = null;       // CAFÉ button on MENU
+var cafePillRect = null;       // CAFÉ pause-pill mid-run (HUD)
+var goCafeRect = null;         // CAFÉ link on GAMEOVER
+var metaTabRects = [];         // [{tab,x,y,w,h}]
+var metaCloseRect = null;
+var metaContentRect = null;
+var permRects = [];            // [{key,x,y,w,h,afford}] — permanent-upgrade buy chips
+var toolTileRects = [];        // [{id,x,y,w,h}] — tap to equip/unequip
+var toolUpRects = [];          // [{id,x,y,w,h,afford}] — tool upgrade chips
+var equipSlotRects = [];       // [{slot,x,y,w,h}] — tap a filled slot to unequip
+var taskClaimRects = [];       // [{i,x,y,w,h,can}] — claim button
+function openCafe(tab) { metaOpen = true; metaTab = (tab === 'tools' || tab === 'tasks') ? tab : 'up'; beep(560, 0.05); }
 function drawMenu(ctx) {
   var W = GF.W, H = GF.H, S = GF.S;
   ctx.fillStyle = 'rgba(40,24,14,0.55)';
@@ -1666,7 +1883,13 @@ function drawMenu(ctx) {
     byy = Math.max(tutBottomBR + clearMarginBR, wideFloorBR);
   } else {
     bw = baseBwBR; bh = baseBhBR;
-    byy = Math.min(H - bh - GF.clamp(34 * S, 20, 56), H * 0.86 - bh / 2);
+    // PLAY is the primary action: keep it the moment the tutorial clears, but
+    // pull it up into the easy-thumb band (~0.62H) so it sits ABOVE the café
+    // button + stars line stacked below it. Reserve room below for café (cbh)
+    // + stars + best so the whole stack fits on a phone.
+    var reserveBelow = GF.clamp(46 * S, 40, 60) + GF.clamp(58 * S, 44, 76);
+    byy = Math.min(Math.max(tutBottomBR + clearMarginBR, H * 0.60),
+                   H - bh - reserveBelow - GF.clamp(18 * S, 12, 26));
   }
   var bx = GF.cx - bw / 2;
   if (isWide) {
@@ -1697,11 +1920,44 @@ function drawMenu(ctx) {
   // Stable hit rect (non-pulsed position/size)
   menuPlayRect = { x: GF.cx - bw / 2, y: byy, w: bw, h: bh };
 
+  // best line sits ABOVE the PLAY button (between PLAY and the tutorial)
   if (best > 0) {
     ctx.fillStyle = '#ffe9c9'; ctx.font = GF.clamp(13 * S, 10, 17) + 'px sans-serif';
-    ctx.textBaseline = 'bottom';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
     ctx.fillText(GF.t('best') + ': ' + best, GF.cx, byy - 8 * S);
   }
+
+  // ── CAFÉ button — opens the cross-session meta overlay (café upgrades +
+  // tool ladder + daily tasks). Sits just BELOW PLAY so PLAY stays the primary
+  // tap; a red badge shows claimable daily tasks; the banked Star count rides
+  // below it.
+  var cbw = bw, cbh = GF.clamp(46 * S, 40, 60);
+  var cbx = GF.cx - cbw / 2, cby = byy + bh + GF.clamp(12 * S, 9, 18);
+  var cg = ctx.createLinearGradient(cbx, cby, cbx, cby + cbh);
+  cg.addColorStop(0, '#caa05a'); cg.addColorStop(1, '#9c7434');
+  ctx.save();
+  ctx.shadowColor = 'rgba(120,70,30,0.45)'; ctx.shadowBlur = 10 * S;
+  ctx.fillStyle = cg; GF.rr(ctx, cbx, cby, cbw, cbh, cbh / 2); ctx.fill();
+  ctx.restore();
+  // vector star + label, centred as a group
+  ctx.font = 'bold ' + GF.clamp(17 * S, 13, 22) + 'px sans-serif';
+  var clabel = GF.t('cafe');
+  var clw = ctx.measureText(clabel).width;
+  var starR = GF.clamp(11 * S, 9, 15);
+  var groupW = clw + starR * 2 + 10 * S;
+  var gx0 = GF.cx - groupW / 2;
+  drawStarIcon(ctx, gx0 + starR, cby + cbh / 2, starR, '#fff6c8');
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(clabel, gx0 + starR * 2 + 10 * S, cby + cbh / 2 + 1 * S);
+  menuCafeRect = { x: cbx, y: cby, w: cbw, h: cbh };
+  var cqMenu = claimableTasks();
+  if (cqMenu > 0) drawBadge(ctx, cbx + cbw - 12 * S, cby + 6 * S, cqMenu);
+  // banked Stars line under the café button
+  ctx.fillStyle = '#ffe9c9'; ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var starTxt = (meta ? meta.stars : 0) + ' ' + GF.t('stars');
+  drawStarIcon(ctx, GF.cx - ctx.measureText(starTxt).width / 2 - 9 * S, cby + cbh + GF.clamp(10 * S, 7, 14), GF.clamp(7 * S, 6, 10), '#ffd24a');
+  ctx.fillText(starTxt, GF.cx + 6 * S, cby + cbh + GF.clamp(5 * S, 3, 8));
 }
 
 function drawHeroCup(ctx, x, y, sz) {
@@ -1771,6 +2027,25 @@ function drawGameOver(ctx) {
   ctx.fillStyle = '#fff';
   ctx.fillText(GF.t('best') + ': ' + best, GF.cx, H * 0.38 + fs * 2.8);
 
+  // ── "+N Café Stars" line — the reason to return to the café. A glowing pill
+  // banks-this-run's Stars (lastStarsEarned), the cross-session payoff.
+  var starsY = H * 0.38 + fs * 4.3;
+  var slabel = '+' + lastStarsEarned + ' ' + GF.t('starsBanked');
+  ctx.font = 'bold ' + GF.clamp(17 * S, 13, 23) + 'px sans-serif';
+  var slw = ctx.measureText(slabel).width;
+  var sr = GF.clamp(11 * S, 9, 15);
+  var pillW = slw + sr * 2 + 30 * S, pillH = GF.clamp(36 * S, 30, 46);
+  var pillX = GF.cx - pillW / 2;
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,210,74,0.55)'; ctx.shadowBlur = 14 * S;
+  ctx.fillStyle = 'rgba(255,210,74,0.16)'; GF.rr(ctx, pillX, starsY, pillW, pillH, pillH / 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ffd24a'; ctx.lineWidth = 1.6 * S; GF.rr(ctx, pillX, starsY, pillW, pillH, pillH / 2); ctx.stroke();
+  ctx.restore();
+  drawStarIcon(ctx, pillX + 14 * S + sr, starsY + pillH / 2, sr, '#ffd24a');
+  ctx.fillStyle = '#ffe9a0'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(slabel, pillX + 14 * S + sr * 2 + 8 * S, starsY + pillH / 2 + 1 * S);
+
   // retry (bottom thumb zone — capped at H*0.85 center so it's inside the
   // gate's tap sweep band and easy to reach)
   var bw = Math.min(W * 0.74, 320 * S), bh = GF.clamp(58 * S, 46, 74);
@@ -1785,6 +2060,490 @@ function drawGameOver(ctx) {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(GF.t('retry'), GF.cx, byy + bh / 2);
   goRetryRect = { x: bx, y: byy, w: bw, h: bh };
+
+  // CAFÉ link above retry (spend the Stars you just earned)
+  var gobh = GF.clamp(40 * S, 34, 52), goby = byy - gobh - GF.clamp(12 * S, 8, 18);
+  var gobw = Math.min(W * 0.6, 260 * S), gobx = GF.cx - gobw / 2;
+  ctx.fillStyle = 'rgba(202,160,90,0.92)'; GF.rr(ctx, gobx, goby, gobw, gobh, gobh / 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('cafe'), GF.cx, goby + gobh / 2);
+  var cqGo = claimableTasks();
+  if (cqGo > 0) drawBadge(ctx, gobx + gobw - 12 * S, goby + 6 * S, cqGo);
+  goCafeRect = { x: gobx, y: goby, w: gobw, h: gobh };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// CAFÉ-META VECTOR ICONS (canvas paths — never emoji, which tofu in the font)
+// ════════════════════════════════════════════════════════════════════════
+// 5-point star (the Stars currency mark)
+function drawStarIcon(ctx, x, y, r, col) {
+  ctx.save();
+  ctx.beginPath();
+  for (var i = 0; i < 10; i++) {
+    var ang = -Math.PI / 2 + i * Math.PI / 5;
+    var rad = (i % 2 === 0) ? r : r * 0.45;
+    var px = x + Math.cos(ang) * rad, py = y + Math.sin(ang) * rad;
+    if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = col || '#ffd24a'; ctx.fill();
+  ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(1, r * 0.12); ctx.strokeStyle = 'rgba(120,70,30,0.35)'; ctx.stroke();
+  ctx.restore();
+}
+// small red count badge (claimable tasks)
+function drawBadge(ctx, cxp, cyp, n) {
+  var S = GF.S, r = GF.clamp(9 * S, 7, 12);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(cxp, cyp, r, 0, 6.28); ctx.fillStyle = '#f4433a'; ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(String(n), cxp, cyp + 0.5 * S);
+  ctx.restore();
+}
+// permanent café-upgrade glyphs (small vector marks per key)
+function drawPermIcon(ctx, key, x, y, r, col) {
+  ctx.save();
+  ctx.fillStyle = col; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = Math.max(1, r * 0.12); ctx.lineJoin = 'round';
+  if (key === 'tipjar') {            // a coin
+    ctx.beginPath(); ctx.arc(x, y, r * 0.85, 0, 6.28); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = 'bold ' + (r * 0.9) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  } else if (key === 'comfy') {      // a cushion / armchair
+    GF.rr(ctx, x - r * 0.8, y - r * 0.2, r * 1.6, r * 0.9, r * 0.3); ctx.fill(); ctx.stroke();
+    GF.rr(ctx, x - r * 0.8, y - r * 0.7, r * 0.45, r * 0.7, r * 0.2); ctx.fill(); ctx.stroke();
+    GF.rr(ctx, x + r * 0.35, y - r * 0.7, r * 0.45, r * 0.7, r * 0.2); ctx.fill(); ctx.stroke();
+  } else if (key === 'prep') {       // a counter / +slot box
+    GF.rr(ctx, x - r * 0.85, y - r * 0.5, r * 1.7, r * 1.0, r * 0.2); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = r * 0.22; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x, y - r * 0.25); ctx.lineTo(x, y + r * 0.25); ctx.moveTo(x - r * 0.25, y); ctx.lineTo(x + r * 0.25, y); ctx.stroke();
+  } else if (key === 'regulars') {   // chain links (loyalty)
+    ctx.lineWidth = r * 0.28; ctx.strokeStyle = col;
+    ctx.beginPath(); ctx.arc(x - r * 0.35, y, r * 0.45, 0, 6.28); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x + r * 0.35, y, r * 0.45, 0, 6.28); ctx.stroke();
+  } else if (key === 'signature') {  // a star-stamped recipe card
+    GF.rr(ctx, x - r * 0.8, y - r * 0.6, r * 1.6, r * 1.2, r * 0.2); ctx.fill(); ctx.stroke();
+    drawStarIcon(ctx, x, y, r * 0.5, '#fff');
+  }
+  ctx.restore();
+}
+// café-tool glyphs (the 8 playtime-ladder items)
+function drawToolIcon(ctx, def, x, y, r) {
+  ctx.save();
+  ctx.fillStyle = def.col; ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = Math.max(1, r * 0.13); ctx.lineJoin = 'round';
+  switch (def.shape) {
+    case 'card': // loyalty card with a star
+      GF.rr(ctx, x - r * 0.9, y - r * 0.6, r * 1.8, r * 1.2, r * 0.22); ctx.fill(); ctx.stroke();
+      drawStarIcon(ctx, x - r * 0.4, y, r * 0.4, '#fff');
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = r * 0.13;
+      ctx.beginPath(); ctx.moveTo(x + r * 0.05, y - r * 0.18); ctx.lineTo(x + r * 0.6, y - r * 0.18);
+      ctx.moveTo(x + r * 0.05, y + r * 0.15); ctx.lineTo(x + r * 0.6, y + r * 0.15); ctx.stroke();
+      break;
+    case 'shaker': // cocktail shaker (express)
+      ctx.beginPath();
+      ctx.moveTo(x - r * 0.5, y - r * 0.8); ctx.lineTo(x + r * 0.5, y - r * 0.8);
+      ctx.lineTo(x + r * 0.62, y + r * 0.75); ctx.lineTo(x - r * 0.62, y + r * 0.75);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      GF.rr(ctx, x - r * 0.6, y - r, r * 1.2, r * 0.34, r * 0.12); ctx.fillStyle = '#fff'; ctx.fill(); ctx.stroke();
+      break;
+    case 'heart': // patience charm
+      ctx.beginPath();
+      ctx.moveTo(x, y + r * 0.7);
+      ctx.bezierCurveTo(x - r * 1.1, y - r * 0.2, x - r * 0.4, y - r * 0.9, x, y - r * 0.3);
+      ctx.bezierCurveTo(x + r * 0.4, y - r * 0.9, x + r * 1.1, y - r * 0.2, x, y + r * 0.7);
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    case 'jar': // jar of pearls (combo)
+      GF.rr(ctx, x - r * 0.7, y - r * 0.5, r * 1.4, r * 1.2, r * 0.3); ctx.fill(); ctx.stroke();
+      GF.rr(ctx, x - r * 0.5, y - r * 0.85, r * 1.0, r * 0.3, r * 0.1); ctx.fillStyle = '#fff'; ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#3a2a22';
+      for (var pj = 0; pj < 5; pj++) {
+        var jx = x - r * 0.4 + (pj % 3) * r * 0.4, jy = y + r * 0.1 + ((pj / 3) | 0) * r * 0.35;
+        ctx.beginPath(); ctx.arc(jx, jy, r * 0.16, 0, 6.28); ctx.fill();
+      }
+      break;
+    case 'straw': // golden straw (diagonal)
+      ctx.strokeStyle = def.col; ctx.lineWidth = r * 0.45; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x - r * 0.6, y + r * 0.8); ctx.lineTo(x + r * 0.3, y - r * 0.8); ctx.stroke();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = r * 0.16;
+      ctx.beginPath(); ctx.moveTo(x - r * 0.45, y + r * 0.5); ctx.lineTo(x + r * 0.15, y - r * 0.45); ctx.stroke();
+      break;
+    case 'stamp': // lucky stamp (a star inside a ring)
+      ctx.beginPath(); ctx.arc(x, y - r * 0.1, r * 0.75, 0, 6.28); ctx.fill(); ctx.stroke();
+      drawStarIcon(ctx, x, y - r * 0.1, r * 0.4, '#fff');
+      ctx.strokeStyle = def.col; ctx.lineWidth = r * 0.3; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x, y + r * 0.62); ctx.lineTo(x, y + r * 0.95); ctx.stroke();
+      break;
+    case 'ice': // ice cube
+      GF.rr(ctx, x - r * 0.7, y - r * 0.7, r * 1.4, r * 1.4, r * 0.25); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      GF.rr(ctx, x - r * 0.45, y - r * 0.45, r * 0.4, r * 0.4, r * 0.12); ctx.fill();
+      break;
+    case 'book': // regulars book
+      GF.rr(ctx, x - r * 0.75, y - r * 0.6, r * 1.5, r * 1.2, r * 0.12); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = r * 0.12;
+      ctx.beginPath(); ctx.moveTo(x, y - r * 0.55); ctx.lineTo(x, y + r * 0.55); ctx.stroke();
+      drawStarIcon(ctx, x + r * 0.38, y, r * 0.26, '#fff');
+      break;
+    default:
+      ctx.beginPath(); ctx.arc(x, y, r, 0, 6.28); ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// CAFÉ OVERLAY — 3 tabs (UPGRADES / TOOLS / TASKS). FULLY OPAQUE backdrop so
+// the MENU / paused run never bleeds through (popup hygiene). Reachable from
+// the MENU café button, the GAMEOVER café link, and the mid-run café pill.
+// ════════════════════════════════════════════════════════════════════════
+function drawMetaOverlay(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H, cx = GF.cx;
+  metaTabRects = []; permRects = []; toolTileRects = []; toolUpRects = []; equipSlotRects = []; taskClaimRects = [];
+  metaCloseRect = null; metaContentRect = null;
+  // OPAQUE wash (solid fill, NOT <1 alpha) — flip_dash's <1.0 alpha ghosted.
+  ctx.fillStyle = '#241510'; ctx.fillRect(0, 0, W, H);
+  // warm header gradient strip
+  var hg = ctx.createLinearGradient(0, 0, 0, H * 0.16);
+  hg.addColorStop(0, '#3a2418'); hg.addColorStop(1, '#241510');
+  ctx.fillStyle = hg; ctx.fillRect(0, 0, W, H * 0.16);
+
+  var y = Math.max(H * 0.045, 22 * S);
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,138,212,0.5)'; ctx.shadowBlur = 16 * S;
+  ctx.fillStyle = '#fff';
+  ctx.font = '900 ' + GF.clamp(28 * S, 20, 38) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(GF.t('cafe'), cx, y);
+  ctx.restore();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  y += GF.clamp(36 * S, 26, 46);
+
+  // header: banked Stars + cumulative open-time
+  var tm = Math.floor(totalPlayMin());
+  var playStr = (tm >= 60 ? Math.floor(tm / 60) + GF.t('hourShort') + ' ' + (tm % 60) + GF.t('minShort') : tm + GF.t('minShort'));
+  var hdr = '   ' + (meta ? meta.stars : 0) + '      ' + GF.t('played') + ': ' + playStr;
+  ctx.font = 'bold ' + GF.clamp(15 * S, 12, 19) + 'px sans-serif';
+  var hdrW = ctx.measureText(hdr).width;
+  drawStarIcon(ctx, cx - hdrW / 2 + GF.clamp(7 * S, 6, 10), y + GF.clamp(8 * S, 6, 11), GF.clamp(7 * S, 6, 10), '#ffd24a');
+  ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'center';
+  ctx.fillText(hdr, cx, y);
+  y += GF.clamp(24 * S, 19, 30);
+
+  // tab row (UPGRADES | TOOLS | TASKS) with claimable badge on TASKS
+  var maxW = Math.min(W - 24 * S, 460 * S);
+  var contentTop = y;
+  var tabX = cx - maxW / 2, tabH = GF.clamp(34 * S, 28, 44), tabGap = 6 * S, tabW = (maxW - tabGap * 2) / 3;
+  var cq = claimableTasks();
+  var tabs = [
+    { id: 'up',    label: GF.t('tabUpgrades') },
+    { id: 'tools', label: GF.t('tabGear') },
+    { id: 'tasks', label: GF.t('tabQuests'), badge: cq }
+  ];
+  for (var t = 0; t < tabs.length; t++) {
+    var on = (metaTab === tabs[t].id), bxx = tabX + t * (tabW + tabGap);
+    GF.rr(ctx, bxx, y, tabW, tabH, 9 * S);
+    ctx.fillStyle = on ? 'rgba(255,170,90,0.26)' : 'rgba(255,255,255,0.06)'; ctx.fill();
+    ctx.strokeStyle = on ? '#ffb300' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5 * S;
+    GF.rr(ctx, bxx, y, tabW, tabH, 9 * S); ctx.stroke();
+    ctx.fillStyle = on ? '#fff' : 'rgba(240,225,205,0.7)';
+    ctx.font = 'bold ' + GF.clamp(12 * S, 9.5, 16) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(tabs[t].label, bxx + tabW / 2, y + tabH / 2 + 1 * S);
+    if (tabs[t].badge) drawBadge(ctx, bxx + tabW - 9 * S, y + 6 * S, tabs[t].badge);
+    metaTabRects.push({ tab: tabs[t].id, x: bxx, y: y, w: tabW, h: tabH });
+  }
+  ctx.textBaseline = 'top';
+  y += tabH + 12 * S;
+
+  // CLOSE button reserved at the bottom; content fills the space between.
+  var closeH = GF.clamp(48 * S, 44, 58), closeW = GF.clamp(200 * S, 170, 280);
+  var closeY = H - closeH - GF.clamp(16 * S, 12, 24);
+  var contentBottom = closeY - 12 * S;
+
+  if (metaTab === 'up')         drawUpgradesTab(ctx, y, contentBottom, maxW);
+  else if (metaTab === 'tools') drawToolsTab(ctx, y, contentBottom, maxW);
+  else                          drawTasksTab(ctx, y, contentBottom, maxW);
+
+  // CLOSE
+  var clg = ctx.createLinearGradient(cx - closeW / 2, closeY, cx - closeW / 2, closeY + closeH);
+  clg.addColorStop(0, '#ffb300'); clg.addColorStop(1, '#e08e2a');
+  ctx.fillStyle = clg; GF.rr(ctx, cx - closeW / 2, closeY, closeW, closeH, closeH / 2); ctx.fill();
+  ctx.fillStyle = '#4a3520'; ctx.font = 'bold ' + GF.clamp(16 * S, 13, 21) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('cafeClose'), cx, closeY + closeH / 2);
+  metaCloseRect = { x: cx - closeW / 2, y: closeY, w: closeW, h: closeH };
+  metaContentRect = { x: tabX, y: contentTop, w: maxW, h: (closeY + closeH) - contentTop };
+}
+
+// UPGRADES tab — the 5 permanent café upgrades (Stars-bought, persist forever).
+function drawUpgradesTab(ctx, topY, bottomY, maxW) {
+  var S = GF.S, cx = GF.cx, x = cx - maxW / 2;
+  var n = PERM_KEYS.length;
+  var gap = GF.clamp(8 * S, 5, 12);
+  var rowH = GF.clamp((bottomY - topY - gap * (n - 1)) / n, 52 * S, 78 * S);
+  for (var i = 0; i < n; i++) {
+    var key = PERM_KEYS[i], def = PERM_DEFS[key];
+    var lvl = meta ? (meta.perm[key] || 0) : 0;
+    var maxed = lvl >= def.max;
+    var cost = permUpCost(key);
+    var afford = !!(meta && !maxed && meta.stars >= cost);
+    var ry = topY + i * (rowH + gap);
+    GF.rr(ctx, x, ry, maxW, rowH, GF.clamp(11 * S, 8, 15));
+    ctx.fillStyle = maxed ? 'rgba(155,209,122,0.13)' : 'rgba(255,255,255,0.06)'; ctx.fill();
+    ctx.strokeStyle = maxed ? 'rgba(155,209,122,0.5)' : 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1.4 * S;
+    GF.rr(ctx, x, ry, maxW, rowH, GF.clamp(11 * S, 8, 15)); ctx.stroke();
+    // icon
+    var icR = GF.clamp(16 * S, 12, 21), icX = x + GF.clamp(14 * S, 10, 20) + icR, icY = ry + rowH / 2;
+    drawPermIcon(ctx, key, icX, icY, icR, def.col);
+    // name + level + desc
+    var tx = icX + icR + GF.clamp(12 * S, 8, 16);
+    var chipW = GF.clamp(76 * S, 60, 104), chipH = GF.clamp(30 * S, 26, 40);
+    var chipX = x + maxW - chipW - GF.clamp(12 * S, 8, 16), chipY = ry + (rowH - chipH) / 2;
+    var nameMaxW = chipX - tx - 8 * S;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + GF.clamp(13.5 * S, 11, 18) + 'px sans-serif';
+    ctx.fillText(GF.t('up_' + key) + '  ' + GF.t('lvl') + lvl + '/' + def.max, tx, ry + GF.clamp(9 * S, 6, 13));
+    ctx.fillStyle = 'rgba(240,225,205,0.78)'; ctx.font = GF.clamp(10.5 * S, 9, 14) + 'px sans-serif';
+    var descLines = wrapLines(ctx, GF.t('up_' + key + '_d').replace('{v}', permValueText(key)), nameMaxW);
+    for (var dl = 0; dl < descLines.length && dl < 2; dl++) ctx.fillText(descLines[dl], tx, ry + rowH * 0.46 + dl * GF.clamp(13 * S, 11, 16));
+    // buy chip
+    GF.rr(ctx, chipX, chipY, chipW, chipH, chipH / 2);
+    ctx.fillStyle = maxed ? 'rgba(155,209,122,0.2)' : (afford ? 'rgba(255,210,74,0.22)' : 'rgba(255,255,255,0.06)'); ctx.fill();
+    if (afford) { ctx.strokeStyle = '#ffd24a'; ctx.lineWidth = 1.4 * S; GF.rr(ctx, chipX, chipY, chipW, chipH, chipH / 2); ctx.stroke(); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (maxed) {
+      ctx.fillStyle = '#9bd17a'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px sans-serif';
+      ctx.fillText(GF.t('maxed'), chipX + chipW / 2, chipY + chipH / 2);
+    } else {
+      drawStarIcon(ctx, chipX + GF.clamp(15 * S, 12, 19), chipY + chipH / 2, GF.clamp(7 * S, 6, 9), afford ? '#ffd24a' : '#9c8a70');
+      ctx.fillStyle = afford ? '#ffd24a' : '#9c8a70'; ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('' + cost, chipX + GF.clamp(24 * S, 19, 30), chipY + chipH / 2 + 0.5 * S);
+    }
+    permRects.push({ key: key, x: chipX, y: chipY, w: chipW, h: chipH, afford: afford });
+  }
+  ctx.textBaseline = 'top';
+}
+
+// TOOLS tab — next-tool progress + 3 equip slots + the 8-item ladder grid.
+function drawToolsTab(ctx, topY, bottomY, maxW) {
+  var S = GF.S, cx = GF.cx, x = cx - maxW / 2;
+  var y = topY;
+  // next-tool progress (the visible pull)
+  var ng = nextTool();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  if (ng) {
+    var prevMin = 0;
+    for (var pi = 0; pi < TOOL_DEFS.length; pi++) { if (TOOL_DEFS[pi].id === ng.id) break; prevMin = TOOL_DEFS[pi].min; }
+    var frac = GF.clamp((totalPlayMin() - prevMin) / (ng.min - prevMin), 0, 1);
+    var leftMin = Math.max(1, Math.ceil(ng.min - totalPlayMin()));
+    ctx.fillStyle = 'rgba(245,230,210,0.85)'; ctx.font = GF.clamp(11.5 * S, 9.5, 15) + 'px sans-serif';
+    ctx.fillText(GF.t('nextTool') + ' ' + leftMin + ' ' + GF.t('minShort'), x, y);
+    var barW = maxW, barH = 7 * S, barY = y + GF.clamp(16 * S, 14, 20);
+    GF.rr(ctx, x, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.13)'; ctx.fill();
+    GF.rr(ctx, x, barY, Math.max(barH, barW * frac), barH, barH / 2); ctx.fillStyle = ng.col; ctx.fill();
+  } else {
+    ctx.fillStyle = '#9bd17a'; ctx.font = 'bold ' + GF.clamp(12 * S, 10, 15) + 'px sans-serif';
+    ctx.fillText(GF.t('allTools'), x, y);
+  }
+  y += GF.clamp(34 * S, 28, 40);
+
+  // equip slots row (3)
+  ctx.fillStyle = 'rgba(220,205,185,0.8)'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.textAlign = 'left'; ctx.fillText(GF.t('equippedTools'), x, y);
+  y += GF.clamp(16 * S, 14, 20);
+  var slotR = GF.clamp(26 * S, 21, 32), slotGap = GF.clamp(20 * S, 12, 30);
+  var totalSlotsW = TOOL_SLOTS * (slotR * 2) + (TOOL_SLOTS - 1) * slotGap;
+  var slotStartX = cx - totalSlotsW / 2, slotsY = y + slotR;
+  for (var s = 0; s < TOOL_SLOTS; s++) {
+    var scx = slotStartX + slotR + s * (slotR * 2 + slotGap), scy = slotsY;
+    var eid = meta ? meta.tools.equipped[s] : null;
+    ctx.beginPath(); ctx.arc(scx, scy, slotR, 0, 6.28);
+    ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = eid ? TOOL_BY_ID[eid].col : 'rgba(255,255,255,0.22)'; ctx.lineWidth = 2 * S;
+    ctx.setLineDash(eid ? [] : [4 * S, 4 * S]); ctx.stroke(); ctx.setLineDash([]);
+    if (eid) drawToolIcon(ctx, TOOL_BY_ID[eid], scx, scy, slotR * 0.6);
+    equipSlotRects.push({ slot: s, x: scx - slotR, y: scy - slotR, w: slotR * 2, h: slotR * 2 });
+  }
+  y = slotsY + slotR + GF.clamp(14 * S, 10, 18);
+
+  // tool grid — 4 cols × 2 rows. Tiles auto-size to fit the band [y, bottomY].
+  var cols = 4, gap = GF.clamp(7 * S, 5, 10);
+  var rows = Math.ceil(TOOL_DEFS.length / cols);
+  var tileW = (maxW - gap * (cols - 1)) / cols;
+  var avail = bottomY - y;
+  var tileH = GF.clamp((avail - gap * (rows - 1)) / rows, 62 * S, 96 * S);
+  for (var i = 0; i < TOOL_DEFS.length; i++) {
+    var def = TOOL_DEFS[i], col = i % cols, row = Math.floor(i / cols);
+    var bx = x + col * (tileW + gap), byy = y + row * (tileH + gap);
+    var owned = !!(meta && meta.tools.owned[def.id]);
+    var equipped = !!(meta && meta.tools.equipped.indexOf(def.id) >= 0);
+    GF.rr(ctx, bx, byy, tileW, tileH, 9 * S);
+    ctx.fillStyle = owned ? (equipped ? 'rgba(155,209,122,0.14)' : 'rgba(255,255,255,0.06)') : 'rgba(255,255,255,0.03)'; ctx.fill();
+    ctx.strokeStyle = equipped ? '#9bd17a' : (owned ? 'rgba(200,180,150,0.5)' : 'rgba(255,255,255,0.12)'); ctx.lineWidth = 1.5 * S;
+    GF.rr(ctx, bx, byy, tileW, tileH, 9 * S); ctx.stroke();
+    var icx = bx + tileW / 2, icy = byy + tileH * 0.28, ir = GF.clamp(15 * S, 11, 19);
+    if (owned) {
+      drawToolIcon(ctx, def, icx, icy, ir);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillStyle = '#f0e1cd'; ctx.font = 'bold ' + GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
+      ctx.fillText(GF.t('lvl') + ' ' + (meta.tools.level[def.id] || 1), icx, byy + tileH * 0.50);
+      // upgrade chip
+      var cost = toolUpCost(def.id), maxed = !isFinite(cost);
+      var afford = !!(meta && !maxed && meta.stars >= cost);
+      var chW = tileW - 8 * S, chH = GF.clamp(17 * S, 14, 22), chX = bx + 4 * S, chY = byy + tileH - chH - 4 * S;
+      GF.rr(ctx, chX, chY, chW, chH, 5 * S);
+      ctx.fillStyle = maxed ? 'rgba(155,209,122,0.18)' : (afford ? 'rgba(255,210,74,0.2)' : 'rgba(255,255,255,0.05)'); ctx.fill();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (maxed) {
+        ctx.fillStyle = '#9bd17a'; ctx.font = 'bold ' + GF.clamp(8.5 * S, 7, 11) + 'px sans-serif';
+        ctx.fillText(GF.t('maxed'), chX + chW / 2, chY + chH / 2 + 0.5 * S);
+      } else {
+        drawStarIcon(ctx, chX + chW / 2 - GF.clamp(11 * S, 9, 14), chY + chH / 2, GF.clamp(5.5 * S, 5, 7), afford ? '#ffd24a' : '#9c8a70');
+        ctx.fillStyle = afford ? '#ffd24a' : '#9c8a70'; ctx.font = 'bold ' + GF.clamp(8.5 * S, 7, 11) + 'px sans-serif';
+        ctx.fillText('' + cost, chX + chW / 2 + GF.clamp(4 * S, 3, 6), chY + chH / 2 + 0.5 * S);
+      }
+      toolTileRects.push({ id: def.id, x: bx, y: byy, w: tileW, h: tileH - chH - 6 * S });
+      toolUpRects.push({ id: def.id, x: chX, y: chY, w: chW, h: chH, afford: afford });
+    } else {
+      ctx.globalAlpha = 0.4; drawToolIcon(ctx, def, icx, icy, ir); ctx.globalAlpha = 1;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = '#a89880';
+      ctx.font = GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
+      ctx.fillText(GF.t('playToUnlock') + ' ' + def.min + GF.t('minShort'), icx, byy + tileH * 0.52);
+    }
+  }
+  ctx.textBaseline = 'top';
+}
+
+// TASKS tab — 3 daily tasks, each a progress bar + a CLAIM button.
+function drawTasksTab(ctx, topY, bottomY, maxW) {
+  var S = GF.S, cx = GF.cx, x = cx - maxW / 2;
+  var y = topY;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText(GF.t('dailyTasks'), x, y);
+  ctx.textAlign = 'right'; ctx.fillStyle = 'rgba(240,225,205,0.75)'; ctx.font = GF.clamp(10.5 * S, 9, 13) + 'px sans-serif';
+  ctx.fillText(GF.t('resetsIn') + ' ' + Math.ceil(hoursToReset()) + GF.t('hourShort'), x + maxW, y + 2 * S);
+  y += GF.clamp(24 * S, 20, 30);
+
+  var list = (meta && meta.tasks.list) ? meta.tasks.list : [];
+  var rowGap = GF.clamp(12 * S, 8, 18);
+  var rowH = GF.clamp((bottomY - y - rowGap * 2) / 3, 58 * S, 100 * S);
+  for (var i = 0; i < 3; i++) {
+    var q = list[i];
+    var ry = y + i * (rowH + rowGap);
+    GF.rr(ctx, x, ry, maxW, rowH, 10 * S);
+    var done = q && taskDone(q);
+    ctx.fillStyle = done ? 'rgba(155,209,122,0.12)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = (done && !q.claimed) ? '#9bd17a' : 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1.5 * S;
+    GF.rr(ctx, x, ry, maxW, rowH, 10 * S); ctx.stroke();
+    if (!q) continue;
+    var pad = GF.clamp(12 * S, 9, 16);
+    var cbW = GF.clamp(96 * S, 78, 128);
+    var labelMaxW = maxW - pad * 2 - cbW - 10 * S;
+    // label
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
+    var ll = wrapLines(ctx, taskLabel(q), labelMaxW);
+    var lh = GF.clamp(15 * S, 12, 19);
+    for (var li = 0; li < ll.length && li < 2; li++) ctx.fillText(ll[li], x + pad, ry + GF.clamp(9 * S, 7, 13) + li * lh);
+    // progress bar
+    var barW = labelMaxW, barH = 7 * S, barY = ry + rowH - GF.clamp(18 * S, 15, 24);
+    GF.rr(ctx, x + pad, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.13)'; ctx.fill();
+    GF.rr(ctx, x + pad, barY, Math.max(barH, barW * GF.clamp(q.prog / q.target, 0, 1)), barH, barH / 2);
+    ctx.fillStyle = done ? '#9bd17a' : '#ff8ad4'; ctx.fill();
+    ctx.fillStyle = 'rgba(240,225,205,0.8)'; ctx.font = GF.clamp(9.5 * S, 8, 12.5) + 'px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(Math.min(q.prog, q.target) + '/' + q.target, x + pad, barY - GF.clamp(9 * S, 7, 12));
+    // claim button
+    var cbH = GF.clamp(38 * S, 32, 48), cbX = x + maxW - pad - cbW, cbY = ry + (rowH - cbH) / 2;
+    var can = done && !q.claimed;
+    GF.rr(ctx, cbX, cbY, cbW, cbH, 8 * S);
+    ctx.fillStyle = q.claimed ? 'rgba(155,209,122,0.1)' : (can ? 'rgba(155,209,122,0.28)' : 'rgba(255,255,255,0.05)'); ctx.fill();
+    if (can) { ctx.strokeStyle = '#9bd17a'; ctx.lineWidth = 1.5 * S; GF.rr(ctx, cbX, cbY, cbW, cbH, 8 * S); ctx.stroke(); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (q.claimed) {
+      ctx.fillStyle = '#9bd17a'; ctx.font = 'bold ' + GF.clamp(10.5 * S, 9, 14) + 'px sans-serif';
+      ctx.fillText(GF.t('claimed'), cbX + cbW / 2, cbY + cbH / 2);
+    } else if (can) {
+      ctx.fillStyle = '#dfffd0'; ctx.font = 'bold ' + GF.clamp(11.5 * S, 9.5, 15) + 'px sans-serif';
+      ctx.fillStyle = '#eaffd8';
+      ctx.fillText(GF.t('claim'), cbX + cbW / 2, cbY + cbH / 2 - 6 * S);
+      drawStarIcon(ctx, cbX + cbW / 2 - GF.clamp(13 * S, 10, 16), cbY + cbH / 2 + 8 * S, GF.clamp(5.5 * S, 5, 7), '#ffd24a');
+      ctx.fillStyle = '#ffd24a'; ctx.font = GF.clamp(9.5 * S, 8, 12.5) + 'px sans-serif';
+      ctx.fillText('+' + q.reward, cbX + cbW / 2 + GF.clamp(5 * S, 4, 7), cbY + cbH / 2 + 8 * S);
+    } else {
+      drawStarIcon(ctx, cbX + cbW / 2 - GF.clamp(13 * S, 10, 16), cbY + cbH / 2, GF.clamp(5.5 * S, 5, 7), 'rgba(240,225,205,0.7)');
+      ctx.fillStyle = 'rgba(240,225,205,0.7)'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+      ctx.fillText('+' + q.reward, cbX + cbW / 2 + GF.clamp(5 * S, 4, 7), cbY + cbH / 2);
+    }
+    taskClaimRects.push({ i: i, x: cbX, y: cbY, w: cbW, h: cbH, can: can });
+  }
+  ctx.textBaseline = 'top';
+}
+
+// ── WELCOME-BACK BANNER (login + streak + idle, shown once per boot) ────────
+function drawBootBanner(ctx) {
+  if (bootBannerT <= 0 || !meta) return;
+  var S = GF.S;
+  var parts = [];
+  var login = (meta.lastLoginReward || 0) + (meta.lastStreakBonus || 0);
+  if (login > 0) parts.push(GF.t('dayStreak') + ' ' + meta.login.streak + ': +' + login);
+  if (meta.pendingIdle > 0) parts.push('+' + meta.pendingIdle + ' ' + GF.t('awayTips'));
+  if (!parts.length) return;
+  ctx.save();
+  var a = GF.clamp(bootBannerT / 0.6, 0, 1);
+  ctx.globalAlpha = a;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  var title = GF.t('welcomeBack');
+  var sub = parts.join('   •   ');
+  var w = Math.min(GF.W - 28 * S, Math.max(ctx.measureText(sub).width, ctx.measureText(title).width) + 50 * S);
+  var h = GF.clamp(52 * S, 44, 64), bx = GF.cx - w / 2, by = Math.max(GF.H * 0.16, 110 * S);
+  ctx.shadowColor = 'rgba(255,138,212,0.5)'; ctx.shadowBlur = 16 * S;
+  GF.rr(ctx, bx, by, w, h, 12 * S); ctx.fillStyle = 'rgba(40,24,14,0.97)'; ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ffb300'; ctx.lineWidth = 1.5 * S; GF.rr(ctx, bx, by, w, h, 12 * S); ctx.stroke();
+  drawStarIcon(ctx, bx + 18 * S, by + h * 0.34, GF.clamp(8 * S, 7, 11), '#ffd24a');
+  ctx.fillStyle = '#fff'; ctx.fillText(title, GF.cx + 6 * S, by + h * 0.34);
+  ctx.fillStyle = '#ffd24a'; ctx.font = GF.clamp(11.5 * S, 9.5, 15) + 'px sans-serif';
+  ctx.fillText(sub, GF.cx, by + h * 0.70);
+  ctx.restore();
+}
+
+// ── TOASTS (NEW TOOL / TASK DONE — non-blocking) ───────────────────────────
+function drawToolToast(ctx) {
+  var S = GF.S, def = toolToast.def;
+  var a = GF.clamp(toolToast.t / 0.5, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  var w = Math.min(GF.W - 30 * S, 330 * S), h = GF.clamp(54 * S, 46, 66);
+  var bx = GF.cx - w / 2, by = GF.H * 0.20;
+  ctx.shadowColor = 'rgba(255,210,74,0.5)'; ctx.shadowBlur = 16 * S;
+  GF.rr(ctx, bx, by, w, h, 12 * S); ctx.fillStyle = 'rgba(40,24,14,0.97)'; ctx.fill();
+  ctx.shadowBlur = 0; ctx.strokeStyle = def.col; ctx.lineWidth = 1.6 * S; GF.rr(ctx, bx, by, w, h, 12 * S); ctx.stroke();
+  drawToolIcon(ctx, def, bx + h * 0.5, by + h / 2, GF.clamp(15 * S, 12, 19));
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = def.col; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText(GF.t('newTool'), bx + h * 0.9, by + h * 0.34);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(13.5 * S, 11, 18) + 'px sans-serif';
+  ctx.fillText(toolName(def), bx + h * 0.9, by + h * 0.66);
+  ctx.restore();
+}
+function drawTaskToast(ctx) {
+  var S = GF.S, q = taskToast.q;
+  var a = GF.clamp(taskToast.t / 0.5, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  var w = Math.min(GF.W - 30 * S, 320 * S), h = GF.clamp(50 * S, 42, 60);
+  var bx = GF.cx - w / 2, by = GF.H * 0.20;
+  ctx.shadowColor = 'rgba(155,209,122,0.5)'; ctx.shadowBlur = 14 * S;
+  GF.rr(ctx, bx, by, w, h, 12 * S); ctx.fillStyle = 'rgba(40,24,14,0.97)'; ctx.fill();
+  ctx.shadowBlur = 0; ctx.strokeStyle = '#9bd17a'; ctx.lineWidth = 1.6 * S; GF.rr(ctx, bx, by, w, h, 12 * S); ctx.stroke();
+  drawStarIcon(ctx, bx + h * 0.5, by + h / 2, GF.clamp(13 * S, 11, 17), '#ffd24a');
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#9bd17a'; ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif';
+  ctx.fillText(GF.t('taskDone'), bx + h * 0.9, by + h * 0.36);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText('+' + q.reward + ' ' + GF.t('stars'), bx + h * 0.9, by + h * 0.66);
+  ctx.restore();
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1794,8 +2553,52 @@ function hit(rect, x, y) {
   return rect && x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }
 
+// CAFÉ overlay press routing (priority: close → tabs → buy chips → tiles →
+// equip slots → task claims → scrim-dismiss). Targets rebuilt each draw frame.
+function handleMetaPress(x, y) {
+  if (hit(metaCloseRect, x, y)) { metaOpen = false; beep(420, 0.05); return; }
+  for (var t = 0; t < metaTabRects.length; t++) { if (hit(metaTabRects[t], x, y)) { metaTab = metaTabRects[t].tab; beep(520, 0.04); return; } }
+  if (metaTab === 'up') {
+    for (var p = 0; p < permRects.length; p++) {
+      var pr = permRects[p];
+      if (hit(pr, x, y)) {
+        if (pr.afford && buyPermUpgrade(pr.key)) { beep(620, 0.08); beep(820, 0.07, 0.05); GF.spawnParticles(x, y, PERM_DEFS[pr.key].col, 14); }
+        else beep(150, 0.08, 0, 'sawtooth');
+        return;
+      }
+    }
+  } else if (metaTab === 'tools') {
+    for (var u = 0; u < toolUpRects.length; u++) {
+      var ur = toolUpRects[u];
+      if (hit(ur, x, y)) {
+        if (ur.afford && buyToolUpgrade(ur.id)) { beep(620, 0.08); beep(820, 0.07, 0.05); GF.spawnParticles(x, y, TOOL_BY_ID[ur.id].col, 14); }
+        else beep(150, 0.08, 0, 'sawtooth');
+        return;
+      }
+    }
+    for (var ti = 0; ti < toolTileRects.length; ti++) { if (hit(toolTileRects[ti], x, y)) { toggleEquipTool(toolTileRects[ti].id); beep(520, 0.05); return; } }
+    for (var s = 0; s < equipSlotRects.length; s++) { if (hit(equipSlotRects[s], x, y)) { unequipToolSlot(equipSlotRects[s].slot); beep(420, 0.05); return; } }
+  } else {
+    for (var q = 0; q < taskClaimRects.length; q++) {
+      var qr = taskClaimRects[q];
+      if (hit(qr, x, y)) {
+        if (qr.can && claimTask(qr.i) > 0) { beep(660, 0.08); beep(900, 0.07, 0.05); GF.spawnParticles(x, y, '#ffd24a', 18); }
+        else beep(420, 0.05);
+        return;
+      }
+    }
+  }
+  // tap outside the content column dismisses (standard modal-scrim behaviour)
+  if (metaContentRect && !hit(metaContentRect, x, y)) { metaOpen = false; beep(420, 0.05); return; }
+}
+
 function onPress(x, y) {
+  // CAFÉ overlay owns input while open (on MENU or a paused run).
+  if (metaOpen && (gs === 'MENU' || gs === 'PLAYING')) { handleMetaPress(x, y); return; }
+  if (metaOpen) metaOpen = false;   // clear any stale overlay flag in other states
+
   if (gs === 'MENU') {
+    if (hit(menuCafeRect, x, y)) { openCafe('up'); return; }
     if (hit(menuPlayRect, x, y)) {
       if (!seenTutorial) { seenTutorial = true; try { localStorage.setItem('boba_rush_seen_tutorial', '1'); } catch (e) {} }
       startGame();
@@ -1803,6 +2606,7 @@ function onPress(x, y) {
     return;
   }
   if (gs === 'GAMEOVER') {
+    if (hit(goCafeRect, x, y)) { openCafe('up'); return; }
     if (hit(goRetryRect, x, y)) startGame();
     return;
   }
@@ -1819,6 +2623,8 @@ function onPress(x, y) {
     else showTut = false; // any tap closes
     return;
   }
+  // CAFÉ pause-pill → pause the rush + open the café meta
+  if (hit(cafePillRect, x, y)) { openCafe('up'); return; }
   // "?" help
   if (hit(helpRect, x, y)) { showTut = true; return; }
   // trash cup
@@ -1908,6 +2714,19 @@ GF.init({
     try { best = parseInt(localStorage.getItem('boba_rush_best') || '0') || 0; } catch (e) {}
     try { seenTutorial = localStorage.getItem('boba_rush_seen_tutorial') === '1'; } catch (e) {}
 
+    // ── CROSS-SESSION CAFÉ META: load AFTER best, then award the boot-time
+    // reason-to-return (login/streak + overnight idle Stars). The WELCOME-BACK
+    // banner is suppressed in headless / screenshot runs, but the grants still
+    // apply deterministically so the test harness can observe them.
+    var headless = false;
+    try {
+      headless = (navigator.webdriver === true) || window._silent ||
+        (location && location.search && /[?&]notut(=|&|$)/.test(location.search)) ||
+        (location && location.protocol === 'file:');
+    } catch (e) {}
+    meta = loadMeta();
+    claimOnOpen(!headless);
+
     // Yandex 1.9 — persist a run across reload.
     GF.persist('boba_rush_run_v1',
       function() {
@@ -1951,6 +2770,7 @@ GF.init({
 
 // ── STATE EXPOSURE (post-build-tester gate) ────────────────────────────────
 GF.exposeState(function() {
+  var ng = nextTool();
   return {
     gs: gs,
     coins: coins,
@@ -1966,9 +2786,28 @@ GF.exposeState(function() {
     flavorsUnlocked: unlockedBases().length,
     toppingsUnlocked: unlockedToppings().length,
     upgrades: up,
-    score: score()
+    score: score(),
+    // ── cross-session café meta surfaced for the harness / dashboards ──
+    stars: meta ? meta.stars : 0,
+    totalPlaySec: Math.floor(totalPlaySec()),
+    totalPlayMin: Math.floor(totalPlayMin()),
+    permLevels: meta ? meta.perm : null,
+    gearOwned: meta ? Object.keys(meta.tools.owned).length : 0,
+    gearEquipped: meta ? meta.tools.equipped.filter(Boolean).length : 0,
+    nextGear: ng ? ng.id : null,
+    nextGearMin: ng ? Math.max(0, Math.ceil(ng.min - totalPlayMin())) : 0,
+    questsClaimable: claimableTasks(),
+    streak: meta ? meta.login.streak : 0,
+    lastStarsEarned: lastStarsEarned,
+    metaOpen: metaOpen
   };
 });
+
+// Persist the in-progress run's playtime before the tab is hidden/closed so a
+// refresh or app-switch mid-run banks it (GF.persist bounces a live run to MENU
+// on reload, which would otherwise drop runPlaySec). Both events for coverage.
+window.addEventListener('pagehide', function() { bankRunPlaytime(); });
+document.addEventListener('visibilitychange', function() { if (document.visibilityState === 'hidden') bankRunPlaytime(); });
 
 })();
 </script>
