@@ -74,6 +74,11 @@ function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 function lerp(a, b, x)    { return a + (b - a) * x; }
 function dist(ax, ay, bx, by) { var dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
 function rr(c, x, y, w, h, r) {
+  // Defensive: NaN/0/negative dims (early autostart frame) make arcTo throw
+  // IndexSizeError and crash the draw loop. Guard + clamp the radius.
+  if (!(w > 0) || !(h > 0) || !isFinite(x) || !isFinite(y)) return;
+  r = Math.max(0, Math.min(r, w / 2, h / 2));
+  if (!isFinite(r)) r = 0;
   c.beginPath();
   c.moveTo(x + r, y);
   c.arcTo(x + w, y, x + w, y + h, r);
@@ -660,9 +665,122 @@ var gpApi = {
   },
 };
 
+// ── PROCEDURAL MUSIC BED ───────────────────────────────────────────────────
+// Zero-asset looping background music, synthesised with WebAudio (no mp3, no
+// network, no credits, no bundle weight). Started on the first user gesture
+// (browser autoplay policy). Mute-aware via setMusicMuted. This is the FACTORY
+// BASELINE so every shipped game has a theme — call GF.startMusic({preset}) in
+// onReady. Presets pick scale/chords/tempo/timbre; pass one matching the vibe.
+var _mus = { ctx: null, master: null, on: false, muted: false, timer: null, next: 0, step: 0, bar: 0, preset: null, started: false };
+var MUSIC_PRESETS = {
+  // warm major lo-fi (root G) — cozy/management/puzzle
+  cozy:   { bpm: 82,  root: 196.00, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[5,0,2],[3,5,0],[4,6,1]], wave: 'triangle', bassWave: 'sine',     drums: false, gain: 0.16, arpDiv: 2 },
+  // driving minor synthwave (root A) — runner/arcade/action
+  synth:  { bpm: 122, root: 220.00, scale: [0,2,3,5,7,8,10], chords: [[0,2,4],[5,0,2],[3,5,0],[6,1,3]], wave: 'sawtooth', bassWave: 'square',   drums: true,  gain: 0.12, arpDiv: 4 },
+  // bright chiptune (root C) — fast casual/score
+  arcade: { bpm: 132, root: 261.63, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[3,5,0],[4,6,1],[0,2,4]], wave: 'square',   bassWave: 'triangle', drums: true,  gain: 0.11, arpDiv: 4 },
+  // slow ambient major (root F) — calm/zen
+  calm:   { bpm: 68,  root: 174.61, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[4,6,1],[5,0,2],[3,5,0]], wave: 'sine',     bassWave: 'sine',     drums: false, gain: 0.15, arpDiv: 2 },
+};
+function _musFreq(root, n) { return root * Math.pow(2, n / 12); }
+function _musTone(freq, t, dur, wave, peak, o) {
+  o = o || {}; var c = _mus.ctx; if (!c) return;
+  var osc = c.createOscillator(), g = c.createGain();
+  osc.type = wave; osc.frequency.setValueAtTime(freq, t);
+  if (o.glideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, o.glideTo), t + dur);
+  var a = o.attack != null ? o.attack : 0.02, r = o.release != null ? o.release : 0.12;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t + a);
+  g.gain.setValueAtTime(Math.max(0.0002, peak), t + Math.max(a + 0.01, dur - r));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  if (o.filter) { var f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.filter; osc.connect(f); f.connect(g); }
+  else osc.connect(g);
+  g.connect(_mus.master);
+  osc.start(t); osc.stop(t + dur + 0.05);
+}
+function _musNoise(t, dur, peak, freq) {
+  var c = _mus.ctx; if (!c) return;
+  var n = Math.floor(c.sampleRate * dur), buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+  for (var i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  var src = c.createBufferSource(); src.buffer = buf;
+  var hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = freq || 6000;
+  var g = c.createGain(); g.gain.setValueAtTime(peak, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(hp); hp.connect(g); g.connect(_mus.master); src.start(t); src.stop(t + dur + 0.02);
+}
+function _musKick(t) { _musTone(130, t, 0.16, 'sine', 0.42, { glideTo: 48, attack: 0.004, release: 0.12 }); }
+function _musSchedule() {
+  var p = _mus.preset, c = _mus.ctx; if (!p || !c) return;
+  var spb = 60 / p.bpm, stepDur = spb / 4;          // 16 sixteenth-steps per bar
+  while (_mus.next < c.currentTime + 0.25) {
+    var t = _mus.next, step = _mus.step % 16;
+    var chord = p.chords[_mus.bar % p.chords.length], sc = p.scale, L = sc.length;
+    var deg2semi = function (deg) { return sc[((deg % L) + L) % L] + 12 * Math.floor(deg / L); };
+    if (step === 0) {                                // bar: pad chord + bass + kick
+      for (var ci = 0; ci < chord.length; ci++) _musTone(_musFreq(p.root, deg2semi(chord[ci])), t, spb * 4 * 0.96, p.wave, 0.085, { attack: 0.10, release: 0.5, filter: 1500 });
+      _musTone(_musFreq(p.root, deg2semi(chord[0]) - 12), t, spb * 2 * 0.92, p.bassWave, 0.17, { attack: 0.02, release: 0.16, filter: 480 });
+      if (p.drums) _musKick(t);
+    }
+    if (step === 8) {                                // beat 3: bass + kick
+      _musTone(_musFreq(p.root, deg2semi(chord[0]) - 12), t, spb * 2 * 0.9, p.bassWave, 0.15, { attack: 0.02, release: 0.16, filter: 480 });
+      if (p.drums) _musKick(t);
+    }
+    var arpEvery = Math.max(1, Math.round(4 / p.arpDiv));
+    if (step % arpEvery === 0) {                     // arpeggiated lead, up an octave
+      var idx = Math.floor(step / arpEvery), deg = chord[idx % chord.length] + (idx % 6 >= 3 ? 7 : 0);
+      _musTone(_musFreq(p.root, deg2semi(deg) + 12), t, stepDur * arpEvery * 0.85, p.wave, 0.05, { attack: 0.008, release: 0.06, filter: 2800 });
+    }
+    if (p.drums && step % 2 === 1) _musNoise(t, 0.035, 0.045, 7000);  // offbeat hats
+    _mus.next += stepDur; _mus.step++;
+    if (_mus.step % 16 === 0) _mus.bar++;
+  }
+}
+function startMusic(opts) {
+  opts = opts || {};
+  _mus.preset = MUSIC_PRESETS[opts.preset] || MUSIC_PRESETS.cozy;
+  if (typeof opts.muted === 'boolean') _mus.muted = opts.muted;
+  if (_mus.started) return; _mus.started = true;
+  var begin = function () {
+    if (_mus.on) return;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+      _mus.ctx = _mus.ctx || new AC();
+      if (_mus.ctx.state === 'suspended') _mus.ctx.resume();
+      _mus.master = _mus.ctx.createGain();
+      _mus.master.gain.value = _mus.muted ? 0.0001 : _mus.preset.gain;
+      _mus.master.connect(_mus.ctx.destination);
+      _mus.next = _mus.ctx.currentTime + 0.12; _mus.step = 0; _mus.bar = 0; _mus.on = true;
+      _mus.timer = setInterval(function () { try { if (_mus.on) _musSchedule(); } catch (e) {} }, 30);
+    } catch (e) {}
+  };
+  // Hard-rule #8: suspend the music context on tab-hide so it stops synthesising
+  // in the background (no wasted CPU/battery); resume + re-anchor on return.
+  if (!_mus._visBound) {
+    _mus._visBound = true;
+    document.addEventListener('visibilitychange', function () {
+      if (!_mus.ctx) return;
+      try {
+        if (document.hidden) _mus.ctx.suspend();
+        else if (_mus.on) { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; }
+      } catch (e) {}
+    });
+  }
+  var fire = function () { begin(); ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.removeEventListener(ev, fire, true); }); };
+  ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.addEventListener(ev, fire, true); });
+}
+function setMusicMuted(m) {
+  _mus.muted = !!m;
+  if (_mus.master && _mus.ctx) { try { _mus.master.gain.setTargetAtTime(m ? 0.0001 : (_mus.preset ? _mus.preset.gain : 0.15), _mus.ctx.currentTime, 0.04); } catch (e) {} }
+}
+
 // ── PUBLIC API ───────────────────────────────────────────────────────────
 window.GF = {
   init: init,
+  // Procedural background music (factory baseline — every game ships a theme).
+  // Call GF.startMusic({ preset:'cozy'|'synth'|'arcade'|'calm', muted:bool }) in
+  // onReady; it begins on the first user gesture. Mirror your mute button to
+  // GF.setMusicMuted(bool). Zero assets, loops forever.
+  startMusic: startMusic,
+  setMusicMuted: setMusicMuted,
   canvas: canvas,
   ctx: ctx,
   // Live properties (read whenever the game needs current values)
