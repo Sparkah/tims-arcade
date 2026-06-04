@@ -82,7 +82,8 @@ When Tim wants to harden against agent-induced data loss, point him at it. Other
 
 ## Gallery-specific hard rules
 
-- **`git push` triggers a production deploy**. There is no staging branch. Every push to `main` goes live within ~60s.
+- **`git push` triggers a production deploy**. There is no staging branch. A push to `main` USUALLY goes live within ~60s — but NOT always: the scorecard can abort it, a ref race can reject it, or GitHub accepts the commit while the CF Pages build queues/lags/fails (then the old build keeps serving). **"Pushed" != "live."**
+- **VERIFY the deploy landed; redo until it does (Tim 2026-06-04).** After any Gallery push, confirm the LIVE site serves the new bytes: `bash Gallery/scripts/push_and_verify.sh --url games/<slug>/ --marker <new-string> [--push] [--retrigger]`. ALWAYS curl with `-L` — game pages 308-redirect (`/games/<slug>/index.html` -> `/games/<slug>/`), and a `-L`-less curl reads an EMPTY redirect body and falsely reports "not live" (the 2026-06-04 false alarm). A deploy that didn't land gets re-triggered (empty commit) until it's live.
 - **Pre-push pipeline is mandatory**: `Gallery/.git/hooks/pre-push` runs stage-0 (cover-art check) + stage-1 (Yandex mechanical check) + stage-2 (6-axis AI scorecard). Don't bypass with `--no-verify` unless Tim explicitly asks.
 - **Cachebust assets after editing CSS/JS**: `Gallery/scripts/sync_games.sh` tails into `cachebust_assets.sh` automatically. If editing `style.css`/`app.js`/`identity.js`/`sdk.js` directly without running sync, manually run `bash scripts/cachebust_assets.sh` before push.
 - **KV is shared with prod from local wrangler dev**. `npx wrangler pages dev` connects to the LIVE KV namespace. A test write IS a prod write. Use a `--remote=false` flag or a separate namespace if you need isolation.
