@@ -42,6 +42,7 @@ var STRINGS = {
     bazaarLv: 'Bazaar Lv', delivToNext: 'deliveries to next level', codexLbl: 'Codex',
     shopTitle: 'Spend vault gold on permanent upgrades', upMax: 'MAX',
     upSlots: 'Start critters', upSell: 'Sell price', upLuck: 'Wild luck',
+    upIdle: 'Idle income', upVault: 'Vault cut',
     goalLine: 'Goal: grow the bazaar, bank gold, complete the codex',
     gameover: 'GRIDLOCK!',
     order: 'ORDERS', want: 'wants', tap_nest: 'TAP TO SPAWN', nest: 'NEST',
@@ -65,6 +66,7 @@ var STRINGS = {
     bazaarLv: 'Базар ур.', delivToNext: 'сдач до следующего уровня', codexLbl: 'Кодекс',
     shopTitle: 'Трать золото казны на постоянные улучшения', upMax: 'МАКС',
     upSlots: 'Стартовые зверята', upSell: 'Цена продажи', upLuck: 'Удача на дикую',
+    upIdle: 'Ночной доход', upVault: 'Доля казны',
     goalLine: 'Цель: расти базар, копи золото, собери кодекс',
     gameover: 'ТУПИК!',
     order: 'ЗАКАЗЫ', want: 'нужно', tap_nest: 'НАЖМИ — ПОЯВИТСЯ', nest: 'ГНЕЗДО',
@@ -149,6 +151,10 @@ var L = { boardX:0, boardY:0, boardW:0, cell:0, trayY:0, trayH:0, nestY:0, nestH
 var helpBtn = { x:0, y:0, w:0, h:0 };
 var vaultBtn = { x:0, y:0, w:0, h:0 };   // in-run button: shows banked gold, opens the Vault (meta) overlay
 var resumeBtn = { x:0, y:0, w:0, h:0 };
+var vaultTabRects = [];     // [{tab,x,y,w,h}] — UPGRADES / COLLECTION tab buttons
+var charmTileRects = [];    // [{id,x,y,w,h}] — owned charm tiles (tap = equip toggle)
+var charmUpRects = [];      // [{id,x,y,w,h,afford}] — charm upgrade buttons
+var equipSlotRects = [];    // [{slot,x,y,w,h}] — equip slots (tap a filled slot = unequip)
 var paused = false;                       // Vault overlay open mid-run (freezes the game so you never have to lose to reach the meta)
 var shopBtns = [];          // {kind, x,y,w,h, cost, enabled}
 var orderRects = [];        // {x,y,w,h, order}
@@ -166,13 +172,117 @@ var META_KEY = 'beast_bazaar_meta_v1';
 // PERMANENT upgrade ladder. level 0 = not bought. Each adds a cumulative perk
 // to the NEXT run. Costs are banked-gold (a separate currency from in-run coins).
 var META_UP = {
-  slots:  { max: 5, base: 60,  step: 1.7, label: 'startSlots',  col: '#7ed957' }, // +1 starting critter per level
-  sell:   { max: 5, base: 80,  step: 1.8, label: 'sellBonus',   col: '#ffd700' }, // +12% delivery coins per level
-  luck:   { max: 5, base: 100, step: 1.9, label: 'spawnLuck',   col: '#c77dff' }, // +2% wildcard chance per level
+  slots:  { max: 5, base: 60,  step: 1.7, col: '#7ed957' }, // +1 starting critter per level
+  sell:   { max: 5, base: 80,  step: 1.8, col: '#ffd700' }, // +12% delivery coins per level
+  luck:   { max: 5, base: 100, step: 1.9, col: '#c77dff' }, // +2% wildcard chance per level
+  idle:   { max: 5, base: 90,  step: 1.8, col: '#6aa9e0' }, // +25% overnight idle income per level
+  vault:  { max: 5, base: 120, step: 1.9, col: '#e8985e' }, // +5% of each run banked as gold per level
 };
-var BANK_RATE = 0.25;        // fraction of a run's score banked as gold at game-over
+var META_UP_KEYS = ['slots', 'sell', 'luck', 'idle', 'vault'];
+var BANK_RATE = 0.25;        // base fraction of a run's score banked as gold at game-over
 var IDLE_CAP_H = 8;          // overnight idle income caps at 8h elapsed
 var IDLE_PER_LVL_PER_H = 6;  // gold/hour generated per bazaar level
+
+// ── M3 THE COLLECTION — playtime-unlocked, equippable Charms ───────────────
+// The multi-DAY pull. Charms unlock on a FIXED ladder of CUMULATIVE PLAYTIME
+// (meta.totalPlaySec), so "next charm in N min" is always a visible goal. Each
+// charm is a passive run boost, upgradable 1→5 with vault gold; only 3 fit in
+// the equip slots, so owning more than you can equip creates loadout choices.
+// Icons are VECTOR-DRAWN (drawCharmIcon) — never emoji, which render as tofu
+// boxes in the game font (the "? over the moon currency" bug Tim flagged).
+var CHARM_MAX_LVL = 5;
+var CHARM_SLOTS = 3;
+var CHARM_DEFS = [
+  { id: 'coin',   min: 5,   col: '#ffd700', stat: 'sell',  per: 0.06, en: 'Lucky Coin',    ru: 'Монета удачи' },
+  { id: 'egg',    min: 15,  col: '#7ed957', stat: 'start', per: 1,    en: "Breeder's Egg",  ru: 'Яйцо выводка' },
+  { id: 'gem',    min: 30,  col: '#6aa9e0', stat: 'merge', per: 2,    en: 'Trade Gem',      ru: 'Самоцвет' },
+  { id: 'clover', min: 45,  col: '#c77dff', stat: 'wild',  per: 0.03, en: 'Wild Clover',    ru: 'Клевер удачи' },
+  { id: 'rune',   min: 70,  col: '#e8985e', stat: 'idle',  per: 0.25, en: 'Vault Rune',     ru: 'Руна казны' },
+  { id: 'bell',   min: 100, col: '#ffd166', stat: 'sell',  per: 0.10, en: 'Golden Bell',    ru: 'Золотой звон' },
+  { id: 'crown',  min: 140, col: '#ff7b6b', stat: 'start', per: 1,    en: 'Beast Crown',    ru: 'Корона зверя' },
+  { id: 'star',   min: 200, col: '#9d7bff', stat: 'merge', per: 5,    en: 'Midas Star',     ru: 'Звезда Мидаса' },
+];
+var CHARM_BY_ID = {};
+for (var _ci = 0; _ci < CHARM_DEFS.length; _ci++) CHARM_BY_ID[CHARM_DEFS[_ci].id] = CHARM_DEFS[_ci];
+// human-readable bonus for a charm at a given level (value = per × level)
+function charmBonusText(def, lvl) {
+  var v = def.per * lvl;
+  if (def.stat === 'sell' || def.stat === 'wild' || def.stat === 'idle') v = Math.round(v * 100) + '%';
+  else v = '' + v;
+  var ru = (GF.lang === 'ru');
+  switch (def.stat) {
+    case 'sell':  return '+' + v + (ru ? ' к продаже' : ' sell value');
+    case 'start': return '+' + v + (ru ? ' стартовый зверь' : ' start critter');
+    case 'merge': return '+' + v + (ru ? ' золота за слияние' : ' gold / merge');
+    case 'wild':  return '+' + v + (ru ? ' шанс дикой' : ' wild luck');
+    case 'idle':  return '+' + v + (ru ? ' ночной доход' : ' idle income');
+  }
+  return '';
+}
+function charmName(def) { return (GF.lang === 'ru' ? def.ru : def.en) || def.en; }
+// summed bonus across EQUIPPED charms whose stat matches (per × level)
+function charmVal(stat) {
+  if (!meta) return 0;
+  var v = 0;
+  for (var i = 0; i < meta.equipped.length; i++) {
+    var id = meta.equipped[i]; if (!id) continue;
+    var def = CHARM_BY_ID[id], c = meta.charms[id];
+    if (def && c && def.stat === stat) v += def.per * c.lvl;
+  }
+  return v;
+}
+// live cumulative playtime (persisted + the in-progress run) in seconds / minutes
+function totalPlaySec() { return (meta ? meta.totalPlaySec : 0) + runPlaySec; }
+function totalPlayMin() { return totalPlaySec() / 60; }
+// the next not-yet-owned charm on the ladder (the visible goal), or null if all owned
+function nextCharm() {
+  if (!meta) return null;
+  for (var i = 0; i < CHARM_DEFS.length; i++) {
+    if (!meta.charms[CHARM_DEFS[i].id]) return CHARM_DEFS[i];
+  }
+  return null;
+}
+// grant any charm whose playtime milestone has been crossed; returns newly-granted defs
+function checkCharmUnlocks() {
+  if (!meta) return [];
+  var mins = totalPlayMin(), granted = [];
+  for (var i = 0; i < CHARM_DEFS.length; i++) {
+    var d = CHARM_DEFS[i];
+    if (mins >= d.min && !meta.charms[d.id]) {
+      meta.charms[d.id] = { lvl: 1 };
+      // auto-equip into a free slot so the first charms are felt immediately
+      for (var s = 0; s < meta.equipped.length; s++) { if (!meta.equipped[s]) { meta.equipped[s] = d.id; break; } }
+      granted.push(d);
+    }
+  }
+  if (granted.length) saveMeta();
+  return granted;
+}
+// gold cost to upgrade a charm to its next level (Infinity if maxed / unowned)
+function charmUpCost(id) {
+  var c = meta && meta.charms[id]; if (!c) return Infinity;
+  if (c.lvl >= CHARM_MAX_LVL) return Infinity;
+  var def = CHARM_BY_ID[id];
+  return Math.round((40 + def.min * 0.6) * Math.pow(1.6, c.lvl - 1));
+}
+function buyCharmUpgrade(id) {
+  var cost = charmUpCost(id);
+  if (!meta || !isFinite(cost) || meta.bank < cost) return false;
+  meta.bank -= cost; meta.charms[id].lvl += 1; saveMeta();
+  return true;
+}
+// equip toggle: equipped → unequip; else drop into first free slot (no-op if full)
+function toggleEquip(id) {
+  if (!meta || !meta.charms[id]) return false;
+  var at = meta.equipped.indexOf(id);
+  if (at >= 0) { meta.equipped[at] = null; saveMeta(); return true; }
+  for (var s = 0; s < meta.equipped.length; s++) { if (!meta.equipped[s]) { meta.equipped[s] = id; saveMeta(); return true; } }
+  return false; // slots full — player unequips one first
+}
+function unequipSlot(slot) {
+  if (!meta || !meta.equipped[slot]) return false;
+  meta.equipped[slot] = null; saveMeta(); return true;
+}
 var meta = null;             // loaded in onReady
 var lastProfit = 0;          // gold banked from the most recent run (session-end hook)
 var lastRunCollected = 0;    // NEW codex species discovered in the most recent run
@@ -180,6 +290,10 @@ var idleClaim = 0;           // gold awarded by the most recent idle-claim (for 
 var idleHoursAway = 0;       // hours elapsed since last close (display)
 var dailyClaim = 0;          // login-bonus gold just awarded (for menu panel)
 var streakJustGrew = false;  // show streak flourish on the menu this open
+var runPlaySec = 0;          // seconds played in the CURRENT run (folded into meta.totalPlaySec at game-over)
+var charmToast = null;       // { def, t } — "NEW CHARM" flourish when a playtime milestone unlocks
+var bootBannerT = 0;         // seconds remaining on the "welcome back" idle/daily banner at boot
+var vaultTab = 'up';         // 'up' | 'charms' — active tab in the Vault overlay
 function defaultMeta() {
   return {
     bank: 0,                 // banked gold (permanent currency)
@@ -195,6 +309,10 @@ function defaultMeta() {
     bestStreak: 0,
     questDay: '',            // UTC day the active quest set was generated for
     quests: [],              // [{kind, goal, prog, done, claimed}]
+    // M3 THE COLLECTION — playtime-unlocked equippable Charms (the multi-day pull)
+    totalPlaySec: 0,         // cumulative time spent actually playing (drives charm unlocks)
+    charms: {},              // charmId -> { lvl: 1..MAX }   (owned + upgrade level)
+    equipped: [null, null, null], // charmId per equip slot (boost the run)
   };
 }
 function loadMeta() {
@@ -216,6 +334,21 @@ function loadMeta() {
         m.bestStreak = +s.bestStreak || 0;
         m.questDay = s.questDay || '';
         m.quests = Array.isArray(s.quests) ? s.quests : [];
+        m.totalPlaySec = Math.max(0, +s.totalPlaySec || 0);
+        if (s.charms && typeof s.charms === 'object') {
+          for (var cid in s.charms) {
+            if (s.charms.hasOwnProperty(cid) && CHARM_BY_ID[cid]) {
+              var lv = +(s.charms[cid] && s.charms[cid].lvl) || 1;
+              m.charms[cid] = { lvl: GF.clamp(lv, 1, CHARM_MAX_LVL) };
+            }
+          }
+        }
+        if (Array.isArray(s.equipped)) {
+          for (var si = 0; si < 3; si++) {
+            var eid = s.equipped[si];
+            m.equipped[si] = (eid && m.charms[eid]) ? eid : null;
+          }
+        }
       }
     }
   } catch (e) {}
@@ -239,9 +372,12 @@ function buyMetaUpgrade(key) {
   return true;
 }
 // permanent perks applied to the CURRENT run, derived from owned upgrade levels
-function permStartCritters() { return 2 + (meta ? meta.up.slots : 0); }       // base 2 seed critters + bought slots
-function permSellMult()      { return 1 + (meta ? meta.up.sell : 0) * 0.12; } // +12% coins/level
-function permWildChance()    { return wildcardChance + (meta ? meta.up.luck : 0) * 0.02; }
+function permStartCritters() { return 2 + (meta ? meta.up.slots : 0) + charmVal('start'); }   // base 2 + slot upgrades + Charms
+function permSellMult()      { return 1 + (meta ? meta.up.sell : 0) * 0.12 + charmVal('sell'); } // +12%/lvl + Charm sell bonus
+function permWildChance()    { return wildcardChance + (meta ? meta.up.luck : 0) * 0.02 + charmVal('wild'); }
+function permMergeGold()     { return charmVal('merge'); }                                     // flat coins granted per merge (Charms)
+function permBankRate()      { return BANK_RATE + (meta ? meta.up.vault : 0) * 0.05; }          // banked cut of run score
+function permIdleMul()       { return 1 + (meta ? meta.up.idle : 0) * 0.25 + charmVal('idle'); }
 // codex (owned collection) — record a tier as forever-discovered
 function recordCodex(tier) {
   if (!meta || tier < 0) return;
@@ -274,7 +410,7 @@ function claimOnOpen() {
     var hrs = Math.min(IDLE_CAP_H, (now - meta.lastClose) / 3600000);
     if (hrs >= 0.05) {
       idleHoursAway = hrs;
-      idleClaim = Math.round(hrs * meta.bazaarLevel * IDLE_PER_LVL_PER_H);
+      idleClaim = Math.round(hrs * meta.bazaarLevel * IDLE_PER_LVL_PER_H * permIdleMul());
       if (idleClaim > 0) meta.bank += idleClaim;
     }
   }
@@ -294,11 +430,13 @@ function claimOnOpen() {
 // Called at game-over: bank a cut of the run as permanent gold + grow the bazaar.
 function bankRun() {
   if (!meta) return;
-  lastProfit = Math.round(score * BANK_RATE);
+  lastProfit = Math.round(score * permBankRate());
   meta.bank += lastProfit;
   meta.totalDeliveries += deliveries;
   meta.runs += 1;
+  meta.totalPlaySec += runPlaySec; runPlaySec = 0;   // bank the run's playtime toward Charm unlocks
   recomputeBazaarLevel();
+  checkCharmUnlocks();
   meta.lastClose = Date.now();
   saveMeta();
 }
@@ -457,6 +595,9 @@ function tryActOn(srcIdx, dstKind, dstRef) {
   combo = (comboTimer > 0) ? combo + 1 : 1;
   comboTimer = comboWindowMs;
   if (combo > bestCombo) bestCombo = combo;
+  // equipped Charm: flat gold per merge (Trade Gem / Midas Star)
+  var mg = permMergeGold();
+  if (mg > 0) { coins += mg; score += mg; GF.spawnFloat(p2.x, p2.y - L.cell * 0.55, '+' + mg, '#ffd700'); }
   // first merge → unlock orders (progressive disclosure)
   if (!firstMergeDone) { firstMergeDone = true; refillOrders(); }
   // VFX
@@ -639,12 +780,20 @@ function shopHit(x, y) {
 // ── INPUT ────────────────────────────────────────────────────────────────
 function onDown(x, y) {
   if (gs !== 'PLAYING') return;
-  // Vault overlay open: handle upgrade buys + RESUME, swallow everything else
+  // Vault overlay open: handle tabs + buys + equip + RESUME, swallow everything else
   if (paused) {
-    if (resumeBtn.w && x >= resumeBtn.x && x <= resumeBtn.x + resumeBtn.w && y >= resumeBtn.y && y <= resumeBtn.y + resumeBtn.h) { paused = false; return; }
+    var hit = function (r) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; };
+    if (resumeBtn.w && hit(resumeBtn)) { paused = false; return; }
+    for (var ti = 0; ti < vaultTabRects.length; ti++) { if (hit(vaultTabRects[ti])) { vaultTab = vaultTabRects[ti].tab; return; } }
+    if (vaultTab === 'charms') {
+      for (var ci = 0; ci < charmUpRects.length; ci++) { if (hit(charmUpRects[ci])) { if (charmUpRects[ci].afford && buyCharmUpgrade(charmUpRects[ci].id) && GF.happytime) GF.happytime(); return; } }
+      for (var cj = 0; cj < charmTileRects.length; cj++) { if (hit(charmTileRects[cj])) { toggleEquip(charmTileRects[cj].id); return; } }
+      for (var ck = 0; ck < equipSlotRects.length; ck++) { if (hit(equipSlotRects[ck])) { unequipSlot(equipSlotRects[ck].slot); return; } }
+      return;
+    }
     for (var mi = 0; mi < metaUpRects.length; mi++) {
       var rr = metaUpRects[mi];
-      if (x >= rr.x && x <= rr.x + rr.w && y >= rr.y && y <= rr.y + rr.h) { if (rr.afford && buyMetaUpgrade(rr.key) && GF.happytime) GF.happytime(); return; }
+      if (hit(rr)) { if (rr.afford && buyMetaUpgrade(rr.key) && GF.happytime) GF.happytime(); return; }
     }
     return;
   }
@@ -715,10 +864,17 @@ function onUp(x, y) {
 
 // ── UPDATE ───────────────────────────────────────────────────────────────
 function update(dt) {
+  if (charmToast) { charmToast.t -= dt; if (charmToast.t <= 0) charmToast = null; }
+  if (bootBannerT > 0) bootBannerT = Math.max(0, bootBannerT - dt);
   if (paused) return;   // Vault overlay open — freeze the run (no losing required to reach the meta)
   if (newBeastFlash > 0) newBeastFlash = Math.max(0, newBeastFlash - dt);
   if (gs !== 'PLAYING') { GF.tutorial.update(dt); return; }
   GF.tutorial.update(dt);
+
+  // accrue playtime → unlock Charms on the cumulative-time ladder (the multi-day pull)
+  runPlaySec += dt;
+  var fresh = checkCharmUnlocks();
+  if (fresh.length) { charmToast = { def: fresh[fresh.length - 1], t: 3.4 }; GF.happytime && GF.happytime(); }
 
   // pop animations
   for (var i = 0; i < board.length; i++) {
@@ -744,33 +900,38 @@ function update(dt) {
 // ── DRAW ─────────────────────────────────────────────────────────────────
 function layout() {
   var W = GF.W, H = GF.H, S = GF.S;
-  // reserve top strip + order tray + bottom nest/shop strip; board fills middle
-  var topH = GF.clamp(46 * S, 38, 64);
+  var pad = GF.clamp(10 * S, 6, 16);
+  // Centered portrait PLAY COLUMN. On phones colW ≈ full width; on desktop it caps to
+  // a phone-like column so the board / nest / HUD don't fling to the screen edges
+  // (fixes the broken desktop layout: stranded bottom-left nest + spread-out shop).
+  var colW = Math.min(W - pad * 2, Math.round(H * 0.62));
+  var colX = Math.round((W - colW) / 2);
+  L.colX = colX; L.colW = colW;
+  // top strip holds two clean rows (score / coins on the left, vault+help / free on the right)
+  var topH = GF.clamp(58 * S, 48, 74);
   var trayH = GF.clamp(64 * S, 52, 88);
   var bottomH = GF.clamp(108 * S, 88, 150);
-  var pad = GF.clamp(10 * S, 6, 16);
   L.trayY = topH;
   L.trayH = trayH;
   var availTop = topH + trayH + pad;
   var availBot = H - bottomH - pad;
   var availH = availBot - availTop;
-  // board sized to fit cols within width AND rows within availH
-  var maxBoardW = W - pad * 2;
+  var maxBoardW = colW - pad * 2;
   var cellByW = maxBoardW / boardCols;
   var cellByH = availH / rows;
   L.cell = Math.floor(Math.min(cellByW, cellByH));
   L.boardW = L.cell * boardCols;
-  L.boardX = (W - L.boardW) / 2;
+  L.boardX = colX + Math.round((colW - L.boardW) / 2);
   var boardH = L.cell * rows;
   L.boardY = availTop + (availH - boardH) / 2;
   L.nestY = H - bottomH;
   L.nestH = bottomH;
-  // help button top-right
-  var hb = GF.clamp(34 * S, 28, 44);
-  helpBtn = { x: W - hb - pad, y: pad * 0.6, w: hb, h: hb };
-  // vault button (banked-gold pill) to the LEFT of help — opens the meta mid-run
+  // help button at the column's top-right (row A)
+  var hb = GF.clamp(30 * S, 26, 38);
+  helpBtn = { x: colX + colW - hb - pad, y: 6 * S, w: hb, h: hb };
+  // vault button (banked-gold pill) to the LEFT of help — opens the meta any time
   var vw = GF.clamp(104 * S, 84, 150);
-  vaultBtn = { x: helpBtn.x - vw - pad * 0.6, y: pad * 0.6, w: vw, h: hb };
+  vaultBtn = { x: helpBtn.x - vw - pad * 0.6, y: 6 * S, w: vw, h: hb };
 }
 
 function draw(ctx) {
@@ -794,33 +955,116 @@ function draw(ctx) {
   }
   if (paused) drawPauseOverlay(ctx);
 
-  if (gs === 'MENU') drawMenu(ctx);
   if (gs === 'GAMEOVER') drawGameOver(ctx);
   if (continueBannerUntil && nowMs() < continueBannerUntil && gs === 'PLAYING') drawContinueBanner(ctx);
+  if (charmToast && !paused) drawCharmToast(ctx);
+  if (bootBannerT > 0 && !paused && gs !== 'GAMEOVER') drawBootBanner(ctx);
+}
+
+// Vector coin (gold disc + ring) — used wherever the in-run coin currency appears.
+// NEVER an emoji: 🪙 renders as a tofu box / "moon" glyph in the game font (Tim's
+// "? over the moon currency" bug). Same reason Charm icons are vector-drawn below.
+function drawCoinIcon(ctx, x, y, r) {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffd700'; ctx.fill();
+  ctx.lineWidth = Math.max(1, r * 0.18); ctx.strokeStyle = '#b9870c'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(x, y, r * 0.52, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = Math.max(1, r * 0.13); ctx.stroke();
+  ctx.restore();
+}
+// Vector Charm icon — shape varies by the boost it grants (no fonts, no emoji).
+function drawCharmIcon(ctx, def, x, y, r) {
+  ctx.save();
+  ctx.fillStyle = def.col;
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = Math.max(1, r * 0.12);
+  var i, ang, rr, px, py;
+  switch (def.stat) {
+    case 'sell':  // coin
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, r * 0.5, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.stroke();
+      break;
+    case 'start': // egg
+      ctx.beginPath(); ctx.ellipse(x, y, r * 0.78, r, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      break;
+    case 'merge': // diamond
+      ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.82, y);
+      ctx.lineTo(x, y + r); ctx.lineTo(x - r * 0.82, y); ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    case 'wild':  // 4-point sparkle
+      ctx.beginPath();
+      for (i = 0; i < 8; i++) { ang = i * Math.PI / 4 - Math.PI / 2; rr = (i % 2 === 0) ? r : r * 0.4; px = x + Math.cos(ang) * rr; py = y + Math.sin(ang) * rr; if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      break;
+    case 'idle':  // vault box + keyhole
+      GF.rr(ctx, x - r * 0.85, y - r * 0.72, r * 1.7, r * 1.44, r * 0.25); ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y - r * 0.05, r * 0.28, 0, Math.PI * 2); ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fill();
+      break;
+    default:
+      ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
+}
+// "NEW CHARM!" flourish when a playtime milestone unlocks (mid-run, non-blocking).
+function drawCharmToast(ctx) {
+  var S = GF.S, def = charmToast.def, ru = (GF.lang === 'ru');
+  var w = GF.clamp(258 * S, 200, 320), h = GF.clamp(54 * S, 46, 66);
+  var x = GF.cx - w / 2, y = GF.clamp(GF.H * 0.16, 60, 150);
+  var a = GF.clamp(charmToast.t / 0.4, 0, 1);   // fade out in the last 0.4s
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, 12 * S); ctx.fillStyle = 'rgba(30,20,12,0.96)'; ctx.fill();
+  ctx.strokeStyle = def.col; ctx.lineWidth = 2 * S; ctx.stroke();
+  drawCharmIcon(ctx, def, x + h * 0.5, y + h / 2, h * 0.3);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = def.col; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText((ru ? 'НОВЫЙ ТАЛИСМАН' : 'NEW CHARM') + '  ·  ' + charmName(def), x + h, y + h * 0.36);
+  ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+  ctx.fillText(charmBonusText(def, 1) + (ru ? '  — в Казне' : '  — in the Vault'), x + h, y + h * 0.68);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
+// "Welcome back" banner at boot: overnight idle income + daily streak bonus (the reason
+// to return), shown briefly so the daily reward is FELT even though there's no menu now.
+function drawBootBanner(ctx) {
+  var S = GF.S, ru = (GF.lang === 'ru');
+  var parts = [];
+  if (idleClaim > 0) parts.push('+' + fmtGold(idleClaim) + ' ' + GF.t('awayEarned'));
+  if (dailyClaim > 0) parts.push(GF.t('streakDay') + ' ' + meta.streak + ': +' + dailyClaim + ' ' + GF.t('streakBonus'));
+  if (!parts.length) return;
+  var txt = parts.join('   •   ');
+  ctx.font = GF.clamp(11.5 * S, 9, 15) + 'px sans-serif';
+  var w = Math.min(GF.W - 24 * S, ctx.measureText(txt).width + 28 * S), h = GF.clamp(34 * S, 28, 44);
+  var x = GF.cx - w / 2, y = GF.clamp(GF.H * 0.5, 120, GF.H - 120);
+  var a = GF.clamp(bootBannerT / 0.6, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, h / 2); ctx.fillStyle = 'rgba(20,14,8,0.95)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(126,217,87,0.6)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+  ctx.fillStyle = '#7ed957'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, GF.cx, y + h / 2);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
 }
 
 function drawTopHUD(ctx) {
-  var S = GF.S, W = GF.W;
-  var fs = GF.clamp(15 * S, 11, 20);
+  var S = GF.S, pad = GF.clamp(10 * S, 6, 16);
+  var lx = L.colX + pad, rx = L.colX + L.colW - pad;
+  var rowA = 18 * S, rowB = 46 * S;
   ctx.textBaseline = 'middle';
-  // score (left)
-  ctx.font = 'bold ' + fs + 'px sans-serif';
+  // SCORE (top-left, row A)
+  ctx.font = 'bold ' + GF.clamp(15 * S, 11, 20) + 'px sans-serif';
   ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
-  ctx.fillText(GF.t('score') + ' ' + score, 10 * S, 18 * S);
-  // best species chip under score
-  ctx.font = GF.clamp(11 * S, 9, 15) + 'px sans-serif';
-  ctx.fillStyle = '#ffd166';
-  ctx.fillText(GF.t('best') + ': ' + speciesName(maxTierReached), 10 * S, 34 * S);
-  // coins + free (right)
-  ctx.textAlign = 'right';
-  ctx.font = 'bold ' + fs + 'px sans-serif';
-  ctx.fillStyle = '#ffd700';
-  ctx.fillText('🪙 ' + coins, W - 10 * S, 18 * S);
+  ctx.fillText(GF.t('score') + ' ' + score, lx, rowA);
+  // COINS (left, row B) — vector coin + amount
+  var cr = GF.clamp(7 * S, 6, 10);
+  drawCoinIcon(ctx, lx + cr, rowB, cr);
+  ctx.font = 'bold ' + GF.clamp(15 * S, 11, 20) + 'px sans-serif';
+  ctx.fillStyle = '#ffd700'; ctx.textAlign = 'left';
+  ctx.fillText('' + coins, lx + cr * 2 + 5 * S, rowB);
+  // FREE cells (right, row B — sits below the vault/help row)
   var fc = freeCells();
-  var fcol = fc <= 2 ? '#ff5b5b' : fc <= 5 ? '#ffb347' : '#9ab';
-  ctx.font = GF.clamp(11 * S, 9, 15) + 'px sans-serif';
-  ctx.fillStyle = fcol;
-  ctx.fillText(GF.t('free') + ': ' + fc, W - 10 * S, 34 * S);
+  ctx.font = GF.clamp(11.5 * S, 9, 15) + 'px sans-serif';
+  ctx.fillStyle = fc <= 2 ? '#ff5b5b' : fc <= 5 ? '#ffb347' : '#9ab';
+  ctx.textAlign = 'right';
+  ctx.fillText(GF.t('free') + ': ' + fc, rx, rowB);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -888,6 +1132,10 @@ function drawBoard(ctx) {
     ctx.fill();
     if (isSel) { ctx.lineWidth = 3 * S; ctx.strokeStyle = '#ffd700'; ctx.stroke(); }
     var c = board[idx];
+    // settle the sprite to its cell center every frame (position is never animated, only
+    // the `pop` scale is). Fixes seeded critters stuck at 0,0 when startGame runs before
+    // the first layout(), and any stale offset after +ROW / resume.
+    if (c) { c.sx = cx + L.cell / 2; c.sy = cy + L.cell / 2; }
     if (c && !(drag && drag.moved && drag.idx === idx)) {
       var sz = L.cell * 0.82 * (1 + (c.pop || 0) * 0.18);
       drawBeast(ctx, c.sx, c.sy, c.tier, c.wild, sz, c.pop || 0);
@@ -957,15 +1205,17 @@ function drawBeast(ctx, x, y, tier, wild, size, pop) {
 }
 
 function drawBottom(ctx) {
-  var S = GF.S, W = GF.W;
+  var S = GF.S;
   nestRects = []; shopBtns = [];
   var y = L.nestY, h = L.nestH;
   var pad = 10 * S;
+  // everything lives inside the centered play column (not the full screen width)
+  var bx0 = L.colX + pad, bw0 = L.colW - pad * 2;
   // NEST tile(s) on the left
-  var nestW = GF.clamp((W * 0.42), 110, 220);
+  var nestW = GF.clamp(bw0 * 0.42, 96, 220);
   var perW = nests > 1 ? (nestW - 6 * S) / nests : nestW;
   for (var k = 0; k < nests; k++) {
-    var nx = pad + k * (perW + 6 * S), ny = y + pad, nh = h - pad * 2;
+    var nx = bx0 + k * (perW + 6 * S), ny = y + pad, nh = h - pad * 2;
     GF.rr(ctx, nx, ny, perW, nh, 14 * S);
     var ready = nestCharges[k] >= 1;
     ctx.fillStyle = ready ? '#3d6b34' : '#2c3a28'; ctx.fill();
@@ -984,9 +1234,9 @@ function drawBottom(ctx) {
     ctx.fillText(ready ? GF.t('tap_nest') : GF.t('nest'), nx + perW / 2, ny + nh - 5 * S);
     nestRects.push({ x: nx, y: ny, w: perW, h: nh, idx: k });
   }
-  // SHOP buttons on the right (once unlocked)
-  var shopX = pad + nestW + 12 * S;
-  var shopW = W - shopX - pad;
+  // SHOP buttons on the right (once unlocked) — bounded by the column, not the screen
+  var shopX = bx0 + nestW + 12 * S;
+  var shopW = (L.colX + L.colW - pad) - shopX;
   if (shopUnlocked) {
     var defs = [
       { kind: 'nest', label: GF.t('buyNest'), cost: genCost, ok: coins >= genCost && nests < 2, col: '#7ed957' },
@@ -1003,15 +1253,20 @@ function drawBottom(ctx) {
       ctx.fillStyle = d.ok ? '#fff' : '#888'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif';
       ctx.fillText(d.label, bx + 10 * S, by + bh / 2);
-      ctx.textAlign = 'right'; ctx.fillStyle = d.ok ? '#ffd700' : '#888';
+      // cost: vector coin + number, right-aligned as a group (no emoji)
       ctx.font = GF.clamp(11 * S, 9, 15) + 'px sans-serif';
-      ctx.fillText('🪙' + d.cost, bx + shopW - 10 * S, by + bh / 2);
+      var costStr = '' + d.cost, ccr = GF.clamp(6 * S, 5, 8);
+      var grpW = ccr * 2 + 3 * S + ctx.measureText(costStr).width;
+      var gx = bx + shopW - 10 * S - grpW;
+      drawCoinIcon(ctx, gx + ccr, by + bh / 2, ccr);
+      ctx.textAlign = 'left'; ctx.fillStyle = d.ok ? '#ffd700' : '#888';
+      ctx.fillText(costStr, gx + ccr * 2 + 3 * S, by + bh / 2);
       shopBtns.push({ kind: d.kind, x: bx, y: by, w: shopW, h: bh });
     }
   } else {
     ctx.fillStyle = '#8a7'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif';
-    var msg = GF.lang === 'ru' ? ('Лавка с ' + SHOP_FAMILY_COIN + ' 🪙') : ('Shop at ' + SHOP_FAMILY_COIN + ' 🪙');
+    var msg = GF.lang === 'ru' ? ('Лавка при ' + SHOP_FAMILY_COIN + ' монетах') : ('Shop opens at ' + SHOP_FAMILY_COIN + ' coins');
     ctx.fillText(msg, shopX + shopW / 2, y + h / 2);
   }
   ctx.textBaseline = 'alphabetic';
@@ -1105,20 +1360,37 @@ function drawVaultBtn(ctx) {
   ctx.fillText('▸ ' + fmtGold(meta ? meta.bank : 0) + ' ' + GF.t('goldUnit'), b.x + b.w / 2, b.y + b.h / 2 + 1);
   ctx.textBaseline = 'alphabetic';
 }
-// Pause overlay = the Vault (meta) reachable mid-run, freezing the game.
+// Pause overlay = the Vault (meta) reachable mid-run, freezing the game. Two tabs:
+// UPGRADES (permanent stat shop) and COLLECTION (playtime-unlocked equippable Charms).
 function drawPauseOverlay(ctx) {
   var S = GF.S, W = GF.W, H = GF.H, ru = (GF.lang === 'ru');
-  ctx.fillStyle = 'rgba(10,6,4,0.9)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(10,6,4,0.92)'; ctx.fillRect(0, 0, W, H);
   ctx.fillStyle = '#ffd166'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  ctx.font = 'bold ' + GF.clamp(22 * S, 16, 30) + 'px sans-serif';
-  var ty = GF.clamp(H * 0.12, 44, 100);
+  ctx.font = 'bold ' + GF.clamp(21 * S, 16, 28) + 'px sans-serif';
+  var ty = GF.clamp(H * 0.085, 38, 84);
   ctx.fillText(ru ? 'КАЗНА БАЗАРА' : 'BAZAAR VAULT', GF.cx, ty);
-  ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif'; ctx.fillStyle = '#caa86a';
-  ctx.fillText(GF.t('goalLine'), GF.cx, ty + 18 * S);
   var maxW = Math.min(W - 24 * S, 440 * S);
-  var pb = drawMetaPanel(ctx, ty + 28 * S, maxW);
-  var bw = GF.clamp(220 * S, 150, 300), bh = GF.clamp(50 * S, 44, 62);
-  var by = Math.min(pb + 18 * S, H - bh - 24 * S);
+  // tab row
+  vaultTabRects = [];
+  var tabH = GF.clamp(34 * S, 28, 42), tabGap = 8 * S, tabW = (maxW - tabGap) / 2;
+  var tabX = GF.cx - maxW / 2, tabY = ty + 12 * S;
+  var tabs = [{ id: 'up', label: ru ? 'УЛУЧШЕНИЯ' : 'UPGRADES' }, { id: 'charms', label: ru ? 'ТАЛИСМАНЫ' : 'CHARMS' }];
+  for (var t = 0; t < 2; t++) {
+    var on = (vaultTab === tabs[t].id), bx = tabX + t * (tabW + tabGap);
+    GF.rr(ctx, bx, tabY, tabW, tabH, 9 * S);
+    ctx.fillStyle = on ? 'rgba(255,209,102,0.22)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = on ? '#ffd166' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+    ctx.fillStyle = on ? '#ffd700' : '#9a8c7a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
+    ctx.fillText(tabs[t].label, bx + tabW / 2, tabY + tabH / 2);
+    vaultTabRects.push({ tab: tabs[t].id, x: bx, y: tabY, w: tabW, h: tabH });
+  }
+  ctx.textBaseline = 'alphabetic';
+  var contentY = tabY + tabH + 14 * S;
+  var pb = (vaultTab === 'charms') ? drawCharmPanel(ctx, contentY, maxW) : drawMetaPanel(ctx, contentY, maxW);
+  // RESUME button
+  var bw = GF.clamp(220 * S, 150, 300), bh = GF.clamp(48 * S, 42, 60);
+  var by = Math.min(pb + 16 * S, H - bh - 18 * S);
   resumeBtn = { x: GF.cx - bw / 2, y: by, w: bw, h: bh };
   var gr = ctx.createLinearGradient(0, by, 0, by + bh); gr.addColorStop(0, '#7ed957'); gr.addColorStop(1, '#4faf3a');
   GF.rr(ctx, resumeBtn.x, by, bw, bh, bh / 2); ctx.fillStyle = gr; ctx.fill();
@@ -1126,6 +1398,101 @@ function drawPauseOverlay(ctx) {
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(ru ? 'ПРОДОЛЖИТЬ' : 'RESUME', GF.cx, by + bh / 2);
   ctx.textBaseline = 'alphabetic';
+}
+
+// THE COLLECTION tab — playtime header + next-charm progress + 3 equip slots + the
+// charm grid (locked = silhouette + "play Xm"; owned = vector icon + Lv + upgrade).
+function drawCharmPanel(ctx, topY, maxW) {
+  var S = GF.S, ru = (GF.lang === 'ru'), x = GF.cx - maxW / 2, pad = 12 * S;
+  charmTileRects = []; charmUpRects = []; equipSlotRects = [];
+  var slotR = GF.clamp(24 * S, 20, 30);
+  var tileH = GF.clamp(62 * S, 52, 76);
+  var cols = 4, gap = 7 * S, tileW = (maxW - pad * 2 - gap * (cols - 1)) / cols;
+  var gridRows = Math.ceil(CHARM_DEFS.length / cols);
+  var headH = 40 * S, slotsH = slotR * 2 + 22 * S;
+  var panelH = pad + headH + slotsH + (tileH * gridRows + gap * (gridRows - 1)) + pad;
+  GF.rr(ctx, x, topY, maxW, panelH, 14 * S); ctx.fillStyle = 'rgba(40,25,16,0.94)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,209,102,0.28)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+  var cy = topY + pad;
+  // header: vault gold (charm upgrades spend it) + cumulative playtime
+  var tm = Math.floor(totalPlayMin());
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif'; ctx.fillStyle = '#ffd700';
+  ctx.fillText(fmtGold(meta ? meta.bank : 0) + ' ' + GF.t('goldUnit'), x + pad, cy);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#caa86a'; ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.fillText((ru ? 'Сыграно: ' : 'Played: ') + (tm >= 60 ? Math.floor(tm / 60) + 'h ' + (tm % 60) + 'm' : tm + 'm'), x + maxW - pad, cy + 3 * S);
+  cy += 20 * S;
+  // next-charm progress (the visible pull)
+  var nc = nextCharm();
+  if (nc) {
+    var prevMin = 0;
+    for (var pi = 0; pi < CHARM_DEFS.length; pi++) { if (CHARM_DEFS[pi].id === nc.id) break; prevMin = CHARM_DEFS[pi].min; }
+    var frac = GF.clamp((totalPlayMin() - prevMin) / (nc.min - prevMin), 0, 1);
+    var left = Math.max(0, Math.ceil(nc.min - totalPlayMin()));
+    ctx.textAlign = 'left'; ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+    ctx.fillText((ru ? 'Следующий талисман через ' : 'Next charm in ') + left + (ru ? ' мин' : ' min'), x + pad, cy);
+    var barW = maxW - pad * 2, barH = 6 * S, barY = cy + 14 * S;
+    GF.rr(ctx, x + pad, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+    GF.rr(ctx, x + pad, barY, Math.max(barH, barW * frac), barH, barH / 2); ctx.fillStyle = nc.col; ctx.fill();
+  } else {
+    ctx.textAlign = 'left'; ctx.fillStyle = '#7ed957'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+    ctx.fillText(ru ? 'Все талисманы собраны!' : 'All charms collected!', x + pad, cy);
+  }
+  cy += headH - 20 * S + 12 * S;
+  // equip slots row
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#9a8c7a';
+  ctx.font = GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+  ctx.fillText(ru ? 'ЭКИПИРОВКА' : 'EQUIPPED', x + pad, cy);
+  var slotsY = cy + 14 * S, slotGap = GF.clamp(16 * S, 10, 26);
+  var totalSlotsW = CHARM_SLOTS * (slotR * 2) + (CHARM_SLOTS - 1) * slotGap;
+  var slotStartX = GF.cx - totalSlotsW / 2;
+  for (var s = 0; s < CHARM_SLOTS; s++) {
+    var scx = slotStartX + slotR + s * (slotR * 2 + slotGap), scy = slotsY + slotR;
+    var eid = meta ? meta.equipped[s] : null;
+    ctx.beginPath(); ctx.arc(scx, scy, slotR, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = eid ? CHARM_BY_ID[eid].col : 'rgba(255,255,255,0.2)'; ctx.lineWidth = 2 * S;
+    ctx.setLineDash(eid ? [] : [4 * S, 4 * S]); ctx.stroke(); ctx.setLineDash([]);
+    if (eid) drawCharmIcon(ctx, CHARM_BY_ID[eid], scx, scy, slotR * 0.62);
+    equipSlotRects.push({ slot: s, x: scx - slotR, y: scy - slotR, w: slotR * 2, h: slotR * 2 });
+  }
+  cy = slotsY + slotR * 2 + 14 * S;
+  // charm grid
+  for (var i = 0; i < CHARM_DEFS.length; i++) {
+    var def = CHARM_DEFS[i], col = i % cols, row = Math.floor(i / cols);
+    var bx = x + pad + col * (tileW + gap), byy = cy + row * (tileH + gap);
+    var owned = !!(meta && meta.charms[def.id]);
+    var equipped = !!(meta && meta.equipped.indexOf(def.id) >= 0);
+    GF.rr(ctx, bx, byy, tileW, tileH, 9 * S);
+    ctx.fillStyle = owned ? (equipped ? 'rgba(126,217,87,0.14)' : 'rgba(255,255,255,0.06)') : 'rgba(255,255,255,0.03)'; ctx.fill();
+    ctx.strokeStyle = equipped ? '#7ed957' : (owned ? 'rgba(255,209,102,0.5)' : 'rgba(255,255,255,0.12)'); ctx.lineWidth = 1.5 * S; ctx.stroke();
+    var icx = bx + tileW / 2, icy = byy + tileH * 0.34, ir = GF.clamp(14 * S, 11, 18);
+    if (owned) {
+      drawCharmIcon(ctx, def, icx, icy, ir);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = '#cdb';
+      ctx.font = 'bold ' + GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
+      ctx.fillText('Lv ' + meta.charms[def.id].lvl, icx, byy + tileH * 0.56);
+      // upgrade chip (bottom of tile) — tap to spend gold
+      var cost = charmUpCost(def.id), maxed = !isFinite(cost);
+      var afford = !!(meta && !maxed && meta.bank >= cost);
+      var chW = tileW - 8 * S, chH = GF.clamp(15 * S, 12, 19), chX = bx + 4 * S, chY = byy + tileH - chH - 4 * S;
+      GF.rr(ctx, chX, chY, chW, chH, 5 * S);
+      ctx.fillStyle = maxed ? 'rgba(126,217,87,0.18)' : (afford ? 'rgba(255,215,0,0.18)' : 'rgba(255,255,255,0.05)'); ctx.fill();
+      ctx.fillStyle = maxed ? '#7ed957' : (afford ? '#ffd700' : '#7a6f5f'); ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold ' + GF.clamp(8.5 * S, 7, 11) + 'px sans-serif';
+      ctx.fillText(maxed ? GF.t('upMax') : (fmtGold(cost) + ' ' + GF.t('goldUnit')), chX + chW / 2, chY + chH / 2);
+      charmTileRects.push({ id: def.id, x: bx, y: byy, w: tileW, h: tileH - chH - 4 * S });
+      charmUpRects.push({ id: def.id, x: chX, y: chY, w: chW, h: chH, afford: afford });
+    } else {
+      // locked: dim silhouette + "play Xm"
+      ctx.globalAlpha = 0.4; drawCharmIcon(ctx, def, icx, icy, ir); ctx.globalAlpha = 1;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = '#8a7d6d';
+      ctx.font = GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
+      ctx.fillText((ru ? 'играй ' : 'play ') + def.min + (ru ? 'м' : 'm'), icx, byy + tileH * 0.58);
+    }
+  }
+  ctx.textBaseline = 'alphabetic';
+  return topY + panelH;
 }
 
 // Tap targets for the permanent-upgrade buttons on the menu meta panel.
@@ -1140,7 +1507,8 @@ function drawMetaPanel(ctx, topY, maxW) {
   metaUpRects = [];
   var btnH = GF.clamp(48 * S, 40, 58);
   var hasBanner = (idleClaim > 0 || dailyClaim > 0);
-  var panelH = pad + 24 * S + (hasBanner ? 19 * S : 0) + 38 * S + btnH + pad;
+  var upRows = Math.ceil(META_UP_KEYS.length / 3);
+  var panelH = pad + 24 * S + (hasBanner ? 19 * S : 0) + 38 * S + (btnH * upRows + 8 * S * (upRows - 1)) + pad;
   GF.rr(ctx, x, topY, maxW, panelH, 14 * S); ctx.fillStyle = 'rgba(40,25,16,0.94)'; ctx.fill();
   ctx.strokeStyle = 'rgba(255,209,102,0.28)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
   var cy = topY + pad;
@@ -1172,25 +1540,26 @@ function drawMetaPanel(ctx, topY, maxW) {
   GF.rr(ctx, x + pad, cy, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
   GF.rr(ctx, x + pad, cy, Math.max(barH, barW * (into / need)), barH, barH / 2); ctx.fillStyle = '#7ed957'; ctx.fill();
   cy += barH + 13 * S;
-  // 3 permanent-upgrade buttons (spend vault gold)
-  var keys = ['slots', 'sell', 'luck'];
-  var labels = { slots: GF.t('upSlots'), sell: GF.t('upSell'), luck: GF.t('upLuck') };
-  var gap = 8 * S, bw = (maxW - pad * 2 - gap * 2) / 3;
+  // permanent-upgrade buttons (spend vault gold) — 3-col grid, wraps to 2 rows
+  var keys = META_UP_KEYS;
+  var labels = { slots: GF.t('upSlots'), sell: GF.t('upSell'), luck: GF.t('upLuck'), idle: GF.t('upIdle'), vault: GF.t('upVault') };
+  var gap = 8 * S, cols = 3, bw = (maxW - pad * 2 - gap * (cols - 1)) / cols;
   for (var i = 0; i < keys.length; i++) {
-    var key = keys[i], bx = x + pad + i * (bw + gap);
+    var key = keys[i], col = i % cols, row = Math.floor(i / cols);
+    var bx = x + pad + col * (bw + gap), byy = cy + row * (btnH + gap);
     var lv = meta ? (meta.up[key] || 0) : 0, maxed = lv >= META_UP[key].max, cost = upCost(key);
     var afford = !!(meta && !maxed && meta.bank >= cost);
-    GF.rr(ctx, bx, cy, bw, btnH, 8 * S);
+    GF.rr(ctx, bx, byy, bw, btnH, 8 * S);
     ctx.fillStyle = maxed ? 'rgba(126,217,87,0.18)' : (afford ? 'rgba(255,215,0,0.16)' : 'rgba(255,255,255,0.05)'); ctx.fill();
     ctx.strokeStyle = afford ? '#ffd700' : 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     ctx.fillStyle = (afford || maxed) ? '#fff' : '#9a8c7a'; ctx.font = 'bold ' + GF.clamp(10.5 * S, 8.5, 13) + 'px sans-serif';
-    ctx.fillText(labels[key], bx + bw / 2, cy + 6 * S);
+    ctx.fillText(labels[key], bx + bw / 2, byy + 6 * S);
     ctx.font = GF.clamp(9 * S, 7.5, 11.5) + 'px sans-serif'; ctx.fillStyle = '#caa86a';
-    ctx.fillText('Lv ' + lv + '/' + META_UP[key].max, bx + bw / 2, cy + 19 * S);
+    ctx.fillText('Lv ' + lv + '/' + META_UP[key].max, bx + bw / 2, byy + 19 * S);
     ctx.fillStyle = maxed ? '#7ed957' : (afford ? '#ffd700' : '#9a8c7a'); ctx.font = 'bold ' + GF.clamp(10 * S, 8, 12.5) + 'px sans-serif';
-    ctx.fillText(maxed ? GF.t('upMax') : (fmtGold(cost) + ' ' + GF.t('goldUnit')), bx + bw / 2, cy + btnH - 14 * S);
-    metaUpRects.push({ key: key, x: bx, y: cy, w: bw, h: btnH, afford: afford });
+    ctx.fillText(maxed ? GF.t('upMax') : (fmtGold(cost) + ' ' + GF.t('goldUnit')), bx + bw / 2, byy + btnH - 14 * S);
+    metaUpRects.push({ key: key, x: bx, y: byy, w: bw, h: btnH, afford: afford });
   }
   ctx.textBaseline = 'alphabetic';
   return topY + panelH;
@@ -1448,8 +1817,21 @@ window._bbInfo = function () {
     idleClaim: idleClaim, dailyClaim: dailyClaim,
     paused: paused, vaultBtn: vaultBtn, resumeBtn: resumeBtn, coins: coins, rowCost: rowCost,
     sprites: board.map(function (c, i) { var p = cellCenter(i); return c ? { dx: Math.round(c.sx - p.x), dy: Math.round(c.sy - p.y) } : null; }),
+    // M3 Collection state — tabs, charms, equip slots (drive equip/upgrade in tests)
+    vaultTab: vaultTab, tabRects: vaultTabRects, charmTiles: charmTileRects, charmUps: charmUpRects, equipSlots: equipSlotRects,
+    equipped: meta ? meta.equipped.slice() : [], charms: meta ? meta.charms : {},
+    totalPlayMin: Math.floor(totalPlayMin()), nextCharm: (function () { var n = nextCharm(); return n ? { id: n.id, min: n.min } : null; }()),
   };
 };
+// Test seam: force cumulative playtime (minutes) so the Charm ladder can be exercised
+// without real wall-clock waiting. Grants any newly-eligible charms. No console output.
+window._bbSetPlay = function (mins) {
+  if (!meta) return;
+  meta.totalPlaySec = Math.max(0, (+mins || 0) * 60); runPlaySec = 0;
+  checkCharmUnlocks(); saveMeta();
+};
+// Test seam: grant vault gold (exercise upgrade-buy paths without grinding). No console output.
+window._bbGrant = function (g) { if (meta) { meta.bank += (+g || 0); saveMeta(); } };
 // take_screenshots.js calls _jumpLevel; webapp_gate calls _jumpLevel(1)/(99)
 window._jumpLevel = function (n) {
   if (n >= 99) { startGame(); gs = 'GAMEOVER'; return; }
@@ -1483,7 +1865,7 @@ GF.init({
       },
       function (s) {
         if (!s) return;
-        if (s.gs !== 'PLAYING') { gs = 'MENU'; return; }
+        if (s.gs !== 'PLAYING') return;   // not mid-run → onReady will startGame() (no menu)
         score = s.score || 0; coins = s.coins || 0; merges = s.merges || 0; deliveries = s.deliveries || 0;
         maxTierReached = s.maxTierReached || 0; shopUnlocked = !!s.shopUnlocked; wildcardSeen = !!s.wildcardSeen;
         bestCombo = s.bestCombo || 0; rows = s.rows || boardRows; nests = s.nests || 1;
@@ -1499,8 +1881,11 @@ GF.init({
         gs = 'PLAYING';
       }
     );
-    if (gs === 'PLAYING') { /* resumed run */ }
-    else gs = 'MENU';
+    // No menu screen — the game is impossible to "lose-gate" the meta behind, so we boot
+    // straight into play. A resumed mid-run keeps its state; anything else starts fresh.
+    if (gs !== 'PLAYING') startGame();
+    // surface the overnight idle income + daily streak bonus as a brief boot banner
+    if (idleClaim > 0 || dailyClaim > 0) bootBannerT = 4.0;
   },
   onUpdate: update,
   onDraw: draw,
