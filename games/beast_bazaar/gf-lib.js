@@ -863,6 +863,29 @@ window.GF = {
   //   - Help (?) button — call GF.tutorial.reopen() to re-run from step 1.
   tutorial: (function () {
     var pulseT = 0;
+    // ── Animated demo HAND (Tim 2026-06-04: tutorials must SHOW the gesture) ──
+    // Vector pointing hand (no emoji). Drawn so the FINGERTIP sits at (x,y) and
+    // the fist trails below-right. `press` squashes it for the grab/tap beat.
+    function _tEase(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+    function _tRR(c, x, y, w, h, r) { r = Math.min(r, w / 2, h / 2); c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+    function _tHand(c, x, y, press, down) {
+      c.save();
+      c.translate(x, y);
+      var k = (press ? 0.88 : 1);
+      c.scale(k * S, k * S);
+      if (down) c.scale(1, -1);   // low targets (near the bottom panel): point DOWN from above so the hand stays visible
+      c.rotate(-0.26);
+      c.lineJoin = 'round'; c.lineCap = 'round';
+      c.shadowColor = 'rgba(0,0,0,0.32)'; c.shadowBlur = 7; c.shadowOffsetX = 2; c.shadowOffsetY = 4;
+      c.fillStyle = '#ffd9b0'; c.strokeStyle = '#7a4e2c'; c.lineWidth = 2.4;
+      _tRR(c, -15, 23, 30, 33, 13); c.fill(); c.stroke();                 // fist
+      c.beginPath(); c.ellipse(-15, 31, 7, 10, -0.5, 0, Math.PI * 2); c.fill(); c.stroke();  // thumb
+      _tRR(c, -6, 0, 12, 30, 6); c.fill(); c.stroke();                    // index finger (tip at 0,0)
+      c.shadowColor = 'transparent';
+      c.strokeStyle = 'rgba(122,78,44,0.45)'; c.lineWidth = 1.3;           // knuckle creases
+      c.beginPath(); c.moveTo(-9, 36); c.lineTo(13, 36); c.moveTo(-10, 44); c.lineTo(14, 44); c.moveTo(-9, 51); c.lineTo(12, 51); c.stroke();
+      c.restore();
+    }
     var state = {
       active: false,
       step: 0,
@@ -950,15 +973,35 @@ window.GF = {
         c.arc(tg.x, tg.y, r, 0, Math.PI * 2);
         c.stroke();
         c.restore();
-        var tipY = tg.y - baseR - 14 * S;
-        var baseY = tipY - 26 * S;
-        c.fillStyle = '#ffeb3b';
-        c.beginPath();
-        c.moveTo(tg.x, tipY);
-        c.lineTo(tg.x - 12 * S, baseY);
-        c.lineTo(tg.x + 12 * S, baseY);
-        c.closePath();
-        c.fill();
+        // ── animated demo: a HAND performs the gesture (tap, or drag from→to) ──
+        var to = step.target2 ? (typeof step.target2 === 'function' ? step.target2() : step.target2) : null;
+        var ges = step.gesture || (to ? 'drag' : 'tap');
+        if (ges === 'drag' && to && typeof to.x === 'number') {
+          // destination highlight ring (green = "drop here")
+          c.save(); c.shadowColor = '#7CFC9A'; c.shadowBlur = 14; c.strokeStyle = '#7CFC9A';
+          c.lineWidth = 3 + pulse * 1.5; c.globalAlpha = 0.85;
+          c.beginPath(); c.arc(to.x, to.y, (to.r || 40) + pulse * 10 * S, 0, Math.PI * 2); c.stroke(); c.restore();
+          // moving dashed path from→to
+          c.save(); c.strokeStyle = 'rgba(255,255,255,0.7)'; c.lineWidth = 3 * S;
+          c.setLineDash([7 * S, 7 * S]); c.lineDashOffset = -pulseT * 36;
+          c.beginPath(); c.moveTo(tg.x, tg.y); c.lineTo(to.x, to.y); c.stroke(); c.restore();
+          // hand: grab → drag → release → pause, looping
+          var cyc = 2.6, tt = (pulseT % cyc) / cyc, hx, hy, pr;
+          if (tt < 0.16) { hx = tg.x; hy = tg.y; pr = true; }
+          else if (tt < 0.62) { var kk = _tEase((tt - 0.16) / 0.46); hx = lerp(tg.x, to.x, kk); hy = lerp(tg.y, to.y, kk); pr = true; }
+          else if (tt < 0.74) { hx = to.x; hy = to.y; pr = true; }
+          else { hx = to.x; hy = to.y; pr = false; }
+          _tHand(c, hx, hy, pr);
+        } else {
+          // tap: hand presses onto the target on a beat, with an expanding ripple
+          var ph = (pulseT % 1.3) / 1.3, pr2 = ph < 0.22;
+          if (pr2) {
+            c.save(); c.strokeStyle = '#ffeb3b'; c.lineWidth = 3 * S; c.globalAlpha = 0.55 * (1 - ph / 0.22);
+            c.beginPath(); c.arc(tg.x, tg.y, (tg.r || 40) * (0.4 + (ph / 0.22) * 0.9), 0, Math.PI * 2); c.stroke(); c.restore();
+          }
+          var low = tg.y > H * 0.66;   // behind the bottom panel → flip the hand to point down from above
+          _tHand(c, tg.x, tg.y - (pr2 ? 0 : 9 * S), pr2, low);
+        }
       }
       // Bottom panel
       var panelH = clamp(118 * S, 96, 150);

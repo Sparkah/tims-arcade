@@ -426,7 +426,7 @@ function init(config) {
       if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
         window.ysdk.features.LoadingAPI.ready();
       }
-      // CrazyGames pairs sdkGameLoadingStart/Stop with gameplayStart/Stop —
+      // CrazyGames pairs the loading lifecycle with the gameplay lifecycle —
       // calling loadingStop here tells CG the boot phase is done, which
       // anchors their Gameplay Conversion measurement.
       try {
@@ -446,7 +446,7 @@ function init(config) {
   //
   // GamePush priority: when the gamepush SDK is loaded, it owns ad / save /
   // leaderboard / achievement routing across all 9 supported platforms
-  // (Yandex, CrazyGames, GameDistribution, GameMonetize, Kongregate,
+  // (Yandex, CrazyGames, GameDistribution, GameMonetize,
   // Playgama, Telegram Mini Apps, VK Play, WG Playground). The native
   // YaGames / CrazyGames init paths below stay as fallbacks for legacy
   // games not yet migrated to GP.

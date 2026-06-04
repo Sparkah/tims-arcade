@@ -208,6 +208,12 @@ var hudButtons = [];             // ? + mute, live during PLAYING
 // Audio
 var audioMuted = false, _ac = null, _master = null;
 
+// Promo capture (?promo=climax) — OFF unless the query flag is present. Drives a
+// deterministic autopilot so record_promo.js gets a clean weaving/coin clip.
+// Strictly gated: normal + shipped builds never set this, so gameplay is 100%
+// unchanged off the promo URL. See promoSetup()/promoSteer() near boot.
+var promoActive = false;
+
 // ── UTILS ─────────────────────────────────────────────────────────────────
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 function rr(c, x, y, w, h, r) {
@@ -775,6 +781,7 @@ function update(dt) {
   if (gs !== 'PLAYING') return;
   if (flipCooldownT > 0) flipCooldownT -= dt;
   if (invulnT > 0) invulnT -= dt;
+  if (promoActive) promoSteer(dt);   // promo=climax: deterministic autopilot weave
 
   // accrue REAL playtime toward the gear ladder; unlock any crossed milestone
   // mid-run (non-blocking toast) so the boost is felt immediately.
@@ -1894,6 +1901,108 @@ window._buyGear = function(id) { return buyGearUpgrade(id); };
 window._grantCoins = function(n) { coins += (+n || 0); saveCoins(); return coins; };
 window._openMeta = function(tab) { metaOpen = true; metaTab = (tab === 'quests' ? 'quests' : 'gear'); };
 
+// ── PROMO CAPTURE (?promo=climax) ──────────────────────────────────────────
+// Boots straight into a run with a deterministic, hand-tuned corridor + an
+// autopilot that flips floor<->ceiling to weave the obstacles and sweep coins,
+// so Shared/skills/promo-video/tools/record_promo.js gets a clean 18s CG clip
+// every time. STRICTLY gated on the query param (set in onReady); off the promo
+// URL nothing here runs and gameplay is byte-for-byte the shipped behaviour.
+//
+// Autopilot timing — flip when the nearest un-passed obstacle on the player's
+// CURRENT surface lane is inside a forward margin scaled by current speed, so a
+// flip lands the cube on the clear lane before the obstacle reaches its column.
+var _promoSeenObst = null;   // identity of the obstacle that last triggered a flip (no double-fire on the same one)
+function promoSteer(dt) {
+  if (gs !== 'PLAYING') return;
+  var px = playerX(), pr = PLAYER_R * GF.S;
+  // Which lane is the cube settling toward right now?
+  var onFloor = (gravDir > 0);
+  var laneY = onFloor ? floorLaneY() : ceilLaneY();
+  // Forward look-ahead: react sooner when faster (cross time ~constant).
+  var lookAhead = clamp(scrollSpeed * GF.S * 0.55, 120 * GF.S, 300 * GF.S);
+  // Find the nearest obstacle AHEAD of the cube that overlaps the CURRENT lane.
+  var threat = null, threatDx = Infinity;
+  for (var i = 0; i < obstacles.length; i++) {
+    var o = obstacles[i];
+    if (o.x + o.w < px - pr) continue;                 // already passed
+    var dxFront = o.x - (px + pr);                     // gap to its leading edge
+    if (dxFront > lookAhead) continue;                 // too far to matter yet
+    // does it occupy the lane the cube is heading to (y overlap with a margin)?
+    if (o.y < laneY + pr * 1.25 && o.y + o.h > laneY - pr * 1.25) {
+      if (dxFront < threatDx) { threatDx = dxFront; threat = o; }
+    }
+  }
+  if (!threat) { _promoSeenObst = null; return; }
+  // Only flip once per threatening obstacle, and only if the cooldown is ready.
+  if (threat === _promoSeenObst) return;
+  if (flipCooldownT > 0) return;
+  // Confirm the OPPOSITE lane is clear across the threat's x-span before committing.
+  var otherY = onFloor ? ceilLaneY() : floorLaneY();
+  var spanL = threat.x - pr, spanR = threat.x + threat.w + pr;
+  for (var j = 0; j < obstacles.length; j++) {
+    var b = obstacles[j];
+    if (b.x + b.w < spanL || b.x > spanR) continue;
+    if (b.y < otherY + pr * 1.25 && b.y + b.h > otherY - pr * 1.25) return; // other lane blocked too — hold (shouldn't happen with promo spawner)
+  }
+  _promoSeenObst = threat;
+  flip();
+}
+
+// Deterministic promo corridor: single-surface obstacles that ALWAYS leave one
+// full lane clear (never a pinch), alternating floor/ceiling on a comfortable
+// cadence, each with a coin arc on the clear lane. Replaces spawnGroup ONLY in
+// promo mode so the weave reads cleanly and the cube can always survive.
+var _promoSpawnSide = 0;   // 0 = block floor (fly ceiling), 1 = block ceiling
+var _promoGroupN = 0;
+function promoSpawnGroup(x) {
+  var top = topY(), bot = botY(), ow = OBST_W * GF.S;
+  var d = diff();
+  // gentle height growth so it looks alive without getting unfair to the bot
+  var h = (52 + 34 * d + ((_promoGroupN % 3) * 10)) * GF.S;
+  var blockFloor = (_promoSpawnSide === 0);
+  if (blockFloor) obstacles.push({ x:x, y:bot - h, w:ow, h:h, surface:'floor' });
+  else            obstacles.push({ x:x, y:top,     w:ow, h:h, surface:'ceil'  });
+  var safeSurface = blockFloor ? 'ceil' : 'floor';
+  // coin arc hugging the clear lane just after the block (gives the sweep beat)
+  var n = 4;
+  var cy0 = (safeSurface === 'floor') ? bot - (PLAYER_R + CORRIDOR_PAD + 6) * GF.S
+                                      : top + (PLAYER_R + CORRIDOR_PAD + 6) * GF.S;
+  var cx0 = x + ow + 40 * GF.S;
+  var arc = 24 * GF.S * (safeSurface === 'floor' ? -1 : 1);
+  for (var i = 0; i < n; i++) {
+    var tt = n > 1 ? i / (n - 1) : 0;
+    coinsArr.push({ x: cx0 + i * 34 * GF.S, y: cy0 + Math.sin(tt * Math.PI) * arc, taken:false });
+  }
+  // comfortable, slightly-tightening gap; alternate the blocked side next time
+  var gap = clamp((360 - 70 * d), 250, 360) * GF.S;
+  _promoSpawnSide ^= 1; _promoGroupN++;
+  nextSpawnX = x + gap;
+}
+
+function promoSetup() {
+  promoActive = true;
+  window._silent = true;          // hard-silence all SFX paths
+  audioMuted = true;              // and the music bed (also -an + --mute-audio in recorder)
+  try { GF.setMusicMuted(true); } catch (e) {}
+  // hide the OS cursor (CG: no cursor in preview)
+  try { var st = document.createElement('style'); st.textContent = 'html,body,canvas{cursor:none !important;}'; document.head.appendChild(st); } catch (e) {}
+  // seed everything deterministically so frame N is identical run-to-run
+  var PROMO_SEED = 0x5EED1234;
+  SEED_TODAY = PROMO_SEED;
+  rng = makeRng(PROMO_SEED);
+  Math.random = makeRng(PROMO_SEED ^ 0x9E3779B9);   // particle/jitter determinism
+  // suppress every overlay/banner so the clip is pure gameplay
+  seenTutorial = true; tutorialOpen = false; metaOpen = false;
+  bootBannerT = 0; gearToast = null; questToast = null;
+  // swap in the clean promo corridor + kick off a DAILY run immediately
+  spawnGroup = promoSpawnGroup;
+  _promoSpawnSide = 0; _promoGroupN = 0; _promoSeenObst = null;
+  startRun('DAILY');
+  startHintT = 0;                 // no "TAP TO FLIP" coaching text in the clip
+  // first ~1.2s reads as a clean establishing beat (pre-spawned blocks start
+  // off-screen at GF.W+; the cube cruises the floor before the first reaches it)
+}
+
 // ── BOOT ──────────────────────────────────────────────────────────────────
 SEED_TODAY = getDaySeed();
 loadMute();
@@ -1906,6 +2015,13 @@ GF.init({
   sprites: [],
   saveKey: 'flip_dash',
   onReady: function() {
+    // ?promo=climax — detected FIRST so it overrides every normal boot path
+    // (tutorial gate, login banner, autostart). Gated strictly on the query
+    // param: shipped/gallery builds never carry it, so this branch is dead code
+    // for real players. Sets window._silent before music init = guaranteed mute.
+    var _promo = false;
+    try { _promo = (new URLSearchParams(location.search)).get('promo') === 'climax'; } catch (e) {}
+    if (_promo) window._silent = true;
     // Yandex 1.9 — persist run context across reload. A live run bounces to
     // MENU (safe entry); coins/skins/bests persist in their own keys.
     GF.persist('flip_dash_run_v1',
@@ -1925,7 +2041,11 @@ GF.init({
     claimOnOpen(!headless);
     // Procedural background-music bed (factory baseline). Begins on the first
     // user gesture; honours the same mute pill as the SFX (mirrored in toggleMute).
-    GF.startMusic({ preset: 'synth', muted: audioMuted });
+    GF.startMusic({ preset: 'synth', muted: audioMuted || _promo });
+    // ?promo=climax wins over the menu/autostart paths: boot the deterministic
+    // capture scene (silent, no cursor, autopilot weave). Returns early so the
+    // normal autostart branch can't also fire.
+    if (_promo) { promoSetup(); return; }
     // Platform builds (Yandex/CrazyGames) inject window.__GF_AUTOSTART so the
     // player drops STRAIGHT into a run — no menu/title/tutorial landing. The
     // gallery build doesn't set the flag and keeps its menu. Never fire during

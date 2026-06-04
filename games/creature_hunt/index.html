@@ -347,6 +347,20 @@ const STRINGS = {
     watch_ad_unlock: 'Watch Ad to unlock',
     ad_unlocked: 'Unlocked!',
     ad_unavailable: 'Ad not available — try again',
+    // iter#13 — Survivor Rank (persistent lifetime XP / rank ladder)
+    rank_label: 'Rank',
+    xp_gained: 'XP',
+    rank_up: 'RANK UP!',
+    rank_to_next: 'to next',
+    rank_maxed: 'MAX RANK',
+    rank_0: 'Prey',
+    rank_1: 'Skulker',
+    rank_2: 'Shadow Runner',
+    rank_3: 'Nightstalker',
+    rank_4: 'Phantom',
+    rank_5: 'Ghost Walker',
+    rank_6: 'Wraith',
+    rank_7: 'Apex Survivor',
   },
   ru: {
     title: 'Creature Hunt',
@@ -480,6 +494,20 @@ const STRINGS = {
     watch_ad_unlock: 'Реклама за разблокировку',
     ad_unlocked: 'Разблокировано!',
     ad_unavailable: 'Реклама недоступна — повторите',
+    // iter#13 — Survivor Rank (persistent lifetime XP / rank ladder)
+    rank_label: 'Ранг',
+    xp_gained: 'опыт',
+    rank_up: 'НОВЫЙ РАНГ!',
+    rank_to_next: 'до следующего',
+    rank_maxed: 'МАКС. РАНГ',
+    rank_0: 'Добыча',
+    rank_1: 'Крадущийся',
+    rank_2: 'Бегущий в тени',
+    rank_3: 'Ночной охотник',
+    rank_4: 'Фантом',
+    rank_5: 'Ходящий-призрак',
+    rank_6: 'Дух',
+    rank_7: 'Высший выживший',
   }
 };
 
@@ -560,6 +588,71 @@ const PersonalBest = (function() {
     return m + ':' + (s < 10 ? '0' : '') + s;
   }
   return { get, recordRound, fmtTime };
+})();
+
+// ── Survivor Rank (iter#13 — persistent lifetime meta / D7 ownership) ──
+// A single cumulative XP pool that climbs an 8-tier rank ladder, persisted in
+// localStorage. Unlike the per-day streak/quests and the single-best Personal
+// Best, this is a LIFETIME progression the player OWNS and grows every session:
+// the #1 cross-session retention driver is "my rank", not a daily checkbox.
+// XP is awarded on SOLO game-over only (MP rounds excluded — the server owns
+// MP outcomes), reading the survival/overtime/catch numbers endGame already
+// computed, so it touches no netcode and never desyncs multiplayer.
+//   human   → survivalSec*2 + overtimeWave*25   (deep solo runs pay the most)
+//   creature→ caughtCount*8
+//   floor of +5 per run so every round visibly advances the bar.
+const SurvivorRank = (function() {
+  const KEY = 'creature_hunt_rank';
+  // Cumulative XP needed to ENTER each rank index. rank 0 = 0 XP.
+  // Curve is gentle early (a few runs → rank up) then widens for long-tail chase.
+  const THRESHOLDS = [0, 120, 320, 650, 1150, 1900, 3000, 4600];
+  const MAX_IDX = THRESHOLDS.length - 1;
+  function load() {
+    try {
+      const raw = localStorage.getItem(KEY);
+      if (raw) {
+        const o = JSON.parse(raw);
+        return { xp: Math.max(0, Number(o.xp) || 0) };
+      }
+    } catch(_) {}
+    return { xp: 0 };
+  }
+  function save(s) { try { localStorage.setItem(KEY, JSON.stringify(s)); } catch(_) {} }
+  let cache = load();
+  function idxForXp(xp) {
+    let idx = 0;
+    for (let i = 0; i < THRESHOLDS.length; i++) { if (xp >= THRESHOLDS[i]) idx = i; }
+    return idx;
+  }
+  function rankName(idx) { return t('rank_' + Math.max(0, Math.min(MAX_IDX, idx))); }
+  // Snapshot for rendering: current rank, progress into the next tier.
+  function get() {
+    const xp = cache.xp || 0;
+    const idx = idxForXp(xp);
+    const base = THRESHOLDS[idx];
+    const next = idx < MAX_IDX ? THRESHOLDS[idx + 1] : null;
+    const intoLevel = xp - base;
+    const levelSpan = next !== null ? (next - base) : 0;
+    const toNext = next !== null ? Math.max(0, next - xp) : 0;
+    const pct = next !== null ? Math.max(0, Math.min(1, intoLevel / levelSpan)) : 1;
+    return { xp, idx, maxed: idx >= MAX_IDX, name: rankName(idx), intoLevel, levelSpan, toNext, pct };
+  }
+  // Award XP for a finished SOLO run. Returns what changed for the game-over UI.
+  function award(role, survivalSec, otWave, caughtCount) {
+    let gained;
+    if (role === 'creature') {
+      gained = (Number(caughtCount) || 0) * 8;
+    } else {
+      gained = (Number(survivalSec) || 0) * 2 + (Number(otWave) || 0) * 25;
+    }
+    gained = Math.max(5, Math.round(gained)); // floor so every run advances the bar
+    const oldIdx = idxForXp(cache.xp || 0);
+    cache.xp = (cache.xp || 0) + gained;
+    save(cache);
+    const newIdx = idxForXp(cache.xp);
+    return { gained, rankUp: newIdx > oldIdx, oldIdx, newIdx, newName: rankName(newIdx) };
+  }
+  return { get, award, idxForXp, MAX_IDX };
 })();
 
 // ── Daily Quests (iter#9 — D3 retention rung) ─────────────────
@@ -1005,6 +1098,24 @@ function renderMenuStats() {
     parts.push(t('best_caught_label') + ' <span style="color:#f88">' + pb.bestCaught + '/10</span>');
   }
   let html = parts.join(' &middot; ');
+
+  // iter#13: Survivor Rank progress bar — the lifetime meta the player owns.
+  // Renders rank title + XP and a fill bar showing progress to the next rank.
+  try {
+    const rk = SurvivorRank.get();
+    const rankCol = rk.maxed ? '#ffd700' : '#7fd4ff';
+    html += '<br><span style="color:#aaa;font-size:11px">' + t('rank_label') + ': </span>'
+          + '<span style="color:' + rankCol + ';font-weight:bold;font-size:12px;letter-spacing:0.5px">' + rk.name + '</span>'
+          + ' <span style="color:#888;font-size:10px">' + rk.xp + ' ' + t('xp_gained') + '</span>';
+    html += '<div style="margin:3px 0 1px;height:7px;background:rgba(255,255,255,0.10);border-radius:4px;overflow:hidden">'
+          + '<div style="height:100%;width:' + Math.round(rk.pct * 100) + '%;'
+          + 'background:linear-gradient(90deg,#3a7bd5,#ffb300);border-radius:4px"></div></div>';
+    if (!rk.maxed) {
+      html += '<span style="color:#666;font-size:10px">' + rk.toNext + ' ' + t('xp_gained') + ' ' + t('rank_to_next') + '</span>';
+    } else {
+      html += '<span style="color:#ffd700;font-size:10px;letter-spacing:1px">' + t('rank_maxed') + '</span>';
+    }
+  } catch(_) {}
 
   // Iter#3: show unlocked skins as clickable colour swatches.
   const earned = UnlockSystem.getEarned();
@@ -4873,6 +4984,12 @@ function endGame(won) {
   if (mpState !== 'playing') {
     try { streakResult = DailyStreak.recordDay(); } catch(_) {}
   }
+  // iter#13: award lifetime Survivor-Rank XP (solo only — MP outcomes are
+  // server-owned and excluded). Reads the same numbers computed above.
+  let rankResult = null;
+  if (mpState !== 'playing') {
+    try { rankResult = SurvivorRank.award(playerRole, survivalSec, otWaveReached, caughtCount); } catch(_) {}
+  }
 
   let title, titleColor, stats;
 
@@ -4948,6 +5065,21 @@ function endGame(won) {
         stats += `<span style="color:#666;font-size:11px">${t('streak_keep_going')}</span>`;
       }
     }
+  }
+  // iter#13: Survivor-Rank payoff — "+N XP" every solo run, gold "RANK UP!" on a
+  // tier-up. The session-end reward hook that gives leaving a forward pull
+  // ("two good runs from the next rank"), reinforcing the menu progress bar.
+  if (rankResult) {
+    if (rankResult.rankUp) {
+      stats += `<br><span style="color:#ffd700;font-weight:bold;font-size:15px;letter-spacing:1px">&#9650; ${t('rank_up')} &middot; ${rankResult.newName}</span>`;
+    }
+    const _rk = SurvivorRank.get();
+    let xpLine = `<span style="color:#7fd4ff;font-size:12px">+${rankResult.gained} ${t('xp_gained')}</span>`;
+    xpLine += ` <span style="color:#888;font-size:11px">&middot; ${t('rank_label')}: ${_rk.name}</span>`;
+    if (!_rk.maxed) {
+      xpLine += ` <span style="color:#666;font-size:11px">(${_rk.toNext} ${t('rank_to_next')})</span>`;
+    }
+    stats += `<br>${xpLine}`;
   }
   // iter#4: daily map line — solo only (MP has server-seeded map, not date-keyed).
   if (mpState !== 'playing') {

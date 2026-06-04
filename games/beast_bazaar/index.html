@@ -127,6 +127,8 @@ var combo = 0, bestCombo = 0, comboTimer = 0;
 var maxTierReached = 0;     // highest tier produced this run (progression)
 var shopUnlocked = false;
 var wildcardSeen = false;
+var crowns = 0;             // Bazaar-King ASCENSIONS this run (in-run prestige) — each adds a stacking coin/merge multiplier (the late-game depth goal beyond tier 10)
+var ascendFlash = 0;        // full-screen flourish timer when a King is ascended
 var revealedTier = {};      // tier -> true once revealed (for new-beast flourish)
 var revealQueue = [];       // pending new-beast flourishes {tier, t}
 
@@ -184,6 +186,21 @@ var META_UP_KEYS = ['slots', 'sell', 'luck', 'idle', 'vault'];
 var BANK_RATE = 0.25;        // base fraction of a run's score banked as gold at game-over
 var IDLE_CAP_H = 8;          // overnight idle income caps at 8h elapsed
 var IDLE_PER_LVL_PER_H = 6;  // gold/hour generated per bazaar level
+
+// ── DEPTH PASS — BAZAAR-KING ASCENSION (in-run prestige / mastery loop) ─────
+// The species ladder dead-ended at tier 10 (Bazaar King): once fused, every
+// further merge produced nothing and the late run (min 8-15, the playtime we
+// want to deepen) went flat with only raw score left. ASCENSION fixes that:
+// fusing TWO Kings consumes them for a CROWN, clears the board's biggest beasts
+// (frees space — pure upside, never punishing), and grants a STACKING in-run
+// multiplier to delivery coins + merge gold — so ascending makes the rest of
+// the run score faster, a compounding "one more ascension" goal. Crowns also
+// bank to the meta (lifetime + best-run) as an owned long-horizon chase. This
+// extends EXISTING systems (ladder/score/meta); it adds no currency, no idle/
+// daily/streak/monetization (all already present).
+var CROWN_MULT       = 0.35; // each Crown adds +35% to delivery coins AND merge gold this run
+var ASCEND_CLEAR_TOP = 6;    // on ascend, also clear up to this many of the highest-tier critters (board relief)
+function crownMult() { return 1 + crowns * CROWN_MULT; }   // run multiplier from Crowns earned this run
 
 // ── M3 THE COLLECTION — playtime-unlocked, equippable Charms ───────────────
 // The multi-DAY pull. Charms unlock on a FIXED ladder of CUMULATIVE PLAYTIME
@@ -379,6 +396,9 @@ function defaultMeta() {
     totalPlaySec: 0,         // cumulative time spent actually playing (drives charm unlocks)
     charms: {},              // charmId -> { lvl: 1..MAX }   (owned + upgrade level)
     equipped: [null, null, null], // charmId per equip slot (boost the run)
+    // DEPTH — Bazaar-King ascensions (in-run prestige), banked across runs
+    lifeCrowns: 0,           // total Crowns ever earned (owned long-horizon goal)
+    bestCrowns: 0,           // most Crowns ascended in a single run (the chase)
   };
 }
 function loadMeta() {
@@ -401,6 +421,8 @@ function loadMeta() {
         m.questDay = s.questDay || '';
         m.quests = Array.isArray(s.quests) ? s.quests : [];
         m.totalPlaySec = Math.max(0, +s.totalPlaySec || 0);
+        m.lifeCrowns = Math.max(0, +s.lifeCrowns || 0);
+        m.bestCrowns = Math.max(0, +s.bestCrowns || 0);
         if (s.charms && typeof s.charms === 'object') {
           for (var cid in s.charms) {
             if (s.charms.hasOwnProperty(cid) && CHARM_BY_ID[cid]) {
@@ -503,6 +525,8 @@ function bankRun() {
   lastProfit = Math.round(score * permBankRate());
   meta.bank += lastProfit;
   meta.totalDeliveries += deliveries;
+  meta.lifeCrowns = (meta.lifeCrowns || 0) + crowns;     // bank this run's ascensions toward the lifetime goal
+  meta.bestCrowns = Math.max(meta.bestCrowns || 0, crowns);
   meta.runs += 1;
   meta.totalPlaySec += runPlaySec; runPlaySec = 0;   // bank the run's playtime toward Charm unlocks
   recomputeBazaarLevel();
@@ -652,10 +676,17 @@ function tryActOn(srcIdx, dstKind, dstRef) {
     GF.saveRun();
     return true;
   }
+  // ASCENSION — two genuine Bazaar Kings fuse into a CROWN (in-run prestige).
+  // (A wildcard + King still bounces below: there is no tier 11, so we never
+  // consume a King for a wildcard — ascend requires TWO real top-tier beasts.)
+  if (src.tier === maxTier && tgt.tier === maxTier && !src.wild && !tgt.wild) {
+    ascendCrown(srcIdx, dst);
+    return true;
+  }
   // MERGE → tier+1 at dst
   var baseTier = src.wild ? tgt.tier : (tgt.wild ? src.tier : src.tier);
   var resultTier = GF.clamp(baseTier + 1, 0, maxTier);
-  // top tier can't go higher — bounce instead of consuming
+  // top tier can't go higher — bounce instead of consuming (wildcard onto a King, etc.)
   if (baseTier >= maxTier) { return false; }
   board[srcIdx] = null;
   var p2 = cellCenter(dst);
@@ -670,8 +701,8 @@ function tryActOn(srcIdx, dstKind, dstRef) {
   combo = (comboTimer > 0) ? combo + 1 : 1;
   comboTimer = comboWindowMs;
   if (combo > bestCombo) bestCombo = combo;
-  // equipped Charm: flat gold per merge (Trade Gem / Midas Star)
-  var mg = permMergeGold();
+  // equipped Charm: flat gold per merge (Trade Gem / Midas Star), scaled by Crowns
+  var mg = Math.round(permMergeGold() * crownMult());
   if (mg > 0) { coins += mg; score += mg; GF.spawnFloat(p2.x, p2.y - L.cell * 0.55, '+' + mg, '#ffd700'); }
   // first merge → unlock orders (progressive disclosure)
   if (!firstMergeDone) { firstMergeDone = true; refillOrders(); }
@@ -700,8 +731,8 @@ function deliverTo(srcIdx, order) {
   if (GF.tutorial.active && GF.tutorial.step === 2) GF.tutorial.next();   // a real delivery completes the tutorial
   GF.spawnParticles(L.boardX + L.boardW / 2, order._cy || L.trayY, '#ffd700', 12);
   if (order.have >= order.need) {
-    // order complete → coins (× permanent sell-bonus upgrade)
-    var gain = Math.round(coinPerDelivery * Math.max(1, order.tier) * (combo >= 2 ? combo : 1) * permSellMult());
+    // order complete → coins (× permanent sell-bonus upgrade × in-run Crown multiplier)
+    var gain = Math.round(coinPerDelivery * Math.max(1, order.tier) * (combo >= 2 ? combo : 1) * permSellMult() * crownMult());
     coins += gain; score += gain; GF.sfx('coin');
     deliveries++;
     questProgress('deliver', 1);
@@ -720,6 +751,39 @@ function deliverTo(srcIdx, order) {
   GF.saveRun();
   checkGameOver();
   return true;
+}
+
+// ── ASCENSION (in-run prestige) ─────────────────────────────────────────────
+// Fuse two Bazaar Kings → +1 CROWN. The Crown raises the run-wide coin/merge
+// multiplier (crownMult), so the rest of the run scores faster — the late-game
+// goal beyond tier 10. It ALSO clears the consumed pair plus the next-highest
+// beasts to free space (pure relief, never a penalty), and awards a one-time
+// score bonus that itself scales with the new multiplier. A flourish + happytime
+// celebrate it. Crowns bank to the meta at game-over (lifetime + best-run).
+function ascendCrown(srcIdx, dstIdx) {
+  crowns += 1;
+  // consume the two Kings
+  board[srcIdx] = null; board[dstIdx] = null;
+  // board relief: clear up to ASCEND_CLEAR_TOP of the remaining HIGHEST-tier beasts
+  var idxs = [];
+  for (var i = 0; i < board.length; i++) if (board[i] && !board[i].wild) idxs.push(i);
+  idxs.sort(function (a, b) { return (board[b].tier | 0) - (board[a].tier | 0); });   // highest first
+  var clear = Math.min(ASCEND_CLEAR_TOP, idxs.length);
+  for (var k = 0; k < clear; k++) board[idxs[k]] = null;
+  // reward: a score/coin bonus that scales with the (now higher) Crown multiplier
+  var bonus = Math.round(coinPerDelivery * (maxTier + 1) * crownMult());
+  coins += bonus; score += bonus;
+  questProgress('earn', bonus);
+  // VFX + audio
+  var pc = cellCenter(dstIdx);
+  ascendFlash = 1.6; newBeastFlash = 0;   // ascend flourish supersedes the new-beast one
+  GF.sfx('levelup'); if (GF.happytime) GF.happytime();
+  GF.setShake(0.9);
+  GF.spawnParticles(pc.x, pc.y, '#ffd700', 30);
+  GF.spawnFloat(pc.x, pc.y - L.cell * 0.4, (GF.lang === 'ru' ? '+1 КОРОНА' : '+1 CROWN'), '#ffd700');
+  GF.spawnFloat(pc.x, pc.y - L.cell * 0.9, '+' + bonus, '#ffd166');
+  GF.saveRun();
+  checkGameOver();
 }
 
 // ── SHOP ─────────────────────────────────────────────────────────────────
@@ -755,6 +819,7 @@ function startGame() {
   score = 0; coins = 0; merges = 0; deliveries = 0;
   combo = 0; bestCombo = 0; comboTimer = 0;
   maxTierReached = 0; shopUnlocked = false; wildcardSeen = false; continueUsed = false; paused = false;
+  crowns = 0; ascendFlash = 0;
   revealedTier = {}; revealQueue = []; newBeastFlash = 0;
   rows = boardRows; nests = 1;
   genRechargeMs = 650;
@@ -804,11 +869,12 @@ function startTutorial() {
   var ru = (GF.lang === 'ru');
   var steps = [
     { text: ru ? 'Нажми ГНЕЗДО, чтобы вылупить зверька' : 'Tap the NEST to hatch a critter',
-      target: function () { return nestTarget(); }, advance: 'manual' },
+      target: function () { return nestTarget(); }, advance: 'manual',
+      onAdvance: function () { try { ensureMergePair(); } catch (e) {} } },   // seed 2 matching critters so the merge demo has a pair to drag (guarded)
     { text: ru ? 'Перетащи зверька на такого же — выйдет зверь покрупнее!' : 'Drag a critter onto a matching one to MERGE!',
-      target: function () { return mergeHintTarget(); }, advance: 'manual' },
+      target: function () { return mergeFromTarget(); }, target2: function () { return mergeToTarget(); }, gesture: 'drag', advance: 'manual' },
     { text: ru ? 'Перетащи зверя на ЗАКАЗ сверху — продай за монеты!' : 'Drag a beast onto the glowing ORDER to SELL it!',
-      target: function () { return orderTarget(); }, advance: 'manual' },
+      target: function () { return deliverFromTarget(); }, target2: function () { return orderTarget(); }, gesture: 'drag', advance: 'manual' },
   ];
   GF.tutorial.start(steps, { storageKey: 'beast_bazaar_seen_tutorial', force: !seen ? true : false });
   try { localStorage.setItem('beast_bazaar_seen_tutorial', '1'); } catch (e) {}
@@ -825,6 +891,29 @@ function mergeHintTarget() {
   if (idxs.length < 2) return null;
   var a = cellCenter(idxs[0]), b = cellCenter(idxs[1]);
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, r: L.cell * 0.7 };
+}
+// ── tutorial demo-hand targets: drag FROM critter A TO matching critter B ──
+function mergeIdxs() {
+  var idxs = [];
+  for (var i = 0; i < board.length && idxs.length < 2; i++) if (board[i] && !board[i].wild) idxs.push(i);
+  return idxs;
+}
+function ensureMergePair() {
+  // the merge step's hand demo needs two same-tier critters to drag together
+  var guard = 0, prev = -1;
+  while (mergeIdxs().length < 2 && guard++ < 10) {
+    var n = mergeIdxs().length; spawnFromNest();
+    if (mergeIdxs().length === n && n === prev) break;   // spawn isn't adding (board full) — stop
+    prev = n;
+  }
+}
+function mergeFromTarget() { var ix = mergeIdxs(); if (ix.length < 1) return null; var a = cellCenter(ix[0]); return { x: a.x, y: a.y, r: L.cell * 0.42 }; }
+function mergeToTarget()   { var ix = mergeIdxs(); if (ix.length < 2) return null; var b = cellCenter(ix[1]); return { x: b.x, y: b.y, r: L.cell * 0.42 }; }
+function deliverFromTarget() {
+  var want = orders.length ? orders[0].tier : -1;
+  for (var i = 0; i < board.length; i++) if (board[i] && (board[i].wild || board[i].tier === want)) { var c = cellCenter(i); return { x: c.x, y: c.y, r: L.cell * 0.42 }; }
+  for (var j = 0; j < board.length; j++) if (board[j]) { var d = cellCenter(j); return { x: d.x, y: d.y, r: L.cell * 0.42 }; }
+  return null;
 }
 function orderTarget() {
   if (!orders.length) return { x: L.boardX + L.boardW / 2, y: L.trayY + (L.trayH || 40 * GF.S) / 2, r: 44 * GF.S };
@@ -970,6 +1059,7 @@ function update(dt) {
   if (bootBannerT > 0) bootBannerT = Math.max(0, bootBannerT - dt);
   if (paused) return;   // Vault overlay open — freeze the run (no losing required to reach the meta)
   if (newBeastFlash > 0) newBeastFlash = Math.max(0, newBeastFlash - dt);
+  if (ascendFlash > 0) ascendFlash = Math.max(0, ascendFlash - dt);
   if (gs !== 'PLAYING') { GF.tutorial.update(dt); return; }
   GF.tutorial.update(dt);
 
@@ -1054,6 +1144,7 @@ function draw(ctx) {
     if (gs === 'PLAYING') drawVaultBtn(ctx);
     drawDrag(ctx);
     if (newBeastFlash > 0) drawNewBeast(ctx);
+    if (ascendFlash > 0) drawAscend(ctx);
     if (gs === 'PLAYING') GF.tutorial.draw(ctx);
   }
   if (paused) drawPauseOverlay(ctx);
@@ -1075,6 +1166,25 @@ function drawCoinIcon(ctx, x, y, r) {
   ctx.lineWidth = Math.max(1, r * 0.18); ctx.strokeStyle = '#b9870c'; ctx.stroke();
   ctx.beginPath(); ctx.arc(x, y, r * 0.52, 0, Math.PI * 2);
   ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = Math.max(1, r * 0.13); ctx.stroke();
+  ctx.restore();
+}
+// Vector crown (the Ascension currency) — never an emoji (tofu in the game font).
+function drawCrownIcon(ctx, x, y, r) {
+  ctx.save();
+  ctx.fillStyle = '#ffd700'; ctx.strokeStyle = '#b9870c'; ctx.lineWidth = Math.max(1, r * 0.14);
+  var bw = r * 1.6, bh = r * 1.5, bx = x - bw / 2, by = y - bh * 0.42;
+  ctx.beginPath();
+  ctx.moveTo(bx, by + bh);                 // base left
+  ctx.lineTo(bx, by + bh * 0.28);          // up left edge
+  ctx.lineTo(bx + bw * 0.22, by + bh * 0.62);   // dip 1
+  ctx.lineTo(bx + bw * 0.5, by);           // centre peak
+  ctx.lineTo(bx + bw * 0.78, by + bh * 0.62);   // dip 2
+  ctx.lineTo(bx + bw, by + bh * 0.28);     // up right edge
+  ctx.lineTo(bx + bw, by + bh);            // base right
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  // gem dots on the band
+  ctx.fillStyle = '#ff7b6b';
+  ctx.beginPath(); ctx.arc(x, by + bh * 0.82, r * 0.13, 0, Math.PI * 2); ctx.fill();
   ctx.restore();
 }
 // Vector Charm icon — shape varies by the boost it grants (no fonts, no emoji).
@@ -1173,6 +1283,21 @@ function drawTopHUD(ctx) {
   ctx.font = 'bold ' + GF.clamp(15 * S, 11, 20) + 'px sans-serif';
   ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
   ctx.fillText(GF.t('score') + ' ' + score, lx, rowA);
+  // CROWNS + active run multiplier (row A, centre) — only after the first ascension.
+  // This is the visible payoff of the late-game prestige goal: each Crown lifts the
+  // multiplier, so the player watches "×N.NN" climb as they keep ascending.
+  if (crowns > 0) {
+    var mlt = crownMult();
+    var mtxt = '×' + (mlt >= 10 ? mlt.toFixed(1) : mlt.toFixed(2));
+    var cr2 = GF.clamp(8 * S, 6, 11);
+    ctx.font = 'bold ' + GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+    var ctxt = '' + crowns + '  ' + mtxt;
+    var cw = ctx.measureText(ctxt).width;
+    var ccx = GF.cx - (cr2 + 4 * S + cw) / 2;
+    drawCrownIcon(ctx, ccx + cr2, rowA, cr2);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#ffd700';
+    ctx.fillText(ctxt, ccx + cr2 * 2 + 4 * S, rowA);
+  }
   // COINS (left, row B) — vector coin + amount
   var cr = GF.clamp(7 * S, 6, 10);
   drawCoinIcon(ctx, lx + cr, rowB, cr);
@@ -1452,6 +1577,26 @@ function drawNewBeast(ctx) {
   ctx.fillText(GF.t('newbeast'), GF.cx, GF.cy + sz * 0.6);
   ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(18 * S, 13, 28) + 'px sans-serif';
   ctx.fillText(speciesName(maxTierReached), GF.cx, GF.cy + sz * 0.6 + 30 * S);
+  ctx.restore();
+}
+
+// Full-screen "ASCENDED!" flourish when two Kings fuse into a Crown — the late-game
+// payoff moment. Shows the Crown, the new run multiplier, and the +bonus.
+function drawAscend(ctx) {
+  var S = GF.S, a = Math.min(1, ascendFlash / 1.6), ru = (GF.lang === 'ru');
+  ctx.save();
+  ctx.globalAlpha = a * 0.85;
+  ctx.fillStyle = 'rgba(20,12,4,0.5)'; ctx.fillRect(0, 0, GF.W, GF.H);
+  ctx.globalAlpha = a;
+  var r = GF.clamp(70 * S, 46, 120);
+  drawCrownIcon(ctx, GF.cx, GF.cy - r * 0.5, r);
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold ' + GF.clamp(26 * S, 17, 38) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(ru ? 'ВОЗНЕСЕНИЕ!' : 'ASCENDED!', GF.cx, GF.cy + r * 0.9);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(17 * S, 12, 26) + 'px sans-serif';
+  var mlt = crownMult();
+  ctx.fillText((ru ? 'Множитель ×' : 'Multiplier ×') + (mlt >= 10 ? mlt.toFixed(1) : mlt.toFixed(2)),
+    GF.cx, GF.cy + r * 0.9 + GF.clamp(30 * S, 20, 44));
   ctx.restore();
 }
 
@@ -1749,7 +1894,17 @@ function drawMetaPanel(ctx, topY, maxW) {
   var lvl = meta ? meta.bazaarLevel : 1;
   var into = (meta ? meta.totalDeliveries : 0) % 12, need = 12;
   ctx.textAlign = 'left'; ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
-  ctx.fillText(GF.t('bazaarLv') + ' ' + lvl, x + pad, cy);
+  var lvlTxt = GF.t('bazaarLv') + ' ' + lvl;
+  ctx.fillText(lvlTxt, x + pad, cy);
+  // lifetime Crowns chip — the owned ascension goal, shown beside the bazaar level
+  var life = meta ? (meta.lifeCrowns || 0) : 0;
+  if (life > 0) {
+    var lw = ctx.measureText(lvlTxt).width, cr3 = GF.clamp(7 * S, 6, 10);
+    var crx = x + pad + lw + 12 * S;
+    drawCrownIcon(ctx, crx + cr3, cy + GF.clamp(7 * S, 6, 9), cr3);
+    ctx.fillStyle = '#ffd700'; ctx.font = 'bold ' + GF.clamp(11.5 * S, 9.5, 15) + 'px sans-serif';
+    ctx.fillText('' + life, crx + cr3 * 2 + 4 * S, cy);
+  }
   ctx.textAlign = 'right'; ctx.fillStyle = '#c77dff'; ctx.font = GF.clamp(10.5 * S, 9, 14) + 'px sans-serif';
   ctx.fillText(GF.t('codexLbl') + ' ' + codexCount() + '/' + (maxTier + 1), x + maxW - pad, cy + 3 * S);
   cy += 18 * S;
@@ -1892,11 +2047,26 @@ function drawGameOver(ctx) {
   drawBeast(ctx, GF.cx, H * 0.3 + 50 * S + sz * 0.4, maxTierReached, false, sz, 0);
   ctx.fillStyle = '#ffd166'; ctx.font = 'bold ' + GF.clamp(16 * S, 12, 22) + 'px sans-serif';
   ctx.fillText(speciesName(maxTierReached), GF.cx, H * 0.3 + 50 * S + sz + 20 * S);
+  var sy0 = H * 0.3 + 50 * S + sz;
+  // CROWNS earned this run (the ascension payoff) + lifetime tally — only when relevant
+  var ru = (GF.lang === 'ru');
+  if (crowns > 0 || (meta && meta.lifeCrowns > 0)) {
+    var life = (meta ? (meta.lifeCrowns || 0) : 0);   // already includes THIS run (banked in gameOver)
+    var ctxt = (ru ? 'Короны: ' : 'Crowns: ') + crowns + '   ' + (ru ? 'всего ' : 'lifetime ') + life;
+    ctx.font = 'bold ' + GF.clamp(13 * S, 10, 18) + 'px sans-serif';
+    var cw = ctx.measureText(ctxt).width, cr = GF.clamp(9 * S, 7, 12);
+    var startX = GF.cx - (cr + 6 * S + cw) / 2;
+    drawCrownIcon(ctx, startX + cr, sy0 + 38 * S, cr);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#ffd700';
+    ctx.fillText(ctxt, startX + cr * 2 + 6 * S, sy0 + 38 * S);
+    ctx.textAlign = 'center';
+    sy0 += 22 * S;   // push score/best down to make room
+  }
   // score
   ctx.fillStyle = '#fff'; ctx.font = GF.clamp(18 * S, 13, 26) + 'px sans-serif';
-  ctx.fillText(GF.t('score') + ': ' + score, GF.cx, H * 0.3 + 50 * S + sz + 50 * S);
+  ctx.fillText(GF.t('score') + ': ' + score, GF.cx, sy0 + 50 * S);
   ctx.fillStyle = '#8a7'; ctx.font = GF.clamp(13 * S, 10, 18) + 'px sans-serif';
-  ctx.fillText(GF.t('best') + ': ' + best, GF.cx, H * 0.3 + 50 * S + sz + 74 * S);
+  ctx.fillText(GF.t('best') + ': ' + best, GF.cx, sy0 + 74 * S);
   // bottom-anchored buttons: rewarded "clear space" continue (one per run) above PLAY AGAIN
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
   var retryY = H - btnH - 20 * S;
@@ -2040,7 +2210,24 @@ window._bbInfo = function () {
     totalPlayMin: Math.floor(totalPlayMin()), nextCharm: (function () { var n = nextCharm(); return n ? { id: n.id, min: n.min } : null; }()),
     quests: (meta && meta.quests) ? meta.quests.map(function (q) { return { kind: q.kind, goal: q.goal, prog: q.prog, done: q.done, claimed: q.claimed, reward: q.reward }; }) : [],
     questClaims: questClaimRects, claimableQuests: claimableQuests(),
+    // DEPTH — Ascension state
+    crowns: crowns, crownMult: crownMult(), maxTier: maxTier,
+    lifeCrowns: meta ? (meta.lifeCrowns || 0) : 0, bestCrowns: meta ? (meta.bestCrowns || 0) : 0,
   };
+};
+// Test seam: drop two Bazaar Kings onto adjacent free cells (so a real merge of
+// them triggers ascendCrown via tryActOn). Returns the two cell indices. No console.
+window._bbSeedKings = function () {
+  var got = [];
+  for (var i = 0; i < board.length && got.length < 2; i++) { if (!board[i]) { placeCritter(i, maxTier, false, false); got.push(i); } }
+  return got;
+};
+// Test seam: fill every empty cell to force GRIDLOCK deterministically (without
+// disturbing crowns/score), then evaluate game-over. Exercises the bank path. No console.
+window._bbFillBoard = function () {
+  for (var i = 0; i < board.length; i++) { if (!board[i]) placeCritter(i, 1, false, false); }
+  checkGameOver();
+  return gs;
 };
 // Test seam: force-complete daily quest i (exercise the CLAIM path without grinding).
 window._bbWinQuest = function (i) {
@@ -2081,7 +2268,7 @@ GF.init({
         return {
           gs: gs, score: score, coins: coins, merges: merges, deliveries: deliveries,
           maxTierReached: maxTierReached, shopUnlocked: shopUnlocked, wildcardSeen: wildcardSeen,
-          bestCombo: bestCombo, rows: rows, nests: nests, genRechargeMs: genRechargeMs,
+          crowns: crowns, bestCombo: bestCombo, rows: rows, nests: nests, genRechargeMs: genRechargeMs,
           board: board.map(function (c) { return c ? { t: c.tier, w: c.wild ? 1 : 0 } : 0; }),
           orders: orders.map(function (o) { return { t: o.tier, n: o.need, h: o.have, id: o.id }; }),
           nestCharges: nestCharges, firstMergeDone: firstMergeDone, firstDeliveryDone: firstDeliveryDone,
@@ -2093,6 +2280,7 @@ GF.init({
         if (s.gs !== 'PLAYING') return;   // not mid-run → onReady will startGame() (no menu)
         score = s.score || 0; coins = s.coins || 0; merges = s.merges || 0; deliveries = s.deliveries || 0;
         maxTierReached = s.maxTierReached || 0; shopUnlocked = !!s.shopUnlocked; wildcardSeen = !!s.wildcardSeen;
+        crowns = s.crowns || 0;
         bestCombo = s.bestCombo || 0; rows = s.rows || boardRows; nests = s.nests || 1;
         genRechargeMs = s.genRechargeMs || 650;
         firstMergeDone = !!s.firstMergeDone; firstDeliveryDone = !!s.firstDeliveryDone;
@@ -2107,7 +2295,8 @@ GF.init({
       }
     );
     // No menu screen — the game is impossible to "lose-gate" the meta behind, so we boot
-    // straight into play. A resumed mid-run keeps its state; anything else starts fresh.
+    // straight into play (rule #9: window.__GF_AUTOSTART is moot here — beast NEVER shows a
+    // menu, on the gallery or a platform build). A resumed mid-run keeps its state; else fresh.
     if (gs !== 'PLAYING') startGame();
     // surface the overnight idle income + daily streak bonus as a brief boot banner
     if (idleClaim > 0 || dailyClaim > 0) bootBannerT = 4.0;
@@ -2123,6 +2312,8 @@ GF.exposeState(function () {
     maxTier: maxTier, maxTierReached: maxTierReached,
     merges: merges, deliveries: deliveries, combo: combo, bestCombo: bestCombo,
     freeCells: freeCells(), shopUnlocked: shopUnlocked, wildcardSeen: wildcardSeen,
+    crowns: crowns, crownMult: crownMult(),
+    lifeCrowns: meta ? (meta.lifeCrowns || 0) : 0, bestCrowns: meta ? (meta.bestCrowns || 0) : 0,
     // tunables (DESIGN.md §Tunables)
     boardCols: boardCols, boardRows: boardRows, genCharge: genCharge, genRechargeMs: genRechargeMs,
     baseOrderTier: baseOrderTier, orderTierRampEvery: orderTierRampEvery, coinPerDelivery: coinPerDelivery,

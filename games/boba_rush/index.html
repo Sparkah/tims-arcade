@@ -2859,10 +2859,150 @@ GF.init({
       showTut = false;                     // ensure no "?" overlay is open
       startGame();                         // → gs === 'PLAYING', fresh shift
     }
+
+    // ── PROMO CLIMAX (CrazyGames preview capture ONLY) ────────────────────────
+    // STRICTLY gated on ?promo=climax — normal play, the gallery build, and any
+    // shipped/platform build (which never carry this query param) are untouched.
+    // Boots straight into a lively shift and DRIVES the real serving loop by
+    // dispatching taps through the game's own onPress() handler at the live
+    // station/customer hit-rects: pour a base -> add the topping(s) -> serve the
+    // customer, on a steady cadence, so the clip shows cups being made, guests
+    // served, and coins/combo climbing for ~18s. Deterministic (Math.random is
+    // seeded). Silent + cursor-hidden per the CG spec.
+    try {
+      if (new URLSearchParams(location.search).get('promo') === 'climax') {
+        setTimeout(setupPromoClimax, 60);
+      }
+    } catch (e) {}
   },
   onUpdate: update,
   onDraw: draw
 });
+
+// ── PROMO DRIVER (only ever reached via ?promo=climax) ──────────────────────
+function setupPromoClimax() {
+  // 1. Silent + no cursor (CG: no audio, no visible mouse).
+  try { document.documentElement.style.cursor = 'none'; document.body.style.cursor = 'none'; } catch (e) {}
+  var _st = document.createElement('style');
+  _st.textContent = 'html,body,canvas{cursor:none !important}';
+  document.head.appendChild(_st);
+  setMuted(true);                 // mutes BOTH SFX (beep) and the music bed
+  try { GF.setMusicMuted(true); } catch (e) {}
+
+  // 2. Deterministic RNG so every recorded frame is bit-identical across runs.
+  (function seedRandom() {
+    var s = 0x1A2B3C4D >>> 0;
+    Math.random = function() { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+  })();
+
+  // 3. Make the shift IMMORTAL for the capture. walkOut() / gameOver() are inner
+  // closure bindings that update() calls by name, so reassigning them here to
+  // no-ops means a customer whose ring empties never walks out and the run can
+  // never hit CLOSING TIME mid-clip (the frozen game-over screen was the dud
+  // failure mode). We still refill patience each heartbeat so rings look healthy
+  // rather than pinned empty. STRICTLY promo-only — nothing outside this code
+  // path ever reassigns them.
+  walkOut = function() {};
+  gameOver = function() {};
+
+  // 4. Suppress every overlay/menu and start a shift immediately.
+  metaOpen = false; showTut = false; bootBannerT = 0; toolToast = null; taskToast = null;
+  screenshotMode = false;
+  startGame();                    // → gs = 'PLAYING', fresh first (plain) customer
+  // Jump ~1.5 min in so green/milk/taro bases + pearls + jelly toppings are
+  // unlocked — colourful, multi-ingredient cups read better on camera than the
+  // plain-tea opening, without the late-game drain being so steep it outpaces
+  // the scripted hands (we also refill patience below so the shift never ends).
+  elapsed = 95;
+  prevBaseCount = unlockedBases().length;
+  prevTopCount  = unlockedToppings().length;
+  spawnTimer = 0.3;
+  maxQueue = MAX_QUEUE + 1;        // one extra slot so the counter looks full
+  // pre-seed a full-ish counter so frame 1 already shows waiting guests
+  for (var i = queue.length; i < maxQueue; i++) spawnCustomer();
+
+  // 4. Synthesize taps through the REAL input handler at the live hit-rects.
+  // btnRects / customer screen positions are rebuilt every draw frame, so by
+  // the time this fires (post-settle) they're populated. We read the front
+  // customer's order, tap its base button, tap each required topping button,
+  // then tap the customer — exactly what a player does.
+  function frontCustomer() {
+    for (var i = 0; i < queue.length; i++) {
+      var c = queue[i];
+      if (c.leaving === 0 && c.angry === 0) return c;
+    }
+    return null;
+  }
+  function rectCenterFor(kind, id) {
+    for (var b = 0; b < btnRects.length; b++) {
+      var r = btnRects[b];
+      if (r.kind === kind && r.id === id && !r.locked) return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+    }
+    return null;
+  }
+  // one full "make + serve" of the current front customer, taps staggered so
+  // the pour / topping / serve each land on a distinct frame (visible motion).
+  function serveFront() {
+    var c = frontCustomer();
+    if (!c) return;                         // nothing waiting → wait for next tick
+    var seq = [];                           // [{at, fn}] relative ms
+    var baseC = rectCenterFor('base', c.order.base);
+    if (baseC) seq.push({ at: 0, fn: function() { onPress(baseC.x, baseC.y); } });
+    else        seq.push({ at: 0, fn: function() { addBase(c.order.base); } });   // fallback: build directly
+    var step = 150;
+    for (var k = 0; k < c.order.toppings.length; k++) {
+      (function(tid, when) {
+        var tc = rectCenterFor('topping', tid);
+        seq.push({ at: when, fn: function() { if (tc) onPress(tc.x, tc.y); else addTopping(tid); } });
+      })(c.order.toppings[k], step * (k + 1));
+    }
+    // finally tap the customer to serve (use the real per-frame screen pos).
+    var serveAt = step * (c.order.toppings.length + 1) + 120;
+    seq.push({ at: serveAt, fn: function() {
+      var cc = frontCustomer();             // re-resolve (positions update each frame)
+      if (cc && cc.sx != null) onPress(cc.sx, cc.sy);
+    } });
+    for (var s = 0; s < seq.length; s++) {
+      (function(item) { setTimeout(item.fn, item.at); })(seq[s]);
+    }
+  }
+
+  // Keep the bar ALIVE for the whole capture: top up every waiting guest's
+  // patience and zero the strikes each tick so nobody ever walks out and the
+  // shift never hits CLOSING TIME mid-clip (a frozen game-over screen is the
+  // failure mode we must avoid). The serve loop still empties + refills the
+  // queue, so coins/combo/served keep climbing on camera — continuous play.
+  function keepShiftLively() {
+    if (gs === 'SHOP') { closeShop(); }     // the between-rush UPGRADE BAR pop freezes the view → dismiss instantly
+    if (gs !== 'PLAYING') return;
+    strikes = 0;
+    servesSinceShop = 0;                     // never let the serve count reach SHOP_EVERY (no shop pop mid-clip)
+    for (var i = 0; i < queue.length; i++) {
+      var c = queue[i];
+      if (c.leaving === 0 && c.angry === 0 && c.patience < 0.65) c.patience = 1;
+    }
+    // refill the counter so there's always someone to serve
+    var waiting = 0;
+    for (var j = 0; j < queue.length; j++) if (queue[j].leaving === 0 && queue[j].angry === 0) waiting++;
+    if (waiting < 2) spawnCustomer();
+  }
+
+  // Cadence: a complete make+serve cycle ~ every 650ms keeps the scene busy
+  // (cups flowing, coins ticking) without being frantic. First cycle after a
+  // ~550ms beat so the opening frame reads as an establishing shot before the
+  // hands start moving. keepShiftLively runs on a faster 220ms heartbeat so a
+  // ring can never empty between serve cycles.
+  var liveTimer = setInterval(keepShiftLively, 220);
+  var promoTimer = setInterval(function() {
+    if (gs === 'SHOP') { closeShop(); }     // skip the between-rush shop pop so play never stalls
+    if (gs === 'GAMEOVER') { startGame(); elapsed = 95; spawnTimer = 0.3; maxQueue = MAX_QUEUE + 1; for (var i = queue.length; i < maxQueue; i++) spawnCustomer(); return; }
+    if (gs === 'PLAYING') serveFront();
+  }, 650);
+  setTimeout(serveFront, 550);
+
+  // Safety stop a bit past the 18s capture window so we never run unbounded.
+  setTimeout(function() { try { clearInterval(promoTimer); clearInterval(liveTimer); } catch (e) {} }, 26000);
+}
 
 // ── STATE EXPOSURE (post-build-tester gate) ────────────────────────────────
 GF.exposeState(function() {
