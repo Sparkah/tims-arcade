@@ -79,6 +79,11 @@ for ((i = 0; i < COUNT; i++)); do
     [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
   done
 
+  # Audio: ship ONLY the runtime loop to the public CDN. bg_full.mp3 (the raw
+  # multi-minute source track) is unused bloat, and audio_manifest.json leaks the
+  # Suno task_id + account credit balance. Keep both in the Games/ source only.
+  rm -f "$OUT_GAMES/$SLUG/audio/bg_full.mp3" "$OUT_GAMES/$SLUG/audio/audio_manifest.json"
+
   # Copy optional sibling files used by the game-factory framework
   for sibling in gf-lib.js; do
     [[ -f "$GAME_DIR/$sibling" ]] && cp "$GAME_DIR/$sibling" "$OUT_GAMES/$SLUG/$sibling"
