@@ -490,8 +490,16 @@ function init(config) {
     setTimeout(boot, 3000);
   } else {
     // Standalone / Gallery: no platform SDK to await, so boot immediately.
-    // (boot() is idempotent via the `booted` guard.) Waiting here just showed
-    // a blank canvas for 3s before the first frame.
+    // No SDK locale here, so fall back to the BROWSER language. Yandex sets
+    // i18n.lang above; this branch only runs off-platform (gallery / screenshot
+    // capture). Without it the game always booted 'en' even when navigator.language
+    // was ru-RU, so RU screenshots rendered an English tutorial (the tutorial bakes
+    // its text at start(), before any post-boot _setLang could re-localize it).
+    try {
+      var _nl = (navigator.language || navigator.userLanguage || '').slice(0, 2).toLowerCase();
+      if (['ru', 'be', 'kk', 'uk', 'uz'].indexOf(_nl) >= 0) lang = 'ru';
+    } catch (e) {}
+    // (boot() is idempotent via the `booted` guard.)
     boot();
   }
 
