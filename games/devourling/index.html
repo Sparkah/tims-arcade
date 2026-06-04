@@ -235,6 +235,112 @@ var META_DEFS = {
   survivor: { max: 1, costs: [400],                    val: function(r){ return r > 0 ? 1 : 0; } }, // free revive
 };
 var META_ORDER = ['vigor','predator','greed','hunger','survivor'];
+
+// ── M3 THE HOARD — Relics unlocked by CUMULATIVE PLAYTIME ──────────────────
+// The multi-DAY pull (the Den is the always-on floor; the Hoard is the loadout
+// layer). A FIXED ordered ladder so "next relic in N min" is always a visible
+// goal. Each relic: a passive run bonus, upgradable 1..5 with Essence; only 3 fit
+// the equip slots, so owning more than you can equip is a loadout choice.
+// Icons are VECTOR-DRAWN (drawRelicIcon) — never emoji (emoji = tofu boxes in the
+// game font). Effects fold into the run at resetRun via relicVal(stat).
+var RELIC_MAX_LVL = 5;
+var RELIC_SLOTS = 3;
+var RELIC_DEFS = [
+  { id:'sac',     min:5,   col:'#7ed957', stat:'hp',      per:25,   en:'Gorged Sac',      ru:'Раздутый мешок' },
+  { id:'fang',    min:15,  col:'#ff7b6b', stat:'dmg',     per:0.12, en:'Razor Fang',      ru:'Острый клык' },
+  { id:'maw',     min:25,  col:'#ffd166', stat:'range',   per:0.20, en:'Hungry Maw',      ru:'Голодная пасть' },
+  { id:'cilia',   min:45,  col:'#6aa9e0', stat:'speed',   per:0.10, en:'Quickstep Cilia', ru:'Быстрые реснички' },
+  { id:'stomach', min:60,  col:'#c77dff', stat:'revive',  per:1,    en:'Second Stomach',  ru:'Второй желудок' },
+  { id:'gland',   min:90,  col:'#ffd700', stat:'essence', per:0.20, en:'Greed Gland',     ru:'Железа жадности' },
+  { id:'venom',   min:120, col:'#9d7bff', stat:'poison',  per:1,    en:'Venom Sac',       ru:'Ядовитый мешок' },
+  { id:'hide',    min:150, col:'#e8985e', stat:'thorns',  per:0.30, en:'Thorn Hide',      ru:'Шипастая шкура' },
+  { id:'core',    min:180, col:'#5fb98f', stat:'regen',   per:2,    en:'Vital Core',      ru:'Живое ядро' },
+  { id:'crown',   min:240, col:'#ff4d6d', stat:'dmg',     per:0.15, stat2:'hppct', per2:0.15, en:"Devourer's Crown", ru:'Корона пожирателя' },
+  { id:'void',    min:300, col:'#b388ff', stat:'range',   per:0.50, stat2:'xp',    per2:0.10, en:'Black Hole Gut', ru:'Чёрная утроба' },
+];
+var RELIC_BY_ID = {};
+for (var _ri = 0; _ri < RELIC_DEFS.length; _ri++) RELIC_BY_ID[RELIC_DEFS[_ri].id] = RELIC_DEFS[_ri];
+var runPlaySec = 0;          // survival seconds in the CURRENT run (folded into totalPlaySec at game-over)
+var relicToast = null;       // { def, t } — NEW RELIC flourish on a playtime unlock
+var relicRevives = 0;        // extra free revives this run from the Second Stomach relic
+var questToast = null;       // { q, t } — daily-quest-complete flourish
+var bootBannerT = 0;         // welcome-back banner timer (idle + daily)
+// summed bonus across EQUIPPED relics for a stat (per × level), incl. secondary stat
+function relicVal(stat) {
+  var v = 0;
+  for (var i = 0; i < meta.equipped.length; i++) {
+    var id = meta.equipped[i]; if (!id) continue;
+    var d = RELIC_BY_ID[id], c = meta.relics[id]; if (!d || !c) continue;
+    if (d.stat === stat) v += d.per * c.lvl;
+    if (d.stat2 === stat) v += d.per2 * c.lvl;
+  }
+  return v;
+}
+function totalPlaySec() { return (meta.totalPlaySec || 0) + runPlaySec; }
+function totalPlayMin() { return totalPlaySec() / 60; }
+function relicName(d) { return (GF.lang === 'ru' ? d.ru : d.en) || d.en; }
+function relicBonusText(d, lvl) {
+  function fmt(stat, per) {
+    var v = per * lvl, ru = (GF.lang === 'ru');
+    switch (stat) {
+      case 'hp':      return '+' + Math.round(v) + (ru ? ' макс. ОЗ' : ' max HP');
+      case 'hppct':   return '+' + Math.round(v*100) + (ru ? '% макс. ОЗ' : '% max HP');
+      case 'dmg':     return '+' + Math.round(v*100) + (ru ? '% урон' : '% damage');
+      case 'range':   return '+' + Math.round(v*100) + (ru ? '% радиус сбора' : '% pickup range');
+      case 'speed':   return '+' + Math.round(v*100) + (ru ? '% скорость' : '% move speed');
+      case 'revive':  return '+' + Math.round(v) + (ru ? ' оживление' : ' revive');
+      case 'essence': return '+' + Math.round(v*100) + (ru ? '% эссенции' : '% essence');
+      case 'poison':  return ru ? 'яд: урон со временем' : 'poison damage over time';
+      case 'thorns':  return '+' + Math.round(v*100) + (ru ? '% отражение' : '% reflect');
+      case 'regen':   return '+' + (v).toFixed(0) + (ru ? ' ОЗ/сек' : ' HP/sec');
+      case 'xp':      return '+' + Math.round(v*100) + (ru ? '% опыт' : '% XP');
+    }
+    return '';
+  }
+  var t = fmt(d.stat, d.per);
+  if (d.stat2) t += '  +  ' + fmt(d.stat2, d.per2);
+  return t;
+}
+function nextRelic() {
+  for (var i = 0; i < RELIC_DEFS.length; i++) if (!meta.relics[RELIC_DEFS[i].id]) return RELIC_DEFS[i];
+  return null;
+}
+// grant any relic whose playtime milestone is crossed; auto-equip into a free slot
+function checkRelicUnlocks() {
+  var mins = totalPlayMin(), granted = [];
+  for (var i = 0; i < RELIC_DEFS.length; i++) {
+    var d = RELIC_DEFS[i];
+    if (mins >= d.min && !meta.relics[d.id]) {
+      meta.relics[d.id] = { lvl: 1 };
+      for (var s = 0; s < meta.equipped.length; s++) { if (!meta.equipped[s]) { meta.equipped[s] = d.id; break; } }
+      granted.push(d);
+    }
+  }
+  if (granted.length) saveMeta();
+  return granted;
+}
+function relicUpCost(id) {
+  var c = meta.relics[id]; if (!c) return null;
+  if (c.lvl >= RELIC_MAX_LVL) return null;
+  var d = RELIC_BY_ID[id];
+  return Math.round((30 + d.min * 0.5) * Math.pow(1.6, c.lvl - 1));
+}
+function relicBuyUpgrade(id) {
+  var cost = relicUpCost(id);
+  if (cost == null || meta.essence < cost) return false;
+  meta.essence -= cost; meta.relics[id].lvl += 1; saveMeta(); return true;
+}
+function relicToggleEquip(id) {
+  if (!meta.relics[id]) return false;
+  var at = meta.equipped.indexOf(id);
+  if (at >= 0) { meta.equipped[at] = null; saveMeta(); return true; }
+  for (var s = 0; s < meta.equipped.length; s++) { if (!meta.equipped[s]) { meta.equipped[s] = id; saveMeta(); return true; } }
+  return false;
+}
+function relicUnequipSlot(slot) {
+  if (!meta.equipped[slot]) return false;
+  meta.equipped[slot] = null; saveMeta(); return true;
+}
 var meta = {
   essence: 0,
   up: { vigor: 0, predator: 0, greed: 0, hunger: 0, survivor: 0 },
@@ -245,6 +351,10 @@ var meta = {
   dailyDay: 0,          // UTC day the current quest set belongs to
   quests: null,         // [{id,type,target,prog,claimed}]
   loginClaimedDay: 0,   // UTC day the login bonus was last granted
+  // M3 THE HOARD — playtime-unlocked, equippable Relics (the multi-day pull)
+  totalPlaySec: 0,      // cumulative survival time across all runs (drives Relic unlocks)
+  relics: {},           // relicId -> { lvl:1..5 }  (owned + upgrade level)
+  equipped: [null, null, null],  // relicId per equip slot (bonuses fold into the run)
 };
 function metaRank(k) { return (meta.up && meta.up[k]) | 0; }
 function metaVal(k) { var d = META_DEFS[k]; return d ? d.val(metaRank(k)) : 0; }
@@ -266,6 +376,7 @@ function saveMeta() {
       essence: meta.essence, up: meta.up,
       lastPlayedDay: meta.lastPlayedDay, streak: meta.streak, lastSeenMs: meta.lastSeenMs,
       dailyDay: meta.dailyDay, quests: meta.quests, loginClaimedDay: meta.loginClaimedDay,
+      totalPlaySec: meta.totalPlaySec, relics: meta.relics, equipped: meta.equipped,
     }));
   } catch (e) {}
 }
@@ -286,6 +397,17 @@ function loadMeta() {
       meta.dailyDay = s.dailyDay | 0;
       meta.quests = Array.isArray(s.quests) ? s.quests : null;
       meta.loginClaimedDay = s.loginClaimedDay | 0;
+      meta.totalPlaySec = Math.max(0, +s.totalPlaySec || 0);
+      meta.relics = {};
+      if (s.relics && typeof s.relics === 'object') {
+        for (var rk in s.relics) {
+          if (s.relics.hasOwnProperty(rk) && RELIC_BY_ID[rk]) {
+            meta.relics[rk] = { lvl: GF.clamp((s.relics[rk] && s.relics[rk].lvl) | 0 || 1, 1, RELIC_MAX_LVL) };
+          }
+        }
+      }
+      meta.equipped = [null, null, null];
+      if (Array.isArray(s.equipped)) for (var ei = 0; ei < 3; ei++) { var id = s.equipped[ei]; meta.equipped[ei] = (id && meta.relics[id]) ? id : null; }
     }
   } catch (e) {}
 }
@@ -421,8 +543,19 @@ function nearestEnemy(fromX, fromY, maxD) {
 
 function damageEnemy(e, dmg, isBite) {
   e.hp -= dmg; e.hitT = 0.12;
+  // Venom Sac relic: a hero hit applies a stacking poison DoT (scaled by relic level)
+  if (isBite) { var pz = relicVal('poison'); if (pz > 0) { e.psn = (e.psn || 0) + 1.5 * pz; e.psnSrc = true; } }
   if (e === miniboss || e === boss) GF.spawnParticles(e.x + (Math.random()-0.5)*e.r, e.y + (Math.random()-0.5)*e.r, '#fff', 2);
   if (e.hp <= 0) killEnemy(e, isBite);
+}
+// poison tick — call from the per-enemy update with dt; deals e.psn dmg/sec while it lasts
+function tickPoison(e, dt) {
+  if (!e.psn || e.psn <= 0) return;
+  var dps = 6 * relicVal('poison');           // damage per second at current loadout
+  if (dps <= 0) { e.psn = 0; return; }
+  e.hp -= dps * dt; e.psn -= dt;
+  if ((Math.random() < dt * 4)) GF.spawnParticles(e.x, e.y, '#9d7bff', 1);
+  if (e.hp <= 0) killEnemy(e, true);
 }
 
 function killEnemy(e, isBite) {
@@ -572,7 +705,7 @@ function hurtHero(n) {
 
 // ── XP / LEVEL-UP ──────────────────────────────────────────────────────────
 function xpForLevel(lv) { return Math.round(XP_BASE * Math.pow(XP_GROWTH, lv - 1)); }
-function gainXp(n) { xp += n; while (xp >= xpNeed) { xp -= xpNeed; doLevelUp(); } }
+function gainXp(n) { xp += n * (1 + relicVal('xp')); while (xp >= xpNeed) { xp -= xpNeed; doLevelUp(); } }
 function doLevelUp() {
   level++;
   xpNeed = xpForLevel(level);
@@ -643,7 +776,7 @@ function applyChoice(ch) {
 // ── GAME LIFECYCLE ───────────────────────────────────────────────────────
 function resetRun() {
   survivalSec = 0; kills = 0; score = 0;
-  maxHp = MAX_HP + metaVal('vigor'); hp = maxHp; level = 1; xp = 0; xpNeed = XP_BASE; form = 0;  // vigor = permanent +HP
+  maxHp = Math.round((MAX_HP + metaVal('vigor') + relicVal('hp')) * (1 + relicVal('hppct'))); hp = maxHp; level = 1; xp = 0; xpNeed = XP_BASE; form = 0;  // vigor (Den) + Gorged Sac/Crown (Relics) = permanent +HP
   HERO_RADIUS = FORM_RADIUS[0];
   hero.x = GF.cx; hero.y = GF.cy; hero.vx = 0; hero.vy = 0; hero.hitFlash = 0; hero.faceX = 1; hero.faceY = 0;
   enemies.length = 0; motes.length = 0; bullets.length = 0; slashes.length = 0;
@@ -651,7 +784,8 @@ function resetRun() {
   miniboss = null; boss = null;
   minibossSpawned = false; bossSpawned = false; secondMiniSpawned = false;
   bannerT = 0; enemyTypesSeen = {}; firstKillDone = false;
-  dmgMul = 1 + metaVal('predator') / 100; rateMul = 1; speedMul = 1; magnetMul = 1 + metaVal('hunger') / 100; regenPerSec = 0; devourHeal = 0;  // predator/hunger = permanent Den perks
+  dmgMul = 1 + metaVal('predator') / 100 + relicVal('dmg'); rateMul = 1; speedMul = 1 + relicVal('speed'); magnetMul = 1 + metaVal('hunger') / 100 + relicVal('range'); regenPerSec = relicVal('regen'); devourHeal = 0;  // Den perks + equipped Relics (dmg/speed/range/regen)
+  relicRevives = Math.round(relicVal('revive'));  // Second Stomach: extra free revives this run
   weapons = { bite: 1 }; weaponTimers = {}; orbitAngle = 0;
   spareUpgrades = 0; levelChoices = [];
   reviveUsed = false; reviveLoading = false; evoFlash = 0; justEvolved = false;
@@ -670,12 +804,19 @@ function startGame() {
   GF.gameStarted(); GF.saveRun();
 }
 function gameOver() {
+  // Second Stomach relic: spend a free (no-ad) revive instead of dying
+  if (relicRevives > 0 && gs === 'PLAYING') {
+    relicRevives -= 1; hp = Math.max(hp, Math.round(maxHp * 0.6));
+    for (var ri = enemies.length - 1; ri >= 0; ri--) { if (GF.dist(hero.x, hero.y, enemies[ri].x, enemies[ri].y) < 180 * GF.S) enemies.splice(ri, 1); }
+    hero.hitFlash = 0.3; GF.setShake(0.5); bannerT = 1.6;
+    return;
+  }
   score = Math.floor(survivalSec) * 2 + kills * 5;
   var newBest = score > best;
   if (newBest) { best = score; try { localStorage.setItem('devourling_best', best); } catch (e) {} }
   gs = 'GAMEOVER';
   // bank Essence from this run (greed upgrade boosts it) — the permanent payoff
-  essenceEarned = Math.max(1, Math.floor((kills / 3 + survivalSec / 6 + level * 2) * (1 + metaVal('greed') / 100)));
+  essenceEarned = Math.max(1, Math.floor((kills / 3 + survivalSec / 6 + level * 2) * (1 + metaVal('greed') / 100 + relicVal('essence'))));
   lastGameOverEssence = essenceEarned;
   meta.essence += essenceEarned;
   saveMeta();
@@ -879,6 +1020,7 @@ function update(dt) {
     if (!e) continue;
     if (e.hitT > 0) e.hitT -= dt;
     if (e.contactCd > 0) e.contactCd -= dt;
+    tickPoison(e, dt); if (e.hp <= 0) continue;   // Venom Sac DoT (may kill the enemy)
     var ang = Math.atan2(hero.y - e.y, hero.x - e.x), sp = e.spd * GF.S;
     if (e.type === 'darter') { e.wob += dt * 6; ang += Math.sin(e.wob) * 0.5; }
     if (e.type === 'spitter') {
@@ -897,6 +1039,7 @@ function update(dt) {
     e.y += Math.sin(ang) * sp * dt;
     if (GF.dist(hero.x, hero.y, e.x, e.y) <= heroR + e.r && e.contactCd <= 0) {
       hurtHero(e.dmg); e.contactCd = CONTACT_COOLDOWN;
+      var th = relicVal('thorns'); if (th > 0) { damageEnemy(e, e.dmg * th, false); GF.spawnParticles(e.x, e.y, '#e8985e', 3); }  // Thorn Hide: reflect contact damage
       if (e.type === 'brute') { var ka = Math.atan2(e.y - hero.y, e.x - hero.x); e.kb = 1.0; e.kbx = Math.cos(ka)*120*GF.S; e.kby = Math.sin(ka)*120*GF.S; }
       if (gs !== 'PLAYING') return;
     }

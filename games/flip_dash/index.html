@@ -183,8 +183,6 @@ var questToast = null;           // { q, t }   — "QUEST DONE" flourish when a 
 var bootBannerT = 0;             // seconds left on the WELCOME BACK banner (login/streak/idle), set at boot
 var metaOpen = false;            // GEAR overlay open (on MENU)
 var metaTab = 'gear';            // 'gear' | 'quests'
-var metaScroll = 0;              // vertical scroll offset for the gear grid (mobile paginate)
-var metaScrollMax = 0;           // computed each draw
 // overlay hit targets (rebuilt per overlay frame)
 var metaTabRects = [];           // [{tab,x,y,w,h}]
 var gearTileRects = [];          // [{id,x,y,w,h}] — tap to equip/unequip
@@ -198,7 +196,6 @@ var metaContentRect = null;      // {x,y,w,h} content column — taps OUTSIDE it
 var reviveUsed = false, reviveLoading = false, invulnT = 0;
 var reviveBtnRect = null;
 var shieldArmed = false;         // GEAR: Spark Shield — survive the first crash of a run once
-var runFlips = 0;                // flips this run (for the flips daily quest)
 
 // Tutorial overlay (MENU + reopen via ?)
 var tutorialOpen = false;
@@ -472,7 +469,8 @@ function maybeRollQuests() {
   saveMeta();
 }
 function questDone(q) { return q.prog >= q.target; }
-// advance every active quest of this type ('zone' tracks a max, others add up)
+// advance every active quest of this type. 'zone' and 'travel' track a per-run
+// MAX (they read "reach zone N" / "travel N m in one run"); the rest accumulate.
 function questProgress(type, amount) {
   if (!meta || !meta.quests.list) return;
   var changed = false;
@@ -480,7 +478,7 @@ function questProgress(type, amount) {
     var q = meta.quests.list[i];
     if (q.type !== type || q.claimed) continue;
     var was = questDone(q);
-    if (type === 'zone') q.prog = Math.max(q.prog, amount); else q.prog += amount;
+    if (type === 'zone' || type === 'travel') q.prog = Math.max(q.prog, amount); else q.prog += amount;
     if (!was && questDone(q)) { questToast = { q:q, t:3.2 }; }
     changed = true;
   }
@@ -529,7 +527,17 @@ function loadMeta() {
         }
         if (s.quests && typeof s.quests === 'object') {
           m.quests.day = s.quests.day || '';
-          if (Array.isArray(s.quests.list)) m.quests.list = s.quests.list;
+          // SANITIZE: only keep well-formed quest entries (corrupt/old localStorage
+          // must never reach questProgress, which assumes .type/.target — a throw
+          // mid-run is a Yandex rejection risk). Malformed → dropped + rerolled.
+          if (Array.isArray(s.quests.list)) {
+            m.quests.list = s.quests.list.filter(function(q) {
+              return q && QUEST_BY_TYPE[q.type] && typeof q.target === 'number' && q.target > 0;
+            }).map(function(q) {
+              return { id:q.type, type:q.type, target:q.target|0,
+                       prog:Math.max(0, q.prog|0), claimed:!!q.claimed, reward:Math.max(0, q.reward|0) };
+            });
+          }
         }
         if (s.login && typeof s.login === 'object') {
           m.login.lastDay = s.login.lastDay || '';
@@ -578,6 +586,15 @@ function claimOnOpen(showBanner) {
 function yesterdayKey() {
   var d = new Date(); d.setDate(d.getDate() - 1);
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+// Fold the current run's accrued seconds into the cumulative meter + re-anchor
+// lastSeen. Called at game-over AND on pagehide/visibility-hidden so a refresh
+// mid-run never loses that run's playtime (and can't inflate the idle window).
+function bankRunPlaytime() {
+  if (!meta || runPlaySec <= 0) return;
+  meta.totalPlaySec += runPlaySec; runPlaySec = 0;
+  meta.lastSeen = Date.now();
+  saveMeta();
 }
 
 // ── CORRIDOR GEOMETRY ─────────────────────────────────────────────────────
@@ -666,13 +683,14 @@ function startRun(m) {
   // GEAR: Head Start — begin the run N metres in (skip the dead early stretch).
   var head = gearVal('headstart');
   worldX = head * PX_PER_M * GF.S; dist = worldX / (PX_PER_M * GF.S);
-  runCoins = 0; runFlips = 0;
+  runCoins = 0;
   zoneIdx = 0; prevZoneIdx = 0;
   gravDir = 1; flipCooldownT = 0; lastFlipFlash = 0;
   bannerT = 0; bannerTxt = '';
   reviveUsed = false; reviveLoading = false; invulnT = 0; reviveBtnRect = null;
   shieldArmed = (gearVal('shield') > 0);   // GEAR: Spark Shield armed for ONE crash this run
   runPlaySec = 0;
+  metaOpen = false;   // never carry the GEAR overlay into a run (defensive: it only draws on MENU)
   startHintT = 1.6;
   player.y = floorLaneY(); player.vy = 0; player.tilt = 0;
   resetSpawns();
@@ -695,7 +713,7 @@ function flip() {
   player.vy = gravDir * 120 * GF.S;  // small kick off the surface
   GF.spawnParticles(playerX(), player.y, activeSkin().glow, 8);
   Sfx.flip();
-  runFlips++; questProgress('flips', 1);   // DAILY QUEST: flip N times today
+  questProgress('flips', 1);   // DAILY QUEST: flip N times today
   return true;
 }
 
@@ -709,12 +727,8 @@ function gameOver() {
   // DAILY QUEST: travel N m in one run (best single-run distance counts)
   questProgress('travel', Math.floor(dist));
   // fold this run's real playtime into the cumulative meter + check gear unlocks
-  if (meta) {
-    meta.totalPlaySec += runPlaySec; runPlaySec = 0;
-    meta.lastSeen = Date.now();
-    checkGearUnlocks();
-    saveMeta();
-  }
+  bankRunPlaytime();
+  if (meta) { meta.lastSeen = Date.now(); checkGearUnlocks(); saveMeta(); }
   if (mode === 'DAILY') { if (dist > dailyBest) { dailyBest = Math.floor(dist); saveDailyBest(); } }
   else { if (dist > endlessBest) { endlessBest = Math.floor(dist); saveEndlessBest(); } }
   GF.spawnParticles(playerX(), player.y, '#ff3b6b', 36);
@@ -1167,7 +1181,8 @@ function drawMenu(ctx, z) {
   // GEAR button — opens the meta overlay (gear ladder + daily quests). A red
   // badge shows the claimable-quest count to nudge the player in.
   var gBtnH = clamp(46*S, 42, 56);
-  drawButton(ctx, bx, y, btnW, gBtnH, '▣ ' + GF.t('gear'), '#3a2f5a', false);
+  drawButton(ctx, bx, y, btnW, gBtnH, '     ' + GF.t('gear'), '#3a2f5a', false);  // pad for the vector cog
+  drawCogGlyph(ctx, bx + btnW*0.5 - ctx.measureText(GF.t('gear')).width*0.5 - 14*S, y + gBtnH/2, clamp(10*S,8,13), '#e6dcff');
   var cqMenu = claimableQuests();
   if (cqMenu > 0) drawBadge(ctx, bx + btnW - 10*S, y + 4*S, cqMenu);
   buttons.push({ x:bx, y:y, w:btnW, h:gBtnH, fn:function(){ openMeta(); } });
@@ -1192,7 +1207,27 @@ function drawBadge(ctx, cxp, cyp, n) {
   ctx.fillText(String(n), cxp, cyp + 0.5*S);
   ctx.restore();
 }
-function openMeta() { metaOpen = true; metaTab = 'gear'; metaScroll = 0; Sfx.click(); }
+// small vector cog (the GEAR button mark) — 8 trapezoid teeth + hub, no glyph font.
+function drawCogGlyph(ctx, x, y, r, col) {
+  ctx.save();
+  ctx.fillStyle = col || '#fff';
+  ctx.beginPath();
+  for (var i=0;i<8;i++) {
+    var a0 = (i/8)*Math.PI*2, a1 = ((i+0.5)/8)*Math.PI*2;
+    var ro = r, ri = r*0.66;
+    if (i===0) ctx.moveTo(x + Math.cos(a0)*ro, y + Math.sin(a0)*ro);
+    else ctx.lineTo(x + Math.cos(a0)*ro, y + Math.sin(a0)*ro);
+    ctx.lineTo(x + Math.cos(a0+0.18)*ro, y + Math.sin(a0+0.18)*ro);
+    ctx.lineTo(x + Math.cos(a1)*ri, y + Math.sin(a1)*ri);
+    ctx.lineTo(x + Math.cos(a1+0.22)*ri, y + Math.sin(a1+0.22)*ri);
+  }
+  ctx.closePath(); ctx.fill();
+  // hub hole
+  ctx.beginPath(); ctx.arc(x, y, r*0.34, 0, Math.PI*2);
+  ctx.fillStyle = '#3a2f5a'; ctx.fill();
+  ctx.restore();
+}
+function openMeta() { metaOpen = true; metaTab = 'gear'; Sfx.click(); }
 function drawButton(ctx, x, y, w, h, label, color, primary) {
   ctx.save();
   if (primary) { ctx.shadowColor = color; ctx.shadowBlur = 18 * GF.S; }
@@ -1713,10 +1748,12 @@ function handlePress(x, y) {
   }
   // GEAR/QUESTS overlay owns input while open (tabs → upgrade → equip → slots →
   // claim → close). Taps that miss a target are swallowed (modal), never a flip.
-  if (metaOpen) {
+  // Guard on gs==='MENU' so a stale flag can never trap input mid-run.
+  if (metaOpen && gs === 'MENU') {
     handleMetaPress(x, y);
     return;
   }
+  if (metaOpen) metaOpen = false;   // clear any stale overlay flag outside MENU
   if (gs === 'PLAYING') {
     for (var h=0;h<hudButtons.length;h++){ var hb=hudButtons[h]; if (hit(hb,x,y)){ hb.fn(); return; } }
     flip();
@@ -1729,7 +1766,7 @@ function hit(b, x, y) { return x >= b.x && x <= b.x+b.w && y >= b.y && y <= b.y+
 // equip slots → quest claims). All targets are rebuilt each draw frame.
 function handleMetaPress(x, y) {
   if (metaCloseRect && hit(metaCloseRect, x, y)) { metaOpen = false; Sfx.click(); return; }
-  for (var t=0;t<metaTabRects.length;t++){ if (hit(metaTabRects[t], x, y)){ metaTab = metaTabRects[t].tab; metaScroll = 0; Sfx.click(); return; } }
+  for (var t=0;t<metaTabRects.length;t++){ if (hit(metaTabRects[t], x, y)){ metaTab = metaTabRects[t].tab; Sfx.click(); return; } }
   if (metaTab === 'gear') {
     for (var u=0;u<gearUpRects.length;u++){ var ur=gearUpRects[u]; if (hit(ur,x,y)){ if (ur.afford && buyGearUpgrade(ur.id)) { Sfx.buy(); GF.spawnParticles(x, y, GEAR_BY_ID[ur.id].col, 16); } else Sfx.click(); return; } }
     for (var ti=0;ti<gearTileRects.length;ti++){ if (hit(gearTileRects[ti], x, y)){ if (toggleEquipGear(gearTileRects[ti].id)) Sfx.click(); else Sfx.click(); return; } }
@@ -1759,6 +1796,11 @@ document.addEventListener('keydown', function(e) {
   }
 });
 document.addEventListener('touchmove', function(e){ e.preventDefault(); }, { passive:false });
+// Persist the in-progress run's playtime before the tab is hidden/closed so a
+// refresh or app-switch mid-run banks it (GF.persist bounces a live run to MENU
+// on reload, which would otherwise drop runPlaySec). Both events for coverage.
+window.addEventListener('pagehide', function(){ bankRunPlaytime(); });
+document.addEventListener('visibilitychange', function(){ if (document.visibilityState === 'hidden') bankRunPlaytime(); });
 
 // ── SCREENSHOT / TEST HOOKS ───────────────────────────────────────────────
 window._setupForScreenshot = function(level) {
@@ -1880,7 +1922,10 @@ GF.init({
       var ng = nextGear();
       return {
         gs: gs, mode: mode,
-        dist: Math.floor(dist), coins: coins, runCoins: runCoins,
+        // distance IS the score in this endless runner — alias it to the names the
+        // playtest harness reads for its progression check (score/distance).
+        dist: Math.floor(dist), distance: Math.floor(dist), score: Math.floor(dist),
+        coins: coins, runCoins: runCoins,
         dailyBest: dailyBest, endlessBest: endlessBest, zoneIdx: zoneIdx,
         gravDir: gravDir, scrollSpeed: Math.round(scrollSpeed),
         obstacles: obstacles.length, coinsOnScreen: coinsArr.length,
