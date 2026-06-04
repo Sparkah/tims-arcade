@@ -226,8 +226,9 @@ function drawOverlay(opts) {
 
   var titleFs = clamp(36*S, 22, 56);
   var subFs   = clamp(16*S, 12, 22);
-  var btnW    = clamp(240*S, 160, 320), btnH = clamp(52*S, 40, 66);
-  var btnX    = cx - btnW/2, btnY = cy + 20*S;
+  var wide    = W / H > 1.15;   // desktop/wide: a noticeably bigger CTA so PLAY is unmissable
+  var btnW    = clamp((wide?320:248)*S, 170, 400), btnH = clamp((wide?64:54)*S, 42, 82);
+  var btnX    = cx - btnW/2, btnY = cy + 22*S;
 
   // title with glow
   ctx.shadowColor = 'rgba(46,204,113,0.4)'; ctx.shadowBlur = 30*S;
@@ -240,13 +241,18 @@ function drawOverlay(opts) {
   if (opts.sub2) { ctx.font = subFs+'px sans-serif'; ctx.fillStyle = '#bcd'; ctx.fillText(opts.sub2, cx, cy + 2*S);  }
 
   if (opts.btnText && opts.btnFn) {
-    var grad = ctx.createLinearGradient(btnX, btnY, btnX, btnY+btnH);
-    grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
-    rr(ctx, btnX, btnY, btnW, btnH, btnH/2);
-    ctx.fillStyle = grad; ctx.fill();
-    ctx.font = 'bold '+subFs+'px sans-serif'; ctx.fillStyle = '#fff';
+    // gentle breathing pulse + glow so the eye lands on PLAY without hunting.
+    // Drawn size breathes; the pushed hit-rect stays the stable base size.
+    var _t = (typeof performance!=='undefined'?performance.now():Date.now())/1000, _k = Math.sin(_t*2.2), _p = 1 + 0.05*_k;
+    var _w = btnW*_p, _h = btnH*_p, _x = cx - _w/2, _y = btnY + btnH/2 - _h/2;
+    var grad = ctx.createLinearGradient(_x, _y, _x, _y+_h);
+    grad.addColorStop(0, '#2ee07a'); grad.addColorStop(1, '#23a657');
+    ctx.save(); ctx.shadowColor = 'rgba(46,224,122,'+(0.4+0.28*_k).toFixed(3)+')'; ctx.shadowBlur = (22+10*_k)*S;
+    rr(ctx, _x, _y, _w, _h, _h/2);
+    ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+    ctx.font = 'bold '+clamp((wide?22:18)*S,14,30)+'px sans-serif'; ctx.fillStyle = '#fff';
     ctx.textBaseline = 'middle';
-    ctx.fillText(opts.btnText, cx, btnY + btnH/2);
+    ctx.fillText('▶ '+opts.btnText, cx, btnY + btnH/2);
     ctx.textBaseline = 'alphabetic';
     buttons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: opts.btnFn });
   }
