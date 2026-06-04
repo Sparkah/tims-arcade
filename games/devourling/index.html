@@ -279,6 +279,9 @@ var relicToast = null;       // { def, t } — NEW RELIC flourish on a playtime 
 var relicRevives = 0;        // extra free revives this run from the Second Stomach relic
 var questToast = null;       // { q, t } — daily-quest-complete flourish
 var bootBannerT = 0;         // welcome-back banner timer (idle + daily)
+// rate-limited sfx (for high-frequency events like kills/hits) so they don't machine-gun
+var _sfxT = {};
+function sfxRL(name, gapMs) { var t = (window.performance && performance.now) ? performance.now() : Date.now(); if (t - (_sfxT[name] || 0) >= gapMs) { _sfxT[name] = t; GF.sfx(name); } }
 // summed bonus across EQUIPPED relics for a stat (per × level), incl. secondary stat
 function relicVal(stat) {
   var v = 0;
@@ -342,7 +345,7 @@ function relicUpCost(id) {
 function relicBuyUpgrade(id) {
   var cost = relicUpCost(id);
   if (cost == null || meta.essence < cost) return false;
-  meta.essence -= cost; meta.relics[id].lvl += 1; saveMeta(); return true;
+  meta.essence -= cost; meta.relics[id].lvl += 1; saveMeta(); GF.sfx('coin'); return true;
 }
 function relicToggleEquip(id) {
   if (!meta.relics[id]) return false;
@@ -391,7 +394,7 @@ function questProgress(kind, amount) {
     if (q.prog >= q.target) { q.prog = q.target; q.done = true; questToast = { q: q, t: 3.6 }; if (GF.happytime) GF.happytime(); saveMeta(); }
   }
 }
-function claimQuest(i) { var q = meta.quests && meta.quests[i]; if (!q || !q.done || q.claimed) return false; q.claimed = true; meta.essence += q.reward; saveMeta(); return true; }
+function claimQuest(i) { var q = meta.quests && meta.quests[i]; if (!q || !q.done || q.claimed) return false; q.claimed = true; meta.essence += q.reward; saveMeta(); GF.sfx('reward'); return true; }
 function claimableQuests() { if (!Array.isArray(meta.quests)) return 0; var n = 0; for (var i = 0; i < meta.quests.length; i++) if (meta.quests[i].done && !meta.quests[i].claimed) n++; return n; }
 function hoursToReset() { return 24 - (Date.now() % 86400000) / 3600000; }
 var meta = {
@@ -416,7 +419,7 @@ function metaIsMax(k) { return metaRank(k) >= META_DEFS[k].max; }
 function metaBuy(k) {
   var c = metaCost(k);
   if (c == null || meta.essence < c) return false;
-  meta.essence -= c; meta.up[k] = metaRank(k) + 1;
+  meta.essence -= c; meta.up[k] = metaRank(k) + 1; GF.sfx('coin');
   saveMeta();
   return true;
 }
@@ -623,6 +626,7 @@ function killEnemy(e, isBite) {
   enemies.splice(idx, 1);
   kills++;
   questProgress('kills', 1);
+  sfxRL('hit', 75);   // throttled so a swarm doesn't machine-gun
   GF.spawnParticles(e.x, e.y, e.col, e.elite ? 16 : 8);
   dropMote(e.x, e.y, e.elite ? 'big' : (Math.random() < 0.04 ? 'gold' : (Math.random() < 0.03 ? 'heal' : 'normal')));
   if (e.elite) dropMote(e.x + 8 * GF.S, e.y, 'normal');
@@ -757,7 +761,7 @@ function fireWeapons(dt) {
 function healHero(n) { hp = Math.min(maxHp, hp + n); }
 function hurtHero(n) {
   if (_ssMode) return;
-  hp -= n; hero.hitFlash = 0.18; GF.setShake(0.25);
+  hp -= n; hero.hitFlash = 0.18; GF.setShake(0.25); sfxRL('hurt', 180);
   if (hp <= 0) { hp = 0; gameOver(); }
 }
 
@@ -778,7 +782,7 @@ function maybeEvolve() {
   var newForm = form;
   for (var i = FORM_LEVELS.length - 1; i >= 0; i--) { if (level >= FORM_LEVELS[i]) { newForm = i; break; } }
   if (newForm > form) {
-    form = newForm; HERO_RADIUS = FORM_RADIUS[form]; questProgress('evolve', 1);
+    form = newForm; HERO_RADIUS = FORM_RADIUS[form]; questProgress('evolve', 1); GF.sfx('evolve');
     evoFlash = 0.9; GF.setShake(0.5); justEvolved = true;
     GF.spawnParticles(hero.x, hero.y, '#7CFC9A', 28);
     healHero(maxHp * 0.25);
@@ -805,7 +809,7 @@ function rollChoices() {
   if (out.length === 0) out.push({ type:'stat', key:'vit' });
   return out;
 }
-function openLevelUp() { levelChoices = rollChoices(); gs = 'LEVELUP'; GF.saveRun(); }
+function openLevelUp() { levelChoices = rollChoices(); gs = 'LEVELUP'; GF.sfx('levelup'); GF.saveRun(); }
 
 function applyChoice(ch) {
   if (ch.type === 'weapon') {
@@ -872,7 +876,7 @@ function gameOver() {
   score = Math.floor(survivalSec) * 2 + kills * 5;
   var newBest = score > best;
   if (newBest) { best = score; try { localStorage.setItem('devourling_best', best); } catch (e) {} }
-  gs = 'GAMEOVER';
+  gs = 'GAMEOVER'; GF.sfx('lose');
   // bank Essence from this run (greed upgrade boosts it) — the permanent payoff
   essenceEarned = Math.max(1, Math.floor((kills / 3 + survivalSec / 6 + level * 2) * (1 + metaVal('greed') / 100 + relicVal('essence'))));
   lastGameOverEssence = essenceEarned;
@@ -976,12 +980,13 @@ window._devInfo = function() {
 
 // ── INPUT ────────────────────────────────────────────────────────────────
 var helpBtn = null;
+var muteBtn = null;   // sound on/off, drawn in HUD + menu
 var uiButtons = [];
 var uiLockUntil = 0;
 function uiHit(px, py) {
   for (var i = 0; i < uiButtons.length; i++) {
     var b = uiButtons[i];
-    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) { uiLockUntil = Date.now() + 450; b.fn(); return true; }
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) { uiLockUntil = Date.now() + 450; GF.sfx('tap'); b.fn(); return true; }
   }
   return false;
 }
@@ -993,6 +998,7 @@ function onPress(px, py) {
   if (gs === 'LEVELUP') { uiHit(px, py); return; }
   if (gs === 'PLAYING') {
     if (tutorialOpen) { tutorialOpen = false; return; }
+    if (muteBtn && px >= muteBtn.x && px <= muteBtn.x + muteBtn.w && py >= muteBtn.y && py <= muteBtn.y + muteBtn.h) { GF.toggleMute(); GF.sfx('tap'); return; }
     if (helpBtn && px >= helpBtn.x && px <= helpBtn.x + helpBtn.w && py >= helpBtn.y && py <= helpBtn.y + helpBtn.h) { tutorialOpen = true; return; }
   }
 }
@@ -1033,7 +1039,7 @@ function update(dt) {
   questProgress('survive', survivalSec); questProgress('level', level);
   // unlock Relics on the cumulative-playtime ladder (the multi-day pull)
   var freshR = checkRelicUnlocks();
-  if (freshR.length) { relicToast = { def: freshR[freshR.length - 1], t: 3.6 }; if (GF.happytime) GF.happytime(); }
+  if (freshR.length) { relicToast = { def: freshR[freshR.length - 1], t: 3.6 }; GF.sfx('unlock'); if (GF.happytime) GF.happytime(); }
   score = Math.floor(survivalSec) * 2 + kills * 5;
   if (regenPerSec > 0) healHero(regenPerSec * dt);
 
@@ -1430,6 +1436,12 @@ function drawHUD(ctx) {
   ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(10*GF.S,9,13) + 'px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(Math.ceil(hp) + ' / ' + maxHp, hpX + hpW/2, hpY + hpH/2 + 0.5);
   ctx.textBaseline = 'top';
+  // mute toggle (left of the hp bar)
+  muteBtn = { x: hpX - 8 * GF.S - helpSz, y: 12 * GF.S, w: helpSz, h: helpSz };
+  GF.rr(ctx, muteBtn.x, muteBtn.y, muteBtn.w, muteBtn.h, 7 * GF.S);
+  ctx.fillStyle = 'rgba(40,48,80,0.85)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(160,180,230,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+  GF.drawMuteIcon(ctx, muteBtn.x + helpSz / 2, muteBtn.y + helpSz / 2, helpSz * 0.3, GF.muted);
   GF.rr(ctx, helpBtn.x, helpBtn.y, helpBtn.w, helpBtn.h, 7 * GF.S);
   ctx.fillStyle = 'rgba(40,48,80,0.85)'; ctx.fill();
   ctx.strokeStyle = 'rgba(160,180,230,0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
@@ -1578,6 +1590,12 @@ function drawMenu(ctx) {
   uiButtons = [];
   ctx.fillStyle = 'rgba(4,4,14,0.9)'; ctx.fillRect(0, 0, GF.W, GF.H);
   var wide = GF.W / GF.H > 1.15;
+  // mute toggle (top-right corner)
+  var mz = GF.clamp(34 * GF.S, 28, 44), mpad = 16 * GF.S, mbx = GF.W - mpad - mz, mby = mpad;
+  GF.rr(ctx, mbx, mby, mz, mz, 8 * GF.S); ctx.fillStyle = 'rgba(40,48,80,0.7)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(160,180,230,0.4)'; ctx.lineWidth = 1.5; ctx.stroke();
+  GF.drawMuteIcon(ctx, mbx + mz / 2, mby + mz / 2, mz * 0.3, GF.muted);
+  uiButtons.push({ x: mbx, y: mby, w: mz, h: mz, fn: function () { GF.toggleMute(); } });
 
   var titleFs = GF.clamp(42 * GF.S, 28, 62);
   ctx.shadowColor = 'rgba(155,77,255,0.6)'; ctx.shadowBlur = 30 * GF.S;
@@ -1688,7 +1706,9 @@ function drawQuestToast(ctx) {
 function drawHoardOverlay(ctx) {
   uiButtons = [];   // only this overlay's buttons are live while it's open
   var S = GF.S, ru = (GF.lang === 'ru');
-  ctx.fillStyle = 'rgba(6,5,16,0.96)'; ctx.fillRect(0, 0, GF.W, GF.H);
+  // FULLY OPAQUE — at 0.96 the menu (title / Den / HOARD+QUESTS+PLAY buttons) bled
+  // through behind the panel, looking like scattered "UI out of boxes" on desktop.
+  ctx.fillStyle = '#06050f'; ctx.fillRect(0, 0, GF.W, GF.H);
   var maxW = Math.min(GF.W * 0.92, 470 * S), x0 = GF.cx - maxW / 2;
   var ty = GF.clamp(GF.H * 0.07, 30, 80);
   ctx.fillStyle = '#b388ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
@@ -1929,6 +1949,7 @@ GF.init({
     loadMeta();      // owned cross-session progression (Essence + Den upgrades)
     claimOnOpen();   // idle "kept feeding" Essence + daily login streak bonus
     maybeRollQuests(); // fresh daily quests (the come-back-tomorrow hook)
+    GF.music('audio/bg_loop.mp3', 0.35);   // bg loop (starts on first gesture per autoplay policy)
     GF.persist('devourling_run_v1',
       function() {
         return { gs: gs, survivalSec: survivalSec, kills: kills, score: score,

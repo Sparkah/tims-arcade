@@ -75,7 +75,7 @@ for ((i = 0; i < COUNT; i++)); do
   fi
 
   # Copy optional asset folders if they exist
-  for sub in fonts sounds data images assets sprites; do
+  for sub in fonts sounds audio data images assets sprites; do
     [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
   done
 

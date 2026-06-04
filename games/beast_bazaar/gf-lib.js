@@ -661,6 +661,96 @@ var gpApi = {
 };
 
 // ── PUBLIC API ───────────────────────────────────────────────────────────
+// ── AUDIO: procedural SFX synth + bg-music loop + mute (reusable) ──────────
+// Games MUST ship sound before publish (Tim 2026-06-04). SFX are synthesized via
+// WebAudio (no asset files, tiny, reliable); music is an mp3 loop from the Suno
+// tool (Shared/tools/game-audio/gen_music.py → <game>/audio/bg_loop.mp3). Both
+// respect GF.muted (persisted) and start on the first user gesture (autoplay policy).
+var _ac = null, _music = null, _musicSrc = null, _musicVol = 0.4;
+var AUDIO_MUTED = false;
+try { AUDIO_MUTED = (localStorage.getItem('gf_muted') === '1'); } catch (e) {}
+function audioCtx() {
+  if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch (e) {} }
+  return _ac;
+}
+function tone(freq, dur, type, gain, slideTo) {
+  if (AUDIO_MUTED) return;
+  var c = audioCtx(); if (!c) return;
+  try {
+    var g = c.createGain(), t0 = c.currentTime;
+    g.gain.setValueAtTime(gain || 0.12, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    g.connect(c.destination);
+    var o = c.createOscillator();
+    o.type = type || 'sine'; o.frequency.setValueAtTime(freq, t0);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+    o.connect(g); o.start(t0); o.stop(t0 + dur + 0.02);
+  } catch (e) {}
+}
+function arp(notes, step, dur, type, gain) {
+  for (var i = 0; i < notes.length; i++) (function (idx, f) {
+    setTimeout(function () { tone(f, dur || 0.16, type || 'sine', gain || 0.13); }, idx * (step || 70));
+  })(i, notes[i]);
+}
+// named stinger library — games call GF.sfx('merge') etc.
+var SFX_LIB = {
+  click:   function () { tone(660, 0.05, 'square', 0.05); },
+  tap:     function () { tone(520, 0.06, 'triangle', 0.07); },
+  merge:   function () { tone(440, 0.10, 'triangle', 0.12, 720); },
+  spawn:   function () { tone(300, 0.08, 'sine', 0.08, 440); },
+  pickup:  function () { tone(880, 0.06, 'sine', 0.09); },
+  coin:    function () { tone(988, 0.07, 'square', 0.08, 1319); },
+  hit:     function () { tone(170, 0.10, 'sawtooth', 0.10, 80); },
+  hurt:    function () { tone(140, 0.16, 'sawtooth', 0.13, 60); },
+  levelup: function () { arp([523, 659, 784, 1047], 80, 0.18, 'triangle', 0.14); },
+  evolve:  function () { arp([523, 659, 880, 1175], 90, 0.20, 'sine', 0.15); },
+  unlock:  function () { arp([659, 988, 1319], 70, 0.18, 'sine', 0.15); },
+  reward:  function () { arp([784, 1047, 1319], 70, 0.16, 'triangle', 0.14); },
+  win:     function () { arp([523, 659, 784, 1047, 1319], 90, 0.20, 'triangle', 0.15); },
+  lose:    function () { tone(330, 0.45, 'sawtooth', 0.13, 90); },
+  error:   function () { tone(200, 0.12, 'square', 0.07, 140); },
+};
+function sfx(name) { var f = SFX_LIB[name]; if (f) f(); }
+function music(url, vol) {
+  if (!url) return;
+  try {
+    if (!_music) { _music = new Audio(); _music.loop = true; _music.preload = 'auto'; }
+    if (vol != null) _musicVol = vol;
+    _musicSrc = url; _music.src = url; _music.volume = _musicVol; _music.muted = AUDIO_MUTED;
+    if (!AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+  } catch (e) {}
+}
+function toggleMute() {
+  AUDIO_MUTED = !AUDIO_MUTED;
+  try { localStorage.setItem('gf_muted', AUDIO_MUTED ? '1' : '0'); } catch (e) {}
+  if (_music) {
+    _music.muted = AUDIO_MUTED;
+    if (AUDIO_MUTED) { try { _music.pause(); } catch (e) {} }
+    else { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+  }
+  return AUDIO_MUTED;
+}
+// vector speaker / muted-speaker icon (never emoji) — games place + wire the click
+function drawMuteIcon(c, x, y, r, muted) {
+  c.save(); c.translate(x, y); c.lineWidth = Math.max(1.5, r * 0.16);
+  c.strokeStyle = muted ? '#8a8a9a' : '#dfe7ff'; c.fillStyle = c.strokeStyle;
+  c.beginPath(); c.moveTo(-r * 0.7, -r * 0.28); c.lineTo(-r * 0.3, -r * 0.28); c.lineTo(0, -r * 0.6); c.lineTo(0, r * 0.6); c.lineTo(-r * 0.3, r * 0.28); c.lineTo(-r * 0.7, r * 0.28); c.closePath(); c.fill();
+  if (muted) { c.beginPath(); c.moveTo(r * 0.22, -r * 0.35); c.lineTo(r * 0.72, r * 0.35); c.moveTo(r * 0.72, -r * 0.35); c.lineTo(r * 0.22, r * 0.35); c.stroke(); }
+  else { c.beginPath(); c.arc(r * 0.12, 0, r * 0.42, -0.9, 0.9); c.stroke(); c.beginPath(); c.arc(r * 0.12, 0, r * 0.72, -0.8, 0.8); c.stroke(); }
+  c.restore();
+}
+// resume audio + (re)start music on the first user gesture (autoplay policy)
+(function () {
+  var kick = function () {
+    audioCtx();
+    if (_music && _musicSrc && !AUDIO_MUTED && _music.paused) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+  };
+  window.addEventListener('pointerdown', kick, { passive: true });
+  window.addEventListener('touchstart', kick, { passive: true });
+  window.addEventListener('keydown', kick);
+})();
+
 window.GF = {
   init: init,
   canvas: canvas,
@@ -682,6 +772,12 @@ window.GF = {
   spawnParticles: spawnParticles,
   spawnFloat: spawnFloat,
   setShake: setShake,
+  // Audio (REQUIRED before publish) — GF.sfx('merge'|'spawn'|'hit'|'levelup'|'unlock'|
+  // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
+  // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
+  sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
+  hasSfx: function (n) { return !!SFX_LIB[n]; },
+  get muted() { return AUDIO_MUTED; },
   // Sprites
   drawSprite: drawSprite,
   sprites: sprites,
