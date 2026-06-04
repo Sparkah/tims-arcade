@@ -155,6 +155,7 @@ var vaultTabRects = [];     // [{tab,x,y,w,h}] — UPGRADES / COLLECTION tab but
 var charmTileRects = [];    // [{id,x,y,w,h}] — owned charm tiles (tap = equip toggle)
 var charmUpRects = [];      // [{id,x,y,w,h,afford}] — charm upgrade buttons
 var equipSlotRects = [];    // [{slot,x,y,w,h}] — equip slots (tap a filled slot = unequip)
+var questClaimRects = [];   // [{i,x,y,w,h,can}] — daily-quest claim buttons
 var paused = false;                       // Vault overlay open mid-run (freezes the game so you never have to lose to reach the meta)
 var shopBtns = [];          // {kind, x,y,w,h, cost, enabled}
 var orderRects = [];        // {x,y,w,h, order}
@@ -283,6 +284,69 @@ function unequipSlot(slot) {
   if (!meta || !meta.equipped[slot]) return false;
   meta.equipped[slot] = null; saveMeta(); return true;
 }
+
+// ── DAILY QUESTS — the come-back-TOMORROW hook (resets every UTC day) ───────
+// Cumulative-playtime Charms reward total time but don't REQUIRE returning daily.
+// Three fresh quests each day (Codex: add a real come-back-tomorrow hook) give a
+// concrete reason to open the game tomorrow. Reward = vault gold (feeds Charm
+// upgrades). Templates pick a random difficulty tier; rolled once per day + stored.
+var QUEST_DEFS = [
+  { kind: 'merge',   goals: [15, 25, 40],     reward: [70, 110, 170],  en: 'Merge {g} critters',      ru: 'Слей {g} зверят' },
+  { kind: 'deliver', goals: [6, 10, 16],      reward: [80, 130, 200],  en: 'Fill {g} orders',         ru: 'Выполни {g} заказов' },
+  { kind: 'tier',    goals: [5, 6, 7],        reward: [90, 150, 230],  en: 'Breed a Tier-{g} beast',  ru: 'Выведи зверя {g} ур.' },
+  { kind: 'earn',    goals: [400, 800, 1400], reward: [70, 120, 180],  en: 'Earn {g} coins',          ru: 'Заработай {g} монет' },
+  { kind: 'spawn',   goals: [30, 55, 80],     reward: [50, 90, 130],   en: 'Spawn {g} critters',      ru: 'Создай {g} зверят' },
+];
+var QUEST_BY_KIND = {};
+for (var _qi = 0; _qi < QUEST_DEFS.length; _qi++) QUEST_BY_KIND[QUEST_DEFS[_qi].kind] = QUEST_DEFS[_qi];
+function questLabel(q) {
+  var d = QUEST_BY_KIND[q.kind]; if (!d) return '';
+  return (GF.lang === 'ru' ? d.ru : d.en).replace('{g}', q.goal);
+}
+// roll 3 fresh quests if the stored set is from a previous day (or missing)
+function maybeRollQuests() {
+  if (!meta) return;
+  var today = utcDayStr(0);
+  if (meta.questDay === today && Array.isArray(meta.quests) && meta.quests.length) return;
+  meta.questDay = today;
+  var pool = QUEST_DEFS.slice(), picked = [];
+  for (var n = 0; n < 3 && pool.length; n++) {
+    var idx = Math.floor(Math.random() * pool.length);
+    var d = pool.splice(idx, 1)[0];
+    var tier = Math.floor(Math.random() * d.goals.length);
+    picked.push({ kind: d.kind, goal: d.goals[tier], prog: 0, done: false, claimed: false, reward: d.reward[tier] });
+  }
+  meta.quests = picked;
+  saveMeta();
+}
+// advance any active quest of this kind ('tier' tracks a max, others accumulate)
+function questProgress(kind, amount) {
+  if (!meta || !Array.isArray(meta.quests)) return;
+  var changed = false;
+  for (var i = 0; i < meta.quests.length; i++) {
+    var q = meta.quests[i];
+    if (q.kind !== kind || q.done) continue;
+    if (kind === 'tier') q.prog = Math.max(q.prog, amount); else q.prog += amount;
+    if (q.prog >= q.goal) { q.prog = q.goal; q.done = true; questToast = { q: q, t: 3.4 }; if (GF.happytime) GF.happytime(); }
+    changed = true;
+  }
+  if (changed) saveMeta();
+}
+function claimQuest(i) {
+  var q = meta && meta.quests && meta.quests[i];
+  if (!q || !q.done || q.claimed) return false;
+  q.claimed = true; meta.bank += q.reward; saveMeta(); return true;
+}
+function claimableQuests() {
+  if (!meta || !Array.isArray(meta.quests)) return 0;
+  var n = 0; for (var i = 0; i < meta.quests.length; i++) if (meta.quests[i].done && !meta.quests[i].claimed) n++;
+  return n;
+}
+// hours until the daily quest reset (UTC midnight) — shown in the Quests tab
+function hoursToReset() {
+  var d = new Date(); return 24 - (d.getUTCHours() + d.getUTCMinutes() / 60);
+}
+
 var meta = null;             // loaded in onReady
 var lastProfit = 0;          // gold banked from the most recent run (session-end hook)
 var lastRunCollected = 0;    // NEW codex species discovered in the most recent run
@@ -292,6 +356,7 @@ var dailyClaim = 0;          // login-bonus gold just awarded (for menu panel)
 var streakJustGrew = false;  // show streak flourish on the menu this open
 var runPlaySec = 0;          // seconds played in the CURRENT run (folded into meta.totalPlaySec at game-over)
 var charmToast = null;       // { def, t } — "NEW CHARM" flourish when a playtime milestone unlocks
+var questToast = null;        // { q, t } — "QUEST DONE" flourish when a daily quest completes
 var bootBannerT = 0;         // seconds remaining on the "welcome back" idle/daily banner at boot
 var vaultTab = 'up';         // 'up' | 'charms' — active tab in the Vault overlay
 function defaultMeta() {
@@ -425,6 +490,7 @@ function claimOnOpen() {
     meta.bank += dailyClaim;
   }
   meta.lastClose = now;     // re-anchor idle accrual
+  maybeRollQuests();        // fresh daily quests (the come-back-tomorrow hook)
   saveMeta();
 }
 // Called at game-over: bank a cut of the run as permanent gold + grow the bazaar.
@@ -534,6 +600,7 @@ function spawnFromNest() {
   var wild = Math.random() < permWildChance() && firstMergeDone;
   if (wild) wildcardSeen = true;
   placeCritter(idx, 0, wild, true);
+  questProgress('spawn', 1);
   GF.spawnParticles(board[idx].sx, board[idx].sy, wild ? '#ffd700' : TIER_COL[0], 8);
   GF.saveRun();
   return true;
@@ -591,6 +658,8 @@ function tryActOn(srcIdx, dstKind, dstRef) {
   recordCodex(resultTier);
   if (resultTier > maxTierReached) { maxTierReached = resultTier; queueReveal(resultTier); }
   merges++;
+  questProgress('merge', 1);
+  questProgress('tier', resultTier);
   // combo
   combo = (comboTimer > 0) ? combo + 1 : 1;
   comboTimer = comboWindowMs;
@@ -622,6 +691,8 @@ function deliverTo(srcIdx, order) {
     var gain = Math.round(coinPerDelivery * Math.max(1, order.tier) * (combo >= 2 ? combo : 1) * permSellMult());
     coins += gain; score += gain;
     deliveries++;
+    questProgress('deliver', 1);
+    questProgress('earn', gain);
     if (!firstDeliveryDone) { firstDeliveryDone = true; }
     GF.spawnFloat(order._cx || (L.boardX + L.boardW / 2), (order._cy || L.trayY) + 6, '+' + gain, '#ffd700');
     GF.setShake(0.4);
@@ -791,6 +862,10 @@ function onDown(x, y) {
       for (var ck = 0; ck < equipSlotRects.length; ck++) { if (hit(equipSlotRects[ck])) { unequipSlot(equipSlotRects[ck].slot); return; } }
       return;
     }
+    if (vaultTab === 'quests') {
+      for (var qi = 0; qi < questClaimRects.length; qi++) { if (hit(questClaimRects[qi])) { if (questClaimRects[qi].can && claimQuest(questClaimRects[qi].i) && GF.happytime) GF.happytime(); return; } }
+      return;
+    }
     for (var mi = 0; mi < metaUpRects.length; mi++) {
       var rr = metaUpRects[mi];
       if (hit(rr)) { if (rr.afford && buyMetaUpgrade(rr.key) && GF.happytime) GF.happytime(); return; }
@@ -865,6 +940,7 @@ function onUp(x, y) {
 // ── UPDATE ───────────────────────────────────────────────────────────────
 function update(dt) {
   if (charmToast) { charmToast.t -= dt; if (charmToast.t <= 0) charmToast = null; }
+  if (questToast) { questToast.t -= dt; if (questToast.t <= 0) questToast = null; }
   if (bootBannerT > 0) bootBannerT = Math.max(0, bootBannerT - dt);
   if (paused) return;   // Vault overlay open — freeze the run (no losing required to reach the meta)
   if (newBeastFlash > 0) newBeastFlash = Math.max(0, newBeastFlash - dt);
@@ -958,6 +1034,7 @@ function draw(ctx) {
   if (gs === 'GAMEOVER') drawGameOver(ctx);
   if (continueBannerUntil && nowMs() < continueBannerUntil && gs === 'PLAYING') drawContinueBanner(ctx);
   if (charmToast && !paused) drawCharmToast(ctx);
+  else if (questToast && !paused) drawQuestToast(ctx);   // charm toast wins if both fire same frame
   if (bootBannerT > 0 && !paused && gs !== 'GAMEOVER') drawBootBanner(ctx);
 }
 
@@ -1023,6 +1100,22 @@ function drawCharmToast(ctx) {
   ctx.fillText(charmBonusText(def, 1) + (ru ? '  — в Казне' : '  — in the Vault'), x + h, y + h * 0.68);
   ctx.restore(); ctx.textBaseline = 'alphabetic';
 }
+// "QUEST DONE" flourish when a daily quest completes mid-run (non-blocking).
+function drawQuestToast(ctx) {
+  var S = GF.S, q = questToast.q, ru = (GF.lang === 'ru');
+  var w = GF.clamp(258 * S, 200, 320), h = GF.clamp(50 * S, 44, 62);
+  var x = GF.cx - w / 2, y = GF.clamp(GF.H * 0.16, 60, 150);
+  var a = GF.clamp(questToast.t / 0.4, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, 12 * S); ctx.fillStyle = 'rgba(20,30,14,0.96)'; ctx.fill();
+  ctx.strokeStyle = '#7ed957'; ctx.lineWidth = 2 * S; ctx.stroke();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#7ed957'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText((ru ? 'ЗАДАНИЕ ВЫПОЛНЕНО' : 'QUEST DONE') + '  ·  +' + q.reward + ' ' + GF.t('goldUnit'), x + 14 * S, y + h * 0.36);
+  ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+  ctx.fillText(questLabel(q) + (ru ? '  — забери в Казне' : '  — claim in the Vault'), x + 14 * S, y + h * 0.68);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
 // "Welcome back" banner at boot: overnight idle income + daily streak bonus (the reason
 // to return), shown briefly so the daily reward is FELT even though there's no menu now.
 function drawBootBanner(ctx) {
@@ -1065,6 +1158,16 @@ function drawTopHUD(ctx) {
   ctx.fillStyle = fc <= 2 ? '#ff5b5b' : fc <= 5 ? '#ffb347' : '#9ab';
   ctx.textAlign = 'right';
   ctx.fillText(GF.t('free') + ': ' + fc, rx, rowB);
+  // NEXT CHARM countdown (top-center, row B) — keeps the playtime-reward goal VISIBLE
+  // outside the Vault so "play X more minutes for an item" is always felt (Codex note).
+  var nc = nextCharm();
+  if (nc) {
+    var left = Math.max(0, Math.ceil(nc.min - totalPlayMin()));
+    var icx = GF.cx - 30 * S;
+    drawCharmIcon(ctx, nc, icx, rowB, GF.clamp(7 * S, 6, 10));
+    ctx.textAlign = 'left'; ctx.fillStyle = '#caa86a'; ctx.font = GF.clamp(10.5 * S, 9, 14) + 'px sans-serif';
+    ctx.fillText((GF.lang === 'ru' ? 'через ' : 'in ') + left + (GF.lang === 'ru' ? ' мин' : 'm'), icx + 12 * S, rowB);
+  }
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -1359,6 +1462,16 @@ function drawVaultBtn(ctx) {
   ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
   ctx.fillText('▸ ' + fmtGold(meta ? meta.bank : 0) + ' ' + GF.t('goldUnit'), b.x + b.w / 2, b.y + b.h / 2 + 1);
   ctx.textBaseline = 'alphabetic';
+  // red badge with claimable-quest count → nudge the player to open the Vault
+  var cq = claimableQuests();
+  if (cq > 0) {
+    var br = GF.clamp(8 * S, 7, 11), bxx = b.x + b.w - br * 0.4, byy = b.y + br * 0.2;
+    ctx.beginPath(); ctx.arc(bxx, byy, br, 0, Math.PI * 2); ctx.fillStyle = '#ff5b5b'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(9 * S, 8, 12) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('' + cq, bxx, byy + 0.5 * S);
+    ctx.textBaseline = 'alphabetic';
+  }
 }
 // Pause overlay = the Vault (meta) reachable mid-run, freezing the game. Two tabs:
 // UPGRADES (permanent stat shop) and COLLECTION (playtime-unlocked equippable Charms).
@@ -1370,24 +1483,38 @@ function drawPauseOverlay(ctx) {
   var ty = GF.clamp(H * 0.085, 38, 84);
   ctx.fillText(ru ? 'КАЗНА БАЗАРА' : 'BAZAAR VAULT', GF.cx, ty);
   var maxW = Math.min(W - 24 * S, 440 * S);
-  // tab row
+  // tab row (3 tabs) — a "!" badge on QUESTS when a reward is claimable
   vaultTabRects = [];
-  var tabH = GF.clamp(34 * S, 28, 42), tabGap = 8 * S, tabW = (maxW - tabGap) / 2;
+  var tabH = GF.clamp(34 * S, 28, 42), tabGap = 6 * S, tabW = (maxW - tabGap * 2) / 3;
   var tabX = GF.cx - maxW / 2, tabY = ty + 12 * S;
-  var tabs = [{ id: 'up', label: ru ? 'УЛУЧШЕНИЯ' : 'UPGRADES' }, { id: 'charms', label: ru ? 'ТАЛИСМАНЫ' : 'CHARMS' }];
-  for (var t = 0; t < 2; t++) {
+  var claimable = claimableQuests();
+  var tabs = [
+    { id: 'up', label: ru ? 'УЛУЧШ.' : 'UPGRADES' },
+    { id: 'charms', label: ru ? 'ТАЛИСМ.' : 'CHARMS' },
+    { id: 'quests', label: ru ? 'ЗАДАНИЯ' : 'QUESTS', badge: claimable },
+  ];
+  for (var t = 0; t < tabs.length; t++) {
     var on = (vaultTab === tabs[t].id), bx = tabX + t * (tabW + tabGap);
     GF.rr(ctx, bx, tabY, tabW, tabH, 9 * S);
     ctx.fillStyle = on ? 'rgba(255,209,102,0.22)' : 'rgba(255,255,255,0.05)'; ctx.fill();
     ctx.strokeStyle = on ? '#ffd166' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
     ctx.fillStyle = on ? '#ffd700' : '#9a8c7a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
+    ctx.font = 'bold ' + GF.clamp(11.5 * S, 9, 15) + 'px sans-serif';
     ctx.fillText(tabs[t].label, bx + tabW / 2, tabY + tabH / 2);
+    if (tabs[t].badge) {
+      var br = GF.clamp(8 * S, 7, 11);
+      ctx.beginPath(); ctx.arc(bx + tabW - br - 2 * S, tabY + br + 2 * S, br, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff5b5b'; ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(9 * S, 8, 12) + 'px sans-serif';
+      ctx.fillText('' + tabs[t].badge, bx + tabW - br - 2 * S, tabY + br + 3 * S);
+    }
     vaultTabRects.push({ tab: tabs[t].id, x: bx, y: tabY, w: tabW, h: tabH });
   }
   ctx.textBaseline = 'alphabetic';
   var contentY = tabY + tabH + 14 * S;
-  var pb = (vaultTab === 'charms') ? drawCharmPanel(ctx, contentY, maxW) : drawMetaPanel(ctx, contentY, maxW);
+  var pb = (vaultTab === 'charms') ? drawCharmPanel(ctx, contentY, maxW)
+        : (vaultTab === 'quests') ? drawQuestPanel(ctx, contentY, maxW)
+        : drawMetaPanel(ctx, contentY, maxW);
   // RESUME button
   var bw = GF.clamp(220 * S, 150, 300), bh = GF.clamp(48 * S, 42, 60);
   var by = Math.min(pb + 16 * S, H - bh - 18 * S);
@@ -1490,6 +1617,63 @@ function drawCharmPanel(ctx, topY, maxW) {
       ctx.font = GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
       ctx.fillText((ru ? 'играй ' : 'play ') + def.min + (ru ? 'м' : 'm'), icx, byy + tileH * 0.58);
     }
+  }
+  ctx.textBaseline = 'alphabetic';
+  return topY + panelH;
+}
+
+// DAILY QUESTS tab — 3 quests, each a progress bar + a CLAIM button (reward gold).
+// "Resets in Xh" makes the daily cadence explicit (the come-back-tomorrow hook).
+function drawQuestPanel(ctx, topY, maxW) {
+  var S = GF.S, ru = (GF.lang === 'ru'), x = GF.cx - maxW / 2, pad = 12 * S;
+  questClaimRects = [];
+  var rowH = GF.clamp(54 * S, 46, 66), rowGap = 8 * S;
+  var quests = (meta && meta.quests) ? meta.quests : [];
+  var headH = 26 * S;
+  var panelH = pad + headH + (rowH * 3 + rowGap * 2) + pad;
+  GF.rr(ctx, x, topY, maxW, panelH, 14 * S); ctx.fillStyle = 'rgba(40,25,16,0.94)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,209,102,0.28)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+  var cy = topY + pad;
+  // header
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#ffd166';
+  ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText(ru ? 'ЕЖЕДНЕВНЫЕ ЗАДАНИЯ' : 'DAILY QUESTS', x + pad, cy);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#caa86a'; ctx.font = GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+  ctx.fillText((ru ? 'обновление через ' : 'resets in ') + Math.ceil(hoursToReset()) + (ru ? 'ч' : 'h'), x + maxW - pad, cy + 2 * S);
+  cy += headH;
+  // quest rows
+  for (var i = 0; i < 3; i++) {
+    var q = quests[i];
+    var ry = cy + i * (rowH + rowGap);
+    GF.rr(ctx, x + pad, ry, maxW - pad * 2, rowH, 9 * S);
+    ctx.fillStyle = q && q.done ? 'rgba(126,217,87,0.12)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = q && q.done && !q.claimed ? '#7ed957' : 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+    if (!q) continue;
+    // label
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#fff';
+    ctx.font = 'bold ' + GF.clamp(11.5 * S, 9.5, 15) + 'px sans-serif';
+    ctx.fillText(questLabel(q), x + pad + 10 * S, ry + 8 * S);
+    // progress bar
+    var barW = maxW - pad * 2 - 20 * S - GF.clamp(78 * S, 64, 100), barH = 7 * S, barY = ry + rowH - 16 * S;
+    GF.rr(ctx, x + pad + 10 * S, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+    GF.rr(ctx, x + pad + 10 * S, barY, Math.max(barH, barW * GF.clamp(q.prog / q.goal, 0, 1)), barH, barH / 2);
+    ctx.fillStyle = q.done ? '#7ed957' : '#ffd166'; ctx.fill();
+    ctx.fillStyle = '#caa86a'; ctx.font = GF.clamp(9.5 * S, 8, 12) + 'px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(Math.min(q.prog, q.goal) + '/' + q.goal, x + pad + 14 * S + barW, barY + barH / 2);
+    // claim button (right)
+    var cbW = GF.clamp(74 * S, 60, 96), cbH = GF.clamp(34 * S, 28, 42), cbX = x + maxW - pad - cbW - 8 * S, cbY = ry + (rowH - cbH) / 2;
+    var can = q.done && !q.claimed;
+    GF.rr(ctx, cbX, cbY, cbW, cbH, 8 * S);
+    ctx.fillStyle = q.claimed ? 'rgba(126,217,87,0.10)' : (can ? 'rgba(126,217,87,0.28)' : 'rgba(255,255,255,0.05)'); ctx.fill();
+    if (can) { ctx.strokeStyle = '#7ed957'; ctx.lineWidth = 1.5 * S; ctx.stroke(); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (q.claimed) { ctx.fillStyle = '#7ed957'; ctx.font = 'bold ' + GF.clamp(10 * S, 8.5, 13) + 'px sans-serif'; ctx.fillText(ru ? 'ГОТОВО' : 'DONE', cbX + cbW / 2, cbY + cbH / 2); }
+    else {
+      ctx.fillStyle = can ? '#dfffd0' : '#caa86a'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+      ctx.fillText(can ? (ru ? 'ЗАБРАТЬ' : 'CLAIM') : ('+' + q.reward), cbX + cbW / 2, cbY + cbH / 2 - (can ? 5 * S : 0));
+      if (can) { ctx.fillStyle = '#ffd700'; ctx.font = GF.clamp(9 * S, 7.5, 11.5) + 'px sans-serif'; ctx.fillText('+' + q.reward + ' ' + GF.t('goldUnit'), cbX + cbW / 2, cbY + cbH / 2 + 8 * S); }
+    }
+    questClaimRects.push({ i: i, x: cbX, y: cbY, w: cbW, h: cbH, can: can });
   }
   ctx.textBaseline = 'alphabetic';
   return topY + panelH;
@@ -1821,7 +2005,14 @@ window._bbInfo = function () {
     vaultTab: vaultTab, tabRects: vaultTabRects, charmTiles: charmTileRects, charmUps: charmUpRects, equipSlots: equipSlotRects,
     equipped: meta ? meta.equipped.slice() : [], charms: meta ? meta.charms : {},
     totalPlayMin: Math.floor(totalPlayMin()), nextCharm: (function () { var n = nextCharm(); return n ? { id: n.id, min: n.min } : null; }()),
+    quests: (meta && meta.quests) ? meta.quests.map(function (q) { return { kind: q.kind, goal: q.goal, prog: q.prog, done: q.done, claimed: q.claimed, reward: q.reward }; }) : [],
+    questClaims: questClaimRects, claimableQuests: claimableQuests(),
   };
+};
+// Test seam: force-complete daily quest i (exercise the CLAIM path without grinding).
+window._bbWinQuest = function (i) {
+  var q = meta && meta.quests && meta.quests[i]; if (!q) return;
+  q.prog = q.goal; q.done = true; q.claimed = false; saveMeta();
 };
 // Test seam: force cumulative playtime (minutes) so the Charm ladder can be exercised
 // without real wall-clock waiting. Grants any newly-eligible charms. No console output.
