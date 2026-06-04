@@ -62,6 +62,10 @@ var STRINGS = {
     e_devour_n:'EVO: Devour', e_devour_d:'Bite heals you on every kill.',
     // ── Meta loop (M1): permanent Essence + the Den shelf ──
     den: 'THE DEN', den_open: '⌂ THE DEN', back: 'BACK',
+    hoard_open: 'THE HOARD', quests_open: 'QUESTS', hoard_hdr: 'THE HOARD',
+    relics_tab: 'RELICS', quests_tab: 'QUESTS', equipped_lbl: 'EQUIPPED',
+    next_relic: 'Next relic in', play_m: 'play', all_relics: 'All relics collected!',
+    daily_quests: 'DAILY QUESTS', resets_in: 'resets in', claim_btn: 'CLAIM', claimed_btn: 'DONE',
     essence: 'ESSENCE', essence_earned: '+%n ESSENCE',
     den_sub: 'Spend Essence to evolve your bloodline — upgrades are PERMANENT across every run.',
     maxed: 'MAX', cost: 'Cost', owned_lbl: 'OWNED',
@@ -121,6 +125,10 @@ var STRINGS = {
     e_devour_n:'ЭВО: Пожирание', e_devour_d:'Укус лечит за каждое убийство.',
     // ── Мета-цикл (M1): постоянная Эссенция + Логово ──
     den: 'ЛОГОВО', den_open: '⌂ ЛОГОВО', back: 'НАЗАД',
+    hoard_open: 'ХРАНИЛИЩЕ', quests_open: 'ЗАДАНИЯ', hoard_hdr: 'ХРАНИЛИЩЕ',
+    relics_tab: 'РЕЛИКВИИ', quests_tab: 'ЗАДАНИЯ', equipped_lbl: 'ЭКИПИРОВКА',
+    next_relic: 'Реликвия через', play_m: 'играй', all_relics: 'Все реликвии собраны!',
+    daily_quests: 'ЕЖЕДНЕВНЫЕ ЗАДАНИЯ', resets_in: 'обновление через', claim_btn: 'ЗАБРАТЬ', claimed_btn: 'ГОТОВО',
     essence: 'ЭССЕНЦИЯ', essence_earned: '+%n ЭССЕНЦИИ',
     den_sub: 'Трать Эссенцию, чтобы развивать род — улучшения ПОСТОЯННЫ во всех забегах.',
     maxed: 'МАКС', cost: 'Цена', owned_lbl: 'ЕСТЬ',
@@ -212,7 +220,13 @@ var lastGameOverEssence = 0; // for the GAMEOVER "+N essence" line
 var lastStreakBonus = 0;     // essence from streak/login shown this session
 var dailyChallengeBonus = false; // Daily Hunt active (UTC-seeded) → essence multiplier
 var pendingIdleEssence = 0;  // idle accrual to collect on the MENU
-var overlay = '';            // '' | 'DEN' | 'DAILY' | 'IDLE' — extra MENU panels
+var overlay = '';            // '' | 'HOARD' — fullscreen sub-panel over the menu
+var hoardTab = 'relics';     // 'relics' | 'quests' — active tab inside the Hoard overlay
+var hoardTabRects = [];      // [{tab,x,y,w,h}] Den/Hoard/Quests tabs in the overlay
+var hoardTileRects = [];     // [{id,x,y,w,h}] relic tiles (tap = equip toggle)
+var hoardUpRects = [];       // [{id,x,y,w,h,afford}] relic upgrade chips
+var equipSlotRects = [];     // [{slot,x,y,w,h}] equip slots
+var questClaimRects = [];    // [{i,x,y,w,h,can}] daily-quest claim buttons
 
 function curStrings() { return STRINGS[GF.lang] || STRINGS.en; }
 
@@ -341,6 +355,45 @@ function relicUnequipSlot(slot) {
   if (!meta.equipped[slot]) return false;
   meta.equipped[slot] = null; saveMeta(); return true;
 }
+
+// ── DAILY QUESTS — the come-back-TOMORROW hook (3/day, reset at UTC midnight) ──
+var QUEST_DEFS = [
+  { kind:'kills',   goals:[40,70,110],   reward:[50,90,140],  en:'Devour {g} enemies', ru:'Поглоти {g} врагов' },
+  { kind:'survive', goals:[180,300,450], reward:[60,110,170], en:'Survive {g}s',        ru:'Продержись {g}с' },
+  { kind:'level',   goals:[6,9,13],      reward:[60,110,180], en:'Reach level {g}',     ru:'Достигни {g} уровня' },
+  { kind:'evolve',  goals:[1,2,3],       reward:[70,130,200], en:'Evolve {g} time(s)',  ru:'Эволюционируй {g}' },
+  { kind:'essence', goals:[60,120,200],  reward:[50,90,130],  en:'Earn {g} essence',    ru:'Заработай {g} эссенции' },
+];
+var QUEST_BY_KIND = {}; for (var _qd = 0; _qd < QUEST_DEFS.length; _qd++) QUEST_BY_KIND[QUEST_DEFS[_qd].kind] = QUEST_DEFS[_qd];
+function questLabel(q) { var d = QUEST_BY_KIND[q.kind]; return d ? (GF.lang === 'ru' ? d.ru : d.en).replace('{g}', q.target) : ''; }
+function maybeRollQuests() {
+  var today = utcDayIdx();
+  if (meta.dailyDay === today && Array.isArray(meta.quests) && meta.quests.length) return;
+  meta.dailyDay = today;
+  var pool = QUEST_DEFS.slice(), picked = [];
+  for (var n = 0; n < 3 && pool.length; n++) {
+    var idx = (Math.random() * pool.length) | 0, d = pool.splice(idx, 1)[0], tier = (Math.random() * d.goals.length) | 0;
+    picked.push({ kind: d.kind, target: d.goals[tier], prog: 0, done: false, claimed: false, reward: d.reward[tier] });
+  }
+  meta.quests = picked; saveMeta();
+}
+function questProgress(kind, amount) {
+  if (!Array.isArray(meta.quests)) return;
+  for (var i = 0; i < meta.quests.length; i++) {
+    var q = meta.quests[i]; if (q.kind !== kind || q.done) continue;
+    var prev = q.prog;
+    if (kind === 'survive' || kind === 'level') q.prog = Math.max(q.prog, amount); else q.prog += amount;
+    if (q.prog === prev) continue;
+    // Progress lives in memory; it is persisted at natural save points (game-over,
+    // menu open, quest claim) — NEVER per frame. survive/level call this EVERY frame,
+    // so saving here would hammer localStorage 60-120x/sec (the perf anti-pattern the
+    // scorecard caught). Only a completion (rare) writes immediately.
+    if (q.prog >= q.target) { q.prog = q.target; q.done = true; questToast = { q: q, t: 3.6 }; if (GF.happytime) GF.happytime(); saveMeta(); }
+  }
+}
+function claimQuest(i) { var q = meta.quests && meta.quests[i]; if (!q || !q.done || q.claimed) return false; q.claimed = true; meta.essence += q.reward; saveMeta(); return true; }
+function claimableQuests() { if (!Array.isArray(meta.quests)) return 0; var n = 0; for (var i = 0; i < meta.quests.length; i++) if (meta.quests[i].done && !meta.quests[i].claimed) n++; return n; }
+function hoursToReset() { return 24 - (Date.now() % 86400000) / 3600000; }
 var meta = {
   essence: 0,
   up: { vigor: 0, predator: 0, greed: 0, hunger: 0, survivor: 0 },
@@ -565,6 +618,7 @@ function killEnemy(e, isBite) {
   if (idx < 0) return;
   enemies.splice(idx, 1);
   kills++;
+  questProgress('kills', 1);
   GF.spawnParticles(e.x, e.y, e.col, e.elite ? 16 : 8);
   dropMote(e.x, e.y, e.elite ? 'big' : (Math.random() < 0.04 ? 'gold' : (Math.random() < 0.03 ? 'heal' : 'normal')));
   if (e.elite) dropMote(e.x + 8 * GF.S, e.y, 'normal');
@@ -720,7 +774,7 @@ function maybeEvolve() {
   var newForm = form;
   for (var i = FORM_LEVELS.length - 1; i >= 0; i--) { if (level >= FORM_LEVELS[i]) { newForm = i; break; } }
   if (newForm > form) {
-    form = newForm; HERO_RADIUS = FORM_RADIUS[form];
+    form = newForm; HERO_RADIUS = FORM_RADIUS[form]; questProgress('evolve', 1);
     evoFlash = 0.9; GF.setShake(0.5); justEvolved = true;
     GF.spawnParticles(hero.x, hero.y, '#7CFC9A', 28);
     healHero(maxHp * 0.25);
@@ -788,7 +842,7 @@ function resetRun() {
   relicRevives = Math.round(relicVal('revive'));  // Second Stomach: extra free revives this run
   weapons = { bite: 1 }; weaponTimers = {}; orbitAngle = 0;
   spareUpgrades = 0; levelChoices = [];
-  reviveUsed = false; reviveLoading = false; evoFlash = 0; justEvolved = false;
+  reviveUsed = false; reviveLoading = false; evoFlash = 0; justEvolved = false; runPlaySec = 0;
   tutorialOpen = false; _ssMode = false;
 }
 function startGame() {
@@ -819,6 +873,9 @@ function gameOver() {
   essenceEarned = Math.max(1, Math.floor((kills / 3 + survivalSec / 6 + level * 2) * (1 + metaVal('greed') / 100 + relicVal('essence'))));
   lastGameOverEssence = essenceEarned;
   meta.essence += essenceEarned;
+  questProgress('essence', essenceEarned);
+  meta.totalPlaySec += Math.floor(runPlaySec); runPlaySec = 0;   // bank run playtime toward Relic unlocks
+  checkRelicUnlocks();
   saveMeta();
   GF.gameEnded(); GF.saveRun();
   if (newBest && best > 0) GF.happytime();
@@ -960,12 +1017,19 @@ function update(dt) {
   if (evoFlash > 0) evoFlash = Math.max(0, evoFlash - dt);
   if (hero.hitFlash > 0) hero.hitFlash = Math.max(0, hero.hitFlash - dt);
   for (var si = slashes.length - 1; si >= 0; si--) { slashes[si].t -= dt; if (slashes[si].t <= 0) slashes.splice(si, 1); }
+  if (relicToast) { relicToast.t -= dt; if (relicToast.t <= 0) relicToast = null; }
+  if (questToast) { questToast.t -= dt; if (questToast.t <= 0) questToast = null; }
 
   if (gs !== 'PLAYING') return;
   if (tutorialOpen) return;
   if (_ssMode) { orbitAngle += dt * 2.4; return; }
 
   survivalSec += dt;
+  runPlaySec += dt;
+  questProgress('survive', survivalSec); questProgress('level', level);
+  // unlock Relics on the cumulative-playtime ladder (the multi-day pull)
+  var freshR = checkRelicUnlocks();
+  if (freshR.length) { relicToast = { def: freshR[freshR.length - 1], t: 3.6 }; if (GF.happytime) GF.happytime(); }
   score = Math.floor(survivalSec) * 2 + kills * 5;
   if (regenPerSec > 0) healHero(regenPerSec * dt);
 
@@ -1151,8 +1215,10 @@ function draw(ctx) {
     if (tutorialOpen) drawTutorialPanel(ctx);
   }
   if (gs === 'LEVELUP') drawLevelUp(ctx);
-  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'MENU') { drawMenu(ctx); if (overlay === 'HOARD') drawHoardOverlay(ctx); }
   if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if (relicToast) drawRelicToast(ctx);
+  else if (questToast) drawQuestToast(ctx);
 }
 
 function drawGrid(ctx) {
@@ -1302,6 +1368,44 @@ function drawSlashes(ctx) {
 // ── HUD ──────────────────────────────────────────────────────────────────
 function fmtTime(t) { var m = Math.floor(t / 60), s = Math.floor(t % 60); return (m<10?'0':'')+m+':'+(s<10?'0':'')+s; }
 
+// Vector Relic icon — distinct shape per relic (NEVER emoji; emoji render as tofu).
+function drawRelicIcon(ctx, def, x, y, r) {
+  ctx.save();
+  ctx.fillStyle = def.col; ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = Math.max(1, r * 0.12);
+  var i, a, rr, px, py;
+  switch (def.id) {
+    case 'sac': ctx.beginPath(); ctx.ellipse(x, y, r * 0.85, r, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); break;
+    case 'fang': ctx.beginPath(); ctx.moveTo(x - r * 0.7, y - r); ctx.lineTo(x + r * 0.7, y - r); ctx.lineTo(x, y + r); ctx.closePath(); ctx.fill(); ctx.stroke(); break;
+    case 'maw': ctx.lineWidth = r * 0.34; ctx.strokeStyle = def.col; ctx.beginPath(); ctx.arc(x, y, r * 0.7, 0, Math.PI * 2); ctx.stroke(); break;
+    case 'cilia': ctx.lineWidth = r * 0.26; ctx.strokeStyle = def.col; for (i = 0; i < 2; i++) { var ox = x - r * 0.25 + i * r * 0.5; ctx.beginPath(); ctx.moveTo(ox - r * 0.4, y - r * 0.6); ctx.lineTo(ox + r * 0.3, y); ctx.lineTo(ox - r * 0.4, y + r * 0.6); ctx.stroke(); } break;
+    case 'stomach': ctx.beginPath(); ctx.moveTo(x, y + r * 0.8); ctx.bezierCurveTo(x - r * 1.3, y - r * 0.3, x - r * 0.4, y - r, x, y - r * 0.35); ctx.bezierCurveTo(x + r * 0.4, y - r, x + r * 1.3, y - r * 0.3, x, y + r * 0.8); ctx.fill(); ctx.stroke(); break;
+    case 'gland': ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x + r * 0.8, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r * 0.8, y); ctx.closePath(); ctx.fill(); ctx.stroke(); break;
+    case 'venom': ctx.beginPath(); ctx.moveTo(x, y - r); ctx.bezierCurveTo(x + r * 0.9, y + r * 0.1, x + r * 0.6, y + r, x, y + r); ctx.bezierCurveTo(x - r * 0.6, y + r, x - r * 0.9, y + r * 0.1, x, y - r); ctx.fill(); ctx.stroke(); break;
+    case 'hide': ctx.beginPath(); for (i = 0; i < 12; i++) { a = i * Math.PI / 6 - Math.PI / 2; rr = (i % 2 === 0) ? r : r * 0.45; px = x + Math.cos(a) * rr; py = y + Math.sin(a) * rr; if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); } ctx.closePath(); ctx.fill(); ctx.stroke(); break;
+    case 'core': var t = r * 0.34; ctx.beginPath(); ctx.rect(x - t, y - r, t * 2, r * 2); ctx.rect(x - r, y - t, r * 2, t * 2); ctx.fill(); break;
+    case 'crown': ctx.beginPath(); ctx.moveTo(x - r, y + r * 0.6); ctx.lineTo(x - r, y - r * 0.3); ctx.lineTo(x - r * 0.45, y + r * 0.1); ctx.lineTo(x, y - r * 0.7); ctx.lineTo(x + r * 0.45, y + r * 0.1); ctx.lineTo(x + r, y - r * 0.3); ctx.lineTo(x + r, y + r * 0.6); ctx.closePath(); ctx.fill(); ctx.stroke(); break;
+    case 'void': ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.beginPath(); ctx.arc(x, y, r * 0.45, 0, Math.PI * 2); ctx.fillStyle = '#02020a'; ctx.fill(); break;
+    default: ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  }
+  ctx.restore();
+}
+// "NEW RELIC" flourish on a playtime unlock (non-blocking, fades out).
+function drawRelicToast(ctx) {
+  var S = GF.S, def = relicToast.def, ru = (GF.lang === 'ru');
+  var w = GF.clamp(266 * S, 210, 330), h = GF.clamp(54 * S, 46, 66);
+  var x = GF.cx - w / 2, y = GF.clamp(GF.H * 0.18, 64, 160), a = GF.clamp(relicToast.t / 0.4, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, 12 * S); ctx.fillStyle = 'rgba(14,12,30,0.96)'; ctx.fill();
+  ctx.strokeStyle = def.col; ctx.lineWidth = 2 * S; ctx.stroke();
+  drawRelicIcon(ctx, def, x + h * 0.5, y + h / 2, h * 0.3);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = def.col; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText((ru ? 'НОВАЯ РЕЛИКВИЯ' : 'NEW RELIC') + '  ·  ' + relicName(def), x + h, y + h * 0.36);
+  ctx.fillStyle = '#cdd'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+  ctx.fillText(relicBonusText(def, 1) + (ru ? '  — в Логове' : '  — in the Den'), x + h, y + h * 0.68);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
+
 function drawHUD(ctx) {
   var fs = GF.clamp(17 * GF.S, 13, 24);
   ctx.textBaseline = 'top';
@@ -1338,6 +1442,15 @@ function drawHUD(ctx) {
   var grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
   grad.addColorStop(0, '#8be9fd'); grad.addColorStop(1, '#50fa7b');
   ctx.fillStyle = grad; GF.rr(ctx, barX, barY, barW * xpFrac, barH, barH/2); ctx.fill();
+  // next-relic playtime hint (top-left, under the timer) — keeps the Hoard goal visible
+  var nr = nextRelic();
+  if (nr) {
+    var hr = GF.clamp(7 * GF.S, 6, 10), hy = 14 * GF.S + fs + 9 * GF.S;
+    drawRelicIcon(ctx, nr, 14 * GF.S + hr, hy, hr);
+    ctx.fillStyle = '#8aa'; ctx.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText((GF.lang === 'ru' ? 'реликвия ' : 'next relic ') + Math.max(0, Math.ceil(nr.min - totalPlayMin())) + (GF.lang === 'ru' ? ' мин' : 'm'), 14 * GF.S + hr * 2 + 6 * GF.S, hy);
+    ctx.textBaseline = 'top';
+  }
 }
 
 function drawWeaponIcon(ctx, key, x, y, sz, lv) {
@@ -1480,12 +1593,18 @@ function drawMenu(ctx) {
   // THE DEN meta panel
   var maxW = Math.min(GF.W * 0.9, 460 * GF.S);
   var panelBottom = drawDenPanel(ctx, topY + titleFs * 0.6 + GF.clamp(40 * GF.S, 30, 56), maxW);
+  // THE HOARD + QUESTS access row (opens the fullscreen Hoard overlay)
+  var accW = (maxW - 10 * GF.S) / 2, accH = GF.clamp(40 * GF.S, 32, 50), accX = GF.cx - maxW / 2, accY = panelBottom + 10 * GF.S;
+  var nClaim = (typeof claimableQuests === 'function') ? claimableQuests() : 0;
+  drawButton(ctx, accX, accY, accW, accH, GF.t('hoard_open'), function () { overlay = 'HOARD'; hoardTab = 'relics'; });
+  drawButton(ctx, accX + accW + 10 * GF.S, accY, accW, accH, GF.t('quests_open') + (nClaim > 0 ? ' (' + nClaim + ')' : ''), function () { overlay = 'HOARD'; hoardTab = 'quests'; });
+  var metaBottom = accY + accH;
   var btnW = GF.clamp((wide ? 300 : 230) * GF.S, 170, 380), btnH = GF.clamp((wide ? 64 : 54) * GF.S, 48, 82);
   var btnX = GF.cx - btnW / 2;
-  var wideFloor = GF.H * 0.58;
+  var wideFloor = GF.H * 0.62;
   var btnY = wide
-    ? Math.max(panelBottom + 14 * GF.S, wideFloor)
-    : Math.min(panelBottom + 14 * GF.S, GF.H - btnH - 30 * GF.S);
+    ? Math.max(metaBottom + 14 * GF.S, wideFloor)
+    : Math.min(metaBottom + 14 * GF.S, GF.H - btnH - 24 * GF.S);
   if (wide) {
     var _t = performance.now() / 1000, _k = Math.sin(_t * 2.2), _p = 1 + 0.05 * _k;
     var _w = btnW * _p, _h = btnH * _p, _x = GF.cx - _w / 2, _y = btnY + btnH / 2 - _h / 2;
@@ -1509,6 +1628,163 @@ function drawMenu(ctx) {
     ctx.font = GF.clamp(13 * GF.S, 10, 17) + 'px sans-serif'; ctx.fillStyle = '#8a7fb0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(GF.t('best') + ': ' + best, GF.cx, btnY + btnH + 24 * GF.S);
   }
+}
+
+// daily-quest rows inside the Hoard overlay's Quests tab
+function drawQuestRows(ctx, x0, cy, maxW) {
+  var S = GF.S, ru = (GF.lang === 'ru'); questClaimRects = [];
+  maybeRollQuests();
+  var quests = meta.quests || [];
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#b388ff'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText(GF.t('daily_quests'), x0, cy);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#8a7fb0'; ctx.font = GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+  ctx.fillText(GF.t('resets_in') + ' ' + Math.ceil(hoursToReset()) + (ru ? 'ч' : 'h'), x0 + maxW, cy + 2 * S);
+  cy += 24 * S;
+  var rowH = GF.clamp(56 * S, 48, 68), rowGap = 10 * S;
+  for (var i = 0; i < 3; i++) {
+    var q = quests[i], ry = cy + i * (rowH + rowGap);
+    GF.rr(ctx, x0, ry, maxW, rowH, 9 * S);
+    ctx.fillStyle = q && q.done ? 'rgba(124,252,154,0.12)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = q && q.done && !q.claimed ? '#7CFC9A' : 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+    if (!q) continue;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(11.5 * S, 9.5, 15) + 'px sans-serif';
+    ctx.fillText(questLabel(q), x0 + 12 * S, ry + 9 * S);
+    var barW = maxW - 24 * S - GF.clamp(82 * S, 66, 104), barH = 7 * S, barY = ry + rowH - 16 * S;
+    GF.rr(ctx, x0 + 12 * S, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+    GF.rr(ctx, x0 + 12 * S, barY, Math.max(barH, barW * GF.clamp(q.prog / q.target, 0, 1)), barH, barH / 2); ctx.fillStyle = q.done ? '#7CFC9A' : '#ffca28'; ctx.fill();
+    ctx.fillStyle = '#8a7fb0'; ctx.font = GF.clamp(9.5 * S, 8, 12) + 'px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(Math.min(q.prog, q.target) + '/' + q.target, x0 + 16 * S + barW, barY + barH / 2);
+    var cbW = GF.clamp(78 * S, 62, 100), cbH = GF.clamp(36 * S, 30, 44), cbX = x0 + maxW - cbW - 8 * S, cbY = ry + (rowH - cbH) / 2, can = q.done && !q.claimed;
+    GF.rr(ctx, cbX, cbY, cbW, cbH, 8 * S);
+    ctx.fillStyle = q.claimed ? 'rgba(124,252,154,0.10)' : (can ? 'rgba(124,252,154,0.28)' : 'rgba(255,255,255,0.05)'); ctx.fill();
+    if (can) { ctx.strokeStyle = '#7CFC9A'; ctx.lineWidth = 1.5 * S; ctx.stroke(); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (q.claimed) { ctx.fillStyle = '#7CFC9A'; ctx.font = 'bold ' + GF.clamp(10 * S, 8.5, 13) + 'px sans-serif'; ctx.fillText(GF.t('claimed_btn'), cbX + cbW / 2, cbY + cbH / 2); }
+    else { ctx.fillStyle = can ? '#dfffe0' : '#8a7fb0'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif'; ctx.fillText(can ? GF.t('claim_btn') : ('+' + q.reward), cbX + cbW / 2, cbY + cbH / 2 - (can ? 5 * S : 0)); if (can) { ctx.fillStyle = '#ffca28'; ctx.font = GF.clamp(9 * S, 7.5, 11.5) + 'px sans-serif'; ctx.fillText('+' + q.reward, cbX + cbW / 2, cbY + cbH / 2 + 8 * S); } }
+    questClaimRects.push({ i: i, x: cbX, y: cbY, w: cbW, h: cbH, can: can });
+    (function (idx, cc) { uiButtons.push({ x: cbX, y: cbY, w: cbW, h: cbH, fn: function () { if (cc && claimQuest(idx) && GF.happytime) GF.happytime(); } }); })(i, can);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+function drawQuestToast(ctx) {
+  var S = GF.S, q = questToast.q, ru = (GF.lang === 'ru');
+  var w = GF.clamp(266 * S, 210, 330), h = GF.clamp(50 * S, 44, 62), x = GF.cx - w / 2, y = GF.clamp(GF.H * 0.18, 64, 160), a = GF.clamp(questToast.t / 0.4, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, 12 * S); ctx.fillStyle = 'rgba(10,24,14,0.96)'; ctx.fill();
+  ctx.strokeStyle = '#7CFC9A'; ctx.lineWidth = 2 * S; ctx.stroke();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#7CFC9A'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText((ru ? 'ЗАДАНИЕ ВЫПОЛНЕНО' : 'QUEST DONE') + '  ·  +' + q.reward + ' ' + GF.t('essence'), x + 14 * S, y + h * 0.36);
+  ctx.fillStyle = '#cdd'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+  ctx.fillText(questLabel(q) + (ru ? '  — забери в Заданиях' : '  — claim in Quests'), x + 14 * S, y + h * 0.68);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
+
+// ── THE HOARD overlay (fullscreen over the menu) — Relics + Quests tabs ─────
+function drawHoardOverlay(ctx) {
+  uiButtons = [];   // only this overlay's buttons are live while it's open
+  var S = GF.S, ru = (GF.lang === 'ru');
+  ctx.fillStyle = 'rgba(6,5,16,0.96)'; ctx.fillRect(0, 0, GF.W, GF.H);
+  var maxW = Math.min(GF.W * 0.92, 470 * S), x0 = GF.cx - maxW / 2;
+  var ty = GF.clamp(GF.H * 0.07, 30, 80);
+  ctx.fillStyle = '#b388ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(24 * S, 18, 32) + 'px sans-serif';
+  ctx.fillText(GF.t('hoard_hdr'), GF.cx, ty);
+  // BACK button (top-left)
+  var bkW = GF.clamp(66 * S, 54, 84), bkH = GF.clamp(32 * S, 28, 40);
+  drawButton(ctx, x0, ty - bkH * 0.7, bkW, bkH, GF.t('back'), function () { overlay = ''; });
+  // tab row
+  var tabH = GF.clamp(34 * S, 28, 42), tabGap = 8 * S, tabW = (maxW - tabGap) / 2, tabY = ty + 14 * S;
+  var nClaim = claimableQuests();
+  var tabs = [{ id: 'relics', label: GF.t('relics_tab') }, { id: 'quests', label: GF.t('quests_tab') + (nClaim > 0 ? ' (' + nClaim + ')' : '') }];
+  hoardTabRects = [];
+  for (var t = 0; t < 2; t++) {
+    var on = (hoardTab === tabs[t].id), bx = x0 + t * (tabW + tabGap);
+    hoardTabRects.push({ tab: tabs[t].id, x: bx, y: tabY, w: tabW, h: tabH });
+    GF.rr(ctx, bx, tabY, tabW, tabH, 9 * S);
+    ctx.fillStyle = on ? 'rgba(179,136,255,0.22)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = on ? '#b388ff' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+    ctx.fillStyle = on ? '#d7c4ff' : '#8a8098'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
+    ctx.fillText(tabs[t].label, bx + tabW / 2, tabY + tabH / 2);
+    (function (id) { uiButtons.push({ x: bx, y: tabY, w: tabW, h: tabH, fn: function () { hoardTab = id; } }); })(tabs[t].id);
+  }
+  ctx.textBaseline = 'alphabetic';
+  var cy = tabY + tabH + 14 * S;
+  if (hoardTab === 'quests') { drawQuestRows(ctx, x0, cy, maxW); return; }
+
+  // ── RELICS tab ──
+  // header: essence + cumulative playtime
+  var tm = Math.floor(totalPlayMin());
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#ffca28';
+  ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif';
+  ctx.fillText((meta.essence | 0) + ' ' + GF.t('essence'), x0, cy);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#8a7fb0'; ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.fillText((ru ? 'Сыграно: ' : 'Played: ') + (tm >= 60 ? Math.floor(tm / 60) + 'h ' + (tm % 60) + 'm' : tm + 'm'), x0 + maxW, cy + 3 * S);
+  cy += 20 * S;
+  // next-relic progress
+  var nr = nextRelic();
+  if (nr) {
+    var prev = 0; for (var pi = 0; pi < RELIC_DEFS.length; pi++) { if (RELIC_DEFS[pi].id === nr.id) break; prev = RELIC_DEFS[pi].min; }
+    var frac = GF.clamp((totalPlayMin() - prev) / (nr.min - prev), 0, 1), left = Math.max(0, Math.ceil(nr.min - totalPlayMin()));
+    ctx.textAlign = 'left'; ctx.fillStyle = '#cdd'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+    ctx.fillText(GF.t('next_relic') + ' ' + left + (ru ? ' мин' : ' min'), x0, cy);
+    var bw = maxW, bh = 6 * S, by = cy + 14 * S;
+    GF.rr(ctx, x0, by, bw, bh, bh / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+    GF.rr(ctx, x0, by, Math.max(bh, bw * frac), bh, bh / 2); ctx.fillStyle = nr.col; ctx.fill();
+  } else {
+    ctx.textAlign = 'left'; ctx.fillStyle = '#7CFC9A'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+    ctx.fillText(GF.t('all_relics'), x0, cy);
+  }
+  cy += 30 * S;
+  // equip slots
+  ctx.textAlign = 'left'; ctx.fillStyle = '#8a8098'; ctx.font = GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+  ctx.fillText(GF.t('equipped_lbl'), x0, cy);
+  var slotR = GF.clamp(24 * S, 20, 30), slotGap = GF.clamp(18 * S, 12, 28), sy = cy + 16 * S;
+  var totW = RELIC_SLOTS * slotR * 2 + (RELIC_SLOTS - 1) * slotGap, sx0 = GF.cx - totW / 2;
+  equipSlotRects = [];
+  for (var s = 0; s < RELIC_SLOTS; s++) {
+    var scx = sx0 + slotR + s * (slotR * 2 + slotGap), scy = sy + slotR, eid = meta.equipped[s];
+    ctx.beginPath(); ctx.arc(scx, scy, slotR, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = eid ? RELIC_BY_ID[eid].col : 'rgba(255,255,255,0.2)'; ctx.lineWidth = 2 * S;
+    ctx.setLineDash(eid ? [] : [4 * S, 4 * S]); ctx.stroke(); ctx.setLineDash([]);
+    if (eid) drawRelicIcon(ctx, RELIC_BY_ID[eid], scx, scy, slotR * 0.62);
+    equipSlotRects.push({ slot: s, x: scx - slotR, y: scy - slotR, w: slotR * 2, h: slotR * 2 });
+    (function (slot) { uiButtons.push({ x: scx - slotR, y: scy - slotR, w: slotR * 2, h: slotR * 2, fn: function () { relicUnequipSlot(slot); } }); })(s);
+  }
+  cy = sy + slotR * 2 + 16 * S;
+  // relic grid (4 cols)
+  var cols = 4, gap = 7 * S, tileW = (maxW - gap * (cols - 1)) / cols, tileH = GF.clamp(64 * S, 54, 78);
+  hoardTileRects = []; hoardUpRects = [];
+  for (var i = 0; i < RELIC_DEFS.length; i++) {
+    var def = RELIC_DEFS[i], col = i % cols, row = (i / cols) | 0;
+    var bx2 = x0 + col * (tileW + gap), by2 = cy + row * (tileH + gap);
+    var owned = !!meta.relics[def.id], equipped = meta.equipped.indexOf(def.id) >= 0;
+    GF.rr(ctx, bx2, by2, tileW, tileH, 9 * S);
+    ctx.fillStyle = owned ? (equipped ? 'rgba(124,252,154,0.13)' : 'rgba(255,255,255,0.06)') : 'rgba(255,255,255,0.03)'; ctx.fill();
+    ctx.strokeStyle = equipped ? '#7CFC9A' : (owned ? 'rgba(179,136,255,0.5)' : 'rgba(255,255,255,0.12)'); ctx.lineWidth = 1.5 * S; ctx.stroke();
+    var icx = bx2 + tileW / 2, icy = by2 + tileH * 0.33, ir = GF.clamp(14 * S, 11, 18);
+    if (owned) {
+      drawRelicIcon(ctx, def, icx, icy, ir);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = '#cdd'; ctx.font = 'bold ' + GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
+      ctx.fillText('Lv ' + meta.relics[def.id].lvl, icx, by2 + tileH * 0.55);
+      var cost = relicUpCost(def.id), maxed = (cost == null), afford = !maxed && meta.essence >= cost;
+      var chW = tileW - 8 * S, chH = GF.clamp(15 * S, 12, 19), chX = bx2 + 4 * S, chY = by2 + tileH - chH - 4 * S;
+      GF.rr(ctx, chX, chY, chW, chH, 5 * S);
+      ctx.fillStyle = maxed ? 'rgba(124,252,154,0.18)' : (afford ? 'rgba(255,202,40,0.18)' : 'rgba(255,255,255,0.05)'); ctx.fill();
+      ctx.fillStyle = maxed ? '#7CFC9A' : (afford ? '#ffca28' : '#776e87'); ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold ' + GF.clamp(8.5 * S, 7, 11) + 'px sans-serif';
+      ctx.fillText(maxed ? (ru ? 'МАКС' : 'MAX') : ('' + cost), chX + chW / 2, chY + chH / 2);
+      hoardTileRects.push({ id: def.id, x: bx2, y: by2, w: tileW, h: tileH - chH - 4 * S });
+      hoardUpRects.push({ id: def.id, x: chX, y: chY, w: chW, h: chH, afford: afford });
+      (function (id) { uiButtons.push({ x: bx2, y: by2, w: tileW, h: tileH - chH - 4 * S, fn: function () { relicToggleEquip(id); } }); })(def.id);
+      (function (id, af) { uiButtons.push({ x: chX, y: chY, w: chW, h: chH, fn: function () { if (af && relicBuyUpgrade(id) && GF.happytime) GF.happytime(); } }); })(def.id, afford);
+    } else {
+      ctx.globalAlpha = 0.4; drawRelicIcon(ctx, def, icx, icy, ir); ctx.globalAlpha = 1;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = '#776e87'; ctx.font = GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
+      ctx.fillText(GF.t('play_m') + ' ' + def.min + (ru ? 'м' : 'm'), icx, by2 + tileH * 0.56);
+    }
+  }
+  ctx.textBaseline = 'alphabetic';
 }
 
 // ── LEVEL-UP CHOOSER ───────────────────────────────────────────────────────
@@ -1648,6 +1924,7 @@ GF.init({
     try { best = parseInt(localStorage.getItem('devourling_best') || '0') || 0; } catch (e) {}
     loadMeta();      // owned cross-session progression (Essence + Den upgrades)
     claimOnOpen();   // idle "kept feeding" Essence + daily login streak bonus
+    maybeRollQuests(); // fresh daily quests (the come-back-tomorrow hook)
     GF.persist('devourling_run_v1',
       function() {
         return { gs: gs, survivalSec: survivalSec, kills: kills, score: score,
@@ -1709,6 +1986,22 @@ window._forceLevelUp = function() { if (gs === 'PLAYING') { xp = xpNeed; gainXp(
 window._forceMiniboss = function() { if (gs === 'PLAYING' && !miniboss) spawnMiniboss(); };
 window._forceBoss = function() { if (gs === 'PLAYING' && !boss) spawnBoss(); };
 window._setTime = function(sec) { survivalSec = sec; };           // test: fast-forward the survival clock
+// ── Relic/Hoard test seams ────────────────────────────────────────────────
+window._devSetPlay = function(mins) { meta.totalPlaySec = Math.max(0, (+mins || 0) * 60); runPlaySec = 0; checkRelicUnlocks(); saveMeta(); };
+window._devGrant = function(e) { meta.essence += (+e || 0); saveMeta(); };
+window._devInfo = function() {
+  return {
+    gs: gs, overlay: overlay, essence: meta.essence | 0, totalPlayMin: Math.floor(totalPlayMin()),
+    relics: meta.relics, equipped: meta.equipped.slice(),
+    nextRelic: (function(){ var n = nextRelic(); return n ? { id:n.id, min:n.min } : null; }()),
+    maxHp: maxHp, dmgMul: +dmgMul.toFixed(3), speedMul: +speedMul.toFixed(3), magnetMul: +magnetMul.toFixed(3), regenPerSec: regenPerSec, relicRevives: relicRevives,
+    tabs: hoardTabRects, tiles: hoardTileRects, ups: hoardUpRects, slots: equipSlotRects,
+    quests: meta.quests, questClaims: questClaimRects,
+  };
+};
+window._devWinQuest = function(i) { var q = meta.quests && meta.quests[i]; if (q) { q.prog = q.target; q.done = true; q.claimed = false; saveMeta(); } };
+window._devOpenHoard = function(tab) { gs = 'MENU'; overlay = 'HOARD'; hoardTab = tab || 'relics'; };
+window._devClick = function(x, y) { uiLockUntil = 0; onPress(x, y); };
 window._sampleTypes = function(n) {                                // test: distribution of spawn types at current time
   var out = {}; for (var i = 0; i < (n || 200); i++) { var t = pickEnemyType(); out[t] = (out[t] || 0) + 1; } return out;
 };
