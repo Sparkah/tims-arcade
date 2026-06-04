@@ -51,6 +51,8 @@ var STRINGS = {
     bonus_streak_boost: 'Streak bonus',
     // Endless mode (playtime depth)
     endless: 'ENDLESS', endless_tag: '∞ LVL', go_deeper: 'tap to go deeper',
+    // Sealed-tube obstacle (Endless in-run mechanic)
+    sealed_hint: '🔒 Sealed tube — complete one pure tube to unlock it',
   },
   ru: {
     title: 'Слей по цвету',
@@ -81,6 +83,8 @@ var STRINGS = {
     bonus_streak_boost: 'Бонус за серию',
     // Endless mode (playtime depth)
     endless: 'БЕЗ КОНЦА', endless_tag: '∞ УР', go_deeper: 'жми, чтобы углубиться',
+    // Sealed-tube obstacle (Endless in-run mechanic)
+    sealed_hint: '🔒 Запечатана — собери одну чистую пробирку, чтобы открыть',
   },
 };
 
@@ -342,6 +346,12 @@ var sel = -1;              // selected source tube index, -1 = none
 var history = [];          // undo snapshots
 var anim = null;           // active pour animation
 var tubeRects = [];        // computed layout per frame
+// SEALED tube flags (Endless in-run mechanic, 2026-06-04): a parallel array, one
+// bool per tube. A sealed tube is corked — you can't pour from OR into it — until
+// it THAWS, which happens the moment you complete your first pure tube on the
+// board (or, as a solvability failsafe, if it's the only thing blocking progress).
+// Only Endless boards ever seal a tube; campaign/daily always leave this all-false.
+var locked = [];
 
 // ── ENDLESS DEPTH (retention milestone #3 — playtime depth, 2026-06-02) ─────
 // The campaign caps at 6 levels (a ~2-minute session). Endless mode is the
@@ -355,6 +365,26 @@ var tubeRects = [];        // computed layout per frame
 var endlessLevel = 0;        // current endless level (1.. ), 0 = not in endless
 var endlessBest = 0;         // deepest endless level ever reached (persisted)
 var ENDLESS_MAX_FILLED = 7;  // cap on filled colour-tubes so the rack stays sane
+var SEAL_FROM_LEVEL = 3;     // endless level a SEALED (corked) tube first appears
+// Reset every tube to unsealed (campaign/daily/endless-before-threshold). Keeps the
+// `locked` array exactly the same length as `tubes` so the two never desync.
+function clearLocks() { locked = tubes.map(function() { return false; }); }
+// Is the tube at index i currently sealed?  (cheap, used by the pour-validity guard)
+function isLocked(i) { return !!locked[i]; }
+// Any sealed tube still on the board?  (drives the one-line in-run hint)
+function anyLocked() { for (var i = 0; i < locked.length; i++) if (locked[i]) return true; return false; }
+// THAW every sealed tube (called the instant the first pure tube is completed, and
+// as a failsafe if a seal is the only thing blocking progress). One-way: once the
+// board is unsealed it stays unsealed, with a little pop of feedback per tube.
+function thawLocks() {
+  for (var i = 0; i < locked.length; i++) {
+    if (locked[i]) {
+      locked[i] = false;
+      var cc = tubeRectCenter(i);
+      GF.spawnParticles(cc.x, cc.y, '#9fe8ff', 12);
+    }
+  }
+}
 function loadEndless() {
   try { endlessBest = parseInt(localStorage.getItem('hue_sort_endless') || '0') || 0; } catch (e) {}
 }
@@ -397,6 +427,15 @@ function buildEndlessLevel(e) {
   sel = -1;
   history = [];
   anim = null;
+  clearLocks();
+  // From SEAL_FROM_LEVEL on, cork the LAST empty tube. It's sealed off the board
+  // until the player completes their first pure tube here — extra space they have
+  // to EARN, so deep boards reward purifying early. The board is still solvable
+  // without it (scramble used the same 2 empties either way) and detectStuck thaws
+  // it as a failsafe, so a seal can never brick a solvable board.
+  if (e >= SEAL_FROM_LEVEL && t.length) {
+    locked[t.length - 1] = true;   // the last tube is always one of the 2 empties
+  }
 }
 
 // ── LEVEL GENERATION ───────────────────────────────────────────────────────
@@ -421,6 +460,7 @@ function buildLevel(lvl) {
   sel = -1;
   history = [];
   anim = null;
+  clearLocks();   // campaign never seals a tube
 }
 
 function topColor(arr) { return arr.length ? arr[arr.length - 1] : 0; }
@@ -469,6 +509,7 @@ function buildDailyLevel() {
   sel = -1;
   history = [];
   anim = null;
+  clearLocks();   // daily never seals a tube — same board for everyone, kept simple
 }
 
 function solvedState(t) {
@@ -487,6 +528,17 @@ function boardImpure() { return !isSolved(); }
 function canPour(s, d) {
   if (s === d || s < 0 || d < 0) return false;
   if (!tubes[s] || !tubes[d]) return false;
+  if (isLocked(s) || isLocked(d)) return false; // a sealed tube is corked both ways
+  if (!tubes[s].length) return false;
+  if (tubes[d].length >= TUBE_CAP) return false;
+  return true;
+}
+
+// Same legality test but IGNORING seals — used only by the stuck failsafe so a
+// sealed tube can never be what bricks an otherwise-solvable board.
+function canPourUnsealed(s, d) {
+  if (s === d || s < 0 || d < 0) return false;
+  if (!tubes[s] || !tubes[d]) return false;
   if (!tubes[s].length) return false;
   if (tubes[d].length >= TUBE_CAP) return false;
   return true;
@@ -497,12 +549,20 @@ function detectStuck() {
   for (var s = 0; s < tubes.length; s++)
     for (var d = 0; d < tubes.length; d++)
       if (canPour(s, d)) return false;
+  // No legal pour with seals on. Before declaring GAMEOVER, FAILSAFE: if unsealing
+  // would open a legal pour, the seal was the only blocker — thaw it (never let a
+  // cork brick a solvable board) and report not-stuck.
+  if (anyLocked()) {
+    for (var s2 = 0; s2 < tubes.length; s2++)
+      for (var d2 = 0; d2 < tubes.length; d2++)
+        if (canPourUnsealed(s2, d2)) { thawLocks(); return false; }
+  }
   return true;
 }
 
 // ── POUR LOGIC ───────────────────────────────────────────────────────────
 function snapshot() {
-  return { tubes: tubes.map(function(a){ return a.slice(); }), pours: pours };
+  return { tubes: tubes.map(function(a){ return a.slice(); }), pours: pours, locked: locked.slice() };
 }
 function pushHistory() {
   history.push(snapshot());
@@ -515,6 +575,7 @@ function doUndo() {
   var snap = history.pop();
   tubes = snap.tubes.map(function(a){ return a.slice(); });
   pours = snap.pours;
+  if (snap.locked && snap.locked.length === tubes.length) locked = snap.locked.slice();
   undoLeft--;
   sel = -1;
   stuck = false;
@@ -566,6 +627,9 @@ function applyPour() {
     GF.spawnParticles(cc2.x, cc2.y - 40 * GF.S, COL_HEX[a.color], 10);
     if (tubes[d].length === TUBE_CAP && topRunLen(tubes[d]) === TUBE_CAP && isPrimary(topColor(tubes[d]))) {
       GF.spawnFloat(cc2.x, cc2.y - 60 * GF.S, 'PURE!', COL_HEX[topColor(tubes[d])]);
+      // Completing a pure tube THAWS any sealed tube on the board — the reward for
+      // purifying early is the corked tube's extra space opening up for you.
+      if (anyLocked()) thawLocks();
     }
   }
   anim = null;
@@ -681,6 +745,16 @@ window._jumpLevel = function(n) {
   buildLevel(level);
   gs = 'PLAYING';
 };
+// Test-only: jump straight into an endless level n (drives the sealed-tube path
+// for headless QA). Mirrors _jumpLevel; safe to ship like the other _ hooks.
+window._jumpEndless = function(n) {
+  GF.tutorial.active = false;
+  mode = 'endless';
+  endlessLevel = Math.max(1, n | 0);
+  buildEndlessLevel(endlessLevel);
+  gs = 'PLAYING';
+  computeLayout();
+};
 window._setupForScreenshot = function(lvl) {
   try { localStorage.setItem('hue_sort_seen_tutorial', '1'); } catch (e) {}
   GF.tutorial.active = false;
@@ -767,6 +841,7 @@ function draw(ctx) {
     if (!tubeRects.length) computeLayout();
     drawBoard(ctx);
     drawHUD(ctx);
+    if (gs === 'PLAYING' && anyLocked()) drawSealedHint(ctx);
   }
   if (gs === 'MENU')      drawMenu(ctx);
   if (gs === 'LEVELEND')  drawLevelEnd(ctx);
@@ -829,11 +904,44 @@ function drawTube(ctx, idx, x, y, w, h, selected) {
   ctx.restore();
   GF.rr(ctx, x, y, w, h, r);
   ctx.lineWidth = Math.max(2.5 * S, 2);
-  ctx.strokeStyle = selected ? '#ffe27a' : 'rgba(190,215,255,0.45)';
+  // A sealed tube reads as frosted ice-blue so it's obviously "not yet usable".
+  ctx.strokeStyle = isLocked(idx) ? '#79c8ff' : (selected ? '#ffe27a' : 'rgba(190,215,255,0.45)');
   ctx.stroke();
   ctx.fillStyle = 'rgba(255,255,255,0.10)';
   ctx.fillRect(x + w * 0.18, y + h * 0.08, w * 0.12, h * 0.8);
+  if (isLocked(idx)) drawSeal(ctx, x, y, w, h);
   ctx.restore();
+}
+
+// Draw the SEALED-tube indicator: a frost veil over the glass + a padlock badge at
+// the mouth, so the corked tube is unmistakable at a glance (no text needed).
+function drawSeal(ctx, x, y, w, h) {
+  var S = GF.S, r = w * 0.5;
+  // frost veil
+  GF.rr(ctx, x, y, w, h, r);
+  ctx.fillStyle = 'rgba(150,205,255,0.16)';
+  ctx.fill();
+  // padlock badge centred near the tube mouth
+  var bx = x + w / 2, by = y + h * 0.30;
+  var pw = Math.max(w * 0.42, 12), ph = pw * 0.78;
+  // shackle
+  ctx.lineWidth = Math.max(2.4 * S, 1.8);
+  ctx.strokeStyle = '#cfeaff';
+  ctx.beginPath();
+  ctx.arc(bx, by - ph * 0.22, pw * 0.26, Math.PI, 0);
+  ctx.stroke();
+  // body
+  GF.rr(ctx, bx - pw / 2, by, pw, ph, Math.max(3 * S, 2));
+  ctx.fillStyle = '#3a78e8';
+  ctx.fill();
+  ctx.lineWidth = Math.max(1.4 * S, 1);
+  ctx.strokeStyle = '#cfeaff';
+  ctx.stroke();
+  // keyhole
+  ctx.fillStyle = '#cfeaff';
+  ctx.beginPath();
+  ctx.arc(bx, by + ph * 0.42, Math.max(pw * 0.10, 1.6), 0, Math.PI * 2);
+  ctx.fill();
 }
 
 function drawPourStream(ctx) {
@@ -913,6 +1021,25 @@ function drawHUD(ctx) {
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillText('' + undoLeft, _undoBtn.x + btn / 2, _undoBtn.y + btn + 2 * S);
+}
+
+// One-line in-context explanation for the SEALED tube, anchored at the BOTTOM of
+// the play area (clear of the top-right HUD buttons in every language) and wrapped
+// so even the longer RU string never collides with anything. Shown ONLY while a
+// sealed tube is on the board, so the obstacle is never left unexplained.
+function drawSealedHint(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif';
+  ctx.fillStyle = '#9fd8ff';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  var maxW = Math.min(W * 0.92, 460);
+  var lines = wrapLines(ctx, GF.t('sealed_hint'), maxW);
+  var lh = GF.clamp(16 * S, 13, 22);
+  var baseY = H - GF.clamp(10 * S, 6, 16);
+  var y = baseY - (lines.length - 1) * lh;
+  for (var i = 0; i < lines.length; i++) { ctx.fillText(lines[i], W / 2, y); y += lh; }
+  ctx.textBaseline = 'top';
 }
 
 function drawIconBtn(ctx, x, y, sz, kind) {
@@ -1447,6 +1574,9 @@ GF.exposeState(function() {
     endlessLevel: endlessLevel,
     endlessBest: endlessBest,
     endlessUnlocked: endlessUnlocked(),
+    sealedTubes: locked.filter(Boolean).length,
+    anyLocked: anyLocked(),
+    SEAL_FROM_LEVEL: SEAL_FROM_LEVEL,
     POUR_BUDGET: POUR_BUDGET,
     TUBE_CAP: TUBE_CAP,
     START_TUBES: START_TUBES,
@@ -1466,6 +1596,8 @@ window._tubeCenters = function() {
 };
 // Test-only: read-only copy of tube contents (safe to ship; aids QA solvers).
 window._tubes = function() { return tubes.map(function(a){ return a.slice(); }); };
+// Test-only: read-only copy of seal flags so a headless solver can skip sealed tubes.
+window._locked = function() { return locked.slice(); };
 
 // ── BOOT ────────────────────────────────────────────────────────────────────
 GF.init({
@@ -1484,7 +1616,8 @@ GF.init({
       function() {
         return { gs: gs, mode: mode, level: level, endlessLevel: endlessLevel,
                  pours: pours, undoLeft: undoLeft,
-                 tubes: tubes.map(function(a){ return a.slice(); }) };
+                 tubes: tubes.map(function(a){ return a.slice(); }),
+                 locked: locked.slice() };
       },
       function(s) {
         if (!s) return;
@@ -1494,6 +1627,10 @@ GF.init({
         pours = (typeof s.pours === 'number') ? s.pours : POUR_BUDGET;
         undoLeft = (typeof s.undoLeft === 'number') ? s.undoLeft : UNDO_MAX;
         if (s.tubes && s.tubes.length) tubes = s.tubes.map(function(a){ return a.slice(); });
+        // Restore seal flags; rebuild to all-false if absent or length-mismatched so
+        // `locked` is always exactly as long as `tubes` (the canPour guard reads it).
+        if (s.locked && s.locked.length === tubes.length) locked = s.locked.slice();
+        else clearLocks();
         gs = (s.gs === 'PLAYING' && tubes.length) ? 'PLAYING' : 'MENU';
       }
     );

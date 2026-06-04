@@ -278,7 +278,9 @@ function hasLOS(ax, ay, bx, by) {
 // ════════════════════════════════════════════════════════════════════════
 function startRun() {
   floorN = 1; score = 0; sanity = SANITY_MAX; battery = BATTERY_MAX; lightOn = true;
-  shotMode = false; jump = 0; flickerDark = 0; pauseMode = null;
+  shotMode = false; jump = 0; flickerDark = 0; pauseMode = null; menuView = 'main';
+  reviveUsed = false; slowT = phaseT = flareT = compassT = 0;
+  meta.runs++; saveMeta();
   genMaze(); gs = 'PLAYING'; GF.gameStarted(); initAudio(); persistSave();
 }
 function descend() {
@@ -295,7 +297,7 @@ function gameOver(reason) {
   try { localStorage.setItem('backrooms_best', best); localStorage.setItem('backrooms_bestscore', bestScore); } catch (e) {}
   jump = 1; flashFx(1); camShakeT = 0.6; sfx('scare'); GF.gameEnded();
   if (nb && best > 1) GF.happytime();
-  persistSave();
+  publishScore(); saveMeta(); persistSave();
 }
 function setupPhotogenic(lvl) {
   floorN = Math.max(1, lvl | 0 || 1); sanity = 62; battery = 70; lightOn = true; pauseMode = null;
@@ -317,8 +319,9 @@ function setupPhotogenic(lvl) {
 function update(dt) {
   if (jump > 0) jump = Math.max(0, jump - dt * 1.4);
   if (camShakeT > 0) camShakeT = Math.max(0, camShakeT - dt);
+  if (dropFlash > 0) dropFlash -= dt; if (claimFlash > 0) claimFlash -= dt;
   if (gs !== 'PLAYING' || pauseMode) { moving = false; return; }
-  sinceFloorStart += dt;
+  sinceFloorStart += dt; if (!shotMode) tickMeta(dt);
 
   var turn = 0, mf = 0, st = 0;
   if (GF.keys['ArrowLeft'] || GF.keys['KeyQ']) turn -= 1;
@@ -334,7 +337,8 @@ function update(dt) {
 
   var ml = Math.hypot(mf, st); if (ml > 1) { mf /= ml; st /= ml; }
   var cos = Math.cos(pa), sin = Math.sin(pa);
-  var vx = (cos * mf - sin * st) * MOVE_SPEED * dt, vy = (sin * mf + cos * st) * MOVE_SPEED * dt;
+  var spd0 = MOVE_SPEED * (phaseT > 0 ? 1.4 : 1);
+  var vx = (cos * mf - sin * st) * spd0 * dt, vy = (sin * mf + cos * st) * spd0 * dt;
   var wasMoving = (ml > 0.05);
   if (canStand(px + vx, py)) px += vx;
   if (canStand(px, py + vy)) py += vy;
@@ -380,8 +384,10 @@ function updateHunters(dt, lit) {
     var hears = moving && d < HEAR_DIST;
     if (sees || hears || d < DREAD_AURA) h.aggro = 3.2; else h.aggro = Math.max(0, h.aggro - dt);
     var spd = Math.min(HUNTER_SPEED_CAP, HUNTER_SPEED_BASE + (floorN - 1) * HUNTER_SPEED_PER_FLOOR);
+    if (slowT > 0) spd *= 0.4;
     var tx, ty;
-    if (h.aggro > 0) {
+    if (flareT > 0) { tx = h.x + (h.x - px); ty = h.y + (h.y - py); h.aggro = 0; }
+    else if (h.aggro > 0) {
       spd *= 1.06;
       if (hasLOS(h.x, h.y, px, py)) { tx = px; ty = py; h.path = null; }
       else { h.repathT -= dt; if (!h.path || h.repathT <= 0) { h.path = bfsNext(h.x | 0, h.y | 0, px | 0, py | 0); h.repathT = 0.35; } if (h.path) { tx = h.path[0] + 0.5; ty = h.path[1] + 0.5; } else { tx = px; ty = py; } }
@@ -394,7 +400,7 @@ function updateHunters(dt, lit) {
     var hx = h.x + Math.cos(ang) * spd * dt, hy = h.y + Math.sin(ang) * spd * dt;
     if (!isWall(hx, h.y)) h.x = hx;
     if (!isWall(h.x, hy)) h.y = hy;
-    if (d <= HUNTER_CATCH_DIST) { gameOver('caught'); return; }
+    if (phaseT <= 0 && flareT <= 0 && d <= HUNTER_CATCH_DIST) { gameOver('caught'); return; }
   }
 }
 
@@ -404,11 +410,13 @@ function updateHunters(dt, lit) {
 function draw(ctx, dt) {
   var W = GF.W, H = GF.H; COL = W > 1100 ? 3 : 2;
   if (gs === 'PLAYING' || gs === 'GAMEOVER' || pauseMode) { renderWorld(ctx, W, H); drawHUD(ctx, W, H); }
+  if (gs === 'PLAYING' && !pauseMode) drawMetaHUD(ctx, W, H);
   if (gs === 'MENU') drawMenu(ctx, W, H);
   if (pauseMode === 'help') drawHelpPanel(ctx, W, H);
   else if (pauseMode === 'pause') drawPausePanel(ctx, W, H);
   if (gs === 'GAMEOVER') drawGameOver(ctx, W, H);
   if (jump > 0) { ctx.fillStyle = 'rgba(120,10,10,' + (jump * 0.7).toFixed(3) + ')'; ctx.fillRect(0, 0, W, H); }
+  drawToasts(ctx, W, H);
 }
 function renderWorld(ctx, W, H) {
   dirX = Math.cos(pa); dirY = Math.sin(pa);
@@ -580,6 +588,8 @@ function drawMenu(ctx, W, H) {
   ctx.fillStyle = '#0c0b06'; ctx.fillRect(0, 0, W, H);
   var bg = ctx.createRadialGradient(W / 2, H * 0.34, 10, W / 2, H * 0.34, Math.max(W, H) * 0.7);
   bg.addColorStop(0, 'rgba(120,104,38,0.28)'); bg.addColorStop(1, 'rgba(10,9,5,0)'); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  if (menuView === 'daily') { drawDailyPanel(ctx, W, H); return; }
+  if (menuView === 'ranks') { drawRanksPanel(ctx, W, H); return; }
   var S = GF.S, flick = 0.82 + 0.18 * Math.sin(performanceNow() * 0.02) * Math.sin(performanceNow() * 0.0061);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.shadowColor = 'rgba(220,200,90,0.5)'; ctx.shadowBlur = 26 * S;
@@ -587,6 +597,14 @@ function drawMenu(ctx, W, H) {
   ctx.fillText(GF.t('title').toUpperCase(), W / 2, H * 0.17); ctx.shadowBlur = 0;
   ctx.fillStyle = '#9b8f5e'; ctx.font = (GF.clamp(14 * S, 11, 18) | 0) + 'px ' + FONT_UI;
   ctx.fillText(GF.t('sub'), W / 2, H * 0.17 + GF.clamp(40 * S, 26, 52));
+  var mpad = 10 * S, mbs = GF.clamp(40 * S, 34, 50);
+  ui.daily = { x: mpad, y: mpad, w: mbs, h: mbs };
+  ui.ranks = { x: W - mbs - mpad, y: mpad, w: mbs, h: mbs };
+  iconBtn(ctx, ui.daily, '🎁', dailyAvailable() ? '#ffd24a' : '#9b8f5e');
+  iconBtn(ctx, ui.ranks, '🏆', '#cdbf8a');
+  if (dailyAvailable()) { ctx.fillStyle = '#ff5a4a'; ctx.beginPath(); ctx.arc(ui.daily.x + mbs - 5 * S, ui.daily.y + 5 * S, 5 * S, 0, 7); ctx.fill(); }
+  ctx.fillStyle = '#b07a3a'; ctx.font = (GF.clamp(12 * S, 10, 15) | 0) + 'px ' + FONT_MONO; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('🔥 ' + meta.streak + '   🎒 ' + invTotal(), W / 2, H * 0.17 + GF.clamp(64 * S, 44, 82));
   ctx.fillStyle = TH.accent; ctx.font = 'bold ' + (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_MONO;
   ctx.fillText(GF.t('tut_head'), W / 2, H * 0.30);
   var endY = drawTutorialBlock(ctx, W, H * 0.30 + GF.clamp(22 * S, 16, 28), Math.min(W * 0.86, 460 * S));
@@ -609,7 +627,12 @@ function drawGameOver(ctx, W, H) {
   ctx.fillText(GF.t('reached') + ' ' + GF.t('depth') + ' ' + floorN, W / 2, H * 0.46);
   ctx.fillStyle = '#7c7350'; ctx.font = (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_MONO;
   ctx.fillText(GF.t('best') + ': ' + best, W / 2, H * 0.46 + GF.clamp(28 * S, 20, 36));
-  bigBtn(ctx, W, H, H * 0.60, GF.t('retry'), 'retry');
+  if (reviveAvail()) {
+    reviveBtn(ctx, W, H, H * 0.585);
+    bigBtn(ctx, W, H, H * 0.585 + GF.clamp(66 * S, 54, 82), GF.t('retry'), 'retry');
+  } else {
+    bigBtn(ctx, W, H, H * 0.60, GF.t('retry'), 'retry');
+  }
 }
 function drawPausePanel(ctx, W, H) {
   panelBg(ctx, W, H, 0.78); var S = GF.S;
@@ -633,14 +656,25 @@ var tMove = { id: null, sx: 0, sy: 0, dx: 0, dy: 0 };
 var tLook = { id: null, lx: 0, turn: 0 };
 function hitBtn(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
 function onPressUI(x, y) {
-  if (gs === 'MENU') { startRun(); return true; }
-  if (gs === 'GAMEOVER') { startRun(); return true; }
+  if (gs === 'MENU') {
+    if (menuView === 'daily') { if (hitBtn(ui.claim, x, y)) claimDaily(); else if (hitBtn(ui.back, x, y)) menuView = 'main'; return true; }
+    if (menuView === 'ranks') { if (hitBtn(ui.back, x, y)) menuView = 'main'; return true; }
+    if (hitBtn(ui.daily, x, y)) { menuView = 'daily'; return true; }
+    if (hitBtn(ui.ranks, x, y)) { menuView = 'ranks'; fetchRanks(); return true; }
+    startRun(); return true;
+  }
+  if (gs === 'GAMEOVER') {
+    if (reviveAvail()) { if (hitBtn(ui.revive, x, y)) doRevive(); else if (hitBtn(ui.retry, x, y)) startRun(); return true; }
+    startRun(); return true;
+  }
   if (gs === 'PLAYING') {
-    if (pauseMode === 'pause') { if (hitBtn(ui.resume, x, y)) { pauseMode = null; } else if (hitBtn(ui.quit, x, y)) { gs = 'MENU'; pauseMode = null; GF.gameEnded(); } return true; }
+    if (pauseMode === 'pause') { if (hitBtn(ui.resume, x, y)) { pauseMode = null; } else if (hitBtn(ui.quit, x, y)) { gs = 'MENU'; pauseMode = null; menuView = 'main'; GF.gameEnded(); } return true; }
     if (pauseMode === 'help') { if (hitBtn(ui.resume, x, y)) pauseMode = null; return true; }
     if (hitBtn(ui.pause, x, y)) { pauseMode = 'pause'; return true; }
     if (hitBtn(ui.help, x, y)) { pauseMode = 'help'; return true; }
     if (hitBtn(ui.torch, x, y)) { lightOn = !lightOn; sfx('click'); return true; }
+    var owned = ownedIds();
+    for (var i = 0; i < owned.length; i++) { if (hitBtn(ui['item_' + owned[i]], x, y)) { useItem(owned[i]); return true; } }
   }
   return false;
 }
@@ -750,6 +784,214 @@ var _t0 = (typeof performance !== 'undefined' && performance.now) ? performance.
 function performanceNow() { return ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - _t0; }
 
 // ════════════════════════════════════════════════════════════════════════
+//  META  -  INVENTORY · PLAYTIME SUPPLY DROPS · DAILY REWARDS · LEADERBOARD
+//  Additive retention layer (M1 owned meta + playtime/session hook,
+//  M2 daily login + streak). Persisted separately from run state.
+// ════════════════════════════════════════════════════════════════════════
+function L(en, ru) { return GF.lang === 'ru' ? ru : en; }
+
+var ITEMS = [
+  { id: 'revive',  glyph: '✚', col: '#ff7a7a', en: 'Second Wind', ru: 'Второе дыхание' },
+  { id: 'slow',    glyph: '❄', col: '#7fd0ff', en: 'Cold Snap',   ru: 'Холод' },
+  { id: 'sanity',  glyph: '✦', col: '#c7a6ff', en: 'Clarity',     ru: 'Ясность' },
+  { id: 'battery', glyph: '⚡', col: '#ffd86b', en: 'Power Cell',  ru: 'Батарея' },
+  { id: 'compass', glyph: '➤', col: '#8effc0', en: 'Compass',     ru: 'Компас' },
+  { id: 'flare',   glyph: '☀', col: '#ffd24a', en: 'Flare',       ru: 'Сигнал' },
+  { id: 'phase',   glyph: '◍', col: '#bfe6ff', en: 'Phase',       ru: 'Фаза' },
+];
+function itemDef(id) { for (var i = 0; i < ITEMS.length; i++) if (ITEMS[i].id === id) return ITEMS[i]; return null; }
+
+var inv = {};                       // id -> count owned (persistent)
+var meta = { playMs: 0, dropMs: 0, dailyDay: 0, streak: 0, runs: 0, lbBest: 0 };
+var DROP_MS = 15 * 60 * 1000;       // 15 min of play = one supply drop
+var slowT = 0, phaseT = 0, flareT = 0, compassT = 0;   // active effect timers (sec)
+var reviveUsed = false, dropFlash = 0, claimFlash = 0, lastDropId = null, lastClaim = null;
+var menuView = 'main';              // main | daily | ranks
+var lbList = [];
+
+function metaKey() { return 'backrooms_meta_v1'; }
+function loadMeta() {
+  try {
+    var raw = localStorage.getItem(metaKey()); if (!raw) return;
+    var o = JSON.parse(raw); if (o.inv) inv = o.inv; var m = o.meta || {};
+    meta.playMs = m.playMs || 0; meta.dropMs = m.dropMs || 0; meta.dailyDay = m.dailyDay || 0;
+    meta.streak = m.streak || 0; meta.runs = m.runs || 0; meta.lbBest = m.lbBest || 0;
+  } catch (e) {}
+}
+function saveMeta() { try { localStorage.setItem(metaKey(), JSON.stringify({ inv: inv, meta: meta })); } catch (e) {} }
+function invTotal() { var n = 0; for (var k in inv) n += inv[k] | 0; return n; }
+function ownedIds() { var a = []; for (var i = 0; i < ITEMS.length; i++) if ((inv[ITEMS[i].id] | 0) > 0) a.push(ITEMS[i].id); return a; }
+function grantItem(id) { inv[id] = (inv[id] | 0) + 1; saveMeta(); }
+function grantRandomItem() {
+  var pool = ['slow', 'sanity', 'battery', 'compass', 'flare', 'slow', 'sanity', 'battery', 'compass', 'flare', 'revive', 'phase'];
+  var id = pool[(Math.random() * pool.length) | 0]; grantItem(id); lastDropId = id; return id;
+}
+function todayDay() { return Math.floor(Date.now() / 86400000); }   // integer UTC day
+function dailyAvailable() { return meta.dailyDay !== todayDay(); }
+function claimDaily() {
+  if (!dailyAvailable()) return;
+  var t = todayDay();
+  meta.streak = (meta.dailyDay === t - 1) ? meta.streak + 1 : 1;
+  meta.dailyDay = t;
+  var n = Math.min(1 + Math.floor(meta.streak / 2), 4), got = [];
+  if (meta.streak % 3 === 0) { grantItem('revive'); got.push('revive'); }
+  for (var i = 0; i < n; i++) got.push(grantRandomItem());
+  lastClaim = got; claimFlash = 4; saveMeta(); sfx('pickup');
+}
+function useItem(id) {
+  if ((inv[id] | 0) <= 0 || id === 'revive') return;   // revive is used on the death screen
+  inv[id]--; var d = itemDef(id);
+  if (id === 'slow') slowT = 8;
+  else if (id === 'sanity') sanity = SANITY_MAX;
+  else if (id === 'battery') battery = BATTERY_MAX;
+  else if (id === 'compass') compassT = 12;
+  else if (id === 'flare') { flareT = 4; for (var i = 0; i < hunters.length; i++) hunters[i].aggro = 0; flashFx(0.22); }
+  else if (id === 'phase') phaseT = 3;
+  floatTxt(L(d.en, d.ru), d.col); sfx('pickup'); saveMeta();
+}
+function reviveAvail() { return (inv['revive'] | 0) > 0 && !reviveUsed; }
+function doRevive() {
+  if ((inv['revive'] | 0) <= 0) return;
+  inv['revive']--; reviveUsed = true; saveMeta();
+  gs = 'PLAYING'; pauseMode = null;
+  sanity = Math.max(sanity, 65); battery = Math.max(battery, 55); flareT = 3;
+  for (var i = 0; i < hunters.length; i++) hunters[i].aggro = 0;
+  jump = 0; flashFx(0.4); GF.gameStarted();
+}
+function publishScore() {
+  if (bestScore > meta.lbBest) { meta.lbBest = bestScore; saveMeta(); }
+  try { GF.gp.leaderboard.publish('score', bestScore); } catch (e) {}
+}
+function fetchRanks() { lbList = []; try { GF.gp.leaderboard.fetch('score', 10).then(function (r) { lbList = r || []; }); } catch (e) {} }
+function tickMeta(dt) {
+  if (slowT > 0) slowT -= dt; if (phaseT > 0) phaseT -= dt; if (flareT > 0) flareT -= dt; if (compassT > 0) compassT -= dt;
+  meta.playMs += dt * 1000; meta.dropMs += dt * 1000;
+  if (meta.dropMs >= DROP_MS) { meta.dropMs -= DROP_MS; grantRandomItem(); dropFlash = 3.5; sfx('descend'); }
+}
+
+// ── META UI ──────────────────────────────────────────────────────────────
+function fmtTime(ms) { var s = Math.max(0, Math.ceil(ms / 1000)), m = (s / 60) | 0; s = s % 60; return m + ':' + (s < 10 ? '0' : '') + s; }
+function drawMetaHUD(ctx, W, H) {
+  var S = GF.S, pad = 10 * S, bs = GF.clamp(40 * S, 32, 52);
+  // supply-drop progress (thin bar under the depth label)
+  var pbW = GF.clamp(96 * S, 70, 130), pbX = W / 2 - pbW / 2, pbY = pad + GF.clamp(20 * S, 16, 26);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(pbX, pbY, pbW, 3 * S);
+  ctx.fillStyle = 'rgba(233,215,120,0.7)'; ctx.fillRect(pbX, pbY, pbW * GF.clamp(meta.dropMs / DROP_MS, 0, 1), 3 * S);
+  ctx.fillStyle = '#8a8059'; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.font = (GF.clamp(9 * S, 8, 12) | 0) + 'px ' + FONT_MONO;
+  ctx.fillText(L('SUPPLY', 'ПРИПАС') + ' ' + fmtTime(DROP_MS - meta.dropMs), W / 2, pbY + 5 * S);
+  // compass arrow toward the exit
+  if (compassT > 0) {
+    var ax = W / 2, ay = pad + GF.clamp(48 * S, 40, 60);
+    var ang = Math.atan2(exitCell.y + 0.5 - py, exitCell.x + 0.5 - px) - pa - Math.PI / 2;
+    ctx.save(); ctx.translate(ax, ay); ctx.rotate(ang);
+    ctx.fillStyle = 'rgba(140,255,180,' + (0.5 + 0.5 * Math.sin(performanceNow() * 0.01)).toFixed(2) + ')';
+    ctx.beginPath(); ctx.moveTo(0, -9 * S); ctx.lineTo(6 * S, 6 * S); ctx.lineTo(0, 2 * S); ctx.lineTo(-6 * S, 6 * S); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  // active-effect chips (top-left, under the sanity bar)
+  var chips = [];
+  if (slowT > 0) chips.push(['❄', slowT, '#7fd0ff']);
+  if (phaseT > 0) chips.push(['◍', phaseT, '#bfe6ff']);
+  if (flareT > 0) chips.push(['☀', flareT, '#ffd24a']);
+  if (compassT > 0) chips.push(['➤', compassT, '#8effc0']);
+  var chy = pad + GF.clamp(28 * S, 22, 36);
+  for (var ci = 0; ci < chips.length; ci++) {
+    ctx.fillStyle = 'rgba(10,10,8,0.6)'; GF.rr(ctx, pad, chy, 50 * S, 16 * S, 6 * S); ctx.fill();
+    ctx.fillStyle = chips[ci][2]; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = (GF.clamp(11 * S, 9, 14) | 0) + 'px ' + FONT_UI;
+    ctx.fillText(chips[ci][0] + ' ' + Math.ceil(chips[ci][1]) + 's', pad + 6 * S, chy + 8 * S);
+    chy += 19 * S;
+  }
+  // inventory bar (owned items) just above the bottom button row
+  var owned = ownedIds();
+  if (owned.length) {
+    var slot = GF.clamp(40 * S, 30, 48), gap = 6 * S, totalW = owned.length * (slot + gap) - gap, startX = W / 2 - totalW / 2, rowY = H - bs - pad - slot - 8 * S;
+    for (var i = 0; i < owned.length; i++) {
+      var id = owned[i], d = itemDef(id), x = startX + i * (slot + gap);
+      var active = (id === 'slow' && slowT > 0) || (id === 'phase' && phaseT > 0) || (id === 'flare' && flareT > 0) || (id === 'compass' && compassT > 0);
+      ctx.fillStyle = active ? 'rgba(44,42,20,0.85)' : 'rgba(16,14,9,0.72)'; GF.rr(ctx, x, rowY, slot, slot, 9 * S); ctx.fill();
+      ctx.strokeStyle = active ? d.col : 'rgba(180,165,110,0.4)'; ctx.lineWidth = active ? 2 : 1; GF.rr(ctx, x, rowY, slot, slot, 9 * S); ctx.stroke();
+      ctx.fillStyle = d.col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = (GF.clamp(20 * S, 15, 26) | 0) + 'px ' + FONT_UI;
+      ctx.fillText(d.glyph, x + slot / 2, rowY + slot / 2);
+      ctx.fillStyle = '#1a1505'; ctx.beginPath(); ctx.arc(x + slot - 7 * S, rowY + slot - 7 * S, 8 * S, 0, 7); ctx.fill();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold ' + (GF.clamp(11 * S, 9, 14) | 0) + 'px ' + FONT_MONO; ctx.fillText('' + (inv[id] | 0), x + slot - 7 * S, rowY + slot - 6 * S);
+      ui['item_' + id] = { x: x, y: rowY, w: slot, h: slot };
+    }
+  }
+}
+function drawToasts(ctx, W, H) {
+  if (dropFlash > 0 && lastDropId) drawToast(ctx, W, H, L('SUPPLY DROP', 'ПРИПАСЫ'), lastDropId, dropFlash);
+  else if (claimFlash > 0 && lastClaim && lastClaim.length) drawToast(ctx, W, H, L('DAILY REWARD', 'НАГРАДА ДНЯ'), lastClaim[lastClaim.length - 1], claimFlash);
+}
+function drawToast(ctx, W, H, title, itemId, t) {
+  var S = GF.S, a = GF.clamp(t, 0, 1), d = itemDef(itemId);
+  ctx.globalAlpha = a;
+  var bw = GF.clamp(232 * S, 180, 300), bh = GF.clamp(54 * S, 44, 64), bx = W / 2 - bw / 2, by = H * 0.18;
+  ctx.fillStyle = 'rgba(14,12,6,0.94)'; GF.rr(ctx, bx, by, bw, bh, 12 * S); ctx.fill();
+  ctx.strokeStyle = d ? d.col : '#e9d77a'; ctx.lineWidth = 2; GF.rr(ctx, bx, by, bw, bh, 12 * S); ctx.stroke();
+  ctx.fillStyle = '#e9d77a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = 'bold ' + (GF.clamp(12 * S, 10, 15) | 0) + 'px ' + FONT_MONO; ctx.fillText(title, bx + 14 * S, by + 16 * S);
+  if (d) {
+    ctx.fillStyle = d.col; ctx.font = (GF.clamp(22 * S, 16, 28) | 0) + 'px ' + FONT_UI; ctx.fillText(d.glyph, bx + 16 * S, by + 38 * S);
+    ctx.fillStyle = '#d8cda0'; ctx.font = (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_UI; ctx.fillText(L(d.en, d.ru), bx + 40 * S, by + 38 * S);
+  }
+  ctx.globalAlpha = 1;
+}
+function reviveBtn(ctx, W, H, cy) {
+  var S = GF.S, bw = GF.clamp(260 * S, 180, 340), bh = GF.clamp(54 * S, 44, 68), bx = W / 2 - bw / 2;
+  var g = ctx.createLinearGradient(bx, cy, bx, cy + bh); g.addColorStop(0, '#46c06a'); g.addColorStop(1, '#2e8e4c');
+  GF.rr(ctx, bx, cy, bw, bh, 12 * S); ctx.fillStyle = g; ctx.fill();
+  ctx.fillStyle = '#08230f'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold ' + (GF.clamp(18 * S, 15, 24) | 0) + 'px ' + FONT_UI;
+  ctx.fillText('✚ ' + L('REVIVE', 'ОЖИТЬ') + ' (' + (inv['revive'] | 0) + ')', W / 2, cy + bh / 2 + 1);
+  ui.revive = { x: bx, y: cy, w: bw, h: bh };
+}
+function smallBtn(ctx, W, H, cy, label, key) {
+  var S = GF.S, bw = GF.clamp(150 * S, 110, 200), bh = GF.clamp(40 * S, 34, 50), bx = W / 2 - bw / 2;
+  ctx.fillStyle = 'rgba(30,26,12,0.9)'; GF.rr(ctx, bx, cy, bw, bh, 10 * S); ctx.fill();
+  ctx.strokeStyle = 'rgba(180,165,110,0.5)'; ctx.lineWidth = 1; GF.rr(ctx, bx, cy, bw, bh, 10 * S); ctx.stroke();
+  ctx.fillStyle = '#cdbf8a'; ctx.font = 'bold ' + (GF.clamp(15 * S, 12, 19) | 0) + 'px ' + FONT_UI; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(label, W / 2, cy + bh / 2 + 1);
+  ui[key] = { x: bx, y: cy, w: bw, h: bh };
+}
+function drawDailyPanel(ctx, W, H) {
+  panelBg(ctx, W, H, 0.92); var S = GF.S;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#e9d77a';
+  ctx.font = 'bold ' + (GF.clamp(26 * S, 18, 34) | 0) + 'px ' + FONT_UI; ctx.fillText(L('DAILY REWARD', 'НАГРАДА ДНЯ'), W / 2, H * 0.18);
+  ctx.fillStyle = '#ff9a4a'; ctx.font = 'bold ' + (GF.clamp(16 * S, 13, 20) | 0) + 'px ' + FONT_MONO;
+  ctx.fillText('🔥 ' + meta.streak + ' ' + L('day streak', 'дней подряд'), W / 2, H * 0.18 + GF.clamp(32 * S, 24, 42));
+  var n = 7, cw = GF.clamp(36 * S, 24, 44), gap = 6 * S, totalW = n * (cw + gap) - gap, sx = W / 2 - totalW / 2, cy = H * 0.38;
+  var doneCount = meta.streak % 7; if (meta.streak > 0 && doneCount === 0) doneCount = 7;
+  for (var i = 0; i < n; i++) {
+    var dn = i + 1, x = sx + i * (cw + gap), big = (dn % 3 === 0), done = i < doneCount;
+    ctx.fillStyle = done ? 'rgba(70,58,20,0.95)' : 'rgba(20,18,10,0.85)'; GF.rr(ctx, x, cy, cw, cw * 1.25, 7 * S); ctx.fill();
+    ctx.strokeStyle = big ? '#ff7a7a' : 'rgba(180,165,110,0.4)'; ctx.lineWidth = 1; GF.rr(ctx, x, cy, cw, cw * 1.25, 7 * S); ctx.stroke();
+    ctx.fillStyle = '#9b8f5e'; ctx.font = (GF.clamp(9 * S, 8, 12) | 0) + 'px ' + FONT_MONO; ctx.textBaseline = 'top'; ctx.fillText('D' + dn, x + cw / 2, cy + 4 * S);
+    ctx.fillStyle = big ? '#ff7a7a' : '#e9d77a'; ctx.font = (GF.clamp(16 * S, 12, 20) | 0) + 'px ' + FONT_UI; ctx.textBaseline = 'middle'; ctx.fillText(big ? '✚' : '●', x + cw / 2, cy + cw * 0.82);
+  }
+  ctx.textBaseline = 'middle';
+  if (dailyAvailable()) bigBtn(ctx, W, H, H * 0.62, L('CLAIM', 'ЗАБРАТЬ'), 'claim');
+  else { ctx.fillStyle = '#8a8059'; ctx.textAlign = 'center'; ctx.font = (GF.clamp(14 * S, 11, 17) | 0) + 'px ' + FONT_UI; ctx.fillText(L('come back tomorrow', 'возвращайся завтра'), W / 2, H * 0.62 + GF.clamp(26 * S, 20, 34)); }
+  smallBtn(ctx, W, H, H * 0.80, L('BACK', 'НАЗАД'), 'back');
+}
+function drawRanksPanel(ctx, W, H) {
+  panelBg(ctx, W, H, 0.92); var S = GF.S;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#e9d77a';
+  ctx.font = 'bold ' + (GF.clamp(26 * S, 18, 34) | 0) + 'px ' + FONT_UI; ctx.fillText(L('LEADERBOARD', 'РЕЙТИНГ'), W / 2, H * 0.18);
+  ctx.fillStyle = TH.accent; ctx.font = 'bold ' + (GF.clamp(14 * S, 12, 18) | 0) + 'px ' + FONT_MONO;
+  ctx.fillText(L('Your best', 'Твой рекорд') + ': ' + GF.t('depth') + ' ' + best + '  ·  ' + meta.lbBest, W / 2, H * 0.18 + GF.clamp(30 * S, 22, 38));
+  var y = H * 0.32, lh = GF.clamp(26 * S, 20, 32);
+  if (lbList && lbList.length) {
+    ctx.font = (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_MONO;
+    for (var i = 0; i < Math.min(lbList.length, 8); i++) {
+      var r = lbList[i]; ctx.fillStyle = i < 3 ? '#e9d77a' : '#b8ad82';
+      ctx.textAlign = 'left'; ctx.fillText((i + 1) + '. ' + ('' + (r.name || r.username || '-')).slice(0, 14), W * 0.18, y);
+      ctx.textAlign = 'right'; ctx.fillText('' + (r.score != null ? r.score : (r.value || 0)), W * 0.82, y); y += lh;
+    }
+  } else {
+    ctx.fillStyle = '#8a8059'; ctx.textAlign = 'center'; ctx.font = (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_UI;
+    ctx.fillText(L('Global ranks on Yandex and CrazyGames.', 'Глобальный рейтинг на Yandex и CrazyGames.'), W / 2, y + 8 * S);
+  }
+  smallBtn(ctx, W, H, H * 0.80, L('BACK', 'НАЗАД'), 'back');
+}
+
+// ════════════════════════════════════════════════════════════════════════
 //  PERSIST + BOOT
 // ════════════════════════════════════════════════════════════════════════
 function persistSave() { try { GF.saveRun(); } catch (e) {} }
@@ -760,13 +1002,13 @@ GF.init({
   onReady: function () {
     try { best = parseInt(localStorage.getItem('backrooms_best') || '1') || 1; if (best < 1) best = 1; } catch (e) {}
     try { bestScore = parseInt(localStorage.getItem('backrooms_bestscore') || '0') || 0; } catch (e) {}
-    buildTextures(); attachInput();
+    buildTextures(); attachInput(); loadMeta();
     // Yandex 1.9  -  persist run across refresh; resume keeps depth, bounces to MENU.
     GF.persist('backrooms_run_v1',
       function () { return { floorN: floorN, score: score, best: best, gs: (gs === 'PLAYING' ? 'PLAYING' : gs) }; },
       function (s) { if (!s) return; best = Math.max(best, s.best || 1); if (s.gs === 'PLAYING' && s.floorN) _resume = s; }
     );
-    GF.exposeState(function () { return { gs: gs, floor: floorN, score: score, best: best, sanity: Math.round(sanity), battery: Math.round(battery), hunters: hunters.length, paused: !!pauseMode }; });
+    GF.exposeState(function () { return { gs: gs, floor: floorN, score: score, best: best, sanity: Math.round(sanity), battery: Math.round(battery), hunters: hunters.length, paused: !!pauseMode, items: invTotal(), streak: meta.streak, playMin: Math.floor(meta.playMs / 60000) }; });
     if (_resume) { floorN = _resume.floorN; score = _resume.score || 0; }
     gs = 'MENU';
   },
