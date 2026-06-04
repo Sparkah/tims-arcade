@@ -465,6 +465,11 @@ function init(config) {
         var l = ysdk.environment && ysdk.environment.i18n && ysdk.environment.i18n.lang;
         if (l) lang = l.startsWith('ru') ? 'ru' : 'en';
       } catch(e) {}
+      // Yandex 1.3 — the SDK fires game_api_pause when the player switches away
+      // (tab hidden, ad from elsewhere, etc.) and game_api_resume on return.
+      // Mute audio while paused; resume respects the mute button.
+      try { ysdk.on('game_api_pause',  function () { pauseAudio();  }); } catch (e) {}
+      try { ysdk.on('game_api_resume', function () { resumeAudio(); }); } catch (e) {}
       boot();
     }).catch(boot);
     setTimeout(boot, 3000);
@@ -543,7 +548,16 @@ function gameplayStop() {
 // object is truthy and they ignore it.
 function showAd(type) {
   type = type || 'midgame';
-  return new Promise(function(ok) {
+  return new Promise(function(rawOk) {
+    // Yandex 4.7 — mute audio while the ad is open; resume on resolve. Wrap the
+    // resolver so EVERY exit path (success / error / 30s no-fill timeout)
+    // resumes exactly once. pauseAudio/resumeAudio are idempotent.
+    var _resolved = false;
+    var ok = function (res) { if (_resolved) return; _resolved = true; resumeAudio(); rawOk(res); };
+    var willShow = (platform === 'gamepush' && window.gp && window.gp.ads) ||
+                   (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad) ||
+                   (platform === 'yandex' && window.ysdk && window.ysdk.adv);
+    if (willShow) pauseAudio();
     try {
       // GamePush — preferred when present. Routes to whichever ad network
       // the active platform supports. showRewardedVideo resolves to bool.
@@ -668,6 +682,7 @@ var gpApi = {
 // respect GF.muted (persisted) and start on the first user gesture (autoplay policy).
 var _ac = null, _music = null, _musicSrc = null, _musicVol = 0.4;
 var AUDIO_MUTED = false;
+var _extPaused = false;   // external pause (ad open / tab hidden) — Yandex 4.7 + 1.3
 try { AUDIO_MUTED = (localStorage.getItem('gf_muted') === '1'); } catch (e) {}
 function audioCtx() {
   if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
@@ -675,7 +690,7 @@ function audioCtx() {
   return _ac;
 }
 function tone(freq, dur, type, gain, slideTo) {
-  if (AUDIO_MUTED) return;
+  if (AUDIO_MUTED || _extPaused) return;   // muted OR an ad/tab-hide paused us
   var c = audioCtx(); if (!c) return;
   try {
     var g = c.createGain(), t0 = c.currentTime;
@@ -726,10 +741,29 @@ function toggleMute() {
   try { localStorage.setItem('gf_muted', AUDIO_MUTED ? '1' : '0'); } catch (e) {}
   if (_music) {
     _music.muted = AUDIO_MUTED;
-    if (AUDIO_MUTED) { try { _music.pause(); } catch (e) {} }
+    // while externally paused (ad open / tab hidden) keep music paused
+    // regardless; resumeAudio() will restart it later if not muted.
+    if (AUDIO_MUTED || _extPaused) { try { _music.pause(); } catch (e) {} }
     else { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
   }
   return AUDIO_MUTED;
+}
+// External pause — Yandex 4.7 (mute audio while an ad is open) + Yandex 1.3
+// (mute when the tab is hidden / minimized). Idempotent: safe to call repeatedly.
+// While paused, _music is paused AND tone()/sfx are silenced (the flag is checked
+// in tone()). resumeAudio() restarts music ONLY if the user hasn't muted.
+function pauseAudio() {
+  if (_extPaused) return;        // already paused — no-op
+  _extPaused = true;
+  if (_music) { try { _music.pause(); } catch (e) {} }
+}
+function resumeAudio() {
+  if (!_extPaused) return;       // wasn't paused — no-op
+  _extPaused = false;
+  // respect the mute button: if the user muted, stay silent.
+  if (!AUDIO_MUTED && _music && _musicSrc) {
+    var p = _music.play(); if (p && p.catch) p.catch(function () {});
+  }
 }
 // vector speaker / muted-speaker icon (never emoji) — games place + wire the click
 function drawMuteIcon(c, x, y, r, muted) {
@@ -744,11 +778,17 @@ function drawMuteIcon(c, x, y, r, muted) {
 (function () {
   var kick = function () {
     audioCtx();
-    if (_music && _musicSrc && !AUDIO_MUTED && _music.paused) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+    if (_music && _musicSrc && !AUDIO_MUTED && !_extPaused && _music.paused) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
   };
   window.addEventListener('pointerdown', kick, { passive: true });
   window.addEventListener('touchstart', kick, { passive: true });
   window.addEventListener('keydown', kick);
+  // Yandex 1.3 fallback (works on the gallery + everywhere, not just Yandex):
+  // mute when the tab is hidden / minimized, resume when it returns. resumeAudio
+  // respects the mute button, so a muted player stays silent.
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) pauseAudio(); else resumeAudio();
+  });
 })();
 
 window.GF = {
@@ -776,8 +816,11 @@ window.GF = {
   // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
   // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
   sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
+  pauseAudio: pauseAudio, resumeAudio: resumeAudio,
   hasSfx: function (n) { return !!SFX_LIB[n]; },
   get muted() { return AUDIO_MUTED; },
+  // test-only audio-state reader (QA harness asserts pause/resume; harmless in prod)
+  __audioDbg: function () { return { extPaused: _extPaused, muted: AUDIO_MUTED, hasMusic: !!_music, musicPaused: _music ? _music.paused : null, musicSrc: _musicSrc }; },
   // Sprites
   drawSprite: drawSprite,
   sprites: sprites,
