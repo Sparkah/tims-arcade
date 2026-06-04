@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Bolus</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #10131c; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function () {
+'use strict';
+
+// ── Localized strings (Yandex 8.2.3 — both languages; title not all-caps) ──
+var STRINGS = {
+  en: {
+    title: 'Bolus',
+    sub: 'Guide the lump down the gut',
+    sub2: 'Drag to steer',
+    play: 'Play', retry: 'Again',
+    score: 'Score', best: 'Best', mass: 'Mass',
+    gameover: 'Digested!',
+    exit: 'Exit cleared!',
+    b_mouth: 'Mouth', b_throat: 'Throat', b_stomach: 'Stomach', b_gut: 'Gut', b_exit: 'Exit',
+    help_title: 'How to play',
+    help_goal: 'Goal: ride the food lump all the way down and out.',
+    help_ctrl: 'Controls: drag (or arrow keys) to slide left and right.',
+    help_win: 'Eat green nutrients to grow your mass and score.',
+    help_lose: 'Dodge red blobs and pinch-rings. Mass hits zero, you are digested.',
+    help_back: 'Got it',
+  },
+  ru: {
+    title: 'Болюс',
+    sub: 'Веди ком вниз по организму',
+    sub2: 'Веди пальцем',
+    play: 'Играть', retry: 'Ещё раз',
+    score: 'Очки', best: 'Рекорд', mass: 'Масса',
+    gameover: 'Переварен!',
+    exit: 'Выход пройден!',
+    b_mouth: 'Рот', b_throat: 'Пищевод', b_stomach: 'Желудок', b_gut: 'Кишечник', b_exit: 'Выход',
+    help_title: 'Как играть',
+    help_goal: 'Цель: провести пищевой ком вниз и наружу.',
+    help_ctrl: 'Управление: веди пальцем (или стрелками) влево и вправо.',
+    help_win: 'Собирай зелёные нутриенты — растёт масса и очки.',
+    help_lose: 'Уворачивайся от красных капель и колец. Масса до нуля — переварен.',
+    help_back: 'Понятно',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── Biomes (abstract, cartoon — no realistic anatomy) ──
+var BIOMES = [
+  { key: 'b_mouth',   c1: '#56d6c6', c2: '#2c9286', wall: '#1f7a70' },
+  { key: 'b_throat',  c1: '#6a93e6', c2: '#3a5fb4', wall: '#2b4a90' },
+  { key: 'b_stomach', c1: '#f0a23c', c2: '#c2761f', wall: '#9c5d15' },
+  { key: 'b_gut',     c1: '#7cc94a', c2: '#4f9c2c', wall: '#3c7a20' },
+  { key: 'b_exit',    c1: '#b07ce0', c2: '#7c45c0', wall: '#5e2f9c' },
+];
+var TRACT_LEN = 3600;                 // design units for one full mouth->exit tract
+var BIOME_LEN = TRACT_LEN / BIOMES.length;
+
+// ── State ──
+var gs = 'MENU';                      // MENU | PLAYING | GAMEOVER | HELP
+var prevGs = 'MENU';
+var depthD = 0, cycleStartD = 0, cycle = 0;
+var mass = 100, score = 0, best = 0;
+var player = { x: 0, y: 0, squish: 0 };
+var targetX = 0;
+var ents = [];
+var lastSpawnD = 0;
+var biomeIdx = 0, toast = 0, toastKey = '';
+var exitFlash = 0;
+var muted = false;
+
+// ── Audio (Suno-generated bed; graceful fallback) ──
+var bgm = null, audioOn = false;
+function audioInit() {
+  try {
+    bgm = new Audio('audio/bg_loop.mp3');
+    bgm.loop = true; bgm.volume = 0.32; bgm.preload = 'auto';
+    bgm.addEventListener('error', function () { bgm = null; });
+  } catch (e) { bgm = null; }
+}
+function audioStart() {                // only ever called from a user gesture
+  if (!bgm || muted || audioOn) return;
+  var p = bgm.play();
+  if (p && p.then) { p.then(function () { audioOn = true; }).catch(function () { audioOn = false; }); }
+  else { audioOn = true; }
+}
+function toggleMute() {
+  muted = !muted;
+  try { localStorage.setItem('bolus_muted', muted ? '1' : '0'); } catch (e) {}
+  if (muted) { if (bgm) { try { bgm.pause(); } catch (e) {} } audioOn = false; }
+  else { audioStart(); }
+}
+
+// ── Layout helpers (recomputed each frame; resize-safe) ──
+function playerY() { return GF.H * 0.40; }
+function laneW() { return Math.min(GF.W * 0.84, 480 * GF.S); }
+function laneL() { return (GF.W - laneW()) / 2; }
+function sx(fx) { return laneL() + fx * laneW(); }
+function pr() { return GF.clamp(18 + mass * 0.14, 16, 38) * GF.S; }
+function topBarH() { return 58 * GF.S; }
+
+// ── Lifecycle ──
+function startGame() {
+  score = 0; mass = 100; depthD = 0; cycleStartD = 0; cycle = 0;
+  ents.length = 0; lastSpawnD = 0; biomeIdx = 0; exitFlash = 0;
+  player.x = GF.W / 2; targetX = player.x; player.squish = 0;
+  gs = 'PLAYING';
+  audioStart();
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver() {
+  var nb = score > best;
+  if (nb) { best = Math.floor(score); try { localStorage.setItem('bolus_best', best); } catch (e) {} }
+  gs = 'GAMEOVER';
+  GF.gameEnded();
+  if (nb && best > 0) GF.happytime();
+  GF.saveRun();
+}
+
+function spawnEnt(kind, fx, aheadScreenPx) {
+  var aheadD = (typeof aheadScreenPx === 'number' ? aheadScreenPx : (GF.H - playerY() + 90)) / GF.S;
+  var e = { kind: kind, depthD: depthD + aheadD, fx: fx, done: false, r: 16 * GF.S, gap: 0.34, gfx: Math.random() };
+  if (kind === 'hazard') e.r = (16 + Math.random() * 8) * GF.S;
+  else if (kind === 'nutrient') e.r = 13 * GF.S;
+  else if (kind === 'ring') { e.gap = 0.30 + Math.random() * 0.12; e.gapc = 0.22 + Math.random() * 0.56; }
+  ents.push(e);
+}
+
+function speedD() {
+  var into = (depthD - cycleStartD) / TRACT_LEN;
+  return (150 + cycle * 26) * (1 + Math.min(into, 1) * 0.18);
+}
+function spawnGapD() {
+  return Math.max(150, 320 - cycle * 16 - biomeIdx * 14);
+}
+
+// ── Update ──
+function update(dt) {
+  toast = Math.max(0, toast - dt);
+  exitFlash = Math.max(0, exitFlash - dt * 1.6);
+  player.squish = Math.max(0, player.squish - dt * 4);
+  if (gs !== 'PLAYING') return;
+
+  var sp = speedD();
+  depthD += sp * dt;
+  score += sp * dt * 0.08;
+
+  // steer — drag below the top bar, or keyboard
+  if (GF.touch.active && GF.touch.y > topBarH()) targetX = GF.touch.x;
+  if (GF.keys['ArrowLeft'] || GF.keys['KeyA']) targetX -= 560 * GF.S * dt;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) targetX += 560 * GF.S * dt;
+  targetX = GF.clamp(targetX, laneL() + pr(), laneL() + laneW() - pr());
+  player.x += (targetX - player.x) * Math.min(1, dt * 12);
+  player.x = GF.clamp(player.x, laneL() + pr(), laneL() + laneW() - pr());
+
+  // biome
+  var bi = GF.clamp(Math.floor((depthD - cycleStartD) / BIOME_LEN), 0, BIOMES.length - 1);
+  if (bi !== biomeIdx) { biomeIdx = bi; toast = 1.6; toastKey = BIOMES[bi].key; }
+
+  // spawn
+  if (depthD - lastSpawnD >= spawnGapD()) {
+    lastSpawnD = depthD;
+    var roll = Math.random();
+    var fx = 0.16 + Math.random() * 0.68;
+    if (biomeIdx >= 1 && roll < 0.18) spawnEnt('ring', 0.5);
+    else if (roll < 0.62) spawnEnt('hazard', fx);
+    else spawnEnt('nutrient', fx);
+  }
+
+  // move / collide / cull
+  var py = playerY();
+  for (var i = ents.length - 1; i >= 0; i--) {
+    var e = ents[i];
+    var dyScreen = (e.depthD - depthD) * GF.S;
+    if (e.kind === 'ring') {
+      if (!e.done && dyScreen < pr() * 0.7 && dyScreen > -pr() * 0.7) {
+        e.done = true;
+        var pfx = (player.x - laneL()) / laneW();
+        var half = e.gap / 2;
+        if (pfx < e.gapc - half || pfx > e.gapc + half) {
+          mass -= 18; GF.setShake(0.6); GF.spawnParticles(player.x, py, '#ff5468', 14); player.squish = 1;
+          GF.saveRun(); if (mass <= 0) { gameOver(); return; }
+        }
+      }
+    } else if (!e.done) {
+      var ex = sx(e.fx);
+      if (Math.abs(dyScreen) < (pr() + e.r) && Math.abs(ex - player.x) < (pr() + e.r) * 0.88) {
+        e.done = true;
+        if (e.kind === 'hazard') {
+          mass -= 20; GF.setShake(0.6); GF.spawnParticles(player.x, py, '#ff5468', 16); player.squish = 1;
+          GF.saveRun(); if (mass <= 0) { gameOver(); return; }
+        } else {
+          mass = Math.min(100, mass + 8); score += 25;
+          GF.spawnParticles(ex, sy(e), '#ffd24a', 10); GF.spawnFloat(ex, sy(e), '+25', '#ffe27a');
+          GF.saveRun();
+        }
+      }
+    }
+    if ((e.depthD - depthD) * GF.S < -110) ents.splice(i, 1);
+  }
+
+  // exit gate -> clear tract, speed up, loop
+  if (depthD - cycleStartD >= TRACT_LEN) {
+    exitFlash = 1; score += 200; cycle++; cycleStartD = depthD; biomeIdx = 0;
+    mass = Math.min(100, mass + 22);
+    toast = 1.8; toastKey = 'exit';
+    GF.spawnParticles(GF.W / 2, py, '#ffffff', 30);
+    if (score > best) { best = Math.floor(score); try { localStorage.setItem('bolus_best', best); } catch (e) {} GF.happytime(); }
+    GF.saveRun();
+  }
+}
+function sy(e) { return playerY() + (e.depthD - depthD) * GF.S; }
+
+// ── Draw ──
+function draw(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S, b = BIOMES[biomeIdx];
+  // background gradient
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, b.c1); g.addColorStop(1, b.c2);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // descent motion — soft horizontal bands scrolling down
+  ctx.globalAlpha = 0.10; ctx.fillStyle = '#ffffff';
+  var bandStep = 90 * S, off = (depthD * S * 0.6) % bandStep;
+  for (var by = -bandStep + off; by < H + bandStep; by += bandStep) {
+    ctx.fillRect(0, by, W, 26 * S);
+  }
+  ctx.globalAlpha = 1;
+  // lane walls (wavy)
+  drawWalls(ctx, b);
+  // entities (far first)
+  for (var i = 0; i < ents.length; i++) drawEnt(ctx, ents[i]);
+  // player
+  if (gs === 'PLAYING' || gs === 'GAMEOVER' || gs === 'HELP') drawPlayer(ctx);
+  // exit flash
+  if (exitFlash > 0) { ctx.globalAlpha = exitFlash * 0.6; ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+  // HUD
+  if (gs !== 'MENU') drawHUD(ctx);
+  drawTopButtons(ctx);
+  // toast (biome / exit name)
+  if (toast > 0) drawToast(ctx);
+
+  if (gs === 'MENU') GF.drawOverlay({ title: GF.t('title'), sub: GF.t('sub'), sub2: GF.t('sub2'), btnText: GF.t('play'), btnFn: startGame, bestText: best > 0 ? GF.t('best') + ': ' + best : null });
+  if (gs === 'GAMEOVER') GF.drawOverlay({ title: GF.t('gameover'), sub: GF.t('score') + ': ' + Math.floor(score), btnText: GF.t('retry'), btnFn: startGame, bestText: GF.t('best') + ': ' + best });
+  if (gs === 'HELP') drawHelp(ctx);
+}
+
+function drawWalls(ctx, b) {
+  var W = GF.W, H = GF.H, S = GF.S, L = laneL(), R = L + laneW();
+  ctx.fillStyle = b.wall;
+  ctx.beginPath(); ctx.moveTo(0, 0);
+  for (var y = 0; y <= H; y += 24 * S) {
+    var w = L + Math.sin((y + depthD * S) * 0.018) * 10 * S;
+    ctx.lineTo(w, y);
+  }
+  ctx.lineTo(0, H); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(W, 0);
+  for (var y2 = 0; y2 <= H; y2 += 24 * S) {
+    var w2 = R + Math.sin((y2 + depthD * S) * 0.018 + 1.7) * 10 * S;
+    ctx.lineTo(w2, y2);
+  }
+  ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+}
+
+function drawEnt(ctx, e) {
+  var S = GF.S, y = sy(e);
+  if (y < -120 * S || y > GF.H + 120 * S) return;
+  if (e.kind === 'ring') {
+    var L = laneL(), w = laneW(), half = e.gap / 2;
+    var gl = L + (e.gapc - half) * w, gr = L + (e.gapc + half) * w;
+    ctx.fillStyle = BIOMES[biomeIdx].wall;
+    ctx.globalAlpha = 0.95;
+    roundRect(ctx, L, y - 13 * S, gl - L, 26 * S, 8 * S); ctx.fill();
+    roundRect(ctx, gr, y - 13 * S, (L + w) - gr, 26 * S, 8 * S); ctx.fill();
+    ctx.globalAlpha = 1;
+    return;
+  }
+  var x = sx(e.fx);
+  if (e.kind === 'hazard') {
+    ctx.fillStyle = '#ff5468';
+    ctx.beginPath();
+    for (var a = 0; a < Math.PI * 2; a += Math.PI / 5) {
+      var rr = e.r * (a % (Math.PI / 2.5) < 0.3 ? 1.25 : 1);
+      var px = x + Math.cos(a + e.gfx) * rr, pyv = y + Math.sin(a + e.gfx) * rr;
+      if (a === 0) ctx.moveTo(px, pyv); else ctx.lineTo(px, pyv);
+    }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#7a1622';
+    ctx.beginPath(); ctx.arc(x, y, e.r * 0.42, 0, Math.PI * 2); ctx.fill();
+  } else {
+    ctx.fillStyle = '#ffd24a';
+    ctx.beginPath(); ctx.arc(x, y, e.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff7d0';
+    ctx.beginPath(); ctx.arc(x - e.r * 0.3, y - e.r * 0.3, e.r * 0.32, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+function drawPlayer(ctx) {
+  var S = GF.S, x = player.x, y = playerY(), r = pr();
+  var sq = 1 - player.squish * 0.22;
+  ctx.save();
+  ctx.translate(x, y); ctx.scale(1 / sq, sq);
+  // body
+  ctx.fillStyle = '#f2b06a';
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#d98e42';
+  ctx.beginPath(); ctx.arc(0, r * 0.28, r * 0.92, 0.15 * Math.PI, 0.85 * Math.PI); ctx.fill();
+  // face
+  ctx.fillStyle = '#2a1c0e';
+  ctx.beginPath(); ctx.arc(-r * 0.32, -r * 0.12, r * 0.13, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(r * 0.32, -r * 0.12, r * 0.13, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#2a1c0e'; ctx.lineWidth = Math.max(1.5, r * 0.09); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(0, r * 0.05, r * 0.42, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  ctx.restore();
+}
+
+function drawHUD(ctx) {
+  var S = GF.S, W = GF.W, fs = GF.clamp(15 * S, 12, 20);
+  // top bar
+  ctx.fillStyle = 'rgba(8,10,18,0.32)'; ctx.fillRect(0, 0, W, topBarH());
+  // score (center)
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('score') + ': ' + Math.floor(score), W / 2, topBarH() * 0.5);
+  // mass bar (under bar)
+  var bx = 56 * S, bw = W - 112 * S, byy = topBarH() + 8 * S, bh = 12 * S;
+  ctx.fillStyle = 'rgba(0,0,0,0.28)'; roundRect(ctx, bx, byy, bw, bh, bh / 2); ctx.fill();
+  var frac = GF.clamp(mass / 100, 0, 1);
+  ctx.fillStyle = frac > 0.5 ? '#5ad24a' : (frac > 0.25 ? '#f0c23c' : '#ff5468');
+  roundRect(ctx, bx, byy, bw * frac, bh, bh / 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + (10 * S) + 'px sans-serif';
+  ctx.textAlign = 'left'; ctx.fillText(GF.t('mass'), bx, byy - 8 * S);
+  // tract progress (right edge)
+  var pgH = GF.H * 0.5, pgY = GF.H * 0.28, pgX = W - 14 * S;
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 4 * S; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(pgX, pgY); ctx.lineTo(pgX, pgY + pgH); ctx.stroke();
+  var pf = GF.clamp((depthD - cycleStartD) / TRACT_LEN, 0, 1);
+  ctx.strokeStyle = '#fff'; ctx.beginPath(); ctx.moveTo(pgX, pgY + pgH); ctx.lineTo(pgX, pgY + pgH - pgH * pf); ctx.stroke();
+}
+
+function btnRects() {
+  var S = GF.S, r = 17 * S, m = 12 * S;
+  return {
+    help: { x: m, y: m, w: r * 2, h: r * 2, cx: m + r, cy: m + r, r: r },
+    mute: { x: GF.W - m - r * 2, y: m, w: r * 2, h: r * 2, cx: GF.W - m - r, cy: m + r, r: r },
+  };
+}
+function drawTopButtons(ctx) {
+  var S = GF.S, B = btnRects();
+  // help '?'
+  ctx.fillStyle = 'rgba(8,10,18,0.45)';
+  ctx.beginPath(); ctx.arc(B.help.cx, B.help.cy, B.help.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + (18 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', B.help.cx, B.help.cy + 1 * S);
+  // mute speaker
+  ctx.fillStyle = 'rgba(8,10,18,0.45)';
+  ctx.beginPath(); ctx.arc(B.mute.cx, B.mute.cy, B.mute.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff';
+  var mx = B.mute.cx, my = B.mute.cy, u = B.mute.r * 0.5;
+  ctx.beginPath();
+  ctx.moveTo(mx - u * 0.9, my - u * 0.35); ctx.lineTo(mx - u * 0.3, my - u * 0.35);
+  ctx.lineTo(mx + u * 0.3, my - u * 0.8); ctx.lineTo(mx + u * 0.3, my + u * 0.8);
+  ctx.lineTo(mx - u * 0.3, my + u * 0.35); ctx.lineTo(mx - u * 0.9, my + u * 0.35);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 * S; ctx.lineCap = 'round';
+  if (muted) {
+    ctx.beginPath(); ctx.moveTo(mx + u * 0.55, my - u * 0.5); ctx.lineTo(mx + u * 1.05, my + u * 0.5);
+    ctx.moveTo(mx + u * 1.05, my - u * 0.5); ctx.lineTo(mx + u * 0.55, my + u * 0.5); ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(mx + u * 0.5, my, u * 0.5, -0.6, 0.6); ctx.stroke();
+    ctx.beginPath(); ctx.arc(mx + u * 0.5, my, u * 0.95, -0.6, 0.6); ctx.stroke();
+  }
+}
+
+function drawToast(ctx) {
+  var S = GF.S, a = Math.min(1, toast);
+  ctx.globalAlpha = a; ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + (26 * S) + 'px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t(toastKey), GF.W / 2, GF.H * 0.2);
+  ctx.globalAlpha = 1;
+}
+
+function drawHelp(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(8,10,18,0.82)'; ctx.fillRect(0, 0, W, H);
+  var pw = Math.min(W * 0.86, 420 * S), px = (W - pw) / 2, py = H * 0.16, ph = H * 0.66;
+  ctx.fillStyle = '#1a2030'; roundRect(ctx, px, py, pw, ph, 16 * S); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + (22 * S) + 'px sans-serif';
+  ctx.fillText(GF.t('help_title'), W / 2, py + 18 * S);
+  var lines = ['help_goal', 'help_ctrl', 'help_win', 'help_lose'];
+  ctx.textAlign = 'left'; ctx.font = (14 * S) + 'px sans-serif';
+  var ly = py + 60 * S, lh = 0;
+  for (var i = 0; i < lines.length; i++) {
+    lh = wrapText(ctx, GF.t(lines[i]), px + 20 * S, ly, pw - 40 * S, 19 * S);
+    ly += lh + 12 * S;
+  }
+  // back button
+  var bw = pw * 0.55, bx = (W - bw) / 2, byy = py + ph - 56 * S, bh = 40 * S;
+  ctx.fillStyle = '#4dd0c0'; roundRect(ctx, bx, byy, bw, bh, bh / 2); ctx.fill();
+  ctx.fillStyle = '#0c1018'; ctx.font = 'bold ' + (16 * S) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('help_back'), W / 2, byy + bh / 2);
+  helpBackRect = { x: bx, y: byy, w: bw, h: bh };
+}
+var helpBackRect = null;
+
+// ── utils ──
+function roundRect(ctx, x, y, w, h, r) {
+  if (w < 0) { x += w; w = -w; } r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function wrapText(ctx, text, x, y, maxW, lh) {
+  var words = text.split(' '), line = '', yy = y;
+  for (var n = 0; n < words.length; n++) {
+    var test = line + words[n] + ' ';
+    if (ctx.measureText(test).width > maxW && n > 0) { ctx.fillText(line, x, yy); line = words[n] + ' '; yy += lh; }
+    else line = test;
+  }
+  ctx.fillText(line, x, yy);
+  return (yy - y) + lh;
+}
+function inRect(x, y, r) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+
+// ── Custom button taps (mute / help / back). gf-lib handles overlay buttons
+//    separately via its own click listener on the canvas. ──
+function onTap(x, y) {
+  var B = btnRects();
+  if (inRect(x, y, B.mute)) { toggleMute(); return; }
+  if (gs === 'HELP') { if (inRect(x, y, helpBackRect)) gs = prevGs; return; }
+  if (inRect(x, y, B.help)) { prevGs = (gs === 'HELP' ? prevGs : gs); gs = 'HELP'; return; }
+}
+
+// ── Boot ──
+GF.init({
+  designW: 450,
+  designH: 800,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'bolus',
+  onReady: function () {
+    try { best = parseInt(localStorage.getItem('bolus_best') || '0') || 0; } catch (e) {}
+    try { muted = localStorage.getItem('bolus_muted') === '1'; } catch (e) {}
+    audioInit();
+    GF.persist('bolus_run_v1',
+      function () { return { gs: gs, depthD: depthD, cycleStartD: cycleStartD, cycle: cycle, mass: mass, score: score, px: player.x }; },
+      function (s) {
+        if (!s) return;
+        gs = (s.gs === 'PLAYING' || s.gs === 'GAMEOVER') ? s.gs : 'MENU';
+        depthD = s.depthD || 0; cycleStartD = s.cycleStartD || 0; cycle = s.cycle || 0;
+        mass = (typeof s.mass === 'number') ? s.mass : 100; score = s.score || 0;
+        player.x = s.px || GF.W / 2; targetX = player.x;
+        biomeIdx = GF.clamp(Math.floor((depthD - cycleStartD) / BIOME_LEN), 0, BIOMES.length - 1);
+      }
+    );
+    GF.exposeState(function () { return { gs: gs, score: Math.floor(score), mass: mass, cycle: cycle, depth: Math.floor(depthD) }; });
+    GF.canvas.addEventListener('click', function (e) { onTap(e.clientX, e.clientY); });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── Screenshot hooks (take_screenshots.js) — land on a busy mid-tract frame ──
+window._setupForScreenshot = function (n) {
+  startGame();
+  depthD = cycleStartD + BIOME_LEN * 2.4;     // mid-stomach
+  biomeIdx = 2; cycle = 1;
+  ents.length = 0;
+  var py = playerY();
+  spawnEnt('hazard', 0.28, GF.H * 0.18 - py); spawnEnt('nutrient', 0.66, GF.H * 0.05 - py);
+  spawnEnt('hazard', 0.72, GF.H * 0.42 - py); spawnEnt('nutrient', 0.30, GF.H * 0.62 - py);
+  spawnEnt('hazard', 0.50, GF.H * 0.86 - py);
+  player.x = laneL() + laneW() * 0.42; targetX = player.x;
+  score = 480 + (n || 0) * 60;
+};
+window._jumpLevel = function (n) {
+  if (n && n >= 99) { window._setupForScreenshot(0); score = 360; mass = 1; gameOver(); return; }   // terminal for the test harness
+  window._setupForScreenshot(n || 1);
+};
+
+})();
+</script>
+</body>
+</html>
