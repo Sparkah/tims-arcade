@@ -185,6 +185,11 @@ var spinCount = 0;
 // overlays
 var overlay = null;             // null | 'VAULT' | 'RANKS' | 'HELP'
 var vaultTab = 0;               // which set's collection grid is shown in VAULT
+// scrollable-overlay state (belt-and-suspenders so tall content never clips)
+var scrollY = 0;                // current scroll offset of the active overlay's content
+var scrollMax = 0;              // max scroll (set during draw from content height)
+var scrollContentTop = 0;       // y where the scrollable region begins (for drag math)
+var dragScroll = null;          // { startY, startScroll } while finger-dragging the overlay
 
 // boot banner (welcome-back)
 var bootBannerT = 0;
@@ -200,12 +205,20 @@ var newBurst = 0;               // NEW! flourish timer
 
 // ── AUDIO (WebAudio reveal chime; pitch/length scale with rarity) ────────────
 var actx = null;
+var musicStarted = false;       // bg-music loop kicked off on the first user gesture
+function startMusicOnce() {
+  if (musicStarted) return; musicStarted = true;
+  // GF.music tolerates a missing file; gf-lib's own first-gesture kick keeps the
+  // loop resumed thereafter. 0.28 = a gentle bed under the SFX.
+  try { GF.music('audio/bg_loop.mp3', 0.28); } catch (e) {}
+}
 function audioCtx() {
   if (actx) return actx;
   try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
   return actx;
 }
 function tone(freq, dur, type, vol, when) {
+  if (GF.muted) return;   // mute button silences ALL custom audio (reel ticks, reveal chime, sell)
   var a = audioCtx(); if (!a) return;
   if (a.state === 'suspended') { try { a.resume(); } catch (e) {} }
   var t0 = a.currentTime + (when || 0);
@@ -632,9 +645,24 @@ var L = {};
 function layout() {
   var W = GF.W, H = GF.H, S = GF.S;
   L.W = W; L.H = H; L.S = S;
+  // ── PORTRAIT CONTENT COLUMN ────────────────────────────────────────────────
+  // gf-lib stretches the canvas to fill the window, so on wide/landscape/desktop
+  // viewports GF.W is huge. Clamp ALL content to a centered portrait column of
+  // width CW = min(GF.W, designW*S). On a portrait phone CW==GF.W, CX==0 (no
+  // change); on desktop 1280x720 CW~=332, CX~=474 → a centered portrait frame.
+  L.CW = Math.min(W, 393 * S);
+  L.CX = (W - L.CW) / 2;
+  L.ccx = L.CX + L.CW / 2;           // horizontal center of the content column
+  L.wide = L.CX > 1;                 // are we letterboxing? (wide screen)
+  var CW = L.CW, CX = L.CX;
   L.pad = Math.round(GF.clamp(14 * S, 8, 22));
   // top bar
   L.topH = Math.round(GF.clamp(54 * S, 40, 74));
+  // mute button — a small circle centered in the dead space of the top bar,
+  // between the coins chip (left edge) and the collection-value chip (right
+  // edge). Column-aware via L.ccx so it sits inside [CX, CX+CW] on any width.
+  var muteD = Math.round(GF.clamp(34 * S, 28, 46));
+  L.muteBtn = { x: L.ccx - muteD / 2, y: Math.round(L.topH / 2 - muteD / 2), w: muteD, h: muteD };
   // pills row (under top bar): Vault | Ranks | Daily | ?
   L.pillY = L.topH + Math.round(6 * S);
   L.pillH = Math.round(GF.clamp(40 * S, 30, 52));
@@ -643,9 +671,9 @@ function layout() {
   L.caseY = H - L.caseH - L.pad;
   // OPEN button above the case strip
   L.openH = Math.round(GF.clamp(64 * S, 48, 86));
-  L.openW = Math.round(GF.clamp(280 * S, 180, 460));
+  L.openW = Math.round(GF.clamp(280 * S, 180, Math.min(460, CW - L.pad * 2)));
   L.openY = L.caseY - L.openH - Math.round(16 * S);
-  L.openX = (W - L.openW) / 2;
+  L.openX = CX + (CW - L.openW) / 2;
   // the stage (reel / reveal) sits between pills and OPEN button
   L.stageTop = L.pillY + L.pillH + Math.round(10 * S);
   L.stageBot = L.openY - Math.round(12 * S);
@@ -656,7 +684,7 @@ function layout() {
   L.reelY = L.stageMidY - L.reelH / 2;
   L.cardW = Math.round(GF.clamp(108 * S, 78, 140));
   L.cardGap = Math.round(6 * S);
-  L.markerX = W / 2;
+  L.markerX = L.ccx;
 }
 
 // ── DRAW HELPERS ─────────────────────────────────────────────────────────────
@@ -865,6 +893,10 @@ function draw(ctx, dt) {
   }
   ctx.globalAlpha = 1;
 
+  // letterbox the area OUTSIDE the portrait column on wide screens so the frame
+  // reads as intentional (drawn over the base content; overlays paint on top).
+  drawLetterbox(ctx);
+
   // overlays
   if (overlay === 'VAULT') drawVault(ctx, dt);
   else if (overlay === 'RANKS') drawRanks(ctx);
@@ -874,8 +906,21 @@ function draw(ctx, dt) {
   GF.tutorial.draw(ctx);
 }
 
+// Subtle dark frame over the off-column area on wide/landscape/desktop viewports.
+function drawLetterbox(ctx) {
+  if (!L.wide) return;
+  var W = GF.W, H = GF.H, CX = L.CX, CW = L.CW;
+  ctx.fillStyle = 'rgba(6,9,18,0.6)';
+  ctx.fillRect(0, 0, CX, H);
+  ctx.fillRect(CX + CW, 0, W - (CX + CW), H);
+  // hairline edges of the column
+  ctx.strokeStyle = 'rgba(120,140,180,0.18)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(CX + 0.5, 0); ctx.lineTo(CX + 0.5, H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(CX + CW - 0.5, 0); ctx.lineTo(CX + CW - 0.5, H); ctx.stroke();
+}
+
 function drawBgGlow(ctx, s) {
-  var g = ctx.createRadialGradient(GF.cx, GF.H * 0.36, 10, GF.cx, GF.H * 0.36, GF.W * 0.9);
+  var g = ctx.createRadialGradient(L.ccx, GF.H * 0.36, 10, L.ccx, GF.H * 0.36, L.CW * 0.9);
   g.addColorStop(0, hexA(s.col, 0.10));
   g.addColorStop(1, hexA(s.col, 0));
   ctx.fillStyle = g; ctx.fillRect(0, 0, GF.W, GF.H);
@@ -885,7 +930,7 @@ function drawBgGlow(ctx, s) {
 var hit = {};   // named rects for input
 
 function drawTopBar(ctx) {
-  var W = GF.W, S = GF.S, p = L.pad;
+  var S = GF.S, p = L.pad, CX = L.CX, CW = L.CW;
   var h = L.topH;
   // coins chip (left)
   var chipH = Math.round(GF.clamp(36 * S, 28, 48));
@@ -895,12 +940,12 @@ function drawTopBar(ctx) {
   var coinTxt = fmt(coins);
   var ctW = ctx.measureText(coinTxt).width;
   var chipW = cr * 2 + 12 * S + ctW + 22 * S;
-  GF.rr(ctx, p, cy - chipH / 2, chipW, chipH, chipH / 2);
+  GF.rr(ctx, CX + p, cy - chipH / 2, chipW, chipH, chipH / 2);
   ctx.fillStyle = 'rgba(20,26,44,0.92)'; ctx.fill();
   ctx.strokeStyle = hexA('#ffc23c', 0.5); ctx.lineWidth = 1.5; ctx.stroke();
-  drawCoin(ctx, p + 12 * S + cr, cy, cr);
+  drawCoin(ctx, CX + p + 12 * S + cr, cy, cr);
   ctx.fillStyle = '#ffe48a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText(coinTxt, p + 12 * S + cr * 2 + 8 * S, cy + 1);
+  ctx.fillText(coinTxt, CX + p + 12 * S + cr * 2 + 8 * S, cy + 1);
   // collection value chip (right)
   ctx.font = '600 ' + Math.round(GF.clamp(11 * S, 9, 15)) + 'px system-ui, sans-serif';
   var lbl = GF.t('value');
@@ -908,7 +953,7 @@ function drawTopBar(ctx) {
   var valTxt = fmt(collectionValue());
   var vW = Math.max(ctx.measureText(valTxt).width, 50 * S);
   var vChipW = vW + 28 * S;
-  var vx = W - p - vChipW;
+  var vx = CX + CW - p - vChipW;
   GF.rr(ctx, vx, cy - chipH / 2, vChipW, chipH, chipH / 2);
   ctx.fillStyle = 'rgba(20,26,44,0.92)'; ctx.fill();
   ctx.strokeStyle = hexA('#7ec8ff', 0.5); ctx.lineWidth = 1.5; ctx.stroke();
@@ -918,6 +963,13 @@ function drawTopBar(ctx) {
   ctx.font = 'bold ' + Math.round(GF.clamp(16 * S, 12, 21)) + 'px system-ui, sans-serif';
   ctx.fillText(valTxt, vx + 16 * S + cr + 8 * S, cy + 1);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  // mute toggle — centered in the top-bar dead space (between the two chips)
+  var mb = L.muteBtn;
+  GF.rr(ctx, mb.x, mb.y, mb.w, mb.h, mb.w / 2);
+  ctx.fillStyle = 'rgba(20,26,44,0.92)'; ctx.fill();
+  ctx.strokeStyle = hexA(GF.muted ? '#5a6478' : '#9fb6e6', 0.5); ctx.lineWidth = 1.5; ctx.stroke();
+  GF.drawMuteIcon(ctx, mb.x + mb.w / 2, mb.y + mb.h / 2, mb.w * 0.3, GF.muted);
+  hit.mute = { x: mb.x, y: mb.y, w: mb.w, h: mb.h };
 }
 
 function drawMiniGem(ctx, cx, cy, r, col) {
@@ -931,12 +983,12 @@ function drawMiniGem(ctx, cx, cy, r, col) {
 }
 
 function drawPills(ctx) {
-  var W = GF.W, S = GF.S, p = L.pad;
+  var S = GF.S, p = L.pad, CX = L.CX, CW = L.CW;
   var y = L.pillY, h = L.pillH;
   // four pills: Vault | Ranks | Daily | ?
   var gap = Math.round(8 * S);
   var n = 4;
-  var pw = (W - p * 2 - gap * (n - 1)) / n;
+  var pw = (CW - p * 2 - gap * (n - 1)) / n;
   hit.pills = [];
   var defs = [
     { id: 'VAULT', label: GF.t('vault'), col: '#7ec8ff', icon: 'vault' },
@@ -945,7 +997,7 @@ function drawPills(ctx) {
     { id: 'HELP',  label: '?',           col: '#9aa6c0', icon: 'help' },
   ];
   for (var i = 0; i < n; i++) {
-    var x = p + i * (pw + gap);
+    var x = CX + p + i * (pw + gap);
     var d = defs[i];
     var pulse = d.pulse ? (0.5 + 0.5 * Math.sin(nowMs() / 300)) : 0;
     GF.rr(ctx, x, y, pw, h, Math.round(10 * S));
@@ -1004,15 +1056,15 @@ function drawStage(ctx, dt) {
 // idle: a glowing "case" with the set's hero gem floating, inviting a tap
 function drawIdleStage(ctx, dt) {
   var s = SETS[curSet], S = GF.S;
-  var cx = GF.cx, cy = L.stageMidY;
+  var cx = L.ccx, cy = L.stageMidY;
   var tt = nowMs() / 1000;
   // soft pedestal glow
   var g = ctx.createRadialGradient(cx, cy + L.stageH * 0.18, 6, cx, cy + L.stageH * 0.18, L.stageH * 0.7);
   g.addColorStop(0, hexA(s.col, 0.22)); g.addColorStop(1, hexA(s.col, 0));
-  ctx.fillStyle = g; ctx.fillRect(0, L.stageTop, GF.W, L.stageH);
+  ctx.fillStyle = g; ctx.fillRect(L.CX, L.stageTop, L.CW, L.stageH);
   // the case (a faceted chest/crate drawn as a rounded box with gem facets)
   var bob = Math.sin(tt * 1.5) * 5 * S;
-  var caseR = Math.min(L.stageH * 0.30, GF.W * 0.20);
+  var caseR = Math.min(L.stageH * 0.30, L.CW * 0.20);
   drawCaseIcon(ctx, cx, cy - L.stageH * 0.06 + bob, caseR, s);
   // set name + completion under the case
   var done = setOwnedCount(curSet), tot = s.gems.length;
@@ -1064,7 +1116,7 @@ function star(ctx, x, y, s) {
 
 // ── THE REEL (the catch) ─────────────────────────────────────────────────────
 function drawReel(ctx, dt) {
-  var W = GF.W, S = GF.S;
+  var S = GF.S, CX = L.CX, CW = L.CW;
   var rY = L.reelY, rH = L.reelH;
   var cardW = L.cardW, gap = L.cardGap;
   var stride = cardW + gap;
@@ -1080,36 +1132,38 @@ function drawReel(ctx, dt) {
     reel.target = WIN_INDEX * stride + cardW / 2 + jitter;
   }
   // reel frame
-  GF.rr(ctx, L.pad, rY - 10 * S, W - L.pad * 2, rH + 20 * S, 14 * S);
+  GF.rr(ctx, CX + L.pad, rY - 10 * S, CW - L.pad * 2, rH + 20 * S, 14 * S);
   ctx.fillStyle = 'rgba(6,9,18,0.85)'; ctx.fill();
   ctx.strokeStyle = 'rgba(120,140,180,0.25)'; ctx.lineWidth = 1.5; ctx.stroke();
   // clip to the reel window
   ctx.save();
-  GF.rr(ctx, L.pad + 2, rY, W - L.pad * 2 - 4, rH, 10 * S);
+  GF.rr(ctx, CX + L.pad + 2, rY, CW - L.pad * 2 - 4, rH, 10 * S);
   ctx.clip();
-  // draw cards
+  // draw cards. leftEdge anchors on markerX (= column center L.ccx), so the
+  // choreographed land math (pos = WIN_INDEX*stride + cardW/2) centers the
+  // winner under the marker inside the portrait column on any viewport.
   var leftEdge = L.markerX - reel.pos;
-  var first = Math.max(0, Math.floor((reel.pos - L.markerX) / stride) - 1);
-  var last = Math.min(reel.cards.length - 1, first + Math.ceil(W / stride) + 3);
+  var first = Math.max(0, Math.floor((reel.pos - L.markerX + CX) / stride) - 1);
+  var last = Math.min(reel.cards.length - 1, first + Math.ceil(CW / stride) + 4);
   for (var i = first; i <= last; i++) {
     var x = leftEdge + i * stride;
-    if (x + cardW < 0 || x > W) continue;
+    if (x + cardW < CX || x > CX + CW) continue;
     drawReelCard(ctx, reel.cards[i], x, rY + 4 * S, cardW, rH - 8 * S);
   }
   ctx.restore();
   // fade edges
-  var fg = ctx.createLinearGradient(L.pad, 0, L.pad + 60 * S, 0);
+  var fg = ctx.createLinearGradient(CX + L.pad, 0, CX + L.pad + 60 * S, 0);
   fg.addColorStop(0, 'rgba(8,11,20,1)'); fg.addColorStop(1, 'rgba(8,11,20,0)');
-  ctx.fillStyle = fg; ctx.fillRect(L.pad + 2, rY, 60 * S, rH);
-  var fg2 = ctx.createLinearGradient(W - L.pad - 60 * S, 0, W - L.pad, 0);
+  ctx.fillStyle = fg; ctx.fillRect(CX + L.pad + 2, rY, 60 * S, rH);
+  var fg2 = ctx.createLinearGradient(CX + CW - L.pad - 60 * S, 0, CX + CW - L.pad, 0);
   fg2.addColorStop(0, 'rgba(8,11,20,0)'); fg2.addColorStop(1, 'rgba(8,11,20,1)');
-  ctx.fillStyle = fg2; ctx.fillRect(W - L.pad - 60 * S, rY, 60 * S, rH);
+  ctx.fillStyle = fg2; ctx.fillRect(CX + CW - L.pad - 60 * S, rY, 60 * S, rH);
   // center marker (the fixed pointer)
   drawMarker(ctx, L.markerX, rY, rH);
   // spinning label
   ctx.fillStyle = '#9fb0cc'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.font = 'bold ' + Math.round(GF.clamp(15 * S, 11, 20)) + 'px system-ui, sans-serif';
-  ctx.fillText(GF.t('spinning'), W / 2, L.openY + L.openH / 2);
+  ctx.fillText(GF.t('spinning'), L.ccx, L.openY + L.openH / 2);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
 
@@ -1142,22 +1196,22 @@ function drawMarker(ctx, mx, y, h) {
 
 // ── THE REVEAL (full-card flash + rise/scale-in + KEEP/SELL) ─────────────────
 function drawReveal(ctx, dt) {
-  var W = GF.W, H = GF.H, S = GF.S;
+  var S = GF.S, CX = L.CX, CW = L.CW;
   var rar = RARITY[reveal.rarity];
   var t = reveal.t;
-  // rarity-colored full flash (decays fast)
+  // rarity-colored full flash (decays fast) — within the column
   var flash = GF.clamp(0.55 - t * 1.4, 0, 0.55);
-  if (flash > 0) { ctx.fillStyle = hexA(rar.glow, flash); ctx.fillRect(0, L.stageTop - 20, W, L.stageH + 200); }
+  if (flash > 0) { ctx.fillStyle = hexA(rar.glow, flash); ctx.fillRect(CX, L.stageTop - 20, CW, L.stageH + 200); }
   // radial rarity backlight behind the gem
-  var cx = GF.cx, cy = L.stageMidY - L.stageH * 0.04;
+  var cx = L.ccx, cy = L.stageMidY - L.stageH * 0.04;
   var rg = ctx.createRadialGradient(cx, cy, 6, cx, cy, L.stageH * 0.7);
   rg.addColorStop(0, hexA(rar.glow, 0.30)); rg.addColorStop(1, hexA(rar.glow, 0));
-  ctx.fillStyle = rg; ctx.fillRect(0, L.stageTop, W, L.stageH);
+  ctx.fillStyle = rg; ctx.fillRect(CX, L.stageTop, CW, L.stageH);
   // gem rises + scales in
   var inT = GF.clamp(t / 0.5, 0, 1);
   var scl = easeOutCubic(inT);
   var rise = (1 - scl) * 30 * S;
-  var rad = Math.min(L.stageH * 0.26, W * 0.22) * (0.6 + 0.4 * scl);
+  var rad = Math.min(L.stageH * 0.26, CW * 0.22) * (0.6 + 0.4 * scl);
   var rot = nowMs() / 1000;
   ctx.save();
   ctx.globalAlpha = inT;
@@ -1202,12 +1256,12 @@ function drawReveal(ctx, dt) {
 }
 
 function drawDecisionButtons(ctx) {
-  var W = GF.W, S = GF.S;
+  var S = GF.S, CW = L.CW;
   var gap = Math.round(12 * S);
   var bw = (L.openW - gap) / 2;
   var bh = L.openH;
   var y = L.openY;
-  var x0 = (W - L.openW) / 2;
+  var x0 = L.openX;            // already column-centered in layout()
   var sval = RARITY[reveal.rarity].sval;
   // KEEP (left, green)
   drawBtn(ctx, x0, y, bw, bh, GF.t('keep'), '#2ee07a', '#23a657', '#06240f');
@@ -1217,14 +1271,14 @@ function drawDecisionButtons(ctx) {
   hit.sell = { x: x0 + bw + gap, y: y, w: bw, h: bh };
   // SELL 2x via ad — a slim button below, in the case-strip band, only if a sell makes sense
   var ay = L.caseY + Math.round(8 * S);
-  var aw = GF.clamp(260 * S, 170, 380), ah = Math.round(GF.clamp(34 * S, 26, 44));
-  var ax = (W - aw) / 2;
+  var aw = GF.clamp(260 * S, 170, Math.min(380, CW - L.pad * 2)), ah = Math.round(GF.clamp(34 * S, 26, 44));
+  var ax = L.ccx - aw / 2;
   GF.rr(ctx, ax, ay, aw, ah, ah / 2);
   ctx.fillStyle = 'rgba(40,30,12,0.92)'; ctx.fill();
   ctx.strokeStyle = hexA('#ffd166', 0.55); ctx.lineWidth = 1.4; ctx.stroke();
   ctx.fillStyle = '#ffd98a'; ctx.font = 'bold ' + Math.round(GF.clamp(13 * S, 10, 16)) + 'px system-ui, sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('▶ ' + GF.t('ad2x') + ' (+' + (sval * 2) + ')', W / 2, ay + ah / 2);
+  ctx.fillText('▶ ' + GF.t('ad2x') + ' (+' + (sval * 2) + ')', L.ccx, ay + ah / 2);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   hit.sell2x = { x: ax, y: ay, w: aw, h: ah };
 }
@@ -1250,7 +1304,7 @@ function drawOpenButton(ctx) {
   var canAfford = coins >= s.cost;
   var pulse = canAfford ? (0.5 + 0.5 * Math.sin(nowMs() / 380)) : 0;
   var pw = w * (1 + 0.02 * pulse), ph = h * (1 + 0.02 * pulse);
-  var px = GF.cx - pw / 2, py = y + h / 2 - ph / 2;
+  var px = L.ccx - pw / 2, py = y + h / 2 - ph / 2;
   var g = ctx.createLinearGradient(px, py, px, py + ph);
   if (canAfford) { g.addColorStop(0, shade(s.col, 0.3)); g.addColorStop(1, s.col2); }
   else { g.addColorStop(0, '#3a4256'); g.addColorStop(1, '#2a3142'); }
@@ -1262,13 +1316,13 @@ function drawOpenButton(ctx) {
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.font = 'bold ' + Math.round(GF.clamp(24 * S, 17, 32)) + 'px system-ui, sans-serif';
   if (canAfford) {
-    ctx.fillText(GF.t('open'), GF.cx, y + h * 0.36);
+    ctx.fillText(GF.t('open'), L.ccx, y + h * 0.36);
     // cost row
     var cr = h * 0.16;
     ctx.font = 'bold ' + Math.round(GF.clamp(15 * S, 11, 20)) + 'px system-ui, sans-serif';
     var costTxt = fmt(s.cost);
     var tw = ctx.measureText(costTxt).width;
-    var startX = GF.cx - (cr + 6 * S + tw) / 2;
+    var startX = L.ccx - (cr + 6 * S + tw) / 2;
     drawCoin(ctx, startX + cr, y + h * 0.70, cr);
     ctx.fillStyle = '#fff7d6'; ctx.textAlign = 'left';
     ctx.fillText(costTxt, startX + cr * 2 + 6 * S, y + h * 0.70 + 1);
@@ -1276,10 +1330,10 @@ function drawOpenButton(ctx) {
   } else {
     ctx.fillStyle = '#aab4c8';
     ctx.font = 'bold ' + Math.round(GF.clamp(18 * S, 13, 24)) + 'px system-ui, sans-serif';
-    ctx.fillText(GF.t('open'), GF.cx, y + h * 0.38);
+    ctx.fillText(GF.t('open'), L.ccx, y + h * 0.38);
     ctx.font = '600 ' + Math.round(GF.clamp(12 * S, 9, 16)) + 'px system-ui, sans-serif';
     ctx.fillStyle = '#ff8a8a';
-    ctx.fillText('▶ ' + GF.t('adFree'), GF.cx, y + h * 0.70);
+    ctx.fillText('▶ ' + GF.t('adFree'), L.ccx, y + h * 0.70);
   }
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   hit.open = { x: x, y: y, w: w, h: h, afford: canAfford };
@@ -1288,15 +1342,15 @@ function drawOpenButton(ctx) {
 // ── CASE SELECTOR STRIP ──────────────────────────────────────────────────────
 function drawCaseStrip(ctx) {
   if (reveal) return;  // the 2x-ad button uses this band during reveal
-  var W = GF.W, S = GF.S, p = L.pad;
+  var S = GF.S, p = L.pad, CX = L.CX, CW = L.CW;
   var y = L.caseY, h = L.caseH;
   var n = SETS.length;
   var gap = Math.round(8 * S);
   // horizontal cards; if too many to fit, shrink (we only have 5 so they fit)
-  var cw = (W - p * 2 - gap * (n - 1)) / n;
+  var cw = (CW - p * 2 - gap * (n - 1)) / n;
   hit.cases = [];
   for (var i = 0; i < n; i++) {
-    var x = p + i * (cw + gap);
+    var x = CX + p + i * (cw + gap);
     var s = SETS[i];
     var unlocked = setUnlocked(i);
     var sel = i === curSet;
@@ -1375,10 +1429,10 @@ function drawBootBanner(ctx) {
   if (dailyClaim > 0) parts.push(GF.t('streakDay') + ' ' + streakNow + ' ' + GF.t('streakBonus') + ': +' + dailyClaim);
   if (idleClaim > 0) parts.push('+' + idleClaim + ' ' + GF.t('awayCoins'));
   if (!parts.length) return;
-  var W = GF.W, S = GF.S;
+  var S = GF.S;
   var a = GF.clamp(bootBannerT / 0.5, 0, 1);
-  var bw = GF.clamp(330 * S, 220, 420), bh = GF.clamp(60 * S, 46, 78);
-  var bx = (W - bw) / 2, by = L.stageTop + 6 * S;
+  var bw = GF.clamp(330 * S, 220, Math.min(420, L.CW - L.pad * 2)), bh = GF.clamp(60 * S, 46, 78);
+  var bx = L.ccx - bw / 2, by = L.stageTop + 6 * S;
   ctx.globalAlpha = a;
   GF.rr(ctx, bx, by, bw, bh, 14 * S);
   var g = ctx.createLinearGradient(bx, by, bx, by + bh);
@@ -1386,9 +1440,9 @@ function drawBootBanner(ctx) {
   ctx.fillStyle = g; ctx.fill();
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.font = 'bold ' + Math.round(GF.clamp(14 * S, 11, 18)) + 'px system-ui, sans-serif';
-  ctx.fillText(GF.t('welcomeBack') + '!', W / 2, by + bh * 0.34);
+  ctx.fillText(GF.t('welcomeBack') + '!', L.ccx, by + bh * 0.34);
   ctx.font = '600 ' + Math.round(GF.clamp(12 * S, 9, 15)) + 'px system-ui, sans-serif';
-  ctx.fillText(parts.join('   ·   '), W / 2, by + bh * 0.70);
+  ctx.fillText(parts.join('   ·   '), L.ccx, by + bh * 0.70);
   ctx.globalAlpha = 1;
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
@@ -1404,11 +1458,11 @@ function drawSetComplete(ctx) {
   ctx.globalAlpha = a;
   ctx.fillStyle = s.col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.font = 'bold ' + Math.round(GF.clamp(30 * S, 20, 42)) + 'px system-ui, sans-serif';
-  ctx.fillText(GF.t('complete'), GF.cx, H * 0.4);
+  ctx.fillText(GF.t('complete'), L.ccx, H * 0.4);
   ctx.fillStyle = '#fff'; ctx.font = 'bold ' + Math.round(GF.clamp(18 * S, 13, 24)) + 'px system-ui, sans-serif';
-  ctx.fillText((GF.lang === 'ru' ? s.ru : s.en), GF.cx, H * 0.4 + 36 * S);
+  ctx.fillText((GF.lang === 'ru' ? s.ru : s.en), L.ccx, H * 0.4 + 36 * S);
   ctx.fillStyle = '#ffd24a'; ctx.font = 'bold ' + Math.round(GF.clamp(16 * S, 12, 22)) + 'px system-ui, sans-serif';
-  ctx.fillText('+' + setCompleteFlash.reward + ' ' + GF.t('coins'), GF.cx, H * 0.4 + 64 * S);
+  ctx.fillText('+' + setCompleteFlash.reward + ' ' + GF.t('coins'), L.ccx, H * 0.4 + 64 * S);
   ctx.globalAlpha = 1;
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
@@ -1418,15 +1472,23 @@ function drawSetComplete(ctx) {
 // All reachable via pills; all close via a top-right ✕ (Yandex 1.15).
 // ════════════════════════════════════════════════════════════════════════════
 function drawOverlayFrame(ctx, title, accent) {
-  var W = GF.W, H = GF.H, S = GF.S;
-  ctx.fillStyle = '#070a13'; ctx.fillRect(0, 0, W, H);
+  var W = GF.W, H = GF.H, S = GF.S, CX = L.CX, CW = L.CW;
+  // dim the whole window, then paint the portrait column solid so the modal is
+  // a clean centered panel on wide screens (letterbox sides stay dimmed).
+  ctx.fillStyle = 'rgba(4,6,12,0.82)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#070a13'; ctx.fillRect(CX, 0, CW, H);
+  if (L.wide) {
+    ctx.strokeStyle = 'rgba(120,140,180,0.22)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(CX + 0.5, 0); ctx.lineTo(CX + 0.5, H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(CX + CW - 0.5, 0); ctx.lineTo(CX + CW - 0.5, H); ctx.stroke();
+  }
   // header
   ctx.fillStyle = accent || '#7ec8ff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = 'bold ' + Math.round(GF.clamp(22 * S, 16, 30)) + 'px system-ui, sans-serif';
-  ctx.fillText(title, L.pad + 4 * S, GF.clamp(34 * S, 24, 50));
+  ctx.fillText(title, CX + L.pad + 4 * S, GF.clamp(34 * S, 24, 50));
   // close ✕
   var cs = Math.round(GF.clamp(40 * S, 30, 54));
-  var cxx = W - L.pad - cs, cyy = GF.clamp(34 * S, 24, 50) - cs / 2;
+  var cxx = CX + CW - L.pad - cs, cyy = GF.clamp(34 * S, 24, 50) - cs / 2;
   GF.rr(ctx, cxx, cyy, cs, cs, cs / 2); ctx.fillStyle = 'rgba(40,46,64,0.9)'; ctx.fill();
   ctx.strokeStyle = 'rgba(150,160,180,0.4)'; ctx.lineWidth = 1.5; ctx.stroke();
   ctx.strokeStyle = '#cfd6e4'; ctx.lineWidth = 2.4;
@@ -1438,16 +1500,16 @@ function drawOverlayFrame(ctx, title, accent) {
 }
 
 function drawVault(ctx, dt) {
-  var W = GF.W, H = GF.H, S = GF.S;
+  var H = GF.H, S = GF.S, CX = L.CX, CW = L.CW;
   drawOverlayFrame(ctx, GF.t('vault'), '#7ec8ff');
-  // set tabs
+  // set tabs (fixed — not part of the scroll region)
   var tabY = GF.clamp(60 * S, 46, 80);
   var tabH = Math.round(GF.clamp(36 * S, 28, 48));
   var n = SETS.length, gap = Math.round(6 * S);
-  var tw = (W - L.pad * 2 - gap * (n - 1)) / n;
+  var tw = (CW - L.pad * 2 - gap * (n - 1)) / n;
   hit.vtabs = [];
   for (var i = 0; i < n; i++) {
-    var x = L.pad + i * (tw + gap);
+    var x = CX + L.pad + i * (tw + gap);
     var s = SETS[i];
     var unlocked = setUnlocked(i);
     var sel = vaultTab === i;
@@ -1461,28 +1523,55 @@ function drawVault(ctx, dt) {
     hit.vtabs.push({ x: x, y: tabY, w: tw, h: tabH, idx: i });
   }
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-  // gem grid for the selected set
+  // ── scrollable content region (grid + footer) ──────────────────────────────
   var s2 = SETS[vaultTab];
-  var gridTop = tabY + tabH + Math.round(18 * S);
+  var regionTop = tabY + tabH + Math.round(14 * S);
+  var regionBot = H - Math.round(14 * S);
   var cols = 3;
   var cellGap = Math.round(12 * S);
-  var cellW = (W - L.pad * 2 - cellGap * (cols - 1)) / cols;
+  var cellW = (CW - L.pad * 2 - cellGap * (cols - 1)) / cols;
   var cellH = cellW * 1.18;
   var rows = Math.ceil(s2.gems.length / cols);
+  var contentH = rows * (cellH + cellGap) + Math.round(28 * S); // grid + footer line
+  // compute scroll bounds for THIS overlay/tab and clamp the live scroll
+  scrollContentTop = regionTop;
+  scrollMax = Math.max(0, contentH - (regionBot - regionTop));
+  scrollY = GF.clamp(scrollY, 0, scrollMax);
+  // clip so nothing paints over the tabs/header or below the viewport
+  ctx.save();
+  ctx.beginPath(); ctx.rect(CX, regionTop, CW, regionBot - regionTop); ctx.clip();
+  var gridTop = regionTop - scrollY;
   for (var gi = 0; gi < s2.gems.length; gi++) {
-    var gx = L.pad + (gi % cols) * (cellW + cellGap);
+    var gx = CX + L.pad + (gi % cols) * (cellW + cellGap);
     var gy = gridTop + Math.floor(gi / cols) * (cellH + cellGap);
+    if (gy > regionBot || gy + cellH < regionTop) continue; // cull off-screen rows
     drawVaultCell(ctx, s2.gems[gi], gx, gy, cellW, cellH, dt);
   }
-  // footer: set value + completion reward state
-  var fy = gridTop + rows * (cellH + cellGap) + Math.round(8 * S);
+  // footer: set value + completion reward state (scrolls with the grid)
+  var fy = gridTop + rows * (cellH + cellGap) + Math.round(2 * S);
   var done = setOwnedCount(vaultTab), tot = s2.gems.length;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillStyle = '#aeb8cc'; ctx.font = '600 ' + Math.round(GF.clamp(13 * S, 10, 17)) + 'px system-ui, sans-serif';
   var line = done + ' / ' + tot + ' ' + GF.t('owned');
   if (setIsComplete(vaultTab)) line += '   ·   ' + GF.t('complete_b');
-  if (fy < H - 30 * S) ctx.fillText(line, GF.cx, fy + 10 * S);
+  ctx.fillText(line, L.ccx, fy + 10 * S);
+  ctx.restore();
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  // scroll indicator when there's overflow
+  if (scrollMax > 1) drawScrollHint(ctx, regionTop, regionBot);
+}
+
+// a slim scrollbar track + thumb on the right edge of the content column
+function drawScrollHint(ctx, top, bot) {
+  var S = GF.S, CX = L.CX, CW = L.CW;
+  var trackX = CX + CW - Math.round(6 * S);
+  var trackH = bot - top;
+  var thumbH = Math.max(24 * S, trackH * (trackH / (trackH + scrollMax)));
+  var thumbY = top + (trackH - thumbH) * (scrollY / scrollMax);
+  ctx.fillStyle = 'rgba(120,140,180,0.12)';
+  GF.rr(ctx, trackX, top, 3 * S, trackH, 1.5 * S); ctx.fill();
+  ctx.fillStyle = 'rgba(160,180,210,0.5)';
+  GF.rr(ctx, trackX, thumbY, 3 * S, thumbH, 1.5 * S); ctx.fill();
 }
 
 function drawVaultCell(ctx, gem, x, y, w, h, dt) {
@@ -1531,34 +1620,45 @@ function drawVaultCell(ctx, gem, x, y, w, h, dt) {
 // ── RANKS (leaderboard by collection value; GP if present else local) ────────
 var ranksCache = null, ranksFetched = false;
 function drawRanks(ctx) {
-  var W = GF.W, H = GF.H, S = GF.S;
+  var H = GF.H, S = GF.S, CX = L.CX, CW = L.CW;
   drawOverlayFrame(ctx, GF.t('ranks'), '#b08bff');
   var myVal = collectionValue();
   var rows = buildRanks(myVal);
-  var top = GF.clamp(70 * S, 54, 96);
+  var regionTop = GF.clamp(64 * S, 50, 92);
+  var regionBot = H - Math.round(14 * S);
   var rowH = Math.round(GF.clamp(48 * S, 38, 62));
+  var rowGap = Math.round(6 * S);
+  var contentH = rows.length * (rowH + rowGap);
+  scrollContentTop = regionTop;
+  scrollMax = Math.max(0, contentH - (regionBot - regionTop));
+  scrollY = GF.clamp(scrollY, 0, scrollMax);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(CX, regionTop, CW, regionBot - regionTop); ctx.clip();
   ctx.textBaseline = 'middle';
-  for (var i = 0; i < rows.length && top + i * (rowH + 6 * S) < H - 30 * S; i++) {
+  for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
-    var y = top + i * (rowH + 6 * S);
-    GF.rr(ctx, L.pad, y, W - L.pad * 2, rowH, 10 * S);
+    var y = regionTop - scrollY + i * (rowH + rowGap);
+    if (y > regionBot || y + rowH < regionTop) continue;
+    GF.rr(ctx, CX + L.pad, y, CW - L.pad * 2, rowH, 10 * S);
     ctx.fillStyle = r.me ? 'rgba(176,139,255,0.20)' : 'rgba(20,26,42,0.9)'; ctx.fill();
     if (r.me) { ctx.strokeStyle = '#b08bff'; ctx.lineWidth = 2; ctx.stroke(); }
     // rank number
     ctx.fillStyle = i === 0 ? '#ffd24a' : (i === 1 ? '#cdd6e2' : (i === 2 ? '#e8985e' : '#8893a8'));
     ctx.font = 'bold ' + Math.round(GF.clamp(18 * S, 13, 24)) + 'px system-ui, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('#' + (i + 1), L.pad + 14 * S, y + rowH / 2 + 1);
+    ctx.fillText('#' + (i + 1), CX + L.pad + 14 * S, y + rowH / 2 + 1);
     // name
     ctx.fillStyle = r.me ? '#e6dcff' : '#cdd6e6';
     ctx.font = (r.me ? 'bold ' : '600 ') + Math.round(GF.clamp(14 * S, 11, 18)) + 'px system-ui, sans-serif';
-    ctx.fillText(r.me ? GF.t('you') : r.name, L.pad + 58 * S, y + rowH / 2 + 1);
+    ctx.fillText(r.me ? GF.t('you') : r.name, CX + L.pad + 58 * S, y + rowH / 2 + 1);
     // value
     ctx.textAlign = 'right';
     ctx.fillStyle = '#7ec8ff';
     ctx.font = 'bold ' + Math.round(GF.clamp(15 * S, 11, 20)) + 'px system-ui, sans-serif';
-    ctx.fillText(fmt(r.val), W - L.pad - 16 * S, y + rowH / 2 + 1);
+    ctx.fillText(fmt(r.val), CX + CW - L.pad - 16 * S, y + rowH / 2 + 1);
   }
+  ctx.restore();
+  if (scrollMax > 1) drawScrollHint(ctx, regionTop, regionBot);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
 
@@ -1596,29 +1696,54 @@ function buildRanks(myVal) {
 
 // ── HELP ─────────────────────────────────────────────────────────────────────
 function drawHelp(ctx) {
-  var W = GF.W, H = GF.H, S = GF.S;
+  var H = GF.H, S = GF.S, CX = L.CX, CW = L.CW;
   drawOverlayFrame(ctx, GF.t('help'), '#9aa6c0');
   var lines = [GF.t('tut1'), GF.t('tut2'), GF.t('tut3'), GF.t('tut4')];
-  var y = GF.clamp(78 * S, 60, 110);
-  ctx.fillStyle = '#cdd6e6'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
   var fs = Math.round(GF.clamp(15 * S, 12, 19));
+  var maxW = CW - L.pad * 2 - 8 * S;
+  var x0 = CX + L.pad + 4 * S;
+  var regionTop = GF.clamp(64 * S, 50, 92);
+  var regionBot = H - Math.round(14 * S);
+  // measure content height first (so we can clamp scroll), then draw clipped
   ctx.font = fs + 'px system-ui, sans-serif';
-  var maxW = W - L.pad * 2 - 8 * S;
+  var measuredY = 0;
+  for (var mi = 0; mi < lines.length; mi++) measuredY = measureWrapHeight(ctx, lines[mi], maxW, fs + 7, measuredY) + fs + 10 * S;
+  measuredY += 6 * S + fs + 4 * S + RARITY.length * (fs + 8 * S);
+  scrollContentTop = regionTop;
+  scrollMax = Math.max(0, Math.round(measuredY) - (regionBot - regionTop));
+  scrollY = GF.clamp(scrollY, 0, scrollMax);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(CX, regionTop, CW, regionBot - regionTop); ctx.clip();
+  var y = regionTop - scrollY + Math.round(8 * S);
+  ctx.fillStyle = '#cdd6e6'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = fs + 'px system-ui, sans-serif';
   for (var i = 0; i < lines.length; i++) {
-    y = wrapText(ctx, lines[i], L.pad + 4 * S, y, maxW, fs + 7) + fs + 10 * S;
+    y = wrapText(ctx, lines[i], x0, y, maxW, fs + 7) + fs + 10 * S;
   }
   // rarity legend
   y += 6 * S;
   ctx.fillStyle = '#8893a8'; ctx.font = 'bold ' + Math.round(GF.clamp(12 * S, 10, 15)) + 'px system-ui, sans-serif';
-  ctx.fillText(GF.t('value') + ':', L.pad + 4 * S, y); y += fs + 4 * S;
+  ctx.fillText(GF.t('value') + ':', x0, y); y += fs + 4 * S;
   for (var r = 0; r < RARITY.length; r++) {
-    var rx = L.pad + 8 * S, ry = y + r * (fs + 8 * S);
-    if (ry > H - 30 * S) break;
+    var rx = x0 + 4 * S, ry = y + r * (fs + 8 * S);
     drawMiniGem(ctx, rx + 8 * S, ry + fs * 0.5, 9 * S, RARITY[r].col);
     ctx.fillStyle = RARITY[r].col; ctx.font = '600 ' + fs + 'px system-ui, sans-serif';
     ctx.fillText(rarityName(r), rx + 24 * S, ry);
   }
+  ctx.restore();
+  if (scrollMax > 1) drawScrollHint(ctx, regionTop, regionBot);
   ctx.textBaseline = 'alphabetic';
+}
+
+// dry-run wrap to compute the y a wrapText() call would end at (no drawing)
+function measureWrapHeight(ctx, text, maxW, lh, startY) {
+  var words = String(text).split(' '), line = '', yy = startY;
+  for (var i = 0; i < words.length; i++) {
+    var test = line ? line + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) { line = words[i]; yy += lh; }
+    else line = test;
+  }
+  return yy;
 }
 
 function wrapText(ctx, text, x, y, maxW, lh) {
@@ -1648,11 +1773,16 @@ function onTap(x, y) {
   // set-complete celebration swallows taps while showing
   if (setCompleteFlash && setCompleteFlash.t < 2.8) { return; }
 
+  // mute toggle — top-bar HUD, visible on main/reel/reveal (an overlay covers it,
+  // so only honour the tap when no overlay is open). Checked first so it works
+  // even mid-reveal / mid-spin.
+  if (!overlay && inRect(x, y, hit.mute)) { GF.toggleMute(); GF.sfx('tap'); return; }
+
   // overlays
   if (overlay) {
-    if (inRect(x, y, hit.close)) { overlay = null; saveMeta(); return; }
+    if (inRect(x, y, hit.close)) { overlay = null; scrollY = 0; saveMeta(); return; }
     if (overlay === 'VAULT' && hit.vtabs) {
-      for (var i = 0; i < hit.vtabs.length; i++) { if (inRect(x, y, hit.vtabs[i])) { vaultTab = hit.vtabs[i].idx; return; } }
+      for (var i = 0; i < hit.vtabs.length; i++) { if (inRect(x, y, hit.vtabs[i])) { vaultTab = hit.vtabs[i].idx; scrollY = 0; return; } }
     }
     // tap outside any control while in RANKS/HELP/VAULT does nothing (stay open)
     return;
@@ -1675,9 +1805,9 @@ function onTap(x, y) {
       if (inRect(x, y, hit.pills[p])) {
         var id = hit.pills[p].id;
         if (id === 'DAILY') { if (dailyReady()) claimDaily(); }
-        else if (id === 'VAULT') { overlay = 'VAULT'; vaultTab = curSet; }
-        else if (id === 'RANKS') { overlay = 'RANKS'; }
-        else if (id === 'HELP') { overlay = 'HELP'; }
+        else if (id === 'VAULT') { overlay = 'VAULT'; vaultTab = curSet; scrollY = 0; }
+        else if (id === 'RANKS') { overlay = 'RANKS'; scrollY = 0; }
+        else if (id === 'HELP') { overlay = 'HELP'; scrollY = 0; }
         return;
       }
     }
@@ -1702,19 +1832,59 @@ function onTap(x, y) {
   }
 }
 
+// ── POINTER: tap-vs-drag so overlays can drag-to-scroll without breaking taps ─
+// On down we record the start. On move, if an overlay is open and the finger
+// travels past a small threshold inside the scroll region, we enter drag-scroll
+// mode (and that gesture will NOT fire a tap on release). A clean tap (little
+// movement) still selects tabs / buttons exactly as before.
+var DRAG_THRESH = 6;            // px before a press becomes a scroll drag
+var ptr = { down: false, sx: 0, sy: 0, moved: false, lastY: 0 };
 var cv = GF.canvas;
-cv.addEventListener('mousedown', function (e) { var p = evtXY(e); onTap(p.x, p.y); });
-cv.addEventListener('touchstart', function (e) { e.preventDefault(); var p = evtXY(e); onTap(p.x, p.y); }, { passive: false });
+function pDown(x, y) {
+  startMusicOnce();   // autoplay policy: kick the bg-music loop on the first gesture
+  ptr.down = true; ptr.sx = x; ptr.sy = y; ptr.lastY = y; ptr.moved = false;
+  dragScroll = null;
+}
+function pMove(x, y) {
+  if (!ptr.down) return;
+  var dy = y - ptr.lastY;
+  if (!ptr.moved && Math.abs(y - ptr.sy) + Math.abs(x - ptr.sx) > DRAG_THRESH) {
+    ptr.moved = true;
+    // only start a scroll drag if an overlay with overflow is open and the press
+    // began inside its scroll region (below the tabs/header)
+    if (overlay && scrollMax > 1 && ptr.sy >= scrollContentTop) dragScroll = true;
+  }
+  if (dragScroll) { scrollY = GF.clamp(scrollY - dy, 0, scrollMax); }
+  ptr.lastY = y;
+}
+function pUp(x, y) {
+  if (!ptr.down) return;
+  ptr.down = false;
+  // a real tap (no significant drag) → dispatch the click logic
+  if (!ptr.moved) onTap(ptr.sx, ptr.sy);
+  dragScroll = null;
+}
+cv.addEventListener('mousedown', function (e) { var p = evtXY(e); pDown(p.x, p.y); });
+cv.addEventListener('mousemove', function (e) { if (ptr.down) { var p = evtXY(e); pMove(p.x, p.y); } });
+window.addEventListener('mouseup', function (e) { var p = evtXY(e); pUp(p.x, p.y); });
+cv.addEventListener('touchstart', function (e) { e.preventDefault(); var p = evtXY(e); pDown(p.x, p.y); }, { passive: false });
+cv.addEventListener('touchmove', function (e) { e.preventDefault(); var p = evtXY(e); pMove(p.x, p.y); }, { passive: false });
+cv.addEventListener('touchend', function (e) { e.preventDefault(); var p = evtXY(e); pUp(p.x, p.y); }, { passive: false });
+// desktop wheel scrolls an open overlay
+cv.addEventListener('wheel', function (e) {
+  if (overlay && scrollMax > 1) { scrollY = GF.clamp(scrollY + e.deltaY, 0, scrollMax); }
+}, { passive: true });
 // desktop: Space opens, Escape closes overlay
 document.addEventListener('keydown', function (e) {
   if (e.code === 'Space') {
     e.preventDefault();
-    if (GF.tutorial.active) { GF.tutorial.handleClick(GF.cx, GF.H - 40); return; }
+    startMusicOnce();   // first gesture may be a keypress on desktop
+    if (GF.tutorial.active) { GF.tutorial.handleClick(L.ccx, GF.H - 40); return; }
     if (overlay) return;
     if (reveal) { var isNew = !(owned[reveal.gem.id] > 0); if (isNew) keepGem(); else sellGem(false); return; }
     if (!reel && coins >= SETS[curSet].cost) startSpin(false);
   } else if (e.code === 'Escape' || e.code === 'KeyP') {
-    if (overlay) overlay = null;
+    if (overlay) { overlay = null; scrollY = 0; }
   }
 });
 
@@ -1725,7 +1895,7 @@ document.addEventListener('keydown', function (e) {
 //   n=1 → mid-spin reel; n=2 → an EPIC reveal; n=3 → the Vault with gems;
 //   n>=8 (loop-depth probe) → a rich late-game vault with multiple sets owned.
 window._setupForScreenshot = function (n) {
-  overlay = null; reel = null; reveal = null;
+  overlay = null; reel = null; reveal = null; scrollY = 0;
   try { localStorage.setItem('gem_cases_tut_v1', '1'); } catch (e) {}
   GF.tutorial.active = false;
   // give the player a healthy collection so frames look populated
@@ -1773,7 +1943,14 @@ window._jumpLevel = function (n) {
 
 // extra test seams (named like beast_bazaar's)
 window._gemGrant = function (c) { coins += (+c || 0); saveMeta(); };
-window.__vaultTab = function (i) { overlay = 'VAULT'; vaultTab = GF.clamp(i | 0, 0, SETS.length - 1); };
+window.__vaultTab = function (i) { overlay = 'VAULT'; vaultTab = GF.clamp(i | 0, 0, SETS.length - 1); scrollY = 0; };
+// test seam: set overlay scroll directly (exercise the scroll/clip path headless)
+window.__setScroll = function (v) { scrollY = Math.max(0, +v || 0); };
+// test seams for the QA harness: open an overlay by name + read live layout
+window.__openOverlay = function (name) { overlay = (name === 'RANKS' || name === 'HELP' || name === 'VAULT') ? name : null; scrollY = 0; };
+window.__L = function () { return { CX: L.CX, CW: L.CW, ccx: L.ccx, wide: L.wide, openX: L.openX, openW: L.openW, caseY: L.caseY }; };
+window.__readScroll = function () { return { scrollY: scrollY, scrollMax: scrollMax, top: scrollContentTop }; };
+window.__muteRect = function () { return hit.mute ? { x: hit.mute.x, y: hit.mute.y, w: hit.mute.w, h: hit.mute.h } : null; };
 window._gemOpen = function () { if (!reel && !reveal) startSpin(true); };
 window._gemInfo = function () {
   return {
@@ -1818,7 +1995,7 @@ GF.init({
     layout();
     GF.tutorial.start([
       { text: GF.t('tapOpen'),
-        target: function () { return { x: GF.cx, y: L.openY + L.openH / 2, r: Math.max(L.openW, L.openH) * 0.5 }; },
+        target: function () { return { x: L.ccx, y: L.openY + L.openH / 2, r: Math.max(L.openW, L.openH) * 0.5 }; },
         advance: 'click_target', onAdvance: function () { meta.seenTut = 1; saveMeta(); } },
     ], { storageKey: 'gem_cases_tut_v1' });
     saveMeta();
