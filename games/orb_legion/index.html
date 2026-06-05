@@ -1,0 +1,1604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Orb Champions</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ===========================================================================
+// ORB CHAMPIONS — a match-orb gacha battler (P&D-style core + collection meta)
+// Vanilla JS canvas. Mobile-portrait first (393x852). gf-lib handles canvas,
+// resize, SFX, music, tutorial, particles, shake, persist.
+// ===========================================================================
+
+var ctx = GF.ctx, canvas = GF.canvas;
+
+// ── ELEMENTS ───────────────────────────────────────────────────────────────
+// 6 orb colors. fire/water/wood form a triangle (fire>wood>water>fire);
+// light<->dark counter each other. heart = heal (no attack element).
+var EL = { FIRE:0, WATER:1, WOOD:2, LIGHT:3, DARK:4, HEART:5 };
+var EL_NAME = ['fire','water','wood','light','dark','heart'];
+var ORB_COLS = [
+  { a:'#ff5a3c', b:'#ff8a5a', glow:'#ff7a4a' }, // fire
+  { a:'#37a8ff', b:'#7fd0ff', glow:'#5ec0ff' }, // water
+  { a:'#46c85a', b:'#86e87a', glow:'#62d86a' }, // wood
+  { a:'#ffcf3a', b:'#fff08a', glow:'#ffe05a' }, // light
+  { a:'#a05cff', b:'#c89bff', glow:'#b87cff' }, // dark
+  { a:'#ff6fae', b:'#ffaccd', glow:'#ff8cbe' }, // heart
+];
+// element advantage: attacker EL vs defender EL -> multiplier
+function elMult(att, def) {
+  if (att === EL.FIRE  && def === EL.WOOD)  return 2;
+  if (att === EL.WOOD  && def === EL.WATER) return 2;
+  if (att === EL.WATER && def === EL.FIRE)  return 2;
+  if (att === EL.LIGHT && def === EL.DARK)  return 2;
+  if (att === EL.DARK  && def === EL.LIGHT) return 2;
+  // weakness (half)
+  if (att === EL.WOOD  && def === EL.FIRE)  return 0.5;
+  if (att === EL.WATER && def === EL.WOOD)  return 0.5;
+  if (att === EL.FIRE  && def === EL.WATER) return 0.5;
+  if (att === EL.LIGHT && def === EL.LIGHT) return 0.5;
+  if (att === EL.DARK  && def === EL.DARK)  return 0.5;
+  return 1;
+}
+
+// ── ROSTER (12 collectibles) ────────────────────────────────────────────────
+// Each: id, name(en/ru), element, base atk/hp, rarity(3/4/5), asset key.
+var ROSTER = [
+  { id:'emberpup',   en:'Emberpup',    ru:'Угольпёс',    el:EL.FIRE,  atk:88,  hp:520, rar:3, art:'beast_emberpup' },
+  { id:'cinderhound',en:'Cinderhound', ru:'Пепелгончая', el:EL.FIRE,  atk:118, hp:640, rar:4, art:'beast_cinderhound' },
+  { id:'magmadrake', en:'Magmadrake',  ru:'Магмадракон', el:EL.FIRE,  atk:165, hp:900, rar:5, art:'beast_magmadrake' },
+  { id:'tidefin',    en:'Tidefin',     ru:'Приливень',   el:EL.WATER, atk:90,  hp:560, rar:3, art:'beast_tidefin' },
+  { id:'marina',     en:'Marina',      ru:'Марина',      el:EL.WATER, atk:158, hp:880, rar:5, art:'hero_marina' },
+  { id:'mossback',   en:'Mossback',    ru:'Мохоспин',    el:EL.WOOD,  atk:80,  hp:680, rar:3, art:'beast_mossback' },
+  { id:'thornbeast', en:'Thornbeast',  ru:'Терновень',   el:EL.WOOD,  atk:150, hp:980, rar:5, art:'beast_thornbeast' },
+  { id:'sparkwing',  en:'Sparkwing',   ru:'Искрокрыл',   el:EL.LIGHT, atk:112, hp:540, rar:4, art:'beast_sparkwing' },
+  { id:'lumenowl',   en:'Lumenowl',    ru:'Светосов',    el:EL.LIGHT, atk:128, hp:620, rar:4, art:'beast_lumenowl' },
+  { id:'solara',     en:'Solara',      ru:'Солара',      el:EL.LIGHT, atk:170, hp:860, rar:5, art:'hero_solara' },
+  { id:'nightmaw',   en:'Nightmaw',    ru:'Тенепасть',   el:EL.DARK,  atk:120, hp:600, rar:4, art:'beast_nightmaw' },
+  { id:'kael',       en:'Kael',        ru:'Каэл',        el:EL.DARK,  atk:168, hp:840, rar:5, art:'hero_kael' },
+];
+function rosterById(id){ for(var i=0;i<ROSTER.length;i++) if(ROSTER[i].id===id) return ROSTER[i]; return null; }
+// star-up: +12% atk / +12% hp per star above 1 (dupes raise stars, cap 5)
+function unitStats(id, stars){
+  var b = rosterById(id); if(!b) return {atk:0,hp:0};
+  var k = 1 + 0.12*(Math.max(1,stars)-1);
+  return { atk: Math.round(b.atk*k), hp: Math.round(b.hp*k) };
+}
+
+// ── STRINGS ──────────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title:'Orb Champions', sub:'Match orbs, power your champions, win the gauntlet',
+    play:'PLAY', tapstart:'TAP TO START', retry:'RETRY', next:'NEXT WAVE', cont:'CONTINUE',
+    stage:'STAGE', wave:'WAVE', boss:'BOSS', combo:'COMBO', victory:'VICTORY!', defeat:'DEFEATED',
+    team:'TEAM', collection:'CHAMPIONS', summon:'SUMMON', back:'BACK', hub:'MENU',
+    essence:'Essence', tickets:'Tickets', pity:'Pity', rateup:'Rate-up 5',
+    summon1:'Summon x1', summon10:'Summon x10', need:'Need', free:'FREE', claim:'CLAIM',
+    daily:'Daily Gift', dailygot:'Come back tomorrow', newunit:'NEW CHAMPION', starup:'STAR UP!',
+    equip:'In Team', addteam:'Add', full:'Team full', remove:'Remove', power:'Power',
+    stagewin:'STAGE CLEARED', allclear:'GAUNTLET CLEARED!', stagesel:'CHOOSE STAGE',
+    locked:'Locked', tutdrag:'Drag an orb to line up 3 of one color', tutmatch:'Match colors your champions share to attack!',
+    tutspawn:'Great! Drag again to chain more combos', adwatch:'+50 Essence (Ad)', skip:'skip',
+    moves:'Moves', healed:'Healed', weak:'WEAK!', super:'SUPER!', goal:'Defeat all waves to clear the stage',
+    teamhint:'Pick 5 champions. Match an orb color to attack with champions of that element.',
+    collhint:'Tap a champion to add to your team. Dupes raise stars (power).',
+    enemyhp:'HP', start:'START STAGE', noenergy:'', summonhint:'Every 30 summons guarantees a 5-star champion (pity).',
+    rerollteam:'Auto Team', mute:'Sound',
+  },
+  ru: {
+    title:'Орб-Чемпионы', sub:'Собирай орбы, усиливай чемпионов, пройди арену',
+    play:'ИГРАТЬ', tapstart:'НАЖМИ ДЛЯ СТАРТА', retry:'ЕЩЁ РАЗ', next:'ВОЛНА ДАЛЕЕ', cont:'ДАЛЕЕ',
+    stage:'ЭТАП', wave:'ВОЛНА', boss:'БОСС', combo:'КОМБО', victory:'ПОБЕДА!', defeat:'ПОРАЖЕНИЕ',
+    team:'ОТРЯД', collection:'ЧЕМПИОНЫ', summon:'ПРИЗЫВ', back:'НАЗАД', hub:'МЕНЮ',
+    essence:'Эссенция', tickets:'Билеты', pity:'Гарант', rateup:'Шанс 5',
+    summon1:'Призыв x1', summon10:'Призыв x10', need:'Нужно', free:'БЕСПЛАТНО', claim:'ЗАБРАТЬ',
+    daily:'Дар дня', dailygot:'Зайди завтра', newunit:'НОВЫЙ ЧЕМПИОН', starup:'ЗВЕЗДА+!',
+    equip:'В отряде', addteam:'В отряд', full:'Отряд полон', remove:'Убрать', power:'Сила',
+    stagewin:'ЭТАП ПРОЙДЕН', allclear:'АРЕНА ПРОЙДЕНА!', stagesel:'ВЫБОР ЭТАПА',
+    locked:'Закрыто', tutdrag:'Веди орб, чтобы собрать 3 одного цвета', tutmatch:'Собирай цвета своих чемпионов для атаки!',
+    tutspawn:'Отлично! Веди снова, собери больше комбо', adwatch:'+50 Эссенции (видео)', skip:'пропустить',
+    moves:'Ходы', healed:'Лечение', weak:'СЛАБО!', super:'СУПЕР!', goal:'Победи все волны этапа',
+    teamhint:'Выбери 5 чемпионов. Собери цвет орбов для атаки чемпионами этой стихии.',
+    collhint:'Нажми чемпиона, чтобы добавить в отряд. Дубли дают звёзды (силу).',
+    enemyhp:'HP', start:'НАЧАТЬ ЭТАП', noenergy:'', summonhint:'Каждые 30 призывов гарантируют 5-зв чемпиона (гарант).',
+    rerollteam:'Авто-отряд', mute:'Звук',
+  },
+};
+
+// ── STAGES (4) ───────────────────────────────────────────────────────────────
+// each: bg, theme element-ish, waves array; last wave is boss. enemy: el, hp, atk, turns(cooldown).
+function mkEnemy(el, hp, atk, turns, boss){ return { el:el, hpMax:hp, hp:hp, atk:atk, turns:turns, cd:turns, boss:!!boss }; }
+var STAGES = [
+  { name:{en:'Cinder Cavern',ru:'Угольная пещера'}, bg:'bg_volcano', waves:[
+      [mkEnemy(EL.WOOD,360,60,3)],
+      [mkEnemy(EL.WOOD,320,55,3), mkEnemy(EL.FIRE,300,70,3)],
+      [mkEnemy(EL.FIRE,1100,130,3,true)],
+  ]},
+  { name:{en:'Tidal Reef',ru:'Приливный риф'}, bg:'bg_ocean', waves:[
+      [mkEnemy(EL.FIRE,520,90,2)],
+      [mkEnemy(EL.LIGHT,440,85,2), mkEnemy(EL.WATER,460,95,3)],
+      [mkEnemy(EL.DARK,520,100,2)],
+      [mkEnemy(EL.WATER,2200,180,3,true)],
+  ]},
+  { name:{en:'Verdant Glade',ru:'Зелёная роща'}, bg:'bg_forest', waves:[
+      [mkEnemy(EL.WATER,640,110,2), mkEnemy(EL.WATER,560,100,2)],
+      [mkEnemy(EL.WOOD,720,120,2), mkEnemy(EL.LIGHT,600,115,3)],
+      [mkEnemy(EL.DARK,700,130,2), mkEnemy(EL.FIRE,640,120,2)],
+      [mkEnemy(EL.WOOD,2900,210,2,true)],
+  ]},
+  { name:{en:'Void Sanctum',ru:'Святилище бездны'}, bg:'bg_void', waves:[
+      [mkEnemy(EL.LIGHT,820,140,2), mkEnemy(EL.DARK,820,140,2)],
+      [mkEnemy(EL.FIRE,900,150,2), mkEnemy(EL.WATER,900,150,2), mkEnemy(EL.WOOD,820,140,2)],
+      [mkEnemy(EL.LIGHT,1000,170,2), mkEnemy(EL.DARK,1000,170,2)],
+      [mkEnemy(EL.DARK,4200,260,2,true)],
+  ]},
+];
+
+// ── META STATE (persisted) ───────────────────────────────────────────────────
+var meta = {
+  v: 1,
+  owned: {},        // id -> {stars, count}
+  team: [],         // up to 5 ids
+  essence: 0,
+  tickets: 1,       // start with one free pull
+  summons: 0,       // pity counter (resets at 30 on a 5*)
+  stageUnlocked: 0, // index of furthest stage cleared (0 = stage 1 available)
+  lastDaily: 0,     // day-number of last daily claim
+  seenTut: false,
+};
+var SAVE_KEY = 'orbchamp_v1';
+
+function saveMeta() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(meta)); } catch (e) {}
+}
+function loadMeta() {
+  try {
+    var raw = localStorage.getItem(SAVE_KEY);
+    if (raw) {
+      var s = JSON.parse(raw);
+      if (s && typeof s === 'object') {
+        meta.owned = s.owned || {};
+        meta.team = Array.isArray(s.team) ? s.team.slice(0,5) : [];
+        meta.essence = Math.max(0, s.essence|0);
+        meta.tickets = Math.max(0, s.tickets|0);
+        meta.summons = Math.max(0, s.summons|0);
+        meta.stageUnlocked = GF.clamp(s.stageUnlocked|0, 0, STAGES.length-1);
+        meta.lastDaily = s.lastDaily|0;
+        meta.seenTut = !!s.seenTut;
+      }
+    }
+  } catch (e) {}
+  // First-run grant: a 4-element starter so the player always has a playable
+  // team that can attack the early stages (fire/water/wood/light coverage).
+  if (Object.keys(meta.owned).length === 0) {
+    grantUnit('emberpup', true); grantUnit('tidefin', true);
+    grantUnit('mossback', true); grantUnit('sparkwing', true);
+  }
+  // Ensure a valid team (fill from owned).
+  rebuildTeamIfNeeded();
+}
+function dayNumber(){ return Math.floor(Date.now()/86400000); }
+
+function grantUnit(id, silent) {
+  var o = meta.owned[id];
+  var isNew = !o;
+  if (!o) { o = meta.owned[id] = { stars: rosterById(id).rar>=5?1: (rosterById(id).rar>=4?1:1), count:0 }; }
+  o.count++;
+  if (!isNew) {
+    // dupe -> star up (cap 5), plus a little essence
+    if (o.stars < 5) o.stars++;
+    meta.essence += 30;
+  }
+  if (!silent) {
+    pullReveal = { id:id, isNew:isNew, stars:o.stars, t:0 };
+  }
+  return isNew;
+}
+function rebuildTeamIfNeeded() {
+  // drop any team ids no longer owned
+  meta.team = meta.team.filter(function(id){ return meta.owned[id]; });
+  // auto-fill up to 5 from owned (prefer higher rarity) if team empty/short
+  if (meta.team.length < 5) {
+    var ids = Object.keys(meta.owned).filter(function(id){ return meta.team.indexOf(id)<0; });
+    ids.sort(function(a,b){ return rosterById(b).rar - rosterById(a).rar; });
+    for (var i=0; i<ids.length && meta.team.length<5; i++) meta.team.push(ids[i]);
+  }
+}
+
+// ── GACHA ────────────────────────────────────────────────────────────────────
+// rate-up: the banner 5* (rotates daily) has boosted odds. pity at 30.
+var PITY = 30;
+function bannerFeatured(){ // rotates so it feels like a real rate-up banner
+  var fives = ROSTER.filter(function(u){return u.rar===5;});
+  return fives[dayNumber() % fives.length].id;
+}
+function rollUnit(forceFive) {
+  var r = Math.random();
+  var rar;
+  if (forceFive) rar = 5;
+  else if (r < 0.04) rar = 5;       // 4%
+  else if (r < 0.20) rar = 4;       // 16%
+  else rar = 3;                     // 80%
+  var pool = ROSTER.filter(function(u){return u.rar===rar;});
+  // rate-up: on a 5*, 50% chance it's the featured one
+  if (rar === 5 && Math.random() < 0.5) return bannerFeatured();
+  return pool[(Math.random()*pool.length)|0].id;
+}
+function doSummon(n) {
+  var got = [];
+  for (var i=0;i<n;i++) {
+    meta.summons++;
+    var force = (meta.summons >= PITY);
+    var id = rollUnit(force);
+    if (rosterById(id).rar === 5) meta.summons = 0; // pity resets on any 5*
+    got.push(id);
+  }
+  // apply grants (reveal only the best/last for x1; for x10 reveal a summary)
+  var anyNew = false, bestRar = 0, bestId = got[0];
+  for (var j=0;j<got.length;j++) {
+    var isNew = grantUnit(got[j], true);
+    anyNew = anyNew || isNew;
+    if (rosterById(got[j]).rar > bestRar) { bestRar = rosterById(got[j]).rar; bestId = got[j]; }
+  }
+  rebuildTeamIfNeeded();
+  saveMeta();
+  return { got:got, bestId:bestId, bestRar:bestRar, anyNew:anyNew };
+}
+
+// ===========================================================================
+//  GAME / BATTLE STATE
+// ===========================================================================
+var gs = 'MENU'; // MENU | STAGESEL | TEAM | COLLECTION | SUMMON | BATTLE
+var battle = null;
+var pullReveal = null;     // {id,isNew,stars,t}
+var summonResult = null;   // x10 summary overlay {got,...,t}
+var dailyToast = 0;
+var muteBtn = null;        // rect
+
+// board geometry (computed each layout)
+var BC = 6, BR = 5;        // 6 wide, 5 tall
+var board = [];            // board[r][c] = element id (0..5)
+var L = {};                // layout rects
+
+// ── BATTLE OBJECT ─────────────────────────────────────────────────────────
+function newBattle(stageIdx) {
+  var st = STAGES[stageIdx];
+  // deep copy waves so hp resets per battle
+  var waves = st.waves.map(function(w){ return w.map(function(e){ return mkEnemy(e.el, e.hpMax, e.atk, e.turns, e.boss); }); });
+  // team units with current stats + current hp
+  var units = meta.team.slice(0,5).map(function(id){
+    var s = unitStats(id, meta.owned[id]?meta.owned[id].stars:1);
+    return { id:id, el:rosterById(id).el, atk:s.atk, hpMax:s.hp, hp:s.hp, art:rosterById(id).art, hitFlash:0, atkAnim:0 };
+  });
+  var teamHpMax = units.reduce(function(a,u){return a+u.hpMax;},0) || 1;
+  battle = {
+    stageIdx: stageIdx, st: st, waves: waves, waveIdx: 0,
+    enemies: waves[0], units: units,
+    teamHp: teamHpMax, teamHpMax: teamHpMax,
+    phase: 'INPUT',   // INPUT | RESOLVE | ENEMY | WIN | LOSE | WAVECLEAR
+    moveTimer: 0, moveMax: 5.0,  // seconds to drag
+    dragOrb: null,  // {r,c, origEl, x,y, fromR, fromC}
+    combos: [], comboShown: 0, resolveT: 0,
+    pendingAd: false, reviveUsed: false,
+    bgShakeT: 0, comboFlash: 0, lastComboCount: 0,
+    enemyTurnT: 0, enemyActing: -1,
+    floatDmg: [], // {x,y,txt,col,t,vy}
+    waveBanner: 0,
+  };
+  fillBoardFull();
+  ensurePlayableBoard();
+}
+
+function startBattle(stageIdx) {
+  newBattle(stageIdx);
+  gs = 'BATTLE';
+  GF.gameStarted();
+  saveMeta();
+}
+
+// ── BOARD MECHANICS ─────────────────────────────────────────────────────────
+function randEl(){ return (Math.random()*6)|0; }
+function fillBoardFull() {
+  board = [];
+  for (var r=0;r<BR;r++){ board[r]=[]; for(var c=0;c<BC;c++) board[r][c]=randEl(); }
+  // avoid pre-made 3-matches at start so the first move is the player's
+  for (var pass=0; pass<8; pass++){
+    var m = findMatches();
+    if (!m.cells.length) break;
+    for (var k=0;k<m.cells.length;k++){ var cc=m.cells[k]; board[cc.r][cc.c]=randEl(); }
+  }
+}
+// detect all horizontal/vertical runs >=3. Returns {groups:[{el,cells:[]}], cells:[]}.
+function findMatches() {
+  var mark = [];
+  for (var r=0;r<BR;r++){ mark[r]=[]; for(var c=0;c<BC;c++) mark[r][c]=false; }
+  // horizontal
+  for (var r2=0;r2<BR;r2++){
+    var run=1;
+    for (var c2=1;c2<=BC;c2++){
+      if (c2<BC && board[r2][c2]===board[r2][c2-1]) run++;
+      else { if (run>=3){ for(var i=0;i<run;i++) mark[r2][c2-1-i]=true; } run=1; }
+    }
+  }
+  // vertical
+  for (var c3=0;c3<BC;c3++){
+    var run2=1;
+    for (var r3=1;r3<=BR;r3++){
+      if (r3<BR && board[r3][c3]===board[r3-1][c3]) run2++;
+      else { if (run2>=3){ for(var j=0;j<run2;j++) mark[r3-1-j][c3]=true; } run2=1; }
+    }
+  }
+  // group marked cells into connected same-color combos (flood fill)
+  var seen=[]; for(var rr=0;rr<BR;rr++){seen[rr]=[];for(var cc2=0;cc2<BC;cc2++)seen[rr][cc2]=false;}
+  var groups=[], all=[];
+  for (var ra=0;ra<BR;ra++) for (var ca=0;ca<BC;ca++){
+    if (mark[ra][ca] && !seen[ra][ca]){
+      var el=board[ra][ca], stack=[[ra,ca]], cells=[];
+      seen[ra][ca]=true;
+      while(stack.length){
+        var p=stack.pop(); cells.push({r:p[0],c:p[1]}); all.push({r:p[0],c:p[1]});
+        var nb=[[p[0]+1,p[1]],[p[0]-1,p[1]],[p[0],p[1]+1],[p[0],p[1]-1]];
+        for (var n=0;n<nb.length;n++){ var nr=nb[n][0],nc=nb[n][1];
+          if(nr>=0&&nr<BR&&nc>=0&&nc<BC&&!seen[nr][nc]&&mark[nr][nc]&&board[nr][nc]===el){ seen[nr][nc]=true; stack.push([nr,nc]); }
+        }
+      }
+      groups.push({el:el, cells:cells});
+    }
+  }
+  return { groups:groups, cells:all };
+}
+// collapse: remove cells, drop above, refill top
+function collapseBoard(cells) {
+  for (var k=0;k<cells.length;k++) board[cells[k].r][cells[k].c] = -1;
+  for (var c=0;c<BC;c++){
+    var write=BR-1;
+    for (var r=BR-1;r>=0;r--){
+      if (board[r][c]!==-1){ board[write][c]=board[r][c]; if(write!==r) board[r][c]=-1; write--; }
+    }
+    for (var r2=write;r2>=0;r2--) board[r2][c]=randEl();
+  }
+}
+
+// ── RESOLVE A MOVE (cascade combos -> damage) ────────────────────────────────
+function resolveMove() {
+  battle.phase = 'RESOLVE';
+  battle.combos = [];
+  battle.comboShown = 0;
+  battle.resolveT = 0;
+  // gather cascade synchronously into a queue of combo events
+  var comboCount = 0;
+  var elementHits = {}; // el -> total orbs cleared this move
+  while (true) {
+    var m = findMatches();
+    if (!m.cells.length) break;
+    for (var g=0; g<m.groups.length; g++) {
+      comboCount++;
+      var grp = m.groups[g];
+      elementHits[grp.el] = (elementHits[grp.el]||0) + grp.cells.length;
+      battle.combos.push({ el:grp.el, cells:grp.cells.slice(), n:grp.cells.length, idx:comboCount });
+    }
+    collapseBoard(m.cells);
+  }
+  battle.lastComboCount = comboCount;
+  // compute damage AFTER combo count known (combo multiplier).
+  // combo multiplier: +25% per combo beyond first
+  var comboMult = 1 + 0.25*Math.max(0, comboCount-1);
+  battle._elementHits = elementHits;
+  battle._comboMult = comboMult;
+  battle._dmgApplied = false;
+  if (comboCount === 0) { battle.phase = 'ENEMY'; battle.enemyTurnT=0; battle.enemyActing=-1; return; }
+  GF.setShake(comboCount>=4?1.0:0.4);
+  battle.comboFlash = 1;
+}
+
+// apply the damage from the resolved combos to enemies (called after anim)
+function applyDamage() {
+  if (battle._dmgApplied) return;
+  battle._dmgApplied = true;
+  var hits = battle._elementHits, comboMult = battle._comboMult;
+  var healOrbs = hits[EL.HEART] || 0;
+  // heal team from heart orbs
+  if (healOrbs > 0) {
+    var heal = Math.round(healOrbs * 60 * comboMult);
+    battle.teamHp = Math.min(battle.teamHpMax, battle.teamHp + heal);
+    floatUp(L.teamY, '+'+heal, '#ff8cbe');
+    GF.sfx('pickup');
+  }
+  // for each element with cleared orbs, the matching team units attack
+  var anyAttack = false;
+  for (var el=0; el<5; el++) {
+    var orbs = hits[el] || 0;
+    if (!orbs) continue;
+    // base per-orb damage scaled by combo, summed across team units of that element
+    var attackers = battle.units.filter(function(u){ return u.hp>0 && u.el===el; });
+    if (!attackers.length) continue;
+    anyAttack = true;
+    // total power = sum(unit.atk) * orbsFactor * comboMult
+    var orbsFactor = 1 + (orbs-3)*0.5;  // more orbs in the combo = bigger hit
+    if (orbsFactor < 1) orbsFactor = 1;
+    var teamPow = 0;
+    for (var a=0;a<attackers.length;a++){ teamPow += attackers[a].atk; attackers[a].atkAnim = 1; }
+    // distribute to a target enemy (focus weakest-to-this-element first, else first alive)
+    var alive = battle.enemies.filter(function(e){return e.hp>0;});
+    if (!alive.length) continue;
+    // pick target: prefer one we're strong against
+    var target = alive[0], bestM = 0;
+    for (var t=0;t<alive.length;t++){ var mm=elMult(el, alive[t].el); if(mm>bestM){bestM=mm; target=alive[t];} }
+    var mult = elMult(el, target.el);
+    var dmg = Math.round(teamPow * orbsFactor * comboMult * mult);
+    target.hp = Math.max(0, target.hp - dmg);
+    target.hitFlash = 1;
+    var label = dmg;
+    var col = mult>1 ? '#ffe05a' : (mult<1 ? '#9fb6c8' : '#ffffff');
+    floatUp(enemyAnchorY(target), ''+dmg, col, ORB_COLS[el].glow);
+    if (mult>1) floatUp(enemyAnchorY(target)-26*GF.S, GF.t('super'), '#ffd23a');
+    else if (mult<1) floatUp(enemyAnchorY(target)-26*GF.S, GF.t('weak'), '#9fb6c8');
+    GF.sfx('hit');
+  }
+  if (anyAttack) GF.setShake(0.5);
+  // check wave/battle outcome
+  if (battle.enemies.every(function(e){return e.hp<=0;})) {
+    advanceWaveOrWin();
+  } else {
+    battle.phase = 'ENEMY'; battle.enemyTurnT = 0; battle.enemyActing=-1;
+  }
+}
+
+function advanceWaveOrWin() {
+  battle.waveIdx++;
+  if (battle.waveIdx >= battle.waves.length) {
+    battle.phase = 'WIN';
+    onBattleWin();
+  } else {
+    battle.enemies = battle.waves[battle.waveIdx];
+    battle.phase = 'WAVECLEAR';
+    battle.waveBanner = 1.4;
+    GF.sfx('levelup');
+  }
+}
+
+// enemy turn: each alive enemy ticks cooldown; when 0, attacks team
+function enemyTurnStep(dt) {
+  battle.enemyTurnT += dt;
+  // simple: after a short telegraph, all ready enemies hit, then back to input
+  if (battle.enemyTurnT < 0.45) return;
+  var totalDmg = 0;
+  for (var i=0;i<battle.enemies.length;i++){
+    var e = battle.enemies[i];
+    if (e.hp<=0) continue;
+    e.cd--;
+    if (e.cd<=0){ e.cd = e.turns; totalDmg += e.atk; e.atkAnim = 1; }
+  }
+  if (totalDmg>0) {
+    battle.teamHp = Math.max(0, battle.teamHp - totalDmg);
+    floatUp(L.teamY-30*GF.S, '-'+totalDmg, '#ff5a5a');
+    GF.sfx('hurt'); GF.setShake(0.6);
+    // flash a couple of units
+    for (var u=0;u<battle.units.length;u++){ if(battle.units[u].hp>0) battle.units[u].hitFlash=1; }
+  }
+  if (battle.teamHp<=0) {
+    battle.phase = 'LOSE';
+    onBattleLose();
+  } else {
+    // new move
+    battle.phase = 'INPUT';
+    battle.moveTimer = 0;
+    ensurePlayableBoard(); // guarantee a move exists (reshuffle if stuck)
+  }
+}
+// true if SOME adjacent swap would create a >=3 match (a real playable move)
+function hasValidMove(){
+  function makesMatch(){ return findMatches().cells.length>0; }
+  for (var r=0;r<BR;r++) for (var c=0;c<BC;c++){
+    // try swap right
+    if (c+1<BC){ swap(r,c,r,c+1); var ok=makesMatch(); swap(r,c,r,c+1); if(ok) return true; }
+    if (r+1<BR){ swap(r,c,r+1,c); var ok2=makesMatch(); swap(r,c,r+1,c); if(ok2) return true; }
+  }
+  return false;
+}
+function swap(r1,c1,r2,c2){ var t=board[r1][c1]; board[r1][c1]=board[r2][c2]; board[r2][c2]=t; }
+function ensurePlayableBoard(){
+  // reshuffle until at least one move exists AND no pre-made match (clean start)
+  var guard=0;
+  while (guard++<30){
+    if (findMatches().cells.length>0){ // clear any accidental pre-matches first
+      var m=findMatches(); for(var k=0;k<m.cells.length;k++) board[m.cells[k].r][m.cells[k].c]=randEl();
+      continue;
+    }
+    if (hasValidMove()) return;
+    fillBoardFull(); // fillBoardFull already strips pre-matches
+  }
+}
+
+function onBattleWin() {
+  GF.sfx('win'); GF.happytime();
+  // rewards: essence + a ticket; unlock next stage
+  var reward = 60 + battle.stageIdx*40;
+  meta.essence += reward;
+  meta.tickets += 1;
+  if (battle.stageIdx >= meta.stageUnlocked && battle.stageIdx < STAGES.length-1) {
+    meta.stageUnlocked = battle.stageIdx+1;
+  }
+  battle._rewardEss = reward;
+  saveMeta();
+  GF.gameEnded();
+}
+function onBattleLose() {
+  GF.sfx('lose');
+  battle.pendingAd = true; // offer revive via rewarded ad
+  GF.gameEnded();
+}
+
+// ── FLOATERS ──────────────────────────────────────────────────────────────
+function floatUp(y, txt, col, glow) {
+  battle.floatDmg.push({ x: GF.cx + (Math.random()-0.5)*60*GF.S, y:y, txt:txt, col:col, glow:glow||null, t:0, vy:-1.4*GF.S });
+}
+function enemyAnchorY(e){ return L.enemyY + 30*GF.S; }
+
+// ===========================================================================
+//  LAYOUT
+// ===========================================================================
+function layout() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  L = {};
+  L.topH = H * 0.30;          // enemy zone
+  L.teamH = H * 0.135;        // team strip
+  // board zone fills the rest
+  var pad = Math.max(6, W*0.012);
+  L.boardTop = L.topH + L.teamH;
+  var boardAreaH = H - L.boardTop - pad;
+  var boardAreaW = W - pad*2;
+  var cell = Math.min(boardAreaW/BC, boardAreaH/BR);
+  L.cell = cell;
+  L.boardW = cell*BC; L.boardH = cell*BR;
+  L.boardX = (W - L.boardW)/2;
+  L.boardY = L.boardTop + (boardAreaH - L.boardH)/2 + pad*0.5;
+  L.enemyY = L.topH*0.42;
+  L.teamY = L.topH + L.teamH*0.5;
+  // hud
+  L.hudY = 8*S;
+}
+
+function cellRect(r,c){ return { x:L.boardX + c*L.cell, y:L.boardY + r*L.cell, s:L.cell }; }
+function cellCenter(r,c){ return { x:L.boardX + c*L.cell + L.cell/2, y:L.boardY + r*L.cell + L.cell/2 }; }
+function cellAt(px,py){
+  if (px<L.boardX||px>L.boardX+L.boardW||py<L.boardY||py>L.boardY+L.boardH) return null;
+  var c = Math.floor((px-L.boardX)/L.cell), r = Math.floor((py-L.boardY)/L.cell);
+  if (r<0||r>=BR||c<0||c>=BC) return null;
+  return { r:r, c:c };
+}
+
+// ===========================================================================
+//  INPUT (pointer events; tight drag with rect-scale recompute each event)
+// ===========================================================================
+function evtPos(e) {
+  var rect = canvas.getBoundingClientRect();
+  var sx = canvas.width / rect.width, sy = canvas.height / rect.height;
+  var cx = (e.touches ? e.touches[0].clientX : e.clientX);
+  var cy = (e.touches ? e.touches[0].clientY : e.clientY);
+  return { x: (cx - rect.left)*sx, y: (cy - rect.top)*sy };
+}
+var pointerDown = false;
+
+function onDown(x,y) {
+  // mute toggle (global)
+  if (muteBtn && hit(muteBtn, x, y)) { var m=GF.toggleMute(); GF.setMusicMuted(m); GF.sfx('tap'); return; }
+  // route to screen
+  if (gs === 'MENU') return menuClick(x,y);
+  if (gs === 'STAGESEL') return stageSelClick(x,y);
+  if (gs === 'TEAM') return teamClick(x,y);
+  if (gs === 'COLLECTION') return collClick(x,y);
+  if (gs === 'SUMMON') return summonClick(x,y);
+  if (gs === 'BATTLE') return battleDown(x,y);
+}
+function onMove(x,y) {
+  if (gs === 'BATTLE' && battle && battle.dragOrb && battle.phase==='INPUT') {
+    var dr = battle.dragOrb;
+    dr.x = x; dr.y = y;
+    var cell = cellAt(x,y);
+    if (cell && (cell.r!==dr.curR || cell.c!==dr.curC)) {
+      // swap dragged orb with the cell it moved into (P&D style)
+      var tmp = board[cell.r][cell.c];
+      board[cell.r][cell.c] = board[dr.curR][dr.curC];
+      board[dr.curR][dr.curC] = tmp;
+      dr.curR = cell.r; dr.curC = cell.c;
+      GF.sfx('tap');
+    }
+  }
+}
+function onUp(x,y) {
+  if (gs === 'BATTLE' && battle && battle.dragOrb) {
+    battle.dragOrb = null;
+    if (battle.phase==='INPUT') {
+      battle.phase = 'PRERESOLVE';
+      battle._preT = 0;
+    }
+  }
+}
+
+canvas.addEventListener('mousedown', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); });
+window.addEventListener('mousemove', function(e){ if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); });
+window.addEventListener('mouseup', function(e){ if(!pointerDown) return; pointerDown=false; var p=evtPos(e); onUp(p.x,p.y); });
+canvas.addEventListener('touchstart', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); }, {passive:false});
+canvas.addEventListener('touchmove', function(e){ e.preventDefault(); if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); }, {passive:false});
+canvas.addEventListener('touchend', function(e){ e.preventDefault(); if(!pointerDown) return; pointerDown=false; var t=e.changedTouches[0]; var rect=canvas.getBoundingClientRect(); var sx=canvas.width/rect.width, sy=canvas.height/rect.height; onUp((t.clientX-rect.left)*sx,(t.clientY-rect.top)*sy); }, {passive:false});
+
+function battleDown(x,y) {
+  // back-to-menu button (top-left)
+  if (L.backBtn && hit(L.backBtn,x,y)) { confirmQuitToHub(); return; }
+  if (battle.phase==='WIN') { return winClick(x,y); }
+  if (battle.phase==='LOSE') { return loseClick(x,y); }
+  if (battle.phase==='WAVECLEAR') return; // auto
+  if (battle.phase!=='INPUT') return;
+  // tutorial intercept
+  if (GF.tutorial.active) { /* allow drag to fall through; tutorial advances on real action */ }
+  var cell = cellAt(x,y);
+  if (!cell) return;
+  battle.dragOrb = { fromR:cell.r, fromC:cell.c, curR:cell.r, curC:cell.c, el:board[cell.r][cell.c], x:x, y:y };
+  if (battle.moveTimer<=0) battle.moveTimer = 0.0001; // start the move clock on first grab
+  GF.sfx('tap');
+}
+
+function confirmQuitToHub() {
+  // simply return to stage select (progress is per-stage, not mid-battle saved)
+  gs = 'STAGESEL'; battle = null; GF.sfx('tap');
+}
+
+function hit(r,x,y){ return r && x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
+
+// ===========================================================================
+//  UPDATE
+// ===========================================================================
+function update(dt) {
+  GF.tutorial.update(dt);
+  if (dailyToast>0) dailyToast -= dt;
+  if (pullReveal) { pullReveal.t += dt; }
+  if (summonResult) { summonResult.t += dt; }
+  if (gs !== 'BATTLE' || !battle) return;
+  var b = battle;
+  // animate unit/enemy flashes
+  for (var i=0;i<b.units.length;i++){ if(b.units[i].hitFlash>0) b.units[i].hitFlash-=dt*3; if(b.units[i].atkAnim>0) b.units[i].atkAnim-=dt*2.2; }
+  for (var j=0;j<b.enemies.length;j++){ if(b.enemies[j].hitFlash>0) b.enemies[j].hitFlash-=dt*3; if(b.enemies[j].atkAnim>0) b.enemies[j].atkAnim-=dt*2.2; }
+  if (b.comboFlash>0) b.comboFlash-=dt*1.5;
+  if (b.waveBanner>0) b.waveBanner-=dt;
+  // floaters
+  for (var f=b.floatDmg.length-1;f>=0;f--){ var fl=b.floatDmg[f]; fl.y+=fl.vy; fl.t+=dt; if(fl.t>1.1) b.floatDmg.splice(f,1); }
+
+  if (b.phase==='INPUT') {
+    if (b.dragOrb && b.moveTimer>=0.0001) {
+      b.moveTimer += dt;
+      if (b.moveTimer >= b.moveMax) {
+        // time up — drop the orb, resolve
+        b.dragOrb = null; b.phase='PRERESOLVE'; b._preT=0;
+      }
+    }
+  } else if (b.phase==='PRERESOLVE') {
+    b._preT += dt;
+    if (b._preT > 0.12) resolveMove();
+  } else if (b.phase==='RESOLVE') {
+    b.resolveT += dt;
+    // reveal combos one by one then apply damage
+    var revealEvery = 0.16;
+    var shouldShow = Math.min(b.combos.length, Math.floor(b.resolveT/revealEvery)+1);
+    if (shouldShow > b.comboShown) {
+      b.comboShown = shouldShow;
+      GF.sfx('coin');
+      GF.setShake(Math.min(1.2, 0.2 + b.comboShown*0.08));
+    }
+    if (b.comboShown >= b.combos.length && b.resolveT > b.combos.length*revealEvery + 0.18) {
+      applyDamage();
+      // tutorial: advance after first successful resolve with attacks
+      if (GF.tutorial.active) GF.tutorial.next();
+    }
+  } else if (b.phase==='ENEMY') {
+    enemyTurnStep(dt);
+  } else if (b.phase==='WAVECLEAR') {
+    if (b.waveBanner<=0) { b.phase='INPUT'; b.moveTimer=0; ensurePlayableBoard(); }
+  }
+}
+
+// ===========================================================================
+//  DRAW
+// ===========================================================================
+function draw() {
+  var W=GF.W, H=GF.H, S=GF.S;
+  layout();
+  ctx.fillStyle = '#0a0a14'; ctx.fillRect(0,0,W,H);
+  if (gs==='BATTLE' && battle) drawBattle();
+  else if (gs==='MENU') drawMenu();
+  else if (gs==='STAGESEL') drawStageSel();
+  else if (gs==='TEAM') drawTeam();
+  else if (gs==='COLLECTION') drawCollection();
+  else if (gs==='SUMMON') drawSummon();
+  // global mute icon top-right
+  drawMute();
+  // overlays
+  if (pullReveal) drawPullReveal();
+  if (summonResult) drawSummonResult();
+  if (dailyToast>0) drawDailyToast();
+  // tutorial overlay last
+  GF.tutorial.draw(ctx);
+}
+
+function drawMute() {
+  var S=GF.S, r=14*S, x=GF.W-22*S, y=22*S;
+  muteBtn = { x:x-r-6*S, y:y-r-6*S, w:(r+6*S)*2, h:(r+6*S)*2 };
+  GF.drawMuteIcon(ctx, x, y, r, GF.muted);
+}
+
+// ── BATTLE RENDER ────────────────────────────────────────────────────────────
+function drawBattle() {
+  var W=GF.W, H=GF.H, S=GF.S, b=battle;
+  // background art (stage bg) — fills top+team+behind board faint
+  var bgImg = IMG[b.st.bg];
+  if (bgImg) {
+    drawCover(bgImg, 0, 0, W, L.boardTop);
+    // darken
+    ctx.fillStyle='rgba(8,8,20,0.30)'; ctx.fillRect(0,0,W,L.boardTop);
+  } else {
+    var g=ctx.createLinearGradient(0,0,0,L.boardTop); g.addColorStop(0,'#1a1330'); g.addColorStop(1,'#0e1024');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,L.boardTop);
+  }
+  drawEnemies();
+  drawTeamStrip();
+  drawBoard();
+  drawBattleHUD();
+  // combo flash overlay
+  if (b.comboFlash>0 && b.lastComboCount>=3) {
+    ctx.save(); ctx.globalAlpha = b.comboFlash*0.18; ctx.fillStyle = b.lastComboCount>=5?'#ffd23a':'#7cf0ff';
+    ctx.fillRect(0,0,W,H); ctx.restore();
+  }
+  // big combo count during resolve
+  if (b.phase==='RESOLVE' && b.comboShown>0) {
+    var cc = b.comboShown;
+    ctx.save();
+    var sc = 1 + Math.min(0.5, cc*0.05);
+    ctx.font = 'bold '+(clampF(46*S,30,72)*sc)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillStyle = cc>=5?'#ffd23a':(cc>=3?'#7cf0ff':'#ffffff');
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur=20*S;
+    ctx.fillText(cc+' '+GF.t('combo'), GF.cx, L.boardTop - 16*S);
+    ctx.restore();
+  }
+  // floaters
+  for (var f=0;f<b.floatDmg.length;f++){ var fl=b.floatDmg[f];
+    ctx.save(); ctx.globalAlpha = Math.max(0,1-fl.t/1.1);
+    ctx.font='bold '+clampF(20*S,14,30)+'px Inter, system-ui, sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    if (fl.glow){ ctx.shadowColor=fl.glow; ctx.shadowBlur=10*S; }
+    ctx.fillStyle=fl.col; ctx.fillText(fl.txt, fl.x, fl.y); ctx.restore();
+  }
+  // wave-clear banner
+  if (b.phase==='WAVECLEAR' && b.waveBanner>0) {
+    ctx.save(); ctx.globalAlpha=Math.min(1,b.waveBanner); ctx.textAlign='center';
+    ctx.font='bold '+clampF(30*S,20,44)+'px Inter, system-ui, sans-serif'; ctx.fillStyle='#7cf0ff';
+    ctx.shadowColor='#7cf0ff'; ctx.shadowBlur=18*S;
+    ctx.fillText(GF.t('next'), GF.cx, GF.cy); ctx.restore();
+  }
+  // win / lose overlays
+  if (b.phase==='WIN') drawWinOverlay();
+  if (b.phase==='LOSE') drawLoseOverlay();
+}
+
+function drawBattleHUD() {
+  var S=GF.S, b=battle;
+  // back button
+  var bw=64*S, bh=30*S;
+  L.backBtn = { x:8*S, y:8*S, w:bw, h:bh };
+  ctx.save();
+  GF.rr(ctx, L.backBtn.x, L.backBtn.y, bw, bh, 8*S); ctx.fillStyle='rgba(16,18,32,0.8)'; ctx.fill();
+  ctx.font='bold '+clampF(13*S,11,18)+'px Inter, system-ui'; ctx.fillStyle='#cdd'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('‹ '+GF.t('hub'), L.backBtn.x+bw/2, L.backBtn.y+bh/2);
+  ctx.restore();
+  // stage/wave top-center
+  ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='top';
+  var waveTxt = (b.waveIdx===b.waves.length-1) ? GF.t('boss') : (GF.t('wave')+' '+(b.waveIdx+1)+'/'+b.waves.length);
+  ctx.fillText(GF.t('stage')+' '+(b.stageIdx+1)+'  ·  '+waveTxt, GF.cx, 12*S);
+}
+
+// enemies row
+function drawEnemies() {
+  var S=GF.S, b=battle, list=b.enemies, n=list.length;
+  var slotW = GF.W/(n+0.4);
+  for (var i=0;i<n;i++){
+    var e=list[i];
+    var cx2 = slotW*(i+0.5)+GF.W*0.05;
+    var cy2 = L.enemyY;
+    var sz = (e.boss?Math.min(GF.W*0.5,L.topH*0.78):Math.min(GF.W*0.30,L.topH*0.55));
+    // attack lunge
+    var lunge = e.atkAnim>0 ? Math.sin(e.atkAnim*Math.PI)*10*S : 0;
+    // portrait
+    var artKey = e.boss ? 'boss_voidtitan' : enemyArtForEl(e.el);
+    var img = IMG[artKey];
+    ctx.save();
+    if (e.hp<=0) ctx.globalAlpha=0.25;
+    ctx.translate(cx2, cy2+lunge);
+    if (e.hitFlash>0){ ctx.shadowColor='#fff'; ctx.shadowBlur=22*S*e.hitFlash; }
+    if (img) drawImgCentered(img, 0, 0, sz, sz);
+    else { ctx.fillStyle=ORB_COLS[e.el].a; GF.rr(ctx,-sz/2,-sz/2,sz,sz,12*S); ctx.fill(); }
+    ctx.restore();
+    // element pip
+    drawElPip(cx2 - sz*0.36, cy2 - sz*0.42, e.el, 7*S);
+    // hp bar
+    if (e.hp>0) {
+      var bw=sz*0.92, bh=7*S, bx=cx2-bw/2, by=cy2+sz*0.46;
+      ctx.fillStyle='rgba(0,0,0,0.55)'; GF.rr(ctx,bx,by,bw,bh,bh/2); ctx.fill();
+      var frac=e.hp/e.hpMax;
+      ctx.fillStyle = e.boss?'#ff5a5a':'#ff7a4a'; GF.rr(ctx,bx,by,bw*frac,bh,bh/2); ctx.fill();
+      ctx.font='bold '+clampF(10*S,8,14)+'px Inter, system-ui'; ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='bottom';
+      ctx.fillText(e.hp+' / '+e.hpMax, cx2, by-2*S);
+      // cooldown pips (turns until this enemy attacks) — vector dots, no emoji
+      var pips=Math.max(0,Math.min(4,e.cd)), pr2=2.6*S, pgap=3.2*S, ptotW=pips*(pr2*2)+(pips-1)*pgap;
+      for (var pk=0; pk<pips; pk++){ ctx.beginPath(); ctx.arc(cx2-ptotW/2+pr2+pk*(pr2*2+pgap), by+bh+7*S, pr2, 0, Math.PI*2); ctx.fillStyle= pips<=1?'#ff5a5a':'#ffd23a'; ctx.fill(); }
+    }
+  }
+}
+function enemyArtForEl(el){
+  // reuse a non-team monster art per element so enemies have faces
+  var map = { 0:'beast_magmadrake', 1:'beast_tidefin', 2:'beast_thornbeast', 3:'beast_lumenowl', 4:'beast_nightmaw', 5:'beast_sparkwing' };
+  return map[el];
+}
+
+// team strip (5 portraits + team hp bar)
+function drawTeamStrip() {
+  var S=GF.S, b=battle, n=b.units.length;
+  var y0=L.topH, h=L.teamH;
+  // team hp bar across the top of the strip
+  var hbW=GF.W*0.9, hbH=10*S, hbX=(GF.W-hbW)/2, hbY=y0+4*S;
+  ctx.fillStyle='rgba(0,0,0,0.5)'; GF.rr(ctx,hbX,hbY,hbW,hbH,hbH/2); ctx.fill();
+  var frac=b.teamHp/b.teamHpMax;
+  var hpcol = frac>0.5?'#46d86a':(frac>0.25?'#ffcf3a':'#ff5a5a');
+  ctx.fillStyle=hpcol; GF.rr(ctx,hbX,hbY,hbW*Math.max(0,frac),hbH,hbH/2); ctx.fill();
+  ctx.font='bold '+clampF(10*S,8,13)+'px Inter, system-ui'; ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(Math.ceil(b.teamHp)+' / '+b.teamHpMax, GF.cx, hbY+hbH/2);
+  // portraits row
+  var pad=4*S, slotW=(GF.W-pad*2)/Math.max(1,n);
+  var pSz=Math.min(slotW*0.86, (h-hbH-10*S));
+  for (var i=0;i<n;i++){
+    var u=b.units[i];
+    var cx2=pad+slotW*(i+0.5), cy2=hbY+hbH+ (h-hbH)*0.5 - 2*S;
+    var pop = u.atkAnim>0 ? 1+Math.sin(u.atkAnim*Math.PI)*0.12 : 1;
+    ctx.save(); ctx.translate(cx2,cy2); ctx.scale(pop,pop);
+    // ring colored by element
+    ctx.beginPath(); ctx.arc(0,0,pSz/2+2*S,0,Math.PI*2);
+    ctx.fillStyle = u.hp>0?ORB_COLS[u.el].a:'#333'; ctx.fill();
+    // portrait clipped to circle
+    ctx.save(); ctx.beginPath(); ctx.arc(0,0,pSz/2,0,Math.PI*2); ctx.clip();
+    var img=IMG[u.art];
+    if (u.hitFlash>0){ ctx.shadowColor='#fff'; ctx.shadowBlur=16*S*u.hitFlash; }
+    if (img) drawCover(img, -pSz/2,-pSz/2,pSz,pSz);
+    else { ctx.fillStyle=ORB_COLS[u.el].b; ctx.fillRect(-pSz/2,-pSz/2,pSz,pSz); }
+    ctx.restore();
+    ctx.restore();
+  }
+}
+
+// the orb board
+function drawBoard() {
+  var S=GF.S, b=battle;
+  // board frame
+  ctx.save();
+  ctx.fillStyle='rgba(6,8,18,0.85)';
+  GF.rr(ctx, L.boardX-4*S, L.boardY-4*S, L.boardW+8*S, L.boardH+8*S, 12*S); ctx.fill();
+  ctx.restore();
+  for (var r=0;r<BR;r++) for (var c=0;c<BC;c++){
+    var el=board[r][c]; if(el<0) continue;
+    var cc=cellCenter(r,c);
+    var isDrag = b.dragOrb && b.dragOrb.curR===r && b.dragOrb.curC===c;
+    if (isDrag) continue; // draw dragged orb last at pointer
+    drawOrb(cc.x, cc.y, L.cell*0.42, el);
+  }
+  // dragged orb follows pointer
+  if (b.dragOrb) {
+    var d=b.dragOrb;
+    // highlight origin cell column/row faintly
+    drawOrb(d.x, d.y, L.cell*0.46, d.el, true);
+  }
+  // move timer ring (when dragging)
+  if (b.phase==='INPUT' && b.dragOrb && b.moveTimer>0) {
+    var frac = 1 - b.moveTimer/b.moveMax;
+    var tx=L.boardX+L.boardW-16*S, ty=L.boardY-16*S;
+    ctx.save(); ctx.lineWidth=5*S; ctx.strokeStyle='rgba(255,255,255,0.25)';
+    ctx.beginPath(); ctx.arc(tx,ty,12*S,0,Math.PI*2); ctx.stroke();
+    ctx.strokeStyle= frac<0.3?'#ff5a5a':'#7cf0ff';
+    ctx.beginPath(); ctx.arc(tx,ty,12*S,-Math.PI/2, -Math.PI/2 + Math.PI*2*frac); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawOrb(x,y,r,el,big) {
+  var col=ORB_COLS[el];
+  ctx.save();
+  if (big){ ctx.shadowColor=col.glow; ctx.shadowBlur=18*GF.S; }
+  var g=ctx.createRadialGradient(x-r*0.3,y-r*0.3,r*0.2, x,y,r);
+  g.addColorStop(0,col.b); g.addColorStop(1,col.a);
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fillStyle=g; ctx.fill();
+  // rim
+  ctx.lineWidth=2*GF.S; ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.stroke();
+  // glossy highlight
+  ctx.beginPath(); ctx.ellipse(x-r*0.32,y-r*0.36,r*0.34,r*0.2,-0.5,0,Math.PI*2);
+  ctx.fillStyle='rgba(255,255,255,0.45)'; ctx.fill();
+  // element glyph (canvas-drawn, no emoji)
+  drawElGlyph(x,y,r*0.62,el);
+  ctx.restore();
+}
+// distinct vector glyph per element so colorblind-friendly + readable
+function drawElGlyph(x,y,s,el){
+  ctx.save(); ctx.translate(x,y); ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.strokeStyle='rgba(255,255,255,0.85)'; ctx.lineWidth=Math.max(1.5,s*0.16); ctx.lineJoin='round'; ctx.lineCap='round';
+  if (el===EL.FIRE){ // flame
+    ctx.beginPath(); ctx.moveTo(0,-s*0.7); ctx.quadraticCurveTo(s*0.6,-s*0.1,s*0.32,s*0.4); ctx.quadraticCurveTo(s*0.1,s*0.7,0,s*0.55); ctx.quadraticCurveTo(-s*0.1,s*0.7,-s*0.32,s*0.4); ctx.quadraticCurveTo(-s*0.6,-s*0.1,0,-s*0.7); ctx.fill();
+  } else if (el===EL.WATER){ // droplet
+    ctx.beginPath(); ctx.moveTo(0,-s*0.7); ctx.quadraticCurveTo(s*0.55,s*0.05,0,s*0.65); ctx.quadraticCurveTo(-s*0.55,s*0.05,0,-s*0.7); ctx.fill();
+  } else if (el===EL.WOOD){ // leaf
+    ctx.beginPath(); ctx.moveTo(-s*0.5,s*0.5); ctx.quadraticCurveTo(-s*0.1,-s*0.6,s*0.55,-s*0.5); ctx.quadraticCurveTo(s*0.1,s*0.55,-s*0.5,s*0.5); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-s*0.4,s*0.4); ctx.lineTo(s*0.35,-s*0.35); ctx.strokeStyle='rgba(70,120,70,0.6)'; ctx.stroke();
+  } else if (el===EL.LIGHT){ // sun/diamond
+    ctx.beginPath(); for(var i=0;i<8;i++){ var a=i/8*Math.PI*2; var rr=(i%2?s*0.35:s*0.75); ctx.lineTo(Math.cos(a)*rr,Math.sin(a)*rr); } ctx.closePath(); ctx.fill();
+  } else if (el===EL.DARK){ // crescent
+    ctx.beginPath(); ctx.arc(0,0,s*0.62,0,Math.PI*2); ctx.fill();
+    ctx.globalCompositeOperation='destination-out'; ctx.beginPath(); ctx.arc(s*0.28,-s*0.12,s*0.55,0,Math.PI*2); ctx.fill();
+  } else { // heart
+    ctx.beginPath(); ctx.moveTo(0,s*0.55); ctx.bezierCurveTo(-s*0.9,-s*0.2,-s*0.4,-s*0.75,0,-s*0.3); ctx.bezierCurveTo(s*0.4,-s*0.75,s*0.9,-s*0.2,0,s*0.55); ctx.fill();
+  }
+  ctx.restore();
+}
+function drawElPip(x,y,el,r){
+  ctx.save(); ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2);
+  ctx.fillStyle=ORB_COLS[el].a; ctx.fill(); ctx.lineWidth=1.5*GF.S; ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.stroke();
+  drawElGlyph(x,y,r*0.7,el); ctx.restore();
+}
+
+// ── WIN / LOSE OVERLAYS ──────────────────────────────────────────────────────
+function drawWinOverlay() {
+  var S=GF.S, W=GF.W, H=GF.H, b=battle;
+  ctx.fillStyle='rgba(6,8,18,0.9)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  var last = b.stageIdx===STAGES.length-1;
+  ctx.font='bold '+clampF(38*S,24,56)+'px Inter, system-ui'; ctx.fillStyle='#ffd23a'; ctx.shadowColor='#ffd23a'; ctx.shadowBlur=24*S;
+  ctx.fillText(last?GF.t('allclear'):GF.t('stagewin'), GF.cx, H*0.30); ctx.shadowBlur=0;
+  ctx.font='bold '+clampF(18*S,13,24)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText('+'+ (b._rewardEss||0) +' '+GF.t('essence')+'   ·   +1 '+GF.t('tickets'), GF.cx, H*0.42);
+  // buttons: summon, continue/next
+  var bw=Math.min(W*0.78,330*S), bh=54*S, bx=GF.cx-bw/2;
+  L.winSummon = { x:bx, y:H*0.52, w:bw, h:bh };
+  drawBigBtn(L.winSummon, GF.t('summon'), '#a05cff','#7e3ce0');
+  L.winNext = { x:bx, y:H*0.52+bh+14*S, w:bw, h:bh };
+  drawBigBtn(L.winNext, last?GF.t('hub'):GF.t('cont'), '#2ee07a','#23a657');
+}
+function winClick(x,y) {
+  if (hit(L.winSummon,x,y)) { openSummon(); return; }
+  if (hit(L.winNext,x,y)) { gs='STAGESEL'; battle=null; GF.sfx('tap'); return; }
+}
+function drawLoseOverlay() {
+  var S=GF.S, W=GF.W, H=GF.H, b=battle;
+  ctx.fillStyle='rgba(10,6,12,0.9)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.font='bold '+clampF(36*S,22,52)+'px Inter, system-ui'; ctx.fillStyle='#ff6a6a';
+  ctx.fillText(GF.t('defeat'), GF.cx, H*0.32);
+  var bw=Math.min(W*0.78,330*S), bh=54*S, bx=GF.cx-bw/2;
+  // revive via ad (once)
+  var yy = H*0.46;
+  if (!b.reviveUsed) {
+    L.loseRevive = { x:bx, y:yy, w:bw, h:bh };
+    drawBigBtn(L.loseRevive, GF.t('adwatch'), '#ffb028','#e0830a');
+    yy += bh+14*S;
+  } else L.loseRevive=null;
+  L.loseRetry = { x:bx, y:yy, w:bw, h:bh };
+  drawBigBtn(L.loseRetry, GF.t('retry'), '#37a8ff','#1e7fd0');
+  yy += bh+14*S;
+  L.loseHub = { x:bx, y:yy, w:bw, h:bh };
+  drawBigBtn(L.loseHub, GF.t('hub'), '#555','#333');
+}
+function loseClick(x,y) {
+  if (L.loseRevive && hit(L.loseRevive,x,y)) {
+    GF.showAd('rewarded').then(function(res){
+      battle.reviveUsed = true;
+      battle.teamHp = battle.teamHpMax; // full team heal
+      battle.phase='INPUT'; battle.moveTimer=0;
+      fillBoardFull(); ensurePlayableBoard();
+      GF.sfx('levelup');
+    });
+    return;
+  }
+  if (hit(L.loseRetry,x,y)) { startBattle(battle.stageIdx); return; }
+  if (hit(L.loseHub,x,y)) { gs='STAGESEL'; battle=null; GF.sfx('tap'); return; }
+}
+
+// ===========================================================================
+//  HUB SCREENS (MENU / STAGESEL / TEAM / COLLECTION / SUMMON)
+// ===========================================================================
+function drawTopBar() {
+  // currency bar shown on hub screens
+  var S=GF.S;
+  ctx.save();
+  ctx.fillStyle='rgba(14,16,30,0.9)'; ctx.fillRect(0,0,GF.W,46*S);
+  ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui'; ctx.textBaseline='middle';
+  // essence
+  ctx.textAlign='left';
+  drawEssenceIcon(16*S, 23*S, 9*S);
+  ctx.fillStyle='#cfe6ff'; ctx.fillText(' '+meta.essence, 28*S, 23*S);
+  // tickets
+  drawTicketIcon(GF.W*0.42, 23*S, 9*S);
+  ctx.fillStyle='#ffe6a0'; ctx.fillText(' '+meta.tickets, GF.W*0.42+14*S, 23*S);
+  ctx.restore();
+}
+function drawEssenceIcon(x,y,r){ ctx.save(); ctx.translate(x,y); ctx.beginPath(); for(var i=0;i<6;i++){var a=i/6*Math.PI*2-Math.PI/2; ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r);} ctx.closePath(); var g=ctx.createLinearGradient(-r,-r,r,r); g.addColorStop(0,'#7cf0ff'); g.addColorStop(1,'#37a8ff'); ctx.fillStyle=g; ctx.fill(); ctx.lineWidth=1.5; ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.stroke(); ctx.restore(); }
+function drawTicketIcon(x,y,r){ ctx.save(); ctx.translate(x,y); GF.rr(ctx,-r*1.3,-r*0.8,r*2.6,r*1.6,r*0.4); ctx.fillStyle='#ffcf3a'; ctx.fill(); ctx.lineWidth=1.4; ctx.strokeStyle='#a07a10'; ctx.setLineDash([2,2]); ctx.beginPath(); ctx.moveTo(0,-r*0.8); ctx.lineTo(0,r*0.8); ctx.stroke(); ctx.restore(); }
+
+function drawHubBg() {
+  var g=ctx.createLinearGradient(0,0,0,GF.H); g.addColorStop(0,'#15122b'); g.addColorStop(1,'#0a0a16'); ctx.fillStyle=g; ctx.fillRect(0,0,GF.W,GF.H);
+}
+
+function drawBigBtn(r, label, ca, cb, disabled) {
+  var S=GF.S;
+  ctx.save();
+  var g=ctx.createLinearGradient(r.x,r.y,r.x,r.y+r.h); g.addColorStop(0,disabled?'#3a3a44':ca); g.addColorStop(1,disabled?'#26262e':cb);
+  if (!disabled){ ctx.shadowColor=ca; ctx.shadowBlur=14*S; }
+  GF.rr(ctx, r.x, r.y, r.w, r.h, Math.min(r.h/2,16*S)); ctx.fillStyle=g; ctx.fill();
+  ctx.shadowBlur=0;
+  ctx.font='bold '+clampF(18*S,13,24)+'px Inter, system-ui'; ctx.fillStyle=disabled?'#888':'#fff'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(label, r.x+r.w/2, r.y+r.h/2);
+  ctx.restore();
+}
+
+// ── MENU ─────────────────────────────────────────────────────────────────────
+function drawMenu() {
+  drawHubBg();
+  var S=GF.S, W=GF.W, H=GF.H;
+  // hero collage: show a couple of owned portraits behind the title
+  var team = meta.team.slice(0,3);
+  for (var i=0;i<team.length;i++){
+    var img=IMG[rosterById(team[i]).art];
+    if (!img) continue;
+    var sz=W*0.34, x=W*(0.5 + (i-1)*0.30), y=H*0.30;
+    ctx.save(); ctx.globalAlpha=0.9; ctx.beginPath(); ctx.arc(x,y,sz/2,0,Math.PI*2); ctx.clip();
+    drawCover(img,x-sz/2,y-sz/2,sz,sz); ctx.restore();
+    ctx.beginPath(); ctx.arc(x,y,sz/2,0,Math.PI*2); ctx.lineWidth=3*S; ctx.strokeStyle=ORB_COLS[rosterById(team[i]).el].a; ctx.stroke();
+  }
+  ctx.textAlign='center';
+  ctx.font='bold '+clampF(40*S,26,60)+'px Inter, system-ui'; ctx.fillStyle='#fff'; ctx.shadowColor='#a05cff'; ctx.shadowBlur=24*S;
+  ctx.fillText(GF.t('title'), GF.cx, H*0.50); ctx.shadowBlur=0;
+  ctx.font=clampF(15*S,11,20)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
+  wrapText(GF.t('sub'), GF.cx, H*0.555, W*0.84, clampF(20*S,15,26));
+  var bw=Math.min(W*0.7,300*S), bh=58*S, bx=GF.cx-bw/2;
+  L.menuPlay = { x:bx, y:H*0.64, w:bw, h:bh };
+  drawBigBtn(L.menuPlay, GF.t('play'), '#2ee07a','#23a657');
+  // sub buttons row: champions, summon
+  var sbw=(bw-12*S)/2, sby=H*0.64+bh+14*S, sbh=46*S;
+  L.menuColl = { x:bx, y:sby, w:sbw, h:sbh };
+  drawBigBtn(L.menuColl, GF.t('collection'), '#37a8ff','#1e7fd0');
+  L.menuSummon = { x:bx+sbw+12*S, y:sby, w:sbw, h:sbh };
+  drawBigBtn(L.menuSummon, GF.t('summon'), '#a05cff','#7e3ce0');
+}
+function menuClick(x,y) {
+  if (hit(L.menuPlay,x,y)) { gs='STAGESEL'; GF.sfx('tap'); return; }
+  if (hit(L.menuColl,x,y)) { gs='COLLECTION'; GF.sfx('tap'); return; }
+  if (hit(L.menuSummon,x,y)) { openSummon(); return; }
+}
+
+// ── STAGE SELECT ─────────────────────────────────────────────────────────────
+function drawStageSel() {
+  drawHubBg(); drawTopBar();
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.textAlign='center'; ctx.font='bold '+clampF(22*S,16,30)+'px Inter, system-ui'; ctx.fillStyle='#fff'; ctx.textBaseline='top';
+  ctx.fillText(GF.t('stagesel'), GF.cx, 58*S);
+  // daily gift button (claim free pull) if available
+  var dailyAvail = meta.lastDaily !== dayNumber();
+  var topY = 92*S;
+  var dbw=Math.min(W*0.86,360*S), dbx=GF.cx-dbw/2, dbh=42*S;
+  L.dailyBtn = dailyAvail ? { x:dbx, y:topY, w:dbw, h:dbh } : null;
+  if (dailyAvail) { drawBigBtn(L.dailyBtn, GF.t('daily')+' · '+GF.t('free')+' '+GF.t('summon'), '#ffb028','#e0830a'); topY += dbh+12*S; }
+  // stage cards
+  var n=STAGES.length, cardH=Math.min(86*S,(H-topY-160*S)/n - 10*S); cardH=Math.max(cardH,64*S);
+  L.stageCards=[];
+  for (var i=0;i<n;i++){
+    var locked = i>meta.stageUnlocked;
+    var cy=topY + i*(cardH+10*S);
+    var cx=GF.W*0.07, cw=GF.W*0.86;
+    var r={x:cx,y:cy,w:cw,h:cardH};
+    L.stageCards.push({rect:r, idx:i, locked:locked});
+    ctx.save();
+    // bg art thumbnail
+    var img=IMG[STAGES[i].bg];
+    GF.rr(ctx,r.x,r.y,r.w,r.h,12*S); ctx.save(); ctx.clip();
+    if (img) drawCover(img,r.x,r.y,r.w,r.h); else { ctx.fillStyle='#222'; ctx.fillRect(r.x,r.y,r.w,r.h); }
+    ctx.fillStyle= locked?'rgba(4,4,10,0.78)':'rgba(8,8,18,0.42)'; ctx.fillRect(r.x,r.y,r.w,r.h);
+    ctx.restore();
+    GF.rr(ctx,r.x,r.y,r.w,r.h,12*S); ctx.lineWidth=2*S; ctx.strokeStyle= locked?'#444':(i===meta.stageUnlocked?'#ffd23a':'#5a6'); ctx.stroke();
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.font='bold '+clampF(18*S,14,24)+'px Inter, system-ui'; ctx.fillStyle= locked?'#888':'#fff';
+    ctx.fillText((GF.t('stage')+' '+(i+1)), r.x+16*S, r.y+r.h*0.36);
+    ctx.font=clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillStyle= locked?'#777':'#cdd';
+    ctx.fillText(STAGES[i].name[GF.lang]||STAGES[i].name.en, r.x+16*S, r.y+r.h*0.66);
+    if (locked){ ctx.textAlign='right'; ctx.fillStyle='#999'; ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillText(GF.t('locked'), r.x+r.w-34*S, r.y+r.h/2);
+      // vector padlock
+      var lx=r.x+r.w-20*S, ly=r.y+r.h/2;
+      ctx.fillStyle='#999'; GF.rr(ctx,lx-6*S,ly-1*S,12*S,9*S,2*S); ctx.fill();
+      ctx.lineWidth=2*S; ctx.strokeStyle='#999'; ctx.beginPath(); ctx.arc(lx,ly-1*S,4*S,Math.PI,0); ctx.stroke();
+    }
+    else { // vector play triangle
+      var tx=r.x+r.w-24*S, ty=r.y+r.h/2, ts=9*S;
+      ctx.fillStyle='#ffd23a'; ctx.beginPath(); ctx.moveTo(tx,ty-ts); ctx.lineTo(tx+ts*1.3,ty); ctx.lineTo(tx,ty+ts); ctx.closePath(); ctx.fill();
+    }
+    ctx.restore();
+  }
+  // bottom: team + back
+  var by=H-86*S, bw=(W*0.86-12*S)/2, bx=GF.W*0.07, bh=52*S;
+  L.ssTeam = { x:bx, y:by, w:bw, h:bh };
+  drawBigBtn(L.ssTeam, GF.t('team')+' ('+meta.team.length+'/5)', '#37a8ff','#1e7fd0');
+  L.ssBack = { x:bx+bw+12*S, y:by, w:bw, h:bh };
+  drawBigBtn(L.ssBack, GF.t('hub'), '#555','#333');
+}
+function stageSelClick(x,y) {
+  if (L.dailyBtn && hit(L.dailyBtn,x,y)) { claimDaily(); return; }
+  for (var i=0;i<L.stageCards.length;i++){ var sc=L.stageCards[i];
+    if (hit(sc.rect,x,y)) { if (sc.locked){ GF.sfx('error'); } else { startBattle(sc.idx); } return; }
+  }
+  if (hit(L.ssTeam,x,y)) { gs='TEAM'; GF.sfx('tap'); return; }
+  if (hit(L.ssBack,x,y)) { gs='MENU'; GF.sfx('tap'); return; }
+}
+function claimDaily() {
+  if (meta.lastDaily===dayNumber()) return;
+  meta.lastDaily = dayNumber();
+  meta.tickets += 1; meta.essence += 50;
+  saveMeta();
+  // immediately do a free pull
+  var res = doSummon(1);
+  pullReveal = { id:res.bestId, isNew:res.anyNew, stars:meta.owned[res.bestId].stars, t:0 };
+  GF.sfx('reward');
+}
+
+// ── TEAM BUILDER ─────────────────────────────────────────────────────────────
+function drawTeam() {
+  drawHubBg(); drawTopBar();
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.textAlign='center'; ctx.textBaseline='top'; ctx.font='bold '+clampF(20*S,15,28)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText(GF.t('team')+' '+meta.team.length+'/5', GF.cx, 56*S);
+  ctx.font=clampF(12*S,10,16)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
+  wrapText(GF.t('teamhint'), GF.cx, 84*S, W*0.9, clampF(16*S,13,20));
+  // current team row (5 slots)
+  var slotY=124*S, slot=Math.min((W-20*S)/5, 64*S);
+  L.teamSlots=[];
+  for (var i=0;i<5;i++){
+    var x=10*S+slot*i+slot/2, y=slotY+slot/2;
+    var id=meta.team[i];
+    L.teamSlots.push({x:x-slot/2,y:y-slot/2,w:slot,h:slot, idx:i, id:id});
+    ctx.save();
+    ctx.beginPath(); ctx.arc(x,y,slot*0.46,0,Math.PI*2);
+    ctx.fillStyle= id?ORB_COLS[rosterById(id).el].a:'#2a2a38'; ctx.fill();
+    if (id){ ctx.save(); ctx.beginPath(); ctx.arc(x,y,slot*0.42,0,Math.PI*2); ctx.clip(); var img=IMG[rosterById(id).art]; if(img) drawCover(img,x-slot*0.42,y-slot*0.42,slot*0.84,slot*0.84); ctx.restore();
+      // stars
+      drawStars(x, y+slot*0.40, meta.owned[id].stars, 5*S);
+    } else { ctx.fillStyle='#556'; ctx.font='bold '+clampF(22*S,16,30)+'px Inter, system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('+',x,y); }
+    ctx.restore();
+  }
+  // synergy line: element counts
+  var counts={}; meta.team.forEach(function(id){var e=rosterById(id).el; counts[e]=(counts[e]||0)+1;});
+  ctx.textAlign='center'; ctx.textBaseline='top'; ctx.font='bold '+clampF(12*S,10,16)+'px Inter, system-ui';
+  var sy=slotY+slot+10*S, txt='';
+  for (var e=0;e<5;e++){ if(counts[e]) txt += EL_NAME[e].toUpperCase()+' x'+counts[e]+'   '; }
+  ctx.fillStyle='#7cf0ff'; ctx.fillText(txt||GF.t('teamhint'), GF.cx, sy);
+  // owned roster grid below (tap to add/remove)
+  var gridTop=sy+26*S;
+  drawRosterGrid(gridTop, H-150*S, function(rect,id){ L.teamGridCells.push({rect:rect,id:id}); }, true);
+  // bottom buttons
+  var by=H-78*S, bw=(W*0.86-12*S)/2, bx=W*0.07, bh=52*S;
+  L.teamAuto = { x:bx, y:by, w:bw, h:bh };
+  drawBigBtn(L.teamAuto, GF.t('rerollteam'), '#a05cff','#7e3ce0');
+  L.teamBack = { x:bx+bw+12*S, y:by, w:bw, h:bh };
+  drawBigBtn(L.teamBack, GF.t('back'), '#2ee07a','#23a657');
+}
+var rosterScroll = 0;
+function teamClick(x,y) {
+  // remove from team slot
+  for (var i=0;i<L.teamSlots.length;i++){ var ts=L.teamSlots[i];
+    if (hit(ts,x,y) && ts.id){ meta.team.splice(ts.idx,1); saveMeta(); GF.sfx('tap'); return; }
+  }
+  // add from grid
+  for (var j=0;j<L.teamGridCells.length;j++){ var gc=L.teamGridCells[j];
+    if (hit(gc.rect,x,y)){
+      var idx=meta.team.indexOf(gc.id);
+      if (idx>=0){ meta.team.splice(idx,1); }
+      else if (meta.team.length<5){ meta.team.push(gc.id); }
+      else { GF.sfx('error'); return; }
+      saveMeta(); GF.sfx('tap'); return;
+    }
+  }
+  if (hit(L.teamAuto,x,y)) { autoTeam(); return; }
+  if (hit(L.teamBack,x,y)) { gs='STAGESEL'; GF.sfx('tap'); return; }
+}
+function autoTeam() {
+  // pick top 5 by power, spread across elements
+  var ids = Object.keys(meta.owned);
+  ids.sort(function(a,b){ var pa=unitStats(a,meta.owned[a].stars).atk, pb=unitStats(b,meta.owned[b].stars).atk; return pb-pa; });
+  meta.team = ids.slice(0,5);
+  saveMeta(); GF.sfx('reward');
+}
+
+// roster grid renderer shared by team + collection
+function drawRosterGrid(top, bottom, cb, teamMode) {
+  var S=GF.S, W=GF.W;
+  if (teamMode) L.teamGridCells=[]; else L.collGridCells=[];
+  var cols=4, gap=8*S, cw=(W-20*S-gap*(cols-1))/cols, ch=cw*1.18;
+  var ids = ROSTER.map(function(u){return u.id;});
+  var rowH=ch+gap;
+  // clip region
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, top, W, bottom-top); ctx.clip();
+  for (var i=0;i<ids.length;i++){
+    var id=ids[i], owned=meta.owned[id];
+    var col=i%cols, row=Math.floor(i/cols);
+    var x=10*S+col*(cw+gap), y=top+row*rowH;
+    var rect={x:x,y:y,w:cw,h:ch};
+    if (teamMode) L.teamGridCells.push({rect:rect,id:id}); else L.collGridCells.push({rect:rect,id:id});
+    var u=rosterById(id);
+    ctx.save();
+    GF.rr(ctx,x,y,cw,ch,8*S);
+    var inTeam = meta.team.indexOf(id)>=0;
+    ctx.fillStyle= owned?'rgba(20,22,40,0.95)':'rgba(14,14,22,0.95)'; ctx.fill();
+    // portrait
+    ctx.save(); GF.rr(ctx,x+4*S,y+4*S,cw-8*S,ch*0.62,6*S); ctx.clip();
+    var img=IMG[u.art];
+    if (img){ if(!owned) ctx.globalAlpha=0.32; drawCover(img,x+4*S,y+4*S,cw-8*S,ch*0.62); }
+    else { ctx.fillStyle=ORB_COLS[u.el].a; ctx.fillRect(x+4*S,y+4*S,cw-8*S,ch*0.62); }
+    ctx.restore();
+    // element ring (rarity-colored border)
+    GF.rr(ctx,x,y,cw,ch,8*S); ctx.lineWidth= inTeam?3*S:2*S;
+    ctx.strokeStyle= inTeam?'#ffd23a':(owned? rarColor(u.rar):'#333'); ctx.stroke();
+    // element pip
+    drawElPip(x+12*S, y+12*S, u.el, 8*S);
+    // name + stars
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.font='bold '+clampF(11*S,9,15)+'px Inter, system-ui'; ctx.fillStyle= owned?'#fff':'#777';
+    var nm=(GF.lang==='ru'?u.ru:u.en);
+    ctx.fillText(fitText(nm, cw-8*S, clampF(11*S,9,15)), x+cw/2, y+ch*0.72);
+    if (owned) drawStars(x+cw/2, y+ch*0.88, owned.stars, 5.5*S);
+    else { ctx.fillStyle='#666'; ctx.font=clampF(9*S,8,12)+'px Inter, system-ui'; ctx.fillText(GF.t('locked'), x+cw/2, y+ch*0.88); }
+    if (inTeam){ ctx.fillStyle='#ffd23a'; ctx.font='bold '+clampF(9*S,8,12)+'px Inter, system-ui'; ctx.textBaseline='top'; ctx.textAlign='right'; ctx.fillText(GF.t('equip'), x+cw-6*S, y+6*S); }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+function rarColor(r){ return r>=5?'#ffd23a':(r>=4?'#b87cff':'#6fbfff'); }
+function drawStars(cx,cy,n,r){
+  ctx.save(); ctx.textAlign='center';
+  for (var i=0;i<5;i++){ var x=cx+(i-2)*r*1.4; ctx.fillStyle= i<n?'#ffd23a':'#3a3a48'; star(x,cy,r,5); }
+  ctx.restore();
+}
+function star(cx,cy,r,p){ ctx.beginPath(); for(var i=0;i<p*2;i++){ var a=i/(p*2)*Math.PI*2-Math.PI/2; var rr=(i%2?r*0.45:r); ctx.lineTo(cx+Math.cos(a)*rr,cy+Math.sin(a)*rr);} ctx.closePath(); ctx.fill(); }
+
+// ── COLLECTION ───────────────────────────────────────────────────────────────
+function drawCollection() {
+  drawHubBg(); drawTopBar();
+  var S=GF.S, W=GF.W, H=GF.H;
+  var ownedN = Object.keys(meta.owned).length;
+  ctx.textAlign='center'; ctx.textBaseline='top'; ctx.font='bold '+clampF(20*S,15,28)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText(GF.t('collection')+'  '+ownedN+'/'+ROSTER.length, GF.cx, 56*S);
+  ctx.font=clampF(12*S,10,16)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
+  wrapText(GF.t('collhint'), GF.cx, 84*S, W*0.9, clampF(16*S,13,20));
+  drawRosterGrid(116*S, H-90*S, null, false);
+  var by=H-78*S, bw=(W*0.86-12*S)/2, bx=W*0.07, bh=52*S;
+  L.collSummon = { x:bx, y:by, w:bw, h:bh };
+  drawBigBtn(L.collSummon, GF.t('summon'), '#a05cff','#7e3ce0');
+  L.collBack = { x:bx+bw+12*S, y:by, w:bw, h:bh };
+  drawBigBtn(L.collBack, GF.t('back'), '#2ee07a','#23a657');
+}
+function collClick(x,y) {
+  for (var j=0;j<L.collGridCells.length;j++){ var gc=L.collGridCells[j];
+    if (hit(gc.rect,x,y)){ // toggle into team if owned
+      if (meta.owned[gc.id]){ var idx=meta.team.indexOf(gc.id);
+        if (idx>=0){ meta.team.splice(idx,1); } else if (meta.team.length<5){ meta.team.push(gc.id); } else { GF.sfx('error'); return; }
+        saveMeta(); GF.sfx('tap'); }
+      else GF.sfx('error');
+      return;
+    }
+  }
+  if (hit(L.collSummon,x,y)) { openSummon(); return; }
+  if (hit(L.collBack,x,y)) { gs= (battle?'STAGESEL':'MENU'); GF.sfx('tap'); return; }
+}
+
+// ── SUMMON ───────────────────────────────────────────────────────────────────
+var summonReturn = 'MENU';
+function openSummon() { summonReturn = (gs==='BATTLE'?'STAGESEL':gs); gs='SUMMON'; GF.sfx('tap'); }
+function drawSummon() {
+  drawHubBg(); drawTopBar();
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.font='bold '+clampF(22*S,16,30)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText(GF.t('summon'), GF.cx, 56*S);
+  // banner: featured 5*
+  var feat=rosterById(bannerFeatured());
+  var bx=W*0.1, bw=W*0.8, by=92*S, bh=H*0.34;
+  ctx.save(); GF.rr(ctx,bx,by,bw,bh,16*S); ctx.save(); ctx.clip();
+  // bg
+  var bgi=IMG[STAGES[3].bg]; if(bgi) drawCover(bgi,bx,by,bw,bh); else { ctx.fillStyle='#201838'; ctx.fillRect(bx,by,bw,bh); }
+  ctx.fillStyle='rgba(8,6,20,0.45)'; ctx.fillRect(bx,by,bw,bh);
+  // featured portrait
+  var img=IMG[feat.art];
+  if (img){ var psz=bh*0.92; drawImgCentered(img, bx+bw*0.5, by+bh*0.5, psz, psz); }
+  ctx.restore();
+  GF.rr(ctx,bx,by,bw,bh,16*S); ctx.lineWidth=2.5*S; ctx.strokeStyle='#ffd23a'; ctx.stroke();
+  // rate-up label + a vector star (no emoji glyph)
+  ctx.textAlign='left'; ctx.textBaseline='top'; ctx.font='bold '+clampF(13*S,11,18)+'px Inter, system-ui'; ctx.fillStyle='#ffd23a';
+  ctx.fillText(GF.t('rateup'), bx+12*S, by+10*S);
+  var rlw=ctx.measureText(GF.t('rateup')).width; star(bx+12*S+rlw+9*S, by+10*S+clampF(13*S,11,18)*0.5, 6*S, 5);
+  ctx.textAlign='center'; ctx.textBaseline='bottom'; ctx.font='bold '+clampF(18*S,14,24)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.shadowColor='#000'; ctx.shadowBlur=8*S;
+  ctx.fillText((GF.lang==='ru'?feat.ru:feat.en), GF.cx, by+bh-10*S); ctx.shadowBlur=0;
+  ctx.restore();
+  // pity bar
+  var py=by+bh+14*S;
+  ctx.textAlign='center'; ctx.textBaseline='top'; ctx.font='bold '+clampF(12*S,10,16)+'px Inter, system-ui'; ctx.fillStyle='#cdd';
+  ctx.fillText(GF.t('pity')+': '+meta.summons+' / '+PITY, GF.cx, py);
+  var pbW=W*0.7, pbX=GF.cx-pbW/2, pbY=py+18*S, pbH=8*S;
+  ctx.fillStyle='rgba(0,0,0,0.5)'; GF.rr(ctx,pbX,pbY,pbW,pbH,pbH/2); ctx.fill();
+  ctx.fillStyle='#ffd23a'; GF.rr(ctx,pbX,pbY,pbW*(meta.summons/PITY),pbH,pbH/2); ctx.fill();
+  // cost: 1 ticket per single; 10 tickets per x10 (or essence)
+  ctx.font=clampF(11*S,9,15)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
+  wrapText(GF.t('summonhint'), GF.cx, pbY+16*S, W*0.86, clampF(15*S,12,19));
+  // buttons
+  var bw2=Math.min(W*0.8,340*S), bx2=GF.cx-bw2/2, bbh=54*S, byy=H-198*S;
+  var canOne = meta.tickets>=1 || meta.essence>=100;
+  var canTen = meta.tickets>=10 || meta.essence>=900;
+  L.sumOne = { x:bx2, y:byy, w:bw2, h:bbh };
+  drawBigBtn(L.sumOne, GF.t('summon1')+'  ('+ (meta.tickets>=1?'1 '+ticketWord():'100 EP') +')', '#37a8ff','#1e7fd0', !canOne);
+  L.sumTen = { x:bx2, y:byy+bbh+12*S, w:bw2, h:bbh };
+  drawBigBtn(L.sumTen, GF.t('summon10')+'  ('+ (meta.tickets>=10?'10 '+ticketWord():'900 EP') +')', '#a05cff','#7e3ce0', !canTen);
+  // rewarded-ad free essence
+  L.sumAd = { x:bx2, y:byy+(bbh+12*S)*2, w:bw2, h:46*S };
+  drawBigBtn(L.sumAd, GF.t('adwatch'), '#ffb028','#e0830a');
+  L.sumBack = { x:bx2, y:byy+(bbh+12*S)*2+46*S+12*S, w:bw2, h:46*S };
+  drawBigBtn(L.sumBack, GF.t('back'), '#555','#333');
+}
+function ticketWord(){ return GF.lang==='ru'?'б.':'tkt'; }
+function summonClick(x,y) {
+  if (hit(L.sumOne,x,y)) { trySummon(1); return; }
+  if (hit(L.sumTen,x,y)) { trySummon(10); return; }
+  if (hit(L.sumAd,x,y)) { GF.showAd('rewarded').then(function(){ meta.essence+=50; saveMeta(); GF.sfx('reward'); }); return; }
+  if (hit(L.sumBack,x,y)) { gs=summonReturn; GF.sfx('tap'); return; }
+}
+function trySummon(n) {
+  var tcost=n, ecost = n===1?100:900;
+  if (meta.tickets>=tcost) { meta.tickets-=tcost; }
+  else if (meta.essence>=ecost) { meta.essence-=ecost; }
+  else { GF.sfx('error'); return; }
+  GF.sfx('unlock');
+  var res=doSummon(n);
+  if (n===1) { pullReveal = { id:res.bestId, isNew:res.anyNew, stars:meta.owned[res.bestId].stars, t:0 }; }
+  else { summonResult = { got:res.got, t:0 }; }
+}
+
+// ── PULL REVEAL OVERLAY ──────────────────────────────────────────────────────
+function drawPullReveal() {
+  var S=GF.S, W=GF.W, H=GF.H, pr=pullReveal;
+  var u=rosterById(pr.id);
+  // backdrop
+  ctx.fillStyle='rgba(4,4,12,'+Math.min(0.92,pr.t*3)+')'; ctx.fillRect(0,0,W,H);
+  var appear=Math.min(1,pr.t*2.2);
+  var rs=rarColor(u.rar);
+  // burst rays
+  ctx.save(); ctx.translate(GF.cx,H*0.42); ctx.globalAlpha=0.5*appear;
+  for (var i=0;i<16;i++){ ctx.rotate(Math.PI/8 + pr.t*0.3); ctx.fillStyle=rs; ctx.globalAlpha=0.12*appear; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-14*S, -W); ctx.lineTo(14*S,-W); ctx.closePath(); ctx.fill(); }
+  ctx.restore();
+  // portrait
+  var psz=Math.min(W*0.62,H*0.40)*appear;
+  var img=IMG[u.art];
+  ctx.save(); ctx.translate(GF.cx, H*0.42); ctx.shadowColor=rs; ctx.shadowBlur=40*S*appear;
+  ctx.beginPath(); ctx.arc(0,0,psz/2,0,Math.PI*2); ctx.save(); ctx.clip();
+  if (img) drawImgCentered(img,0,0,psz,psz); else { ctx.fillStyle=ORB_COLS[u.el].a; ctx.fillRect(-psz/2,-psz/2,psz,psz);} ctx.restore();
+  ctx.lineWidth=4*S; ctx.strokeStyle=rs; ctx.beginPath(); ctx.arc(0,0,psz/2,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+  // name + rarity stars
+  ctx.textAlign='center';
+  ctx.font='bold '+clampF(26*S,18,38)+'px Inter, system-ui'; ctx.fillStyle='#fff'; ctx.globalAlpha=appear;
+  ctx.fillText((GF.lang==='ru'?u.ru:u.en), GF.cx, H*0.66);
+  drawStars(GF.cx, H*0.70, pr.stars, 10*S);
+  ctx.globalAlpha=1;
+  // NEW or STAR UP tag
+  if (pr.t>0.4){
+    ctx.font='bold '+clampF(18*S,13,24)+'px Inter, system-ui';
+    ctx.fillStyle= pr.isNew?'#2ee07a':'#ffd23a';
+    ctx.fillText(pr.isNew?GF.t('newunit'):GF.t('starup'), GF.cx, H*0.75);
+  }
+  // tap to dismiss
+  if (pr.t>0.6){ ctx.font=clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillStyle='#9ab'; ctx.fillText(GF.lang==='ru'?'нажми чтобы продолжить':'tap to continue', GF.cx, H*0.84); }
+}
+// global tap to dismiss pull/summon overlays (handled before other clicks)
+var _origOnDown = onDown;
+onDown = function(x,y){
+  if (pullReveal && pullReveal.t>0.4){ pullReveal=null; GF.sfx('tap'); return; }
+  if (summonResult && summonResult.t>0.3){ summonResult=null; GF.sfx('tap'); return; }
+  _origOnDown(x,y);
+};
+
+function drawSummonResult() {
+  var S=GF.S, W=GF.W, H=GF.H, sr=summonResult;
+  ctx.fillStyle='rgba(4,4,12,0.92)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center'; ctx.textBaseline='top'; ctx.font='bold '+clampF(22*S,16,30)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText(GF.t('summon')+' x'+sr.got.length, GF.cx, H*0.10);
+  // grid of 10 results
+  var cols=5, gap=8*S, cw=(W*0.9-gap*(cols-1))/cols, ch=cw*1.16;
+  var gx=W*0.05, gy=H*0.20;
+  for (var i=0;i<sr.got.length;i++){
+    var appear=Math.min(1, Math.max(0,(sr.t - i*0.06)*4));
+    if (appear<=0) continue;
+    var u=rosterById(sr.got[i]);
+    var col=i%cols, row=Math.floor(i/cols);
+    var x=gx+col*(cw+gap), y=gy+row*(ch+gap);
+    ctx.save(); ctx.globalAlpha=appear;
+    GF.rr(ctx,x,y,cw,ch,6*S); ctx.fillStyle='rgba(18,20,36,0.95)'; ctx.fill();
+    ctx.save(); GF.rr(ctx,x+3*S,y+3*S,cw-6*S,ch*0.66,4*S); ctx.clip(); var img=IMG[u.art]; if(img) drawCover(img,x+3*S,y+3*S,cw-6*S,ch*0.66); else {ctx.fillStyle=ORB_COLS[u.el].a; ctx.fillRect(x+3*S,y+3*S,cw-6*S,ch*0.66);} ctx.restore();
+    GF.rr(ctx,x,y,cw,ch,6*S); ctx.lineWidth=2*S; ctx.strokeStyle=rarColor(u.rar); ctx.stroke();
+    drawStars(x+cw/2, y+ch*0.84, u.rar, 4.5*S);
+    ctx.restore();
+  }
+  if (sr.t>0.7){ ctx.fillStyle='#9ab'; ctx.font=clampF(13*S,11,17)+'px Inter, system-ui'; ctx.textAlign='center'; ctx.fillText(GF.lang==='ru'?'нажми чтобы продолжить':'tap to continue', GF.cx, H*0.9); }
+}
+
+function drawDailyToast() {
+  var S=GF.S;
+  ctx.save(); ctx.globalAlpha=Math.min(1,dailyToast);
+  ctx.fillStyle='rgba(20,22,40,0.95)'; var w=GF.W*0.7, x=GF.cx-w/2, y=GF.H*0.12, h=44*S;
+  GF.rr(ctx,x,y,w,h,12*S); ctx.fill();
+  ctx.fillStyle='#ffd23a'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font='bold '+clampF(15*S,12,20)+'px Inter, system-ui';
+  ctx.fillText(GF.t('daily'), GF.cx, y+h/2); ctx.restore();
+}
+
+// ===========================================================================
+//  IMAGE HELPERS
+// ===========================================================================
+var IMG = {};
+var IMG_KEYS = [
+  'beast_emberpup','beast_cinderhound','beast_magmadrake','beast_tidefin','hero_marina',
+  'beast_mossback','beast_thornbeast','beast_sparkwing','beast_lumenowl','hero_solara',
+  'beast_nightmaw','hero_kael','boss_voidtitan',
+  'bg_volcano','bg_ocean','bg_forest','bg_void'
+];
+function loadImages() {
+  return Promise.all(IMG_KEYS.map(function(k){
+    return new Promise(function(res){
+      var img=new Image();
+      img.onload=function(){ IMG[k]=img; res(); };
+      img.onerror=function(){ IMG[k]=null; res(); };
+      img.src='./assets/'+k+'.webp';
+    });
+  }));
+}
+// draw image centered, "contain" (whole image fits, may letterbox) — for portraits
+function drawImgCentered(img,cx,cy,w,h){
+  if (!img||!img.width) return;
+  var ar=img.width/img.height, tar=w/h, dw,dh;
+  if (ar>tar){ dw=w; dh=w/ar; } else { dh=h; dw=h*ar; }
+  ctx.drawImage(img, cx-dw/2, cy-dh/2, dw, dh);
+}
+// draw image as "cover" (fills target, crops overflow) — for bg + thumbnails
+function drawCover(img,x,y,w,h){
+  if (!img||!img.width){ return; }
+  var ar=img.width/img.height, tar=w/h, sw,sh,sx,sy;
+  if (ar>tar){ sh=img.height; sw=sh*tar; sx=(img.width-sw)/2; sy=0; }
+  else { sw=img.width; sh=sw/tar; sx=0; sy=(img.height-sh)/2; }
+  ctx.drawImage(img, sx,sy,sw,sh, x,y,w,h);
+}
+
+// ── TEXT HELPERS ─────────────────────────────────────────────────────────────
+function clampF(v,lo,hi){ return Math.max(lo,Math.min(hi,v)); }
+function wrapText(text,cx,y,maxW,lineH){
+  var words=String(text).split(/\s+/), line='', lines=[];
+  for (var i=0;i<words.length;i++){ var probe=line?line+' '+words[i]:words[i];
+    if (ctx.measureText(probe).width>maxW && line){ lines.push(line); line=words[i]; } else line=probe; }
+  if (line) lines.push(line);
+  for (var j=0;j<lines.length;j++) ctx.fillText(lines[j], cx, y+j*lineH);
+}
+function fitText(txt,maxW,fs){
+  ctx.font='bold '+fs+'px Inter, system-ui';
+  if (ctx.measureText(txt).width<=maxW) return txt;
+  var t=txt; while(t.length>1 && ctx.measureText(t+'…').width>maxW) t=t.slice(0,-1);
+  return t+'…';
+}
+
+// ===========================================================================
+//  TUTORIAL
+// ===========================================================================
+function startTutorial() {
+  // point at the board; show a horizontal drag to line up a color.
+  // It advances when the player's first move resolves a combo (GF.tutorial.next in RESOLVE).
+  var c1 = cellCenter(BR-1, 1), c2 = cellCenter(BR-1, 3);
+  GF.tutorial.start([
+    { text: GF.t('tutdrag'),
+      target: function(){ return { x: cellCenter(BR-1,1).x, y: cellCenter(BR-1,1).y, r: L.cell*0.5 }; },
+      target2: function(){ return { x: cellCenter(BR-1,3).x, y: cellCenter(BR-1,3).y, r: L.cell*0.5 }; },
+      gesture:'drag', advance:'manual' },
+    { text: GF.t('tutmatch'),
+      target: function(){ return { x: GF.cx, y: L.enemyY, r: 60*GF.S }; },
+      advance:'click_any' },
+  ], { storageKey:'orbchamp_tut_v1', force: !meta.seenTut });
+  meta.seenTut = true; saveMeta();
+}
+
+// ===========================================================================
+//  BOOT
+// ===========================================================================
+GF.init({
+  designW: 393, designH: 852,
+  strings: STRINGS,
+  saveKey: SAVE_KEY,
+  onReady: function() {
+    loadMeta();
+    GF.startMusic({ preset:'arcade', muted:GF.muted });
+    // expose state for the test gate
+    GF.exposeState(function(){
+      return {
+        gs: gs,
+        phase: battle?battle.phase:null,
+        stage: battle?battle.stageIdx:null,
+        wave: battle?battle.waveIdx:null,
+        teamHp: battle?Math.round(battle.teamHp):null,
+        enemyHp: battle?battle.enemies.reduce(function(a,e){return a+e.hp;},0):null,
+        owned: Object.keys(meta.owned).length,
+        team: meta.team.length,
+        essence: meta.essence, tickets: meta.tickets, summons: meta.summons,
+        stageUnlocked: meta.stageUnlocked,
+      };
+    });
+    // load images then maybe autostart
+    loadImages().then(function(){
+      if (window.__GF_AUTOSTART && !window._silent) {
+        // platform builds: drop straight into a battle (stage at furthest unlocked)
+        startBattle(Math.min(meta.stageUnlocked, STAGES.length-1));
+        setTimeout(startTutorial, 60);
+      }
+    });
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// when a battle starts (gallery flow via PLAY), arm the tutorial on first stage
+var _origStart = startBattle;
+startBattle = function(idx){
+  _origStart(idx);
+  if (!localStorage.getItem('orbchamp_tut_v1')) setTimeout(startTutorial, 80);
+};
+
+// test seam: jump straight into a battle (used by screenshot/gate tooling)
+window._jumpLevel = function(){ if(gs!=='BATTLE') startBattle(Math.min(meta.stageUnlocked,STAGES.length-1)); };
+// dev seams for verification (see Game Build Hygiene §8 — drive real actions in-browser)
+window._orbInfo = function(){ try { return window.__gfState(); } catch(e){ return null; } };
+window._orbGrant = function(id){ grantUnit(id,true); rebuildTeamIfNeeded(); saveMeta(); };
+window._orbBoard = function(){ return board.map(function(r){return r.slice();}); };
+window._orbSetBoard = function(b){ board=b; };
+window._orbForceWin = function(){ if(battle){ battle.enemies.forEach(function(e){e.hp=0;}); } };
+window._orbStartStage = function(i){ startBattle(GF.clamp(i|0,0,STAGES.length-1)); };
+window._orbGoto = function(s){ gs=s; };
+window._orbGeom = function(r,c){ var cc=cellCenter(r,c); return { x:cc.x, y:cc.y, cell:L.cell, BR:BR, BC:BC, boardX:L.boardX, boardY:L.boardY }; };
+window._orbButtons = function(){ // current screen's primary buttons (game-space rects) for the harness to tap
+  return { menuPlay:L.menuPlay, menuColl:L.menuColl, menuSummon:L.menuSummon,
+    ssTeam:L.ssTeam, ssBack:L.ssBack, dailyBtn:L.dailyBtn, stageCards:L.stageCards,
+    sumOne:L.sumOne, sumTen:L.sumTen, sumAd:L.sumAd, sumBack:L.sumBack,
+    winSummon:L.winSummon, winNext:L.winNext, loseRetry:L.loseRetry, loseHub:L.loseHub, loseRevive:L.loseRevive,
+    collSummon:L.collSummon, collBack:L.collBack, teamBack:L.teamBack, teamAuto:L.teamAuto }; };
+window._orbDismissOverlay = function(){ if(pullReveal&&pullReveal.t>0.1){pullReveal.t=1;pullReveal=null;return 'pull';} if(summonResult&&summonResult.t>0.1){summonResult.t=1;summonResult=null;return 'summon';} return null; };
+// test seams to manipulate persisted meta (it's IIFE-private) + read combo info
+window._orbMeta = function(patch){ if(patch){ for(var k in patch) meta[k]=patch[k]; saveMeta(); } return { tickets:meta.tickets, essence:meta.essence, lastDaily:meta.lastDaily, team:meta.team.slice(), owned:Object.keys(meta.owned).length, stageUnlocked:meta.stageUnlocked, summons:meta.summons }; };
+window._orbCombo = function(){ return battle?{count:battle.lastComboCount, flash:battle.comboFlash}:null; };
+window._orbTeamEls = function(){ return battle?battle.units.map(function(u){return u.el;}):[]; };
+
+})();
+</script>
+</body>
+</html>
