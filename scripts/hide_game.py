@@ -33,9 +33,21 @@ BASE = os.environ.get("GALLERY_BASE", "https://game-factory.tech").rstrip("/")
 
 
 def read_token() -> str:
+    # 1) explicit env override (per-call): ADMIN_TOKEN=... hide_game.py ...
     env_tok = os.environ.get("ADMIN_TOKEN")
     if env_tok:
         return env_tok.strip()
+    # 2) dedicated PROD-token file (gitignored). This is the production ADMIN_TOKEN
+    #    from the Cloudflare Pages dashboard — the SAME token pasted into admin.html.
+    #    Prefer it: Gallery/.dev.vars holds the LOCAL wrangler dev token, which does
+    #    NOT match prod, so a .dev.vars token gets a 403 against the live site.
+    prod = GALLERY / ".admin_token"
+    if prod.exists():
+        tok = prod.read_text(encoding="utf-8").strip()
+        if tok:
+            return tok
+    # 3) fallback: ADMIN_TOKEN in .dev.vars/.env (local dev token — only works
+    #    against `wrangler pages dev`, not production).
     for fn in (GALLERY / ".dev.vars", GALLERY / ".env"):
         if not fn.exists():
             continue
@@ -43,7 +55,10 @@ def read_token() -> str:
             line = line.strip()
             if line.startswith("ADMIN_TOKEN"):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise SystemExit("ADMIN_TOKEN not found in Gallery/.dev.vars or Gallery/.env")
+    raise SystemExit(
+        "No admin token. Put the PROD token (the one you paste into admin.html) "
+        "in Gallery/.admin_token, or run with ADMIN_TOKEN=<token> in the env."
+    )
 
 
 def call(method: str, token: str, body: dict | None = None) -> dict:
@@ -51,7 +66,15 @@ def call(method: str, token: str, body: dict | None = None) -> dict:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         url, data=data, method=method,
-        headers={"content-type": "application/json", "x-admin-token": token},
+        headers={
+            "content-type": "application/json",
+            "x-admin-token": token,
+            # Cloudflare blocks the default Python-urllib UA with error 1010
+            # before the request reaches the Function — present a browser UA.
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
