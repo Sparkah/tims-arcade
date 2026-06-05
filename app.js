@@ -1,5 +1,6 @@
 // ── State ─────────────────────────────────────────────────────────────────
 let games = [];   // from games.json
+let hiddenSlugs = new Set();   // admin-hidden slugs (low-quality, curated out of the grid)
 let counts = {};  // from /api/counts (cumulative all-time)
 let todayScores = {}; // from /api/trending — { slug: {seconds, comments, score} }
 let myVotes = JSON.parse(localStorage.getItem('myVotes') || '{}');
@@ -115,9 +116,33 @@ async function init() {
   const featuredP = fetch('/api/featured', { cache: 'no-store' })
                       .then(r => r.ok ? r.json() : null)
                       .catch(() => null);
+  // Admin-hidden (low-quality) slugs curated out of the public grid. Fetched in
+  // parallel so the filter below rarely adds latency and never blocks paint.
+  const hiddenP   = fetch('/api/hidden', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : null)
+                      .catch(() => null);
 
   // FIRST PAINT — block only on the catalogue.
   games = await gamesP;
+
+  // Drop hidden games from the public catalogue before anything renders, so the
+  // grid, search, and genre counts all operate on the visible set. The set is
+  // cached to localStorage so a transient /api/hidden failure FAILS CLOSED (uses
+  // the last known hidden set) instead of resurfacing hidden games.
+  try {
+    let list = null;
+    const hid = await hiddenP;
+    if (hid && Array.isArray(hid.hidden)) {
+      list = hid.hidden;
+      try { localStorage.setItem('gf_hidden', JSON.stringify(list)); } catch (e) { /* private mode */ }
+    } else {
+      try { const c = JSON.parse(localStorage.getItem('gf_hidden') || '[]'); if (Array.isArray(c)) list = c; } catch (e) { /* ignore */ }
+    }
+    if (list && list.length) {
+      hiddenSlugs = new Set(list);
+      games = games.filter(g => !hiddenSlugs.has(g.slug));
+    }
+  } catch (e) { /* hidden filter is best-effort — never block the grid */ }
 
   attachEvents();
   renderGenres();
@@ -168,6 +193,7 @@ async function init() {
   // "🔥 Trending" to "⭐ FEATURED TODAY · 2× TOKENS" when the slugs match.
   featuredP.then(f => {
     if (!f || !f.slug) return;
+    if (hiddenSlugs.has(f.slug)) return;   // hidden wins over featured — never badge a hidden game
     todaysFeaturedSlug = f.slug;
     render();
   });
