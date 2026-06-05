@@ -242,9 +242,10 @@ async function load() {
   document.getElementById('content').innerHTML = '<p style="color:#8a8aa0">Loading…</p>';
   lastLoadAt = Date.now();
   try {
-    const [statsRes, gamesRes] = await Promise.all([
+    const [statsRes, gamesRes, publishRes] = await Promise.all([
       fetch('/api/admin/stats?token=' + encodeURIComponent(token), { cache: 'no-store' }),
       fetch('/games.json', { cache: 'no-store' }),
+      fetch('/api/admin/publish-status?token=' + encodeURIComponent(token), { cache: 'no-store' }),
     ]);
     if (statsRes.status === 403) {
       sessionStorage.removeItem('adminToken');
@@ -277,6 +278,7 @@ async function load() {
     // Sort by total seconds (desc), then plays
     merged.sort((a, b) => (b.seconds - a.seconds) || (b.plays - a.plays));
 
+    stats.publishStatus = (publishRes && publishRes.ok) ? await publishRes.json().catch(() => null) : null;
     stats.perGame = merged;
     render(stats);
 
@@ -543,6 +545,65 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
+function renderPublishBoard(d) {
+  const ps = d.publishStatus;
+  if (!ps || !ps.games) {
+    return '<h2 style="margin-top:36px">Publish board</h2><p style="color:#8a8aa0;font-size:12px">publish-status.json not loaded — run build_dashboard.py + sync_games.sh.</p>';
+  }
+  const titleFor = (slug) => (d.perGame.find(x => x.slug === slug) || {}).title || slug;
+  const sum = ps.summary || {};
+  const sy = sum.yandex || {}, sc = sum.crazygames || {}, sgp = sum.gamepush || {};
+  const platLabels = { yandex: 'Yandex', crazygames: 'CrazyGames', gamedistribution: 'GameDistribution', gamepush: 'GamePush' };
+  const badge = (p) => {
+    if (!p || !p.status) return '<span style="color:#5a5a6a">—</span>';
+    const s = p.status, url = p.url || p.developerUrl;
+    if (s === 'live') return url ? `<a href="${escapeHtml(url)}" target="_blank" style="color:#3ad17a;font-weight:600;text-decoration:none">● live ↗</a>` : '<span style="color:#3ad17a;font-weight:600">● live</span>';
+    if (s === 'approved') return '<span style="color:#3ad17a">✓ approved</span>';
+    if (s === 'submitted') return url ? `<a href="${escapeHtml(url)}" target="_blank" style="color:#ffd23f;text-decoration:none">⏳ in mod ↗</a>` : '<span style="color:#ffd23f">⏳ in mod</span>';
+    if (s === 'built') return '<span style="color:#7aa2f7">◆ ready</span>';
+    if (s === 'rejected') return '<span style="color:#f7768e">✗ rejected</span>';
+    if (s === 'removed') return '<span style="color:#a55">⊘ removed</span>';
+    if (s === 'not_started' || s === 'n/a') return '<span style="color:#5a5a6a">—</span>';
+    return `<span style="opacity:0.6">${escapeHtml(s)}</span>`;
+  };
+  const ready = [];
+  for (const slug of Object.keys(ps.games)) {
+    const g = ps.games[slug];
+    if ((g.readyPlatforms || []).length && g.engagement) {
+      ready.push({ title: titleFor(slug), eng: g.engagement, ready: g.readyPlatforms });
+    }
+  }
+  ready.sort((a, b) => (b.eng.seconds - a.eng.seconds) || (b.eng.plays7d - a.eng.plays7d));
+  const readyTop = ready.slice(0, 12);
+  const untracked = ps.untracked || [];
+  const rows = Object.keys(ps.games).map(slug => {
+    const g = ps.games[slug], pl = g.platforms || {};
+    const other = g.other ? Object.keys(g.other).map(k => { const p = g.other[k]; return `${escapeHtml(k)}:${p.url ? `<a href="${escapeHtml(p.url)}" target="_blank" style="color:#3ad17a">${escapeHtml(p.status || '?')}↗</a>` : escapeHtml(p.status || '?')}`; }).join(' ') : '<span style="color:#5a5a6a">—</span>';
+    const e = g.engagement;
+    const eng = e ? `<span style="font-size:11px;color:#8a8aa0"> ${e.plays7d}p·👍${e.likes}/👎${e.dislikes}</span>` : '';
+    return `<tr>
+      <td><div style="color:#e7e7ee;font-weight:600">${escapeHtml(titleFor(slug))}</div><div style="font-size:11px;color:#6a6a7a">${escapeHtml(slug)}${eng}</div></td>
+      <td>${badge(pl.yandex)}</td><td>${badge(pl.crazygames)}</td><td>${badge(pl.gamedistribution)}</td><td>${badge(pl.gamepush)}</td>
+      <td style="font-size:11px">${other}</td>
+    </tr>`;
+  }).join('');
+  return `
+    <h2 style="margin-top:36px">Publish board <span style="font-size:12px;color:#8a8aa0;font-weight:400">— what's live / in moderation / ready, per platform</span></h2>
+    <p style="color:#8a8aa0;font-size:12px;margin:-6px 0 10px">
+      Source of truth (from status.json, generated ${escapeHtml((ps.generated || '').slice(0, 16))}). Yandex ${sy.live || 0} live · ${sy.submitted || 0} in mod &nbsp;|&nbsp; CrazyGames ${sc.live || 0} live · ${sc.submitted || 0} in mod &nbsp;|&nbsp; GamePush ${sgp.built || 0} ready. Tell Claude "publish &lt;game&gt; to &lt;platform&gt;" — it auto-submits and updates this board.
+    </p>
+    ${readyTop.length ? `<div style="background:rgba(122,162,247,0.08);border:1px solid rgba(122,162,247,0.25);border-radius:6px;padding:10px 12px;margin-bottom:14px">
+      <div style="font-weight:600;color:#7aa2f7;font-size:13px;margin-bottom:6px">◆ Ready to publish — built, has plays, missing platforms</div>
+      ${readyTop.map(r => `<div style="font-size:12px;margin:3px 0"><b style="color:#e7e7ee">${escapeHtml(r.title)}</b> <span style="color:#8a8aa0">${r.eng.plays7d}p · 👍${r.eng.likes}</span> → open on: ${r.ready.map(p => platLabels[p] || p).join(', ')}</div>`).join('')}
+    </div>` : ''}
+    <table>
+      <thead><tr><th>Game</th><th>Yandex</th><th>CrazyGames</th><th>GameDistr.</th><th>GamePush</th><th>Other</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${untracked.length ? `<p style="color:#8a8aa0;font-size:11px;margin-top:8px"><b>${untracked.length} untracked-but-played</b> (no status entry yet — publish candidates): ${untracked.slice(0, 10).map(u => `${escapeHtml(u.slug)} (${u.engagement.plays7d}p)`).join(', ')}</p>` : ''}
+  `;
+}
+
 function render(d) {
   const fmt = n => Math.round(n).toLocaleString();
   const fmtMin = sec => sec < 60 ? sec + 's' : sec < 3600 ? Math.round(sec/60) + 'm' : (sec/3600).toFixed(1) + 'h';
@@ -628,6 +689,8 @@ function render(d) {
         }).join('')}
       </tbody>
     </table>
+
+    ${renderPublishBoard(d)}
 
     ${d.abGames && d.abGames.length ? `
     <h2>A/B thumbnail performance</h2>
