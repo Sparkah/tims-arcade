@@ -421,7 +421,7 @@ function init(config) {
       if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
         window.ysdk.features.LoadingAPI.ready();
       }
-      // CrazyGames pairs sdkGameLoadingStart/Stop with gameplayStart/Stop —
+      // CrazyGames pairs the loading lifecycle with the gameplay lifecycle —
       // calling loadingStop here tells CG the boot phase is done, which
       // anchors their Gameplay Conversion measurement.
       try {
@@ -441,7 +441,7 @@ function init(config) {
   //
   // GamePush priority: when the gamepush SDK is loaded, it owns ad / save /
   // leaderboard / achievement routing across all 9 supported platforms
-  // (Yandex, CrazyGames, GameDistribution, GameMonetize, Kongregate,
+  // (Yandex, CrazyGames, GameDistribution, GameMonetize,
   // Playgama, Telegram Mini Apps, VK Play, WG Playground). The native
   // YaGames / CrazyGames init paths below stay as fallbacks for legacy
   // games not yet migrated to GP.
@@ -660,6 +660,113 @@ var gpApi = {
   },
 };
 
+// ── PROCEDURAL MUSIC BED ───────────────────────────────────────────────────
+// Zero-asset looping background music, synthesised with WebAudio (no mp3, no
+// network, no credits, no bundle weight). Started on the first user gesture
+// (browser autoplay policy). Mute-aware via setMusicMuted. This is the FACTORY
+// BASELINE so every shipped game has a theme — call GF.startMusic({preset}) in
+// onReady. Presets pick scale/chords/tempo/timbre; pass one matching the vibe.
+var _mus = { ctx: null, master: null, on: false, muted: false, timer: null, next: 0, step: 0, bar: 0, preset: null, started: false };
+var MUSIC_PRESETS = {
+  // warm major lo-fi (root G) — cozy/management/puzzle
+  cozy:   { bpm: 82,  root: 196.00, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[5,0,2],[3,5,0],[4,6,1]], wave: 'triangle', bassWave: 'sine',     drums: false, gain: 0.16, arpDiv: 2 },
+  // driving minor synthwave (root A) — runner/arcade/action
+  synth:  { bpm: 122, root: 220.00, scale: [0,2,3,5,7,8,10], chords: [[0,2,4],[5,0,2],[3,5,0],[6,1,3]], wave: 'sawtooth', bassWave: 'square',   drums: true,  gain: 0.12, arpDiv: 4 },
+  // bright chiptune (root C) — fast casual/score
+  arcade: { bpm: 132, root: 261.63, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[3,5,0],[4,6,1],[0,2,4]], wave: 'square',   bassWave: 'triangle', drums: true,  gain: 0.11, arpDiv: 4 },
+  // slow ambient major (root F) — calm/zen
+  calm:   { bpm: 68,  root: 174.61, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[4,6,1],[5,0,2],[3,5,0]], wave: 'sine',     bassWave: 'sine',     drums: false, gain: 0.15, arpDiv: 2 },
+};
+function _musFreq(root, n) { return root * Math.pow(2, n / 12); }
+function _musTone(freq, t, dur, wave, peak, o) {
+  o = o || {}; var c = _mus.ctx; if (!c) return;
+  var osc = c.createOscillator(), g = c.createGain();
+  osc.type = wave; osc.frequency.setValueAtTime(freq, t);
+  if (o.glideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, o.glideTo), t + dur);
+  var a = o.attack != null ? o.attack : 0.02, r = o.release != null ? o.release : 0.12;
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t + a);
+  g.gain.setValueAtTime(Math.max(0.0002, peak), t + Math.max(a + 0.01, dur - r));
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  if (o.filter) { var f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.filter; osc.connect(f); f.connect(g); }
+  else osc.connect(g);
+  g.connect(_mus.master);
+  osc.start(t); osc.stop(t + dur + 0.05);
+}
+function _musNoise(t, dur, peak, freq) {
+  var c = _mus.ctx; if (!c) return;
+  var n = Math.floor(c.sampleRate * dur), buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+  for (var i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  var src = c.createBufferSource(); src.buffer = buf;
+  var hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = freq || 6000;
+  var g = c.createGain(); g.gain.setValueAtTime(peak, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(hp); hp.connect(g); g.connect(_mus.master); src.start(t); src.stop(t + dur + 0.02);
+}
+function _musKick(t) { _musTone(130, t, 0.16, 'sine', 0.42, { glideTo: 48, attack: 0.004, release: 0.12 }); }
+function _musSchedule() {
+  var p = _mus.preset, c = _mus.ctx; if (!p || !c) return;
+  var spb = 60 / p.bpm, stepDur = spb / 4;          // 16 sixteenth-steps per bar
+  while (_mus.next < c.currentTime + 0.25) {
+    var t = _mus.next, step = _mus.step % 16;
+    var chord = p.chords[_mus.bar % p.chords.length], sc = p.scale, L = sc.length;
+    var deg2semi = function (deg) { return sc[((deg % L) + L) % L] + 12 * Math.floor(deg / L); };
+    if (step === 0) {                                // bar: pad chord + bass + kick
+      for (var ci = 0; ci < chord.length; ci++) _musTone(_musFreq(p.root, deg2semi(chord[ci])), t, spb * 4 * 0.96, p.wave, 0.085, { attack: 0.10, release: 0.5, filter: 1500 });
+      _musTone(_musFreq(p.root, deg2semi(chord[0]) - 12), t, spb * 2 * 0.92, p.bassWave, 0.17, { attack: 0.02, release: 0.16, filter: 480 });
+      if (p.drums) _musKick(t);
+    }
+    if (step === 8) {                                // beat 3: bass + kick
+      _musTone(_musFreq(p.root, deg2semi(chord[0]) - 12), t, spb * 2 * 0.9, p.bassWave, 0.15, { attack: 0.02, release: 0.16, filter: 480 });
+      if (p.drums) _musKick(t);
+    }
+    var arpEvery = Math.max(1, Math.round(4 / p.arpDiv));
+    if (step % arpEvery === 0) {                     // arpeggiated lead, up an octave
+      var idx = Math.floor(step / arpEvery), deg = chord[idx % chord.length] + (idx % 6 >= 3 ? 7 : 0);
+      _musTone(_musFreq(p.root, deg2semi(deg) + 12), t, stepDur * arpEvery * 0.85, p.wave, 0.05, { attack: 0.008, release: 0.06, filter: 2800 });
+    }
+    if (p.drums && step % 2 === 1) _musNoise(t, 0.035, 0.045, 7000);  // offbeat hats
+    _mus.next += stepDur; _mus.step++;
+    if (_mus.step % 16 === 0) _mus.bar++;
+  }
+}
+function startMusic(opts) {
+  opts = opts || {};
+  _mus.preset = MUSIC_PRESETS[opts.preset] || MUSIC_PRESETS.cozy;
+  if (typeof opts.muted === 'boolean') _mus.muted = opts.muted;
+  if (_mus.started) return; _mus.started = true;
+  var begin = function () {
+    if (_mus.on) return;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+      _mus.ctx = _mus.ctx || new AC();
+      if (_mus.ctx.state === 'suspended') _mus.ctx.resume();
+      _mus.master = _mus.ctx.createGain();
+      _mus.master.gain.value = _mus.muted ? 0.0001 : _mus.preset.gain;
+      _mus.master.connect(_mus.ctx.destination);
+      _mus.next = _mus.ctx.currentTime + 0.12; _mus.step = 0; _mus.bar = 0; _mus.on = true;
+      _mus.timer = setInterval(function () { try { if (_mus.on) _musSchedule(); } catch (e) {} }, 30);
+    } catch (e) {}
+  };
+  // Hard-rule #8: suspend the music context on tab-hide.
+  if (!_mus._visBound) {
+    _mus._visBound = true;
+    document.addEventListener('visibilitychange', function () {
+      if (!_mus.ctx) return;
+      try {
+        if (document.hidden) _mus.ctx.suspend();
+        else if (_mus.on) { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; }
+      } catch (e) {}
+    });
+  }
+  var fire = function () { begin(); ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.removeEventListener(ev, fire, true); }); };
+  ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.addEventListener(ev, fire, true); });
+}
+function setMusicMuted(m) {
+  _mus.muted = !!m;
+  if (_mus.master && _mus.ctx) { try { _mus.master.gain.setTargetAtTime(m ? 0.0001 : (_mus.preset ? _mus.preset.gain : 0.15), _mus.ctx.currentTime, 0.04); } catch (e) {} }
+}
+
+
 // ── PUBLIC API ───────────────────────────────────────────────────────────
 // ── AUDIO: procedural SFX synth + bg-music loop + mute (reusable) ──────────
 // Games MUST ship sound before publish (Tim 2026-06-04). SFX are synthesized via
@@ -776,6 +883,8 @@ window.GF = {
   // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
   // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
   sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
+  // Procedural music bed (no-credit baseline; GF.music(mp3) is the Suno upgrade):
+  startMusic: startMusic, setMusicMuted: setMusicMuted,
   hasSfx: function (n) { return !!SFX_LIB[n]; },
   get muted() { return AUDIO_MUTED; },
   // Sprites
@@ -863,9 +972,10 @@ window.GF = {
   //   - Help (?) button — call GF.tutorial.reopen() to re-run from step 1.
   tutorial: (function () {
     var pulseT = 0;
-    // ── Animated demo HAND (Tim 2026-06-04: tutorials must SHOW the gesture) ──
-    // Vector pointing hand (no emoji). Drawn so the FINGERTIP sits at (x,y) and
-    // the fist trails below-right. `press` squashes it for the grab/tap beat.
+    // ── Animated demo HAND (Tim 2026-06-04: tutorials must SHOW the gesture, not
+    // a text panel). Vector pointing hand; FINGERTIP sits at (x,y), fist trails
+    // below-right. `press` squashes it for the grab/tap; `down` flips it to point
+    // down from above (for targets near the bottom edge). See feedback_tutorial_demo_hand_ux.
     function _tEase(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
     function _tRR(c, x, y, w, h, r) { r = Math.min(r, w / 2, h / 2); c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
     function _tHand(c, x, y, press, down) {
@@ -873,16 +983,16 @@ window.GF = {
       c.translate(x, y);
       var k = (press ? 0.88 : 1);
       c.scale(k * S, k * S);
-      if (down) c.scale(1, -1);   // low targets (near the bottom panel): point DOWN from above so the hand stays visible
+      if (down) c.scale(1, -1);
       c.rotate(-0.26);
       c.lineJoin = 'round'; c.lineCap = 'round';
       c.shadowColor = 'rgba(0,0,0,0.32)'; c.shadowBlur = 7; c.shadowOffsetX = 2; c.shadowOffsetY = 4;
       c.fillStyle = '#ffd9b0'; c.strokeStyle = '#7a4e2c'; c.lineWidth = 2.4;
-      _tRR(c, -15, 23, 30, 33, 13); c.fill(); c.stroke();                 // fist
-      c.beginPath(); c.ellipse(-15, 31, 7, 10, -0.5, 0, Math.PI * 2); c.fill(); c.stroke();  // thumb
-      _tRR(c, -6, 0, 12, 30, 6); c.fill(); c.stroke();                    // index finger (tip at 0,0)
+      _tRR(c, -15, 23, 30, 33, 13); c.fill(); c.stroke();
+      c.beginPath(); c.ellipse(-15, 31, 7, 10, -0.5, 0, Math.PI * 2); c.fill(); c.stroke();
+      _tRR(c, -6, 0, 12, 30, 6); c.fill(); c.stroke();
       c.shadowColor = 'transparent';
-      c.strokeStyle = 'rgba(122,78,44,0.45)'; c.lineWidth = 1.3;           // knuckle creases
+      c.strokeStyle = 'rgba(122,78,44,0.45)'; c.lineWidth = 1.3;
       c.beginPath(); c.moveTo(-9, 36); c.lineTo(13, 36); c.moveTo(-10, 44); c.lineTo(14, 44); c.moveTo(-9, 51); c.lineTo(12, 51); c.stroke();
       c.restore();
     }
@@ -955,8 +1065,8 @@ window.GF = {
       // Resolve target (may be a function returning {x,y,r} so games can
       // point at moving things like a swinging pendulum)
       var tg = typeof step.target === 'function' ? step.target() : step.target;
-      // Light scrim — the HAND is the focus now, so keep the board clearly visible
-      // (Tim 2026-06-04: "hand is enough", dropped the heavy bottom panel).
+      // Light scrim — the HAND is the focus, keep the board visible (Tim 2026-06-04:
+      // "hand is enough", dropped the heavy bottom panel).
       c.fillStyle = 'rgba(0, 0, 0, 0.26)';
       c.fillRect(0, 0, W, H);
       // Pulse highlight
@@ -978,15 +1088,12 @@ window.GF = {
         var to = step.target2 ? (typeof step.target2 === 'function' ? step.target2() : step.target2) : null;
         var ges = step.gesture || (to ? 'drag' : 'tap');
         if (ges === 'drag' && to && typeof to.x === 'number') {
-          // destination highlight ring (green = "drop here")
           c.save(); c.shadowColor = '#7CFC9A'; c.shadowBlur = 14; c.strokeStyle = '#7CFC9A';
           c.lineWidth = 3 + pulse * 1.5; c.globalAlpha = 0.85;
           c.beginPath(); c.arc(to.x, to.y, (to.r || 40) + pulse * 10 * S, 0, Math.PI * 2); c.stroke(); c.restore();
-          // moving dashed path from→to
           c.save(); c.strokeStyle = 'rgba(255,255,255,0.7)'; c.lineWidth = 3 * S;
           c.setLineDash([7 * S, 7 * S]); c.lineDashOffset = -pulseT * 36;
           c.beginPath(); c.moveTo(tg.x, tg.y); c.lineTo(to.x, to.y); c.stroke(); c.restore();
-          // hand: grab → drag → release → pause, looping
           var cyc = 2.6, tt = (pulseT % cyc) / cyc, hx, hy, pr;
           if (tt < 0.16) { hx = tg.x; hy = tg.y; pr = true; }
           else if (tt < 0.62) { var kk = _tEase((tt - 0.16) / 0.46); hx = lerp(tg.x, to.x, kk); hy = lerp(tg.y, to.y, kk); pr = true; }
@@ -994,19 +1101,17 @@ window.GF = {
           else { hx = to.x; hy = to.y; pr = false; }
           _tHand(c, hx, hy, pr);
         } else {
-          // tap: hand presses onto the target on a beat, with an expanding ripple
           var ph = (pulseT % 1.3) / 1.3, pr2 = ph < 0.22;
           if (pr2) {
             c.save(); c.strokeStyle = '#ffeb3b'; c.lineWidth = 3 * S; c.globalAlpha = 0.55 * (1 - ph / 0.22);
             c.beginPath(); c.arc(tg.x, tg.y, (tg.r || 40) * (0.4 + (ph / 0.22) * 0.9), 0, Math.PI * 2); c.stroke(); c.restore();
           }
-          var low = tg.y > H * 0.66;   // behind the bottom panel → flip the hand to point down from above
+          var low = tg.y > H * 0.66;
           _tHand(c, tg.x, tg.y - (pr2 ? 0 : 9 * S), pr2, low);
         }
       }
-      // ── slim caption + skip, anchored ABOVE the action (NOT a full-width bottom
-      // panel — Tim 2026-06-04: "drop that bottom ui panel, hand is enough"). Short
-      // worded hint rides just above the hand so words + gesture read together. ──
+      // ── slim caption + skip, anchored above the action (NOT a full-width bottom
+      // panel — Tim 2026-06-04: "drop that bottom ui panel, hand is enough") ──
       var aTg = (tg && typeof tg.x === 'number') ? tg : { x: W / 2, y: H * 0.5, r: 40 };
       var aTo = step.target2 ? (typeof step.target2 === 'function' ? step.target2() : step.target2) : null;
       var capFs = clamp(14 * S, 12, 18) | 0;
@@ -1023,7 +1128,7 @@ window.GF = {
       var ax = aTg.x, ay = aTg.y, ar = aTg.r || 40;
       if (aTo && typeof aTo.x === 'number') { ax = (aTg.x + aTo.x) / 2; ay = Math.min(aTg.y, aTo.y); ar = Math.max(aTg.r || 40, aTo.r || 40); }
       var pillY = ay - ar - pillH - 16 * S;
-      if (pillY < 52 * S) pillY = (aTo ? Math.max(aTg.y, aTo.y) : aTg.y) + ar + 16 * S;   // would clip the top HUD → drop below the action
+      if (pillY < 52 * S) pillY = (aTo ? Math.max(aTg.y, aTo.y) : aTg.y) + ar + 16 * S;
       pillY = clamp(pillY, 52 * S, H - pillH - 12 * S);
       var pillX = clamp(ax - pillW / 2, 8 * S, W - pillW - 8 * S);
       c.save();

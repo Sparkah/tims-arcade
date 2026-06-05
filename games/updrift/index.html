@@ -31,6 +31,12 @@ var STRINGS = {
     mode_dig: 'DIG', mode_brace: 'BRACE', mode_blast: 'BLAST',
     cause_oxy: 'Your air ran out', cause_crush: 'Crushed by falling rock',
     tap_mode: 'tap to switch mode',
+    objective: 'DIG UP TO THE SURFACE',
+    coach_dig: 'TAP ABOVE TO DIG UP',
+    coach_mode: 'PICK A MODE BELOW ↓',
+    mode_hint_dig: 'breaks 1 above',
+    mode_hint_brace: 'stops the fall',
+    mode_hint_blast: 'clears 3 above',
     best: 'BEST DEPTH', career_max: 'TANK',
     goal_next: 'NEXT GOAL: reach Lvl {lv} to bank +{air} max air',
     goal_done: 'CAREER COMPLETE — all depths mastered!',
@@ -38,7 +44,7 @@ var STRINGS = {
     new_best: 'NEW BEST DEPTH!',
     tut_title: 'How to play',
     tut_goal: 'Goal: Carve a shaft straight UP and reach the bright surface before your air runs out.',
-    tut_controls: 'Controls: Tap the rock above you to act. Tap the mode chip (or press B) to switch DIG / BRACE / BLAST. Arrows move you left-right to aim a column.',
+    tut_controls: 'Controls: Tap a mode chip at the bottom — DIG / BRACE / BLAST — then tap the rock above you to act. The glowing cells show what your tap will hit. Tap left/right (or arrows) to aim a column.',
     tut_win: 'Win: Rise to the surface row to clear the level — survive all 5 levels.',
     tut_lose: 'Lose: Your oxygen tank hits 0, or falling debris crushes you 3 times.',
     tut_tip: 'Tip: Every dig loosens the rock above — BRACE a column for cheap air before it rains down on your head.',
@@ -67,6 +73,12 @@ var STRINGS = {
     mode_dig: 'КОПАТЬ', mode_brace: 'УПОР', mode_blast: 'ВЗРЫВ',
     cause_oxy: 'Кончился воздух', cause_crush: 'Раздавлен породой',
     tap_mode: 'тап — смена режима',
+    objective: 'КОПАЙТЕ ВВЕРХ К ПОВЕРХНОСТИ',
+    coach_dig: 'ТАП СВЕРХУ — КОПАТЬ ВВЕРХ',
+    coach_mode: 'ВЫБЕРИТЕ РЕЖИМ НИЖЕ ↓',
+    mode_hint_dig: 'ломает 1 сверху',
+    mode_hint_brace: 'держит свод',
+    mode_hint_blast: 'сносит 3 сверху',
     best: 'РЕКОРД ГЛУБИНЫ', career_max: 'БАК',
     goal_next: 'ЦЕЛЬ: дойдите до ур. {lv}, чтобы получить +{air} к запасу воздуха',
     goal_done: 'КАРЬЕРА ПРОЙДЕНА — все глубины покорены!',
@@ -74,7 +86,7 @@ var STRINGS = {
     new_best: 'НОВЫЙ РЕКОРД ГЛУБИНЫ!',
     tut_title: 'Как играть',
     tut_goal: 'Цель: Прорубите шахту прямо ВВЕРХ и доберитесь до светлой поверхности, пока не кончился воздух.',
-    tut_controls: 'Управление: Тапайте по камню над собой. Меняйте режим (или клавиша B): КОПАТЬ / УПОР / ВЗРЫВ. Стрелки двигают влево-вправо для выбора колонны.',
+    tut_controls: 'Управление: Выберите режим внизу — КОПАТЬ / УПОР / ВЗРЫВ — затем тапайте по камню над собой. Подсвеченные клетки показывают, что заденет ваш тап. Тап слева/справа (или стрелки) — выбор колонны.',
     tut_win: 'Победа: Поднимитесь до верхнего ряда — пройдите все 5 уровней.',
     tut_lose: 'Поражение: Кислород на нуле или падающие обломки раздавили вас 3 раза.',
     tut_tip: 'Совет: Каждый удар расшатывает камень сверху — поставьте УПОР за дёшево, пока он не обрушился на голову.',
@@ -117,6 +129,71 @@ var SURFACE_ROW = 0;
 // reads as a dense rock face rather than sparse floating ovals.
 var SPRITE_NAMES = ['diver'];
 
+// ── AUDIO — one shared context, synth SFX + soft procedural music bed ───────
+// Inline (the bundled gf-lib predates GF.startMusic). Adapted from the proven
+// merge_defense pattern: a single AudioContext, an SFX bus + a quieter music
+// bus, started on the first user gesture (autoplay policy). Every control action
+// gets a tactile cue — the player comment was that the controls FEEL
+// uncomfortable, so audio feedback is part of the control-clarity fix.
+var AC = null, mGain = null, sGain = null, muGain = null;
+var _mStep = 0, _mNext = 0, _lastDigT = 0;
+function audioInit() {
+  if (AC) return;
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+  mGain = AC.createGain(); mGain.gain.value = audioMuted ? 0 : 1; mGain.connect(AC.destination);
+  sGain = AC.createGain(); sGain.gain.value = 0.55; sGain.connect(mGain);
+  muGain = AC.createGain(); muGain.gain.value = 0.26; muGain.connect(mGain);
+  _mNext = AC.currentTime + 0.1;
+}
+function audioResume() { try { if (AC && AC.state === 'suspended') AC.resume(); } catch (e) {} }
+function tone(freq, dur, type, vol, bus) {
+  if (!AC || audioMuted) return;
+  try {
+    var o = AC.createOscillator(), g2 = AC.createGain();
+    o.type = type || 'sine'; o.frequency.value = freq; o.connect(g2); g2.connect(bus || sGain);
+    var n = AC.currentTime;
+    g2.gain.setValueAtTime(0.0001, n);
+    g2.gain.linearRampToValueAtTime(vol || 0.25, n + 0.012);
+    g2.gain.exponentialRampToValueAtTime(0.0006, n + dur);
+    o.start(n); o.stop(n + dur + 0.03);
+  } catch (e) {}
+}
+function sfx(name) {
+  if (!AC || audioMuted) return;
+  if (name === 'dig') {              // rate-limited thud so rapid taps don't machine-gun
+    var nn = AC.currentTime; if (nn - _lastDigT < 0.05) return; _lastDigT = nn;
+    tone(150 + Math.random() * 30, 0.07, 'square', 0.10);
+    tone(90, 0.06, 'sine', 0.10);
+  }
+  else if (name === 'brace') { tone(330, 0.10, 'triangle', 0.18); tone(495, 0.08, 'sine', 0.10); }
+  else if (name === 'blast') { tone(70, 0.32, 'sawtooth', 0.30); tone(110, 0.22, 'square', 0.12); }
+  else if (name === 'pocket') { tone(784, 0.12, 'sine', 0.22); tone(1175, 0.16, 'sine', 0.12); }
+  else if (name === 'mode') { tone(660, 0.07, 'square', 0.16); tone(990, 0.06, 'sine', 0.09); }
+  else if (name === 'crush') { tone(140, 0.18, 'sawtooth', 0.22); tone(70, 0.22, 'square', 0.16); }
+  else if (name === 'win') { [523, 659, 784, 1047].forEach(function (f, i) { setTimeout(function () { tone(f, 0.22, 'triangle', 0.24); }, i * 80); }); }
+  else if (name === 'lose') { [392, 311, 233].forEach(function (f, i) { setTimeout(function () { tone(f, 0.26, 'sawtooth', 0.18); }, i * 110); }); }
+  else if (name === 'daily') { tone(784, 0.12, 'triangle', 0.24); tone(1175, 0.18, 'sine', 0.14); }
+}
+// Slow, watery arpeggio bed (Am–F–C–G) — only while diving.
+var MPROG = [[220, 261.63, 329.63], [174.61, 220, 261.63], [261.63, 329.63, 392], [196, 246.94, 293.66]];
+function scheduleMusic() {
+  if (!AC || audioMuted || gs !== 'PLAYING') return;
+  var spb = 60 / 76, sps = spb / 2;
+  while (_mNext < AC.currentTime + 0.25) {
+    var ch = MPROG[(_mStep >> 3) % MPROG.length], beat = _mStep % 8;
+    if (beat === 0 || beat === 4) tone(ch[0] / 2, sps * 1.8, 'triangle', 0.13, muGain);
+    tone(ch[beat % 3] * 2, sps * 0.85, 'sine', 0.05, muGain);
+    if (beat === 0) ch.forEach(function (f) { tone(f, spb * 4 * 0.95, 'sine', 0.028, muGain); });
+    _mNext += sps; _mStep++;
+  }
+}
+function setMuted(m) {
+  audioMuted = m;
+  saveMeta();
+  if (mGain && AC) { try { mGain.gain.setTargetAtTime(m ? 0 : 1, AC.currentTime, 0.02); } catch (e) {} }
+  if (!m) audioResume();
+}
+
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';            // MENU | PLAYING | WON | GAMEOVER
 var level = 1;
@@ -136,6 +213,9 @@ var fullWin = false;
 var tutorialOpen = false;
 var lastAct = null;
 var hitFlashT = 0;
+var firstActionDone = false;  // clarity: drives the in-board coach hint until the first dig
+var modeSwitched = false;     // clarity: true once the player has changed mode at least once
+var audioMuted = false;       // persisted mute flag (loaded from meta)
 
 // ── PERSISTENT META — "Career Depth" (iteration #1, retention pass) ─────────
 // The single cross-session progression the player OWNS: the deepest level ever
@@ -257,6 +337,7 @@ function collectDaily() {
   dailyClaimedToday = true;
   dailyAvailable = false;
   saveMeta();
+  audioInit(); audioResume(); sfx('daily');
   return dailyRunBonus;
 }
 // Evaluate today's quest against current run progress. Completing it banks a
@@ -294,6 +375,7 @@ function loadMeta() {
     if (typeof m.lastSeenMs === 'number') lastSeenMs = m.lastSeenMs;
     if (typeof m.questBankedAir === 'number') questBankedAir = Math.max(0, m.questBankedAir | 0);
     if (typeof m.questDoneToday === 'boolean') questDoneToday = m.questDoneToday;
+    if (typeof m.audioMuted === 'boolean') audioMuted = m.audioMuted;
   } catch (e) {}
 }
 function saveMeta() {
@@ -307,6 +389,7 @@ function saveMeta() {
       lastSeenMs: lastSeenMs,
       questBankedAir: questBankedAir,
       questDoneToday: questDoneToday,
+      audioMuted: audioMuted,
     }));
   } catch (e) {}
 }
@@ -402,8 +485,11 @@ function startGame() {
   runPockets = 0;
   questProgressDepth = 0;
   actionsThisRun = 0;
+  firstActionDone = false;
+  modeSwitched = false;
   buildLevel(1);
   gs = 'PLAYING';
+  audioInit(); audioResume();   // first dive = a user gesture → safe to start audio
   if (runStartBonus > 0) {
     GF.spawnFloat(GF.cx, GF.H * 0.42, subst(GF.t('run_bonus'), { air: runStartBonus }), '#7af5ff');
   }
@@ -423,6 +509,7 @@ function loseGame(cause) {
   loseCause = cause;
   gs = 'GAMEOVER';
   GF.setShake(1.0);
+  sfx(cause === 'crush' ? 'crush' : 'lose');
   GF.gameEnded();
   GF.saveRun();
 }
@@ -436,6 +523,7 @@ function winLevel() {
   questProgressDepth = Math.max(questProgressDepth, level);
   checkQuest();
   GF.spawnParticles(GF.cx, GF.H * 0.3, '#ffe06a', 56);
+  sfx('win');
   GF.gameEnded();
   GF.saveRun();
 }
@@ -458,14 +546,18 @@ function digUp() {
         runAirGained += O2_POCKET_REFILL; runPockets += 1; checkQuest();
         GF.spawnParticles(px, py, '#34e1ff', 18);
         GF.spawnFloat(px, py, '+' + O2_POCKET_REFILL + ' ' + GF.t('o2'), '#34e1ff');
+        sfx('pocket');
       } else {
         GF.spawnParticles(px, py, '#8a6b50', 12);
+        sfx('dig');
       }
       setCell(tr, tc, null);
     } else {
       GF.spawnParticles(px, py, '#6a5440', 8);
+      sfx('dig');
     }
-  }
+  } else { sfx('dig'); }
+  firstActionDone = true;
   afterAction();
 }
 
@@ -477,6 +569,8 @@ function brace() {
   var px = layout.gx + (diverCol + 0.5) * layout.cell;
   var py = layout.gy + (diverRow - 0.5) * layout.cell;
   GF.spawnParticles(px, py, '#ffd24a', 8);
+  sfx('brace');
+  firstActionDone = true;
   afterAction();
 }
 
@@ -497,8 +591,10 @@ function blast() {
       setCell(tr, tc, null);
     }
   }
-  if (gained) { oxygen = Math.min(START_OXY, oxygen + gained); runAirGained += gained; checkQuest(); }
+  if (gained) { oxygen = Math.min(START_OXY, oxygen + gained); runAirGained += gained; checkQuest(); sfx('pocket'); }
   GF.setShake(0.6);
+  sfx('blast');
+  firstActionDone = true;
   afterAction();
 }
 
@@ -511,6 +607,17 @@ function act() {
 function cycleMode() {
   var i = MODES.indexOf(mode);
   mode = MODES[(i + 1) % MODES.length];
+  modeSwitched = true;
+  sfx('mode');
+}
+// Clarity: direct mode selection (tappable chips + number keys) so the player
+// is never blindly cycling — they pick the mode they want and can SEE it's
+// active. Re-tapping the active chip is a no-op (no accidental cycle).
+function selectMode(m) {
+  if (MODES.indexOf(m) < 0 || mode === m) return;
+  mode = m;
+  modeSwitched = true;
+  sfx('mode');
 }
 
 function moveDiver(dx) {
@@ -557,6 +664,7 @@ function gravityTick() {
       var pyh = layout.gy + (diverRow + 0.5) * layout.cell;
       GF.spawnParticles(pxh, pyh, '#ff4d5e', 22);
       GF.setShake(0.8);
+      sfx('crush');
       chunks.splice(i, 1);
       if (crushLives <= 0) { loseGame('crush'); return; }
       continue;
@@ -632,6 +740,8 @@ window._jumpLevel = function (lv) {
   oxygen = Math.round(START_OXY * 0.62);
   crushLives = 2;
   mode = 'brace';
+  firstActionDone = true;   // mid-game jump = past the first-action coach hint
+  modeSwitched = true;
 };
 window._setupForScreenshot = window._jumpLevel;
 window._setLang = function (l) { GF.lang = l; };
@@ -640,11 +750,13 @@ window._getI18N = function () { return STRINGS; };
 window._getFontBody = function () { return 'sans-serif'; };
 
 // ── LAYOUT ───────────────────────────────────────────────────────────────
-var layout = { gx: 0, gy: 0, cell: 0, gw: 0, gh: 0, topPad: 0, botPad: 0, helpBtn: null, modeChip: null, dailyBtn: null };
+var layout = { gx: 0, gy: 0, cell: 0, gw: 0, gh: 0, topPad: 0, botPad: 0, helpBtn: null, muteBtn: null, modeChip: null, modeChips: [], dailyBtn: null };
 function recomputeLayout() {
   var W = GF.W, H = GF.H;
   layout.topPad = GF.clamp(74 * GF.S, 52, 104);
-  layout.botPad = GF.clamp(86 * GF.S, 60, 118);
+  // Taller bottom band: the three mode chips are now stacked as a labelled row,
+  // so reserve a little more vertical room than the old single cycle chip.
+  layout.botPad = GF.clamp(104 * GF.S, 78, 140);
   var availH = H - layout.topPad - layout.botPad;
   var availW = W - GF.clamp(16 * GF.S, 8, 28) * 2;
   var cell = Math.floor(Math.min(availW / GRID_W, availH / GRID_H));
@@ -656,8 +768,25 @@ function recomputeLayout() {
   layout.gy = layout.topPad;
   var hb = GF.clamp(34 * GF.S, 26, 44);
   layout.helpBtn = { x: W - hb - GF.clamp(12 * GF.S, 8, 18), y: GF.clamp(12 * GF.S, 8, 18), s: hb };
-  var chipW = GF.clamp(220 * GF.S, 160, 300), chipH = GF.clamp(54 * GF.S, 42, 66);
-  layout.modeChip = { x: (W - chipW) / 2, y: H - layout.botPad + GF.clamp(14 * GF.S, 8, 22), w: chipW, h: chipH };
+  // Mute toggle sits to the LEFT of help (top-right corner), same size.
+  layout.muteBtn = { x: layout.helpBtn.x - hb - GF.clamp(8 * GF.S, 5, 12), y: layout.helpBtn.y, s: hb };
+
+  // CLARITY: three directly-tappable mode chips (DIG / BRACE / BLAST) in a row,
+  // replacing the blind single-cycle chip. The active one is highlighted; each
+  // shows its O2 cost so the trade-off is legible at a glance.
+  var gap = GF.clamp(8 * GF.S, 5, 12);
+  var rowW = Math.min(W - GF.clamp(16 * GF.S, 8, 24) * 2, GF.clamp(440 * GF.S, 300, 560));
+  var chipW = (rowW - gap * 2) / 3;
+  var chipH = GF.clamp(58 * GF.S, 46, 76);
+  var rowX = (W - rowW) / 2;
+  var rowY = H - layout.botPad + GF.clamp(16 * GF.S, 10, 26);
+  layout.modeChips = [];
+  for (var mi = 0; mi < MODES.length; mi++) {
+    layout.modeChips.push({ mode: MODES[mi], x: rowX + mi * (chipW + gap), y: rowY, w: chipW, h: chipH });
+  }
+  // Back-compat: keep a single modeChip rect (= the whole row) so any legacy hit
+  // test / exposed field still resolves; new input uses modeChips.
+  layout.modeChip = { x: rowX, y: rowY, w: rowW, h: chipH };
 }
 
 // ── INPUT ────────────────────────────────────────────────────────────────
@@ -704,7 +833,11 @@ function onPress(x, y) {
   }
   // PLAYING
   if (inRect(x, y, layout.helpBtn)) { tutorialOpen = true; return; }
-  if (inRect(x, y, layout.modeChip)) { cycleMode(); return; }
+  if (inRect(x, y, layout.muteBtn)) { audioInit(); setMuted(!audioMuted); return; }
+  // CLARITY: direct mode selection — tap the chip you want (no blind cycle).
+  for (var ci = 0; ci < layout.modeChips.length; ci++) {
+    if (inRect(x, y, layout.modeChips[ci])) { selectMode(layout.modeChips[ci].mode); return; }
+  }
   var lx = x - layout.gx, ly = y - layout.gy;
   if (lx >= 0 && lx <= layout.gw && ly >= 0 && ly <= layout.gh) {
     var tc = Math.floor(lx / layout.cell);
@@ -729,6 +862,15 @@ function handleKeys() {
   if (!(GF.keys['ArrowUp'] || GF.keys['KeyW'] || GF.keys['Space'])) keyLatch.up = false;
   if (GF.keys['KeyB'] && !keyLatch.b) { cycleMode(); keyLatch.b = true; }
   if (!GF.keys['KeyB']) keyLatch.b = false;
+  // CLARITY: number keys pick a mode directly (1=dig, 2=brace, 3=blast).
+  if ((GF.keys['Digit1'] || GF.keys['Numpad1']) && !keyLatch.k1) { selectMode('dig'); keyLatch.k1 = true; }
+  if (!(GF.keys['Digit1'] || GF.keys['Numpad1'])) keyLatch.k1 = false;
+  if ((GF.keys['Digit2'] || GF.keys['Numpad2']) && !keyLatch.k2) { selectMode('brace'); keyLatch.k2 = true; }
+  if (!(GF.keys['Digit2'] || GF.keys['Numpad2'])) keyLatch.k2 = false;
+  if ((GF.keys['Digit3'] || GF.keys['Numpad3']) && !keyLatch.k3) { selectMode('blast'); keyLatch.k3 = true; }
+  if (!(GF.keys['Digit3'] || GF.keys['Numpad3'])) keyLatch.k3 = false;
+  if (GF.keys['KeyM'] && !keyLatch.m) { audioInit(); setMuted(!audioMuted); keyLatch.m = true; }
+  if (!GF.keys['KeyM']) keyLatch.m = false;
 }
 
 // ── UPDATE ───────────────────────────────────────────────────────────────
@@ -765,6 +907,7 @@ function update(dt) {
   }
   if (gs !== 'PLAYING') { handleMenuKeys(); return; }
   handleKeys();
+  scheduleMusic();   // soft procedural bed, only while diving
   fallTimer += dt * 1000;
   if (fallTimer >= FALL_TICK_MS) {
     fallTimer -= FALL_TICK_MS;
@@ -882,6 +1025,91 @@ function drawChunks(c) {
   }
 }
 
+// CLARITY: a translucent "ghost" over the exact cell(s) the CURRENT tap will
+// hit — 1 cell for DIG/BRACE, the 3 cells above for BLAST — so the player can
+// SEE what their next tap does before committing. Colour-matched to the mode.
+function drawActionGhost(c) {
+  var cell = layout.cell;
+  var col = diverCol;
+  var pulse = 0.5 + 0.5 * Math.sin(performance.now() / 260);
+  var n = (mode === 'blast') ? 3 : 1;
+  var color = mode === 'dig' ? '120,230,255' : (mode === 'brace' ? '255,210,74' : '255,122,58');
+  for (var k = 1; k <= n; k++) {
+    var tr = diverRow - k;
+    if (tr < SURFACE_ROW) break;
+    var gx = layout.gx + col * cell, gy = layout.gy + tr * cell;
+    c.save();
+    c.fillStyle = 'rgba(' + color + ',' + (0.10 + 0.10 * pulse) + ')';
+    GF.rr(c, gx + cell * 0.06, gy + cell * 0.06, cell * 0.88, cell * 0.88, Math.max(2, cell * 0.12));
+    c.fill();
+    c.strokeStyle = 'rgba(' + color + ',' + (0.55 + 0.35 * pulse) + ')';
+    c.lineWidth = Math.max(2, cell * 0.07);
+    c.setLineDash([cell * 0.18, cell * 0.12]);
+    c.stroke();
+    c.restore();
+  }
+  // Mode glyph just above the diver so the active action is legible ON the board:
+  // a pick (dig), a beam/brace bar (brace), or a burst (blast).
+  var mgx = layout.gx + (col + 0.5) * cell;
+  var mgy = layout.gy + (diverRow - 0.5) * cell;
+  c.save();
+  c.globalAlpha = 0.9;
+  if (mode === 'dig') {
+    c.strokeStyle = 'rgba(160,240,255,0.95)'; c.lineWidth = Math.max(2, cell * 0.09);
+    c.beginPath(); c.moveTo(mgx, mgy + cell * 0.12); c.lineTo(mgx, mgy - cell * 0.18); c.stroke();
+    c.beginPath(); c.moveTo(mgx - cell * 0.12, mgy - cell * 0.10); c.lineTo(mgx, mgy - cell * 0.20); c.lineTo(mgx + cell * 0.12, mgy - cell * 0.10); c.stroke();
+  } else if (mode === 'brace') {
+    c.strokeStyle = 'rgba(255,210,74,0.95)'; c.lineWidth = Math.max(2, cell * 0.10);
+    c.beginPath(); c.moveTo(mgx - cell * 0.18, mgy - cell * 0.14); c.lineTo(mgx + cell * 0.18, mgy - cell * 0.14); c.stroke();
+    c.beginPath(); c.moveTo(mgx, mgy - cell * 0.14); c.lineTo(mgx, mgy + cell * 0.10); c.stroke();
+  } else {
+    c.strokeStyle = 'rgba(255,140,80,0.95)'; c.lineWidth = Math.max(2, cell * 0.08);
+    for (var a = 0; a < 6; a++) {
+      var ang = a * Math.PI / 3;
+      c.beginPath();
+      c.moveTo(mgx + Math.cos(ang) * cell * 0.06, mgy + Math.sin(ang) * cell * 0.06);
+      c.lineTo(mgx + Math.cos(ang) * cell * 0.20, mgy + Math.sin(ang) * cell * 0.20);
+      c.stroke();
+    }
+  }
+  c.restore();
+}
+
+// CLARITY: a non-blocking coach caption near the diver. On the very first run it
+// tells the player the core gesture ("TAP ABOVE TO DIG UP"); it disappears the
+// instant they take their first action, so it never nags an experienced player.
+function drawCoach(c) {
+  var msg = null;
+  if (!firstActionDone) msg = GF.t('coach_dig');
+  if (!msg) return;
+  var cell = layout.cell;
+  var cx = layout.gx + (diverCol + 0.5) * cell;
+  // anchor the pill above the diver, clamped on-screen
+  var py = layout.gy + (diverRow - 1.6) * cell;
+  if (py < layout.gy + cell * 0.4) py = layout.gy + (diverRow + 1.4) * cell;
+  c.save();
+  c.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  var tw = c.measureText(msg).width;
+  var padX = GF.clamp(14 * GF.S, 10, 20), bh = GF.clamp(30 * GF.S, 24, 40);
+  var bw = tw + padX * 2;
+  var bx = GF.clamp(cx - bw / 2, 6, GF.W - bw - 6);
+  var a = 0.7 + 0.3 * Math.sin(performance.now() / 360);
+  GF.rr(c, bx, py - bh / 2, bw, bh, bh / 2);
+  c.fillStyle = 'rgba(8,28,40,0.92)'; c.fill();
+  c.strokeStyle = 'rgba(122,245,255,' + a + ')'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#dffaff';
+  c.fillText(msg, bx + bw / 2, py);
+  // little arrow pointing up toward the rock the player should tap
+  c.fillStyle = 'rgba(122,245,255,' + a + ')';
+  c.beginPath();
+  c.moveTo(cx, py - bh / 2 - GF.clamp(8 * GF.S, 6, 12));
+  c.lineTo(cx - GF.clamp(7 * GF.S, 5, 10), py - bh / 2 + 1);
+  c.lineTo(cx + GF.clamp(7 * GF.S, 5, 10), py - bh / 2 + 1);
+  c.closePath(); c.fill();
+  c.restore();
+}
+
 function drawDiver(c) {
   var cell = layout.cell;
   var x = layout.gx + diverCol * cell;
@@ -942,17 +1170,35 @@ function drawHUD(c) {
   c.font = 'bold ' + fs + 'px sans-serif';
   var hearts = '';
   for (var i = 0; i < MAX_CRUSH_LIVES; i++) hearts += (i < crushLives ? '♥' : '♡');
-  var rightX = (hb ? hb.x - 8 : W - pad);
+  // Anchor hearts/LVL to the LEFT of the leftmost top-right button (mute), so
+  // they never render under the mute or help icons (the mute btn was added this
+  // pass to the left of help).
+  var rightX = (layout.muteBtn ? layout.muteBtn.x - 8 : (hb ? hb.x - 8 : W - pad));
   c.fillText(hearts, rightX, pad);
   c.fillStyle = '#bcd';
   c.font = fs + 'px sans-serif';
   c.fillText(GF.t('lvl') + ' ' + level + '/' + MAX_LEVEL, rightX, pad + fs + 6);
 
+  // Top-center: a persistent OBJECTIVE banner (always on screen) + the rows-to-
+  // surface count under it. The banner answers "what am I doing here" at a glance
+  // — the loudest player complaint was "very unclear how to play".
   c.textAlign = 'center'; c.textBaseline = 'top';
+  c.fillStyle = '#bfe8f0';
+  c.font = 'bold ' + GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+  c.fillText(GF.t('objective'), W / 2, pad);
   c.fillStyle = '#eaffff';
   c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
   var rows = Math.max(0, diverRow - SURFACE_ROW);
-  c.fillText(GF.t('surface') + ': ' + rows, W / 2, pad);
+  c.fillText(GF.t('surface') + ': ' + rows, W / 2, pad + GF.clamp(15 * GF.S, 12, 19));
+
+  // Mute toggle (vector speaker, never emoji — tofu on headless/Android).
+  var mb = layout.muteBtn;
+  if (mb) {
+    GF.rr(c, mb.x, mb.y, mb.s, mb.s, mb.s / 2);
+    c.fillStyle = 'rgba(10,40,60,0.7)'; c.fill();
+    c.strokeStyle = '#7af5ff'; c.lineWidth = 2; c.stroke();
+    drawSpeaker(c, mb.x + mb.s / 2, mb.y + mb.s / 2, mb.s * 0.42, audioMuted);
+  }
 
   if (hb) {
     GF.rr(c, hb.x, hb.y, hb.s, hb.s, hb.s / 2);
@@ -964,24 +1210,75 @@ function drawHUD(c) {
     c.fillText('?', hb.x + hb.s / 2, hb.y + hb.s / 2);
   }
 
-  var chip = layout.modeChip;
-  if (chip) {
-    GF.rr(c, chip.x, chip.y, chip.w, chip.h, chip.h / 2);
-    var cg = c.createLinearGradient(chip.x, chip.y, chip.x, chip.y + chip.h);
-    var modeColor = mode === 'dig' ? ['#2c83b0', '#1c5e80'] : (mode === 'brace' ? ['#c79a28', '#8f6f18'] : ['#c0502a', '#8a361a']);
-    cg.addColorStop(0, modeColor[0]); cg.addColorStop(1, modeColor[1]);
-    c.fillStyle = cg; c.fill();
-    c.strokeStyle = 'rgba(255,255,255,0.3)'; c.lineWidth = 2; c.stroke();
-    var label = mode === 'dig' ? GF.t('mode_dig') : (mode === 'brace' ? GF.t('mode_brace') : GF.t('mode_blast'));
-    var cost = mode === 'dig' ? OXY_DIG : (mode === 'brace' ? OXY_BRACE : OXY_BLAST);
-    c.fillStyle = '#fff';
-    c.textAlign = 'center'; c.textBaseline = 'middle';
-    c.font = 'bold ' + GF.clamp(19 * GF.S, 15, 25) + 'px sans-serif';
-    c.fillText(label + '  -' + cost + ' ' + GF.t('o2'), chip.x + chip.w / 2, chip.y + chip.h * 0.42);
-    c.fillStyle = 'rgba(255,255,255,0.7)';
-    c.font = GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
-    c.fillText(GF.t('tap_mode'), chip.x + chip.w / 2, chip.y + chip.h * 0.78);
+  // CLARITY: three directly-selectable mode chips. The ACTIVE mode is fully lit
+  // (mode colour + bright border + a small ▲ marker); the others are dimmed.
+  // Each chip shows its name, O2 cost, and a one-line "what it does" subtitle so
+  // the player never has to guess what DIG/BRACE/BLAST mean or which is active.
+  var chips = layout.modeChips;
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  for (var i2 = 0; i2 < chips.length; i2++) {
+    var ch = chips[i2];
+    var m = ch.mode;
+    var on = (mode === m);
+    var pal = m === 'dig' ? ['#2c83b0', '#164a66'] : (m === 'brace' ? ['#c79a28', '#7a5e12'] : ['#c0502a', '#7a2e14']);
+    GF.rr(c, ch.x, ch.y, ch.w, ch.h, GF.clamp(12 * GF.S, 8, 16));
+    if (on) {
+      var cg = c.createLinearGradient(ch.x, ch.y, ch.x, ch.y + ch.h);
+      cg.addColorStop(0, pal[0]); cg.addColorStop(1, pal[1]);
+      c.fillStyle = cg; c.fill();
+      c.strokeStyle = '#ffffff'; c.lineWidth = Math.max(2.5, ch.w * 0.018); c.stroke();
+    } else {
+      c.fillStyle = 'rgba(14,34,46,0.82)'; c.fill();
+      c.strokeStyle = 'rgba(120,200,220,0.35)'; c.lineWidth = 1.5; c.stroke();
+    }
+    var label = m === 'dig' ? GF.t('mode_dig') : (m === 'brace' ? GF.t('mode_brace') : GF.t('mode_blast'));
+    var cost = m === 'dig' ? OXY_DIG : (m === 'brace' ? OXY_BRACE : OXY_BLAST);
+    var hint = m === 'dig' ? GF.t('mode_hint_dig') : (m === 'brace' ? GF.t('mode_hint_brace') : GF.t('mode_hint_blast'));
+    var cxm = ch.x + ch.w / 2;
+    // active-marker triangle
+    if (on) {
+      c.fillStyle = '#ffffff';
+      var ty = ch.y + GF.clamp(7 * GF.S, 5, 10);
+      c.beginPath();
+      c.moveTo(cxm, ty); c.lineTo(cxm - GF.clamp(6 * GF.S, 4, 9), ty + GF.clamp(8 * GF.S, 6, 11)); c.lineTo(cxm + GF.clamp(6 * GF.S, 4, 9), ty + GF.clamp(8 * GF.S, 6, 11));
+      c.closePath(); c.fill();
+    }
+    c.fillStyle = on ? '#ffffff' : 'rgba(210,235,242,0.7)';
+    c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 21) + 'px sans-serif';
+    c.fillText(label, cxm, ch.y + ch.h * 0.34);
+    c.fillStyle = on ? 'rgba(255,255,255,0.9)' : 'rgba(180,215,225,0.6)';
+    c.font = 'bold ' + GF.clamp(11 * GF.S, 9, 14) + 'px sans-serif';
+    c.fillText('-' + cost + ' ' + GF.t('o2'), cxm, ch.y + ch.h * 0.58);
+    c.fillStyle = on ? 'rgba(255,255,255,0.72)' : 'rgba(160,195,205,0.5)';
+    c.font = GF.clamp(9.5 * GF.S, 8, 12) + 'px sans-serif';
+    var hl = wrapLines(c, hint, ch.w * 0.94);
+    c.fillText(hl[0], cxm, ch.y + ch.h * 0.80);
   }
+}
+
+// Vector speaker icon for the mute toggle (filled = on, with an X when muted).
+function drawSpeaker(c, x, y, s, muted) {
+  c.save();
+  c.fillStyle = muted ? 'rgba(122,245,255,0.45)' : '#7af5ff';
+  c.beginPath();
+  c.moveTo(x - s * 0.7, y - s * 0.3);
+  c.lineTo(x - s * 0.25, y - s * 0.3);
+  c.lineTo(x + s * 0.15, y - s * 0.7);
+  c.lineTo(x + s * 0.15, y + s * 0.7);
+  c.lineTo(x - s * 0.25, y + s * 0.3);
+  c.lineTo(x - s * 0.7, y + s * 0.3);
+  c.closePath(); c.fill();
+  c.strokeStyle = muted ? 'rgba(122,245,255,0.45)' : '#7af5ff';
+  c.lineWidth = Math.max(1.5, s * 0.16);
+  c.lineCap = 'round';
+  if (muted) {
+    c.beginPath(); c.moveTo(x + s * 0.35, y - s * 0.4); c.lineTo(x + s * 0.85, y + s * 0.4); c.stroke();
+    c.beginPath(); c.moveTo(x + s * 0.85, y - s * 0.4); c.lineTo(x + s * 0.35, y + s * 0.4); c.stroke();
+  } else {
+    c.beginPath(); c.arc(x + s * 0.3, y, s * 0.45, -Math.PI / 3, Math.PI / 3); c.stroke();
+    c.beginPath(); c.arc(x + s * 0.3, y, s * 0.78, -Math.PI / 3.2, Math.PI / 3.2); c.stroke();
+  }
+  c.restore();
 }
 
 function wrapLines(c, text, maxW) {
@@ -1241,8 +1538,10 @@ function draw(c) {
   } else if (gs === 'PLAYING') {
     drawBackground(c);
     drawGrid(c);
+    drawActionGhost(c);   // clarity: show what the current tap will hit
     drawChunks(c);
     drawDiver(c);
+    drawCoach(c);         // clarity: first-run gesture hint (fades after first action)
     drawHUD(c);
   } else {
     drawEnd(c);
@@ -1295,6 +1594,23 @@ GF.init({
     if (gs === 'PLAYING' && (!grid || grid.length !== GRID_W * GRID_H)) { buildLevel(level); }
     if (gs !== 'PLAYING' && gs !== 'WON' && gs !== 'GAMEOVER') gs = 'MENU';
     tutorialOpen = false;
+    // PLATFORM AUTOSTART (CLAUDE.md #9): on Yandex/CrazyGames/etc. (where
+    // build_platforms.sh injects window.__GF_AUTOSTART) drop STRAIGHT into a
+    // dive — no menu/title landing. The gallery never gets the flag, so it keeps
+    // its menu. Suppress the tutorial overlay and start a run immediately.
+    if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') {
+      try { localStorage.setItem('updrift_seen_tutorial', '1'); } catch (e) {}
+      tutorialOpen = false;
+      startGame();
+    }
+    // Suspend audio when the tab is hidden, resume on return (CLAUDE.md #8 — and
+    // good battery hygiene). Mirrors the AudioContext lifecycle.
+    try {
+      document.addEventListener('visibilitychange', function () {
+        if (!AC) return;
+        try { if (document.hidden) AC.suspend(); else if (!audioMuted) AC.resume(); } catch (e) {}
+      });
+    } catch (e) {}
   },
   onUpdate: update,
   onDraw: draw,
@@ -1314,6 +1630,10 @@ GF.exposeState(function () {
     diverCol: diverCol,
     mode: mode,
     chunks: chunks.length,
+    // clarity/control-fix (iteration #3) — direct mode selection + audio
+    firstActionDone: firstActionDone,
+    modeSwitched: modeSwitched,
+    audioMuted: audioMuted,
     bestLevel: bestLevel,
     careerO2Bonus: careerO2Bonus(),
     effectiveStartOxy: effectiveStartOxy(),
