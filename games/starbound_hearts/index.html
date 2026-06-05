@@ -1038,6 +1038,9 @@ function drawResult(c, dt) {
   c.fillStyle = 'rgba(8,6,18,0.86)'; c.fillRect(0, 0, W, H);
   var won = sx.dateWon;
   var su = sx.suitor;
+  // worst-case guard: RESULT can be forced (gate / a stale state) before a date
+  // has set sx.suitor — never read su.art on null. Fall back to the hub.
+  if (!su) { gs = 'SUITORS'; prevScreen = 'SUITORS'; return; }
   var cy = H * 0.30;
   var ccx = LCX();
   c.textAlign = 'center'; c.textBaseline = 'alphabetic';
@@ -1500,10 +1503,13 @@ function drawReveal(c, dt) {
 function drawCelebrate(c, dt) {
   var W = GF.W, H = GF.H, S = GF.S;
   celebrate.t += dt;
+  var su = celebrate.suitor;
+  // worst-case guard: never read su.art/su.bg on a null suitor (a forced/stale
+  // celebrate state). Just close the overlay.
+  if (!su) { celebrate.active = false; return; }
   c.fillStyle = 'rgba(8,4,18,0.92)'; c.fillRect(0, 0, W, H);
   // block taps from reaching the screen behind this overlay
   pushRect(0, 0, W, H, function () {});
-  var su = celebrate.suitor;
   // spawn hearts continuously for the first bit
   if (celebrate.t < 1.5 && Math.random() < 0.3) blush();
   // backdrop
@@ -1777,6 +1783,172 @@ function update(dt) {
 }
 
 // ════════════════════════════════════════════════════════════════════════
+//  REACHABILITY GATE (window.__gfReach / __gfTour)
+// ════════════════════════════════════════════════════════════════════════
+// Reports the CURRENT screen's interactive hit-rects so reachability_check.js
+// can prove every button / card / suitor row can be brought fully on-screen at
+// some reachable scroll position, at BOTH 393x852 and 1280x720. The geometry
+// MIRRORS the draw functions (same column/anchor math) so a rect here is where
+// the player actually taps. The only scrolling screen is COLLECTION: its gallery
+// cells are reported in the scroll region's CONTENT space (y from the viewport
+// top) with scrollMaxY = scroll.max so the gate proves the existing scroller
+// (the `scroll` object, scrollBegin('COLLECTION', ...)) reaches them; pinned
+// header/bottom-bar buttons are reported in screen space with pinned:true.
+function _ri(id, x, y, w, h, pinned) { return { id: id, x: x, y: y, w: w, h: h, pinned: !!pinned }; }
+// the back button + mute button are drawn on most screens at fixed screen px.
+function _backBtnRect() { var S = GF.S; return _ri('back', 10 * S, 34 * S, 64 * S, 28 * S, true); }
+function _muteRect() { var S = GF.S, W = GF.W, r = 13 * S; var x = W - r - 12 * S, y = 34 * S + r;
+  return _ri('mute', x - r - 6 * S, y - r - 6 * S, (r + 6 * S) * 2, (r + 6 * S) * 2, true); }
+
+function reachState() {
+  var W = GF.W, H = GF.H, S = GF.S, items = [];
+  var res = { screen: gs, items: items, screenH: H, viewportH: H };
+  // overlays sit on TOP of any screen and consume all input - report ONLY their
+  // single continue button when active (they fully gate the screen behind).
+  if (reveal.active) {
+    res.screen = 'reveal';
+    if (reveal.t > 0.5) { var bw = LZ.w - U(32), bh = clampF(U(48), 40, 60);
+      items.push(_ri('reveal_cont', LCX() - bw / 2, H - bh - U(28), bw, bh, true)); }
+    return res;
+  }
+  if (celebrate.active) {
+    res.screen = 'celebrate';
+    if (celebrate.t > 0.8) { var bw2 = LZ.w - U(32), bh2 = clampF(U(50), 42, 62);
+      items.push(_ri('celebrate_cont', LCX() - bw2 / 2, H - bh2 - U(20), bw2, bh2, true)); }
+    return res;
+  }
+
+  if (gs === 'DATE') {
+    // hand of up to 4 cards along the bottom (mirror drawHand)
+    var n = sx.hand.length;
+    if (n > 0) {
+      var bottomPad = U(14), cardH = H * 0.20, cardW = cardH * 0.70, gap = U(8);
+      var totalW = n * cardW + (n - 1) * gap;
+      var avail = LZ.w - U(16);
+      if (totalW > avail) { var scq = avail / totalW; cardW *= scq; cardH *= scq; totalW = n * cardW + (n - 1) * gap; }
+      var startX = LCX() - totalW / 2, hy = H - cardH - bottomPad;
+      for (var i = 0; i < n; i++) { var x = startX + i * (cardW + gap); items.push(_ri('card_' + i, x, hy, cardW, cardH, true)); }
+    }
+    items.push(_backBtnRect());
+    items.push(_muteRect());
+
+  } else if (gs === 'RESULT') {
+    var su = sx.suitor;
+    // bottom-anchored button stack (mirror drawResult): primary + collection
+    var bw3 = LZ.w - U(32), bh3 = clampF(U(54), 44, 66);
+    var bx = LCX() - bw3 / 2, by = H - bh3 * 2.4 - U(16);
+    items.push(_ri('result_primary', bx, by, bw3, bh3, true));
+    var by2 = by + bh3 + 14 * S;
+    items.push(_ri('result_collection', bx, by2, bw3, bh3 * 0.82, true));
+    items.push(_muteRect());
+
+  } else if (gs === 'SUITORS') {
+    // header + currency, suitor list, hub nav (mirror drawSuitors layout)
+    var top = clampF(U(16), 12, 26), tfz = clampF(U(24), 18, 32);
+    var curY = top + tfz + U(32);
+    var nav = hubNavMetrics();
+    var listTop = curY + U(40), listBot = nav.y - U(10), pad = U(16), rowGap = U(12);
+    var rowH = GF.clamp((listBot - listTop - rowGap * (SUITORS.length - 1)) / SUITORS.length, U(78), U(120));
+    var listH = rowH * SUITORS.length + rowGap * (SUITORS.length - 1);
+    var y0 = listTop + Math.max(0, (listBot - listTop - listH) / 2);
+    for (var si = 0; si < SUITORS.length; si++) {
+      var sy = y0 + si * (rowH + rowGap), sx0 = LZ.x + pad, sw = LZ.w - pad * 2;
+      // only UNLOCKED rows are tappable (locked rows are display-only) - but we
+      // report all rows so the gate proves the whole list fits without scroll.
+      items.push(_ri('suitor_' + SUITORS[si].id, sx0, sy, sw, rowH, true));
+    }
+    // hub nav: 3 buttons (summon / daily / collection)
+    var npad = U(16), ngap = U(8), nbw = (LZ.w - npad * 2 - ngap * 2) / 3;
+    var nx0 = LZ.x + npad;
+    items.push(_ri('nav_summon', nx0, nav.y, nbw, nav.h, true));
+    items.push(_ri('nav_daily', nx0 + nbw + ngap, nav.y, nbw, nav.h, true));
+    items.push(_ri('nav_collection', nx0 + (nbw + ngap) * 2, nav.y, nbw, nav.h, true));
+    items.push(_muteRect());
+
+  } else if (gs === 'COLLECTION') {
+    // pinned: header (no buttons) + bottom bar (back + summon)
+    var headerH = U(18) /*top*/ ; // recompute header bottom like drawScreenHeader
+    var topH = clampF(U(18), 14, 30), fzH = clampF(U(22), 17, 30);
+    var hbH = topH + fzH + U(12);
+    headerH = hbH + U(10);
+    // bottom bar (mirror drawBottomBar): left=back, right=summon
+    var bbH = clampF(U(52), 44, 64), bpad = U(16), bgap = U(10);
+    var bby = H - bbH - clampF(U(16), 12, 24);
+    var bbw = (LZ.w - bpad * 2 - bgap) / 2;
+    items.push(_ri('back', LZ.x + bpad, bby, bbw, bbH, true));
+    items.push(_ri('summon', LZ.x + bpad + bbw + bgap, bby, bbw, bbH, true));
+    items.push(_muteRect());
+    // scrollable region between header and bottom bar (mirror drawCollection)
+    var vT = headerH, vH = (bby - U(10)) - headerH;
+    res.viewportH = vH;                 // the scroll viewport's on-screen height
+    res.scrollMaxY = scroll.max || 0;   // the existing scroller's max offset
+    // content-space layout (y measured from the viewport top, i.e. oy - vT)
+    var pad2 = U(16), colGap = U(10), sectGap = U(10);
+    var mems = unlockedMemories();
+    var memCols = 2, memCW = (LZ.w - pad2 * 2 - colGap * (memCols - 1)) / memCols, memCH = memCW * 0.62;
+    var oy = U(10);   // matches `oy = vT - scroll.y + U(10)` with origin shifted to content space (vT - scroll.y -> 0)
+    // SECTION: memories
+    oy += U(28);      // section title row
+    if (mems.length) {
+      var memRows = Math.ceil(mems.length / memCols);
+      for (var mi = 0; mi < mems.length; mi++) {
+        var mcol = mi % memCols, mrow = (mi / memCols) | 0;
+        var mx = LZ.x + pad2 + mcol * (memCW + colGap), my = oy + mrow * (memCH + colGap);
+        items.push(_ri('mem_' + mems[mi].su.id + '_' + mems[mi].idx, mx, my, memCW, memCH, false));
+      }
+      oy += memRows * (memCH + colGap);
+    } else {
+      oy += U(54);    // empty-state line
+    }
+    oy += sectGap;
+    // SECTION: cards grid (3 per row)
+    oy += U(28);      // section title row
+    var cardCols = 3, cardCW = (LZ.w - pad2 * 2 - colGap * (cardCols - 1)) / cardCols, cardCH = cardCW * 1.42;
+    for (var ci = 0; ci < CARDS.length; ci++) {
+      var ccol = ci % cardCols, crow = (ci / cardCols) | 0;
+      var cx2 = LZ.x + pad2 + ccol * (cardCW + colGap), cy2 = oy + crow * (cardCH + colGap);
+      items.push(_ri('card_' + CARDS[ci].id, cx2, cy2, cardCW, cardCH, false));
+    }
+
+  } else if (gs === 'SUMMON') {
+    // bottom-anchored button stack (mirror drawSummon)
+    var spad = U(16), sbw = LZ.w - spad * 2;
+    var sbh = clampF(U(54), 44, 64), sgap = U(11);
+    var backH = clampF(U(46), 40, 56), adH = clampF(U(46), 40, 56);
+    var stackBottom = H - clampF(U(16), 12, 22);
+    var canDaily = dailyReady();
+    var yBack = stackBottom - backH;
+    var yAd = yBack - sgap - adH;
+    var yTicket = yAd - sgap - sbh;
+    var yDust = yTicket - sgap - sbh;
+    var yDaily = canDaily ? (yDust - sgap - sbh) : yDust;
+    if (canDaily) items.push(_ri('summon_daily', LZ.x + spad, yDaily, sbw, sbh, true));
+    items.push(_ri('summon_dust', LZ.x + spad, yDust, sbw, sbh, true));
+    items.push(_ri('summon_ticket', LZ.x + spad, yTicket, sbw, sbh, true));
+    items.push(_ri('summon_ad', LZ.x + spad, yAd, sbw, adH, true));
+    items.push(_ri('summon_back', LZ.x + spad, yBack, sbw, backH, true));
+    items.push(_muteRect());
+  }
+  return res;
+}
+
+// Tour: every screen the gate steps through. Each `go` puts the game into that
+// state WITHOUT side effects that block the next step. A live date/suitor is
+// ensured before DATE/RESULT so su.art is never read on null.
+function _ensureDate() {
+  if (!sx.suitor || !sx.dateRef) startDate(SUITORS[0]);
+}
+var REACH_TOUR = [
+  { name: 'suitors',   go: function () { reveal.active = false; celebrate.active = false; openScreen('SUITORS'); } },
+  { name: 'summon',    go: function () { reveal.active = false; celebrate.active = false; openScreen('SUMMON'); } },
+  { name: 'collection',go: function () { reveal.active = false; celebrate.active = false; window._shUnlockAll && window._shUnlockAll(); openScreen('COLLECTION'); scroll.y = 0; scroll.vel = 0; } },
+  { name: 'date',      go: function () { reveal.active = false; celebrate.active = false; _ensureDate(); if (GF.tutorial) GF.tutorial.active = false; sx.playing = true; sx.momentScored = false; gs = 'DATE'; } },
+  { name: 'result',    go: function () { reveal.active = false; celebrate.active = false; _ensureDate(); sx.dateWon = true; sx.rewardDust = 14; sx.rewardTicket = 1; gs = 'RESULT'; } },
+  { name: 'reveal',    go: function () { celebrate.active = false; _ensureDate(); reveal.active = true; reveal.t = 1; reveal.card = CARDS[CARDS.length - 1]; reveal.dupe = false; reveal.lvl = 1; } },
+  { name: 'celebrate', go: function () { reveal.active = false; _ensureDate(); celebrate.active = true; celebrate.t = 1; celebrate.suitor = sx.suitor || SUITORS[0]; celebrate.line = 'A tender moment among the stars.'; } },
+];
+
+// ════════════════════════════════════════════════════════════════════════
 //  BOOT
 // ════════════════════════════════════════════════════════════════════════
 GF.init({
@@ -1791,6 +1963,11 @@ GF.init({
       if (GF.platform === 'local' && /^ru/i.test(navigator.language || '')) GF.lang = 'ru';
     } catch (e) {}
     meta = loadMeta();
+    // reachability gate: expose the per-screen hit-rects + a screen tour so
+    // reachability_check.js can prove all UI is reachable on both viewports.
+    GF.exposeReach(reachState);
+    // tour is test-only (the gate loads with ?test=1) so it never ships, matching date_the_look
+    if (/[?&]test=1/.test(location.search) || (typeof window !== 'undefined' && window.__SH_TEST)) GF.exposeTour(REACH_TOUR);
     loadAssets(function () {
       // flag any missing art
       missingArt = IMG_KEYS.filter(function (k) { return !hasImg(k); });
