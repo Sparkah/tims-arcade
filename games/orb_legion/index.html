@@ -276,6 +276,14 @@ var BC = 6, BR = 5;        // 6 wide, 5 tall
 var board = [];            // board[r][c] = element id (0..5)
 var L = {};                // layout rects
 
+// ── TUTORIAL BOARD (deterministic so the demo hand ALWAYS makes a match) ──────
+// The demo hand drags the orb at TUT_DRAG.fromC across to TUT_DRAG.toC along
+// row TUT_DRAG.row. The board is seeded so following that drag completes a
+// horizontal 3-match the starter team can attack with. See buildTutorialBoard.
+var tutorialActive = false;   // true while the first-battle tutorial is showing
+var TUT_DRAG = { row: 2, fromC: 1, toC: 3 }; // grab (2,1), carry to (2,3)
+var TUT_EL = EL.FIRE;         // the colour the player will line up (starter has FIRE; wave-1 enemy is WOOD => super-effective, satisfying first hit)
+
 // ── BATTLE OBJECT ─────────────────────────────────────────────────────────
 function newBattle(stageIdx) {
   var st = STAGES[stageIdx];
@@ -301,8 +309,25 @@ function newBattle(stageIdx) {
     floatDmg: [], // {x,y,txt,col,t,vy}
     waveBanner: 0,
   };
-  fillBoardFull();
-  ensurePlayableBoard();
+  // First-battle tutorial: seed a deterministic board so the demo-hand drag is
+  // guaranteed to make a match (otherwise step 1 can never advance). Only on the
+  // first stage, and only until the tutorial has been seen.
+  if (tutorialPending(stageIdx)) {
+    tutorialActive = true;
+    buildTutorialBoard();   // seeded, no reshuffle (ensurePlayableBoard would scramble it)
+  } else {
+    tutorialActive = false;
+    fillBoardFull();
+    ensurePlayableBoard();
+  }
+}
+
+// True if the one-time tutorial should run for a battle on `stageIdx`.
+function tutorialPending(stageIdx) {
+  if (stageIdx !== 0) return false;
+  if (meta.seenTut) return false;
+  try { if (localStorage.getItem('orbchamp_tut_v1')) return false; } catch (e) {}
+  return true;
 }
 
 function startBattle(stageIdx) {
@@ -322,6 +347,46 @@ function fillBoardFull() {
     var m = findMatches();
     if (!m.cells.length) break;
     for (var k=0;k<m.cells.length;k++){ var cc=m.cells[k]; board[cc.r][cc.c]=randEl(); }
+  }
+}
+// Seed a DETERMINISTIC tutorial board: no pre-made match, but the demo-hand
+// drag (carry the orb at (row,fromC) across to toC) completes a horizontal
+// 3-match of TUT_EL at (row,toC..toC+2). Carry mechanics (see onMove): the
+// grabbed orb ends at toC; the orbs it passed shift one cell toward fromC; the
+// orbs to the RIGHT of toC stay put. So placing TUT_EL at fromC and at the two
+// cells right of toC yields TUT_EL,TUT_EL,TUT_EL after the drop.
+function buildTutorialBoard() {
+  var row = TUT_DRAG.row, fromC = TUT_DRAG.fromC, toC = TUT_DRAG.toC;
+  // non-FIRE palette for the backdrop (water/wood/light/dark/heart)
+  var PAL = [EL.WATER, EL.WOOD, EL.LIGHT, EL.DARK, EL.HEART];
+  // a stripe pattern with no 3-in-a-row of one colour, then we punch in the
+  // FIRE setup and repair any accidental run.
+  board = [];
+  for (var r=0;r<BR;r++){ board[r]=[];
+    for (var c=0;c<BC;c++){ board[r][c] = PAL[(c + r*2 + ((c/2)|0)) % PAL.length]; }
+  }
+  // FIRE trio source cells: grabbed orb + the two cells right of the landing.
+  board[row][fromC] = TUT_EL;
+  board[row][toC+1] = TUT_EL;
+  board[row][toC+2] = TUT_EL;
+  // keep the landing cell itself NON-fire so there is no pre-match before the drag
+  if (board[row][toC] === TUT_EL) board[row][toC] = EL.WATER;
+  // repair: recolour any cell that completes a same-colour run of 3, leaving the
+  // three intended FIRE source cells untouched. A few passes converge.
+  function isFireSeed(r,c){ return r===row && (c===fromC || c===toC+1 || c===toC+2); }
+  for (var pass=0; pass<12; pass++){
+    var m = findMatches();
+    if (!m.cells.length) break;
+    for (var k=0;k<m.cells.length;k++){
+      var cc=m.cells[k]; if (isFireSeed(cc.r,cc.c)) continue;
+      // pick a palette colour that differs from both axis-neighbours and isn't FIRE
+      for (var p=0;p<PAL.length;p++){
+        var cand = PAL[(cc.c + cc.r + p) % PAL.length];
+        var bad = (cc.c>0 && board[cc.r][cc.c-1]===cand) || (cc.c<BC-1 && board[cc.r][cc.c+1]===cand)
+               || (cc.r>0 && board[cc.r-1][cc.c]===cand) || (cc.r<BR-1 && board[cc.r+1][cc.c]===cand);
+        if (!bad){ board[cc.r][cc.c]=cand; break; }
+      }
+    }
   }
 }
 // detect all horizontal/vertical runs >=3. Returns {groups:[{el,cells:[]}], cells:[]}.
@@ -402,7 +467,19 @@ function resolveMove() {
   battle._elementHits = elementHits;
   battle._comboMult = comboMult;
   battle._dmgApplied = false;
-  if (comboCount === 0) { battle.phase = 'ENEMY'; battle.enemyTurnT=0; battle.enemyActing=-1; return; }
+  if (comboCount === 0) {
+    // During the DRAG step, a no-match move would leave the demo hand pointing
+    // at a now-scrambled board. Re-seed the teachable board and stay in INPUT
+    // (no enemy turn) so the taught gesture stays valid, but bounded so a
+    // player who keeps making the same non-match move (or an automated solver)
+    // can't get stuck in a deterministic reseed loop: after a couple of fumbles
+    // we let normal play resume.
+    if (tutorialActive && GF.tutorial.active && GF.tutorial.step === 0 && (battle._tutReseeds|0) < 2) {
+      battle._tutReseeds = (battle._tutReseeds|0) + 1;
+      buildTutorialBoard(); battle.phase='INPUT'; battle.moveTimer=0; battle.dragOrb=null; return;
+    }
+    battle.phase = 'ENEMY'; battle.enemyTurnT=0; battle.enemyActing=-1; return;
+  }
   GF.setShake(comboCount>=4?1.0:0.4);
   battle.comboFlash = 1;
 }
@@ -642,12 +719,24 @@ canvas.addEventListener('touchend', function(e){ e.preventDefault(); if(!pointer
 function battleDown(x,y) {
   // back-to-menu button (top-left)
   if (L.backBtn && hit(L.backBtn,x,y)) { confirmQuitToHub(); return; }
+  // help (?) re-opens the tutorial (any phase), but not while it's already up
+  if (L.helpBtn && hit(L.helpBtn,x,y) && !GF.tutorial.active) { reopenTutorial(); return; }
   if (battle.phase==='WIN') { return winClick(x,y); }
   if (battle.phase==='LOSE') { return loseClick(x,y); }
   if (battle.phase==='WAVECLEAR') return; // auto
   if (battle.phase!=='INPUT') return;
-  // tutorial intercept
-  if (GF.tutorial.active) { /* allow drag to fall through; tutorial advances on real action */ }
+  // tutorial routing:
+  //  - DRAG step (advance 'manual'): let the grab fall through so the player can
+  //    actually perform the taught move; only the skip pill consumes the tap.
+  //  - tap steps (click_any/click_target): route to handleClick so the beat
+  //    advances / the tutorial closes on a tap.
+  if (GF.tutorial.active) {
+    var stp = GF.tutorial.steps[GF.tutorial.step];
+    var sb = GF.tutorial._skipBtn;
+    if (sb && x>=sb.x && x<=sb.x+sb.w && y>=sb.y && y<=sb.y+sb.h) { GF.tutorial.handleClick(x,y); tutorialActive=false; markTutorialDone(); return; }
+    if (stp && (stp.advance==='click_any' || stp.advance==='click_target')) { GF.tutorial.handleClick(x,y); return; }
+    // else: manual drag step — fall through to grab the orb below.
+  }
   var cell = cellAt(x,y);
   if (!cell) return;
   battle.dragOrb = { fromR:cell.r, fromC:cell.c, curR:cell.r, curC:cell.c, el:board[cell.r][cell.c], x:x, y:y };
@@ -657,6 +746,9 @@ function battleDown(x,y) {
 
 function confirmQuitToHub() {
   // simply return to stage select (progress is per-stage, not mid-battle saved)
+  // dismiss any active tutorial so its overlay doesn't linger on the hub
+  if (GF.tutorial.active) { GF.tutorial.active = false; }
+  tutorialActive = false;
   gs = 'STAGESEL'; battle = null; GF.sfx('tap');
 }
 
@@ -703,8 +795,9 @@ function update(dt) {
     }
     if (b.comboShown >= b.combos.length && b.resolveT > b.combos.length*revealEvery + 0.18) {
       applyDamage();
-      // tutorial: advance after first successful resolve with attacks
-      if (GF.tutorial.active) GF.tutorial.next();
+      // tutorial: advance from the DRAG step (0) only when the player's first
+      // move actually resolves a combo (real action gate, not a timer).
+      if (GF.tutorial.active && GF.tutorial.step === 0) GF.tutorial.next();
     }
   } else if (b.phase==='ENEMY') {
     enemyTurnStep(dt);
@@ -809,6 +902,20 @@ function drawBattleHUD() {
   ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.textBaseline='top';
   var waveTxt = (b.waveIdx===b.waves.length-1) ? GF.t('boss') : (GF.t('wave')+' '+(b.waveIdx+1)+'/'+b.waves.length);
   ctx.fillText(GF.t('stage')+' '+(b.stageIdx+1)+'  ·  '+waveTxt, GF.cx, 12*S);
+  // help (?) button: re-opens the tutorial. Only shown on the first tutorial
+  // battle (stage 0 / wave 0) where reopenTutorial() is functional, so it is
+  // never a dead/no-op button on later waves.
+  L.helpBtn = null;
+  if (b.stageIdx===0 && b.waveIdx===0) {
+    var hr=14*S, hx=GF.W-58*S, hy=22*S;
+    L.helpBtn = { x:hx-hr-4*S, y:hy-hr-4*S, w:(hr+4*S)*2, h:(hr+4*S)*2 };
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx,hy,hr,0,Math.PI*2); ctx.fillStyle='rgba(16,18,32,0.8)'; ctx.fill();
+    ctx.lineWidth=1.5*S; ctx.strokeStyle='rgba(255,255,255,0.35)'; ctx.stroke();
+    ctx.font='bold '+clampF(16*S,13,20)+'px Inter, system-ui'; ctx.fillStyle='#cdd'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('?', hx, hy+0.5*S);
+    ctx.restore();
+  }
 }
 
 // enemies row
@@ -1514,20 +1621,46 @@ function fitText(txt,maxW,fs){
 // ===========================================================================
 //  TUTORIAL
 // ===========================================================================
-function startTutorial() {
-  // point at the board; show a horizontal drag to line up a color.
-  // It advances when the player's first move resolves a combo (GF.tutorial.next in RESOLVE).
-  var c1 = cellCenter(BR-1, 1), c2 = cellCenter(BR-1, 3);
+function startTutorial(forceShow) {
+  // Step 1 shows a HAND dragging the orb at (row,fromC) across to (row,toC).
+  // The board is seeded (buildTutorialBoard) so this exact drag lines up 3 of
+  // TUT_EL -> a real, winnable move. It advances when the player's first move
+  // actually resolves a combo (GF.tutorial.next in the RESOLVE path, gated to
+  // step 0). Step 2 is a short "matches power your champions" beat.
+  var row = TUT_DRAG.row, fromC = TUT_DRAG.fromC, toC = TUT_DRAG.toC;
   GF.tutorial.start([
     { text: GF.t('tutdrag'),
-      target: function(){ return { x: cellCenter(BR-1,1).x, y: cellCenter(BR-1,1).y, r: L.cell*0.5 }; },
-      target2: function(){ return { x: cellCenter(BR-1,3).x, y: cellCenter(BR-1,3).y, r: L.cell*0.5 }; },
+      target: function(){ var cc=cellCenter(row,fromC); return { x: cc.x, y: cc.y, r: L.cell*0.5 }; },
+      target2: function(){ var cc=cellCenter(row,toC); return { x: cc.x, y: cc.y, r: L.cell*0.5 }; },
       gesture:'drag', advance:'manual' },
     { text: GF.t('tutmatch'),
       target: function(){ return { x: GF.cx, y: L.enemyY, r: 60*GF.S }; },
-      advance:'click_any' },
-  ], { storageKey:'orbchamp_tut_v1', force: !meta.seenTut });
-  meta.seenTut = true; saveMeta();
+      advance:'click_any',
+      // tutorial COMPLETED: now (and only now) mark it seen + persist, so a
+      // mid-tutorial quit/reload re-teaches instead of being suppressed.
+      onAdvance: function(){ tutorialActive = false; markTutorialDone(); } },
+  ], { storageKey:'orbchamp_tut_v1', force: forceShow || !meta.seenTut });
+}
+// Persist the "tutorial seen" flag. Called on COMPLETE or SKIP (not on start).
+// The GF.tutorial system writes orbchamp_tut_v1 itself; this mirrors it into
+// the save so tutorialPending() agrees across reloads.
+function markTutorialDone() {
+  if (!meta.seenTut) { meta.seenTut = true; saveMeta(); }
+}
+
+// Reopen the tutorial from the in-battle ? button. Re-seeding the deterministic
+// teachable board only makes sense at the very start (stage 1, wave 1); doing
+// it mid-run would reset/exploit a live board, so reopen is gated there. On any
+// later stage/wave the ? is a harmless no-op.
+function reopenTutorial() {
+  if (gs !== 'BATTLE' || !battle) return;
+  if (battle.phase !== 'INPUT') return;          // don't reseed mid-resolve/enemy turn
+  if (battle.stageIdx !== 0 || battle.waveIdx !== 0) return; // only the first tutorial battle
+  tutorialActive = true;
+  buildTutorialBoard();
+  battle.dragOrb = null;
+  startTutorial(true);
+  GF.sfx('tap');
 }
 
 // ===========================================================================
@@ -1558,9 +1691,10 @@ GF.init({
     // load images then maybe autostart
     loadImages().then(function(){
       if (window.__GF_AUTOSTART && !window._silent) {
-        // platform builds: drop straight into a battle (stage at furthest unlocked)
+        // platform builds: drop straight into a battle (stage at furthest
+        // unlocked). startBattle (overridden below) arms the tutorial itself
+        // when tutorialPending() is true, so no separate startTutorial call.
         startBattle(Math.min(meta.stageUnlocked, STAGES.length-1));
-        setTimeout(startTutorial, 60);
       }
     });
   },
@@ -1568,11 +1702,14 @@ GF.init({
   onDraw: draw,
 });
 
-// when a battle starts (gallery flow via PLAY), arm the tutorial on first stage
+// when a battle starts (gallery flow via PLAY), arm the tutorial on the first
+// stage. newBattle has already seeded the deterministic tutorial board when
+// tutorialPending() is true, so the demo-hand drag completes a real match.
 var _origStart = startBattle;
 startBattle = function(idx){
+  var armTut = tutorialPending(idx);   // capture tutorial-pending state before the battle starts (seenTut is flipped later by markTutorialDone)
   _origStart(idx);
-  if (!localStorage.getItem('orbchamp_tut_v1')) setTimeout(startTutorial, 80);
+  if (armTut) setTimeout(startTutorial, 80);
 };
 
 // test seam: jump straight into a battle (used by screenshot/gate tooling)
@@ -1597,6 +1734,10 @@ window._orbDismissOverlay = function(){ if(pullReveal&&pullReveal.t>0.1){pullRev
 window._orbMeta = function(patch){ if(patch){ for(var k in patch) meta[k]=patch[k]; saveMeta(); } return { tickets:meta.tickets, essence:meta.essence, lastDaily:meta.lastDaily, team:meta.team.slice(), owned:Object.keys(meta.owned).length, stageUnlocked:meta.stageUnlocked, summons:meta.summons }; };
 window._orbCombo = function(){ return battle?{count:battle.lastComboCount, flash:battle.comboFlash}:null; };
 window._orbTeamEls = function(){ return battle?battle.units.map(function(u){return u.el;}):[]; };
+// tutorial verification seams
+window._orbTutInfo = function(){ return { tutorialActive:tutorialActive, active:GF.tutorial.active, step:GF.tutorial.step, drag:TUT_DRAG, el:TUT_EL }; };
+window._orbTutDragGeom = function(){ var a=cellCenter(TUT_DRAG.row,TUT_DRAG.fromC), b=cellCenter(TUT_DRAG.row,TUT_DRAG.toC); return { from:{x:a.x,y:a.y}, to:{x:b.x,y:b.y} }; };
+window._orbHelpBtn = function(){ return L.helpBtn||null; };
 
 })();
 </script>
