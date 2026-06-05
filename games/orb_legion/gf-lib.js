@@ -195,6 +195,229 @@ function shakeOffset() {
   return { x: (Math.random() - 0.5) * shake * 12 * S, y: (Math.random() - 0.5) * shake * 12 * S };
 }
 
+// ── SCROLL (reusable canvas scroll region) ─────────────────────────────────
+// Any screen whose content can exceed the viewport (long lists: rosters,
+// collections, shops) MUST scroll - a player can never be left unable to reach
+// UI (Tim 2026-06-05, after Orb Champions shipped a desktop team-builder where
+// the lower 8 of 12 champions were clipped off-screen with no way to scroll).
+//
+// Usage (canvas, per-frame):
+//   // once per layout, create + keep the controller:
+//   sc = GF.makeScroll('team_roster', { x, y, w, h });        // viewport rect
+//   sc.setViewport({ x, y, w, h });                            // each layout (S changes on resize)
+//   sc.setContentHeight(totalContentPx);                       // full un-clipped height
+//   sc.begin(ctx);                                             // clip to viewport + translate by -offset
+//     ... draw content in CONTENT space (y measured from contentTop=viewport.y) ...
+//   sc.end(ctx);
+//   sc.draw(ctx);                                              // scrollbar + top/bottom fades
+//   // input:
+//   onWheel(dy)  -> sc.handleWheel(dy)
+//   onDown(x,y)  -> if (sc.contains(x,y)) sc.dragStart(y)
+//   onMove(x,y)  -> sc.dragMove(y)
+//   onUp()       -> sc.dragEnd()
+//   // hit-testing a content item tapped at screen (x,y): item is at content
+//   //   y in [it.y, it.y+it.h]; the tap hits it when
+//   //   sc.screenToContentY(y) is within that range AND x within the item.
+//   // (Equivalently compare against it.y - sc.offset in screen space.)
+//
+// The controller hard-CLAMPS offset to [0, contentH-viewportH] so the player
+// can never overscroll. It also registers the region (id + rect + scrollMaxY)
+// so the reachability gate (window.__gfReach) can prove every item is reachable.
+var _scrollRegions = {};   // id -> controller (for the reachability gate)
+function makeScroll(id, rect) {
+  var c = {
+    id: id,
+    vp: { x: 0, y: 0, w: 0, h: 0 },   // viewport rect (screen px)
+    contentH: 0,                       // total content height (px)
+    offset: 0,                         // current scroll offset (px, >= 0)
+    _drag: null,                       // { startY, startOffset, lastY, lastT, vel } while dragging
+    _vel: 0,                           // flick velocity (px/frame) for momentum
+    _grabbed: false,                   // true between dragStart and the first move past threshold
+  };
+  c.setViewport = function (r) {
+    if (r) { c.vp.x = r.x; c.vp.y = r.y; c.vp.w = r.w; c.vp.h = r.h; }
+    c.clamp();
+    return c;
+  };
+  c.setContentHeight = function (h) { c.contentH = Math.max(0, h || 0); c.clamp(); return c; };
+  c.maxOffset = function () { return Math.max(0, c.contentH - c.vp.h); };
+  c.clamp = function () { c.offset = Math.max(0, Math.min(c.offset, c.maxOffset())); return c.offset; };
+  c.scrollable = function () { return c.maxOffset() > 0.5; };
+  c.contains = function (x, y) { return x >= c.vp.x && x <= c.vp.x + c.vp.w && y >= c.vp.y && y <= c.vp.y + c.vp.h; };
+  // map between screen-space y and content-space y (content top == vp.y)
+  c.screenToContentY = function (y) { return (y - c.vp.y) + c.offset; };
+  c.contentToScreenY = function (cy) { return (cy - c.offset) + c.vp.y; };
+  c.scrollBy = function (dy) { c.offset += dy; c.clamp(); };
+  c.scrollTo = function (off) { c.offset = off; c.clamp(); };
+  c.handleWheel = function (dy) { if (!c.scrollable()) return false; c.offset += dy; c.clamp(); return true; };
+  c.dragStart = function (y) {
+    if (!c.scrollable()) { c._drag = null; return false; }
+    c._drag = { startY: y, startOffset: c.offset, lastY: y, lastT: (typeof performance !== 'undefined' ? performance.now() : Date.now()), vel: 0 };
+    c._vel = 0; c._grabbed = true;
+    return true;
+  };
+  c.dragMove = function (y) {
+    if (!c._drag) return false;
+    var d = c._drag;
+    c.offset = d.startOffset - (y - d.startY);   // drag down -> content moves down -> offset decreases
+    c.clamp();
+    var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    var dt = Math.max(1, now - d.lastT);
+    d.vel = (d.lastY - y) / dt * 16;             // px per ~frame, sign matches offset delta
+    d.lastY = y; d.lastT = now;
+    return true;
+  };
+  c.dragEnd = function () {
+    if (c._drag) { c._vel = c._drag.vel || 0; c._drag = null; }
+    c._grabbed = false;
+  };
+  c.isDragging = function () { return !!c._drag; };
+  // call once per frame (optional) for inertial flick after release
+  c.update = function () {
+    if (c._drag || Math.abs(c._vel) < 0.4) { c._vel = 0; return; }
+    c.offset += c._vel; c.clamp();
+    if (c.offset <= 0 || c.offset >= c.maxOffset()) c._vel = 0;
+    c._vel *= 0.92;
+  };
+  // clip to viewport + translate so content drawn at content-y appears at the
+  // right screen-y. Pair every begin() with end().
+  c.begin = function (cc) {
+    cc.save();
+    cc.beginPath(); cc.rect(c.vp.x, c.vp.y, c.vp.w, c.vp.h); cc.clip();
+    cc.translate(0, c.vp.y - c.offset);   // content-y origin = vp.y, shifted up by offset
+  };
+  c.end = function (cc) { cc.restore(); };
+  // scrollbar track/thumb + top/bottom fades so the player KNOWS there is more.
+  c.draw = function (cc) {
+    if (!c.scrollable()) return;
+    var sc = S, vp = c.vp;
+    // top fade if scrolled down
+    var fadeH = Math.min(24 * sc, vp.h * 0.18);
+    if (c.offset > 1) {
+      var gt = cc.createLinearGradient(0, vp.y, 0, vp.y + fadeH);
+      gt.addColorStop(0, 'rgba(10,10,20,0.85)'); gt.addColorStop(1, 'rgba(10,10,20,0)');
+      cc.fillStyle = gt; cc.fillRect(vp.x, vp.y, vp.w, fadeH);
+      // up chevron hint
+      _scrollChevron(cc, vp.x + vp.w / 2, vp.y + 9 * sc, sc, true);
+    }
+    // bottom fade if more below
+    if (c.offset < c.maxOffset() - 1) {
+      var gb = cc.createLinearGradient(0, vp.y + vp.h - fadeH, 0, vp.y + vp.h);
+      gb.addColorStop(0, 'rgba(10,10,20,0)'); gb.addColorStop(1, 'rgba(10,10,20,0.85)');
+      cc.fillStyle = gb; cc.fillRect(vp.x, vp.y + vp.h - fadeH, vp.w, fadeH);
+      _scrollChevron(cc, vp.x + vp.w / 2, vp.y + vp.h - 9 * sc, sc, false);
+    }
+    // scrollbar (right edge of viewport)
+    var trackX = vp.x + vp.w - 5 * sc, trackW = 3.5 * sc;
+    var trackY = vp.y + 3 * sc, trackH = vp.h - 6 * sc;
+    cc.fillStyle = 'rgba(255,255,255,0.08)';
+    rr(cc, trackX, trackY, trackW, trackH, trackW / 2); cc.fill();
+    var frac = vp.h / c.contentH;                       // visible fraction
+    var thumbH = Math.max(24 * sc, trackH * frac);
+    var prog = c.maxOffset() > 0 ? c.offset / c.maxOffset() : 0;
+    var thumbY = trackY + (trackH - thumbH) * prog;
+    cc.fillStyle = c._drag ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.32)';
+    rr(cc, trackX, thumbY, trackW, thumbH, trackW / 2); cc.fill();
+  };
+  _scrollRegions[id] = c;
+  // sync the rect passed at creation (so the first frame is correct before setViewport)
+  if (rect) c.setViewport(rect);
+  return c;
+}
+function _scrollChevron(cc, x, y, sc, up) {
+  cc.save(); cc.strokeStyle = 'rgba(220,230,255,0.7)'; cc.lineWidth = 2 * sc; cc.lineCap = 'round'; cc.lineJoin = 'round';
+  var w = 7 * sc, h = 4 * sc;
+  cc.beginPath();
+  if (up) { cc.moveTo(x - w, y + h); cc.lineTo(x, y - h); cc.lineTo(x + w, y + h); }
+  else { cc.moveTo(x - w, y - h); cc.lineTo(x, y + h); cc.lineTo(x + w, y - h); }
+  cc.stroke(); cc.restore();
+}
+
+// ── REACHABILITY GATE HOOKS (window.__gfReach / window.__gfTour) ───────────
+// The reachability gate (Shared/skills/yandex-testing/tools/reachability_check.js)
+// proves EVERY interactive item on EVERY screen can be brought fully into the
+// visible viewport at some reachable scroll position. A game opts in by calling:
+//
+//   GF.exposeReach(function () {
+//     return {
+//       screen: <string>,            // current screen id (for the gate's report)
+//       items: [ { id, x, y, w, h }, ... ],  // interactive hit-rects, CONTENT px
+//       // optional: scrollId of the scroll region this screen scrolls (so the
+//       // gate reads scrollMaxY automatically), OR pass scrollMaxY directly.
+//       scrollId: 'team_roster',     // -> gate uses GF.scrollMax('team_roster')
+//       // scrollMaxY: <number>,     // (alternative to scrollId)
+//     };
+//   });
+//   GF.exposeTour([
+//     { name: 'menu',       go: function(){ gs='MENU'; } },
+//     { name: 'team',       go: function(){ gs='TEAM'; } },
+//     ...
+//   ]);
+//
+// Items whose y is INSIDE a scroll region must be reported in CONTENT space
+// (y from the region's content top); items pinned outside the scroll region
+// (headers, action buttons) are reported with pinned:true in plain screen space
+// (scrollMaxY does not apply to them; the gate only checks they sit within
+// [0, screenH]). The template wires both into NEW games automatically.
+// ONE scroll region per screen: the payload carries a single scrollId + viewportH
+// (the active region's on-screen height). A screen with TWO independent scroll
+// regions is not expressible in one payload, so split it into two tour steps (one
+// per region). Scroll is vertical-only: horizontal overflow is always a hard fail,
+// never "scroll right to reveal".
+// Coordinate contract (read by reachability_check.js):
+//   - For a screen WITHOUT a scroll region: report every item in SCREEN px,
+//     return viewportH = screen height, scrollMaxY = 0. Every item must satisfy
+//     0 <= y && y+h <= viewportH.
+//   - For a screen WITH a scroll region (pass scrollId): report the SCROLLABLE
+//     items in the region's CONTENT space (y measured from the region's content
+//     top, i.e. as drawn at scroll offset 0 minus the region's screen top), set
+//     viewportH = the region's VIEWPORT height (its on-screen px height), and
+//     scrollMaxY = the region's max offset (auto from scrollId). Mark any PINNED
+//     item (header/action button drawn OUTSIDE the scroll region) with
+//     pinned:true and report it in SCREEN px + screenH - the gate verifies a
+//     pinned item is within [0, screenH] (it does not scroll). screenH defaults
+//     to the screen height. A scrollable item passes iff some scrollY in
+//     [0, scrollMaxY] makes [y, y+h] ⊆ [scrollY, scrollY+viewportH].
+function exposeReach(getter) {
+  if (typeof getter !== 'function') return;
+  window.__gfReach = function () {
+    try {
+      var r = getter() || {};
+      var maxY = 0;
+      if (typeof r.scrollMaxY === 'number') maxY = r.scrollMaxY;
+      else if (r.scrollId && _scrollRegions[r.scrollId]) maxY = _scrollRegions[r.scrollId].maxOffset();
+      var vpH = (typeof r.viewportH === 'number') ? r.viewportH : H;
+      return {
+        screen: r.screen != null ? String(r.screen) : '?',
+        viewportH: Math.round(vpH),
+        viewportW: W,
+        screenH: Math.round(typeof r.screenH === 'number' ? r.screenH : H),
+        scrollId: r.scrollId || null,
+        scrollMaxY: Math.round(maxY),
+        items: (r.items || []).map(function (it) {
+          var o = { id: String(it.id), x: Math.round(it.x), y: Math.round(it.y), w: Math.round(it.w), h: Math.round(it.h) };
+          if (it.pinned) o.pinned = true;
+          return o;
+        }),
+      };
+    } catch (e) { return { screen: '__error', viewportH: H, viewportW: W, screenH: H, scrollMaxY: 0, items: [], error: String(e) }; }
+  };
+}
+var _tourSteps = [];
+function exposeTour(steps) {
+  _tourSteps = Array.isArray(steps) ? steps : [];
+  // __gfTour(i): navigate to tour step i (returns its name), or with no arg
+  // returns the list of step names so the gate knows how many screens to visit.
+  window.__gfTour = function (i) {
+    if (i == null) return _tourSteps.map(function (s) { return s.name; });
+    var s = _tourSteps[i];
+    if (!s) return null;
+    try { if (typeof s.go === 'function') s.go(); } catch (e) {}
+    return s.name;
+  };
+}
+function scrollMax(id) { return _scrollRegions[id] ? _scrollRegions[id].maxOffset() : 0; }
+
 // ── SPRITES ──────────────────────────────────────────────────────────────
 var sprites = {};
 function loadSprites(names) {
@@ -954,6 +1177,18 @@ window.GF = {
   spawnParticles: spawnParticles,
   spawnFloat: spawnFloat,
   setShake: setShake,
+  // Scroll regions (REQUIRED for any screen whose content can exceed the
+  // viewport - long lists/grids). GF.makeScroll(id, {x,y,w,h}) -> controller
+  // with .setViewport/.setContentHeight/.begin/.end/.draw/.handleWheel/.dragStart/
+  // .dragMove/.dragEnd/.update/.offset/.clamp()/.screenToContentY/.contains.
+  // See the SCROLL block above for the per-frame usage pattern.
+  makeScroll: makeScroll,
+  scrollMax: scrollMax,
+  // Reachability gate hooks - GF.exposeReach(getter) + GF.exposeTour(steps).
+  // Every NEW game wires these so reachability_check.js can prove all UI is
+  // reachable. See the REACHABILITY GATE HOOKS block above.
+  exposeReach: exposeReach,
+  exposeTour: exposeTour,
   // Audio (REQUIRED before publish) — GF.sfx('merge'|'spawn'|'hit'|'levelup'|'unlock'|
   // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
   // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
@@ -1018,6 +1253,21 @@ window.GF = {
     if (typeof getter !== 'function') return;
     window.__gfState = function () {
       try { return getter(); } catch (e) { return { __error: String(e) }; }
+    };
+  },
+  // Register a BOT action contract for the autonomous progression probe (#276).
+  //   GF.exposeBot(
+  //     () => ['merge','spawn'],        // actions available RIGHT NOW (strings)
+  //     (action) => { /* apply it */ }  // perform one action
+  //   );
+  // The probe enumerates actions, applies a heuristic one, fast-forwards the
+  // logic via window.__gfStep(), and samples __gfState() to build a progression
+  // curve (score / difficulty / time-to-wall) over a simulated 10-15 min run —
+  // verifying BALANCE/pacing, which the boot + 60s vision gates can't see.
+  exposeBot: function (getActions, doAction) {
+    window.__gfBot = {
+      actions: function () { try { var a = getActions(); return Array.isArray(a) ? a : []; } catch (e) { return []; } },
+      act: function (a) { try { return doAction(a); } catch (e) {} },
     };
   },
   // Persist run state to localStorage (Yandex 1.9 — game progress must
@@ -1263,6 +1513,35 @@ window.GF = {
 
 // Screenshot helpers — exposed at window for external tooling (take_screenshots.js)
 window._setLang = function(l) { lang = (l === 'ru' ? 'ru' : 'en'); };
+// Fast-forward hook for the progression probe (#276): advance the game's logic
+// by `n` ticks of `dt` seconds with NO rendering or realtime wait, so a bot can
+// drive a 10-15 min run in milliseconds. Calls the same onUpdate(dt) the RAF
+// loop uses; no-op until a game registered onUpdate via GF.init. Guarded so a
+// throwing onUpdate stops the stepping (returns how many ticks actually applied)
+// instead of wedging. NOTE: only DT-DRIVEN logic fast-forwards; a game whose
+// timers use setTimeout/Date.now won't advance (the probe flags that case).
+window.__gfStep = function (n, dt) {
+  n = n | 0; dt = (typeof dt === 'number' && dt > 0) ? dt : (1 / 60);
+  var i = 0;
+  for (; i < n; i++) { try { if (onUpdate) onUpdate(dt); } catch (e) { return i; } }
+  return i;
+};
+// Deterministic PLAY/CTA locator for the QA gates (fixes the canvas-button
+// false-negative: random taps scattered across the viewport miss a canvas-drawn
+// PLAY capsule, and the IIFE hides its rect). Returns the PRIMARY overlay button
+// (buttons[0] — PLAY on the menu, RETRY on game-over) in CSS px + its centre, so
+// a gate can tap the REAL button. null when no overlay button shows (game in
+// play, or it hand-draws its menu without drawOverlay → gate falls back to sweep).
+window.__gfPlayRect = function () {
+  try {
+    if (!buttons || !buttons.length || !canvas) return null;
+    var b = buttons[0], r = canvas.getBoundingClientRect();
+    if (!r.width || !canvas.width) return null;
+    var sx = r.width / canvas.width, sy = r.height / canvas.height;
+    return { x: r.left + b.x * sx, y: r.top + b.y * sy, w: b.w * sx, h: b.h * sy,
+             cx: r.left + (b.x + b.w / 2) * sx, cy: r.top + (b.y + b.h / 2) * sy };
+  } catch (e) { return null; }
+};
 // _jumpLevel must be defined per-game (each game has its own level model).
 
 })();

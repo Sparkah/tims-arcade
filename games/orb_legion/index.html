@@ -672,19 +672,49 @@ function evtPos(e) {
   return { x: (cx - rect.left)*sx, y: (cy - rect.top)*sy };
 }
 var pointerDown = false;
+// scroll-press state for the hub list screens (TEAM/COLLECTION). A press inside
+// a scroll region becomes a DRAG-to-scroll when it moves past TAP_SLOP; a press
+// that stays within TAP_SLOP is a TAP (item select), fired on release. Pinned
+// buttons (outside the scroll region) also resolve on release via the screen's
+// click handler, so a drag-scroll never accidentally triggers them.
+var TAP_SLOP = 8;   // px (game-space) of movement that still counts as a tap
+var press = null;   // { x0, y0, scroll, moved }
+
+// which scroll controller owns the current hub screen (null elsewhere)
+function activeScroll() {
+  if (gs === 'TEAM') return teamScroll;
+  if (gs === 'COLLECTION') return collScroll;
+  return null;
+}
 
 function onDown(x,y) {
   // mute toggle (global)
   if (muteBtn && hit(muteBtn, x, y)) { var m=GF.toggleMute(); GF.setMusicMuted(m); GF.sfx('tap'); return; }
+  // hub list screens: start a press that may become a scroll-drag or a tap.
+  // The drag does NOT begin here - only once movement crosses TAP_SLOP in
+  // onMove - so a clean tap (sub-slop) never scrolls the list.
+  var sc = activeScroll();
+  if (sc) {
+    press = { x0:x, y0:y, scroll: sc.contains(x,y) ? sc : null, moved:false };
+    return;   // selection / button taps resolve in onUp (or as a scroll-drag)
+  }
   // route to screen
   if (gs === 'MENU') return menuClick(x,y);
   if (gs === 'STAGESEL') return stageSelClick(x,y);
-  if (gs === 'TEAM') return teamClick(x,y);
-  if (gs === 'COLLECTION') return collClick(x,y);
   if (gs === 'SUMMON') return summonClick(x,y);
   if (gs === 'BATTLE') return battleDown(x,y);
 }
 function onMove(x,y) {
+  if (press) {
+    // Only treat it as a scroll-DRAG once movement crosses TAP_SLOP; below the
+    // slop it stays a tap (no scroll, so sub-slop jitter never moves the list).
+    if (!press.moved && (Math.abs(x-press.x0)>TAP_SLOP || Math.abs(y-press.y0)>TAP_SLOP)) {
+      press.moved = true;
+      if (press.scroll) press.scroll.dragStart(press.y0);   // begin the drag from the ORIGINAL press y
+    }
+    if (press.moved && press.scroll) press.scroll.dragMove(y);
+    return;
+  }
   if (gs === 'BATTLE' && battle && battle.dragOrb && battle.phase==='INPUT') {
     var dr = battle.dragOrb;
     dr.x = x; dr.y = y;
@@ -700,6 +730,15 @@ function onMove(x,y) {
   }
 }
 function onUp(x,y) {
+  if (press) {
+    if (press.scroll) press.scroll.dragEnd();
+    if (!press.moved) {   // a genuine tap -> route to the screen's click handler
+      if (gs === 'TEAM') teamClick(x,y);
+      else if (gs === 'COLLECTION') collClick(x,y);
+    }
+    press = null;
+    return;
+  }
   if (gs === 'BATTLE' && battle && battle.dragOrb) {
     battle.dragOrb = null;
     if (battle.phase==='INPUT') {
@@ -708,6 +747,11 @@ function onUp(x,y) {
     }
   }
 }
+// mouse-wheel scrolling on desktop for the active hub list
+function onWheel(dy) {
+  var sc = activeScroll();
+  if (sc) { sc.handleWheel(dy); }
+}
 
 canvas.addEventListener('mousedown', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); });
 window.addEventListener('mousemove', function(e){ if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); });
@@ -715,6 +759,10 @@ window.addEventListener('mouseup', function(e){ if(!pointerDown) return; pointer
 canvas.addEventListener('touchstart', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); }, {passive:false});
 canvas.addEventListener('touchmove', function(e){ e.preventDefault(); if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); }, {passive:false});
 canvas.addEventListener('touchend', function(e){ e.preventDefault(); if(!pointerDown) return; pointerDown=false; var t=e.changedTouches[0]; var rect=canvas.getBoundingClientRect(); var sx=canvas.width/rect.width, sy=canvas.height/rect.height; onUp((t.clientX-rect.left)*sx,(t.clientY-rect.top)*sy); }, {passive:false});
+// mouse-wheel: convert client delta to game-space px (canvas px / CSS px) so
+// scroll speed matches the rendered scale. gf-lib already preventDefaults wheel
+// globally; this listener feeds the active hub list its delta.
+canvas.addEventListener('wheel', function(e){ var rect=canvas.getBoundingClientRect(); var sy=canvas.height/rect.height; onWheel(e.deltaY*sy); }, {passive:false});
 
 function battleDown(x,y) {
   // back-to-menu button (top-left)
@@ -1289,8 +1337,8 @@ function drawTeam() {
     ctx.beginPath(); ctx.arc(x,y,slot*0.46,0,Math.PI*2);
     ctx.fillStyle= id?ORB_COLS[rosterById(id).el].a:'#2a2a38'; ctx.fill();
     if (id){ ctx.save(); ctx.beginPath(); ctx.arc(x,y,slot*0.42,0,Math.PI*2); ctx.clip(); var img=IMG[rosterById(id).art]; if(img) drawCover(img,x-slot*0.42,y-slot*0.42,slot*0.84,slot*0.84); ctx.restore();
-      // stars
-      drawStars(x, y+slot*0.40, meta.owned[id].stars, 5*S);
+      // stars (defensive: a stale team id with no owned record falls back to 1*)
+      drawStars(x, y+slot*0.40, (meta.owned[id]?meta.owned[id].stars:1), 5*S);
     } else { ctx.fillStyle='#556'; ctx.font='bold '+clampF(22*S,16,30)+'px Inter, system-ui'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('+',x,y); }
     ctx.restore();
   }
@@ -1300,34 +1348,59 @@ function drawTeam() {
   var sy=slotY+slot+10*S, txt='';
   for (var e=0;e<5;e++){ if(counts[e]) txt += EL_NAME[e].toUpperCase()+' x'+counts[e]+'   '; }
   ctx.fillStyle='#7cf0ff'; ctx.fillText(txt||GF.t('teamhint'), GF.cx, sy);
-  // owned roster grid below (tap to add/remove)
+  // owned roster grid below (tap to add/remove) - SCROLLS (drag + wheel).
+  // viewport ends above the bottom button strip so Auto-Team/Back stay reachable.
+  ensureScrolls();
   var gridTop=sy+26*S;
-  drawRosterGrid(gridTop, H-150*S, function(rect,id){ L.teamGridCells.push({rect:rect,id:id}); }, true);
-  // bottom buttons
+  drawRosterGrid(gridTop, H-92*S, teamScroll, true);
+  // bottom buttons (pinned below the scroll region)
   var by=H-78*S, bw=(W*0.86-12*S)/2, bx=W*0.07, bh=52*S;
   L.teamAuto = { x:bx, y:by, w:bw, h:bh };
   drawBigBtn(L.teamAuto, GF.t('rerollteam'), '#a05cff','#7e3ce0');
   L.teamBack = { x:bx+bw+12*S, y:by, w:bw, h:bh };
   drawBigBtn(L.teamBack, GF.t('back'), '#2ee07a','#23a657');
 }
-var rosterScroll = 0;
+// Scroll controllers for the two long-list hub screens. Created lazily (the
+// gf-lib makeScroll registers them for the reachability gate). The grid cells
+// (L.teamGridCells / L.collGridCells) are recorded in CONTENT space; hit-testing
+// converts the tap to content space via the controller's offset.
+var teamScroll = null, collScroll = null;
+function ensureScrolls() {
+  if (!teamScroll) teamScroll = GF.makeScroll('team_roster', {x:0,y:0,w:0,h:0});
+  if (!collScroll) collScroll = GF.makeScroll('coll_roster', {x:0,y:0,w:0,h:0});
+}
+// hit-test a CONTENT-space rect against a SCREEN-space tap, via the controller.
+// The tap must land inside the viewport AND map (screen->content) into the rect.
+function hitScrolled(rect, x, y, sc) {
+  if (!rect || !sc) return false;
+  if (!sc.contains(x,y)) return false;        // tap outside the scroll viewport
+  var cy = sc.screenToContentY(y);            // (y - vp.y) + offset
+  return x>=rect.x && x<=rect.x+rect.w && cy>=rect.y && cy<=rect.y+rect.h;
+}
 function teamClick(x,y) {
-  // remove from team slot
+  // remove from team slot (pinned, screen space)
   for (var i=0;i<L.teamSlots.length;i++){ var ts=L.teamSlots[i];
     if (hit(ts,x,y) && ts.id){ meta.team.splice(ts.idx,1); saveMeta(); GF.sfx('tap'); return; }
   }
-  // add from grid
+  // bottom buttons (pinned, screen space) - check before the grid so a cell
+  // scrolled under the button strip can't be tapped through it
+  if (hit(L.teamAuto,x,y)) { autoTeam(); return; }
+  if (hit(L.teamBack,x,y)) { gs='STAGESEL'; GF.sfx('tap'); return; }
+  // add from grid (content space, clipped to the scroll viewport). Only OWNED
+  // champions can go on the team - tapping an unowned (locked) cell errors. (The
+  // desktop scroll fix made the locked lower-row cells tappable for the first
+  // time, exposing a latent crash where an unowned id reached drawTeam's
+  // meta.owned[id].stars.)
   for (var j=0;j<L.teamGridCells.length;j++){ var gc=L.teamGridCells[j];
-    if (hit(gc.rect,x,y)){
+    if (hitScrolled(gc.rect,x,y,teamScroll)){
       var idx=meta.team.indexOf(gc.id);
       if (idx>=0){ meta.team.splice(idx,1); }
+      else if (!meta.owned[gc.id]){ GF.sfx('error'); return; }
       else if (meta.team.length<5){ meta.team.push(gc.id); }
       else { GF.sfx('error'); return; }
       saveMeta(); GF.sfx('tap'); return;
     }
   }
-  if (hit(L.teamAuto,x,y)) { autoTeam(); return; }
-  if (hit(L.teamBack,x,y)) { gs='STAGESEL'; GF.sfx('tap'); return; }
 }
 function autoTeam() {
   // pick top 5 by power, spread across elements
@@ -1337,20 +1410,33 @@ function autoTeam() {
   saveMeta(); GF.sfx('reward');
 }
 
-// roster grid renderer shared by team + collection
-function drawRosterGrid(top, bottom, cb, teamMode) {
+// roster grid renderer shared by team + collection. SCROLLS: the 12-cell grid
+// (4 cols x 3 rows) overflows the clip region on desktop, so it's drawn inside a
+// GF scroll controller (touch-drag + wheel, hard-clamped). Cell rects are stored
+// in CONTENT space (y from the viewport top); the click handlers subtract the
+// controller's offset when hit-testing.
+function drawRosterGrid(top, bottom, sc, teamMode) {
   var S=GF.S, W=GF.W;
   if (teamMode) L.teamGridCells=[]; else L.collGridCells=[];
   var cols=4, gap=8*S, cw=(W-20*S-gap*(cols-1))/cols, ch=cw*1.18;
   var ids = ROSTER.map(function(u){return u.id;});
   var rowH=ch+gap;
-  // clip region
-  ctx.save();
-  ctx.beginPath(); ctx.rect(0, top, W, bottom-top); ctx.clip();
+  var rows=Math.ceil(ids.length/cols);
+  var vpH = bottom-top;
+  // content height = all rows + a little bottom padding so the last row clears
+  // the fade/scrollbar comfortably
+  var contentH = rows*rowH - gap + 10*S;
+  sc.setViewport({x:0, y:top, w:W, h:vpH});
+  sc.setContentHeight(contentH);
+  sc.update();        // inertial flick settle
+  // Draw cells in CONTENT space: y measured from the region's content TOP (0).
+  // begin() translates by (vp.y - offset), so content-y 0 maps to screen vp.y.
+  // (Cells are stored at content-y too; hit-testing + the gate use content-y.)
+  sc.begin(ctx);
   for (var i=0;i<ids.length;i++){
     var id=ids[i], owned=meta.owned[id];
     var col=i%cols, row=Math.floor(i/cols);
-    var x=10*S+col*(cw+gap), y=top+row*rowH;
+    var x=10*S+col*(cw+gap), y=row*rowH;   // content-space y (0 = region top)
     var rect={x:x,y:y,w:cw,h:ch};
     if (teamMode) L.teamGridCells.push({rect:rect,id:id}); else L.collGridCells.push({rect:rect,id:id});
     var u=rosterById(id);
@@ -1379,7 +1465,9 @@ function drawRosterGrid(top, bottom, cb, teamMode) {
     if (inTeam){ ctx.fillStyle='#ffd23a'; ctx.font='bold '+clampF(9*S,8,12)+'px Inter, system-ui'; ctx.textBaseline='top'; ctx.textAlign='right'; ctx.fillText(GF.t('equip'), x+cw-6*S, y+6*S); }
     ctx.restore();
   }
-  ctx.restore();
+  sc.end(ctx);
+  // scrollbar + top/bottom fades so the player knows there's more
+  sc.draw(ctx);
 }
 function rarColor(r){ return r>=5?'#ffd23a':(r>=4?'#b87cff':'#6fbfff'); }
 function drawStars(cx,cy,n,r){
@@ -1398,7 +1486,8 @@ function drawCollection() {
   ctx.fillText(GF.t('collection')+'  '+ownedN+'/'+ROSTER.length, GF.cx, 56*S);
   ctx.font=clampF(12*S,10,16)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
   wrapText(GF.t('collhint'), GF.cx, 84*S, W*0.9, clampF(16*S,13,20));
-  drawRosterGrid(116*S, H-90*S, null, false);
+  ensureScrolls();
+  drawRosterGrid(116*S, H-92*S, collScroll, false);
   var by=H-78*S, bw=(W*0.86-12*S)/2, bx=W*0.07, bh=52*S;
   L.collSummon = { x:bx, y:by, w:bw, h:bh };
   drawBigBtn(L.collSummon, GF.t('summon'), '#a05cff','#7e3ce0');
@@ -1406,8 +1495,11 @@ function drawCollection() {
   drawBigBtn(L.collBack, GF.t('back'), '#2ee07a','#23a657');
 }
 function collClick(x,y) {
+  // bottom buttons (pinned, screen space) - check before the grid
+  if (hit(L.collSummon,x,y)) { openSummon(); return; }
+  if (hit(L.collBack,x,y)) { gs= (battle?'STAGESEL':'MENU'); GF.sfx('tap'); return; }
   for (var j=0;j<L.collGridCells.length;j++){ var gc=L.collGridCells[j];
-    if (hit(gc.rect,x,y)){ // toggle into team if owned
+    if (hitScrolled(gc.rect,x,y,collScroll)){ // toggle into team if owned
       if (meta.owned[gc.id]){ var idx=meta.team.indexOf(gc.id);
         if (idx>=0){ meta.team.splice(idx,1); } else if (meta.team.length<5){ meta.team.push(gc.id); } else { GF.sfx('error'); return; }
         saveMeta(); GF.sfx('tap'); }
@@ -1415,8 +1507,6 @@ function collClick(x,y) {
       return;
     }
   }
-  if (hit(L.collSummon,x,y)) { openSummon(); return; }
-  if (hit(L.collBack,x,y)) { gs= (battle?'STAGESEL':'MENU'); GF.sfx('tap'); return; }
 }
 
 // ── SUMMON ───────────────────────────────────────────────────────────────────
@@ -1458,18 +1548,23 @@ function drawSummon() {
   // cost: 1 ticket per single; 10 tickets per x10 (or essence)
   ctx.font=clampF(11*S,9,15)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
   wrapText(GF.t('summonhint'), GF.cx, pbY+16*S, W*0.86, clampF(15*S,12,19));
-  // buttons
-  var bw2=Math.min(W*0.8,340*S), bx2=GF.cx-bw2/2, bbh=54*S, byy=H-198*S;
+  // buttons - anchored to the BOTTOM of the screen so the whole stack (2 summon
+  // + ad + back) always fits, including its back button (the back button used to
+  // overflow the viewport ~38px on both 393x852 and 1280x720; the reachability
+  // gate caught it). Stack height = bbh + gap + bbh + gap + 46 + gap + 46.
+  var bw2=Math.min(W*0.8,340*S), bx2=GF.cx-bw2/2, bbh=54*S, gap2=12*S, adH=46*S, backH=46*S;
+  var stackH = bbh + gap2 + bbh + gap2 + adH + gap2 + backH;
+  var byy = H - stackH - 14*S;
   var canOne = meta.tickets>=1 || meta.essence>=100;
   var canTen = meta.tickets>=10 || meta.essence>=900;
   L.sumOne = { x:bx2, y:byy, w:bw2, h:bbh };
   drawBigBtn(L.sumOne, GF.t('summon1')+'  ('+ (meta.tickets>=1?'1 '+ticketWord():'100 EP') +')', '#37a8ff','#1e7fd0', !canOne);
-  L.sumTen = { x:bx2, y:byy+bbh+12*S, w:bw2, h:bbh };
+  L.sumTen = { x:bx2, y:byy+bbh+gap2, w:bw2, h:bbh };
   drawBigBtn(L.sumTen, GF.t('summon10')+'  ('+ (meta.tickets>=10?'10 '+ticketWord():'900 EP') +')', '#a05cff','#7e3ce0', !canTen);
   // rewarded-ad free essence
-  L.sumAd = { x:bx2, y:byy+(bbh+12*S)*2, w:bw2, h:46*S };
+  L.sumAd = { x:bx2, y:byy+(bbh+gap2)*2, w:bw2, h:adH };
   drawBigBtn(L.sumAd, GF.t('adwatch'), '#ffb028','#e0830a');
-  L.sumBack = { x:bx2, y:byy+(bbh+12*S)*2+46*S+12*S, w:bw2, h:46*S };
+  L.sumBack = { x:bx2, y:byy+(bbh+gap2)*2+adH+gap2, w:bw2, h:backH };
   drawBigBtn(L.sumBack, GF.t('back'), '#555','#333');
 }
 function ticketWord(){ return GF.lang==='ru'?'б.':'tkt'; }
@@ -1664,6 +1759,65 @@ function reopenTutorial() {
 }
 
 // ===========================================================================
+//  REACHABILITY GATE (window.__gfReach / __gfTour)
+// ===========================================================================
+// Reports the CURRENT screen's interactive hit-rects so reachability_check.js
+// can prove every button + champion cell can be brought fully on-screen. The
+// scroll screens (TEAM/COLLECTION) report grid cells in the scroll region's
+// CONTENT space (y from the region top) + scrollId so the gate reads scrollMaxY;
+// pinned buttons are reported in screen space with pinned:true. L.* rects are
+// populated by draw() every frame, so __gfReach is read AFTER a frame.
+function _ri(id, r, pinned){ if(!r) return null; return { id:id, x:r.x, y:r.y, w:r.w, h:r.h, pinned:!!pinned }; }
+function _push(arr, it){ if(it) arr.push(it); }
+function reachState(){
+  var S=GF.S, H=GF.H, items=[], res={ screen:gs, items:items, screenH:H, viewportH:H };
+  if (gs==='MENU'){
+    _push(items,_ri('play',L.menuPlay)); _push(items,_ri('collection',L.menuColl)); _push(items,_ri('summon',L.menuSummon));
+  } else if (gs==='STAGESEL'){
+    if (L.dailyBtn) _push(items,_ri('daily',L.dailyBtn));
+    for (var i=0;i<(L.stageCards||[]).length;i++) _push(items,_ri('stage_'+i, L.stageCards[i].rect));
+    _push(items,_ri('team',L.ssTeam)); _push(items,_ri('back',L.ssBack));
+  } else if (gs==='TEAM'){
+    res.scrollId='team_roster';
+    res.viewportH = teamScroll ? teamScroll.vp.h : H;       // region viewport height
+    // team slots + bottom buttons are PINNED (drawn outside the scroll region)
+    for (var s=0;s<(L.teamSlots||[]).length;s++) _push(items,_ri('slot_'+s, L.teamSlots[s], true));
+    _push(items,_ri('auto',L.teamAuto,true)); _push(items,_ri('back',L.teamBack,true));
+    // champion cells already stored in CONTENT space (y from region top)
+    for (var c=0;c<(L.teamGridCells||[]).length;c++){ var gc=L.teamGridCells[c];
+      _push(items,_ri('champ_'+gc.id, gc.rect)); }
+  } else if (gs==='COLLECTION'){
+    res.scrollId='coll_roster';
+    res.viewportH = collScroll ? collScroll.vp.h : H;
+    _push(items,_ri('summon',L.collSummon,true)); _push(items,_ri('back',L.collBack,true));
+    for (var k=0;k<(L.collGridCells||[]).length;k++){ var cc2=L.collGridCells[k];
+      _push(items,_ri('champ_'+cc2.id, cc2.rect)); }
+  } else if (gs==='SUMMON'){
+    _push(items,_ri('summon1',L.sumOne)); _push(items,_ri('summon10',L.sumTen));
+    _push(items,_ri('ad',L.sumAd)); _push(items,_ri('back',L.sumBack));
+  } else if (gs==='BATTLE' && battle){
+    if (battle.phase==='WIN'){ _push(items,_ri('win_summon',L.winSummon)); _push(items,_ri('win_next',L.winNext)); }
+    else if (battle.phase==='LOSE'){ if(L.loseRevive) _push(items,_ri('lose_revive',L.loseRevive)); _push(items,_ri('lose_retry',L.loseRetry)); _push(items,_ri('lose_hub',L.loseHub)); }
+    else { _push(items,_ri('back',L.backBtn)); if(L.helpBtn) _push(items,_ri('help',L.helpBtn)); }
+  }
+  return res;
+}
+// Tour: every screen the gate steps through. Each `go` puts the game in that
+// state WITHOUT side effects that block the next step. The battle screens need a
+// live battle; start one (silently) if absent.
+function _ensureBattle(){ if(!battle){ window._silent=true; startBattle(Math.min(meta.stageUnlocked,STAGES.length-1)); window._silent=false; } }
+var REACH_TOUR = [
+  { name:'menu',       go:function(){ battle=null; gs='MENU'; } },
+  { name:'stage_select', go:function(){ battle=null; gs='STAGESEL'; } },
+  { name:'team',       go:function(){ battle=null; gs='TEAM'; if(teamScroll) teamScroll.scrollTo(0); } },
+  { name:'collection', go:function(){ battle=null; gs='COLLECTION'; if(collScroll) collScroll.scrollTo(0); } },
+  { name:'summon',     go:function(){ summonReturn='MENU'; gs='SUMMON'; } },
+  { name:'battle',     go:function(){ _ensureBattle(); if(GF.tutorial) GF.tutorial.active=false; tutorialActive=false; battle.phase='INPUT'; gs='BATTLE'; } },
+  { name:'battle_win', go:function(){ _ensureBattle(); battle.phase='WIN'; battle._rewardEss=battle._rewardEss||60; gs='BATTLE'; } },
+  { name:'battle_lose',go:function(){ _ensureBattle(); battle.phase='LOSE'; battle.reviveUsed=false; gs='BATTLE'; } },
+];
+
+// ===========================================================================
 //  BOOT
 // ===========================================================================
 GF.init({
@@ -1688,6 +1842,10 @@ GF.init({
         stageUnlocked: meta.stageUnlocked,
       };
     });
+    // reachability gate: expose the per-screen hit-rects + a screen tour so
+    // reachability_check.js can prove all UI is reachable (no clipped buttons).
+    GF.exposeReach(reachState);
+    GF.exposeTour(REACH_TOUR);
     // load images then maybe autostart
     loadImages().then(function(){
       if (window.__GF_AUTOSTART && !window._silent) {
@@ -1738,6 +1896,24 @@ window._orbTeamEls = function(){ return battle?battle.units.map(function(u){retu
 window._orbTutInfo = function(){ return { tutorialActive:tutorialActive, active:GF.tutorial.active, step:GF.tutorial.step, drag:TUT_DRAG, el:TUT_EL }; };
 window._orbTutDragGeom = function(){ var a=cellCenter(TUT_DRAG.row,TUT_DRAG.fromC), b=cellCenter(TUT_DRAG.row,TUT_DRAG.toC); return { from:{x:a.x,y:a.y}, to:{x:b.x,y:b.y} }; };
 window._orbHelpBtn = function(){ return L.helpBtn||null; };
+// scroll verification seams: read/drive the hub-list scroll + locate a champion
+// cell's CURRENT on-screen rect (content rect minus the controller offset).
+window._orbScroll = function(which, setTo){
+  var sc = which==='coll'?collScroll:teamScroll; if(!sc) return null;
+  if (typeof setTo==='number') sc.scrollTo(setTo);
+  return { offset:sc.offset, maxOffset:sc.maxOffset(), vpY:sc.vp.y, vpH:sc.vp.h, contentH:sc.contentH, scrollable:sc.scrollable() };
+};
+window._orbChampScreenRect = function(id){
+  var cells = gs==='COLLECTION'?L.collGridCells:L.teamGridCells;
+  var sc = gs==='COLLECTION'?collScroll:teamScroll;
+  if(!cells||!sc) return null;
+  for (var i=0;i<cells.length;i++){ if(cells[i].id===id){ var r=cells[i].rect;
+    // cell.rect.y is CONTENT-space (0 = region top). Screen y = vp.y + content - offset.
+    var sy = sc.contentToScreenY(r.y);   // (r.y - offset) + vp.y
+    return { x:r.x, y:sy, w:r.w, h:r.h, cx:r.x+r.w/2, cy:sy+r.h/2,
+             visible: sy>=sc.vp.y-1 && (sy+r.h)<=sc.vp.y+sc.vp.h+1 }; } }
+  return null;
+};
 
 })();
 </script>
