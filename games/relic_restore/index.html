@@ -38,7 +38,7 @@ var STRINGS = {
     up_width_d: 'Bigger cleaning area', up_speed_d: 'Clean faster per stroke', up_shine_d: 'Polish bonus shine',
     howto: 'How to Play',
     tut_brush: 'Drag across the relic to sweep off the dust.',
-    tut_scrub: 'Keep dragging — scrub the grime away.',
+    tut_scrub: 'Keep dragging to scrub the grime away.',
     tut_polish: 'Polish in circles to a mirror shine!',
     tut_tap: 'Tap to spawn the next relic.',
     setgem: 'Tap the socket to set the gem',
@@ -61,7 +61,7 @@ var STRINGS = {
     up_width_d: 'Больше зона чистки', up_speed_d: 'Чистка быстрее', up_shine_d: 'Бонус к блеску',
     howto: 'Как играть',
     tut_brush: 'Веди по реликвии, чтобы смести пыль.',
-    tut_scrub: 'Веди дальше — отмой всю грязь.',
+    tut_scrub: 'Веди дальше, отмой всю грязь.',
     tut_polish: 'Полируй кругами до блеска!',
     tut_tap: 'Коснись, чтобы взять след. реликвию.',
     setgem: 'Коснись гнезда, чтобы вставить камень',
@@ -73,13 +73,16 @@ var STRINGS = {
 // ── STAGE DEFINITIONS ────────────────────────────────────────────────────
 // Each stage clears one grime layer via the erase mask. col = grime tint,
 // particle = vfx kind, sound = SFX name, reveal = how the surface changes.
+// hard = wipe-passes needed to clear a cell (1 = sweeps off in one pass; 2+ =
+// must scrub back and forth → tactile ASMR resistance + natural escalation, as
+// tougher stages appear on later relics).
 var STAGES = {
-  brush:  { key: 't_brush',  grime: '#6b5a3a', particle: 'dust',  sfx: 'brushS',  base: '#7a6a48' },
-  scrub:  { key: 't_scrub',  grime: '#4d5a3e', particle: 'foam',  sfx: 'scrubS',  base: '#5a6048' },
-  rust:   { key: 't_rust',   grime: '#7a3a22', particle: 'fizz',  sfx: 'fizzS',   base: '#8a4a2a' },
-  purify: { key: 't_purify', grime: '#3a2a55', particle: 'fizz',  sfx: 'fizzS',   base: '#4a3a66' },
-  polish: { key: 't_polish', grime: '#5a5a66', particle: 'spark', sfx: 'polishS', base: '#6a6a78' },
-  gem:    { key: 't_gem',    grime: null,      particle: 'spark', sfx: 'coin',    base: null },
+  brush:  { key: 't_brush',  grime: '#6b5a3a', particle: 'dust',  sfx: 'brushS',  base: '#7a6a48', hard: 1 },
+  scrub:  { key: 't_scrub',  grime: '#4d5a3e', particle: 'foam',  sfx: 'scrubS',  base: '#5a6048', hard: 2 },
+  rust:   { key: 't_rust',   grime: '#7a3a22', particle: 'fizz',  sfx: 'fizzS',   base: '#8a4a2a', hard: 3 },
+  purify: { key: 't_purify', grime: '#3a2a55', particle: 'fizz',  sfx: 'fizzS',   base: '#4a3a66', hard: 3 },
+  polish: { key: 't_polish', grime: '#5a5a66', particle: 'spark', sfx: 'polishS', base: '#6a6a78', hard: 2 },
+  gem:    { key: 't_gem',    grime: null,      particle: 'spark', sfx: 'coin',    base: null,      hard: 1 },
 };
 
 // ── RELIC LADDER (escalating: density, stages, value) ────────────────────
@@ -118,12 +121,12 @@ var RELICS = [
 // ── TUNABLES (DESIGN.md §Tunables) ───────────────────────────────────────
 var BRUSH_R       = 46;     // base wipe radius (design px)
 var BRUSH_GROW    = 10;     // +radius per width-upgrade level
-var STAGE_DONE    = 0.95;   // coverage fraction to auto-advance a stage
-var COMBO_WINDOW  = 0.55;   // s gap before smoothness combo resets
+var STAGE_DONE    = 0.92;   // coverage fraction to auto-advance a stage
+var COMBO_WINDOW  = 0.7;    // s gap before smoothness combo resets
 var COMBO_MAX     = 5;      // smoothness multiplier cap
 var COINS_BASE    = 12;     // base coins per relic before star+value scaling
 var STAR3_COVER   = 0.93;   // coverage (×combo) for a 3-star appraisal
-var MASK_CELLS    = 26;     // mask grid resolution (short axis)
+var MASK_CELLS    = 42;     // mask grid resolution (short axis) — finer = smoother wipe
 var FIZZ_RATE     = 0.7;    // de-rust fizz spawn prob per sample
 var UPGRADE_COST  = [60, 140, 260];  // tool upgrade ladder
 var NUM_RELICS    = RELICS.length;
@@ -146,6 +149,8 @@ var coverage = 0;           // 0..1 cleared fraction this stage
 var revealBuf = [];         // per-cell reveal alpha for smooth fade
 var combo = 1, comboTimer = 0, comboPeak = 1;
 var stagePeakSum = 0, stagePeakN = 0;  // accumulate avg combo across stages
+var stageComboPeak = 1;                 // PEAK combo within the current stage
+var coverSum = 0, coverN = 0;           // accumulate per-stage final coverage
 var lastSample = null;      // last drag sample for smoothness
 var gemSet = false, gemNeeded = false;
 var stagePop = 0;           // color-pop animation 0..1 after a stage clears
@@ -192,18 +197,29 @@ function relicBox() {
 // A square grid over the relic box. Cell value 1 = grime, 0 = cleaned. Only
 // cells whose center falls inside the relic silhouette (insideRelic) count
 // toward coverage so wiping empty corners doesn't finish the stage.
+var hits = null;            // remaining wipe-passes per cell (multi-hit grime)
+function stageHardness() {
+  var k = stageList[stageI];
+  var h = (STAGES[k] && STAGES[k].hard) || 1;
+  return h;
+}
 function buildMask() {
   var box = relicBox();
   maskW = MASK_CELLS; maskH = MASK_CELLS;
   mask = new Uint8Array(maskW * maskH);
-  revealBuf = new Float32Array(maskW * maskH);
+  revealBuf = new Float32Array(maskW * maskH);   // 0 = full grime → 1 = fully gone
+  hits = new Float32Array(maskW * maskH);
+  hitT = new Float32Array(maskW * maskH);        // fresh cooldown clocks each stage
+  var hard = stageHardness();
   maskTotal = 0; maskCleared = 0;
   for (var gy = 0; gy < maskH; gy++) {
     for (var gx = 0; gx < maskW; gx++) {
       var fx = (gx + 0.5) / maskW, fy = (gy + 0.5) / maskH;  // 0..1 within box
       if (insideRelic(fx, fy)) {
-        mask[gy * maskW + gx] = 1;
-        revealBuf[gy * maskW + gx] = 0;
+        var idx = gy * maskW + gx;
+        mask[idx] = 1;
+        revealBuf[idx] = 0;
+        hits[idx] = hard;
         maskTotal++;
       }
     }
@@ -211,62 +227,72 @@ function buildMask() {
   coverage = 0;
 }
 
-// Silhouette test in normalized box space (0..1). Approximate each shape so
-// grime only sits on the object, not the whole square.
+// Silhouette test in normalized box space (0..1). Tuned to match each drawn
+// SHAPE_FN so grime sits exactly ON the object (no oversized blob, no bleed).
+// Coordinates here are in box-HALF units: x,y in -0.5..0.5, and the drawn shape
+// uses radius r = box.r = 0.5*size, so a draw of `r*k` => threshold (0.5*k)^2.
 function insideRelic(fx, fy) {
   var x = fx - 0.5, y = fy - 0.5;  // -0.5..0.5
   var s = relic ? relic.shape : 'coin';
   switch (s) {
-    case 'coin': case 'medal': case 'amulet':
-      return x * x + y * y <= 0.205;
+    case 'coin':
+      return x * x + y * y <= 0.33 * 0.33;          // disc ~0.64r
+    case 'medal': case 'amulet':
+      return x * x + (y - 0.06) * (y - 0.06) <= 0.27 * 0.27;  // tighter body ~0.52r
     case 'ring':
-      var d = Math.sqrt(x * x + y * y); return d <= 0.46 && d >= 0.22;
+      var d = Math.sqrt(x * x + y * y); return d <= 0.36 && d >= 0.20;   // torus 0.70..0.44 r
     case 'gem':
-      return Math.abs(x) + Math.abs(y * 0.92) <= 0.42 && y > -0.46;
+      // faceted gem: top point y=-0.41r, widest ~0.74r → diamond test
+      return (Math.abs(x) / 0.40 + Math.abs(y) / 0.42) <= 1 && y > -0.45;
     case 'spoon':
-      // bowl (lower) + handle (upper)
-      var by = y - 0.18; if ((x * x) / 0.034 + (by * by) / 0.05 <= 1) return true;
-      return Math.abs(x) <= 0.07 && y >= -0.46 && y <= 0.12;
+      var by = y - 0.18; if ((x * x) / 0.022 + (by * by) / 0.038 <= 1) return true; // bowl
+      return Math.abs(x) <= 0.055 && y >= -0.40 && y <= 0.12;                        // handle
     case 'key':
-      // ring head (top) + shaft
-      var ky = y + 0.27; if (x * x + ky * ky <= 0.026) return true;
-      if (Math.abs(x) <= 0.06 && y >= -0.18 && y <= 0.42) return true;
-      return (y >= 0.26 && y <= 0.42 && x >= 0 && x <= 0.20);
+      var ky = y + 0.21; if (x * x + ky * ky <= 0.018) return true;                  // head ring
+      if (Math.abs(x) <= 0.05 && y >= -0.14 && y <= 0.34) return true;               // shaft
+      return (y >= 0.20 && y <= 0.34 && x >= -0.02 && x <= 0.14);                    // teeth
     case 'watch':
-      var dd = Math.sqrt(x * x + (y + 0.02) * (y + 0.02));
-      if (dd <= 0.40) return true;
-      return (Math.abs(x) <= 0.07 && y <= -0.34 && y >= -0.48);  // crown stem
+      var dd = Math.sqrt(x * x + y * y);
+      if (dd <= 0.40) return true;                                                    // case 0.8r
+      return (Math.abs(x) <= 0.05 && y <= -0.36 && y >= -0.48);                       // crown stem
     case 'vase':
-      var w = 0.10 + 0.30 * Math.sin((fy * 0.86 + 0.10) * Math.PI);
+      var w = (0.10 + 0.30 * Math.sin((fy * 0.86 + 0.10) * Math.PI));                 // matches draw
       return Math.abs(x) <= w && fy > 0.06 && fy < 0.96;
     case 'goblet':
-      if (fy < 0.42) { var cw = 0.30 - fy * 0.18; return Math.abs(x) <= cw; }       // cup
-      if (fy < 0.74) return Math.abs(x) <= 0.05;                                     // stem
-      return Math.abs(x) <= 0.26 && fy < 0.92;                                       // base
+      if (fy < 0.28) return Math.abs(x) <= 0.28 - fy * 0.30;                          // cup taper
+      if (fy < 0.62) return Math.abs(x) <= 0.07;                                      // stem
+      return Math.abs(x) <= 0.22 && fy < 0.78;                                        // base
     case 'crown':
-      if (fy < 0.34) { return Math.abs(x) <= 0.42 && fy > 0.10 && (Math.sin(fx * Math.PI * 5) > -0.2); } // points
-      return Math.abs(x) <= 0.42 && fy >= 0.30 && fy < 0.74;                          // band
+      if (fy < 0.30) return Math.abs(x) <= 0.35 && fy > 0.10 && (Math.sin(fx * Math.PI * 4 + 0.6) > -0.35);
+      return Math.abs(x) <= 0.35 && fy >= 0.28 && fy < 0.70;                          // band
     case 'idol':
-      if (Math.abs(x) <= 0.30 && fy > 0.30 && fy < 0.96) return true;                 // body
-      return x * x + (y + 0.22) * (y + 0.22) <= 0.045;                                // head
+      if (Math.abs(x) <= 0.22 && fy > 0.40 && fy < 0.86) return true;                 // body
+      return x * x + (y + 0.17) * (y + 0.17) <= 0.024;                                // head
     case 'hilt':
-      if (Math.abs(x) <= 0.07 && y >= -0.10 && y <= 0.46) return true;                // grip
-      if (Math.abs(y + 0.10) <= 0.055 && Math.abs(x) <= 0.40) return true;            // guard
-      return x * x + (y + 0.30) * (y + 0.30) <= 0.020;                                // pommel
+      if (Math.abs(x) <= 0.05 && y >= -0.15 && y <= 0.40) return true;                // grip
+      if (Math.abs(y + 0.10) <= 0.04 && Math.abs(x) <= 0.30) return true;             // guard
+      if (x * x + (y - 0.31) * (y - 0.31) <= 0.012) return true;                      // pommel
+      return Math.abs(x) <= 0.045 && y <= -0.10 && y >= -0.31;                        // blade stub
     default:
-      return x * x + y * y <= 0.20;
+      return x * x + y * y <= 0.34 * 0.34;
   }
 }
 
-// Clear mask cells under a wipe at canvas (px,py) with radius rpx.
+var hitT = null;             // last-hit timestamp per cell (scrub cooldown)
+var HIT_COOLDOWN = 70;       // ms before a cell can take another wipe-pass
+// Wipe cells under a stroke at canvas (px,py) with radius rpx. Multi-hit grime
+// wears down a pass at a time (rate-limited per cell) so tougher stages need
+// real back-and-forth scrubbing. Returns count of cells FULLY cleared this call.
 function wipeAt(px, py, rpx) {
   if (!mask) return 0;
+  if (!hitT || hitT.length !== mask.length) hitT = new Float32Array(mask.length);
   var box = relicBox();
   var x0 = box.cx - box.size / 2, y0 = box.cy - box.size / 2;
-  var cleared = 0;
+  var touched = 0;
   var cw = box.size / maskW, ch = box.size / maskH;
-  var rr = rpx;
-  // bounding cell range
+  var rr = rpx, rr2 = rr * rr;
+  var now = performance.now();
+  var hard = stageHardness();
   var gx0 = Math.max(0, Math.floor((px - rr - x0) / cw));
   var gx1 = Math.min(maskW - 1, Math.ceil((px + rr - x0) / cw));
   var gy0 = Math.max(0, Math.floor((py - rr - y0) / ch));
@@ -277,15 +303,21 @@ function wipeAt(px, py, rpx) {
       if (mask[i] !== 1) continue;
       var ccx = x0 + (gx + 0.5) * cw, ccy = y0 + (gy + 0.5) * ch;
       var dx = ccx - px, dy = ccy - py;
-      if (dx * dx + dy * dy <= rr * rr) {
-        mask[i] = 2;             // mark cleared (fades via revealBuf)
+      if (dx * dx + dy * dy > rr2) continue;
+      if (now - hitT[i] < HIT_COOLDOWN) continue;   // still cooling from last pass
+      hitT[i] = now;
+      hits[i] -= 1;
+      touched++;
+      // visual wear: lighten the grime toward gone as hits drop
+      revealBuf[i] = GF.clamp(1 - hits[i] / hard, 0, 0.999) * 0.8;  // partial fade until cleared
+      if (hits[i] <= 0) {
+        mask[i] = 2;             // fully cleared (revealBuf finishes the fade in update)
         maskCleared++;
-        cleared++;
       }
     }
   }
   if (maskTotal > 0) coverage = maskCleared / maskTotal;
-  return cleared;
+  return touched;
 }
 
 function brushRadius() {
@@ -298,8 +330,8 @@ function startRelic(idx) {
   relic = RELICS[relicIdx];
   stageList = relic.stages.slice();
   stageI = 0;
-  combo = 1; comboPeak = 1; comboTimer = 0;
-  stagePeakSum = 0; stagePeakN = 0;
+  combo = 1; comboPeak = 1; comboTimer = 0; stageComboPeak = 1;
+  stagePeakSum = 0; stagePeakN = 0; coverSum = 0; coverN = 0;
   gemSet = false; gemNeeded = stageList.indexOf('gem') >= 0;
   grimeSeed = (relicIdx + 1) * 9301 + 4929;
   stagePop = 0; poppedStage = -1;
@@ -309,9 +341,10 @@ function startRelic(idx) {
   buildMask();
   // if first stage is gem (rare), nothing to wipe — handled in update
   gs = 'PLAYING';
-  GF.saveRun();
+  if (!_restoring) GF.saveRun();   // restore applies saved stage/effort then saves once
   GF.gameStarted();
 }
+var _restoring = false;
 
 function startGame() {
   // Always start a session at relic 0 for the satisfying quick-win ramp; the
@@ -320,14 +353,21 @@ function startGame() {
 }
 
 function advanceStage() {
-  // record this stage's average combo into the appraisal accumulator
-  stagePeakSum += combo; stagePeakN++;
+  // record this stage's PEAK combo (not the decayed end value) + its coverage
+  stagePeakSum += Math.max(stageComboPeak, combo); stagePeakN++;
+  coverSum += (stageList[stageI] === 'gem') ? 1 : coverage; coverN++;
+  var bx = relicBox();
   GF.sfx('stageDone');
-  GF.spawnParticles(relicBox().cx, relicBox().cy, '#ffe27a', 22);
-  GF.setShake(0.5);
+  // juicy clear: golden sparkle burst + a ring of motes + shake
+  GF.spawnParticles(bx.cx, bx.cy, '#ffe9a0', 30);
+  for (var s = 0; s < 14; s++) {
+    var a = (s / 14) * Math.PI * 2;
+    GF.spawnParticles(bx.cx + Math.cos(a) * bx.r * 0.6, bx.cy + Math.sin(a) * bx.r * 0.6, '#fff6d0', 2);
+  }
+  GF.setShake(0.55);
   stagePop = 1; poppedStage = stageI;
   stageI++;
-  combo = 1; comboTimer = 0; lastSample = null;
+  combo = 1; comboTimer = 0; lastSample = null; stageComboPeak = 1;
   if (stageI >= stageList.length) { finishRelic(); return; }
   // next stage: gem stage needs no mask
   if (stageList[stageI] === 'gem') { gemSet = false; }
@@ -336,19 +376,24 @@ function advanceStage() {
 }
 
 function finishRelic() {
-  // appraisal: coverage of final cleaning stage already ~1; score = thoroughness
-  // (avg combo across stages, capped) → stars
-  var avgCombo = stagePeakN > 0 ? stagePeakSum / stagePeakN : 1;
+  // Score = THOROUGHNESS (avg coverage across stages) × SMOOTHNESS (avg peak
+  // combo). A clean, reasonably smooth restore reliably earns 3 stars so the
+  // payoff feels EARNED, not punishing. Rushing (low coverage / jabby strokes)
+  // visibly drops to 2 or 1 star.
+  var avgCover = coverN > 0 ? coverSum / coverN : coverage;
+  var avgCombo = stagePeakN > 0 ? stagePeakSum / stagePeakN : combo;
   comboPeak = avgCombo;
-  var quality = GF.clamp((avgCombo - 1) / (COMBO_MAX - 1), 0, 1);  // 0..1 smoothness
-  // include a tiny shine bonus from the upgrade
-  quality = GF.clamp(quality + upShine * 0.04, 0, 1);
+  var smooth = GF.clamp((avgCombo - 1) / 2.2, 0, 1);  // reaches 1.0 at combo ~3.2
+  // thoroughness dominates (stages auto-advance at ~0.92, so a real clean is ~0.95+);
+  // smoothness is the bonus that separates a careful 3-star from a hasty 2-star.
+  var quality = GF.clamp(avgCover * 0.78 + smooth * 0.22 + upShine * 0.03, 0, 1);
   appraiseCover = quality;
-  var stars = quality >= STAR3_COVER * 0.0 + 0.7 ? 3 : quality >= 0.4 ? 2 : 1;
-  if (quality >= 0.7) stars = 3; else if (quality >= 0.38) stars = 2; else stars = 1;
+  var stars = quality >= 0.82 ? 3 : quality >= 0.58 ? 2 : 1;
   appraiseStars = stars;
+  // payout: scales with relic value + tier; even a 1-star pays a fair amount so
+  // progress never stalls, but 3-star pays ~2.2x to reward care.
   var mult = stars === 3 ? 1.0 : stars === 2 ? 0.7 : 0.45;
-  appraiseCoins = Math.round((COINS_BASE + relic.val) * mult * (1 + relicIdx * 0.05));
+  appraiseCoins = Math.round((COINS_BASE + relic.val) * mult * (1 + relicIdx * 0.08));
   coins += appraiseCoins;
   totalStars += stars;
   if (appraiseCoins > best) best = appraiseCoins;
@@ -373,9 +418,13 @@ function toReveal() {
 }
 
 function nextRelic() {
-  // advance to next unlocked relic, wrapping to 0 at the top of unlocked range
+  // ALWAYS climb the ladder: the session walks up through escalating relics so
+  // every restore is fresh content (the core "it stays interesting" lever). The
+  // next relic is unlocked on arrival (coin gates only govern jump-ahead from the
+  // collection grid). At the top of the ladder, loop to the start of the run.
   var n = relicIdx + 1;
-  if (n > unlockedMax || n >= NUM_RELICS) n = 0;
+  if (n >= NUM_RELICS) n = 0;
+  if (n > unlockedMax) { unlockedMax = n; saveMeta(); }
   startRelic(n);
 }
 
@@ -384,15 +433,21 @@ window._setupForScreenshot = function (lvl) {
   coins = 900; unlockedMax = 11; upWidth = 2; upSpeed = 1;
   var idx = GF.clamp((lvl || 5) + 4, 4, NUM_RELICS - 1);
   startRelic(idx);
-  // partially clean the relic for a busy mid-action frame
-  var box = relicBox();
-  var r = brushRadius();
-  for (var i = 0; i < 70; i++) {
-    var a = (i / 70) * Math.PI * 4, rad = (i / 70) * box.r * 0.8;
-    wipeAt(box.cx + Math.cos(a) * rad, box.cy + Math.sin(a) * rad, r);
+  // partially clean the relic for a busy mid-action frame: clear the LOWER ~55%
+  // of grime cells directly (bypassing the scrub cooldown) so the half-restored
+  // gleam shows for the promo shot.
+  if (mask) {
+    for (var c2 = 0; c2 < mask.length; c2++) {
+      if (mask[c2] !== 1) continue;
+      var gy = (c2 / maskW) | 0;
+      if (gy > maskH * 0.45) { mask[c2] = 2; revealBuf[c2] = 1; maskCleared++; }
+      else if (Math.random() < 0.3) { revealBuf[c2] = 0.5; }   // partial wear up top
+    }
+    if (maskTotal > 0) coverage = maskCleared / maskTotal;
   }
-  combo = 3.4; comboTimer = COMBO_WINDOW;
+  combo = 3.4; comboPeak = 3.4; stageComboPeak = 3.4; comboTimer = COMBO_WINDOW;
   // spawn some particles for visual life
+  var box = relicBox();
   for (var p = 0; p < 16; p++) GF.spawnParticles(box.cx + (Math.random() - 0.5) * box.size, box.cy + (Math.random() - 0.5) * box.size, '#ffe27a', 2);
 };
 
@@ -488,10 +543,11 @@ function onDown(x, y) {
 }
 
 function advanceStageManual() {
-  // manual skip counts the stage as done (records current combo)
-  stagePeakSum += combo; stagePeakN++;
+  // manual skip counts the stage as done (records peak combo + current coverage)
+  stagePeakSum += Math.max(stageComboPeak, combo); stagePeakN++;
+  coverSum += (stageList[stageI] === 'gem') ? 1 : coverage; coverN++;
   stageI++;
-  combo = 1; comboTimer = 0; lastSample = null;
+  combo = 1; comboTimer = 0; lastSample = null; stageComboPeak = 1;
   if (stageI >= stageList.length) { finishRelic(); return; }
   if (stageList[stageI] !== 'gem') buildMask();
   GF.saveRun();
@@ -530,7 +586,7 @@ function applyWipe(x, y, isStart) {
     var py = lastSample ? lastSample.y + (y - lastSample.y) * (k / n) : y;
     var cleared = wipeAt(px, py, r * (1 + upSpeed * SPEED_GROW * 0.0));  // radius is via brushRadius
     clearedTotal += cleared;
-    if (cleared > 0 && Math.random() < 0.5) spawnStageFx(px, py, stg);
+    if (cleared > 0 && Math.random() < 0.7) spawnStageFx(px, py, stg);
   }
   // speed upgrade: bonus clear of nearby cells
   if (upSpeed > 0 && clearedTotal > 0) wipeAt(x, y, r * (1 + upSpeed * SPEED_GROW));
@@ -540,27 +596,27 @@ function applyWipe(x, y, isStart) {
     var mvx = x - lastSample.x, mvy = y - lastSample.y;
     var moved = Math.sqrt(mvx * mvx + mvy * mvy);
     if (moved > 2 * GF.S && clearedTotal > 0) {
-      combo = Math.min(COMBO_MAX, combo + 0.035);
+      combo = Math.min(COMBO_MAX, combo + 0.08);
       comboTimer = COMBO_WINDOW;
       if (combo > comboPeak) comboPeak = combo;
+      if (combo > stageComboPeak) stageComboPeak = combo;
     }
   }
   lastSample = { x: x, y: y, t: now };
-  if (clearedTotal > 0) {
-    if (Math.random() < 0.25) GF.sfx(stg.sfx);
-  }
+  // continuous ASMR wipe sound while productively cleaning (gf-lib rate-limits
+  // these to ~90ms so they layer into a texture, not a machine-gun).
+  if (clearedTotal > 0) GF.sfx(stg.sfx);
 }
 
 function spawnStageFx(px, py, stg) {
-  var c = GF.ctx;
   if (stg.particle === 'dust') {
-    GF.spawnParticles(px, py, '#bfa878', 2);
+    GF.spawnParticles(px, py, Math.random() < 0.5 ? '#bfa878' : '#d8c79a', 3);
   } else if (stg.particle === 'foam') {
-    GF.spawnParticles(px, py, '#dff0ff', 2);
+    GF.spawnParticles(px, py, Math.random() < 0.5 ? '#dff0ff' : '#ffffff', 3);
   } else if (stg.particle === 'fizz') {
-    GF.spawnParticles(px, py, Math.random() < 0.5 ? '#ffd07a' : '#fff2c0', 3);
+    GF.spawnParticles(px, py, Math.random() < 0.5 ? '#ffd07a' : '#fff2c0', 4);
   } else if (stg.particle === 'spark') {
-    GF.spawnParticles(px, py, relic ? relic.shine : '#fff', 2);
+    GF.spawnParticles(px, py, relic ? relic.shine : '#fff', 3);
   }
 }
 
@@ -592,14 +648,19 @@ function update(dt) {
       if (mask[i] === 2 && revealBuf[i] < 1) revealBuf[i] = Math.min(1, revealBuf[i] + dt * 8);
     }
   }
-  // combo decay
-  if (comboTimer > 0) { comboTimer -= dt; if (comboTimer <= 0) combo = Math.max(1, combo - dt * 2); }
-  else combo = Math.max(1, combo - dt * 1.5);
+  // combo decay — gentle, so lifting to reposition during a careful clean keeps
+  // most of the combo (only sustained idleness / jabbing erodes it).
+  if (comboTimer > 0) { comboTimer -= dt; }
+  else combo = Math.max(1, combo - dt * 0.8);
 
-  // tutorial step advancement (hands-on, action-gated)
+  // tutorial step advancement (hands-on, action-gated). Step 0 (brush) completes
+  // when the FIRST stage is half-cleared; step 1 (polish) only once we've actually
+  // reached a later stage and made progress on it — so it can't auto-skip the
+  // instant brush passes 0.55 (Codex review 2026-06-05).
   if (GF.tutorial.active) {
     var st = GF.tutorial.step;
-    if ((st === 0 || st === 1) && coverage >= 0.55) GF.tutorial.next();
+    if (st === 0 && stageI === 0 && coverage >= 0.55) GF.tutorial.next();
+    else if (st === 1 && stageI >= 1 && coverage >= 0.5) GF.tutorial.next();
   }
 
   // auto-advance stage at coverage target
@@ -636,17 +697,19 @@ function draw(ctx) {
   layout();
   drawBackground(ctx);
 
-  if (gs === 'PLAYING' || gs === 'APPRAISE' || gs === 'REVEAL' || gs === 'SHOP_OVERLAY') {
+  if (gs === 'PLAYING') {
     drawRelicScene(ctx);
     drawTopBar(ctx);
-    if (gs === 'PLAYING') {
-      drawStageBar(ctx);
-      drawToolbar(ctx);
-      drawComboMeter(ctx);
-      drawHelp(ctx);
-      GF.tutorial.draw(ctx);
-    }
+    drawStageBar(ctx);
+    drawToolbar(ctx);
+    drawComboMeter(ctx);
+    drawHelp(ctx);
+    GF.tutorial.draw(ctx);
   }
+  // APPRAISE / REVEAL / SHOP draw their OWN featured relic inside an opaque
+  // panel — the gameplay scene is NOT drawn behind them (no grime bleed, no
+  // mismatched ghost disc). Top bar stays for context.
+  if (gs === 'APPRAISE' || gs === 'REVEAL' || gs === 'SHOP_OVERLAY') drawTopBar(ctx);
   if (gs === 'APPRAISE') drawAppraise(ctx);
   if (gs === 'REVEAL') drawReveal(ctx);
   if (gs === 'SHOP_OVERLAY') drawShop(ctx);
@@ -677,16 +740,28 @@ function drawRelicScene(ctx) {
   var stgKey = stageList[stageI] || 'polish';
   var atGem = stgKey === 'gem';
 
-  // 1) clean / shiny base relic (fully drawn) — this is what's revealed
+  // 1) clean / shiny base relic (fully drawn) — this is what's revealed.
+  // Brightness ramps with completed stages AND the live coverage of the current
+  // stage, so the metal visibly gleams more with every stroke (dull->shine).
   ctx.save();
-  // overall shine grows as stages complete (stageI / total)
-  var prog = stageList.length > 1 ? stageI / (stageList.length - 1) : 1;
-  drawRelicShape(ctx, box, relic, prog, gemSet || atGem ? true : false);
+  var nStages = stageList.length;
+  var stageFrac = (gs === 'PLAYING' && !atGem) ? coverage : (atGem ? (gemSet ? 1 : 0.85) : 1);
+  var prog;
+  if (gs === 'APPRAISE' || gs === 'REVEAL' || gs === 'SHOP_OVERLAY') prog = 1;
+  else if (nStages > 1) prog = GF.clamp((stageI + stageFrac) / nStages, 0, 1);
+  else prog = stageFrac;
+  drawRelicShape(ctx, box, relic, prog, (gemSet || (atGem && gemSet)) ? true : (gs !== 'PLAYING' && gemNeeded));
   ctx.restore();
 
-  // 2) grime overlay for the CURRENT stage, clipped to silhouette, holes where cleaned
-  if (!atGem && mask) {
-    drawGrimeLayer(ctx, box, STAGES[stgKey]);
+  // 2) grime overlay for the CURRENT stage — ONLY while actively playing (never
+  // bleeds onto the appraise / reveal overlays). Holes where cleaned. Clipped to
+  // the relic silhouette (round shapes) so the dirt stops cleanly at the edge.
+  if (gs === 'PLAYING' && !atGem && mask) {
+    ctx.save();
+    var clipped = hasShapePath(relic.shape);
+    if (clipped) { shapePath(ctx, box, relic.shape); ctx.clip(); }
+    drawGrimeLayer(ctx, box, STAGES[stgKey], clipped);
+    ctx.restore();
   }
 
   // 3) stage-clear color pop flash
@@ -719,32 +794,49 @@ function clipRelic(ctx, box) {
   ctx.clip();
 }
 
-function drawGrimeLayer(ctx, box, stg) {
+// Cached soft-dab sprites (one per stage grime color) so the grime layer blits
+// pre-rendered gradients (drawImage) instead of building ~900 createRadialGradient
+// per frame — keeps it cheap on low-end mobile. The dab bakes a dark gritty core.
+var _dabCache = {};
+function grimeDab(hex) {
+  if (_dabCache[hex]) return _dabCache[hex];
+  var S = 48;  // sprite resolution
+  var cv = document.createElement('canvas'); cv.width = cv.height = S;
+  var c = cv.getContext('2d');
+  var gr = hexToRgb(hex);
+  var g = c.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+  g.addColorStop(0, 'rgba(' + Math.round(gr.r * 0.62) + ',' + Math.round(gr.g * 0.62) + ',' + Math.round(gr.b * 0.62) + ',1)');
+  g.addColorStop(0.55, 'rgba(' + Math.round(gr.r * 0.78) + ',' + Math.round(gr.g * 0.78) + ',' + Math.round(gr.b * 0.78) + ',0.85)');
+  g.addColorStop(1, 'rgba(' + gr.r + ',' + gr.g + ',' + gr.b + ',0)');
+  c.fillStyle = g; c.fillRect(0, 0, S, S);
+  _dabCache[hex] = cv;
+  return cv;
+}
+// Grime reads as a continuous dirty layer that erases smoothly under the stroke.
+// Each grid cell blits a cached soft dab (> cell size, overlapping) with per-cell
+// alpha from the wear buffer + a noise jitter for grit. Cleared cells fade out.
+function drawGrimeLayer(ctx, box, stg, clipped) {
   var x0 = box.cx - box.size / 2, y0 = box.cy - box.size / 2;
   var cw = box.size / maskW, ch = box.size / maskH;
+  // clipped shapes can use a big overlapping dab (the clip crops the spill);
+  // unpathed shapes use a tighter dab so grime hugs the mask silhouette.
+  var dab = Math.max(cw, ch) * (clipped ? 1.6 : 1.15);
+  var sprite = grimeDab(stg.grime);
+  var half = dab / 2;
   ctx.save();
   for (var gy = 0; gy < maskH; gy++) {
     for (var gx = 0; gx < maskW; gx++) {
       var i = gy * maskW + gx;
-      if (mask[i] === 0) continue;       // not part of relic
-      var a;
-      if (mask[i] === 1) a = 1;          // full grime
-      else { a = 1 - revealBuf[i]; if (a <= 0.02) continue; }  // fading out
-      var px = x0 + gx * cw, py = y0 + gy * ch;
-      // procedural grime texture: dither tint by seeded noise
-      var nz = noise2(gx + grimeSeed, gy);
-      var shade = 0.55 + nz * 0.45;
-      ctx.globalAlpha = a * (0.78 + nz * 0.22);
-      ctx.fillStyle = tint(stg.grime, shade);
-      ctx.fillRect(px - 0.5, py - 0.5, cw + 1, ch + 1);
-      // a few darker specks for dust/rust grit
-      if (nz > 0.72) {
-        ctx.globalAlpha = a * 0.55;
-        ctx.fillStyle = 'rgba(20,12,6,0.7)';
-        ctx.beginPath(); ctx.arc(px + cw * 0.5, py + ch * 0.5, cw * 0.22, 0, Math.PI * 2); ctx.fill();
-      }
+      if (mask[i] === 0) continue;          // not part of relic
+      var a = 1 - revealBuf[i];             // wear (0=full grime → 1=gone)
+      if (a <= 0.03) continue;
+      var cxp = x0 + (gx + 0.5) * cw, cyp = y0 + (gy + 0.5) * ch;
+      var nz = noise2(gx + grimeSeed, gy * 1.3 + grimeSeed * 0.5);
+      ctx.globalAlpha = a * (0.72 + nz * 0.28);
+      ctx.drawImage(sprite, cxp - half, cyp - half, dab, dab);
     }
   }
+  ctx.globalAlpha = 1;
   ctx.restore();
 }
 
@@ -771,39 +863,90 @@ function lerpHex(a, b, t) {
   return 'rgb(' + Math.round(ca.r + (cb.r - ca.r) * t) + ',' + Math.round(ca.g + (cb.g - ca.g) * t) + ',' + Math.round(ca.b + (cb.b - ca.b) * t) + ')';
 }
 
+// shapes that have a faithful clip path (used to crisp-clip the grime + the shine
+// sweep). Thin/compound shapes (spoon, key, hilt) are excluded — they rely on the
+// mask to bound grime, and the shine sweep is suppressed for them.
+function hasShapePath(shape) {
+  return shape === 'coin' || shape === 'medal' || shape === 'amulet' ||
+         shape === 'ring' || shape === 'gem' || shape === 'watch' || shape === 'vase' ||
+         shape === 'goblet' || shape === 'crown' || shape === 'idol';
+}
 // ── RELIC SHAPE RENDERING ───────────────────────────────────────────────────
 // Build a clip path for a shape in box space.
 function shapePath(ctx, box, shape) {
   var cx = box.cx, cy = box.cy, r = box.r;
   ctx.beginPath();
   switch (shape) {
-    case 'coin': case 'medal': case 'amulet':
-      ctx.arc(cx, cy, r * 0.64, 0, Math.PI * 2); break;
+    case 'coin':
+      ctx.arc(cx, cy, r * 0.66, 0, Math.PI * 2); break;
+    case 'medal': case 'amulet':
+      ctx.arc(cx, cy + r * 0.12, r * 0.56, 0, Math.PI * 2); break;
     case 'ring':
-      ctx.arc(cx, cy, r * 0.92, 0, Math.PI * 2); ctx.arc(cx, cy, r * 0.44, 0, Math.PI * 2, true); break;
+      ctx.arc(cx, cy, r * 0.74, 0, Math.PI * 2); ctx.arc(cx, cy, r * 0.40, 0, Math.PI * 2, true); break;
     case 'gem':
-      ctx.moveTo(cx, cy - r * 0.92); ctx.lineTo(cx + r * 0.84, cy - r * 0.1);
-      ctx.lineTo(cx + r * 0.5, cy + r * 0.86); ctx.lineTo(cx - r * 0.5, cy + r * 0.86);
-      ctx.lineTo(cx - r * 0.84, cy - r * 0.1); ctx.closePath(); break;
+      ctx.moveTo(cx, cy - r * 0.84); ctx.lineTo(cx + r * 0.78, cy - r * 0.1);
+      ctx.lineTo(cx + r * 0.46, cy + r * 0.8); ctx.lineTo(cx - r * 0.46, cy + r * 0.8);
+      ctx.lineTo(cx - r * 0.78, cy - r * 0.1); ctx.closePath(); break;
     case 'watch':
       ctx.arc(cx, cy, r * 0.8, 0, Math.PI * 2); break;
+    case 'vase':
+      var pts = [];
+      for (var t = 0; t <= 1.001; t += 0.05) {
+        var w = (0.10 + 0.30 * Math.sin((t * 0.86 + 0.10) * Math.PI)) * r * 2;
+        var yy = cy - r * 0.88 + t * r * 1.76;
+        if (t === 0) ctx.moveTo(cx + w / 2, yy); else ctx.lineTo(cx + w / 2, yy);
+      }
+      for (var t2 = 1; t2 >= -0.001; t2 -= 0.05) {
+        var w2 = (0.10 + 0.30 * Math.sin((t2 * 0.86 + 0.10) * Math.PI)) * r * 2;
+        var yy2 = cy - r * 0.88 + t2 * r * 1.76;
+        ctx.lineTo(cx - w2 / 2, yy2);
+      }
+      ctx.closePath(); break;
+    case 'goblet':
+      // cup (bowl) + a generous body box covering stem+base
+      ctx.moveTo(cx - r * 0.55, cy - r * 0.8); ctx.lineTo(cx + r * 0.55, cy - r * 0.8);
+      ctx.quadraticCurveTo(cx + r * 0.42, cy - r * 0.1, cx + r * 0.1, cy - r * 0.05);
+      ctx.lineTo(cx + r * 0.1, cy + r * 0.42);
+      ctx.lineTo(cx + r * 0.44, cy + r * 0.6); ctx.lineTo(cx - r * 0.44, cy + r * 0.6);
+      ctx.lineTo(cx - r * 0.1, cy + r * 0.42);
+      ctx.lineTo(cx - r * 0.1, cy - r * 0.05);
+      ctx.quadraticCurveTo(cx - r * 0.42, cy - r * 0.1, cx - r * 0.55, cy - r * 0.8); ctx.closePath(); break;
+    case 'crown':
+      // band + points as one bounding polygon
+      var bx = cx - r * 0.72, bw = r * 1.44;
+      ctx.moveTo(bx, cy + r * 0.42); ctx.lineTo(bx, cy - r * 0.12);
+      for (var ci = 0; ci <= 4; ci++) {
+        var pxc = bx + (ci / 4) * bw;
+        ctx.lineTo(pxc, cy - r * 0.58);
+        if (ci < 4) ctx.lineTo(bx + ((ci + 0.5) / 4) * bw, cy - r * 0.16);
+      }
+      ctx.lineTo(bx + bw, cy + r * 0.42); ctx.closePath(); break;
+    case 'idol':
+      // rounded body + head, generous box
+      GF.rr(ctx, cx - r * 0.46, cy - r * 0.12, r * 0.92, r * 1.0, r * 0.18);
+      ctx.moveTo(cx + r * 0.34, cy - r * 0.34); ctx.arc(cx, cy - r * 0.34, r * 0.34, 0, Math.PI * 2); break;
     default:
-      // generic: trace the silhouette via sampled grid bounds (rounded blob)
+      // thin / compound shapes (spoon, key, hilt): no single faithful path — the
+      // mask (insideRelic) already constrains grime; fall back to a loose circle.
       ctx.arc(cx, cy, r * 0.8, 0, Math.PI * 2); break;
   }
 }
 
 // Draw the full relic (clean base + shine), prog 0..1 governs overall polish.
+var _shineProg = 1;   // read by shadeFill so the DULL state is flat/dark and the
+                      // SHINE state is glossy — gives the before/after real punch.
 function drawRelicShape(ctx, box, rel, prog, gemOn) {
   var cx = box.cx, cy = box.cy, r = box.r;
+  _shineProg = prog;
   // base color blends dull→clean→shine with prog
   var col = prog < 0.5 ? lerpHex(rel.dull, rel.clean, prog / 0.5) : lerpHex(rel.clean, rel.shine, (prog - 0.5) / 0.5);
   ctx.save();
   ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   var fn = SHAPE_FN[rel.shape] || SHAPE_FN.coin;
   fn(ctx, cx, cy, r, col, rel, prog, gemOn);
-  // shine sweep when polished
-  if (prog > 0.6) {
+  // shine sweep when polished — only for shapes we can faithfully clip, so the
+  // moving gleam never shows outside a thin/compound relic (Codex review).
+  if (prog > 0.6 && hasShapePath(rel.shape)) {
     ctx.save();
     shapePath(ctx, box, rel.shape); ctx.clip();
     var t = (performance.now() / 1400) % 1;
@@ -819,10 +962,13 @@ function drawRelicShape(ctx, box, rel, prog, gemOn) {
 }
 
 function shadeFill(ctx, cx, cy, r, col) {
+  // highlight intensity ramps with polish: dull = matte/flat, shine = glossy.
+  var hi = 0.06 + _shineProg * 0.42;        // 0.06 (dull) → 0.48 (mirror)
+  var lo = 0.5 - _shineProg * 0.14;         // deeper shadow when dull
   var g = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
-  g.addColorStop(0, lerpHex(col, '#ffffff', 0.35));
-  g.addColorStop(0.6, col);
-  g.addColorStop(1, lerpHex(col, '#000000', 0.4));
+  g.addColorStop(0, lerpHex(col, '#ffffff', hi));
+  g.addColorStop(0.55, col);
+  g.addColorStop(1, lerpHex(col, '#000000', lo));
   ctx.fillStyle = g;
 }
 
@@ -1187,40 +1333,71 @@ function drawHint(ctx) {
 // ── APPRAISE / REVEAL OVERLAYS ──────────────────────────────────────────────
 function drawAppraise(ctx) {
   var W = GF.W, H = GF.H, S = GF.S;
-  ctx.fillStyle = 'rgba(10,8,16,0.78)'; ctx.fillRect(0, 0, W, H);
-  var cy = H * 0.30;
-  // "Appraised" title
+  // near-opaque panel (no gameplay grime behind it)
+  ctx.fillStyle = 'rgba(9,7,15,0.95)'; ctx.fillRect(0, 0, W, H);
+
+  // 1) hero: the freshly restored relic, spotlit + gently bobbing
+  var hb = { cx: W / 2, cy: H * 0.27, r: Math.min(W * 0.32, H * 0.16), size: 0 };
+  hb.size = hb.r * 2;
+  // warm spotlight
+  var sg = ctx.createRadialGradient(hb.cx, hb.cy, 0, hb.cx, hb.cy, hb.r * 2.4);
+  sg.addColorStop(0, 'rgba(255,225,140,0.22)'); sg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = sg; ctx.fillRect(hb.cx - hb.r * 2.4, hb.cy - hb.r * 2.4, hb.r * 4.8, hb.r * 4.8);
+  var bob = Math.sin(performance.now() / 700) * 3 * S;
+  var hbb = { cx: hb.cx, cy: hb.cy + bob, r: hb.r, size: hb.size };
+  drawRelicShape(ctx, hbb, relic, 1, gemNeeded);
+  // sparkle motes around the hero (driven by particle system already; add subtle static glints)
+  for (var g = 0; g < 3; g++) {
+    var ga = performance.now() / 900 + g * 2.1;
+    var gx = hb.cx + Math.cos(ga) * hb.r * 1.15, gy = hb.cy + Math.sin(ga * 1.3) * hb.r * 0.9;
+    star(ctx, gx, gy, 4 * S, 1.6 * S, 'rgba(255,250,210,0.9)');
+  }
+
+  var cy = H * 0.50;
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.font = 'bold ' + GF.clamp(26 * S, 20, 40) + 'px Inter, system-ui, sans-serif';
-  ctx.fillText(GF.t('appraised'), W / 2, cy - 30 * S);
-  // stars
-  var sR = GF.clamp(20 * S, 16, 30), sgap = sR * 2.6;
+  ctx.font = 'bold ' + GF.clamp(24 * S, 18, 36) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('appraised'), W / 2, cy - 34 * S);
+
+  // 2) stars reveal one-by-one over the first ~0.9s
+  var sR = GF.clamp(22 * S, 16, 32), sgap = sR * 2.7;
   for (var i = 0; i < 3; i++) {
     var on = i < appraiseStars;
-    var pop = bigPop > 0 ? (1 + 0.3 * Math.sin(bigPop * Math.PI * (i + 1))) : 1;
-    star(ctx, W / 2 + (i - 1) * sgap, cy + 14 * S, sR * pop, sR * 0.45 * pop, on ? '#ffd24a' : 'rgba(255,255,255,0.16)');
+    var revT = appraiseT - 0.18 - i * 0.22;          // each star pops in sequence
+    var shown = revT > 0;
+    var pop = shown ? (1 + 0.6 * Math.max(0, 1 - revT * 4)) : 0.0001;
+    if (on && shown && revT < 0.06) { /* pop frame */ }
+    var col = on ? (shown ? '#ffd24a' : 'rgba(255,255,255,0.10)') : 'rgba(255,255,255,0.12)';
+    star(ctx, W / 2 + (i - 1) * sgap, cy + 8 * S, sR * (on ? pop : 1), sR * 0.45 * (on ? pop : 1), col);
   }
-  // rating word
-  ctx.fillStyle = '#bfb6d0'; ctx.font = GF.clamp(14 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
-  var word = appraiseStars >= 3 ? GF.t('star_hi') : appraiseStars === 2 ? GF.t('star_mid') : GF.t('star_lo');
-  ctx.fillText(word, W / 2, cy + 50 * S);
-  // big coin pop
-  var bp = 1 + bigPop * 0.5;
-  drawCoinIcon(ctx, W / 2 - 60 * S, cy + 100 * S, 18 * S * bp);
+  // rating word (after stars)
+  if (appraiseT > 0.7) {
+    ctx.fillStyle = appraiseStars >= 3 ? '#ffe27a' : '#bfb6d0';
+    ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+    var word = appraiseStars >= 3 ? GF.t('perfect') : appraiseStars === 2 ? GF.t('star_mid') : GF.t('star_lo');
+    ctx.fillText(word, W / 2, cy + 48 * S);
+  }
+
+  // 3) coins count up
+  var bp = 1 + bigPop * 0.4;
+  var shownCoins = Math.min(appraiseCoins, Math.round(appraiseCoins * GF.clamp((appraiseT - 0.5) / 0.7, 0, 1)));
+  drawCoinIcon(ctx, W / 2 - 58 * S, cy + 98 * S, 17 * S * bp);
   ctx.fillStyle = '#ffe27a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.save(); ctx.shadowColor = 'rgba(255,210,74,0.6)'; ctx.shadowBlur = 14 * S;
-  ctx.font = 'bold ' + (GF.clamp(40 * S, 30, 60) * bp) + 'px Inter, system-ui, sans-serif';
-  ctx.fillText('+' + appraiseCoins, W / 2 - 36 * S, cy + 100 * S);
+  ctx.font = 'bold ' + (GF.clamp(38 * S, 28, 56) * bp) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText('+' + shownCoins, W / 2 - 34 * S, cy + 98 * S);
   ctx.restore();
-  // newly unlocked relic banner (vector stars, never emoji glyphs)
-  if (newUnlock >= 0) {
+
+  // 4) newly unlocked relic banner
+  if (newUnlock >= 0 && appraiseT > 1.0) {
     ctx.fillStyle = '#7af0a0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
     var un = (GF.lang === 'ru' ? RELICS[newUnlock].nameRu : RELICS[newUnlock].nameEn);
-    var unW = ctx.measureText(un).width;
-    ctx.fillText(un, W / 2, cy + 150 * S);
-    star(ctx, W / 2 - unW / 2 - 16 * S, cy + 150 * S, 7 * S, 3 * S, '#7af0a0');
-    star(ctx, W / 2 + unW / 2 + 16 * S, cy + 150 * S, 7 * S, 3 * S, '#7af0a0');
+    var pre = (GF.lang === 'ru' ? 'Открыто: ' : 'Unlocked: ');
+    var full = pre + un;
+    var unW = ctx.measureText(full).width;
+    ctx.fillText(full, W / 2, cy + 146 * S);
+    star(ctx, W / 2 - unW / 2 - 14 * S, cy + 146 * S, 6 * S, 2.6 * S, '#7af0a0');
+    star(ctx, W / 2 + unW / 2 + 14 * S, cy + 146 * S, 6 * S, 2.6 * S, '#7af0a0');
   }
   // CTA
   drawBigButton(ctx, L.bigBtn, GF.t('next'), appraiseT >= 0.5);
@@ -1228,18 +1405,27 @@ function drawAppraise(ctx) {
 
 function drawReveal(ctx) {
   var W = GF.W, H = GF.H, S = GF.S;
-  ctx.fillStyle = 'rgba(10,8,16,0.82)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(9,7,15,0.95)'; ctx.fillRect(0, 0, W, H);
+  // title
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(22 * S, 17, 32) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText((GF.lang === 'ru' ? RELICS[relicIdx].nameRu : RELICS[relicIdx].nameEn), W / 2, H * 0.13);
   // before/after of the relic, split by revealSlide
-  var box = { cx: W / 2, cy: H * 0.34, r: Math.min(W * 0.6, H * 0.30) / 2, size: Math.min(W * 0.6, H * 0.30) };
+  var box = { cx: W / 2, cy: H * 0.36, r: Math.min(W * 0.30, H * 0.18), size: 0 };
   box.size = box.r * 2;
   // draw dull (before) on whole, then clip-right to shiny (after)
   ctx.save();
   drawRelicShape(ctx, box, relic, 0.0, false);  // before (dull)
+  // grime wash over the dull side so "before" looks genuinely filthy
+  if (hasShapePath(relic.shape)) { shapePath(ctx, box, relic.shape); ctx.clip(); }
+  var gw = ctx.createRadialGradient(box.cx, box.cy, box.r * 0.1, box.cx, box.cy, box.r);
+  gw.addColorStop(0, 'rgba(40,30,16,0.55)'); gw.addColorStop(1, 'rgba(20,14,8,0.78)');
+  ctx.fillStyle = gw; ctx.fillRect(box.cx - box.r, box.cy - box.r, box.size, box.size);
   ctx.restore();
   ctx.save();
   var splitX = box.cx - box.r + revealSlide * box.r * 2;
   ctx.beginPath(); ctx.rect(splitX, box.cy - box.r - 4 * S, box.cx + box.r - splitX + 8 * S, box.size + 8 * S); ctx.clip();
-  drawRelicShape(ctx, box, relic, 1.0, gemNeeded);  // after (shiny)
+  drawRelicShape(ctx, box, relic, 1.0, gemNeeded);  // after (shiny) — paints over the wash
   ctx.restore();
   // divider line + handle
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2 * S;
@@ -1423,9 +1609,10 @@ function setupTutorial(force) {
   // target = relic center; gesture = drag across it
   var tgFn = function () { var b = relicBox(); return { x: b.cx - b.r * 0.4, y: b.cy, r: b.r * 0.35 }; };
   var toFn = function () { var b = relicBox(); return { x: b.cx + b.r * 0.4, y: b.cy, r: b.r * 0.35 }; };
+  // Relic 0 is brush -> polish; teach the universal drag, then the polish shine.
   GF.tutorial.start([
-    { text: GF.t('tut_brush'), target: tgFn, target2: toFn, gesture: 'drag', advance: 'manual' },
-    { text: GF.t('tut_scrub'), target: tgFn, target2: toFn, gesture: 'drag', advance: 'manual' },
+    { text: GF.t('tut_brush'),  target: tgFn, target2: toFn, gesture: 'drag', advance: 'manual' },
+    { text: GF.t('tut_polish'), target: tgFn, target2: toFn, gesture: 'drag', advance: 'manual' },
   ], { storageKey: 'relic_restore_tut_v1', force: force });
 }
 
@@ -1488,8 +1675,8 @@ GF.init({
         return {
           gs: gs, relicIdx: relicIdx, stageI: stageI, coins: coins, unlockedMax: unlockedMax,
           upWidth: upWidth, upSpeed: upSpeed, upShine: upShine, best: best, totalStars: totalStars,
-          gemSet: gemSet, combo: combo, comboPeak: comboPeak,
-          stagePeakSum: stagePeakSum, stagePeakN: stagePeakN,
+          gemSet: gemSet, combo: combo, comboPeak: comboPeak, stageComboPeak: stageComboPeak,
+          stagePeakSum: stagePeakSum, stagePeakN: stagePeakN, coverSum: coverSum, coverN: coverN,
           maskCleared: maskCleared, // restore approximate progress
         };
       },
@@ -1499,20 +1686,25 @@ GF.init({
         if (typeof s.upWidth === 'number') { upWidth = s.upWidth; upSpeed = s.upSpeed; upShine = s.upShine; }
         if (typeof s.best === 'number') best = s.best;
         if (s.gs === 'PLAYING' && typeof s.relicIdx === 'number') {
+          _restoring = true;
           startRelic(s.relicIdx);
           stageI = GF.clamp(s.stageI || 0, 0, stageList.length - 1);
           if (stageList[stageI] !== 'gem') buildMask();
           gemSet = !!s.gemSet;
+          // restore in-progress effort so a reload near stage-end keeps the score
           stagePeakSum = s.stagePeakSum || 0; stagePeakN = s.stagePeakN || 0;
+          coverSum = s.coverSum || 0; coverN = s.coverN || 0;
+          combo = s.combo || 1; comboPeak = s.comboPeak || 1; stageComboPeak = s.stageComboPeak || 1;
           // partial coverage restore: re-clear maskCleared cells from the start
           var target = Math.min(s.maskCleared || 0, maskTotal);
-          var box = relicBox();
           var idxs = [];
           for (var i = 0; i < mask.length; i++) if (mask[i] === 1) idxs.push(i);
           for (var k = 0; k < target && k < idxs.length; k++) { mask[idxs[k]] = 2; revealBuf[idxs[k]] = 1; maskCleared++; }
           if (maskTotal > 0) coverage = maskCleared / maskTotal;
           gs = 'PLAYING';
           GF.tutorial.active = false;
+          _restoring = false;
+          GF.saveRun();
         }
       }
     );
@@ -1563,8 +1755,21 @@ GF.exposeState(function () {
     COMBO_WINDOW: COMBO_WINDOW, COMBO_MAX: COMBO_MAX, COINS_BASE: COINS_BASE,
     STAR3_COVER: STAR3_COVER, MASK_CELLS: MASK_CELLS, FIZZ_RATE: FIZZ_RATE,
     NUM_RELICS: NUM_RELICS,
+    _isGem: stageList[stageI] === 'gem',
+    _stageKey: stageList[stageI] || null,
   };
 });
+
+// post-build-tester seams: live UI rects + the relic geometry (hygiene #8)
+window._rrBox = function () { return relicBox(); };
+window._rrPlayBtn = function () {
+  // mirror drawMenu's PLAY rect
+  var W = GF.W, H = GF.H, S = GF.S;
+  var bw = GF.clamp(280 * S, 200, 440), bh = GF.clamp(60 * S, 48, 84);
+  return { x: (W - bw) / 2, y: H - bh - GF.clamp(34 * S, 24, 56), w: bw, h: bh };
+};
+window._rrCtaBtn = function () { return L.bigBtn; };
+window._rrToolRects = function () { return toolRects; };
 
 })();
 </script>
