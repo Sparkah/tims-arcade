@@ -912,6 +912,13 @@ window.GF = {
 
 // Screenshot helpers — exposed at window for external tooling (take_screenshots.js)
 window._setLang = function(l) { lang = (l === 'ru' ? 'ru' : 'en'); };
+// Fast-forward hook for the progression probe (#276) — backported from the template.
+window.__gfStep = function (n, dt) {
+  n = n | 0; dt = (typeof dt === 'number' && dt > 0) ? dt : (1 / 60);
+  var i = 0;
+  for (; i < n; i++) { try { if (onUpdate) onUpdate(dt); } catch (e) { return i; } }
+  return i;
+};
 // _jumpLevel must be defined per-game (each game has its own level model).
 
 })();

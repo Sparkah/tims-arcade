@@ -21,24 +21,11 @@ if (!canvas) {
 }
 var ctx = canvas.getContext('2d');
 var W = 0, H = 0, cx = 0, cy = 0, S = 1;
-var offX = 0, fullW = 0, fullH = 0;   // desktop framing: centred gameplay band + side margins
 var DESIGN_W = 800, DESIGN_H = 600;
 
 function resize() {
-  fullW = canvas.width  = window.innerWidth;
-  fullH = canvas.height = window.innerHeight;
-  // Desktop/landscape framing: constrain gameplay to a centred portrait band so
-  // wide screens get a dense playfield + designed side margins instead of a
-  // stretched void. CrazyGames is desktop-first and an empty 16:9 frame reads as
-  // unfinished at QA. On portrait/phone the band IS the full width — mobile is
-  // pixel-identical to before (offX 0). Margins are painted by the lib, or by an
-  // optional game-supplied config.drawMargins(ctx, fullW, fullH, offX, bandW).
-  var band = fullW;
-  if (fullW > fullH * 0.9) {                                  // landscape-ish => frame it
-    band = Math.min(fullW, Math.round(fullH * 0.62));         // ~portrait playfield band
-  }
-  offX = Math.round((fullW - band) / 2);
-  W = band; H = fullH;
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
   cx = W / 2; cy = H / 2;
   S = Math.min(W / DESIGN_W, H / DESIGN_H);
 }
@@ -87,8 +74,6 @@ function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 function lerp(a, b, x)    { return a + (b - a) * x; }
 function dist(ax, ay, bx, by) { var dx=ax-bx, dy=ay-by; return Math.sqrt(dx*dx+dy*dy); }
 function rr(c, x, y, w, h, r) {
-  // Defensive: NaN/0/negative dims (early autostart frame) make arcTo throw
-  // IndexSizeError and crash the draw loop. Guard + clamp the radius.
   if (!(w > 0) || !(h > 0) || !isFinite(x) || !isFinite(y)) return;
   r = Math.max(0, Math.min(r, w / 2, h / 2));
   if (!isFinite(r)) r = 0;
@@ -114,18 +99,18 @@ canvas.addEventListener('touchstart', function(e) {
   e.preventDefault();
   var t0 = e.changedTouches[0];
   touch.active = true; touch.id = t0.identifier;
-  touch.sx = t0.clientX - offX; touch.sy = t0.clientY;
-  touch.x = t0.clientX - offX; touch.y = t0.clientY;
+  touch.sx = t0.clientX; touch.sy = t0.clientY;
+  touch.x = t0.clientX; touch.y = t0.clientY;
   touch.dx = 0; touch.dy = 0;
-  checkButtons(t0.clientX - offX, t0.clientY);
+  checkButtons(t0.clientX, t0.clientY);
 }, { passive: false });
 canvas.addEventListener('touchmove', function(e) {
   e.preventDefault();
   for (var i = 0; i < e.changedTouches.length; i++) {
     var t0 = e.changedTouches[i];
     if (t0.identifier !== touch.id) continue;
-    touch.x = t0.clientX - offX; touch.y = t0.clientY;
-    var dx = touch.x - touch.sx, dy = touch.y - touch.sy;
+    touch.x = t0.clientX; touch.y = t0.clientY;
+    var dx = t0.clientX - touch.sx, dy = t0.clientY - touch.sy;
     var d = Math.sqrt(dx*dx + dy*dy);
     if (d > 8) { touch.dx = dx / Math.max(d, 50); touch.dy = dy / Math.max(d, 50); }
   }
@@ -149,7 +134,7 @@ function checkButtons(x, y) {
   }
   return false;
 }
-canvas.addEventListener('click', function(e) { checkButtons(e.clientX - offX, e.clientY); });
+canvas.addEventListener('click', function(e) { checkButtons(e.clientX, e.clientY); });
 
 // ── PARTICLES & FLOATS ───────────────────────────────────────────────────
 var particles = [];
@@ -209,6 +194,229 @@ function shakeOffset() {
   if (shake <= 0) return { x: 0, y: 0 };
   return { x: (Math.random() - 0.5) * shake * 12 * S, y: (Math.random() - 0.5) * shake * 12 * S };
 }
+
+// ── SCROLL (reusable canvas scroll region) ─────────────────────────────────
+// Any screen whose content can exceed the viewport (long lists: rosters,
+// collections, shops) MUST scroll - a player can never be left unable to reach
+// UI (Tim 2026-06-05, after Orb Champions shipped a desktop team-builder where
+// the lower 8 of 12 champions were clipped off-screen with no way to scroll).
+//
+// Usage (canvas, per-frame):
+//   // once per layout, create + keep the controller:
+//   sc = GF.makeScroll('team_roster', { x, y, w, h });        // viewport rect
+//   sc.setViewport({ x, y, w, h });                            // each layout (S changes on resize)
+//   sc.setContentHeight(totalContentPx);                       // full un-clipped height
+//   sc.begin(ctx);                                             // clip to viewport + translate by -offset
+//     ... draw content in CONTENT space (y measured from contentTop=viewport.y) ...
+//   sc.end(ctx);
+//   sc.draw(ctx);                                              // scrollbar + top/bottom fades
+//   // input:
+//   onWheel(dy)  -> sc.handleWheel(dy)
+//   onDown(x,y)  -> if (sc.contains(x,y)) sc.dragStart(y)
+//   onMove(x,y)  -> sc.dragMove(y)
+//   onUp()       -> sc.dragEnd()
+//   // hit-testing a content item tapped at screen (x,y): item is at content
+//   //   y in [it.y, it.y+it.h]; the tap hits it when
+//   //   sc.screenToContentY(y) is within that range AND x within the item.
+//   // (Equivalently compare against it.y - sc.offset in screen space.)
+//
+// The controller hard-CLAMPS offset to [0, contentH-viewportH] so the player
+// can never overscroll. It also registers the region (id + rect + scrollMaxY)
+// so the reachability gate (window.__gfReach) can prove every item is reachable.
+var _scrollRegions = {};   // id -> controller (for the reachability gate)
+function makeScroll(id, rect) {
+  var c = {
+    id: id,
+    vp: { x: 0, y: 0, w: 0, h: 0 },   // viewport rect (screen px)
+    contentH: 0,                       // total content height (px)
+    offset: 0,                         // current scroll offset (px, >= 0)
+    _drag: null,                       // { startY, startOffset, lastY, lastT, vel } while dragging
+    _vel: 0,                           // flick velocity (px/frame) for momentum
+    _grabbed: false,                   // true between dragStart and the first move past threshold
+  };
+  c.setViewport = function (r) {
+    if (r) { c.vp.x = r.x; c.vp.y = r.y; c.vp.w = r.w; c.vp.h = r.h; }
+    c.clamp();
+    return c;
+  };
+  c.setContentHeight = function (h) { c.contentH = Math.max(0, h || 0); c.clamp(); return c; };
+  c.maxOffset = function () { return Math.max(0, c.contentH - c.vp.h); };
+  c.clamp = function () { c.offset = Math.max(0, Math.min(c.offset, c.maxOffset())); return c.offset; };
+  c.scrollable = function () { return c.maxOffset() > 0.5; };
+  c.contains = function (x, y) { return x >= c.vp.x && x <= c.vp.x + c.vp.w && y >= c.vp.y && y <= c.vp.y + c.vp.h; };
+  // map between screen-space y and content-space y (content top == vp.y)
+  c.screenToContentY = function (y) { return (y - c.vp.y) + c.offset; };
+  c.contentToScreenY = function (cy) { return (cy - c.offset) + c.vp.y; };
+  c.scrollBy = function (dy) { c.offset += dy; c.clamp(); };
+  c.scrollTo = function (off) { c.offset = off; c.clamp(); };
+  c.handleWheel = function (dy) { if (!c.scrollable()) return false; c.offset += dy; c.clamp(); return true; };
+  c.dragStart = function (y) {
+    if (!c.scrollable()) { c._drag = null; return false; }
+    c._drag = { startY: y, startOffset: c.offset, lastY: y, lastT: (typeof performance !== 'undefined' ? performance.now() : Date.now()), vel: 0 };
+    c._vel = 0; c._grabbed = true;
+    return true;
+  };
+  c.dragMove = function (y) {
+    if (!c._drag) return false;
+    var d = c._drag;
+    c.offset = d.startOffset - (y - d.startY);   // drag down -> content moves down -> offset decreases
+    c.clamp();
+    var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    var dt = Math.max(1, now - d.lastT);
+    d.vel = (d.lastY - y) / dt * 16;             // px per ~frame, sign matches offset delta
+    d.lastY = y; d.lastT = now;
+    return true;
+  };
+  c.dragEnd = function () {
+    if (c._drag) { c._vel = c._drag.vel || 0; c._drag = null; }
+    c._grabbed = false;
+  };
+  c.isDragging = function () { return !!c._drag; };
+  // call once per frame (optional) for inertial flick after release
+  c.update = function () {
+    if (c._drag || Math.abs(c._vel) < 0.4) { c._vel = 0; return; }
+    c.offset += c._vel; c.clamp();
+    if (c.offset <= 0 || c.offset >= c.maxOffset()) c._vel = 0;
+    c._vel *= 0.92;
+  };
+  // clip to viewport + translate so content drawn at content-y appears at the
+  // right screen-y. Pair every begin() with end().
+  c.begin = function (cc) {
+    cc.save();
+    cc.beginPath(); cc.rect(c.vp.x, c.vp.y, c.vp.w, c.vp.h); cc.clip();
+    cc.translate(0, c.vp.y - c.offset);   // content-y origin = vp.y, shifted up by offset
+  };
+  c.end = function (cc) { cc.restore(); };
+  // scrollbar track/thumb + top/bottom fades so the player KNOWS there is more.
+  c.draw = function (cc) {
+    if (!c.scrollable()) return;
+    var sc = S, vp = c.vp;
+    // top fade if scrolled down
+    var fadeH = Math.min(24 * sc, vp.h * 0.18);
+    if (c.offset > 1) {
+      var gt = cc.createLinearGradient(0, vp.y, 0, vp.y + fadeH);
+      gt.addColorStop(0, 'rgba(10,10,20,0.85)'); gt.addColorStop(1, 'rgba(10,10,20,0)');
+      cc.fillStyle = gt; cc.fillRect(vp.x, vp.y, vp.w, fadeH);
+      // up chevron hint
+      _scrollChevron(cc, vp.x + vp.w / 2, vp.y + 9 * sc, sc, true);
+    }
+    // bottom fade if more below
+    if (c.offset < c.maxOffset() - 1) {
+      var gb = cc.createLinearGradient(0, vp.y + vp.h - fadeH, 0, vp.y + vp.h);
+      gb.addColorStop(0, 'rgba(10,10,20,0)'); gb.addColorStop(1, 'rgba(10,10,20,0.85)');
+      cc.fillStyle = gb; cc.fillRect(vp.x, vp.y + vp.h - fadeH, vp.w, fadeH);
+      _scrollChevron(cc, vp.x + vp.w / 2, vp.y + vp.h - 9 * sc, sc, false);
+    }
+    // scrollbar (right edge of viewport)
+    var trackX = vp.x + vp.w - 5 * sc, trackW = 3.5 * sc;
+    var trackY = vp.y + 3 * sc, trackH = vp.h - 6 * sc;
+    cc.fillStyle = 'rgba(255,255,255,0.08)';
+    rr(cc, trackX, trackY, trackW, trackH, trackW / 2); cc.fill();
+    var frac = vp.h / c.contentH;                       // visible fraction
+    var thumbH = Math.max(24 * sc, trackH * frac);
+    var prog = c.maxOffset() > 0 ? c.offset / c.maxOffset() : 0;
+    var thumbY = trackY + (trackH - thumbH) * prog;
+    cc.fillStyle = c._drag ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.32)';
+    rr(cc, trackX, thumbY, trackW, thumbH, trackW / 2); cc.fill();
+  };
+  _scrollRegions[id] = c;
+  // sync the rect passed at creation (so the first frame is correct before setViewport)
+  if (rect) c.setViewport(rect);
+  return c;
+}
+function _scrollChevron(cc, x, y, sc, up) {
+  cc.save(); cc.strokeStyle = 'rgba(220,230,255,0.7)'; cc.lineWidth = 2 * sc; cc.lineCap = 'round'; cc.lineJoin = 'round';
+  var w = 7 * sc, h = 4 * sc;
+  cc.beginPath();
+  if (up) { cc.moveTo(x - w, y + h); cc.lineTo(x, y - h); cc.lineTo(x + w, y + h); }
+  else { cc.moveTo(x - w, y - h); cc.lineTo(x, y + h); cc.lineTo(x + w, y - h); }
+  cc.stroke(); cc.restore();
+}
+
+// ── REACHABILITY GATE HOOKS (window.__gfReach / window.__gfTour) ───────────
+// The reachability gate (Shared/skills/yandex-testing/tools/reachability_check.js)
+// proves EVERY interactive item on EVERY screen can be brought fully into the
+// visible viewport at some reachable scroll position. A game opts in by calling:
+//
+//   GF.exposeReach(function () {
+//     return {
+//       screen: <string>,            // current screen id (for the gate's report)
+//       items: [ { id, x, y, w, h }, ... ],  // interactive hit-rects, CONTENT px
+//       // optional: scrollId of the scroll region this screen scrolls (so the
+//       // gate reads scrollMaxY automatically), OR pass scrollMaxY directly.
+//       scrollId: 'team_roster',     // -> gate uses GF.scrollMax('team_roster')
+//       // scrollMaxY: <number>,     // (alternative to scrollId)
+//     };
+//   });
+//   GF.exposeTour([
+//     { name: 'menu',       go: function(){ gs='MENU'; } },
+//     { name: 'team',       go: function(){ gs='TEAM'; } },
+//     ...
+//   ]);
+//
+// Items whose y is INSIDE a scroll region must be reported in CONTENT space
+// (y from the region's content top); items pinned outside the scroll region
+// (headers, action buttons) are reported with pinned:true in plain screen space
+// (scrollMaxY does not apply to them; the gate only checks they sit within
+// [0, screenH]). The template wires both into NEW games automatically.
+// ONE scroll region per screen: the payload carries a single scrollId + viewportH
+// (the active region's on-screen height). A screen with TWO independent scroll
+// regions is not expressible in one payload, so split it into two tour steps (one
+// per region). Scroll is vertical-only: horizontal overflow is always a hard fail,
+// never "scroll right to reveal".
+// Coordinate contract (read by reachability_check.js):
+//   - For a screen WITHOUT a scroll region: report every item in SCREEN px,
+//     return viewportH = screen height, scrollMaxY = 0. Every item must satisfy
+//     0 <= y && y+h <= viewportH.
+//   - For a screen WITH a scroll region (pass scrollId): report the SCROLLABLE
+//     items in the region's CONTENT space (y measured from the region's content
+//     top, i.e. as drawn at scroll offset 0 minus the region's screen top), set
+//     viewportH = the region's VIEWPORT height (its on-screen px height), and
+//     scrollMaxY = the region's max offset (auto from scrollId). Mark any PINNED
+//     item (header/action button drawn OUTSIDE the scroll region) with
+//     pinned:true and report it in SCREEN px + screenH - the gate verifies a
+//     pinned item is within [0, screenH] (it does not scroll). screenH defaults
+//     to the screen height. A scrollable item passes iff some scrollY in
+//     [0, scrollMaxY] makes [y, y+h] ⊆ [scrollY, scrollY+viewportH].
+function exposeReach(getter) {
+  if (typeof getter !== 'function') return;
+  window.__gfReach = function () {
+    try {
+      var r = getter() || {};
+      var maxY = 0;
+      if (typeof r.scrollMaxY === 'number') maxY = r.scrollMaxY;
+      else if (r.scrollId && _scrollRegions[r.scrollId]) maxY = _scrollRegions[r.scrollId].maxOffset();
+      var vpH = (typeof r.viewportH === 'number') ? r.viewportH : H;
+      return {
+        screen: r.screen != null ? String(r.screen) : '?',
+        viewportH: Math.round(vpH),
+        viewportW: W,
+        screenH: Math.round(typeof r.screenH === 'number' ? r.screenH : H),
+        scrollId: r.scrollId || null,
+        scrollMaxY: Math.round(maxY),
+        items: (r.items || []).map(function (it) {
+          var o = { id: String(it.id), x: Math.round(it.x), y: Math.round(it.y), w: Math.round(it.w), h: Math.round(it.h) };
+          if (it.pinned) o.pinned = true;
+          return o;
+        }),
+      };
+    } catch (e) { return { screen: '__error', viewportH: H, viewportW: W, screenH: H, scrollMaxY: 0, items: [], error: String(e) }; }
+  };
+}
+var _tourSteps = [];
+function exposeTour(steps) {
+  _tourSteps = Array.isArray(steps) ? steps : [];
+  // __gfTour(i): navigate to tour step i (returns its name), or with no arg
+  // returns the list of step names so the gate knows how many screens to visit.
+  window.__gfTour = function (i) {
+    if (i == null) return _tourSteps.map(function (s) { return s.name; });
+    var s = _tourSteps[i];
+    if (!s) return null;
+    try { if (typeof s.go === 'function') s.go(); } catch (e) {}
+    return s.name;
+  };
+}
+function scrollMax(id) { return _scrollRegions[id] ? _scrollRegions[id].maxOffset() : 0; }
 
 // ── SPRITES ──────────────────────────────────────────────────────────────
 var sprites = {};
@@ -354,8 +562,14 @@ function shareCard(opts) {
     x.fillStyle = accent;
     x.font = 'bold 28px sans-serif';
     x.textAlign = 'right'; x.textBaseline = 'bottom';
-    var ctaUrl = opts.slug ? 'game-factory.tech/p/' + opts.slug : 'game-factory.tech';
-    x.fillText('Beat me at ' + ctaUrl, 1140, 570);
+    // Platform-aware CTA: on CrazyGames NEVER print game-factory.tech (their
+    // static scanner flags cross-promotion); use a domain-free call to action.
+    if (platform === 'crazygames') {
+      x.fillText('Beat my score!', 1140, 570);
+    } else {
+      var ctaUrl = opts.slug ? 'game-factory.tech/p/' + opts.slug : 'game-factory.tech';
+      x.fillText('Beat me at ' + ctaUrl, 1140, 570);
+    }
 
     // Hairline
     x.strokeStyle = accent + '66'; x.lineWidth = 2;
@@ -372,7 +586,9 @@ function shareBlob(blob, opts) {
   opts = opts || {};
   var fileName = opts.fileName || 'share.png';
   var title = opts.title || "Tim's Game Lab";
-  var text  = opts.text  || 'Play it: https://game-factory.tech';
+  // On CrazyGames omit the game-factory.tech URL (cross-promo scanner); the
+  // caller's opts.text always wins, only the default is platform-aware.
+  var text  = opts.text  || (platform === 'crazygames' ? 'Can you beat my score?' : 'Play it: https://game-factory.tech');
   var file  = new File([blob], fileName, { type: 'image/png' });
 
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -390,7 +606,7 @@ function shareBlob(blob, opts) {
 }
 
 // ── MAIN LOOP ────────────────────────────────────────────────────────────
-var lastTs = 0, onUpdate = null, onDraw = null, isRunning = false, marginsFn = null;
+var lastTs = 0, onUpdate = null, onDraw = null, isRunning = false;
 
 function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
@@ -402,19 +618,8 @@ function frame(ts) {
   if (onUpdate) onUpdate(dt);
 
   var ofs = shakeOffset();
-  // Desktop framing: paint the side margins (full-canvas space) behind the
-  // clipped gameplay band. Game supplies config.drawMargins for designed art;
-  // otherwise a dark fallback so the margins are never an empty/white void.
-  if (offX > 0) {
-    ctx.save();
-    ctx.translate(ofs.x, ofs.y);
-    if (marginsFn) marginsFn(ctx, fullW, fullH, offX, W);
-    else { ctx.fillStyle = '#0b0f1a'; ctx.fillRect(0, 0, fullW, fullH); }
-    ctx.restore();
-  }
   ctx.save();
-  ctx.translate(offX + ofs.x, ofs.y);
-  if (offX > 0) { ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip(); }
+  ctx.translate(ofs.x, ofs.y);
   if (onDraw) onDraw(ctx, dt);
   drawParticles();
   drawFloats();
@@ -433,7 +638,6 @@ function init(config) {
   if (config.saveKey) SAVE_KEY = config.saveKey;
   onUpdate = config.onUpdate || null;
   onDraw   = config.onDraw   || null;
-  marginsFn = config.drawMargins || null;
 
   resize(); // re-resize with the new design dimensions
 
@@ -491,6 +695,9 @@ function init(config) {
     platform = 'yandex';
     YaGames.init().then(function(ysdk) {
       window.ysdk = ysdk;
+      // Yandex 1.3 - mute/resume audio on the platform's own pause lifecycle
+      // (tab hidden, system dialog, etc.), independent of visibilitychange.
+      try { ysdk.on('game_api_pause', pauseAudio); ysdk.on('game_api_resume', resumeAudio); } catch (e) {}
       try {
         var l = ysdk.environment && ysdk.environment.i18n && ysdk.environment.i18n.lang;
         if (l) lang = l.startsWith('ru') ? 'ru' : 'en';
@@ -511,6 +718,29 @@ function init(config) {
       } catch(e) {}
       boot();
       try { window.CrazyGames.SDK.game.loadingStop(); } catch(e) {}
+      // CrazyGames quality: honour the platform mute button (settings.muteAudio)
+      // so the SDK's mute actually silences the game. Set BOTH mute flags to the
+      // platform value (toggleMute only when it actually differs, plus music).
+      try {
+        if (window.CrazyGames.SDK.game.addSettingsChangeListener) {
+          window.CrazyGames.SDK.game.addSettingsChangeListener(function (key, value) {
+            if (key === 'muteAudio') {
+              // Set both mute flags to the platform value WITHOUT persisting
+              // gf_muted: the platform mute is the SDK's own state, not the
+              // in-game mute button, so don't cross-contaminate localStorage.
+              AUDIO_MUTED = !!value;
+              try { setMusicMuted(!!value); } catch (e) {}
+              try {
+                if (_music) {
+                  _music.muted = AUDIO_MUTED;
+                  if (AUDIO_MUTED) { _music.pause(); }
+                  else if (_musicSrc) { var _p = _music.play(); if (_p && _p.catch) _p.catch(function () {}); }
+                }
+              } catch (e) {}
+            }
+          });
+        }
+      } catch (e) {}
     }).catch(boot);
     setTimeout(boot, 3000);
   } else {
@@ -573,7 +803,16 @@ function gameplayStop() {
 // object is truthy and they ignore it.
 function showAd(type) {
   type = type || 'midgame';
-  return new Promise(function(ok) {
+  return new Promise(function(rawOk) {
+    // Yandex 4.7 - mute audio while the ad is open; resume on EVERY exit path
+    // (success / error / 30s no-fill timeout) exactly once. pauseAudio and
+    // resumeAudio are idempotent.
+    var _resolved = false;
+    var ok = function (res) { if (_resolved) return; _resolved = true; resumeAudio(); rawOk(res); };
+    var willShow = (platform === 'gamepush' && window.gp && window.gp.ads) ||
+                   (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad) ||
+                   (platform === 'yandex' && window.ysdk && window.ysdk.adv);
+    if (willShow) pauseAudio();
     try {
       // GamePush — preferred when present. Routes to whichever ad network
       // the active platform supports. showRewardedVideo resolves to bool.
@@ -614,6 +853,15 @@ function showAd(type) {
       }
     } catch (e) {}
     ok({ shown: false, rewarded: false });  // local / unknown → resolve immediately
+  });
+}
+// Convenience: rewarded ad with callbacks. Audio pause/resume + the no-fill
+// watchdog are handled inside showAd; onReward fires ONLY on a confirmed reward.
+function rewardedAd(onReward, onSkip) {
+  return showAd('rewarded').then(function (r) {
+    if (r && r.rewarded) { if (onReward) onReward(); }
+    else if (onSkip) onSkip();
+    return r;
   });
 }
 
@@ -777,15 +1025,14 @@ function startMusic(opts) {
       _mus.timer = setInterval(function () { try { if (_mus.on) _musSchedule(); } catch (e) {} }, 30);
     } catch (e) {}
   };
-  // Hard-rule #8: suspend the music context on tab-hide so it stops synthesising
-  // in the background (no wasted CPU/battery); resume + re-anchor on return.
+  // Hard-rule #8: suspend the music context on tab-hide.
   if (!_mus._visBound) {
     _mus._visBound = true;
     document.addEventListener('visibilitychange', function () {
       if (!_mus.ctx) return;
       try {
         if (document.hidden) _mus.ctx.suspend();
-        else if (_mus.on) { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; }
+        else if (_mus.on && !_extPaused) { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; }
       } catch (e) {}
     });
   }
@@ -797,15 +1044,120 @@ function setMusicMuted(m) {
   if (_mus.master && _mus.ctx) { try { _mus.master.gain.setTargetAtTime(m ? 0.0001 : (_mus.preset ? _mus.preset.gain : 0.15), _mus.ctx.currentTime, 0.04); } catch (e) {} }
 }
 
+
 // ── PUBLIC API ───────────────────────────────────────────────────────────
+// ── AUDIO: procedural SFX synth + bg-music loop + mute (reusable) ──────────
+// Games MUST ship sound before publish (Tim 2026-06-04). SFX are synthesized via
+// WebAudio (no asset files, tiny, reliable); music is an mp3 loop from the Suno
+// tool (Shared/tools/game-audio/gen_music.py → <game>/audio/bg_loop.mp3). Both
+// respect GF.muted (persisted) and start on the first user gesture (autoplay policy).
+var _ac = null, _music = null, _musicSrc = null, _musicVol = 0.4;
+var AUDIO_MUTED = false;
+var _extPaused = false;   // audio suspended over an ad / platform pause (Yandex 4.7 + 1.3)
+try { AUDIO_MUTED = (localStorage.getItem('gf_muted') === '1'); } catch (e) {}
+function audioCtx() {
+  if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch (e) {} }
+  return _ac;
+}
+function tone(freq, dur, type, gain, slideTo) {
+  if (AUDIO_MUTED || _extPaused) return;
+  var c = audioCtx(); if (!c) return;
+  try {
+    var g = c.createGain(), t0 = c.currentTime;
+    g.gain.setValueAtTime(gain || 0.12, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    g.connect(c.destination);
+    var o = c.createOscillator();
+    o.type = type || 'sine'; o.frequency.setValueAtTime(freq, t0);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+    o.connect(g); o.start(t0); o.stop(t0 + dur + 0.02);
+  } catch (e) {}
+}
+function arp(notes, step, dur, type, gain) {
+  for (var i = 0; i < notes.length; i++) (function (idx, f) {
+    setTimeout(function () { tone(f, dur || 0.16, type || 'sine', gain || 0.13); }, idx * (step || 70));
+  })(i, notes[i]);
+}
+// named stinger library — games call GF.sfx('merge') etc.
+var SFX_LIB = {
+  click:   function () { tone(660, 0.05, 'square', 0.05); },
+  tap:     function () { tone(520, 0.06, 'triangle', 0.07); },
+  merge:   function () { tone(440, 0.10, 'triangle', 0.12, 720); },
+  spawn:   function () { tone(300, 0.08, 'sine', 0.08, 440); },
+  pickup:  function () { tone(880, 0.06, 'sine', 0.09); },
+  coin:    function () { tone(988, 0.07, 'square', 0.08, 1319); },
+  hit:     function () { tone(170, 0.10, 'sawtooth', 0.10, 80); },
+  hurt:    function () { tone(140, 0.16, 'sawtooth', 0.13, 60); },
+  levelup: function () { arp([523, 659, 784, 1047], 80, 0.18, 'triangle', 0.14); },
+  evolve:  function () { arp([523, 659, 880, 1175], 90, 0.20, 'sine', 0.15); },
+  unlock:  function () { arp([659, 988, 1319], 70, 0.18, 'sine', 0.15); },
+  reward:  function () { arp([784, 1047, 1319], 70, 0.16, 'triangle', 0.14); },
+  win:     function () { arp([523, 659, 784, 1047, 1319], 90, 0.20, 'triangle', 0.15); },
+  lose:    function () { tone(330, 0.45, 'sawtooth', 0.13, 90); },
+  error:   function () { tone(200, 0.12, 'square', 0.07, 140); },
+};
+function sfx(name) { var f = SFX_LIB[name]; if (f) f(); }
+function music(url, vol) {
+  if (!url) return;
+  try {
+    if (!_music) { _music = new Audio(); _music.loop = true; _music.preload = 'auto'; }
+    if (vol != null) _musicVol = vol;
+    _musicSrc = url; _music.src = url; _music.volume = _musicVol; _music.muted = AUDIO_MUTED;
+    if (!AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+  } catch (e) {}
+}
+function toggleMute() {
+  AUDIO_MUTED = !AUDIO_MUTED;
+  try { localStorage.setItem('gf_muted', AUDIO_MUTED ? '1' : '0'); } catch (e) {}
+  if (_music) {
+    _music.muted = AUDIO_MUTED;
+    if (AUDIO_MUTED) { try { _music.pause(); } catch (e) {} }
+    else { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+  }
+  return AUDIO_MUTED;
+}
+// ── External pause (Yandex 4.7 rewarded-ad mute + 1.3 game_api_pause / CG) ──
+// Suspend ALL audio (procedural music ctx + sfx ctx + mp3 element) while an ad
+// is open or the platform fires a pause event, then resume RESPECTING the mute
+// button. Idempotent via _extPaused so overlapping triggers (ad + tab-hide)
+// can't double-suspend/resume; tone() and the visibilitychange handler honour it.
+function pauseAudio() {
+  if (_extPaused) return;
+  _extPaused = true;
+  try { if (_mus.ctx && _mus.ctx.state === 'running') _mus.ctx.suspend(); } catch (e) {}
+  try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch (e) {}
+  try { if (_music) _music.pause(); } catch (e) {}
+}
+function resumeAudio() {
+  if (!_extPaused) return;
+  _extPaused = false;
+  try { if (_mus.ctx && _mus.on && _mus.ctx.state === 'suspended') { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; } } catch (e) {}
+  try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {}
+  try { if (_music && _musicSrc && !AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); } } catch (e) {}
+}
+// vector speaker / muted-speaker icon (never emoji) — games place + wire the click
+function drawMuteIcon(c, x, y, r, muted) {
+  c.save(); c.translate(x, y); c.lineWidth = Math.max(1.5, r * 0.16);
+  c.strokeStyle = muted ? '#8a8a9a' : '#dfe7ff'; c.fillStyle = c.strokeStyle;
+  c.beginPath(); c.moveTo(-r * 0.7, -r * 0.28); c.lineTo(-r * 0.3, -r * 0.28); c.lineTo(0, -r * 0.6); c.lineTo(0, r * 0.6); c.lineTo(-r * 0.3, r * 0.28); c.lineTo(-r * 0.7, r * 0.28); c.closePath(); c.fill();
+  if (muted) { c.beginPath(); c.moveTo(r * 0.22, -r * 0.35); c.lineTo(r * 0.72, r * 0.35); c.moveTo(r * 0.72, -r * 0.35); c.lineTo(r * 0.22, r * 0.35); c.stroke(); }
+  else { c.beginPath(); c.arc(r * 0.12, 0, r * 0.42, -0.9, 0.9); c.stroke(); c.beginPath(); c.arc(r * 0.12, 0, r * 0.72, -0.8, 0.8); c.stroke(); }
+  c.restore();
+}
+// resume audio + (re)start music on the first user gesture (autoplay policy)
+(function () {
+  var kick = function () {
+    audioCtx();
+    if (_music && _musicSrc && !AUDIO_MUTED && _music.paused) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+  };
+  window.addEventListener('pointerdown', kick, { passive: true });
+  window.addEventListener('touchstart', kick, { passive: true });
+  window.addEventListener('keydown', kick);
+})();
+
 window.GF = {
   init: init,
-  // Procedural background music (factory baseline — every game ships a theme).
-  // Call GF.startMusic({ preset:'cozy'|'synth'|'arcade'|'calm', muted:bool }) in
-  // onReady; it begins on the first user gesture. Mirror your mute button to
-  // GF.setMusicMuted(bool). Zero assets, loops forever.
-  startMusic: startMusic,
-  setMusicMuted: setMusicMuted,
   canvas: canvas,
   ctx: ctx,
   // Live properties (read whenever the game needs current values)
@@ -814,10 +1166,6 @@ window.GF = {
   get cx() { return cx; },
   get cy() { return cy; },
   get S()  { return S; },
-  get offX() { return offX; },
-  get fullW() { return fullW; },
-  get fullH() { return fullH; },
-  get platform() { return platform; },
   get lang() { return lang; },
   set lang(v) { lang = (v === 'ru' ? 'ru' : 'en'); },
   t: t,
@@ -829,6 +1177,29 @@ window.GF = {
   spawnParticles: spawnParticles,
   spawnFloat: spawnFloat,
   setShake: setShake,
+  // Scroll regions (REQUIRED for any screen whose content can exceed the
+  // viewport - long lists/grids). GF.makeScroll(id, {x,y,w,h}) -> controller
+  // with .setViewport/.setContentHeight/.begin/.end/.draw/.handleWheel/.dragStart/
+  // .dragMove/.dragEnd/.update/.offset/.clamp()/.screenToContentY/.contains.
+  // See the SCROLL block above for the per-frame usage pattern.
+  makeScroll: makeScroll,
+  scrollMax: scrollMax,
+  // Reachability gate hooks - GF.exposeReach(getter) + GF.exposeTour(steps).
+  // Every NEW game wires these so reachability_check.js can prove all UI is
+  // reachable. See the REACHABILITY GATE HOOKS block above.
+  exposeReach: exposeReach,
+  exposeTour: exposeTour,
+  // Audio (REQUIRED before publish) — GF.sfx('merge'|'spawn'|'hit'|'levelup'|'unlock'|
+  // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
+  // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
+  sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
+  // Procedural music bed (no-credit baseline; GF.music(mp3) is the Suno upgrade):
+  startMusic: startMusic, setMusicMuted: setMusicMuted,
+  // Suspend/resume ALL audio over an ad or platform pause (Yandex 4.7 + 1.3).
+  // showAd() brackets these automatically; call directly only for custom flows.
+  pauseAudio: pauseAudio, resumeAudio: resumeAudio,
+  hasSfx: function (n) { return !!SFX_LIB[n]; },
+  get muted() { return AUDIO_MUTED; },
   // Sprites
   drawSprite: drawSprite,
   sprites: sprites,
@@ -857,6 +1228,9 @@ window.GF = {
   // (or immediately on local). Games call this at natural breaks — never
   // during active gameplay (CG rejects games that do).
   showAd: showAd,
+  // Rewarded ad with callbacks: GF.rewardedAd(onReward[, onSkip]). onReward
+  // fires only on a confirmed reward; audio + no-fill watchdog handled inside.
+  rewardedAd: rewardedAd,
   // CrazyGames "happy moment" — triggers their confetti animation on victory
   // / new high score. Use sparingly (CG rejects games that fire it on every
   // level clear). Safe no-op on other platforms.
@@ -879,6 +1253,21 @@ window.GF = {
     if (typeof getter !== 'function') return;
     window.__gfState = function () {
       try { return getter(); } catch (e) { return { __error: String(e) }; }
+    };
+  },
+  // Register a BOT action contract for the autonomous progression probe (#276).
+  //   GF.exposeBot(
+  //     () => ['merge','spawn'],        // actions available RIGHT NOW (strings)
+  //     (action) => { /* apply it */ }  // perform one action
+  //   );
+  // The probe enumerates actions, applies a heuristic one, fast-forwards the
+  // logic via window.__gfStep(), and samples __gfState() to build a progression
+  // curve (score / difficulty / time-to-wall) over a simulated 10-15 min run —
+  // verifying BALANCE/pacing, which the boot + 60s vision gates can't see.
+  exposeBot: function (getActions, doAction) {
+    window.__gfBot = {
+      actions: function () { try { var a = getActions(); return Array.isArray(a) ? a : []; } catch (e) { return []; } },
+      act: function (a) { try { return doAction(a); } catch (e) {} },
     };
   },
   // Persist run state to localStorage (Yandex 1.9 — game progress must
@@ -914,6 +1303,30 @@ window.GF = {
   //   - Help (?) button — call GF.tutorial.reopen() to re-run from step 1.
   tutorial: (function () {
     var pulseT = 0;
+    // ── Animated demo HAND (Tim 2026-06-04: tutorials must SHOW the gesture, not
+    // a text panel). Vector pointing hand; FINGERTIP sits at (x,y), fist trails
+    // below-right. `press` squashes it for the grab/tap; `down` flips it to point
+    // down from above (for targets near the bottom edge). See feedback_tutorial_demo_hand_ux.
+    function _tEase(t) { return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; }
+    function _tRR(c, x, y, w, h, r) { r = Math.min(r, w / 2, h / 2); c.beginPath(); c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r); c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath(); }
+    function _tHand(c, x, y, press, down) {
+      c.save();
+      c.translate(x, y);
+      var k = (press ? 0.88 : 1);
+      c.scale(k * S, k * S);
+      if (down) c.scale(1, -1);
+      c.rotate(-0.26);
+      c.lineJoin = 'round'; c.lineCap = 'round';
+      c.shadowColor = 'rgba(0,0,0,0.32)'; c.shadowBlur = 7; c.shadowOffsetX = 2; c.shadowOffsetY = 4;
+      c.fillStyle = '#ffd9b0'; c.strokeStyle = '#7a4e2c'; c.lineWidth = 2.4;
+      _tRR(c, -15, 23, 30, 33, 13); c.fill(); c.stroke();
+      c.beginPath(); c.ellipse(-15, 31, 7, 10, -0.5, 0, Math.PI * 2); c.fill(); c.stroke();
+      _tRR(c, -6, 0, 12, 30, 6); c.fill(); c.stroke();
+      c.shadowColor = 'transparent';
+      c.strokeStyle = 'rgba(122,78,44,0.45)'; c.lineWidth = 1.3;
+      c.beginPath(); c.moveTo(-9, 36); c.lineTo(13, 36); c.moveTo(-10, 44); c.lineTo(14, 44); c.moveTo(-9, 51); c.lineTo(12, 51); c.stroke();
+      c.restore();
+    }
     var state = {
       active: false,
       step: 0,
@@ -983,8 +1396,9 @@ window.GF = {
       // Resolve target (may be a function returning {x,y,r} so games can
       // point at moving things like a swinging pendulum)
       var tg = typeof step.target === 'function' ? step.target() : step.target;
-      // Dim scrim
-      c.fillStyle = 'rgba(0, 0, 0, 0.55)';
+      // Light scrim — the HAND is the focus, keep the board visible (Tim 2026-06-04:
+      // "hand is enough", dropped the heavy bottom panel).
+      c.fillStyle = 'rgba(0, 0, 0, 0.26)';
       c.fillRect(0, 0, W, H);
       // Pulse highlight
       if (tg && typeof tg.x === 'number') {
@@ -1001,49 +1415,66 @@ window.GF = {
         c.arc(tg.x, tg.y, r, 0, Math.PI * 2);
         c.stroke();
         c.restore();
-        var tipY = tg.y - baseR - 14 * S;
-        var baseY = tipY - 26 * S;
-        c.fillStyle = '#ffeb3b';
-        c.beginPath();
-        c.moveTo(tg.x, tipY);
-        c.lineTo(tg.x - 12 * S, baseY);
-        c.lineTo(tg.x + 12 * S, baseY);
-        c.closePath();
-        c.fill();
+        // ── animated demo: a HAND performs the gesture (tap, or drag from→to) ──
+        var to = step.target2 ? (typeof step.target2 === 'function' ? step.target2() : step.target2) : null;
+        var ges = step.gesture || (to ? 'drag' : 'tap');
+        if (ges === 'drag' && to && typeof to.x === 'number') {
+          c.save(); c.shadowColor = '#7CFC9A'; c.shadowBlur = 14; c.strokeStyle = '#7CFC9A';
+          c.lineWidth = 3 + pulse * 1.5; c.globalAlpha = 0.85;
+          c.beginPath(); c.arc(to.x, to.y, (to.r || 40) + pulse * 10 * S, 0, Math.PI * 2); c.stroke(); c.restore();
+          c.save(); c.strokeStyle = 'rgba(255,255,255,0.7)'; c.lineWidth = 3 * S;
+          c.setLineDash([7 * S, 7 * S]); c.lineDashOffset = -pulseT * 36;
+          c.beginPath(); c.moveTo(tg.x, tg.y); c.lineTo(to.x, to.y); c.stroke(); c.restore();
+          var cyc = 2.6, tt = (pulseT % cyc) / cyc, hx, hy, pr;
+          if (tt < 0.16) { hx = tg.x; hy = tg.y; pr = true; }
+          else if (tt < 0.62) { var kk = _tEase((tt - 0.16) / 0.46); hx = lerp(tg.x, to.x, kk); hy = lerp(tg.y, to.y, kk); pr = true; }
+          else if (tt < 0.74) { hx = to.x; hy = to.y; pr = true; }
+          else { hx = to.x; hy = to.y; pr = false; }
+          _tHand(c, hx, hy, pr);
+        } else {
+          var ph = (pulseT % 1.3) / 1.3, pr2 = ph < 0.22;
+          if (pr2) {
+            c.save(); c.strokeStyle = '#ffeb3b'; c.lineWidth = 3 * S; c.globalAlpha = 0.55 * (1 - ph / 0.22);
+            c.beginPath(); c.arc(tg.x, tg.y, (tg.r || 40) * (0.4 + (ph / 0.22) * 0.9), 0, Math.PI * 2); c.stroke(); c.restore();
+          }
+          var low = tg.y > H * 0.66;
+          _tHand(c, tg.x, tg.y - (pr2 ? 0 : 9 * S), pr2, low);
+        }
       }
-      // Bottom panel
-      var panelH = clamp(118 * S, 96, 150);
-      var panelY = H - panelH;
-      c.fillStyle = 'rgba(12, 16, 26, 0.96)';
-      c.fillRect(0, panelY, W, panelH);
-      c.fillStyle = '#ffeb3b';
-      c.fillRect(0, panelY, W, 3);
-      var fsSmall = clamp(12 * S, 10, 15) | 0;
-      c.fillStyle = '#9aa3b2';
-      c.font = fsSmall + 'px Inter, system-ui, sans-serif';
-      c.textAlign = 'left';
-      c.fillText('TUTORIAL  ' + (state.step + 1) + ' / ' + state.steps.length, 16, panelY + 22);
-      // Skip ✕
-      c.fillStyle = '#9bb';
-      c.textAlign = 'right';
-      var skipLabel = (lang === 'ru' ? 'пропустить ✕' : 'skip ✕');
-      c.fillText(skipLabel, W - 16, panelY + 22);
-      state._skipBtn = { x: W - 110, y: panelY + 4, w: 110, h: 30 };
-      // Instruction
-      c.fillStyle = '#fff';
-      c.textAlign = 'center';
-      var fs = clamp(17 * S, 13, 22) | 0;
-      c.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
-      wrap(c, step.text, W / 2, panelY + panelH / 2 + 4, W - 60, fs + 6);
-      // Hint
-      var hintTxt = '';
-      if (step.advance === 'click_any') hintTxt = (lang === 'ru' ? '(нажмите в любом месте)' : '(tap anywhere to continue)');
-      else if (step.advance === 'auto') hintTxt = (lang === 'ru' ? '(продолжение автоматически…)' : '(continuing automatically…)');
-      if (hintTxt) {
-        c.fillStyle = '#aac';
-        c.font = fsSmall + 'px Inter, system-ui, sans-serif';
-        c.fillText(hintTxt, W / 2, panelY + panelH - 12);
-      }
+      // ── slim caption + skip, anchored above the action (NOT a full-width bottom
+      // panel — Tim 2026-06-04: "drop that bottom ui panel, hand is enough") ──
+      var aTg = (tg && typeof tg.x === 'number') ? tg : { x: W / 2, y: H * 0.5, r: 40 };
+      var aTo = step.target2 ? (typeof step.target2 === 'function' ? step.target2() : step.target2) : null;
+      var capFs = clamp(14 * S, 12, 18) | 0;
+      c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif';
+      var capTxt = String(step.text || '');
+      var capW = c.measureText(capTxt).width;
+      var maxW = Math.min(W * 0.88, 520 * S);
+      while (capW > maxW && capFs > 11) { capFs--; c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif'; capW = c.measureText(capTxt).width; }
+      var skipTxt = (lang === 'ru' ? 'пропустить ✕' : 'skip ✕');
+      c.font = (capFs - 1) + 'px Inter, system-ui, sans-serif';
+      var skipW = c.measureText(skipTxt).width;
+      var padX = 14 * S, gapX = 16 * S, pillH = clamp(32 * S, 27, 42);
+      var pillW = capW + padX * 2 + gapX + skipW;
+      var ax = aTg.x, ay = aTg.y, ar = aTg.r || 40;
+      if (aTo && typeof aTo.x === 'number') { ax = (aTg.x + aTo.x) / 2; ay = Math.min(aTg.y, aTo.y); ar = Math.max(aTg.r || 40, aTo.r || 40); }
+      var pillY = ay - ar - pillH - 16 * S;
+      if (pillY < 52 * S) pillY = (aTo ? Math.max(aTg.y, aTo.y) : aTg.y) + ar + 16 * S;
+      pillY = clamp(pillY, 52 * S, H - pillH - 12 * S);
+      var pillX = clamp(ax - pillW / 2, 8 * S, W - pillW - 8 * S);
+      c.save();
+      c.shadowColor = 'rgba(0,0,0,0.4)'; c.shadowBlur = 9 * S; c.shadowOffsetY = 3 * S;
+      c.fillStyle = 'rgba(16, 20, 30, 0.9)';
+      rr(c, pillX, pillY, pillW, pillH, pillH / 2); c.fill();
+      c.restore();
+      c.textBaseline = 'middle';
+      c.fillStyle = '#fff'; c.textAlign = 'left';
+      c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif';
+      c.fillText(capTxt, pillX + padX, pillY + pillH / 2 + 1);
+      c.fillStyle = '#9cc'; c.font = (capFs - 1) + 'px Inter, system-ui, sans-serif';
+      c.fillText(skipTxt, pillX + padX + capW + gapX, pillY + pillH / 2 + 1);
+      c.textBaseline = 'alphabetic';
+      state._skipBtn = { x: pillX + padX + capW + gapX - 8 * S, y: pillY - 5 * S, w: skipW + 24 * S, h: pillH + 10 * S };
     };
     state.handleClick = function (x, y) {
       if (!state.active) return false;
@@ -1082,6 +1513,35 @@ window.GF = {
 
 // Screenshot helpers — exposed at window for external tooling (take_screenshots.js)
 window._setLang = function(l) { lang = (l === 'ru' ? 'ru' : 'en'); };
+// Fast-forward hook for the progression probe (#276): advance the game's logic
+// by `n` ticks of `dt` seconds with NO rendering or realtime wait, so a bot can
+// drive a 10-15 min run in milliseconds. Calls the same onUpdate(dt) the RAF
+// loop uses; no-op until a game registered onUpdate via GF.init. Guarded so a
+// throwing onUpdate stops the stepping (returns how many ticks actually applied)
+// instead of wedging. NOTE: only DT-DRIVEN logic fast-forwards; a game whose
+// timers use setTimeout/Date.now won't advance (the probe flags that case).
+window.__gfStep = function (n, dt) {
+  n = n | 0; dt = (typeof dt === 'number' && dt > 0) ? dt : (1 / 60);
+  var i = 0;
+  for (; i < n; i++) { try { if (onUpdate) onUpdate(dt); } catch (e) { return i; } }
+  return i;
+};
+// Deterministic PLAY/CTA locator for the QA gates (fixes the canvas-button
+// false-negative: random taps scattered across the viewport miss a canvas-drawn
+// PLAY capsule, and the IIFE hides its rect). Returns the PRIMARY overlay button
+// (buttons[0] — PLAY on the menu, RETRY on game-over) in CSS px + its centre, so
+// a gate can tap the REAL button. null when no overlay button shows (game in
+// play, or it hand-draws its menu without drawOverlay → gate falls back to sweep).
+window.__gfPlayRect = function () {
+  try {
+    if (!buttons || !buttons.length || !canvas) return null;
+    var b = buttons[0], r = canvas.getBoundingClientRect();
+    if (!r.width || !canvas.width) return null;
+    var sx = r.width / canvas.width, sy = r.height / canvas.height;
+    return { x: r.left + b.x * sx, y: r.top + b.y * sy, w: b.w * sx, h: b.h * sy,
+             cx: r.left + (b.x + b.w / 2) * sx, cy: r.top + (b.y + b.h / 2) * sy };
+  } catch (e) { return null; }
+};
 // _jumpLevel must be defined per-game (each game has its own level model).
 
 })();

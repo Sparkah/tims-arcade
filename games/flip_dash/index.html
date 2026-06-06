@@ -33,6 +33,7 @@ var STRINGS = {
     skins: 'SKINS', equip: 'EQUIP', equipped: 'ON', buy: 'BUY', locked: 'NEED',
     extraLife: 'EXTRA LIFE', extraLifeSub: 'Watch a short ad to continue',
     zoneUnlocked: 'NEW ZONE', tapToFlip: 'TAP TO FLIP GRAVITY',
+    graze: 'GRAZE', overdrive: 'OVERDRIVE!', overReady: 'OVERDRIVE READY',
     tut_goal:     'Goal: Dash as far as you can down the neon corridor.',
     tut_controls: 'Controls: Tap anywhere (or Space) to flip gravity — floor to ceiling and back.',
     tut_win:      'Win: No finish line — beat your distance; today’s Daily course is the same for everyone.',
@@ -74,6 +75,7 @@ var STRINGS = {
     skins: 'СКИНЫ', equip: 'НАДЕТЬ', equipped: 'НАД.', buy: 'КУПИТЬ', locked: 'НУЖНО',
     extraLife: 'ДОП. ЖИЗНЬ', extraLifeSub: 'Посмотри короткую рекламу, чтобы продолжить',
     zoneUnlocked: 'НОВАЯ ЗОНА', tapToFlip: 'ТАП — ПЕРЕВОРОТ ГРАВИТАЦИИ',
+    graze: 'В КАСАНИЕ', overdrive: 'ОВЕРДРАЙВ!', overReady: 'ОВЕРДРАЙВ ГОТОВ',
     tut_goal:     'Цель: Мчись как можно дальше по неоновому коридору.',
     tut_controls: 'Управление: Тапни в любом месте (или Пробел), чтобы перевернуть гравитацию — с пола на потолок и обратно.',
     tut_win:      'Победа: Финиша нет — бей свой рекорд дистанции; сегодняшняя «трасса дня» одинакова для всех.',
@@ -195,6 +197,18 @@ var metaContentRect = null;      // {x,y,w,h} content column — taps OUTSIDE it
 // Revive (rewarded ad) — one per run
 var reviveUsed = false, reviveLoading = false, invulnT = 0;
 var reviveBtnRect = null;
+
+// ── OVERDRIVE (the hook) ───────────────────────────────────────────────────
+// Graze obstacles (flip LATE, skim past) to charge a meter; a full meter
+// auto-triggers OVERDRIVE — a short burst of extra speed, 2x coins, brief
+// invulnerability, and an intense visual surge. The skill is risking a close
+// pass for charge while staying alive. Reuses invulnT so it adds NO new
+// collision path. This is what makes Flip Dash more than a bare flip-runner.
+var heat = 0;          // 0..1 overdrive charge
+var overT = 0;         // seconds of OVERDRIVE remaining
+var grazeFlash = 0;    // brief glow on a fresh graze
+var OVER_DUR = 3.2;    // overdrive duration (s)
+var GRAZE_GAIN = 0.30; // charge per fresh graze (~3-4 grazes to fill)
 var shieldArmed = false;         // GEAR: Spark Shield — survive the first crash of a run once
 
 // Tutorial overlay (MENU + reopen via ?)
@@ -698,6 +712,7 @@ function startRun(m) {
   gravDir = 1; flipCooldownT = 0; lastFlipFlash = 0;
   bannerT = 0; bannerTxt = '';
   reviveUsed = false; reviveLoading = false; invulnT = 0; reviveBtnRect = null;
+  heat = 0; overT = 0; grazeFlash = 0;
   shieldArmed = (gearVal('shield') > 0);   // GEAR: Spark Shield armed for ONE crash this run
   runPlaySec = 0;
   metaOpen = false;   // never carry the GEAR overlay into a run (defensive: it only draws on MENU)
@@ -770,6 +785,18 @@ function doRevive() {
   GF.gameStarted();
 }
 
+// Fire OVERDRIVE when the graze meter fills. Reuses invulnT for the safe
+// window so it never creates an unfair death; speed/coins handled in update().
+function triggerOverdrive() {
+  overT = OVER_DUR;
+  invulnT = Math.max(invulnT, OVER_DUR);
+  heat = 0;
+  bannerTxt = GF.t('overdrive'); bannerT = 1.6;
+  GF.setShake(0.55);
+  GF.spawnParticles(playerX(), player.y, '#7df9ff', 34);
+  Sfx.zone();
+}
+
 // ── UPDATE ────────────────────────────────────────────────────────────────
 function update(dt) {
   if (lastFlipFlash > 0) lastFlipFlash = Math.max(0, lastFlipFlash - dt * 4);
@@ -781,6 +808,9 @@ function update(dt) {
   if (gs !== 'PLAYING') return;
   if (flipCooldownT > 0) flipCooldownT -= dt;
   if (invulnT > 0) invulnT -= dt;
+  if (overT > 0) overT -= dt;
+  if (grazeFlash > 0) grazeFlash = Math.max(0, grazeFlash - dt * 3);
+  if (overT <= 0 && heat > 0) heat = Math.max(0, heat - dt * 0.05);  // slow bleed: use it
   if (promoActive) promoSteer(dt);   // promo=climax: deterministic autopilot weave
 
   // accrue REAL playtime toward the gear ladder; unlock any crossed milestone
@@ -792,7 +822,7 @@ function update(dt) {
   // escalate speed — GEAR: Steady Pace softens the per-second ramp
   var rampMul = 1 - clamp(gearVal('slowramp'), 0, 60) / 100;
   scrollSpeed = Math.min(MAX_SPEED, scrollSpeed + SPEED_RAMP * rampMul * dt);
-  var dx = scrollSpeed * GF.S * dt;
+  var dx = scrollSpeed * (overT > 0 ? 1.55 : 1) * GF.S * dt;   // OVERDRIVE = faster scroll
   worldX += dx;
   dist = worldX / (PX_PER_M * GF.S);
 
@@ -843,6 +873,7 @@ function update(dt) {
       c.taken = true;
       var got = 1;
       if (doubleChance > 0 && rng() < doubleChance) got = 2;
+      if (overT > 0) got *= 2;   // OVERDRIVE doubles coin value
       runCoins += got;
       GF.spawnParticles(c.x, c.y, got > 1 ? '#fff6c0' : '#FFD700', got > 1 ? 11 : 7);
       GF.spawnFloat(c.x, c.y - 12*GF.S, '+' + got, '#FFD700');
@@ -857,10 +888,12 @@ function update(dt) {
   if (invulnT <= 0) {
     var shrink = 1 - clamp(gearVal('cushion'), 0, 40) / 100;  // cap at 40% smaller
     var pr = PLAYER_R * GF.S * shrink;
+    var grazeBand = 24 * GF.S;                    // a near-miss this close charges OVERDRIVE
     for (var m = 0; m < obstacles.length; m++) {
       var o = obstacles[m];
-      if (px + pr > o.x && px - pr < o.x + o.w &&
-          player.y + pr > o.y && player.y - pr < o.y + o.h) {
+      if (!(px + pr > o.x && px - pr < o.x + o.w)) continue;   // not in this obstacle's column
+      var hitY = (player.y + pr > o.y && player.y - pr < o.y + o.h);
+      if (hitY) {
         if (shieldArmed) {
           shieldArmed = false;
           invulnT = gearVal('shield');           // post-save grace scales with level
@@ -874,6 +907,17 @@ function update(dt) {
           break;
         }
         gameOver(); break;
+      } else if (!o.grazed) {
+        // skimmed past without hitting → graze charge (once per obstacle)
+        var gap = (player.y < o.y) ? (o.y - (player.y + pr)) : ((player.y - pr) - (o.y + o.h));
+        if (gap >= 0 && gap < grazeBand) {
+          o.grazed = true;
+          heat = Math.min(1, heat + GRAZE_GAIN);
+          grazeFlash = 1;
+          GF.spawnFloat(px + 16*GF.S, player.y - 20*GF.S, GF.t('graze'), '#7df9ff');
+          Sfx.coin();
+          if (heat >= 1) triggerOverdrive();
+        }
       }
     }
   }
@@ -901,6 +945,7 @@ function draw(ctx) {
     drawObstacles(ctx, z);
     drawCoins(ctx);
     if (gs === 'PLAYING' || invulnT > 0) drawPlayer(ctx);
+    drawOverdrive(ctx, z);
     drawHUD(ctx, z);
     drawBanner(ctx);
     drawStartHint(ctx);
@@ -916,6 +961,56 @@ function draw(ctx) {
     if (gs === 'MENU')  drawBootBanner(ctx, z);
   }
   if (tutorialOpen)      drawTutorialPanel(ctx, z);
+}
+
+// Synthwave skyline that frames the corridor on wide/desktop screens — the
+// centred band is the neon track; the margins become a retro city + grid sky.
+// Only called when gf-lib gives us side margins (offX>0); mobile is untouched.
+function drawNeonMargins(ctx, fullW, fullH, offX, bandW) {
+  var S = GF.S, horizon = fullH * 0.46;
+  var sky = ctx.createLinearGradient(0, 0, 0, fullH);
+  sky.addColorStop(0, '#1a0b2e'); sky.addColorStop(0.5, '#241046'); sky.addColorStop(1, '#0a0618');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, fullW, fullH);
+  // sun glow behind the band
+  var sun = ctx.createRadialGradient(fullW/2, horizon, 8*S, fullW/2, horizon, fullW*0.5);
+  sun.addColorStop(0, 'rgba(255,94,160,0.33)'); sun.addColorStop(0.5, 'rgba(150,70,210,0.13)'); sun.addColorStop(1, 'rgba(150,70,210,0)');
+  ctx.fillStyle = sun; ctx.fillRect(0, 0, fullW, fullH);
+  // perspective grid below the horizon
+  ctx.save();
+  ctx.strokeStyle = 'rgba(125,249,255,0.16)'; ctx.lineWidth = 1.2 * S;
+  for (var i = 1; i <= 9; i++) {
+    var t = i / 9, gy = horizon + t * t * (fullH - horizon);
+    ctx.globalAlpha = 0.5 * (1 - t * 0.55);
+    ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(fullW, gy); ctx.stroke();
+  }
+  ctx.globalAlpha = 0.35;
+  for (var v = -10; v <= 10; v++) {
+    ctx.beginPath(); ctx.moveTo(fullW/2 + v * 7 * S, horizon); ctx.lineTo(fullW/2 + v * (fullW * 0.062), fullH); ctx.stroke();
+  }
+  ctx.restore();
+  drawNeonSkyline(ctx, 0, offX, horizon, S);
+  drawNeonSkyline(ctx, offX + bandW, fullW, horizon, S);
+}
+function drawNeonSkyline(ctx, mx0, mx1, horizon, S) {
+  var mw = mx1 - mx0; if (mw < 30) return;
+  var heights = [0.48, 0.82, 0.34, 0.66, 0.92, 0.52, 0.74, 0.40];
+  var n = Math.max(3, Math.round(mw / (48 * S)));
+  var bw = mw / n;
+  ctx.save();
+  for (var i = 0; i < n; i++) {
+    var hh = (34 + heights[(i + (mx0 > 0 ? 3 : 0)) % heights.length] * 128) * S;
+    var bx = mx0 + i * bw, by = horizon - hh;
+    ctx.fillStyle = '#120a26';
+    ctx.fillRect(bx + 2*S, by, bw - 4*S, hh + 4*S);
+    ctx.fillStyle = (i % 2) ? 'rgba(255,94,160,0.7)' : 'rgba(125,249,255,0.7)';
+    ctx.fillRect(bx + 2*S, by, bw - 4*S, 2.5*S);   // neon roof edge
+    ctx.fillStyle = 'rgba(255,221,150,0.45)';       // lit windows
+    var rows = Math.floor(hh / (18 * S));
+    for (var w = 0; w < 3; w++) for (var hr = 0; hr < rows; hr++) {
+      if (((i + w + hr) % 3) === 0) ctx.fillRect(bx + 9*S + w*(bw-18*S)/3, by + 9*S + hr*18*S, 4*S, 5*S);
+    }
+  }
+  ctx.restore();
 }
 
 function drawCorridor(ctx, z) {
@@ -1084,6 +1179,44 @@ function drawBanner(ctx) {
   ctx.fillText(bannerTxt, GF.cx, GF.cy - GF.H * 0.12);
   ctx.restore();
 }
+// OVERDRIVE feedback: a left-rail charge meter (fills from grazes) + a screen
+// surge while the boost is live. Read at a glance, which is what sells the hook.
+function drawOverdrive(ctx, z) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  if (overT > 0) {
+    var pulse = 0.55 + 0.45 * Math.sin(performance.now() / 70);
+    ctx.save();
+    var vg = ctx.createLinearGradient(0, 0, W, 0);
+    vg.addColorStop(0,   'rgba(125,249,255,' + (0.34 * pulse).toFixed(3) + ')');
+    vg.addColorStop(0.5, 'rgba(125,249,255,0)');
+    vg.addColorStop(1,   'rgba(125,249,255,' + (0.34 * pulse).toFixed(3) + ')');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 0.45; ctx.strokeStyle = '#bff8ff'; ctx.lineWidth = 2 * S;
+    var now = performance.now();
+    for (var i = 0; i < 8; i++) {
+      var sy = (i + 0.5) / 8 * H;
+      var sx = W - (((now * 0.9) + i * 137) % (W + 240 * S));
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx + 60 * S, sy); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  if (gs !== 'PLAYING') return;
+  var f = overT > 0 ? 1 : heat;
+  if (f <= 0 && grazeFlash <= 0) return;
+  var mx = 12 * S, mw = 7 * S, my = H * 0.37, mh = H * 0.26;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  rr(ctx, mx, my, mw, mh, mw / 2); ctx.fill();
+  if (f > 0) {
+    var fh = mh * f;
+    ctx.shadowColor = '#7df9ff';
+    ctx.shadowBlur = (overT > 0 ? 16 : 6 + grazeFlash * 12) * S;
+    ctx.fillStyle = overT > 0 ? '#bff8ff' : (f >= 1 ? '#7df9ff' : '#39d6e6');
+    rr(ctx, mx, my + mh - fh, mw, fh, mw / 2); ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawStartHint(ctx) {
   if (startHintT <= 0 || gs !== 'PLAYING') return;
   var a = clamp(startHintT / 1.6, 0, 1) * (0.6 + 0.4 * Math.sin(performance.now()/180));
@@ -1344,7 +1477,10 @@ function drawGameOver(ctx, z) {
 
   var btnW = clamp(240*S,180,300), btnH = clamp(52*S,46,62), bx = cx - btnW/2;
 
-  if (!reviveUsed) {
+  // Rewarded-ad revive — HIDDEN on CrazyGames: ads (incl. rewarded) are
+  // prohibited at CG Basic Launch, and a visible "watch an ad to continue" CTA
+  // is a QA reject trigger there. Yandex / gallery keep it (ads allowed).
+  if (!reviveUsed && GF.platform !== 'crazygames') {
     drawButton(ctx, bx, y, btnW, btnH, reviveLoading ? '...' : ('▶ ' + GF.t('extraLife')), '#FFD700', false);
     reviveBtnRect = { x:bx, y:y, w:btnW, h:btnH };
     buttons.push({ x:bx, y:y, w:btnW, h:btnH, fn:function(){ requestRevive(); } });
@@ -1795,9 +1931,11 @@ var canvas = document.getElementById('c');
 canvas.addEventListener('touchstart', function(e) {
   e.preventDefault();
   var t0 = e.changedTouches[0];
-  handlePress(t0.clientX, t0.clientY);
+  // subtract the desktop-framing left margin so taps land in the centred band
+  // (GF.offX is 0 on mobile/portrait, so the phone path is unchanged)
+  handlePress(t0.clientX - GF.offX, t0.clientY);
 }, { passive:false });
-canvas.addEventListener('mousedown', function(e) { handlePress(e.clientX, e.clientY); });
+canvas.addEventListener('mousedown', function(e) { handlePress(e.clientX - GF.offX, e.clientY); });
 document.addEventListener('keydown', function(e) {
   if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW') {
     e.preventDefault();
@@ -2014,6 +2152,7 @@ GF.init({
   strings: STRINGS,
   sprites: [],
   saveKey: 'flip_dash',
+  drawMargins: drawNeonMargins,
   onReady: function() {
     // ?promo=climax — detected FIRST so it overrides every normal boot path
     // (tutorial gate, login banner, autostart). Gated strictly on the query

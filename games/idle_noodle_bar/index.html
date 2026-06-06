@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Idle Noodle Bar</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #140c1e; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ===========================================================================
+// IDLE NOODLE BAR — a late-night ramen tycoon (idle/incremental)
+// Vanilla JS canvas. Mobile-portrait first (393x852). gf-lib handles canvas,
+// resize, SFX, music, tutorial, particles, shake, persist, scroll, reach gate.
+// In-session idle only (no cross-session offline accrual — that is the iterate
+// job). Tap pot to serve -> coins; buy upgrades/auto-cooks/stations; renovate.
+// ===========================================================================
+
+var ctx = GF.ctx, canvas = GF.canvas;
+var clampF = function(v,lo,hi){ return Math.max(lo, Math.min(hi, v)); };
+
+// ── TUNABLES (mirror DESIGN.md) ──────────────────────────────────────────────
+var SPAWN_BASE        = 1.6;
+var DRAIN_PER_WAITING = 4.2;
+var PATIENCE_MAX      = 100;
+var SERVE_REFILL      = 14;
+var COOK_BASE_MS      = 900;
+var BASE_COIN         = 1;
+var AUTOCOOK_BASE_CPS = 0.5;
+var COST_GROWTH       = 1.15;
+var STATION_MULT      = 2.4;
+var RENOVATE_STAR_MULT= 0.5;
+var RENOVATE_REQ_BASE = 1500;
+var POT_RADIUS        = 78;
+var CUST_R            = 18;
+var MAX_QUEUE_BASE    = 4;     // visible queue cap at station 1; +1 per station
+
+// ── STATIONS (8 dish tiers) ──────────────────────────────────────────────────
+// each unlock multiplies ALL income by STATION_MULT and re-skins the broth.
+var STATIONS = [
+  { en:'Ramen',    ru:'Рамен',    broth:'#e8a23a', accent:'#ffd27a', cost:0 },
+  { en:'Udon',     ru:'Удон',     broth:'#d9cdb0', accent:'#f3e8c8', cost:320 },
+  { en:'Soba',     ru:'Соба',     broth:'#9a6b4a', accent:'#c79a78', cost:1400 },
+  { en:'Tonkotsu', ru:'Тонкоцу',  broth:'#f0e2c8', accent:'#fff4dd', cost:6500 },
+  { en:'Tempura',  ru:'Темпура',  broth:'#e6b24e', accent:'#ffce82', cost:28000 },
+  { en:'Gyoza',    ru:'Гёдза',    broth:'#cfa86a', accent:'#efce96', cost:120000 },
+  { en:'Curry',    ru:'Карри',    broth:'#c9772a', accent:'#f0a14a', cost:520000 },
+  { en:'Hot Pot',  ru:'Хого',     broth:'#d83a2e', accent:'#ff7a5a', cost:2400000 },
+];
+
+// ── UPGRADES ─────────────────────────────────────────────────────────────────
+// kinds: tap (coins/serve), auto (passive cps + auto-serve), speed (auto cadence),
+// mult (global income x). Cost scales by COST_GROWTH^level. Some gate behind a
+// station so new things keep appearing.
+function mkUp(id, kind, en, ru, base, gain, gateStation){
+  return { id:id, kind:kind, en:en, ru:ru, base:base, gain:gain, lvl:0,
+           gate:(gateStation||0), _new:false, _seen:false };
+}
+var UPGRADES = [
+  mkUp('cook1', 'auto',  'Hire Cook',      'Нанять повара',   5,    AUTOCOOK_BASE_CPS, 0),
+  mkUp('tap1',  'tap',   'Sharper Knife',  'Острый нож',      12,   1,    0),
+  mkUp('speed1','speed', 'Faster Burner',  'Мощная горелка',  40,   0.12, 0),
+  mkUp('cook2', 'auto',  'Sous Chef',      'Су-шеф',          90,   1.6,  1),
+  mkUp('mult1', 'mult',  'House Special',  'Фирменное блюдо', 260,  0.5,  1),
+  mkUp('tap2',  'tap',   'Twin Woks',      'Двойной вок',     480,  6,    2),
+  mkUp('cook3', 'auto',  'Line Cook Team', 'Бригада поваров', 1100, 7,    2),
+  mkUp('speed2','speed', 'Pressure Cooker','Скороварка',      2600, 0.18, 3),
+  mkUp('mult2', 'mult',  'Secret Broth',   'Тайный бульон',   5400, 0.8,  3),
+  mkUp('cook4', 'auto',  'Robot Server',   'Робот-официант',  14000,40,   4),
+  mkUp('tap3',  'tap',   'Master Hands',   'Руки мастера',    33000,60,   5),
+  mkUp('mult3', 'mult',  'Michelin Star',  'Звезда Мишлен',   90000,1.4,  6),
+];
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+var gs = 'PLAYING';   // PLAYING | GAMEOVER | RENOVATE | HUB
+var coins = 0;
+var totalEarned = 0;       // lifetime this run (score)
+var bestEarned = 0;        // persisted high score
+var station = 0;           // index into STATIONS (unlocked up to here)
+var renovateLevel = 0;     // prestige stars
+var patience = PATIENCE_MAX;
+var queue = [];            // customers waiting {id, t, hue, served}
+var spawnT = 0;
+var autoServeT = 0;
+var potFill = 0;           // 0..1 visual cook animation
+var potPulse = 0;          // serve squash
+var lifetimeServes = 0;
+var unlockFanfare = 0;     // timer for station-unlock banner
+var fanfareName = '';
+var coinsDisplay = 0;      // smoothed counter for juice
+var tutorialActive = false;
+var bootDone = false;
+
+var SAVE_KEY = 'idle_noodle_bar';
+var TUT_KEY  = 'idle_noodle_bar_tut_v1';
+
+// layout cache (filled each draw; read by input + reach gate)
+var L = {};
+var shopScroll = null;
+var muteBtn = null;
+
+// ── INCOME MATH ───────────────────────────────────────────────────────────────
+function globalMult(){
+  var stationM = Math.pow(STATION_MULT, station);           // each station x2.4
+  var starM = 1 + RENOVATE_STAR_MULT * renovateLevel;       // prestige
+  var multUp = 1;
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='mult') multUp += u.gain*u.lvl; }
+  return stationM * starM * multUp;
+}
+function coinPerServe(){
+  var tap = BASE_COIN;
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='tap') tap += u.gain*u.lvl; }
+  return tap * globalMult();
+}
+function autoCps(){   // passive coins/sec (pre-display)
+  var cps = 0;
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='auto') cps += u.gain*u.lvl; }
+  return cps * globalMult();
+}
+function autoServeInterval(){  // seconds between an auto-cook delivering a bowl
+  var lvls = 0;
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='auto') lvls += u.lvl; }
+  if (lvls <= 0) return 999;          // no auto-cooks -> never auto-serves
+  var speed = 0;
+  for (var j=0;j<UPGRADES.length;j++){ var s=UPGRADES[j]; if (s.kind==='speed') speed += s.gain*s.lvl; }
+  var base = 2.4 / (1 + lvls*0.12);   // more cooks -> faster cadence
+  return Math.max(0.18, base * (1 / (1 + speed)));
+}
+function upgradeCost(u){ return Math.ceil(u.base * Math.pow(COST_GROWTH, u.lvl)); }
+function maxQueue(){ return MAX_QUEUE_BASE + station; }
+function renovateReq(){ return Math.ceil(RENOVATE_REQ_BASE * Math.pow(12, renovateLevel)); }
+function canRenovate(){ return totalEarned >= renovateReq(); }
+function renovateStarsGain(){ return 1; }   // one star per renovate (simple, predictable)
+
+// nextGoal: the cheapest thing the player is saving toward (for the "next goal" line)
+function nextGoal(){
+  // unaffordable station first if it's the immediate gate
+  if (station < STATIONS.length-1){
+    var nx = STATIONS[station+1];
+    // surface the station as the goal once any current upgrade is maxed-ish OR always show it
+    var cheapestUp = null, cc = Infinity;
+    for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.gate<=station){ var c=upgradeCost(u); if (c<cc && coins<c){ cc=c; cheapestUp=u; } } }
+    if (cheapestUp && cc < nx.cost) return { name:(GF.lang==='ru'?cheapestUp.ru:cheapestUp.en), cost:cc };
+    return { name:(GF.lang==='ru'?nx.ru:nx.en), cost:nx.cost, station:true };
+  }
+  // no more stations: goal = renovate
+  return { name:GF.t('renovate'), cost:renovateReq(), renovate:true };
+}
+
+// ── NUMBER FORMAT (K/M/B/T suffix) ────────────────────────────────────────────
+var SUFFIX = ['', 'K', 'M', 'B', 'T', 'aa', 'ab', 'ac', 'ad', 'ae'];
+function fmt(n){
+  n = Math.floor(n);
+  if (n < 1000) return '' + n;
+  var tier = Math.floor(Math.log10(Math.abs(n)) / 3);
+  if (tier >= SUFFIX.length) tier = SUFFIX.length-1;
+  var scaled = n / Math.pow(1000, tier);
+  var s = scaled.toFixed(scaled < 10 ? 2 : (scaled < 100 ? 1 : 0));
+  return s + SUFFIX[tier];
+}
+function fmtRate(n){
+  if (n < 10) return n.toFixed(1);
+  return fmt(n);
+}
+
+// ===========================================================================
+//  LOCALISATION
+// ===========================================================================
+var STRINGS = {
+  en: {
+    cps: '/sec', next_goal: 'Next', serve: 'Serve', tap_pot: 'Tap the pot',
+    patience: 'Crowd', upgrades: 'Upgrades', buy: 'Buy', level: 'Lv',
+    renovate: 'Renovate', renovate_desc: 'Reset for a permanent boost',
+    renovate_confirm: 'Renovate now?', renovate_gain: 'Gain a Star: all income +50% forever',
+    confirm: 'Renovate', cancel: 'Cancel', stars: 'Stars',
+    walked_out: 'The crowd walked out!', kept: 'You kept everything', best: 'Best earned',
+    resume: 'Resume', home: 'Menu', help: 'How to play', close: 'Close',
+    unlock: 'Unlocked', station_open: 'New dish!', locked: 'Locked', need: 'Need',
+    earn_per: 'each', x_income: 'income', faster: 'auto speed', tap_power: 'per tap',
+    auto_income: 'auto income',
+    tut_step_serve: 'Tap the pot to serve a bowl',
+    tut_step_buy: 'Tap here to hire your first cook',
+    tut_step_done: 'Cooks earn coins for you. Serve to keep the crowd happy!',
+    tut_goal: 'Goal: Build the busiest noodle bar - earn coins, buy upgrades, unlock dishes.',
+    tut_controls: 'Tap the pot to serve a bowl. Tap an upgrade to buy it.',
+    tut_win: 'Endless: chase your best coins. Renovate to multiply all income.',
+    tut_lose: 'If too many customers wait unserved, the crowd walks out (you keep everything).',
+    tut_tip: 'Hire auto-cooks early so coins flow while you save for the next dish.',
+    new_pip: 'NEW',
+  },
+  ru: {
+    cps: '/сек', next_goal: 'Цель', serve: 'Подать', tap_pot: 'Нажми на котёл',
+    patience: 'Гости', upgrades: 'Улучшения', buy: 'Купить', level: 'Ур',
+    renovate: 'Ремонт', renovate_desc: 'Сброс ради вечного бонуса',
+    renovate_confirm: 'Сделать ремонт?', renovate_gain: 'Звезда: весь доход +50% навсегда',
+    confirm: 'Ремонт', cancel: 'Отмена', stars: 'Звёзды',
+    walked_out: 'Гости разошлись!', kept: 'Всё сохранено', best: 'Лучший доход',
+    resume: 'Продолжить', home: 'Меню', help: 'Как играть', close: 'Закрыть',
+    unlock: 'Открыто', station_open: 'Новое блюдо!', locked: 'Закрыто', need: 'Нужно',
+    earn_per: 'за бовл', x_income: 'доход', faster: 'скорость', tap_power: 'за нажатие',
+    auto_income: 'авто-доход',
+    tut_step_serve: 'Нажми на котёл, чтобы подать бовл',
+    tut_step_buy: 'Нажми здесь, чтобы нанять повара',
+    tut_step_done: 'Повара зарабатывают за тебя. Подавай, чтобы гости были довольны!',
+    tut_goal: 'Цель: построй лучший лапшичный бар - копи монеты, покупай улучшения, открывай блюда.',
+    tut_controls: 'Нажми на котёл, чтобы подать бовл. Нажми на улучшение, чтобы купить.',
+    tut_win: 'Бесконечно: побей свой рекорд. Ремонт умножает весь доход.',
+    tut_lose: 'Если слишком много гостей ждут, они уйдут (но всё сохранится).',
+    tut_tip: 'Нанимай поваров пораньше  -  монеты идут, пока копишь на новое блюдо.',
+    new_pip: 'НОВОЕ',
+  },
+};
+
+// ===========================================================================
+//  PERSISTENCE (Yandex 1.9)
+// ===========================================================================
+function snapshot(){
+  return {
+    coins: Math.floor(coins), totalEarned: Math.floor(totalEarned),
+    bestEarned: Math.floor(bestEarned), station: station, renovateLevel: renovateLevel,
+    ups: UPGRADES.map(function(u){ return u.lvl; }),
+    seen: UPGRADES.map(function(u){ return u._seen?1:0; }),
+    lifetimeServes: lifetimeServes,
+  };
+}
+function applySnapshot(s){
+  if (!s) return;
+  coins = s.coins||0; totalEarned = s.totalEarned||0; bestEarned = s.bestEarned||0;
+  station = clampF(s.station||0, 0, STATIONS.length-1);
+  renovateLevel = s.renovateLevel||0;
+  lifetimeServes = s.lifetimeServes||0;
+  if (s.ups) for (var i=0;i<UPGRADES.length;i++){ if (typeof s.ups[i]==='number') UPGRADES[i].lvl = s.ups[i]; }
+  if (s.seen) for (var j=0;j<UPGRADES.length;j++){ UPGRADES[j]._seen = !!s.seen[j]; }
+  coinsDisplay = coins;
+}
+function save(){ GF.saveRun(); }
+
+// ===========================================================================
+//  ACTIONS
+// ===========================================================================
+function addCoins(n){ coins += n; totalEarned += n; if (totalEarned > bestEarned) bestEarned = totalEarned; }
+
+function serve(fromTap){
+  if (queue.length === 0){
+    // serving with an empty queue still cooks a "to-go" bowl (keeps the tap fun)
+  }
+  var gain = coinPerServe();
+  addCoins(gain);
+  lifetimeServes++;
+  patience = Math.min(PATIENCE_MAX, patience + SERVE_REFILL);
+  if (queue.length) queue.shift();           // front customer leaves happy
+  potFill = 0; potPulse = 1;
+  // VFX
+  var px = L.potX || GF.cx, py = L.potY || GF.cy;
+  GF.spawnParticles(px, py - POT_RADIUS*GF.S*0.3, STATIONS[station].accent, 10);
+  GF.spawnFloat(px + (Math.random()-0.5)*30*GF.S, py - POT_RADIUS*GF.S*0.6, '+'+fmt(gain), '#ffd86a');
+  GF.sfx(fromTap ? 'coin' : 'pickup');
+  if (fromTap) GF.setShake(0.18);
+  // action-gated tutorial: advance step 1 (serve) when the player serves by tap
+  if (fromTap && GF.tutorial.active && GF.tutorial.step === 0) GF.tutorial.next();
+}
+
+function buyUpgrade(u){
+  var cost = upgradeCost(u);
+  if (coins < cost){ GF.sfx('error'); return false; }
+  coins -= cost; u.lvl++;
+  GF.sfx('click');
+  GF.spawnFloat((L.shopX||GF.cx), (GF.H*0.55), '-'+fmt(cost), '#ff8a6a');
+  save();
+  // action-gated tutorial: advance step 2 (buy) when the player buys the first cook
+  if (GF.tutorial.active && GF.tutorial.step === 1 && u.id === 'cook1') GF.tutorial.next();
+  return true;
+}
+
+function unlockStation(){
+  if (station >= STATIONS.length-1){ GF.sfx('error'); return false; }
+  var nx = STATIONS[station+1];
+  if (coins < nx.cost){ GF.sfx('error'); return false; }
+  coins -= nx.cost; station++;
+  unlockFanfare = 2.6; fanfareName = (GF.lang==='ru'?STATIONS[station].ru:STATIONS[station].en);
+  GF.sfx('unlock'); GF.setShake(0.6);
+  GF.spawnParticles(GF.cx, GF.H*0.34, STATIONS[station].accent, 36);
+  save();
+  return true;
+}
+
+function doRenovate(){
+  if (!canRenovate()){ GF.sfx('error'); return; }
+  renovateLevel += renovateStarsGain();
+  // reset run economy but keep best + stars
+  coins = 0; totalEarned = 0; station = 0; patience = PATIENCE_MAX; queue = [];
+  for (var i=0;i<UPGRADES.length;i++) UPGRADES[i].lvl = 0;
+  coinsDisplay = 0;
+  gs = 'PLAYING';
+  unlockFanfare = 2.6; fanfareName = GF.t('stars')+' +1';
+  GF.sfx('evolve'); GF.setShake(0.8);
+  save();
+}
+
+function triggerGameOver(){
+  gs = 'GAMEOVER'; GF.sfx('lose');
+  save();
+}
+function resumeFromGameOver(){
+  patience = PATIENCE_MAX; queue = []; spawnT = 0; gs = 'PLAYING';
+  GF.sfx('reward'); save();
+}
+
+// ===========================================================================
+//  UPDATE
+// ===========================================================================
+function update(dt){
+  GF.tutorial.update(dt);
+
+  // smooth the displayed coin counter toward true value (juice)
+  coinsDisplay += (coins - coinsDisplay) * Math.min(1, dt*8);
+
+  potPulse = Math.max(0, potPulse - dt*3);
+  if (unlockFanfare > 0) unlockFanfare = Math.max(0, unlockFanfare - dt);
+
+  if (gs !== 'PLAYING'){ return; }
+
+  // visual pot fill cook anim
+  potFill = Math.min(1, potFill + dt * (1000/COOK_BASE_MS));
+
+  // passive income
+  var cps = autoCps();
+  if (cps > 0){
+    addCoins(cps * dt);
+  }
+
+  // freeze the threat while the tutorial coach is up (first-seconds safety)
+  var frozen = GF.tutorial.active;
+
+  if (!frozen){
+    // spawn customers
+    spawnT += dt;
+    var spawnEvery = SPAWN_BASE / (1 + station*0.18 + renovateLevel*0.06);
+    if (spawnT >= spawnEvery && queue.length < maxQueue()){
+      spawnT = 0;
+      queue.push({ t:0, hue: 20 + Math.random()*320 });
+    }
+    // queued customers age (used for drain weighting)
+    for (var i=0;i<queue.length;i++) queue[i].t += dt;
+
+    // auto-cook serving
+    if (autoCps() > 0){
+      autoServeT += dt;
+      var iv = autoServeInterval();
+      while (autoServeT >= iv){
+        autoServeT -= iv;
+        if (queue.length > 0){
+          queue.shift();
+          patience = Math.min(PATIENCE_MAX, patience + SERVE_REFILL*0.7);
+          // a small steam puff shows the auto-cook delivered a bowl. Coins are
+          // already credited via passive cps, so NO coin float here (a "+0"
+          // float reads as meaningless noise).
+          var px = L.potX || GF.cx, py = L.potY || GF.cy;
+          GF.spawnParticles(px + (Math.random()-0.5)*30*GF.S, py - 30*GF.S, '#bfe', 4);
+        } else break;
+      }
+    }
+
+    // patience drain from waiting (unserved) customers
+    var waiting = queue.length;
+    if (waiting > 0){
+      patience -= DRAIN_PER_WAITING * waiting * dt;
+    } else {
+      patience = Math.min(PATIENCE_MAX, patience + 6*dt);   // slow recover when empty
+    }
+    if (patience <= 0){ patience = 0; triggerGameOver(); }
+  }
+
+  // mark newly-affordable upgrades (for the NEW pip + glow)
+  for (var k=0;k<UPGRADES.length;k++){
+    var u = UPGRADES[k];
+    if (u.gate <= station && coins >= upgradeCost(u) && !u._seen){ u._new = true; }
+  }
+}
+
+// ===========================================================================
+//  DRAW
+// ===========================================================================
+function bgGrad(){
+  var W=GF.W, H=GF.H;
+  var g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, '#1a1030');
+  g.addColorStop(0.45, '#2a1430');
+  g.addColorStop(1, '#120a1c');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // hanging lanterns (top band)
+  var S=GF.S;
+  for (var i=0;i<6;i++){
+    var lx = (i+0.5)/6 * W;
+    var ly = 8*S + (i%2)*10*S;
+    ctx.save(); ctx.globalAlpha=0.5;
+    var lg = ctx.createRadialGradient(lx,ly,2*S,lx,ly,30*S);
+    lg.addColorStop(0,'rgba(255,160,90,0.7)'); lg.addColorStop(1,'rgba(255,120,60,0)');
+    ctx.fillStyle=lg; ctx.beginPath(); ctx.arc(lx,ly,30*S,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawCoinIcon(c, x, y, r){
+  c.save(); c.translate(x,y);
+  var g = c.createLinearGradient(0,-r,0,r);
+  g.addColorStop(0,'#ffe680'); g.addColorStop(1,'#e6a52a');
+  c.fillStyle=g; c.beginPath(); c.arc(0,0,r,0,Math.PI*2); c.fill();
+  c.strokeStyle='#b07d10'; c.lineWidth=Math.max(1,r*0.12); c.stroke();
+  c.fillStyle='#c98a1a'; c.font='bold '+(r*1.15)+'px Georgia, serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText('¥', 0, r*0.06);
+  c.restore();
+}
+
+function drawStarIcon(c,x,y,r,filled){
+  c.save(); c.translate(x,y); c.beginPath();
+  for (var i=0;i<10;i++){ var a=i/10*Math.PI*2-Math.PI/2; var rr=(i%2?r*0.45:r); c.lineTo(Math.cos(a)*rr,Math.sin(a)*rr); }
+  c.closePath(); c.fillStyle=filled?'#ffd23a':'#4a4458'; c.fill(); c.restore();
+}
+
+// the pot + steam + bowls
+function drawPot(x, y, r){
+  var S=GF.S, st=STATIONS[station];
+  ctx.save();
+  var squash = 1 - potPulse*0.08;
+  ctx.translate(x, y); ctx.scale(1, squash);
+  // counter shadow
+  ctx.save(); ctx.globalAlpha=0.35; ctx.fillStyle='#000';
+  ctx.beginPath(); ctx.ellipse(0, r*0.95, r*1.05, r*0.32, 0,0,Math.PI*2); ctx.fill(); ctx.restore();
+  // pot body
+  var pg = ctx.createLinearGradient(0,-r,0,r);
+  pg.addColorStop(0,'#3a3a44'); pg.addColorStop(1,'#1c1c24');
+  ctx.fillStyle=pg;
+  GF.rr(ctx, -r, -r*0.5, r*2, r*1.5, r*0.32); ctx.fill();
+  ctx.strokeStyle='#54545e'; ctx.lineWidth=3*S; ctx.stroke();
+  // broth surface
+  var bg = ctx.createRadialGradient(0,-r*0.45, r*0.2, 0,-r*0.45, r);
+  bg.addColorStop(0, st.accent); bg.addColorStop(1, st.broth);
+  ctx.fillStyle=bg; ctx.beginPath(); ctx.ellipse(0,-r*0.45,r*0.9,r*0.34,0,0,Math.PI*2); ctx.fill();
+  // noodles hint
+  ctx.strokeStyle='rgba(255,245,210,0.55)'; ctx.lineWidth=2*S;
+  for (var n=0;n<4;n++){ ctx.beginPath(); ctx.arc((n-1.5)*r*0.3, -r*0.45, r*0.18, 0.2, Math.PI-0.2); ctx.stroke(); }
+  // pot handles
+  ctx.strokeStyle='#44444e'; ctx.lineWidth=5*S;
+  ctx.beginPath(); ctx.arc(-r*1.02, 0, r*0.22, -0.6, 0.6); ctx.stroke();
+  ctx.beginPath(); ctx.arc(r*1.02, 0, r*0.22, Math.PI-0.6, Math.PI+0.6); ctx.stroke();
+  ctx.restore();
+
+  // steam (drawn unsquashed)
+  var t = (typeof performance!=='undefined'?performance.now():Date.now())/1000;
+  ctx.save(); ctx.globalAlpha=0.4; ctx.strokeStyle='#fff'; ctx.lineWidth=3*S; ctx.lineCap='round';
+  for (var s=0;s<3;s++){
+    var sx = x + (s-1)*r*0.45;
+    ctx.beginPath();
+    for (var yy=0; yy<=1; yy+=0.1){
+      var py = y - r*0.7 - yy*r*1.1;
+      var px = sx + Math.sin(yy*6 + t*2 + s)*r*0.14;
+      if (yy===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCustomer(x, y, r, hue, urgent){
+  ctx.save(); ctx.translate(x,y);
+  // body
+  ctx.fillStyle='hsl('+hue+',55%,55%)';
+  GF.rr(ctx, -r*0.7, -r*0.1, r*1.4, r*1.3, r*0.4); ctx.fill();
+  // head
+  ctx.fillStyle='#ffd9b0'; ctx.beginPath(); ctx.arc(0,-r*0.5,r*0.6,0,Math.PI*2); ctx.fill();
+  // hungry mark
+  if (urgent){ ctx.fillStyle='#ff5a5a'; ctx.font='bold '+(r*0.9)+'px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('!', 0, -r*1.15); }
+  ctx.restore();
+}
+
+// top bar: coins, cps, stars, mute
+function drawTopBar(){
+  var S=GF.S, W=GF.W;
+  var h = 64*S;
+  ctx.fillStyle='rgba(12,8,20,0.78)'; ctx.fillRect(0,0,W,h);
+  // stars (top-left)
+  var sx = 12*S, sy = h*0.5;
+  drawStarIcon(ctx, sx+10*S, sy, 9*S, renovateLevel>0);
+  ctx.fillStyle='#ffd23a'; ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText('x'+renovateLevel, sx+24*S, sy);
+  // coins (center, big)
+  drawCoinIcon(ctx, W*0.5 - 60*S, h*0.42, 11*S);
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(26*S,18,34)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(fmt(coinsDisplay), W*0.5 - 44*S, h*0.40);
+  // cps line
+  ctx.fillStyle='#8fe6b0'; ctx.font=clampF(12*S,10,15)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('+'+fmtRate(autoCps())+' '+GF.t('cps'), W*0.5, h*0.78);
+  // mute (top-right)
+  var mr = 13*S; muteBtn = { x:W-34*S, y:h*0.5-mr, w:mr*2, h:mr*2 };
+  GF.drawMuteIcon(ctx, W-34*S+mr, h*0.5, mr, GF.muted);
+}
+
+// patience bar (lose signal)
+function drawPatience(yTop){
+  var S=GF.S, W=GF.W;
+  var pad=12*S, h=14*S, w=W-pad*2;
+  var frac = patience/PATIENCE_MAX;
+  ctx.fillStyle='rgba(0,0,0,0.45)'; GF.rr(ctx, pad, yTop, w, h, h/2); ctx.fill();
+  var col = frac>0.4 ? '#4fd07a' : frac>0.2 ? '#ffb13a' : '#ff4a4a';
+  var pulse = frac<0.4 ? (0.7+0.3*Math.sin((performance.now()/1000)*8)) : 1;
+  ctx.save(); ctx.globalAlpha=pulse;
+  ctx.fillStyle=col; GF.rr(ctx, pad, yTop, Math.max(0,w*frac), h, h/2); ctx.fill();
+  ctx.restore();
+  // label
+  ctx.fillStyle='#cdd'; ctx.font=clampF(10*S,9,13)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('patience'), pad+4*S, yTop+h*0.5);
+}
+
+// queue strip of customers
+function drawQueue(yTop){
+  var S=GF.S, W=GF.W;
+  var r = CUST_R*S;
+  var n = queue.length, maxN = maxQueue();
+  var gap = (W-40*S) / Math.max(maxN, 1);
+  L.queueRects = [];
+  for (var i=0;i<n;i++){
+    var cx = 28*S + i*gap + gap*0.0;
+    var urgent = queue[i].t > 3;
+    drawCustomer(cx, yTop + r, r, queue[i].hue, urgent);
+  }
+}
+
+// the play area: pot + station name + next goal
+function drawPlayArea(yTop, yBot){
+  var S=GF.S, W=GF.W;
+  var midY = (yTop+yBot)*0.5;
+  var r = Math.min(POT_RADIUS*S, (yBot-yTop)*0.34);
+  L.potX = W*0.5; L.potY = midY - r*0.1; L.potR = r;
+  // station name
+  ctx.fillStyle='#ffd27a'; ctx.font='bold '+clampF(18*S,14,24)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText((GF.lang==='ru'?STATIONS[station].ru:STATIONS[station].en), W*0.5, yTop+16*S);
+  // pot
+  drawPot(L.potX, L.potY, r);
+  // "Serve" hint ring + tap cue when no auto-cooks yet
+  if (autoCps() === 0 && !GF.tutorial.active){
+    var pt = 0.5+0.5*Math.sin(performance.now()/300);
+    ctx.save(); ctx.globalAlpha=0.4+0.3*pt; ctx.strokeStyle='#ffd27a'; ctx.lineWidth=2*S;
+    ctx.beginPath(); ctx.arc(L.potX, L.potY, r*1.25, 0, Math.PI*2); ctx.stroke(); ctx.restore();
+  }
+  // next goal line
+  var goal = nextGoal();
+  ctx.fillStyle='#9ab'; ctx.font=clampF(12*S,10,16)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  var label = GF.t('next_goal')+': '+goal.name+'  '+fmt(goal.cost);
+  ctx.fillText(label, W*0.5, yBot-14*S);
+}
+
+// ── SHOP (scrollable list) ────────────────────────────────────────────────────
+// visible upgrade rows = unlocked-or-soon upgrades, plus the NEXT station unlock
+// row (if any), plus the renovate row at the end. The whole list scrolls.
+function shopRowList(){
+  var rows = [];
+  // station unlock row (next station) — shown as a buy-to-unlock at the TOP of shop
+  if (station < STATIONS.length-1){
+    var nx = STATIONS[station+1];
+    rows.push({ type:'station', station:station+1, name:(GF.lang==='ru'?nx.ru:nx.en), cost:nx.cost });
+  }
+  // upgrades that are unlocked (gate<=station) OR the next gate (preview, locked)
+  for (var i=0;i<UPGRADES.length;i++){
+    var u=UPGRADES[i];
+    if (u.gate <= station){ rows.push({ type:'up', u:u }); }
+    else if (u.gate === station+1){ rows.push({ type:'up', u:u, locked:true }); }
+  }
+  // renovate row (always last)
+  rows.push({ type:'renovate' });
+  return rows;
+}
+
+function drawShop(yTop, yBot){
+  var S=GF.S, W=GF.W;
+  // panel bg
+  ctx.fillStyle='rgba(10,8,18,0.92)'; ctx.fillRect(0, yTop, W, yBot-yTop);
+  // header
+  ctx.fillStyle='#cdd'; ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('upgrades'), 14*S, yTop+16*S);
+  // home/help button (top-right of shop header) — BIG-ish, reachable
+  var hbW=78*S, hbH=26*S;
+  L.homeBtn = { x:W-hbW-12*S, y:yTop+4*S, w:hbW, h:hbH };
+  ctx.fillStyle='rgba(120,90,200,0.9)'; GF.rr(ctx, L.homeBtn.x, L.homeBtn.y, hbW, hbH, hbH/2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('home'), L.homeBtn.x+hbW/2, L.homeBtn.y+hbH/2);
+
+  var listTop = yTop + 30*S;
+  var listH = yBot - listTop - 6*S;
+  if (!shopScroll) shopScroll = GF.makeScroll('shop_list', {x:0,y:listTop,w:W,h:listH});
+  shopScroll.setViewport({ x:0, y:listTop, w:W, h:listH });
+
+  var rows = shopRowList();
+  var ROW_H = 76*S, GAP = 8*S;
+  var contentH = rows.length*(ROW_H+GAP) - GAP + 8*S;
+  shopScroll.setContentHeight(contentH);
+  shopScroll.update();
+
+  L.shopRows = [];   // content-space rects for hit-testing + reach gate
+  shopScroll.begin(ctx);
+  for (var i=0;i<rows.length;i++){
+    var y = i*(ROW_H+GAP);
+    drawShopRow(rows[i], 10*S, y, W-20*S, ROW_H);
+    L.shopRows.push({ y:y, h:ROW_H, x:10*S, w:W-20*S, row:rows[i] });
+  }
+  shopScroll.end(ctx);
+  shopScroll.draw(ctx);
+  L.shopTop = listTop; L.shopH = listH; L.shopX = W*0.5;
+}
+
+function drawShopRow(row, x, y, w, h){
+  var S=GF.S;
+  var affordable=false, cost=0, name='', effect='', lvl=-1, locked=false, isNew=false, kindCol='#2a2a3a', icon='coin';
+  if (row.type==='station'){
+    cost=row.cost; affordable = coins>=cost; name=GF.t('station_open')+' '+row.name; effect='income x'+STATION_MULT.toFixed(1);
+    kindCol='#7a3ce0'; icon='star';
+  } else if (row.type==='renovate'){
+    cost=renovateReq(); affordable=canRenovate(); name=GF.t('renovate'); effect=GF.t('renovate_desc');
+    kindCol='#e0a13c'; icon='star';
+  } else {
+    var u=row.u; cost=upgradeCost(u); affordable = coins>=cost && !row.locked; locked=!!row.locked;
+    name=(GF.lang==='ru'?u.ru:u.en); lvl=u.lvl; isNew=u._new && !u._seen;
+    if (u.kind==='auto'){ effect='+'+fmtRate(u.gain)+' '+GF.t('cps')+' '+GF.t('auto_income'); kindCol='#2e7ad0'; }
+    else if (u.kind==='tap'){ effect='+'+fmt(u.gain)+' '+GF.t('tap_power'); kindCol='#d04e7a'; }
+    else if (u.kind==='speed'){ effect='+'+Math.round(u.gain*100)+'% '+GF.t('faster'); kindCol='#3cb0a0'; }
+    else if (u.kind==='mult'){ effect='+'+Math.round(u.gain*100)+'% '+GF.t('x_income'); kindCol='#d0a03c'; }
+  }
+  ctx.save();
+  // row bg
+  var bgc = locked ? 'rgba(20,20,28,0.7)' : (affordable ? 'rgba(30,40,30,0.95)' : 'rgba(24,24,34,0.92)');
+  GF.rr(ctx, x, y, w, h, 12*S); ctx.fillStyle=bgc; ctx.fill();
+  if (affordable && !locked){
+    var pulse=0.5+0.5*Math.sin(performance.now()/350);
+    ctx.save(); ctx.globalAlpha=0.5+0.4*pulse; ctx.strokeStyle='#4fd07a'; ctx.lineWidth=2*S;
+    GF.rr(ctx, x, y, w, h, 12*S); ctx.stroke(); ctx.restore();
+  }
+  // icon chip
+  ctx.fillStyle=kindCol; GF.rr(ctx, x+8*S, y+h*0.5-22*S, 44*S, 44*S, 10*S); ctx.fill();
+  if (icon==='star') drawStarIcon(ctx, x+30*S, y+h*0.5, 15*S, true);
+  else drawCoinIcon(ctx, x+30*S, y+h*0.5, 14*S);
+  // name
+  ctx.fillStyle = locked ? '#888' : '#fff';
+  ctx.font='bold '+clampF(14*S,12,18)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  ctx.fillText(name, x+62*S, y+24*S);
+  // level badge
+  if (lvl>=0){
+    ctx.fillStyle='#7a8'; ctx.font=clampF(11*S,9,14)+'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('level')+' '+lvl, x+w-70*S, y+22*S);
+  }
+  // effect
+  ctx.fillStyle = locked ? '#666' : '#9ab'; ctx.font=clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(effect, x+62*S, y+44*S);
+  // cost / lock
+  if (locked){
+    ctx.fillStyle='#a66'; ctx.font='bold '+clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='right';
+    ctx.fillText(GF.t('locked'), x+w-12*S, y+h*0.5+14*S);
+  } else {
+    ctx.textAlign='right'; ctx.textBaseline='middle';
+    drawCoinIcon(ctx, x+w-12*S-getCostW(cost)-10*S, y+h*0.5+12*S, 9*S);
+    ctx.fillStyle = affordable ? '#ffd86a' : '#c98';
+    ctx.font='bold '+clampF(14*S,12,18)+'px Inter, system-ui, sans-serif';
+    ctx.fillText(fmt(cost), x+w-12*S, y+h*0.5+12*S);
+  }
+  // NEW pip
+  if (isNew && !locked){
+    ctx.fillStyle='#ff5a5a'; GF.rr(ctx, x+w-44*S, y+6*S, 38*S, 16*S, 8*S); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold '+clampF(9*S,8,12)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(GF.t('new_pip'), x+w-25*S, y+14*S);
+  }
+  ctx.restore();
+}
+function getCostW(cost){
+  ctx.save(); ctx.font='bold '+clampF(14*GF.S,12,18)+'px Inter, system-ui, sans-serif';
+  var w = ctx.measureText(fmt(cost)).width; ctx.restore(); return w;
+}
+
+// unlock fanfare banner
+function drawFanfare(){
+  if (unlockFanfare<=0) return;
+  var S=GF.S, W=GF.W, H=GF.H;
+  var a = Math.min(1, unlockFanfare/0.4) * Math.min(1, (2.6-unlockFanfare)/0.3+0.3);
+  ctx.save(); ctx.globalAlpha=clampF(a,0,1);
+  var by=H*0.30, bh=64*S, bw=Math.min(W*0.8, 320*S), bx=W*0.5-bw/2;
+  ctx.shadowColor='rgba(255,180,80,0.7)'; ctx.shadowBlur=24*S;
+  var g=ctx.createLinearGradient(bx,by,bx,by+bh); g.addColorStop(0,'#ffce82'); g.addColorStop(1,'#e0902a');
+  ctx.fillStyle=g; GF.rr(ctx,bx,by,bw,bh,16*S); ctx.fill();
+  ctx.shadowColor='transparent';
+  ctx.fillStyle='#3a1c08'; ctx.font='bold '+clampF(15*S,12,20)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('station_open'), W*0.5, by+22*S);
+  ctx.font='bold '+clampF(20*S,16,28)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(fanfareName, W*0.5, by+44*S);
+  ctx.restore();
+}
+
+// ── OVERLAYS ──────────────────────────────────────────────────────────────────
+function panel(title){
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.fillStyle='rgba(8,6,14,0.9)'; ctx.fillRect(0,0,W,H);
+  var pw=Math.min(W*0.86, 360*S), ph=Math.min(H*0.62, 420*S), px=W*0.5-pw/2, py=H*0.5-ph/2;
+  ctx.fillStyle='#1a1626'; GF.rr(ctx,px,py,pw,ph,18*S); ctx.fill();
+  ctx.strokeStyle='#3a3450'; ctx.lineWidth=2*S; GF.rr(ctx,px,py,pw,ph,18*S); ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(22*S,17,30)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(title, W*0.5, py+30*S);
+  return { px:px, py:py, pw:pw, ph:ph };
+}
+function bigBtn(rect, label, colA, colB){
+  var g=ctx.createLinearGradient(rect.x,rect.y,rect.x,rect.y+rect.h);
+  g.addColorStop(0,colA); g.addColorStop(1,colB);
+  ctx.save(); ctx.shadowColor=colA+'88'; ctx.shadowBlur=16*GF.S;
+  GF.rr(ctx,rect.x,rect.y,rect.w,rect.h,rect.h/2); ctx.fillStyle=g; ctx.fill(); ctx.restore();
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(16*GF.S,13,22)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(label, rect.x+rect.w/2, rect.y+rect.h/2);
+}
+
+function drawGameOver(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('walked_out'));
+  ctx.fillStyle='#9ab'; ctx.font=clampF(14*S,11,18)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('kept'), W*0.5, p.py+72*S);
+  drawCoinIcon(ctx, W*0.5-50*S, p.py+108*S, 14*S);
+  ctx.fillStyle='#ffd86a'; ctx.font='bold '+clampF(24*S,18,32)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left';
+  ctx.fillText(fmt(coins), W*0.5-32*S, p.py+108*S);
+  ctx.fillStyle='#789'; ctx.font=clampF(12*S,10,16)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText(GF.t('best')+': '+fmt(bestEarned), W*0.5, p.py+150*S);
+  var bw=p.pw*0.7, bx=W*0.5-bw/2;
+  L.goResume = { x:bx, y:p.py+p.ph-110*S, w:bw, h:52*S };
+  bigBtn(L.goResume, GF.t('resume'), '#2ee07a','#23a657');
+  L.goHelp = { x:bx, y:p.py+p.ph-48*S, w:bw, h:40*S };
+  bigBtn(L.goHelp, GF.t('help'), '#5a5470','#3a3450');
+}
+
+function drawHub(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('home'));
+  // renovate big button (glows when affordable)
+  var bw=p.pw*0.78, bx=W*0.5-bw/2;
+  L.hubReno = { x:bx, y:p.py+70*S, w:bw, h:64*S };
+  var canR = canRenovate();
+  bigBtn(L.hubReno, GF.t('renovate')+'   +1', canR?'#ffce5a':'#6a5a3a', canR?'#e09a2a':'#4a3e2a');
+  // vector star next to the "+1" (NEVER an emoji/symbol glyph in fillText)
+  ctx.save(); ctx.font='bold '+clampF(16*S,13,22)+'px Inter, system-ui, sans-serif';
+  var _lblW = ctx.measureText(GF.t('renovate')+'   +1').width; ctx.restore();
+  drawStarIcon(ctx, L.hubReno.x+L.hubReno.w/2 + _lblW/2 + 14*S, L.hubReno.y+L.hubReno.h/2, 9*S, true);
+  ctx.fillStyle='#9ab'; ctx.font=clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('need')+' '+fmt(renovateReq())+'  ('+GF.t('best')+' '+fmt(totalEarned)+')', W*0.5, p.py+148*S);
+  // help button
+  L.hubHelp = { x:bx, y:p.py+176*S, w:bw, h:50*S };
+  bigBtn(L.hubHelp, GF.t('help'), '#7a5ce0','#5a3cc0');
+  // close
+  L.hubClose = { x:bx, y:p.py+p.ph-58*S, w:bw, h:48*S };
+  bigBtn(L.hubClose, GF.t('close'), '#2ee07a','#23a657');
+  // stars line
+  ctx.fillStyle='#ffd23a'; ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('stars')+': '+renovateLevel, W*0.5, p.py+p.ph-90*S);
+}
+
+function drawRenovateConfirm(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('renovate_confirm'));
+  ctx.fillStyle='#ffd86a'; ctx.font=clampF(14*S,11,18)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  wrapLine(GF.t('renovate_gain'), W*0.5, p.py+90*S, p.pw*0.84, clampF(20*S,16,26));
+  var bw=p.pw*0.7, bx=W*0.5-bw/2;
+  L.renoYes = { x:bx, y:p.py+p.ph-118*S, w:bw, h:52*S };
+  bigBtn(L.renoYes, GF.t('confirm'), '#ffce5a','#e09a2a');
+  L.renoNo = { x:bx, y:p.py+p.ph-56*S, w:bw, h:44*S };
+  bigBtn(L.renoNo, GF.t('cancel'), '#5a5470','#3a3450');
+}
+
+// help card (reopen tutorial recap) — drawn as overlay when helpOpen
+var helpOpen = false;
+function drawHelp(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('help'));
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  var yy=p.py+58*S, lh=clampF(17*S,14,22);
+  for (var i=0;i<lines.length;i++){
+    ctx.fillStyle = i===4 ? '#8fe6b0' : '#cdd';
+    ctx.font=clampF(12.5*S,11,16)+'px Inter, system-ui, sans-serif';
+    yy = wrapLineLeft(lines[i], p.px+18*S, yy, p.pw-36*S, lh) + 8*S;
+  }
+  var bw=p.pw*0.7, bx=W*0.5-bw/2;
+  L.helpClose = { x:bx, y:p.py+p.ph-56*S, w:bw, h:46*S };
+  bigBtn(L.helpClose, GF.t('close'), '#2ee07a','#23a657');
+}
+
+function wrapLine(text, cx, cy, maxW, lh){
+  ctx.textAlign='center';
+  var words=String(text).split(/\s+/), lines=[], cur='';
+  for (var i=0;i<words.length;i++){ var pr=cur?cur+' '+words[i]:words[i];
+    if (ctx.measureText(pr).width>maxW && cur){ lines.push(cur); cur=words[i]; } else cur=pr; }
+  if (cur) lines.push(cur);
+  var sy=cy-(lines.length-1)*lh/2;
+  for (var j=0;j<lines.length;j++) ctx.fillText(lines[j], cx, sy+j*lh);
+}
+function wrapLineLeft(text, x, y, maxW, lh){
+  var words=String(text).split(/\s+/), cur='', yy=y;
+  for (var i=0;i<words.length;i++){ var pr=cur?cur+' '+words[i]:words[i];
+    if (ctx.measureText(pr).width>maxW && cur){ ctx.fillText(cur, x, yy); yy+=lh; cur=words[i]; } else cur=pr; }
+  if (cur){ ctx.fillText(cur, x, yy); yy+=lh; }
+  return yy;
+}
+
+// ── MAIN DRAW ─────────────────────────────────────────────────────────────────
+function layout(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  L.topH = 64*S;
+  L.patY = L.topH + 6*S;
+  L.queueY = L.patY + 24*S;
+  L.playTop = L.queueY + (CUST_R*S*2) + 10*S;
+  // shop takes the bottom ~46% but at least 300px tall content area on tall screens
+  L.shopY = Math.max(L.playTop + 150*S, H*0.54);
+  L.shopBot = H;
+  L.playBot = L.shopY;
+}
+
+function draw(){
+  layout();
+  bgGrad();
+  drawTopBar();
+  drawPatience(L.patY);
+  drawQueue(L.queueY);
+  drawPlayArea(L.playTop, L.playBot);
+  drawShop(L.shopY, L.shopBot);
+  drawFanfare();
+
+  if (gs==='GAMEOVER') drawGameOver();
+  else if (gs==='HUB') { if (helpOpen) drawHelp(); else drawHub(); }
+  else if (gs==='RENOVATE') drawRenovateConfirm();
+  else if (helpOpen) drawHelp();
+
+  // tutorial overlay LAST (so it sits on top of the live board)
+  GF.tutorial.draw(ctx);
+}
+
+// ===========================================================================
+//  INPUT (pointer; rect-scale recompute each event; scroll-aware shop)
+// ===========================================================================
+function evtPos(e){
+  var rect = canvas.getBoundingClientRect();
+  var sx = canvas.width/rect.width, sy = canvas.height/rect.height;
+  var cx = (e.touches ? e.touches[0].clientX : e.clientX);
+  var cy = (e.touches ? e.touches[0].clientY : e.clientY);
+  return { x:(cx-rect.left)*sx, y:(cy-rect.top)*sy };
+}
+function hit(r,x,y){ return r && x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
+function hitScrolled(rect,x,y,sc){
+  if (!rect||!sc) return false;
+  if (!sc.contains(x,y)) return false;
+  var cy = sc.screenToContentY(y);
+  return x>=rect.x && x<=rect.x+rect.w && cy>=rect.y && cy<=rect.y+rect.h;
+}
+
+var pointerDown=false, TAP_SLOP=8, press=null;
+
+function onDown(x,y){
+  // tutorial routing:
+  //  - the skip pill always consumes the tap (closes the tutorial).
+  //  - 'auto' steps: swallow taps so the world stays frozen until the timer.
+  //  - 'manual' steps (serve / buy): let the tap FALL THROUGH to the real game
+  //    action below, which calls GF.tutorial.next() on success (action-gated).
+  if (GF.tutorial.active){
+    var stp = GF.tutorial.steps[GF.tutorial.step];
+    var sb = GF.tutorial._skipBtn;
+    if (sb && x>=sb.x && x<=sb.x+sb.w && y>=sb.y && y<=sb.y+sb.h){ GF.tutorial.handleClick(x,y); return; }
+    if (stp && stp.advance==='auto'){ return; }   // swallow during the auto recap beat
+    // else: manual step — fall through to the real action (serve / buy a cook).
+  }
+  // overlays
+  if (helpOpen){ if (hit(L.helpClose,x,y)){ helpOpen=false; GF.sfx('tap'); } return; }
+  if (gs==='GAMEOVER'){
+    if (hit(L.goResume,x,y)) resumeFromGameOver();
+    else if (hit(L.goHelp,x,y)){ helpOpen=true; GF.sfx('tap'); }
+    return;
+  }
+  if (gs==='RENOVATE'){
+    if (hit(L.renoYes,x,y)) doRenovate();
+    else if (hit(L.renoNo,x,y)){ gs='PLAYING'; GF.sfx('tap'); }
+    return;
+  }
+  if (gs==='HUB'){
+    if (hit(L.hubReno,x,y)){ if (canRenovate()){ gs='RENOVATE'; GF.sfx('tap'); } else GF.sfx('error'); }
+    else if (hit(L.hubHelp,x,y)){ helpOpen=true; GF.sfx('tap'); }
+    else if (hit(L.hubClose,x,y)){ gs='PLAYING'; GF.sfx('tap'); }
+    return;
+  }
+  // PLAYING:
+  // mute toggle
+  if (muteBtn && hit(muteBtn,x,y)){ var m=GF.toggleMute(); GF.setMusicMuted(m); GF.sfx('tap'); return; }
+  // shop home button
+  if (hit(L.homeBtn,x,y)){ gs='HUB'; GF.sfx('tap'); return; }
+  // shop list: start a press that may become a scroll-drag or a tap
+  if (shopScroll && shopScroll.contains(x,y)){
+    press = { x0:x, y0:y, scroll:shopScroll, moved:false };
+    return;
+  }
+  // tap the pot / play area -> serve
+  serve(true);
+}
+
+function onMove(x,y){
+  if (press){
+    if (!press.moved && (Math.abs(x-press.x0)>TAP_SLOP || Math.abs(y-press.y0)>TAP_SLOP)){
+      press.moved=true; if (press.scroll) press.scroll.dragStart(press.y0);
+    }
+    if (press.moved && press.scroll) press.scroll.dragMove(y);
+  }
+}
+function onUp(x,y){
+  if (press){
+    if (press.scroll) press.scroll.dragEnd();
+    if (!press.moved){ shopTap(x,y); }
+    press=null;
+  }
+}
+function shopTap(x,y){
+  if (!L.shopRows || !shopScroll) return;
+  for (var i=0;i<L.shopRows.length;i++){
+    var sr=L.shopRows[i];
+    if (hitScrolled(sr, x, y, shopScroll)){
+      var row=sr.row;
+      if (row.type==='station'){
+        unlockStation();
+      } else if (row.type==='renovate'){
+        if (canRenovate()){ gs='RENOVATE'; GF.sfx('tap'); } else GF.sfx('error');
+      } else if (row.type==='up' && !row.locked){
+        var u=row.u;
+        var ok = buyUpgrade(u);
+        if (ok){ u._seen=true; u._new=false; }
+      } else { GF.sfx('error'); }
+      return;
+    }
+  }
+}
+function onWheel(dy){ if (shopScroll && gs==='PLAYING' && !helpOpen) shopScroll.handleWheel(dy); }
+
+canvas.addEventListener('mousedown', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); });
+window.addEventListener('mousemove', function(e){ if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); });
+window.addEventListener('mouseup', function(e){ if(!pointerDown) return; pointerDown=false; var p=evtPos(e); onUp(p.x,p.y); });
+canvas.addEventListener('touchstart', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); }, {passive:false});
+canvas.addEventListener('touchmove', function(e){ e.preventDefault(); if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); }, {passive:false});
+canvas.addEventListener('touchend', function(e){ e.preventDefault(); if(!pointerDown) return; pointerDown=false; var t=e.changedTouches[0]; var rect=canvas.getBoundingClientRect(); var sx=canvas.width/rect.width, sy=canvas.height/rect.height; onUp((t.clientX-rect.left)*sx,(t.clientY-rect.top)*sy); }, {passive:false});
+canvas.addEventListener('wheel', function(e){ var rect=canvas.getBoundingClientRect(); var sy=canvas.height/rect.height; onWheel(e.deltaY*sy); }, {passive:false});
+
+// ===========================================================================
+//  TUTORIAL (demo hand, action-gated)
+// ===========================================================================
+function startTutorial(force){
+  // step targets resolve live (pot moves with layout; first shop row position)
+  GF.tutorial.start([
+    { text: GF.t('tut_step_serve'),
+      target: function(){ return { x:L.potX||GF.cx, y:L.potY||GF.cy, r:(L.potR||60) }; },
+      gesture:'tap', advance:'manual' },
+    { text: GF.t('tut_step_buy'),
+      target: function(){
+        // point at the "Hire Cook" row in the shop (first 'up' row). It is in
+        // content space; convert to screen via the scroll controller.
+        var sc=shopScroll; var ry=null;
+        if (L.shopRows){ for (var i=0;i<L.shopRows.length;i++){ var r=L.shopRows[i]; if (r.row.type==='up' && r.row.u && r.row.u.id==='cook1'){ ry=r; break; } } }
+        if (ry && sc){ var sy=sc.contentToScreenY(ry.y+ry.h/2); return { x:GF.W*0.5, y:sy, r:40*GF.S }; }
+        return { x:GF.W*0.5, y:GF.H*0.7, r:40*GF.S };
+      },
+      gesture:'tap', advance:'manual' },
+    { text: GF.t('tut_step_done'), advance:'auto', after:2200,
+      target: function(){ return { x:GF.W*0.5, y:GF.H*0.42, r:50*GF.S }; } },
+  ], { storageKey: TUT_KEY, force: !!force });
+}
+function reopenTutorial(){ helpOpen=true; }
+
+// ===========================================================================
+//  REACHABILITY GATE (every screen; shop list scrolls)
+// ===========================================================================
+function _ri(id,r,pinned){ if(!r) return null; return { id:id, x:r.x, y:r.y, w:r.w, h:r.h, pinned:!!pinned }; }
+function _push(a,it){ if(it) a.push(it); }
+function reachState(){
+  var H=GF.H, items=[], res={ screen:gs+(helpOpen?'_HELP':''), items:items, screenH:H, viewportH:H };
+  if (helpOpen){
+    _push(items,_ri('help_close',L.helpClose,true));
+    return res;
+  }
+  if (gs==='GAMEOVER'){
+    _push(items,_ri('resume',L.goResume,true)); _push(items,_ri('help',L.goHelp,true));
+    return res;
+  }
+  if (gs==='HUB'){
+    _push(items,_ri('reno',L.hubReno,true)); _push(items,_ri('help',L.hubHelp,true)); _push(items,_ri('close',L.hubClose,true));
+    return res;
+  }
+  if (gs==='RENOVATE'){
+    _push(items,_ri('yes',L.renoYes,true)); _push(items,_ri('no',L.renoNo,true));
+    return res;
+  }
+  // PLAYING — pinned HUD + the scrollable shop rows
+  _push(items,_ri('mute',muteBtn,true));
+  _push(items,_ri('home',L.homeBtn,true));
+  // the pot tap zone (pinned, screen space)
+  if (L.potX) _push(items,_ri('pot', { x:L.potX-(L.potR||60), y:L.potY-(L.potR||60), w:(L.potR||60)*2, h:(L.potR||60)*2 }, true));
+  // shop rows are CONTENT space + scrollId
+  if (L.shopRows && shopScroll){
+    res.scrollId='shop_list';
+    res.viewportH = shopScroll.vp.h;
+    for (var i=0;i<L.shopRows.length;i++){ var sr=L.shopRows[i]; _push(items,_ri('shoprow_'+i, { x:sr.x, y:sr.y, w:sr.w, h:sr.h })); }
+  }
+  return res;
+}
+var REACH_TOUR = [
+  { name:'playing',   go:function(){ helpOpen=false; gs='PLAYING'; if(shopScroll) shopScroll.scrollTo(0); GF.tutorial.active=false; } },
+  { name:'shop_bottom', go:function(){ helpOpen=false; gs='PLAYING'; GF.tutorial.active=false; if(shopScroll) shopScroll.scrollTo(shopScroll.maxOffset()); } },
+  { name:'hub',       go:function(){ helpOpen=false; gs='HUB'; } },
+  { name:'help',      go:function(){ gs='HUB'; helpOpen=true; } },
+  { name:'gameover',  go:function(){ helpOpen=false; gs='GAMEOVER'; } },
+  { name:'renovate',  go:function(){ helpOpen=false; gs='RENOVATE'; } },
+];
+
+// ===========================================================================
+//  BOT CONTRACT (progression probe)
+// ===========================================================================
+function botActions(){
+  var a = ['serve'];
+  // station unlock if affordable
+  if (station<STATIONS.length-1 && coins>=STATIONS[station+1].cost) a.push('station');
+  // any affordable upgrade
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.gate<=station && coins>=upgradeCost(u)) a.push('buy_'+u.id); }
+  if (canRenovate()) a.push('renovate');
+  return a;
+}
+function botAct(a){
+  if (a==='serve'){ if (gs==='PLAYING') serve(true); return; }
+  if (a==='station'){ unlockStation(); return; }
+  if (a==='renovate'){ doRenovate(); return; }
+  if (a && a.indexOf('buy_')===0){
+    var id=a.slice(4);
+    for (var i=0;i<UPGRADES.length;i++){ if (UPGRADES[i].id===id){ var ok=buyUpgrade(UPGRADES[i]); if(ok){UPGRADES[i]._seen=true;} return; } }
+  }
+}
+
+// ===========================================================================
+//  BOOT
+// ===========================================================================
+GF.init({
+  designW: 393, designH: 852,
+  strings: STRINGS,
+  saveKey: SAVE_KEY,
+  sprites: [],
+  onReady: function(){
+    // persistence (Yandex 1.9)
+    var restored = GF.persist(SAVE_KEY, snapshot, applySnapshot);
+    // Fresh start: hand the player a tiny coin cushion so the FIRST upgrade
+    // (Hire Cook, cost 5) is affordable right after the first serve — no
+    // friction wall on the tutorial's "buy a cook" step (and an instant first
+    // dopamine hit for everyone). Only on a genuinely new game, not a restore.
+    if (!restored){ coins = 6; }
+    coinsDisplay = coins;
+    GF.startMusic({ preset:'cozy', muted:GF.muted });
+
+    GF.exposeState(function(){
+      return {
+        gs: gs, coins: Math.floor(coins), totalEarned: Math.floor(totalEarned),
+        bestEarned: Math.floor(bestEarned), station: station, renovateLevel: renovateLevel,
+        patience: Math.round(patience), queue: queue.length, cps: Math.round(autoCps()*10)/10,
+        coinPerServe: Math.round(coinPerServe()*10)/10,
+        stationsUnlocked: station+1, autoLevels: UPGRADES.filter(function(u){return u.kind==='auto';}).reduce(function(a,u){return a+u.lvl;},0),
+      };
+    });
+    GF.exposeReach(reachState);
+    GF.exposeTour(REACH_TOUR);
+    GF.exposeBot(botActions, botAct);
+
+    bootDone = true;
+    // first-run tutorial (gallery AND platform both teach — it's the first
+    // seconds of live play, no menu). Show once via TUT_KEY.
+    var seen=false;
+    try { seen = !!localStorage.getItem(TUT_KEY); } catch(e){}
+    if (!seen && !window._silent){
+      // delay one beat so layout() has run (pot/shop rects exist)
+      setTimeout(function(){ startTutorial(false); }, 120);
+    }
+    // window.__GF_AUTOSTART: platform builds drop straight into play. We already
+    // boot to PLAYING, so nothing extra needed — just ensure no menu gate.
+    if (window.__GF_AUTOSTART){ gs='PLAYING'; }
+  },
+  onUpdate: update,
+  onDraw: function(c){ draw(); },
+});
+
+// screenshot / gate seam: land on a populated mid-game state (Yandex 5.1.1 — a
+// busy bar, several stations unlocked, full queue, big numbers).
+window._setupForScreenshot = function(level){
+  window._silent = true;
+  GF.tutorial.active = false;
+  try { localStorage.setItem(TUT_KEY,'1'); } catch(e){}
+  var lv = level || 3;
+  station = Math.min(lv, STATIONS.length-1);
+  renovateLevel = lv>=4 ? 1 : 0;
+  // buy a spread of upgrades so the shop + HUD look advanced
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.gate<=station){ u.lvl = Math.max(1, 5-u.gate); u._seen=true; } }
+  coins = STATIONS[station].cost * 6 + 500;
+  totalEarned = coins * 3; bestEarned = totalEarned;
+  coinsDisplay = coins;
+  // fill the queue so the pressure reads
+  queue = []; for (var q=0;q<maxQueue();q++) queue.push({ t:1+Math.random()*3, hue:20+Math.random()*320 });
+  patience = 62;
+  gs='PLAYING'; helpOpen=false;
+  window._silent = false;
+};
+// jump straight to mid-game (used by screenshot/gate tooling)
+window._jumpLevel = function(n){ window._setupForScreenshot(n||3); };
+window._setLang = function(l){ GF.lang = (l==='ru'?'ru':'en'); };
+// dev seam: read current state
+window._noodleInfo = function(){ try { return window.__gfState(); } catch(e){ return null; } };
+
+})();
+</script>
+</body>
+</html>

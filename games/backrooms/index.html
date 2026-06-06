@@ -121,6 +121,7 @@ function theme() {
     t.ceilTop = '#caa07a'; t.ceilHor = '#4a2418'; t.floorHor = '#2a1410'; t.floorBot = '#7a4030';
     t.tint = 'rgba(150,40,30,1)'; t.tintA = 0.18; t.accent = '#f0a070';
   }
+  if (RIT && RIT.id === 'blackout') { t.ambient = GF.clamp(t.ambient - 0.18, 0.3, 1); t.flashR = GF.clamp(t.flashR - 0.06, 0.3, 0.62); t.battDrain *= 1.15; }  // M3 ritual: dimmer + thirstier light
   return t;
 }
 var TH = theme();
@@ -226,6 +227,7 @@ function genMaze() {
   pa = bestA;
   items = [];
   var nItems = 3 + Math.floor(floorN * 0.6);
+  if (RIT && RIT.id === 'bountiful') nItems += 2;   // M3 ritual: supplies everywhere
   for (var it = 0; it < nItems; it++) { var fc = randFloorCell(4); if (fc) items.push({ x: fc.x + 0.5, y: fc.y + 0.5, type: (Math.random() < 0.55 ? 'almond' : 'battery'), got: false, bob: Math.random() * 6.28 }); }
   hunters = [];
   var nH = floorN >= 4 ? 2 : 1;
@@ -280,14 +282,17 @@ function hasLOS(ax, ay, bx, by) {
 // ════════════════════════════════════════════════════════════════════════
 function startRun(floorArg) {
   floorN = floorArg || 1; score = 0; sanity = SANITY_MAX; battery = BATTERY_MAX; lightOn = true;
-  shotMode = false; jump = 0; flickerDark = 0; pauseMode = null; menuView = 'main';
+  shotMode = false; jump = 0; flickerDark = 0; pauseMode = null; panel = null; menuView = 'main';
   reviveUsed = false; slowT = phaseT = flareT = compassT = 0;
+  RIT = ritualToday();              // M3: lock today's ritual modifier for this run
   meta.runs++; saveMeta();
+  applyRelics();                    // M3: permanent relics buff the fresh run (battery/sanity/items/compass)
   genMaze(); gs = 'PLAYING'; GF.gameStarted(); initAudio(); persistSave();
 }
 function descend() {
   floorN++; score += EXIT_SCORE;
-  sanity = Math.min(SANITY_MAX, sanity + 18); battery = Math.min(BATTERY_MAX, battery + 12);
+  sanity = Math.min(sanityCap(), sanity + 18); battery = Math.min(batteryCap(), battery + 12);
+  if (relicTier('cartog') > 0) compassT = Math.max(compassT, 3 + relicTier('cartog') * 1.5);   // M3: floor-start ping
   genMaze(); flashFx(0.4); sfx('descend'); GF.gameStarted(); saveMeta(); persistSave();
 }
 function gameOver(reason) {
@@ -297,6 +302,7 @@ function gameOver(reason) {
   if (floorN > best) { best = floorN; nb = true; }
   if (total > bestScore) bestScore = total;
   try { localStorage.setItem('backrooms_best', best); localStorage.setItem('backrooms_bestscore', bestScore); } catch (e) {}
+  bankFragments();                  // M3: bank fragments (depth + score, x relic/ritual mult) for the relic shop
   jump = 1; flashFx(1); camShakeT = 0.6; sfx('scare'); GF.gameEnded();
   if (nb && best > 1) GF.happytime();
   publishScore(); saveMeta(); persistSave();
@@ -324,6 +330,7 @@ function update(dt) {
   if (jump > 0) jump = Math.max(0, jump - dt * 1.4);
   if (camShakeT > 0) camShakeT = Math.max(0, camShakeT - dt);
   if (dropFlash > 0) dropFlash -= dt; if (claimFlash > 0) claimFlash -= dt;
+  if (relicScroll && relicsOpen()) relicScroll.update();   // inertial flick for the relic list
   if (gs !== 'PLAYING' || pauseMode || panel) { moving = false; return; }
   sinceFloorStart += dt; if (!shotMode) tickMeta(dt);
 
@@ -365,16 +372,16 @@ function update(dt) {
     if (flickerT <= 0) { flickerDark = flickerDark > 0.5 ? 0 : 1; flickerT = flickerDark > 0.5 ? 0.12 + Math.random() * 0.5 : 1.5 + Math.random() * 2.5; if (flickerDark > 0.5) sfx('flick'); }
   } else flickerDark = 0;
   var lit = lightOn && battery > 0 && flickerDark < 0.5;
-  if (lit) battery = Math.max(0, battery - TH.battDrain * dt);
+  if (lit) battery = Math.max(0, battery - TH.battDrain * relBattMul() * dt);   // M3: Long Cell slows drain
 
   var nearD = 99;
   for (var i = 0; i < hunters.length; i++) { var d = Math.hypot(hunters[i].x - px, hunters[i].y - py); if (d < nearD) nearD = d; }
 
   if (!shotMode && !coachActive) {
     if (nearD < DREAD_AURA) sanity -= SANITY_DRAIN_NEAR * dt * (1 - 0.4 * (nearD / DREAD_AURA));
-    else if (!lit) sanity -= SANITY_DRAIN_DARK * dt;
-    else sanity += SANITY_REGEN_LIT * dt;
-    sanity = GF.clamp(sanity, 0, SANITY_MAX);
+    else if (!lit) sanity -= SANITY_DRAIN_DARK * relSanityDarkMul() * dt;   // M3: Steady Mind slows dark drain
+    else if (sanity < SANITY_MAX) sanity = Math.min(SANITY_MAX, sanity + SANITY_REGEN_LIT * dt);   // regen refills only up to base 100; never pulls the Iron Will buffer down
+    sanity = GF.clamp(sanity, 0, sanityCap());   // ceiling = 100 (+ Iron Will buffer); base players still cap at 100
     if (sanity <= 0) { gameOver('lostmind'); return; }
   }
 
@@ -399,6 +406,7 @@ function updateHunters(dt, lit) {
     var hears = moving && d < HEAR_DIST;
     if (sees || hears || d < DREAD_AURA) h.aggro = 3.2; else h.aggro = Math.max(0, h.aggro - dt);
     var spd = Math.min(HUNTER_SPEED_CAP, HUNTER_SPEED_BASE + (floorN - 1) * HUNTER_SPEED_PER_FLOOR);
+    if (RIT && RIT.id === 'swarm') spd *= 1.12;   // M3 ritual: it hunts harder
     if (slowT > 0) spd *= 0.4;
     var tx, ty;
     if (flareT > 0) { tx = h.x + (h.x - px); ty = h.y + (h.y - py); h.aggro = 0; }
@@ -432,6 +440,7 @@ function draw(ctx, dt) {
   else if (pauseMode === 'pause') drawPausePanel(ctx, W, H);
   if (panel === 'daily') drawDailyPanel(ctx, W, H);
   else if (panel === 'ranks') drawRanksPanel(ctx, W, H);
+  else if (panel === 'relics') drawRelicsPanel(ctx, W, H);
   if (gs === 'GAMEOVER') drawGameOver(ctx, W, H);
   if (jump > 0) { ctx.fillStyle = 'rgba(120,10,10,' + (jump * 0.7).toFixed(3) + ')'; ctx.fillRect(0, 0, W, H); }
   drawToasts(ctx, W, H);
@@ -609,6 +618,7 @@ function drawMenu(ctx, W, H) {
   bg.addColorStop(0, 'rgba(120,104,38,0.28)'); bg.addColorStop(1, 'rgba(10,9,5,0)'); ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
   if (menuView === 'daily') { drawDailyPanel(ctx, W, H); return; }
   if (menuView === 'ranks') { drawRanksPanel(ctx, W, H); return; }
+  if (menuView === 'relics') { drawRelicsPanel(ctx, W, H); return; }
   var S = GF.S, flick = 0.82 + 0.18 * Math.sin(performanceNow() * 0.02) * Math.sin(performanceNow() * 0.0061);
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.shadowColor = 'rgba(220,200,90,0.5)'; ctx.shadowBlur = 26 * S;
@@ -618,16 +628,28 @@ function drawMenu(ctx, W, H) {
   ctx.fillText(GF.t('sub'), W / 2, H * 0.17 + GF.clamp(40 * S, 26, 52));
   var mpad = 10 * S, mbs = GF.clamp(40 * S, 34, 50);
   ui.daily = { x: mpad, y: mpad, w: mbs, h: mbs };
+  ui.relics = { x: mpad + mbs + 8 * S, y: mpad, w: mbs, h: mbs };
   ui.ranks = { x: W - mbs - mpad, y: mpad, w: mbs, h: mbs };
   iconBtn(ctx, ui.daily, '🎁', dailyAvailable() ? '#ffd24a' : '#9b8f5e');
+  iconBtn(ctx, ui.relics, '⛯', canAffordAnyRelic() ? '#ffd24a' : '#cdbf8a');
   iconBtn(ctx, ui.ranks, '🏆', '#cdbf8a');
   if (dailyAvailable()) { ctx.fillStyle = '#ff5a4a'; ctx.beginPath(); ctx.arc(ui.daily.x + mbs - 5 * S, ui.daily.y + 5 * S, 5 * S, 0, 7); ctx.fill(); }
+  if (canAffordAnyRelic()) { ctx.fillStyle = '#ff5a4a'; ctx.beginPath(); ctx.arc(ui.relics.x + mbs - 5 * S, ui.relics.y + 5 * S, 5 * S, 0, 7); ctx.fill(); }
   ctx.fillStyle = '#b07a3a'; ctx.font = (GF.clamp(12 * S, 10, 15) | 0) + 'px ' + FONT_MONO; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('🔥 ' + meta.streak + '   🎒 ' + invTotal(), W / 2, H * 0.17 + GF.clamp(64 * S, 44, 82));
-  ctx.fillStyle = TH.accent; ctx.font = 'bold ' + (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_MONO;
-  ctx.fillText(GF.t('tut_head'), W / 2, H * 0.30);
-  var endY = drawTutorialBlock(ctx, W, H * 0.30 + GF.clamp(22 * S, 16, 28), Math.min(W * 0.86, 460 * S));
-  var btnY = Math.min(H - GF.clamp(96 * S, 72, 120), endY + 16 * S);
+  ctx.fillText('🔥 ' + meta.streak + '   🎒 ' + invTotal() + '   ◆ ' + meta.frags, W / 2, H * 0.17 + GF.clamp(64 * S, 44, 82));
+  // ── ritual-of-the-day banner (FOMO: a reason to return THIS window) ──
+  var rit = ritualToday(), ry = H * 0.17 + GF.clamp(84 * S, 58, 104), rbw = Math.min(W * 0.84, 420 * S), rbx = W / 2 - rbw / 2, rbh = GF.clamp(34 * S, 28, 44);
+  ctx.fillStyle = 'rgba(30,22,8,0.7)'; GF.rr(ctx, rbx, ry, rbw, rbh, 9 * S); ctx.fill();
+  ctx.strokeStyle = rit.id === 'calm' ? 'rgba(180,165,110,0.4)' : '#caa83a'; ctx.lineWidth = 1; GF.rr(ctx, rbx, ry, rbw, rbh, 9 * S); ctx.stroke();
+  ctx.textAlign = 'left'; ctx.fillStyle = '#ffd24a'; ctx.font = 'bold ' + (GF.clamp(12 * S, 10, 15) | 0) + 'px ' + FONT_MONO;
+  ctx.fillText('◷ ' + L('TODAY', 'СЕГОДНЯ') + ': ' + L(rit.en, rit.ru), rbx + 12 * S, ry + rbh * 0.36);
+  ctx.fillStyle = '#a89a68'; ctx.font = (GF.clamp(10 * S, 9, 13) | 0) + 'px ' + FONT_UI;
+  ctx.fillText(L(rit.note_en, rit.note_ru) + '  ·  ' + ritualDaysLeft() + L('d left', 'д'), rbx + 12 * S, ry + rbh * 0.72);
+  var tutTop = ry + rbh + GF.clamp(10 * S, 8, 16);
+  ctx.fillStyle = TH.accent; ctx.font = 'bold ' + (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_MONO; ctx.textAlign = 'center';
+  ctx.fillText(GF.t('tut_head'), W / 2, tutTop);
+  var endY = drawTutorialBlock(ctx, W, tutTop + GF.clamp(20 * S, 15, 26), Math.min(W * 0.86, 460 * S));
+  var btnY = Math.min(H - GF.clamp(96 * S, 72, 120), endY + 14 * S);
   bigBtn(ctx, W, H, btnY, GF.t('play'), 'play');
   if (best > 1) {
     ctx.fillStyle = '#6b6242'; ctx.font = (GF.clamp(12 * S, 10, 15) | 0) + 'px ' + FONT_MONO;
@@ -635,6 +657,7 @@ function drawMenu(ctx, W, H) {
     ctx.fillText(GF.t('best') + ': ' + GF.t('depth') + ' ' + best, W / 2, btnY + GF.clamp(56 * S, 44, 70) + 12 * S);
   }
 }
+function canAffordAnyRelic() { for (var i = 0; i < RELICS.length; i++) { var c = relicNextCost(RELICS[i].id); if (c != null && meta.frags >= c) return true; } return false; }
 function drawGameOver(ctx, W, H) {
   panelBg(ctx, W, H, 0.82); var S = GF.S;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -643,9 +666,12 @@ function drawGameOver(ctx, W, H) {
   ctx.fillStyle = '#c9bd92'; ctx.font = (GF.clamp(15 * S, 12, 19) | 0) + 'px ' + FONT_UI;
   ctx.fillText(GF.t(lastReason === 'lostmind' ? 'lostmind' : 'caught'), W / 2, H * 0.30 + GF.clamp(34 * S, 24, 44));
   ctx.fillStyle = '#e9d77a'; ctx.font = 'bold ' + (GF.clamp(20 * S, 16, 26) | 0) + 'px ' + FONT_MONO;
-  ctx.fillText(GF.t('reached') + ' ' + GF.t('depth') + ' ' + floorN, W / 2, H * 0.46);
+  ctx.fillText(GF.t('reached') + ' ' + GF.t('depth') + ' ' + floorN, W / 2, H * 0.44);
   ctx.fillStyle = '#7c7350'; ctx.font = (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_MONO;
-  ctx.fillText(GF.t('best') + ': ' + best, W / 2, H * 0.46 + GF.clamp(28 * S, 20, 36));
+  ctx.fillText(GF.t('best') + ': ' + best, W / 2, H * 0.44 + GF.clamp(26 * S, 20, 34));
+  // M3: fragments banked this run + total (the relic-shop currency draw)
+  ctx.fillStyle = '#ffd24a'; ctx.font = 'bold ' + (GF.clamp(15 * S, 12, 19) | 0) + 'px ' + FONT_MONO;
+  ctx.fillText('◆ +' + lastFragGain + '  ·  ' + meta.frags + ' ' + L('total', 'всего'), W / 2, H * 0.44 + GF.clamp(50 * S, 38, 64));
   if (reviveAvail()) {
     reviveBtn(ctx, W, H, H * 0.585);
     bigBtn(ctx, W, H, H * 0.585 + GF.clamp(66 * S, 54, 82), GF.t('retry'), 'retry');
@@ -656,9 +682,10 @@ function drawGameOver(ctx, W, H) {
 function drawPausePanel(ctx, W, H) {
   panelBg(ctx, W, H, 0.84); var S = GF.S;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#e9d77a';
-  ctx.font = 'bold ' + (GF.clamp(30 * S, 20, 42) | 0) + 'px ' + FONT_UI; ctx.fillText(GF.t('paused'), W / 2, H * 0.13);
-  var y = H * 0.24, gap = GF.clamp(72 * S, 60, 92);
+  ctx.font = 'bold ' + (GF.clamp(30 * S, 20, 42) | 0) + 'px ' + FONT_UI; ctx.fillText(GF.t('paused'), W / 2, H * 0.10);
+  var y = H * 0.20, gap = GF.clamp(64 * S, 54, 80);
   bigBtn(ctx, W, H, y, GF.t('resume'), 'resume'); y += gap;
+  hubBtn(ctx, W, H, y, '⛯  ' + L('THRESHOLD', 'ПОРОГ'), 'pthresh', canAffordAnyRelic()); y += gap;
   hubBtn(ctx, W, H, y, '🎁  ' + L('DAILY REWARD', 'НАГРАДА ДНЯ'), 'pdaily', dailyAvailable()); y += gap;
   hubBtn(ctx, W, H, y, '🏆  ' + L('LEADERBOARD', 'РЕЙТИНГ'), 'pranks', false); y += gap;
   bigBtn(ctx, W, H, y, L('RESTART', 'ЗАНОВО'), 'restart');
@@ -677,13 +704,26 @@ function drawHelpPanel(ctx, W, H) {
 var tMove = { id: null, sx: 0, sy: 0, dx: 0, dy: 0 };
 var tLook = { id: null, lx: 0, turn: 0 };
 function hitBtn(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+function hitRelicBuy(x, y) {   // map screen (x,y) -> content space via the scroll controller, test buy rects
+  if (!relicScroll) return false;
+  if (!relicScroll.contains(x, y)) return false;
+  var cy = relicScroll.screenToContentY(y);
+  for (var i = 0; i < _relicRects.length; i++) {
+    var r = _relicRects[i].buy; if (!r) continue;   // MAX'd relic has no buy rect
+    if (x >= r.x && x <= r.x + r.w && cy >= r.y && cy <= r.y + r.h) { buyRelic(_relicRects[i].id); return true; }
+  }
+  return true;   // tap inside the list area but not on a button: swallow (don't fall through to start the game)
+}
 function onPressUI(x, y) {
   if (panel === 'daily') { if (hitBtn(ui.claim, x, y)) claimDaily(); else if (hitBtn(ui.back, x, y)) panel = null; return true; }
   if (panel === 'ranks') { if (hitBtn(ui.back, x, y)) panel = null; return true; }
+  if (panel === 'relics') { if (hitBtn(ui.back, x, y)) panel = null; return true; }   // BUY handled on tap-up (drag-aware)
   if (gs === 'MENU') {
     if (menuView === 'daily') { if (hitBtn(ui.claim, x, y)) claimDaily(); else if (hitBtn(ui.back, x, y)) menuView = 'main'; return true; }
     if (menuView === 'ranks') { if (hitBtn(ui.back, x, y)) menuView = 'main'; return true; }
+    if (menuView === 'relics') { if (hitBtn(ui.back, x, y)) menuView = 'main'; return true; }   // BUY handled on tap-up (drag-aware)
     if (hitBtn(ui.daily, x, y)) { menuView = 'daily'; return true; }
+    if (hitBtn(ui.relics, x, y)) { menuView = 'relics'; return true; }
     if (hitBtn(ui.ranks, x, y)) { menuView = 'ranks'; fetchRanks(); return true; }
     startRun(); return true;
   }
@@ -694,6 +734,7 @@ function onPressUI(x, y) {
   if (gs === 'PLAYING') {
     if (pauseMode === 'pause') {
       if (hitBtn(ui.resume, x, y)) pauseMode = null;
+      else if (hitBtn(ui.pthresh, x, y)) panel = 'relics';
       else if (hitBtn(ui.pdaily, x, y)) panel = 'daily';
       else if (hitBtn(ui.pranks, x, y)) { panel = 'ranks'; fetchRanks(); }
       else if (hitBtn(ui.restart, x, y)) { saveMeta(); startRun(); }
@@ -709,17 +750,32 @@ function onPressUI(x, y) {
   }
   return false;
 }
+function relicsOpen() { return panel === 'relics' || (gs === 'MENU' && menuView === 'relics'); }
+var _relScroll = { id: null, sx: 0, sy: 0, moved: false };   // tap-vs-drag tracker for the relics list
 function pointerDown(id, x, y) {
+  // Relics list open: start a drag-scroll inside the region (tap-buy resolved on
+  // pointerUp so a flick scrolls instead of mis-buying). BACK is handled on press.
+  if (relicsOpen() && relicScroll && relicScroll.contains(x, y)) {
+    relicScroll.dragStart(y); _relScroll = { id: id, sx: x, sy: y, moved: false };
+    return;   // do NOT fall through to onPressUI/move so the world stays frozen
+  }
   if (onPressUI(x, y)) return;
   if (gs !== 'PLAYING' || pauseMode) return;
   if (x < GF.W * 0.5) { if (tMove.id === null) { tMove.id = id; tMove.sx = x; tMove.sy = y; tMove.dx = 0; tMove.dy = 0; } }
   else { if (tLook.id === null) { tLook.id = id; tLook.lx = x; tLook.turn = 0; } }
 }
 function pointerMove(id, x, y) {
+  if (_relScroll.id === id) { if (Math.abs(y - _relScroll.sy) > 5 * GF.S || Math.abs(x - _relScroll.sx) > 5 * GF.S) _relScroll.moved = true; if (relicScroll) relicScroll.dragMove(y); return; }
   if (tMove.id === id) { var dx = x - tMove.sx, dy = y - tMove.sy, mx = 56 * GF.S; tMove.dx = GF.clamp(dx / mx, -1, 1); tMove.dy = GF.clamp(dy / mx, -1, 1); }
   else if (tLook.id === id) { tLook.turn += (x - tLook.lx) * LOOK_SENS; tLook.lx = x; }
 }
 function pointerUp(id) {
+  if (_relScroll.id === id) {
+    if (relicScroll) relicScroll.dragEnd();
+    if (!_relScroll.moved) hitRelicBuy(_relScroll.sx, _relScroll.sy);   // it was a tap, not a scroll -> buy
+    _relScroll = { id: null, sx: 0, sy: 0, moved: false };
+    return;
+  }
   if (tMove.id === id) { tMove.id = null; tMove.dx = 0; tMove.dy = 0; }
   if (tLook.id === id) { tLook.id = null; tLook.turn = 0; }
 }
@@ -733,8 +789,11 @@ function attachInput() {
   cv.addEventListener('mousedown', function (e) { mouseDown = true; pointerDown('m', e.clientX, e.clientY); });
   cv.addEventListener('mousemove', function (e) { if (mouseDown) pointerMove('m', e.clientX, e.clientY); });
   window.addEventListener('mouseup', function () { mouseDown = false; pointerUp('m'); });
+  // wheel scroll for the relics list on desktop
+  cv.addEventListener('wheel', function (e) { if (relicsOpen() && relicScroll) { relicScroll.handleWheel(e.deltaY); e.preventDefault(); } }, { passive: false });
   document.addEventListener('keydown', function (e) {
     if (panel) { if (e.code === 'Escape') panel = null; return; }   // panel open: Esc closes it, swallow other keys
+    if (gs === 'MENU' && menuView !== 'main') { if (e.code === 'Escape') menuView = 'main'; return; }   // sub-panel: Esc back to menu
     if (pauseMode === 'intro' && (e.code === 'Enter' || e.code === 'Space' || e.code === 'Escape')) { pauseMode = null; try { localStorage.setItem('backrooms_seen_v1', '1'); } catch (x) {} if (actx && actx.state === 'suspended') { try { actx.resume(); } catch (x) {} } }
     else if (gs === 'MENU' && (e.code === 'Enter' || e.code === 'Space')) startRun();
     else if (gs === 'GAMEOVER' && (e.code === 'Enter' || e.code === 'Space')) startRun();
@@ -836,12 +895,45 @@ var ITEMS = [
 ];
 function itemDef(id) { for (var i = 0; i < ITEMS.length; i++) if (ITEMS[i].id === id) return ITEMS[i]; return null; }
 
+// ── M3: PERMANENT RELICS (roguelite meta progression) ─────────────────────
+// Each relic is a permanent passive upgrade bought with FRAGMENTS (the soft
+// currency banked every run). 3 tiers each; effects apply at startRun(). This
+// is the run-over-run depth spine - the "I'm stronger every session" pull that
+// holds D7+. 100% earnable by playing; nothing gated behind payment (Yandex 1.15).
+var RELICS = [
+  { id: 'mind',    glyph: '✦', col: '#c7a6ff', en: 'Steady Mind',  ru: 'Ясный ум',   desc_en: 'Sanity drains slower in the dark', desc_ru: 'Рассудок тает медленнее во тьме', cost: [40, 110, 240] },
+  { id: 'battery', glyph: '⚡', col: '#ffd86b', en: 'Long Cell',    ru: 'Ёмкость',    desc_en: 'Bigger light reserve, slower drain', desc_ru: 'Больше заряда, медленнее садится', cost: [40, 110, 240] },
+  { id: 'survivor',glyph: '✚', col: '#ff9a8a', en: 'Survivor Kit', ru: 'Набор',      desc_en: 'Start each run with bonus items',  desc_ru: 'Старт забега с бонус-предметами',   cost: [60, 150, 320] },
+  { id: 'cartog',  glyph: '➤', col: '#8effc0', en: 'Cartographer', ru: 'Картограф',  desc_en: 'A compass ping starts each floor', desc_ru: 'Компас в начале каждого этажа',    cost: [50, 130, 280] },
+  { id: 'will',    glyph: '◆', col: '#9fe6f2', en: 'Iron Will',    ru: 'Воля',       desc_en: 'Begin runs with a sanity buffer',  desc_ru: 'Старт с запасом рассудка',         cost: [50, 130, 280] },
+  { id: 'diver',   glyph: '▼', col: '#f0a070', en: 'Deep Diver',   ru: 'Ныряльщик',  desc_en: 'Earn more fragments the deeper you go', desc_ru: 'Больше осколков на глубине',   cost: [70, 170, 360] },
+];
+function relicDef(id) { for (var i = 0; i < RELICS.length; i++) if (RELICS[i].id === id) return RELICS[i]; return null; }
+function relicTier(id) { return (meta.relics && meta.relics[id]) | 0; }            // 0..3 owned tiers
+function relicNextCost(id) { var d = relicDef(id), t = relicTier(id); return t >= 3 ? null : d.cost[t]; }
+
+// ── M3: RITUAL OF THE DAY (3-day rotating world modifier + FOMO) ──────────
+// A reason to return THIS window: the world rule shifts every 3 days and pays
+// bonus fragments while active. Deterministic from the calendar so all players
+// share the same ritual; pure-additive (never blocks play).
+var RITUALS = [
+  { id: 'calm',     en: 'Calm Halls',    ru: 'Тихие залы',   note_en: 'A quiet stretch. Standard descent.',        note_ru: 'Спокойный отрезок. Обычный спуск.',        mult: 1.0 },
+  { id: 'blackout', en: 'Blackout',      ru: 'Затмение',     note_en: 'Lights run dim, fragments pay double.',     note_ru: 'Свет тусклый, осколков вдвое больше.',     mult: 2.0 },
+  { id: 'swarm',    en: 'The Swarm',     ru: 'Рой',          note_en: 'It hunts harder. Fragments +50%.',          note_ru: 'Оно охотится злее. Осколков +50%.',        mult: 1.5 },
+  { id: 'bountiful',en: 'Bountiful',     ru: 'Изобилие',     note_en: 'Supplies everywhere. Fragments +75%.',      note_ru: 'Припасов в избытке. Осколков +75%.',       mult: 1.75 },
+];
+function ritualToday() { return RITUALS[Math.floor(Date.now() / 86400000 / 3) % RITUALS.length]; }
+function ritualDaysLeft() { var period = 86400000 * 3; return 3 - Math.floor((Date.now() % period) / 86400000); }
+var RIT = RITUALS[0];               // active ritual this session (refreshed on each run start)
+
 var inv = {};                       // id -> count owned (persistent)
-var meta = { playMs: 0, dropMs: 0, dailyDay: 0, streak: 0, runs: 0, lbBest: 0 };
+var meta = { playMs: 0, dropMs: 0, dailyDay: 0, streak: 0, runs: 0, lbBest: 0, frags: 0, relics: {} };
 var DROP_MS = 15 * 60 * 1000;       // 15 min of play = one supply drop
 var slowT = 0, phaseT = 0, flareT = 0, compassT = 0;   // active effect timers (sec)
 var reviveUsed = false, dropFlash = 0, claimFlash = 0, lastDropId = null, lastClaim = null;
-var menuView = 'main';              // main | daily | ranks
+var lastFragGain = 0;               // M3: fragments banked on the last run-end (run-over GUI)
+var menuView = 'main';              // main | daily | ranks | relics
+var relicScroll = null;             // M3: scroll controller for the relics list
 var lbList = [];
 
 function metaKey() { return 'backrooms_meta_v1'; }
@@ -851,6 +943,7 @@ function loadMeta() {
     var o = JSON.parse(raw); if (o.inv) inv = o.inv; var m = o.meta || {};
     meta.playMs = m.playMs || 0; meta.dropMs = m.dropMs || 0; meta.dailyDay = m.dailyDay || 0;
     meta.streak = m.streak || 0; meta.runs = m.runs || 0; meta.lbBest = m.lbBest || 0;
+    meta.frags = m.frags || 0; meta.relics = m.relics || {};   // M3: fragments + permanent relics
   } catch (e) {}
 }
 function saveMeta() { try { localStorage.setItem(metaKey(), JSON.stringify({ inv: inv, meta: meta })); } catch (e) {} }
@@ -877,8 +970,8 @@ function useItem(id) {
   if ((inv[id] | 0) <= 0 || id === 'revive') return;   // revive is used on the death screen
   inv[id]--; var d = itemDef(id);
   if (id === 'slow') slowT = 8;
-  else if (id === 'sanity') sanity = SANITY_MAX;
-  else if (id === 'battery') battery = BATTERY_MAX;
+  else if (id === 'sanity') sanity = sanityCap();
+  else if (id === 'battery') battery = batteryCap();
   else if (id === 'compass') compassT = 12;
   else if (id === 'flare') { flareT = 4; for (var i = 0; i < hunters.length; i++) hunters[i].aggro = 0; flashFx(0.22); }
   else if (id === 'phase') phaseT = 3;
@@ -902,6 +995,41 @@ function tickMeta(dt) {
   if (slowT > 0) slowT -= dt; if (phaseT > 0) phaseT -= dt; if (flareT > 0) flareT -= dt; if (compassT > 0) compassT -= dt;
   meta.playMs += dt * 1000; meta.dropMs += dt * 1000;
   if (meta.dropMs >= DROP_MS) { meta.dropMs -= DROP_MS; grantRandomItem(); dropFlash = 3.5; sfx('descend'); }
+}
+
+// ── M3: RELIC effects (read by startRun / per-floor / economy) ────────────
+// Relic tiers tune the run; all additive buffs, never gates.
+function applyRelics() {
+  var t;
+  // Long Cell: +battery max + slower drain (relBattMul()/batteryCap()).
+  battery = batteryCap();
+  // Iron Will: start with the full (raised) sanity ceiling.
+  sanity = sanityCap();
+  t = 0;
+  // Survivor Kit: roll bonus starting items (1 per tier).
+  t = relicTier('survivor'); for (var i = 0; i < t; i++) grantRandomItem();
+  if (t > 0) { lastDropId = null; dropFlash = 0; }   // silent grant (no toast spam at boot)
+  // Cartographer: floor-start compass ping.
+  if (relicTier('cartog') > 0) compassT = 4 + relicTier('cartog') * 2;
+}
+function relBattMul() { return 1 - relicTier('battery') * 0.12; }            // slower light drain
+function relSanityDarkMul() { return 1 - relicTier('mind') * 0.16; }         // slower dark drain
+function sanityCap() { return SANITY_MAX + Math.min(relicTier('will') * 12, 40); }   // Iron Will raises the ceiling
+function batteryCap() { return BATTERY_MAX + relicTier('battery') * 15; }            // Long Cell raises the reserve
+function fragMult() {                                                        // Deep Diver + ritual bonus
+  var diver = 1 + relicTier('diver') * 0.18 * Math.max(0, floorN - 1) / 4;
+  return diver * ritualToday().mult;
+}
+function bankFragments() {                                                   // called once at run end
+  var base = floorN * 5 + Math.floor(score / 20);
+  var got = Math.max(1, Math.round(base * fragMult()));
+  meta.frags += got; lastFragGain = got; saveMeta(); return got;
+}
+function buyRelic(id) {
+  var cost = relicNextCost(id); if (cost == null || meta.frags < cost) { sfx('click'); return false; }
+  meta.frags -= cost; meta.relics[id] = relicTier(id) + 1; saveMeta(); sfx('pickup');
+  var d = relicDef(id); floatTxt(L(d.en, d.ru) + ' ' + (GF.lang === 'ru' ? 'ур.' : 'Lv') + relicTier(id), d.col); GF.happytime && (relicTier(id) >= 3) && GF.happytime();
+  return true;
 }
 
 // ── META UI ──────────────────────────────────────────────────────────────
@@ -1056,6 +1184,123 @@ function drawRanksPanel(ctx, W, H) {
   smallBtn(ctx, W, H, H * 0.80, L('BACK', 'НАЗАД'), 'back');
 }
 
+// ── M3: THRESHOLD (permanent-relic shop) ──────────────────────────────────
+// Scrollable list of 6 relics x 3 tiers, bought with fragments. The header
+// (title + balance) and BACK button are PINNED; the relic cards live in a
+// GF.makeScroll region so the list is always reachable on any viewport.
+var _relicRects = [];   // [{id, cx, cardY, cardH, buy}] in CONTENT space, rebuilt each draw
+function drawRelicsPanel(ctx, W, H) {
+  panelBg(ctx, W, H, 0.97); var S = GF.S;
+  // header (pinned)
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#e9d77a';
+  ctx.font = 'bold ' + (GF.clamp(25 * S, 18, 33) | 0) + 'px ' + FONT_UI; ctx.fillText(L('THRESHOLD', 'ПОРОГ'), W / 2, H * 0.085);
+  ctx.fillStyle = '#a89a68'; ctx.font = (GF.clamp(11 * S, 9, 14) | 0) + 'px ' + FONT_UI;
+  ctx.fillText(L('Permanent upgrades. Earn fragments by descending.', 'Вечные улучшения. Осколки за спуск.'), W / 2, H * 0.085 + GF.clamp(24 * S, 18, 30));
+  ctx.fillStyle = '#ffd24a'; ctx.font = 'bold ' + (GF.clamp(17 * S, 14, 22) | 0) + 'px ' + FONT_MONO;
+  ctx.fillText('◆ ' + meta.frags, W / 2, H * 0.085 + GF.clamp(46 * S, 34, 58));
+
+  // scroll region between header and BACK
+  var topY = H * 0.085 + GF.clamp(64 * S, 48, 80), botY = H - GF.clamp(72 * S, 58, 92);
+  var vpW = Math.min(W * 0.92, 460 * S), vpX = W / 2 - vpW / 2, vpH = botY - topY;
+  if (!relicScroll) relicScroll = GF.makeScroll('relics', { x: vpX, y: topY, w: vpW, h: vpH });
+  relicScroll.setViewport({ x: vpX, y: topY, w: vpW, h: vpH });
+  var cardH = GF.clamp(78 * S, 64, 96), cgap = 8 * S, contentH = RELICS.length * (cardH + cgap);
+  relicScroll.setContentHeight(contentH);
+  _relicRects = [];
+  relicScroll.begin(ctx);
+  for (var i = 0; i < RELICS.length; i++) {
+    var d = RELICS[i], cardY = i * (cardH + cgap), tier = relicTier(d.id), cost = relicNextCost(d.id);
+    // card bg
+    ctx.fillStyle = 'rgba(20,18,10,0.92)'; GF.rr(ctx, vpX, cardY, vpW, cardH, 10 * S); ctx.fill();
+    ctx.strokeStyle = 'rgba(180,165,110,0.32)'; ctx.lineWidth = 1; GF.rr(ctx, vpX, cardY, vpW, cardH, 10 * S); ctx.stroke();
+    // glyph badge
+    ctx.fillStyle = 'rgba(40,36,18,0.9)'; GF.rr(ctx, vpX + 10 * S, cardY + cardH / 2 - 19 * S, 38 * S, 38 * S, 9 * S); ctx.fill();
+    ctx.fillStyle = d.col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = (GF.clamp(22 * S, 16, 28) | 0) + 'px ' + FONT_UI;
+    ctx.fillText(d.glyph, vpX + 29 * S, cardY + cardH / 2);
+    // name + tier pips
+    ctx.textAlign = 'left'; ctx.fillStyle = '#e9d77a'; ctx.font = 'bold ' + (GF.clamp(14 * S, 12, 18) | 0) + 'px ' + FONT_UI;
+    ctx.fillText(L(d.en, d.ru), vpX + 56 * S, cardY + 18 * S);
+    for (var p = 0; p < 3; p++) { ctx.fillStyle = p < tier ? d.col : 'rgba(120,110,70,0.4)'; ctx.beginPath(); ctx.arc(vpX + 60 * S + p * 12 * S, cardY + 36 * S, 4 * S, 0, 7); ctx.fill(); }
+    ctx.fillStyle = '#9a8f63'; ctx.font = (GF.clamp(10.5 * S, 9, 13) | 0) + 'px ' + FONT_UI;
+    ctx.fillText(L(d.desc_en, d.desc_ru), vpX + 56 * S, cardY + 56 * S);
+    // buy button (content space)
+    var bbw = GF.clamp(86 * S, 66, 110), bbh = GF.clamp(40 * S, 32, 50), bbx = vpX + vpW - bbw - 10 * S, bby = cardY + cardH / 2 - bbh / 2;
+    var afford = cost != null && meta.frags >= cost;
+    var _rr = { id: d.id, card: { x: vpX, y: cardY, w: vpW, h: cardH } };   // every card -> reach item (content space)
+    if (cost != null) _rr.buy = { x: bbx, y: bby, w: bbw, h: bbh };
+    _relicRects.push(_rr);
+    if (cost == null) {
+      ctx.fillStyle = 'rgba(50,46,24,0.9)'; GF.rr(ctx, bbx, bby, bbw, bbh, 9 * S); ctx.fill();
+      ctx.fillStyle = '#caa83a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold ' + (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_UI;
+      ctx.fillText(L('MAX', 'МАКС'), bbx + bbw / 2, bby + bbh / 2);
+    } else {
+      var g = ctx.createLinearGradient(bbx, bby, bbx, bby + bbh);
+      g.addColorStop(0, afford ? '#caa83a' : '#3a3520'); g.addColorStop(1, afford ? '#9c7e22' : '#2a2616');
+      GF.rr(ctx, bbx, bby, bbw, bbh, 9 * S); ctx.fillStyle = g; ctx.fill();
+      ctx.fillStyle = afford ? '#1a1505' : '#6b6242'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold ' + (GF.clamp(13 * S, 11, 16) | 0) + 'px ' + FONT_MONO;
+      ctx.fillText('◆ ' + cost, bbx + bbw / 2, bby + bbh / 2);
+    }
+  }
+  relicScroll.end(ctx);
+  relicScroll.draw(ctx);
+  smallBtn(ctx, W, H, H - GF.clamp(58 * S, 48, 74), L('BACK', 'НАЗАД'), 'back');
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  REACHABILITY GATE (window.__gfReach / __gfTour) - every screen's hit-rects
+// ════════════════════════════════════════════════════════════════════════
+// Proves every interactive item on every screen can be brought fully on-screen.
+// ui.* rects are populated by draw() each frame, so __gfReach is read AFTER a
+// frame. The relics list reports cards in the scroll region's CONTENT space
+// (scrollId='relics' so the gate reads scrollMaxY); BACK is pinned.
+function _rr2(id, r, pinned) { if (!r) return null; return { id: id, x: r.x, y: r.y, w: r.w, h: r.h, pinned: !!pinned }; }
+function reachState() {
+  var H = GF.H, items = [], res = { screen: '?', items: items, screenH: H, viewportH: H };
+  function push(it) { if (it) items.push(it); }
+  // sub-panels can be reached either as a full-screen menuView (gs==='MENU') or
+  // an in-run overlay (panel). Resolve the effective screen.
+  var view = (panel ? panel : (gs === 'MENU' ? menuView : null));
+  if (view === 'relics') {
+    res.screen = 'relics'; res.scrollId = 'relics';
+    res.viewportH = relicScroll ? relicScroll.vp.h : H;
+    for (var i = 0; i < _relicRects.length; i++) push(_rr2('relic_' + _relicRects[i].id, _relicRects[i].card));   // CONTENT space
+    push(_rr2('back', ui.back, true));   // pinned
+    return res;
+  }
+  if (view === 'daily') { res.screen = 'daily'; push(_rr2('claim', ui.claim)); push(_rr2('back', ui.back)); return res; }
+  if (view === 'ranks') { res.screen = 'ranks'; push(_rr2('back', ui.back)); return res; }
+  if (gs === 'MENU') {
+    res.screen = 'menu';
+    push(_rr2('daily', ui.daily)); push(_rr2('relics', ui.relics)); push(_rr2('ranks', ui.ranks)); push(_rr2('play', ui.play));
+    return res;
+  }
+  if (gs === 'GAMEOVER') {
+    res.screen = 'gameover'; push(_rr2('revive', ui.revive)); push(_rr2('retry', ui.retry)); return res;
+  }
+  // PLAYING (+ pause/help overlays)
+  if (pauseMode === 'pause') {
+    res.screen = 'pause';
+    push(_rr2('resume', ui.resume)); push(_rr2('pthresh', ui.pthresh)); push(_rr2('pdaily', ui.pdaily)); push(_rr2('pranks', ui.pranks)); push(_rr2('restart', ui.restart));
+    return res;
+  }
+  if (pauseMode === 'help' || pauseMode === 'intro') { res.screen = 'help'; push(_rr2('resume', ui.resume)); return res; }
+  res.screen = 'playing';
+  push(_rr2('pause', ui.pause)); push(_rr2('torch', ui.torch)); push(_rr2('help', ui.help));
+  var owned = ownedIds();
+  for (var k = 0; k < owned.length; k++) push(_rr2('item_' + owned[k], ui['item_' + owned[k]]));
+  return res;
+}
+// Tour: each step puts the game in a screen so the gate can read its rects.
+var REACH_TOUR = [
+  { name: 'menu',     go: function () { panel = null; pauseMode = null; if (gs !== 'MENU') { gs = 'MENU'; } menuView = 'main'; } },
+  { name: 'relics',   go: function () { gs = 'MENU'; pauseMode = null; panel = null; menuView = 'relics'; if (relicScroll) relicScroll.scrollTo(0); } },
+  { name: 'daily',    go: function () { gs = 'MENU'; pauseMode = null; panel = null; menuView = 'daily'; } },
+  { name: 'ranks',    go: function () { gs = 'MENU'; pauseMode = null; panel = null; menuView = 'ranks'; } },
+  { name: 'playing',  go: function () { menuView = 'main'; panel = null; window._silent = true; if (gs !== 'PLAYING') startRun(1); pauseMode = null; coachActive = false; window._silent = false; } },
+  { name: 'pause',    go: function () { if (gs !== 'PLAYING') { window._silent = true; startRun(1); window._silent = false; } panel = null; pauseMode = 'pause'; } },
+  { name: 'gameover', go: function () { if (gs !== 'PLAYING') { window._silent = true; startRun(1); window._silent = false; } pauseMode = null; panel = null; lastReason = 'caught'; gs = 'GAMEOVER'; } },
+];
+
 // ════════════════════════════════════════════════════════════════════════
 //  PERSIST + BOOT
 // ════════════════════════════════════════════════════════════════════════
@@ -1073,7 +1318,9 @@ GF.init({
       function () { return { floorN: floorN, score: score, best: best, gs: (gs === 'PLAYING' ? 'PLAYING' : gs) }; },
       function (s) { if (!s) return; best = Math.max(best, s.best || 1); if (s.gs === 'PLAYING' && s.floorN) _resume = s; }
     );
-    GF.exposeState(function () { return { gs: gs, floor: floorN, score: score, best: best, sanity: Math.round(sanity), battery: Math.round(battery), hunters: hunters.length, paused: !!pauseMode, items: invTotal(), streak: meta.streak, playMin: Math.floor(meta.playMs / 60000) }; });
+    GF.exposeState(function () { return { gs: gs, floor: floorN, score: score, best: best, sanity: Math.round(sanity), battery: Math.round(battery), hunters: hunters.length, paused: !!pauseMode, items: invTotal(), streak: meta.streak, playMin: Math.floor(meta.playMs / 60000), frags: meta.frags, relicTiers: (function () { var n = 0; for (var k in meta.relics) n += meta.relics[k] | 0; return n; })() }; });
+    // Reachability gate: prove all UI on all screens is reachable (no clipped buttons).
+    GF.exposeReach(reachState); GF.exposeTour(REACH_TOUR);
     // Boot straight into gameplay — no title/start-menu gate (Yandex rejects title screens on load).
     startRun((_resume && _resume.floorN) ? _resume.floorN : 1);
     if (_resume && _resume.score) { score = _resume.score; persistSave(); }   // re-save so resumed score survives a 2nd reload

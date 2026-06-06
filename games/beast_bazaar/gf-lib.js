@@ -1,7 +1,7 @@
-// gf-lib.js — Tim's Game Factory shared library
+// gf-lib.js - Tim's Game Factory shared library
 //
 // Loaded via <script src="./gf-lib.js"></script> BEFORE the game's inline
-// script. Exposes window.GF — the game registers its update/draw/strings
+// script. Exposes window.GF - the game registers its update/draw/strings
 // via GF.init({...}) and the lib handles canvas/resize, input, particles,
 // localisation, sprite loading, SDK boot, and the main loop.
 //
@@ -31,7 +31,7 @@ function resize() {
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', resize);
-// Yandex 1.6.2.3 — on mobile, exiting fullscreen can leave the viewport at
+// Yandex 1.6.2.3 - on mobile, exiting fullscreen can leave the viewport at
 // the fullscreen dimensions because the resize event sometimes fires before
 // the browser settles. Fire resize on every dimension-changing transition
 // with two delayed retries so the canvas always matches the viewport.
@@ -41,10 +41,10 @@ document.addEventListener('webkitfullscreenchange', _gfForceResize);
 window.addEventListener('pageshow', _gfForceResize);
 resize();
 
-// Yandex 1.9 — run progress must persist across page refreshes. Games call
+// Yandex 1.9 - run progress must persist across page refreshes. Games call
 // GF.persist(key, getState, applyState) inside their onReady. The lib:
 //   - on boot: reads localStorage[key], if present passes it to applyState
-//   - exposes GF.saveRun() — call after every state transition
+//   - exposes GF.saveRun() - call after every state transition
 // The game keeps its own state shape; the lib only ferries JSON.
 var _persistKey = null, _persistGetter = null;
 function persist(key, getState, applyState) {
@@ -192,16 +192,163 @@ function shakeOffset() {
   return { x: (Math.random() - 0.5) * shake * 12 * S, y: (Math.random() - 0.5) * shake * 12 * S };
 }
 
+// ── SCROLLABLE LIST CONTROLLER (touch-drag + wheel, hard-clamped) ──────────
+// Any screen whose content can exceed the viewport (collections, tracks, shops)
+// MUST scroll so a player can never be left unable to reach UI (Tim 2026-06-05,
+// after Orb Champions clipped 8 of 12 champions off-screen with no scroll).
+// Per-frame: sc.setViewport({x,y,w,h}); sc.setContentHeight(total);
+//   sc.begin(ctx); /* draw in CONTENT space (y from vp.y) */ sc.end(ctx); sc.draw(ctx);
+// Input: onWheel->handleWheel(dy); onDown->if(contains)dragStart(y); onMove->dragMove(y); onUp->dragEnd().
+// Grafted verbatim from the factory template gf-lib (canonical impl) so the
+// reachability gate reads scrollMaxY from the registered region by id.
+var _scrollRegions = {};   // id -> controller (for the reachability gate)
+function makeScroll(id, rect) {
+  var c = {
+    id: id,
+    vp: { x: 0, y: 0, w: 0, h: 0 },
+    contentH: 0,
+    offset: 0,
+    _drag: null,
+    _vel: 0,
+    _grabbed: false,
+  };
+  c.setViewport = function (r) { if (r) { c.vp.x = r.x; c.vp.y = r.y; c.vp.w = r.w; c.vp.h = r.h; } c.clamp(); return c; };
+  c.setContentHeight = function (h) { c.contentH = Math.max(0, h || 0); c.clamp(); return c; };
+  c.maxOffset = function () { return Math.max(0, c.contentH - c.vp.h); };
+  c.clamp = function () { c.offset = Math.max(0, Math.min(c.offset, c.maxOffset())); return c.offset; };
+  c.scrollable = function () { return c.maxOffset() > 0.5; };
+  c.contains = function (x, y) { return x >= c.vp.x && x <= c.vp.x + c.vp.w && y >= c.vp.y && y <= c.vp.y + c.vp.h; };
+  c.screenToContentY = function (y) { return (y - c.vp.y) + c.offset; };
+  c.contentToScreenY = function (cy) { return (cy - c.offset) + c.vp.y; };
+  c.scrollBy = function (dy) { c.offset += dy; c.clamp(); };
+  c.scrollTo = function (off) { c.offset = off; c.clamp(); };
+  c.handleWheel = function (dy) { if (!c.scrollable()) return false; c.offset += dy; c.clamp(); return true; };
+  c.dragStart = function (y) {
+    if (!c.scrollable()) { c._drag = null; return false; }
+    c._drag = { startY: y, startOffset: c.offset, lastY: y, lastT: (typeof performance !== 'undefined' ? performance.now() : Date.now()), vel: 0 };
+    c._vel = 0; c._grabbed = true;
+    return true;
+  };
+  c.dragMove = function (y) {
+    if (!c._drag) return false;
+    var d = c._drag;
+    c.offset = d.startOffset - (y - d.startY);
+    c.clamp();
+    var now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    var dt = Math.max(1, now - d.lastT);
+    d.vel = (d.lastY - y) / dt * 16;
+    d.lastY = y; d.lastT = now;
+    return true;
+  };
+  c.dragEnd = function () { if (c._drag) { c._vel = c._drag.vel || 0; c._drag = null; } c._grabbed = false; };
+  c.isDragging = function () { return !!c._drag; };
+  c.update = function () {
+    if (c._drag || Math.abs(c._vel) < 0.4) { c._vel = 0; return; }
+    c.offset += c._vel; c.clamp();
+    if (c.offset <= 0 || c.offset >= c.maxOffset()) c._vel = 0;
+    c._vel *= 0.92;
+  };
+  c.begin = function (cc) { cc.save(); cc.beginPath(); cc.rect(c.vp.x, c.vp.y, c.vp.w, c.vp.h); cc.clip(); cc.translate(0, c.vp.y - c.offset); };
+  c.end = function (cc) { cc.restore(); };
+  c.draw = function (cc) {
+    if (!c.scrollable()) return;
+    var sc = S, vp = c.vp;
+    var fadeH = Math.min(24 * sc, vp.h * 0.18);
+    if (c.offset > 1) {
+      var gt = cc.createLinearGradient(0, vp.y, 0, vp.y + fadeH);
+      gt.addColorStop(0, 'rgba(10,10,20,0.85)'); gt.addColorStop(1, 'rgba(10,10,20,0)');
+      cc.fillStyle = gt; cc.fillRect(vp.x, vp.y, vp.w, fadeH);
+      _scrollChevron(cc, vp.x + vp.w / 2, vp.y + 9 * sc, sc, true);
+    }
+    if (c.offset < c.maxOffset() - 1) {
+      var gb = cc.createLinearGradient(0, vp.y + vp.h - fadeH, 0, vp.y + vp.h);
+      gb.addColorStop(0, 'rgba(10,10,20,0)'); gb.addColorStop(1, 'rgba(10,10,20,0.85)');
+      cc.fillStyle = gb; cc.fillRect(vp.x, vp.y + vp.h - fadeH, vp.w, fadeH);
+      _scrollChevron(cc, vp.x + vp.w / 2, vp.y + vp.h - 9 * sc, sc, false);
+    }
+    var trackX = vp.x + vp.w - 5 * sc, trackW = 3.5 * sc;
+    var trackY = vp.y + 3 * sc, trackH = vp.h - 6 * sc;
+    cc.fillStyle = 'rgba(255,255,255,0.08)';
+    rr(cc, trackX, trackY, trackW, trackH, trackW / 2); cc.fill();
+    var frac = vp.h / c.contentH;
+    var thumbH = Math.max(24 * sc, trackH * frac);
+    var prog = c.maxOffset() > 0 ? c.offset / c.maxOffset() : 0;
+    var thumbY = trackY + (trackH - thumbH) * prog;
+    cc.fillStyle = c._drag ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.32)';
+    rr(cc, trackX, thumbY, trackW, thumbH, trackW / 2); cc.fill();
+  };
+  _scrollRegions[id] = c;
+  if (rect) c.setViewport(rect);
+  return c;
+}
+function _scrollChevron(cc, x, y, sc, up) {
+  cc.save(); cc.strokeStyle = 'rgba(220,230,255,0.7)'; cc.lineWidth = 2 * sc; cc.lineCap = 'round'; cc.lineJoin = 'round';
+  var w = 7 * sc, h = 4 * sc;
+  cc.beginPath();
+  if (up) { cc.moveTo(x - w, y + h); cc.lineTo(x, y - h); cc.lineTo(x + w, y + h); }
+  else { cc.moveTo(x - w, y - h); cc.lineTo(x, y + h); cc.lineTo(x + w, y - h); }
+  cc.stroke(); cc.restore();
+}
+
+// ── REACHABILITY GATE HOOKS (window.__gfReach / window.__gfTour) ───────────
+// reachability_check.js proves every interactive item on every screen can be
+// brought fully into the viewport at some reachable scroll position. Opt in via
+// GF.exposeReach(getter) + GF.exposeTour(steps). Scrollable items report CONTENT
+// px + scrollId; pinned items report SCREEN px + pinned:true. Verbatim from the
+// canonical template gf-lib.
+function exposeReach(getter) {
+  if (typeof getter !== 'function') return;
+  window.__gfReach = function () {
+    try {
+      var r = getter() || {};
+      var maxY = 0;
+      if (typeof r.scrollMaxY === 'number') maxY = r.scrollMaxY;
+      else if (r.scrollId && _scrollRegions[r.scrollId]) maxY = _scrollRegions[r.scrollId].maxOffset();
+      var vpH = (typeof r.viewportH === 'number') ? r.viewportH : H;
+      return {
+        screen: r.screen != null ? String(r.screen) : '?',
+        viewportH: Math.round(vpH),
+        viewportW: W,
+        screenH: Math.round(typeof r.screenH === 'number' ? r.screenH : H),
+        scrollId: r.scrollId || null,
+        scrollMaxY: Math.round(maxY),
+        items: (r.items || []).map(function (it) {
+          var o = { id: String(it.id), x: Math.round(it.x), y: Math.round(it.y), w: Math.round(it.w), h: Math.round(it.h) };
+          if (it.pinned) o.pinned = true;
+          return o;
+        }),
+      };
+    } catch (e) { return { screen: '__error', viewportH: H, viewportW: W, screenH: H, scrollMaxY: 0, items: [], error: String(e) }; }
+  };
+}
+var _tourSteps = [];
+function exposeTour(steps) {
+  _tourSteps = Array.isArray(steps) ? steps : [];
+  window.__gfTour = function (i) {
+    if (i == null) return _tourSteps.map(function (s) { return s.name; });
+    var s = _tourSteps[i];
+    if (!s) return null;
+    try { if (typeof s.go === 'function') s.go(); } catch (e) {}
+    return s.name;
+  };
+}
+function scrollMax(id) { return _scrollRegions[id] ? _scrollRegions[id].maxOffset() : 0; }
+
 // ── SPRITES ──────────────────────────────────────────────────────────────
 var sprites = {};
 function loadSprites(names) {
   if (!names || !names.length) return Promise.resolve();
   return Promise.all(names.map(function(name) {
     return new Promise(function(resolve) {
+      var done = false, fin = function () { if (!done) { done = true; resolve(); } };
       var img = new Image();
-      img.onload  = function() { sprites[name] = img;  resolve(); };
-      img.onerror = function() { sprites[name] = null; resolve(); };
+      img.onload  = function() { sprites[name] = img;  fin(); };
+      img.onerror = function() { sprites[name] = null; fin(); };
       img.src = './sprites/' + name + '.png';
+      // Boot fallback: never let a single never-firing image stall the whole
+      // Promise.all (a flaky CDN can leave load/error pending forever) - resolve
+      // after 6s and fall back to the procedural blob for that sprite.
+      setTimeout(function () { if (!done) { sprites[name] = sprites[name] || null; fin(); } }, 6000);
     });
   }));
 }
@@ -347,7 +494,7 @@ function shareCard(opts) {
   });
 }
 
-// shareBlob — Web Share API with file (mobile) or download fallback (desktop).
+// shareBlob - Web Share API with file (mobile) or download fallback (desktop).
 // Also copies a text snippet to clipboard so the user can paste-attach.
 function shareBlob(blob, opts) {
   if (!blob) return;
@@ -421,7 +568,7 @@ function init(config) {
       if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
         window.ysdk.features.LoadingAPI.ready();
       }
-      // CrazyGames pairs sdkGameLoadingStart/Stop with gameplayStart/Stop —
+      // CrazyGames pairs sdkGameLoadingStart/Stop with gameplayStart/Stop -
       // calling loadingStop here tells CG the boot phase is done, which
       // anchors their Gameplay Conversion measurement.
       try {
@@ -470,7 +617,7 @@ function init(config) {
     setTimeout(boot, 3000);
   } else if (window.CrazyGames && window.CrazyGames.SDK) {
     platform = 'crazygames';
-    // Fire loadingStart SYNCHRONOUSLY before init resolves — CG QA scanner
+    // Fire loadingStart SYNCHRONOUSLY before init resolves - CG QA scanner
     // requires the literal call path before the .then() chain. See
     // Shared/skills/crazygames-publish/SKILL.md "SDK Integration Pattern".
     try { window.CrazyGames.SDK.game.loadingStart(); } catch(e) {}
@@ -516,7 +663,7 @@ function init(config) {
 // the PLAYING state and GF.gameplayStop() on game-over/menu-return.
 // These no-op locally; on CG they're required for ad timing (Full Launch);
 // on Yandex they're a no-op today but kept here so games using GF only
-// need ONE set of calls. Safe to call repeatedly — the platform SDKs
+// need ONE set of calls. Safe to call repeatedly - the platform SDKs
 // dedupe internally.
 var platform = 'local';
 function gameplayStart() {
@@ -533,19 +680,19 @@ function gameplayStop() {
     }
   } catch (e) {}
 }
-// Request an ad. Resolves regardless of outcome — caller should treat
+// Request an ad. Resolves regardless of outcome - caller should treat
 // resolve as "you may resume" and never block gameplay on this.
-// type = 'midgame' | 'rewarded' — Yandex maps both to its interstitial;
+// type = 'midgame' | 'rewarded' - Yandex maps both to its interstitial;
 // GamePush has separate showFullscreen / showRewardedVideo paths.
 // Returns a Promise that resolves to:
 //   { shown: bool, rewarded: bool }
-// Old callers that just `await GF.showAd()` still work — the resolved
+// Old callers that just `await GF.showAd()` still work - the resolved
 // object is truthy and they ignore it.
 function showAd(type) {
   type = type || 'midgame';
   return new Promise(function(ok) {
     try {
-      // GamePush — preferred when present. Routes to whichever ad network
+      // GamePush - preferred when present. Routes to whichever ad network
       // the active platform supports. showRewardedVideo resolves to bool.
       if (platform === 'gamepush' && window.gp && window.gp.ads) {
         if (type === 'rewarded' && typeof window.gp.ads.showRewardedVideo === 'function') {
@@ -646,12 +793,12 @@ var gpApi = {
       try { gp.achievements.unlock(idOrTag); } catch (e) {}
     },
   },
-  // Banner ads — call once on game-ready, GP handles the refresh.
+  // Banner ads - call once on game-ready, GP handles the refresh.
   showSticky: function () {
     var gp = _gp(); if (!gp || !gp.ads || typeof gp.ads.showSticky !== 'function') return;
     try { gp.ads.showSticky(); } catch (e) {}
   },
-  // Pre-game ad — call after assets load, BEFORE the player can interact.
+  // Pre-game ad - call after assets load, BEFORE the player can interact.
   // Resolves regardless of outcome.
   showPreloader: function () {
     var gp = _gp();
@@ -693,7 +840,7 @@ function arp(notes, step, dur, type, gain) {
     setTimeout(function () { tone(f, dur || 0.16, type || 'sine', gain || 0.13); }, idx * (step || 70));
   })(i, notes[i]);
 }
-// named stinger library — games call GF.sfx('merge') etc.
+// named stinger library - games call GF.sfx('merge') etc.
 var SFX_LIB = {
   click:   function () { tone(660, 0.05, 'square', 0.05); },
   tap:     function () { tone(520, 0.06, 'triangle', 0.07); },
@@ -731,7 +878,7 @@ function toggleMute() {
   }
   return AUDIO_MUTED;
 }
-// vector speaker / muted-speaker icon (never emoji) — games place + wire the click
+// vector speaker / muted-speaker icon (never emoji) - games place + wire the click
 function drawMuteIcon(c, x, y, r, muted) {
   c.save(); c.translate(x, y); c.lineWidth = Math.max(1.5, r * 0.16);
   c.strokeStyle = muted ? '#8a8a9a' : '#dfe7ff'; c.fillStyle = c.strokeStyle;
@@ -772,7 +919,7 @@ window.GF = {
   spawnParticles: spawnParticles,
   spawnFloat: spawnFloat,
   setShake: setShake,
-  // Audio (REQUIRED before publish) — GF.sfx('merge'|'spawn'|'hit'|'levelup'|'unlock'|
+  // Audio (REQUIRED before publish) - GF.sfx('merge'|'spawn'|'hit'|'levelup'|'unlock'|
   // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
   // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
   sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
@@ -789,7 +936,7 @@ window.GF = {
   // Tells the gallery shell (parent of the iframe) that the round just ended,
   // so the "More games" rail can surface without interrupting active play.
   // Call from the game's onGameOver / onWin handler.
-  // Also calls platform gameplayStop() (CG ad lifecycle) — safe no-op elsewhere.
+  // Also calls platform gameplayStop() (CG ad lifecycle) - safe no-op elsewhere.
   gameEnded: function () {
     gameplayStop();
     try { window.parent.postMessage({ type: 'gf:gameEnded' }, '*'); } catch (_) {}
@@ -797,16 +944,16 @@ window.GF = {
   // Tells the shell a new round / level just started. Call after the player
   // hits Next Level / Retry so the gallery's "More games" rail dismisses
   // itself instead of lingering over fresh play.
-  // Also calls platform gameplayStart() (CG ad lifecycle) — safe no-op elsewhere.
+  // Also calls platform gameplayStart() (CG ad lifecycle) - safe no-op elsewhere.
   gameStarted: function () {
     gameplayStart();
     try { window.parent.postMessage({ type: 'gf:gameStarted' }, '*'); } catch (_) {}
   },
   // Platform-aware ad request. Promise resolves when the ad finishes
-  // (or immediately on local). Games call this at natural breaks — never
+  // (or immediately on local). Games call this at natural breaks - never
   // during active gameplay (CG rejects games that do).
   showAd: showAd,
-  // CrazyGames "happy moment" — triggers their confetti animation on victory
+  // CrazyGames "happy moment" - triggers their confetti animation on victory
   // / new high score. Use sparingly (CG rejects games that fire it on every
   // level clear). Safe no-op on other platforms.
   happytime: function () {
@@ -817,7 +964,7 @@ window.GF = {
     } catch (e) {}
   },
   get platform() { return platform; },
-  // GamePush wrappers — no-op when GP isn't loaded, so games can call these
+  // GamePush wrappers - no-op when GP isn't loaded, so games can call these
   // unconditionally. See _gp / gpApi above for the full surface.
   gp: gpApi,
   // Register a state-getter for the post-build-tester gate.
@@ -830,11 +977,19 @@ window.GF = {
       try { return getter(); } catch (e) { return { __error: String(e) }; }
     };
   },
-  // Persist run state to localStorage (Yandex 1.9 — game progress must
+  // Scrollable-list controller + reachability gate hooks (window.__gfReach /
+  // window.__gfTour). makeScroll(id,{x,y,w,h}) for any overflowing list;
+  // exposeReach(getter)+exposeTour(steps) so reachability_check.js can prove
+  // every screen's UI is reachable at both 393x852 and 1280x720.
+  makeScroll: makeScroll,
+  scrollMax: scrollMax,
+  exposeReach: exposeReach,
+  exposeTour: exposeTour,
+  // Persist run state to localStorage (Yandex 1.9 - game progress must
   // survive page refresh). Usage:
   //   GF.persist('mygame_run_v1',
-  //     () => ({ level, coins, ... }),         // getter — what to save
-  //     (s) => { level = s.level; coins = s.coins; ... }  // applier — how to restore
+  //     () => ({ level, coins, ... }),         // getter - what to save
+  //     (s) => { level = s.level; coins = s.coins; ... }  // applier - how to restore
   //   );
   // Then call GF.saveRun() after every state transition that changes
   // persisted fields (level++, coin spend, gs change, etc.).
@@ -854,13 +1009,13 @@ window.GF = {
   //   ], { storageKey: 'pendulum_sniper_tutorial_v1' });
   //
   // Game integration:
-  //   - update(dt) — call GF.tutorial.update(dt) at the start.
+  //   - update(dt) - call GF.tutorial.update(dt) at the start.
   //     Gate the rest of update() on `if (GF.tutorial.active) return;`
   //     so the world freezes between steps.
-  //   - render() — call GF.tutorial.draw(ctx) LAST so the overlay is on top.
-  //   - onPress(x, y) — call GF.tutorial.handleClick(x, y) FIRST.
+  //   - render() - call GF.tutorial.draw(ctx) LAST so the overlay is on top.
+  //   - onPress(x, y) - call GF.tutorial.handleClick(x, y) FIRST.
   //     If it returns true, return early (tutorial consumed the click).
-  //   - Help (?) button — call GF.tutorial.reopen() to re-run from step 1.
+  //   - Help (?) button - call GF.tutorial.reopen() to re-run from step 1.
   tutorial: (function () {
     var pulseT = 0;
     // ── Animated demo HAND (Tim 2026-06-04: tutorials must SHOW the gesture) ──
@@ -955,7 +1110,7 @@ window.GF = {
       // Resolve target (may be a function returning {x,y,r} so games can
       // point at moving things like a swinging pendulum)
       var tg = typeof step.target === 'function' ? step.target() : step.target;
-      // Light scrim — the HAND is the focus now, so keep the board clearly visible
+      // Light scrim - the HAND is the focus now, so keep the board clearly visible
       // (Tim 2026-06-04: "hand is enough", dropped the heavy bottom panel).
       c.fillStyle = 'rgba(0, 0, 0, 0.26)';
       c.fillRect(0, 0, W, H);
@@ -1005,7 +1160,7 @@ window.GF = {
         }
       }
       // ── slim caption + skip, anchored ABOVE the action (NOT a full-width bottom
-      // panel — Tim 2026-06-04: "drop that bottom ui panel, hand is enough"). Short
+      // panel - Tim 2026-06-04: "drop that bottom ui panel, hand is enough"). Short
       // worded hint rides just above the hand so words + gesture read together. ──
       var aTg = (tg && typeof tg.x === 'number') ? tg : { x: W / 2, y: H * 0.5, r: 40 };
       var aTo = step.target2 ? (typeof step.target2 === 'function' ? step.target2() : step.target2) : null;
@@ -1042,7 +1197,7 @@ window.GF = {
     };
     state.handleClick = function (x, y) {
       if (!state.active) return false;
-      // Cooldown after start (see start() comment) — swallow the click but
+      // Cooldown after start (see start() comment) - swallow the click but
       // don't advance, so the bubbled startGame click can't skip step 1.
       if (state._startTs && Date.now() - state._startTs < 200) return true;
       var step = state.steps[state.step];
@@ -1069,13 +1224,13 @@ window.GF = {
         state.next();
         return true;
       }
-      return true; // 'auto' or unknown — swallow
+      return true; // 'auto' or unknown - swallow
     };
     return state;
   })(),
 };
 
-// Screenshot helpers — exposed at window for external tooling (take_screenshots.js)
+// Screenshot helpers - exposed at window for external tooling (take_screenshots.js)
 window._setLang = function(l) { lang = (l === 'ru' ? 'ru' : 'en'); };
 // _jumpLevel must be defined per-game (each game has its own level model).
 

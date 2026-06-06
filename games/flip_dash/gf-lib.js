@@ -21,11 +21,24 @@ if (!canvas) {
 }
 var ctx = canvas.getContext('2d');
 var W = 0, H = 0, cx = 0, cy = 0, S = 1;
+var offX = 0, fullW = 0, fullH = 0;   // desktop framing: centred gameplay band + side margins
 var DESIGN_W = 800, DESIGN_H = 600;
 
 function resize() {
-  W = canvas.width  = window.innerWidth;
-  H = canvas.height = window.innerHeight;
+  fullW = canvas.width  = window.innerWidth;
+  fullH = canvas.height = window.innerHeight;
+  // Desktop/landscape framing: constrain gameplay to a centred portrait band so
+  // wide screens get a dense playfield + designed side margins instead of a
+  // stretched void. CrazyGames is desktop-first and an empty 16:9 frame reads as
+  // unfinished at QA. On portrait/phone the band IS the full width — mobile is
+  // pixel-identical to before (offX 0). Margins are painted by the lib, or by an
+  // optional game-supplied config.drawMargins(ctx, fullW, fullH, offX, bandW).
+  var band = fullW;
+  if (fullW > fullH * 0.9) {                                  // landscape-ish => frame it
+    band = Math.min(fullW, Math.round(fullH * 0.62));         // ~portrait playfield band
+  }
+  offX = Math.round((fullW - band) / 2);
+  W = band; H = fullH;
   cx = W / 2; cy = H / 2;
   S = Math.min(W / DESIGN_W, H / DESIGN_H);
 }
@@ -101,18 +114,18 @@ canvas.addEventListener('touchstart', function(e) {
   e.preventDefault();
   var t0 = e.changedTouches[0];
   touch.active = true; touch.id = t0.identifier;
-  touch.sx = t0.clientX; touch.sy = t0.clientY;
-  touch.x = t0.clientX; touch.y = t0.clientY;
+  touch.sx = t0.clientX - offX; touch.sy = t0.clientY;
+  touch.x = t0.clientX - offX; touch.y = t0.clientY;
   touch.dx = 0; touch.dy = 0;
-  checkButtons(t0.clientX, t0.clientY);
+  checkButtons(t0.clientX - offX, t0.clientY);
 }, { passive: false });
 canvas.addEventListener('touchmove', function(e) {
   e.preventDefault();
   for (var i = 0; i < e.changedTouches.length; i++) {
     var t0 = e.changedTouches[i];
     if (t0.identifier !== touch.id) continue;
-    touch.x = t0.clientX; touch.y = t0.clientY;
-    var dx = t0.clientX - touch.sx, dy = t0.clientY - touch.sy;
+    touch.x = t0.clientX - offX; touch.y = t0.clientY;
+    var dx = touch.x - touch.sx, dy = touch.y - touch.sy;
     var d = Math.sqrt(dx*dx + dy*dy);
     if (d > 8) { touch.dx = dx / Math.max(d, 50); touch.dy = dy / Math.max(d, 50); }
   }
@@ -136,7 +149,7 @@ function checkButtons(x, y) {
   }
   return false;
 }
-canvas.addEventListener('click', function(e) { checkButtons(e.clientX, e.clientY); });
+canvas.addEventListener('click', function(e) { checkButtons(e.clientX - offX, e.clientY); });
 
 // ── PARTICLES & FLOATS ───────────────────────────────────────────────────
 var particles = [];
@@ -377,7 +390,7 @@ function shareBlob(blob, opts) {
 }
 
 // ── MAIN LOOP ────────────────────────────────────────────────────────────
-var lastTs = 0, onUpdate = null, onDraw = null, isRunning = false;
+var lastTs = 0, onUpdate = null, onDraw = null, isRunning = false, marginsFn = null;
 
 function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
@@ -389,8 +402,19 @@ function frame(ts) {
   if (onUpdate) onUpdate(dt);
 
   var ofs = shakeOffset();
+  // Desktop framing: paint the side margins (full-canvas space) behind the
+  // clipped gameplay band. Game supplies config.drawMargins for designed art;
+  // otherwise a dark fallback so the margins are never an empty/white void.
+  if (offX > 0) {
+    ctx.save();
+    ctx.translate(ofs.x, ofs.y);
+    if (marginsFn) marginsFn(ctx, fullW, fullH, offX, W);
+    else { ctx.fillStyle = '#0b0f1a'; ctx.fillRect(0, 0, fullW, fullH); }
+    ctx.restore();
+  }
   ctx.save();
-  ctx.translate(ofs.x, ofs.y);
+  ctx.translate(offX + ofs.x, ofs.y);
+  if (offX > 0) { ctx.beginPath(); ctx.rect(0, 0, W, H); ctx.clip(); }
   if (onDraw) onDraw(ctx, dt);
   drawParticles();
   drawFloats();
@@ -409,6 +433,7 @@ function init(config) {
   if (config.saveKey) SAVE_KEY = config.saveKey;
   onUpdate = config.onUpdate || null;
   onDraw   = config.onDraw   || null;
+  marginsFn = config.drawMargins || null;
 
   resize(); // re-resize with the new design dimensions
 
@@ -789,6 +814,10 @@ window.GF = {
   get cx() { return cx; },
   get cy() { return cy; },
   get S()  { return S; },
+  get offX() { return offX; },
+  get fullW() { return fullW; },
+  get fullH() { return fullH; },
+  get platform() { return platform; },
   get lang() { return lang; },
   set lang(v) { lang = (v === 'ru' ? 'ru' : 'en'); },
   t: t,
