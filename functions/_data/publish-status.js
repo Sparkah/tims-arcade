@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-07T10:27:11.360584+00:00",
+  "generated": "2026-06-07T18:53:27.537954+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -541,7 +541,8 @@ export default {
       },
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-07",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -555,7 +556,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -566,7 +566,8 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-07",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -580,7 +581,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -597,7 +597,8 @@ export default {
       },
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-07",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -611,7 +612,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -622,7 +622,8 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-07",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -636,7 +637,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -653,7 +653,8 @@ export default {
       },
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-07",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -667,7 +668,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -678,7 +678,8 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-07",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -692,7 +693,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -782,9 +782,9 @@ export default {
     "yandex": {
       "live": 4,
       "approved": 0,
-      "submitted": 12,
+      "submitted": 18,
       "rejected": 2,
-      "built": 7
+      "built": 1
     },
     "crazygames": {
       "live": 0,

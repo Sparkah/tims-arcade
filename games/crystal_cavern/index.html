@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Crystal Cavern</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #07060f; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ===========================================================================
+// CRYSTAL CAVERN — a deep-shaft mining idle-tycoon.
+// Vanilla JS canvas. Mobile-portrait first (393x852). gf-lib handles canvas,
+// resize, SFX, music, tutorial, particles, shake, persist, scroll, reach gate.
+// Auto-miners fill the cart -> elevator SELLS for gold -> buy upgrades/safety
+// -> DIG DEEPER (new crystal + new hazard) -> RESTAKE for a value multiplier.
+// Non-timer pressure: instability gauge -> cave-in -> crew attrition / bankrupt.
+// In-session only (no offline accrual). crystal_cavern_best is the lone persist.
+// ===========================================================================
+
+var ctx = GF.ctx, canvas = GF.canvas;
+var clampF = function(v,lo,hi){ return Math.max(lo, Math.min(hi, v)); };
+
+// ── TUNABLES (mirror DESIGN.md) ──────────────────────────────────────────────
+var baseGemValue      = 3;     // gold per crystal at layer 0, pre-multipliers
+var minerSpeed        = 0.55;  // crystals/sec each miner digs (pre-upgrade)
+var cartCapacity      = 12;    // crystals a cart holds before it auto-hauls
+var elevatorSpeed     = 1.0;   // haul-trip factor (higher = faster sell cycle)
+var instabilityRate   = 5.5;   // instability pts/sec while mining (layer 0)
+var supportCost       = 8;     // base cost of a support (lowers instability)
+var layerCount        = 10;    // number of depth layers (>= 8 required)
+var upgradeCostGrowth = 1.16;  // cost multiplier per upgrade level
+var prestigeMultStep  = 0.5;   // +50% crystal value per prestige core
+var hazardChance      = 0.55;  // P(cave-in) when instability stays pinned at 100
+
+// derived hitbox sizes
+var ROW_H_BASE = 76;
+var MUTE_R     = 13;
+var HELP_R     = 14;
+
+// ── DEPTH LAYERS (10 biomes) ─────────────────────────────────────────────────
+// each deeper layer: new crystal (colour+name), higher value mult, higher
+// instability scaling, escalating hazard flavour (dust->gas->water->magma->void).
+// digCost = gold to unlock (buy the dig). valueMult multiplies crystal value.
+var LAYERS = [
+  { en:'Quartz',    ru:'Кварц',     col:'#e8eef7', glow:'#aab8d8', rock:'#2a2636', valueMult:1,    digCost:0,        instab:1.0,  hazard:'dust'  },
+  { en:'Amethyst',  ru:'Аметист',   col:'#b884f0', glow:'#8a4fd8', rock:'#2b2240', valueMult:2.6,  digCost:140,      instab:1.15, hazard:'dust'  },
+  { en:'Citrine',   ru:'Цитрин',    col:'#f6c64a', glow:'#d89a2a', rock:'#33293a', valueMult:7,    digCost:900,      instab:1.35, hazard:'gas'   },
+  { en:'Emerald',   ru:'Изумруд',   col:'#3fe08a', glow:'#1fa860', rock:'#1f2e2c', valueMult:18,   digCost:5200,     instab:1.55, hazard:'gas'   },
+  { en:'Sapphire',  ru:'Сапфир',    col:'#4aa6f6', glow:'#2a6fd8', rock:'#1e2740', valueMult:46,   digCost:28000,    instab:1.8,  hazard:'water' },
+  { en:'Topaz',     ru:'Топаз',     col:'#f68a4a', glow:'#d8602a', rock:'#33271f', valueMult:120,  digCost:150000,   instab:2.05, hazard:'water' },
+  { en:'Ruby',      ru:'Рубин',     col:'#f64a6a', glow:'#d82a4a', rock:'#321f24', valueMult:320,  digCost:820000,   instab:2.35, hazard:'magma' },
+  { en:'Garnet',    ru:'Гранат',    col:'#e0506a', glow:'#a82a44', rock:'#2e1c22', valueMult:820,  digCost:4500000,  instab:2.7,  hazard:'magma' },
+  { en:'Diamond',   ru:'Алмаз',     col:'#bfeeff', glow:'#7fd0f0', rock:'#202a32', valueMult:2200, digCost:26000000, instab:3.1,  hazard:'void'  },
+  { en:'Voidstone', ru:'Камень Бездны', col:'#c06ff6', glow:'#7a2ad8', rock:'#241830', valueMult:6000, digCost:160000000, instab:3.6, hazard:'void' },
+];
+var HAZARD_LABEL = {
+  dust:  { en:'Dust',  ru:'Пыль' },
+  gas:   { en:'Gas',   ru:'Газ' },
+  water: { en:'Water', ru:'Вода' },
+  magma: { en:'Magma', ru:'Магма' },
+  void:  { en:'Void',  ru:'Бездна' },
+};
+
+// ── UPGRADES (6 tracks) ──────────────────────────────────────────────────────
+// kinds: miner (count -> dig rate + passive), speed (dig speed mult), cart
+// (capacity), elev (haul/sell speed), value (sell value mult), foreman
+// (passive auto-sell gold/sec). gateLayer = depth at which it appears so new
+// tracks keep arriving. supportCost handled by the dedicated SUPPORT row.
+function mkUp(id, kind, en, ru, base, gain, gateLayer){
+  return { id:id, kind:kind, en:en, ru:ru, base:base, gain:gain, lvl:0,
+           gate:(gateLayer||0), _new:false, _seen:false };
+}
+var UPGRADES = [
+  mkUp('miner1', 'miner', 'Hire Miner',     'Нанять шахтёра',   8,    1,     0),
+  mkUp('speed1', 'speed', 'Sharper Picks',  'Острые кирки',     14,   0.16,  0),
+  mkUp('cart1',  'cart',  'Bigger Cart',    'Большая вагонетка',26,   4,     0),
+  mkUp('elev1',  'elev',  'Faster Elevator','Быстрый лифт',     48,   0.18,  0),
+  mkUp('value1', 'value', 'Gem Cutter',     'Огранщик',         90,   0.35,  1),
+  mkUp('miner2', 'miner', 'Mining Crew',    'Бригада',          220,  3,     1),
+  mkUp('foreman1','foreman','Foreman',      'Десятник',         150,  0.6,   2),
+  mkUp('value2', 'value', 'Jeweller',       'Ювелир',           1400, 0.6,   2),
+  mkUp('speed2', 'speed', 'Power Drills',   'Перфораторы',      2600, 0.2,   3),
+  mkUp('foreman2','foreman','Pit Boss',     'Управляющий',      9000, 8,     4),
+  mkUp('cart2',  'cart',  'Ore Train',      'Рудный состав',    24000,40,    5),
+  mkUp('value3', 'value', 'Master Lapidary','Мастер-камнерез',  80000,1.2,   6),
+];
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+var gs = 'PLAYING';   // PLAYING | GAMEOVER | HUB | RESTAKE
+var gold = 0;
+var totalMined = 0;        // lifetime gold earned this run (drives prestige req)
+var bestGold = 0;          // persisted best score (crystal_cavern_best)
+var depth = 0;             // index into LAYERS (deepest unlocked = active)
+var claimLevel = 0;        // prestige cores
+var crew = 3;              // miners alive; 0 = game over
+var cartGold = 0;          // crystals currently in the cart (count)
+var cartPos = 0;           // 0 = at the face (bottom), 1 = at the surface (sell)
+var cartHauling = false;   // true while the full cart is riding the elevator up
+var instability = 0;       // 0..100; at 100 -> cave-in roll
+var caveinFlash = 0;       // red flash timer after a cave-in
+var caveinShakeName = '';  // hazard label shown on cave-in banner
+var upkeepT = 0;           // upkeep tick accumulator
+var unlockFanfare = 0;     // depth-unlock / restake banner timer
+var fanfareName = '';
+var goldDisplay = 0;       // smoothed counter for juice
+var bootDone = false;
+var swing = 0;             // miner pick-swing anim phase
+
+var BEST_KEY = 'crystal_cavern_best';
+var TUT_KEY  = 'crystal_cavern_seen_tutorial';
+
+// layout cache (filled each draw; read by input + reach gate)
+var L = {};
+var shopScroll = null;
+var muteBtn = null, helpBtn = null;
+var helpOpen = false;
+
+// ── ECONOMY MATH ───────────────────────────────────────────────────────────────
+function upCount(kind){ var n=0; for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind===kind) n+=u.lvl; } return n; }
+function globalMult(){
+  var valM = 1; for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='value') valM += u.gain*u.lvl; }
+  var coreM = 1 + prestigeMultStep * claimLevel;
+  return valM * coreM;
+}
+function gemValue(){ return baseGemValue * LAYERS[depth].valueMult * globalMult(); }
+function minerDigRate(){            // crystals/sec total from live crew
+  var speedM = 1; for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='speed') speedM += u.gain*u.lvl; }
+  return crew * minerSpeed * speedM;
+}
+function cartCap(){ return cartCapacity + upCount('cart')*0 + (function(){ var c=0; for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='cart') c+=u.gain*u.lvl; } return c; })(); }
+function elevFactor(){ var e=elevatorSpeed; for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='elev') e+=u.gain*u.lvl; } return e; }
+function foremanGps(){              // passive auto-sell gold/sec
+  var g=0; for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.kind==='foreman') g+=u.gain*u.lvl; }
+  return g * LAYERS[depth].valueMult * globalMult();
+}
+function goldPerSec(){              // shown rate ≈ mining throughput + foreman
+  var perCart = cartCap() * gemValue();
+  var cartTime = cartCap() / Math.max(0.01, minerDigRate()) + 1.4/Math.max(0.2,elevFactor());
+  var mineGps = (crew>0) ? perCart / cartTime : 0;
+  return mineGps + foremanGps();
+}
+// instability climbs while mining; deeper layers strain the rock harder, but
+// each support permanently dampens the passive rate (ventLevel). Net rate is
+// gentle at shallow depth (≈45s to fill from empty at L0 with no supports) so a
+// reckless DEEP push is what kills you, not normal shallow play.
+function instabRate(){
+  var raw = instabilityRate * LAYERS[depth].instab * (1 + depth*0.32);
+  return Math.max(0.3, raw - ventLevel);
+}
+function supportPower(){ return 62; }              // instability removed per support buy (one support clears a scare)
+function curSupportCost(){ return Math.ceil(supportCost * Math.pow(1.14, supportsBought) * Math.pow(2.2, depth)); }
+var supportsBought = 0;            // raises support cost a little each buy (scarcity)
+var ventLevel = 0;                 // permanent passive instability dampening from supports
+// upkeep is a SMALL slice of expected income (never a crew-count spiral): you go
+// bankrupt only if income truly dries up (no crew + no foreman + empty cart).
+function minerUpkeep(){ return Math.ceil(Math.max(1, goldPerSec() * 0.12)); }
+function upgradeCost(u){ return Math.ceil(u.base * Math.pow(upgradeCostGrowth, u.lvl) * (1 + u.gate*0.4)); }
+function restakeReq(){ return Math.ceil(2000 * Math.pow(14, claimLevel)); }
+function canRestake(){ return totalMined >= restakeReq(); }
+
+// nextGoal: cheapest thing the player is saving toward (the always-visible line)
+function nextGoal(){
+  var cheapest=null, cc=Infinity, isSup=false, isDig=false;
+  // support
+  var sc=curSupportCost(); if (sc<cc){ cc=sc; cheapest={name:GF.t('support'),cost:sc}; isSup=true; isDig=false; }
+  // upgrades
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.gate<=depth){ var c=upgradeCost(u); if (c<cc){ cc=c; cheapest={name:(GF.lang==='ru'?u.ru:u.en),cost:c}; isSup=false; isDig=false; } } }
+  // dig deeper
+  if (depth < LAYERS.length-1){ var dc=LAYERS[depth+1].digCost; if (dc<cc){ cc=dc; cheapest={name:GF.t('dig_deeper'),cost:dc}; isDig=true; isSup=false; } }
+  if (!cheapest){ cheapest={name:GF.t('restake'),cost:restakeReq()}; }
+  return cheapest;
+}
+
+// ── NUMBER FORMAT (K/M/B/T suffix) ────────────────────────────────────────────
+var SUFFIX = ['', 'K', 'M', 'B', 'T', 'aa', 'ab', 'ac', 'ad', 'ae'];
+function fmt(n){
+  n = Math.floor(n);
+  if (n < 1000) return '' + n;
+  var tier = Math.floor(Math.log10(Math.abs(n)) / 3);
+  if (tier >= SUFFIX.length) tier = SUFFIX.length-1;
+  var scaled = n / Math.pow(1000, tier);
+  var s = scaled.toFixed(scaled < 10 ? 2 : (scaled < 100 ? 1 : 0));
+  return s + SUFFIX[tier];
+}
+function fmtRate(n){ if (n < 10) return n.toFixed(1); return fmt(n); }
+
+// ===========================================================================
+//  LOCALISATION
+// ===========================================================================
+var STRINGS = {
+  en: {
+    gps: '/sec', next_goal: 'Next', boost: 'Boost', tap_shaft: 'Tap the shaft',
+    instability: 'Instability', crew: 'Crew', upgrades: 'Upgrades', buy: 'Buy', level: 'Lv',
+    restake: 'Restake Claim', restake_desc: 'Reset for a permanent value boost',
+    restake_confirm: 'Restake the claim?', restake_gain: 'Gain a Core: all crystal value +50% forever',
+    confirm: 'Restake', cancel: 'Cancel', cores: 'Cores', depth: 'Depth', layer: 'Layer',
+    cavein: 'CAVE-IN!', kept: 'You banked', best: 'Best gold', lost_crew: 'Lost a miner',
+    restart: 'Dig again', home: 'Menu', help: 'How to play', close: 'Close',
+    dig_deeper: 'Dig Deeper', support: 'Add Support', vent: 'Ventilation', new_layer: 'New crystal!',
+    locked: 'Locked', need: 'Need', value_x: 'value', dig_speed: 'dig speed', cart_size: 'cart size',
+    elev_speed: 'haul speed', auto_gold: 'auto gold', per_miner: 'per miner', sell_value: 'sell value',
+    bankrupt: 'Bankrupt - crew unpaid!', gameover_crew: 'Your last miner is gone',
+    tut_step_boost: 'Tap the shaft to boost the cart',
+    tut_step_support: 'Tap here to add a support',
+    tut_step_done: 'Crystals sell for gold. Dig deeper for richer ones!',
+    tut_goal: 'Goal: Dig deeper, sell richer crystals, automate the mine - then restake to dig even deeper.',
+    tut_controls: 'Tap the shaft to boost the cart. Tap an upgrade to buy it.',
+    tut_win: 'Endless: chase your best gold and the deepest layer. Restake for a permanent value multiplier.',
+    tut_lose: 'If a cave-in kills your last miner, or you go bankrupt and cannot pay the crew, the cavern closes.',
+    tut_tip: 'Buy supports before instability hits the red - a cave-in steals your cart and a crew member.',
+    new_pip: 'NEW',
+  },
+  ru: {
+    gps: '/сек', next_goal: 'Цель', boost: 'Ускорить', tap_shaft: 'Нажми на шахту',
+    instability: 'Нестабильность', crew: 'Бригада', upgrades: 'Улучшения', buy: 'Купить', level: 'Ур',
+    restake: 'Перезаложить', restake_desc: 'Сброс ради вечного бонуса',
+    restake_confirm: 'Перезаложить участок?', restake_gain: 'Ядро: ценность кристаллов +50% навсегда',
+    confirm: 'Перезаложить', cancel: 'Отмена', cores: 'Ядра', depth: 'Глубина', layer: 'Слой',
+    cavein: 'ОБВАЛ!', kept: 'Накоплено', best: 'Рекорд золота', lost_crew: 'Потерян шахтёр',
+    restart: 'Копать снова', home: 'Меню', help: 'Как играть', close: 'Закрыть',
+    dig_deeper: 'Копать глубже', support: 'Поставить крепь', vent: 'Вентиляция', new_layer: 'Новый кристалл!',
+    locked: 'Закрыто', need: 'Нужно', value_x: 'ценность', dig_speed: 'скорость', cart_size: 'вагонетка',
+    elev_speed: 'подъём', auto_gold: 'авто-золото', per_miner: 'за шахтёра', sell_value: 'цена продажи',
+    bankrupt: 'Банкрот - бригаде не платят!', gameover_crew: 'Последний шахтёр погиб',
+    tut_step_boost: 'Нажми на шахту, чтобы ускорить вагонетку',
+    tut_step_support: 'Нажми сюда, чтобы поставить крепь',
+    tut_step_done: 'Кристаллы продаются за золото. Копай глубже ради ценных!',
+    tut_goal: 'Цель: копай глубже, продавай ценные кристаллы, автоматизируй шахту - затем перезаложи участок, чтобы копать ещё глубже.',
+    tut_controls: 'Нажми на шахту, чтобы ускорить вагонетку. Нажми на улучшение, чтобы купить.',
+    tut_win: 'Бесконечно: побей рекорд золота и спустись глубже. Перезаложи участок ради вечного множителя ценности.',
+    tut_lose: 'Если обвал убьёт последнего шахтёра или ты обанкротишься и не сможешь платить бригаде - пещера закроется.',
+    tut_tip: 'Покупай крепи до того, как нестабильность дойдёт до красного - обвал крадёт вагонетку и шахтёра.',
+    new_pip: 'НОВОЕ',
+  },
+};
+
+// ===========================================================================
+//  PERSISTENCE — in-session only; just the best score survives a reload.
+//  (Per the brief: NO save-game progression carry-over. Run state resets on
+//   reload; crystal_cavern_best is the lone persisted value.)
+// ===========================================================================
+function loadBest(){ try { var v = parseFloat(localStorage.getItem(BEST_KEY)); if (!isNaN(v)) bestGold = v; } catch(e){} }
+function saveBest(){ try { localStorage.setItem(BEST_KEY, String(Math.floor(bestGold))); } catch(e){} }
+
+// ===========================================================================
+//  ACTIONS
+// ===========================================================================
+function addGold(n){ gold += n; totalMined += n; if (totalMined > bestGold){ bestGold = totalMined; saveBest(); } }
+
+function sellCart(){
+  if (cartGold <= 0) return;
+  var gain = cartGold * gemValue();
+  addGold(gain);
+  GF.spawnFloat(L.surfX || GF.W*0.18, (L.surfY||GF.H*0.18), '+'+fmt(gain), '#ffd86a');
+  GF.spawnParticles(L.surfX||GF.W*0.18, L.surfY||GF.H*0.18, '#ffd86a', 10);
+  GF.sfx('coin');
+  cartGold = 0; cartHauling = false; cartPos = 0;
+}
+
+// Boost: manual tap on the shaft -> add crystals to the cart + nudge it up.
+function boost(){
+  if (gs !== 'PLAYING') return;
+  if (crew > 0){
+    cartGold = Math.min(cartCap(), cartGold + Math.max(1, Math.round(cartCap()*0.16)));
+  }
+  // nudge the cart toward the surface (a full cart sells faster when you tap)
+  if (!cartHauling){ cartPos = Math.min(1, cartPos + 0.12); if (cartGold >= cartCap()) cartHauling = true; }
+  else { cartPos = Math.min(1, cartPos + 0.16); }
+  var sx=L.shaftX||GF.W*0.18, sy=L.faceY||GF.H*0.4;
+  GF.spawnParticles(sx, sy, LAYERS[depth].col, 6);
+  GF.spawnFloat(sx+(Math.random()-0.5)*24, sy-20, '+', LAYERS[depth].glow);
+  GF.sfx('pickup'); GF.setShake(0.12);
+  if (GF.tutorial.active && GF.tutorial.step === 0) GF.tutorial.next();
+}
+
+function buyUpgrade(u){
+  var cost = upgradeCost(u);
+  if (gold < cost){ GF.sfx('error'); return false; }
+  gold -= cost; u.lvl++;
+  if (u.kind==='miner'){ crew += u.gain; }   // hiring miners adds crew
+  GF.sfx('click');
+  GF.spawnFloat((L.shopX||GF.cx), (GF.H*0.55), '-'+fmt(cost), '#ff8a6a');
+  return true;
+}
+
+function buySupport(){
+  var cost = curSupportCost();
+  if (gold < cost){ GF.sfx('error'); return false; }
+  gold -= cost; supportsBought++;
+  instability = Math.max(0, instability - supportPower());
+  ventLevel += 0.06;   // permanent passive dampening
+  GF.sfx('click'); GF.setShake(0.1);
+  GF.spawnParticles(L.shaftX||GF.W*0.18, L.faceY||GF.H*0.45, '#bfa86a', 12);
+  GF.spawnFloat((L.shopX||GF.cx), (GF.H*0.55), '-'+fmt(cost), '#ff8a6a');
+  if (GF.tutorial.active && GF.tutorial.step === 1) GF.tutorial.next();
+  return true;
+}
+
+function digDeeper(){
+  if (depth >= LAYERS.length-1){ GF.sfx('error'); return false; }
+  var nx = LAYERS[depth+1];
+  if (gold < nx.digCost){ GF.sfx('error'); return false; }
+  gold -= nx.digCost; depth++;
+  instability = Math.max(0, instability*0.4);   // fresh face, partial reset
+  unlockFanfare = 2.6; fanfareName = (GF.lang==='ru'?LAYERS[depth].ru:LAYERS[depth].en);
+  GF.sfx('unlock'); GF.setShake(0.55);
+  GF.spawnParticles(GF.W*0.18, GF.H*0.4, LAYERS[depth].col, 30);
+  return true;
+}
+
+function doRestake(){
+  if (!canRestake()){ GF.sfx('error'); return; }
+  claimLevel += 1;
+  // reset run economy but keep best + cores
+  gold = 0; totalMined = 0; depth = 0; crew = 3; cartGold = 0; cartPos = 0; cartHauling = false;
+  instability = 0; supportsBought = 0; ventLevel = 0;
+  for (var i=0;i<UPGRADES.length;i++) UPGRADES[i].lvl = 0;
+  goldDisplay = 0; gs = 'PLAYING';
+  unlockFanfare = 2.6; fanfareName = GF.t('cores')+' +1';
+  GF.sfx('evolve'); GF.setShake(0.8);
+}
+
+function caveIn(){
+  // hazard fires: lose cart crystals + a chunk of crew (deeper = deadlier),
+  // instability partial reset, big shake. A shallow cave-in costs ~1 miner; a
+  // deep one (magma/void) can wipe a third of the crew — that's why supports
+  // matter more the deeper you push.
+  cartGold = 0; cartHauling = false; cartPos = 0;
+  var killed = Math.max(1, Math.floor(crew * (0.14 + depth*0.05)));
+  crew -= killed;
+  instability = 40;
+  caveinFlash = 1; caveinShakeName = (function(){ var h=HAZARD_LABEL[LAYERS[depth].hazard]; return GF.lang==='ru'?h.ru:h.en; })();
+  GF.sfx('hit'); GF.setShake(1.0);
+  GF.spawnParticles(L.shaftX||GF.W*0.18, L.faceY||GF.H*0.45, '#8a7a5a', 30);
+  GF.spawnFloat(L.shaftX||GF.W*0.18, (L.faceY||GF.H*0.45)-30, '-'+killed+' '+GF.t('crew'), '#ff5a5a');
+  if (crew <= 0){ crew = 0; triggerGameOver('crew'); }
+}
+
+var gameoverReason = 'crew';
+function triggerGameOver(reason){
+  gameoverReason = reason || 'crew';
+  gs = 'GAMEOVER'; GF.sfx('lose');
+  if (totalMined > bestGold){ bestGold = totalMined; }
+  saveBest();
+}
+function restart(){
+  gold = 0; totalMined = 0; depth = 0; crew = 3; cartGold = 0; cartPos = 0; cartHauling = false;
+  instability = 0; supportsBought = 0; ventLevel = 0;
+  for (var i=0;i<UPGRADES.length;i++) UPGRADES[i].lvl = 0;
+  goldDisplay = 0; gs = 'PLAYING';
+  GF.sfx('reward');
+}
+
+// ===========================================================================
+//  UPDATE
+// ===========================================================================
+function update(dt){
+  GF.tutorial.update(dt);
+  if (dt > 0.1) dt = 0.1;   // clamp huge frames (tab refocus)
+
+  goldDisplay += (gold - goldDisplay) * Math.min(1, dt*8);
+  if (unlockFanfare > 0) unlockFanfare = Math.max(0, unlockFanfare - dt);
+  if (caveinFlash > 0) caveinFlash = Math.max(0, caveinFlash - dt*1.6);
+  swing += dt * (4 + minerDigRate()*0.3);
+
+  if (gs !== 'PLAYING') return;
+
+  var frozen = GF.tutorial.active;   // keep the player safe during the coach
+
+  // ── mining: crew fills the cart ──
+  if (crew > 0){
+    var dig = minerDigRate() * dt;
+    cartGold = Math.min(cartCap(), cartGold + dig);
+    if (!frozen) instability = Math.min(100, instability + (instabRate() - ventLevel*4) * dt);
+  } else {
+    // no crew: nothing mines (bankruptcy/cave-in edge); instability cools
+    instability = Math.max(0, instability - 8*dt);
+  }
+
+  // ── cart auto-haul + sell cycle ──
+  if (cartGold >= cartCap()) cartHauling = true;
+  if (cartHauling){
+    cartPos = Math.min(1, cartPos + elevFactor()*0.55*dt);
+    if (cartPos >= 1){ sellCart(); }   // resets cart + pos
+  } else if (cartPos > 0){
+    cartPos = Math.max(0, cartPos - 0.6*dt);   // empty cart drifts back to face
+  }
+
+  // ── foreman passive gold ──
+  var fg = foremanGps();
+  if (fg > 0 && !frozen) addGold(fg * dt);
+
+  // ── cave-in check ──
+  if (!frozen && instability >= 100){
+    instability = 100;
+    if (Math.random() < hazardChance){ caveIn(); }
+    else { instability = 70; GF.setShake(0.3); }   // near-miss
+  }
+
+  // ── upkeep / bankruptcy ──
+  // upkeep is a gentle gold drain (a slice of income). You only go BANKRUPT if
+  // income has genuinely dried up: no crew left to mine AND no foreman income
+  // AND nothing left in the cart to sell AND you can't cover the bill. This is
+  // the distinct resource-scarcity loss axis (cave-ins handle crew attrition).
+  if (!frozen){
+    upkeepT += dt;
+    if (upkeepT >= 1){
+      upkeepT -= 1;
+      var due = minerUpkeep();
+      if (gold >= due){ gold -= due; }
+      else if (crew <= 0 && foremanGps() <= 0 && cartGold <= 0){ triggerGameOver('bankrupt'); }
+      // otherwise the bill simply goes unpaid this tick (no crew loss) — income
+      // recovers as the next cart sells. Forgiving by design.
+    }
+  }
+
+  // mark newly-affordable upgrades (NEW pip + glow)
+  for (var k=0;k<UPGRADES.length;k++){
+    var u = UPGRADES[k];
+    if (u.gate <= depth && gold >= upgradeCost(u) && !u._seen){ u._new = true; }
+  }
+}
+
+// ===========================================================================
+//  DRAW
+// ===========================================================================
+function bgGrad(){
+  var W=GF.W, H=GF.H, S=GF.S;
+  var lay = LAYERS[depth];
+  var g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, '#0a0814');
+  g.addColorStop(0.5, lay.rock);
+  g.addColorStop(1, '#060410');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // biome glow band around the active face
+  ctx.save(); ctx.globalAlpha=0.25;
+  var gy = (L.faceY||H*0.42);
+  var rg = ctx.createRadialGradient(W*0.18, gy, 8*S, W*0.18, gy, 160*S);
+  rg.addColorStop(0, lay.glow); rg.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle=rg; ctx.fillRect(0,0,W,H);
+  ctx.restore();
+}
+
+function drawCrystalIcon(c, x, y, r, col, glow){
+  c.save(); c.translate(x,y);
+  c.shadowColor=glow||col; c.shadowBlur=r*0.8;
+  var g=c.createLinearGradient(0,-r,0,r); g.addColorStop(0,'#ffffff'); g.addColorStop(0.4,col); g.addColorStop(1,glow||col);
+  c.fillStyle=g;
+  c.beginPath();
+  c.moveTo(0,-r); c.lineTo(r*0.62,-r*0.2); c.lineTo(r*0.4,r); c.lineTo(-r*0.4,r); c.lineTo(-r*0.62,-r*0.2); c.closePath();
+  c.fill();
+  c.shadowBlur=0; c.strokeStyle='rgba(255,255,255,0.55)'; c.lineWidth=Math.max(1,r*0.08);
+  c.beginPath(); c.moveTo(0,-r); c.lineTo(0,r); c.moveTo(-r*0.62,-r*0.2); c.lineTo(r*0.62,-r*0.2); c.stroke();
+  c.restore();
+}
+function drawGoldIcon(c, x, y, r){
+  c.save(); c.translate(x,y);
+  var g = c.createLinearGradient(0,-r,0,r); g.addColorStop(0,'#ffe680'); g.addColorStop(1,'#e6a52a');
+  c.fillStyle=g; c.beginPath(); c.arc(0,0,r,0,Math.PI*2); c.fill();
+  c.strokeStyle='#b07d10'; c.lineWidth=Math.max(1,r*0.14); c.stroke();
+  c.restore();
+}
+function drawCoreIcon(c,x,y,r,filled){
+  c.save(); c.translate(x,y);
+  c.beginPath();
+  for (var i=0;i<6;i++){ var a=i/6*Math.PI*2-Math.PI/2; c.lineTo(Math.cos(a)*r,Math.sin(a)*r); }
+  c.closePath();
+  c.fillStyle=filled?'#c06ff6':'#3a3450';
+  if (filled){ c.shadowColor='#c06ff6'; c.shadowBlur=r*0.7; }
+  c.fill(); c.restore();
+}
+function drawHelmetPip(c,x,y,r,alive){
+  c.save(); c.translate(x,y);
+  c.fillStyle=alive?'#ffce5a':'#3a3540';
+  c.beginPath(); c.arc(0,0,r,Math.PI,0); c.closePath(); c.fill();   // dome
+  c.fillStyle=alive?'#ffe28a':'#4a4450';
+  c.fillRect(-r,-r*0.1,r*2,r*0.22);                                  // brim
+  if (alive){ c.fillStyle='#fff'; c.beginPath(); c.arc(0,-r*0.4,r*0.18,0,Math.PI*2); c.fill(); } // lamp
+  c.restore();
+}
+
+// the vertical shaft: rock walls, miners at the face, cart on the elevator
+function drawShaft(x, top, w, bot){
+  var S=GF.S, lay=LAYERS[depth];
+  var h = bot-top;
+  L.shaftX = x + w*0.5; L.shaftTop = top; L.shaftBot = bot; L.shaftW = w;
+  // shaft well
+  ctx.save();
+  var wg = ctx.createLinearGradient(x,0,x+w,0);
+  wg.addColorStop(0,'#0a0712'); wg.addColorStop(0.5,lay.rock); wg.addColorStop(1,'#0a0712');
+  ctx.fillStyle=wg; GF.rr(ctx, x, top, w, h, 10*S); ctx.fill();
+  ctx.strokeStyle='#1a1626'; ctx.lineWidth=3*S; GF.rr(ctx, x, top, w, h, 10*S); ctx.stroke();
+  ctx.clip();
+
+  // embedded crystals glinting in the walls (depth flavour)
+  var t = (typeof performance!=='undefined'?performance.now():Date.now())/1000;
+  for (var i=0;i<7;i++){
+    var cxp = x + (i%2? w*0.22 : w*0.78) + Math.sin(i*2.1)*w*0.06;
+    var cyp = top + (i+0.5)/7*h;
+    var tw = 0.4+0.6*Math.abs(Math.sin(t*1.3+i));
+    ctx.globalAlpha=0.35*tw;
+    drawCrystalIcon(ctx, cxp, cyp, 7*S, lay.col, lay.glow);
+    ctx.globalAlpha=1;
+  }
+
+  // depth ladder marks on the left
+  ctx.fillStyle='rgba(255,255,255,0.10)';
+  for (var d=0;d<=depth;d++){ var ly = top + (d+0.5)/LAYERS.length*h; ctx.fillRect(x+4*S, ly, w-8*S, 1.5*S); }
+
+  // the mining FACE (bottom of shaft) + miners swinging
+  var faceY = bot - h*0.16;
+  L.faceY = faceY;
+  ctx.fillStyle=lay.rock; ctx.fillRect(x, faceY, w, bot-faceY);
+  // crystal cluster at the face
+  for (var k=0;k<3;k++){ drawCrystalIcon(ctx, x+w*(0.3+k*0.2), faceY+12*S, 9*S, lay.col, lay.glow); }
+  // miners (up to 3 drawn, swinging picks)
+  var shown = Math.min(3, crew);
+  for (var m=0;m<shown;m++){
+    var mx = x + w*(0.28 + m*0.22);
+    var my = faceY - 6*S;
+    drawMiner(mx, my, 11*S, swing + m*1.3);
+  }
+  ctx.restore();
+
+  // ── elevator track + cart ──
+  var trackX = x + w + 7*S;
+  L.elevX = trackX;
+  // surface platform (sell point) at top
+  L.surfX = x + w*0.5; L.surfY = top - 4*S;
+  // cart vertical position: pos 0 = at faceY, pos 1 = at top (surface)
+  var cartY = faceY - cartPos*(faceY - (top+10*S));
+  drawCart(trackX, cartY, 18*S, cartGold/Math.max(1,cartCap()), lay);
+}
+
+function drawMiner(x,y,r,phase){
+  var S=GF.S;
+  ctx.save(); ctx.translate(x,y);
+  // body
+  ctx.fillStyle='#4a5a72'; GF.rr(ctx, -r*0.5, -r*0.2, r, r*1.1, r*0.3); ctx.fill();
+  // head + helmet
+  drawHelmetPip(ctx, 0, -r*0.45, r*0.42, true);
+  // pick arm swing
+  var sw = Math.sin(phase)*0.7;
+  ctx.save(); ctx.translate(r*0.3,-r*0.05); ctx.rotate(-0.6+sw);
+  ctx.strokeStyle='#caa06a'; ctx.lineWidth=2.4*S; ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(r*0.8,-r*0.3); ctx.stroke();
+  ctx.fillStyle='#bcc'; ctx.fillRect(r*0.7,-r*0.5,r*0.3,r*0.2);
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawCart(x,y,r,fill,lay){
+  var S=GF.S;
+  ctx.save(); ctx.translate(x,y);
+  // wheels
+  ctx.fillStyle='#222';
+  ctx.beginPath(); ctx.arc(-r*0.5, r*0.55, r*0.22,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc( r*0.5, r*0.55, r*0.22,0,Math.PI*2); ctx.fill();
+  // body
+  var g=ctx.createLinearGradient(0,-r*0.4,0,r*0.5); g.addColorStop(0,'#6a5436'); g.addColorStop(1,'#3a2c1c');
+  ctx.fillStyle=g; GF.rr(ctx,-r*0.7,-r*0.4,r*1.4,r*0.9,r*0.14); ctx.fill();
+  ctx.strokeStyle='#2a2012'; ctx.lineWidth=2*S; GF.rr(ctx,-r*0.7,-r*0.4,r*1.4,r*0.9,r*0.14); ctx.stroke();
+  // ore fill (crystals piled)
+  if (fill > 0.02){
+    ctx.save(); ctx.beginPath(); GF.rr(ctx,-r*0.62,-r*0.34,r*1.24,r*0.78,r*0.1); ctx.clip();
+    var fh = r*0.78*clampF(fill,0,1);
+    ctx.fillStyle=lay.glow; ctx.fillRect(-r*0.62, r*0.44-fh, r*1.24, fh);
+    // a couple of crystal tips poking up
+    var tips=Math.min(4,Math.ceil(fill*4));
+    for (var i=0;i<tips;i++){ drawCrystalIcon(ctx, -r*0.4+i*r*0.28, r*0.44-fh, 5*S, lay.col, lay.glow); }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+// top bar: cores, gold, gold/sec, mute, help
+function drawTopBar(){
+  var S=GF.S, W=GF.W;
+  var h = 64*S; L.topH = h;
+  ctx.fillStyle='rgba(10,8,18,0.82)'; ctx.fillRect(0,0,W,h);
+  // cores (top-left)
+  var sx = 12*S, sy = h*0.5;
+  drawCoreIcon(ctx, sx+9*S, sy, 9*S, claimLevel>0);
+  ctx.fillStyle='#c98ff6'; ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText('x'+claimLevel, sx+22*S, sy);
+  // gold (center, big)
+  drawGoldIcon(ctx, W*0.5 - 62*S, h*0.42, 11*S);
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(25*S,18,33)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(fmt(goldDisplay), W*0.5 - 46*S, h*0.40);
+  // gps line
+  ctx.fillStyle='#8fe6b0'; ctx.font=clampF(12*S,10,15)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('+'+fmtRate(goldPerSec())+' '+GF.t('gps'), W*0.5, h*0.78);
+  // mute + help (top-right)
+  var mr = MUTE_R*S; muteBtn = { x:W-34*S, y:h*0.5-mr, w:mr*2, h:mr*2 };
+  GF.drawMuteIcon(ctx, W-34*S+mr, h*0.5, mr, GF.muted);
+  var hr = HELP_R*S; helpBtn = { x:W-72*S, y:h*0.5-hr, w:hr*2, h:hr*2 };
+  ctx.fillStyle='rgba(120,90,200,0.85)'; ctx.beginPath(); ctx.arc(W-72*S+hr, h*0.5, hr,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(16*S,12,20)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('?', W-72*S+hr, h*0.5+1*S);
+}
+
+// instability bar + crew pips (the lose signal)
+function drawInstability(yTop){
+  var S=GF.S, W=GF.W;
+  var pad=12*S, h=16*S, w=W-pad*2;
+  var frac = instability/100;
+  ctx.fillStyle='rgba(0,0,0,0.45)'; GF.rr(ctx, pad, yTop, w, h, h/2); ctx.fill();
+  var col = frac<0.5 ? '#4fd07a' : frac<0.8 ? '#ffb13a' : '#ff4a4a';
+  var pulse = frac>0.8 ? (0.65+0.35*Math.sin((performance.now()/1000)*10)) : 1;
+  ctx.save(); ctx.globalAlpha=pulse;
+  ctx.fillStyle=col; GF.rr(ctx, pad, yTop, Math.max(0,w*frac), h, h/2); ctx.fill();
+  ctx.restore();
+  // label
+  ctx.fillStyle='#cdd'; ctx.font=clampF(10*S,9,13)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('instability')+' ('+(GF.lang==='ru'?HAZARD_LABEL[LAYERS[depth].hazard].ru:HAZARD_LABEL[LAYERS[depth].hazard].en)+')', pad+4*S, yTop+h*0.5);
+  // crew pips on the right
+  ctx.textAlign='right';
+  var pipR=7*S, px=W-pad-pipR;
+  for (var i=0;i<Math.max(crew,3);i++){
+    if (i<3 || i<crew){
+      drawHelmetPip(ctx, px - i*(pipR*2.4), yTop+h*0.5, pipR, i<crew);
+    }
+  }
+}
+
+// the active layer banner under the top bar
+function drawLayerLabel(y){
+  var S=GF.S, W=GF.W, lay=LAYERS[depth];
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  drawCrystalIcon(ctx, 22*S, y, 10*S, lay.col, lay.glow);
+  ctx.fillStyle=lay.col; ctx.font='bold '+clampF(16*S,13,22)+'px Inter, system-ui, sans-serif';
+  ctx.fillText((GF.lang==='ru'?lay.ru:lay.en), 40*S, y);
+  ctx.fillStyle='#8aa'; ctx.font=clampF(11*S,9,14)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='right';
+  ctx.fillText(GF.t('depth')+' '+(depth+1)+'/'+LAYERS.length, W-14*S, y);
+}
+
+// ── SHOP (scrollable list) ────────────────────────────────────────────────────
+function shopRowList(){
+  var rows = [];
+  // dig deeper row (TOP) if a deeper layer exists
+  if (depth < LAYERS.length-1){
+    var nx = LAYERS[depth+1];
+    rows.push({ type:'dig', name:(GF.lang==='ru'?nx.ru:nx.en), cost:nx.digCost });
+  }
+  // support row (always near top — the safety lever)
+  rows.push({ type:'support' });
+  // upgrades unlocked OR next gate (preview locked)
+  for (var i=0;i<UPGRADES.length;i++){
+    var u=UPGRADES[i];
+    if (u.gate <= depth){ rows.push({ type:'up', u:u }); }
+    else if (u.gate === depth+1){ rows.push({ type:'up', u:u, locked:true }); }
+  }
+  // restake row (always last)
+  rows.push({ type:'restake' });
+  return rows;
+}
+
+function drawShop(yTop, yBot){
+  var S=GF.S, W=GF.W;
+  ctx.fillStyle='rgba(10,8,18,0.93)'; ctx.fillRect(0, yTop, W, yBot-yTop);
+  // header
+  ctx.fillStyle='#cdd'; ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('upgrades'), 14*S, yTop+16*S);
+  // menu button (top-right of shop header)
+  var hbW=78*S, hbH=26*S;
+  L.homeBtn = { x:W-hbW-12*S, y:yTop+4*S, w:hbW, h:hbH };
+  ctx.fillStyle='rgba(120,90,200,0.9)'; GF.rr(ctx, L.homeBtn.x, L.homeBtn.y, hbW, hbH, hbH/2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('home'), L.homeBtn.x+hbW/2, L.homeBtn.y+hbH/2);
+
+  var listTop = yTop + 30*S;
+  var listH = yBot - listTop - 6*S;
+  if (!shopScroll) shopScroll = GF.makeScroll('shop_list', {x:0,y:listTop,w:W,h:listH});
+  shopScroll.setViewport({ x:0, y:listTop, w:W, h:listH });
+
+  var rows = shopRowList();
+  var ROW_H = ROW_H_BASE*S, GAP = 8*S;
+  var contentH = rows.length*(ROW_H+GAP) - GAP + 8*S;
+  shopScroll.setContentHeight(contentH);
+  shopScroll.update();
+
+  L.shopRows = [];
+  shopScroll.begin(ctx);
+  for (var i=0;i<rows.length;i++){
+    var y = i*(ROW_H+GAP);
+    drawShopRow(rows[i], 10*S, y, W-20*S, ROW_H);
+    L.shopRows.push({ y:y, h:ROW_H, x:10*S, w:W-20*S, row:rows[i] });
+  }
+  shopScroll.end(ctx);
+  shopScroll.draw(ctx);
+  L.shopTop = listTop; L.shopH = listH; L.shopX = W*0.5;
+}
+
+function drawShopRow(row, x, y, w, h){
+  var S=GF.S;
+  var affordable=false, cost=0, name='', effect='', lvl=-1, locked=false, isNew=false, kindCol='#2a2a3a', icon='gold';
+  if (row.type==='dig'){
+    cost=row.cost; affordable = gold>=cost; name=GF.t('dig_deeper')+' → '+row.name;
+    effect=GF.t('new_layer')+'  '+GF.t('value_x')+' x'+(LAYERS[depth+1].valueMult/LAYERS[depth].valueMult).toFixed(1);
+    kindCol='#7a3ce0'; icon='crystal';
+  } else if (row.type==='support'){
+    cost=curSupportCost(); affordable=gold>=cost; name=GF.t('support');
+    effect='-'+Math.round(supportPower())+' '+GF.t('instability');
+    kindCol='#6a5a2a'; icon='support';
+  } else if (row.type==='restake'){
+    cost=restakeReq(); affordable=canRestake(); name=GF.t('restake'); effect=GF.t('restake_desc');
+    kindCol='#a03ce0'; icon='core';
+  } else {
+    var u=row.u; cost=upgradeCost(u); affordable = gold>=cost && !row.locked; locked=!!row.locked;
+    name=(GF.lang==='ru'?u.ru:u.en); lvl=u.lvl; isNew=u._new && !u._seen;
+    if (u.kind==='miner'){ effect='+'+u.gain+' '+GF.t('crew'); kindCol='#2e7ad0'; }
+    else if (u.kind==='speed'){ effect='+'+Math.round(u.gain*100)+'% '+GF.t('dig_speed'); kindCol='#3cb0a0'; }
+    else if (u.kind==='cart'){ effect='+'+u.gain+' '+GF.t('cart_size'); kindCol='#caa06a'; }
+    else if (u.kind==='elev'){ effect='+'+Math.round(u.gain*100)+'% '+GF.t('elev_speed'); kindCol='#3c8cd0'; }
+    else if (u.kind==='value'){ effect='+'+Math.round(u.gain*100)+'% '+GF.t('sell_value'); kindCol='#d0a03c'; }
+    else if (u.kind==='foreman'){ effect='+'+fmtRate(u.gain)+' '+GF.t('auto_gold'); kindCol='#d04e7a'; }
+  }
+  ctx.save();
+  var bgc = locked ? 'rgba(20,20,28,0.7)' : (affordable ? 'rgba(28,42,32,0.95)' : 'rgba(24,24,34,0.92)');
+  GF.rr(ctx, x, y, w, h, 12*S); ctx.fillStyle=bgc; ctx.fill();
+  if (affordable && !locked){
+    var pulse=0.5+0.5*Math.sin(performance.now()/350);
+    ctx.save(); ctx.globalAlpha=0.5+0.4*pulse; ctx.strokeStyle='#4fd07a'; ctx.lineWidth=2*S;
+    GF.rr(ctx, x, y, w, h, 12*S); ctx.stroke(); ctx.restore();
+  }
+  // icon chip
+  ctx.fillStyle=kindCol; GF.rr(ctx, x+8*S, y+h*0.5-22*S, 44*S, 44*S, 10*S); ctx.fill();
+  if (icon==='core') drawCoreIcon(ctx, x+30*S, y+h*0.5, 14*S, true);
+  else if (icon==='crystal') drawCrystalIcon(ctx, x+30*S, y+h*0.5, 13*S, (row.type==='dig'?LAYERS[depth+1].col:'#fff'), (row.type==='dig'?LAYERS[depth+1].glow:'#aaa'));
+  else if (icon==='support') drawSupportIcon(ctx, x+30*S, y+h*0.5, 15*S);
+  else drawGoldIcon(ctx, x+30*S, y+h*0.5, 13*S);
+  // name
+  ctx.fillStyle = locked ? '#888' : '#fff';
+  ctx.font='bold '+clampF(14*S,12,18)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+  ctx.fillText(name, x+62*S, y+24*S);
+  // level badge
+  if (lvl>=0){
+    ctx.fillStyle='#7a8'; ctx.font=clampF(11*S,9,14)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='right'; ctx.fillText(GF.t('level')+' '+lvl, x+w-70*S, y+22*S);
+    ctx.textAlign='left';
+  }
+  // effect
+  ctx.fillStyle = locked ? '#666' : '#9ab'; ctx.font=clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(effect, x+62*S, y+44*S);
+  // cost / lock
+  if (locked){
+    ctx.fillStyle='#a66'; ctx.font='bold '+clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='right'; ctx.fillText(GF.t('locked'), x+w-12*S, y+h*0.5+14*S);
+  } else {
+    ctx.textAlign='right'; ctx.textBaseline='middle';
+    drawGoldIcon(ctx, x+w-12*S-getCostW(cost)-10*S, y+h*0.5+12*S, 9*S);
+    ctx.fillStyle = affordable ? '#ffd86a' : '#c98';
+    ctx.font='bold '+clampF(14*S,12,18)+'px Inter, system-ui, sans-serif';
+    ctx.fillText(fmt(cost), x+w-12*S, y+h*0.5+12*S);
+  }
+  // NEW pip
+  if (isNew && !locked){
+    ctx.fillStyle='#ff5a5a'; GF.rr(ctx, x+w-44*S, y+6*S, 38*S, 16*S, 8*S); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.font='bold '+clampF(9*S,8,12)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(GF.t('new_pip'), x+w-25*S, y+14*S);
+  }
+  ctx.restore();
+}
+function drawSupportIcon(c,x,y,r){
+  c.save(); c.translate(x,y); c.strokeStyle='#caa86a'; c.lineWidth=Math.max(2,r*0.18); c.lineCap='round';
+  c.beginPath(); c.moveTo(-r*0.7,r); c.lineTo(-r*0.5,-r*0.8); c.lineTo(r*0.5,-r*0.8); c.lineTo(r*0.7,r); c.stroke();
+  c.beginPath(); c.moveTo(-r*0.6,-r*0.8); c.lineTo(r*0.6,-r*0.8); c.stroke();
+  c.restore();
+}
+function getCostW(cost){
+  ctx.save(); ctx.font='bold '+clampF(14*GF.S,12,18)+'px Inter, system-ui, sans-serif';
+  var w = ctx.measureText(fmt(cost)).width; ctx.restore(); return w;
+}
+
+// fanfare banner (new layer / restake)
+function drawFanfare(){
+  if (unlockFanfare<=0) return;
+  var S=GF.S, W=GF.W, H=GF.H;
+  var a = Math.min(1, unlockFanfare/0.4) * Math.min(1, (2.6-unlockFanfare)/0.3+0.3);
+  ctx.save(); ctx.globalAlpha=clampF(a,0,1);
+  var by=H*0.28, bh=64*S, bw=Math.min(W*0.82, 330*S), bx=W*0.5-bw/2;
+  ctx.shadowColor='rgba(150,120,255,0.7)'; ctx.shadowBlur=24*S;
+  var g=ctx.createLinearGradient(bx,by,bx,by+bh); g.addColorStop(0,'#b884f0'); g.addColorStop(1,'#7a3ce0');
+  ctx.fillStyle=g; GF.rr(ctx,bx,by,bw,bh,16*S); ctx.fill();
+  ctx.shadowColor='transparent';
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(15*S,12,20)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('new_layer'), W*0.5, by+22*S);
+  ctx.font='bold '+clampF(20*S,16,28)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(fanfareName, W*0.5, by+44*S);
+  ctx.restore();
+}
+
+// cave-in red flash + banner
+function drawCaveinFlash(){
+  if (caveinFlash<=0) return;
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.save(); ctx.globalAlpha=caveinFlash*0.4; ctx.fillStyle='#ff2a1a'; ctx.fillRect(0,0,W,H); ctx.restore();
+  ctx.save(); ctx.globalAlpha=Math.min(1,caveinFlash*1.4);
+  ctx.fillStyle='#ff5a4a'; ctx.font='bold '+clampF(30*S,20,42)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('cavein'), W*0.5, H*0.4);
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(caveinShakeName+' • '+GF.t('lost_crew'), W*0.5, H*0.4+30*S);
+  ctx.restore();
+}
+
+// ── OVERLAYS ──────────────────────────────────────────────────────────────────
+function panel(title){
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.fillStyle='rgba(6,5,12,0.9)'; ctx.fillRect(0,0,W,H);
+  var pw=Math.min(W*0.86, 360*S), ph=Math.min(H*0.62, 430*S), px=W*0.5-pw/2, py=H*0.5-ph/2;
+  ctx.fillStyle='#161324'; GF.rr(ctx,px,py,pw,ph,18*S); ctx.fill();
+  ctx.strokeStyle='#352f4e'; ctx.lineWidth=2*S; GF.rr(ctx,px,py,pw,ph,18*S); ctx.stroke();
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(22*S,17,30)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(title, W*0.5, py+30*S);
+  return { px:px, py:py, pw:pw, ph:ph };
+}
+function bigBtn(rect, label, colA, colB){
+  var g=ctx.createLinearGradient(rect.x,rect.y,rect.x,rect.y+rect.h);
+  g.addColorStop(0,colA); g.addColorStop(1,colB);
+  ctx.save(); ctx.shadowColor=colA+'88'; ctx.shadowBlur=16*GF.S;
+  GF.rr(ctx,rect.x,rect.y,rect.w,rect.h,rect.h/2); ctx.fillStyle=g; ctx.fill(); ctx.restore();
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(16*GF.S,13,22)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(label, rect.x+rect.w/2, rect.y+rect.h/2);
+}
+
+function drawGameOver(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('cavein'));
+  ctx.fillStyle='#9ab'; ctx.font=clampF(13*S,11,17)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(gameoverReason==='bankrupt'?GF.t('bankrupt'):GF.t('gameover_crew'), W*0.5, p.py+64*S);
+  ctx.fillStyle='#789'; ctx.font=clampF(12*S,10,16)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('kept'), W*0.5, p.py+96*S);
+  drawGoldIcon(ctx, W*0.5-54*S, p.py+128*S, 13*S);
+  ctx.fillStyle='#ffd86a'; ctx.font='bold '+clampF(23*S,17,31)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.fillText(fmt(totalMined), W*0.5-36*S, p.py+128*S);
+  ctx.fillStyle='#789'; ctx.font=clampF(12*S,10,16)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText(GF.t('best')+': '+fmt(bestGold), W*0.5, p.py+162*S);
+  var bw=p.pw*0.7, bx=W*0.5-bw/2;
+  L.goRestart = { x:bx, y:p.py+p.ph-110*S, w:bw, h:52*S };
+  bigBtn(L.goRestart, GF.t('restart'), '#2ee07a','#23a657');
+  L.goHelp = { x:bx, y:p.py+p.ph-48*S, w:bw, h:40*S };
+  bigBtn(L.goHelp, GF.t('help'), '#5a5470','#3a3450');
+}
+
+function drawHub(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('home'));
+  var bw=p.pw*0.78, bx=W*0.5-bw/2;
+  L.hubReno = { x:bx, y:p.py+66*S, w:bw, h:64*S };
+  var canR = canRestake();
+  bigBtn(L.hubReno, GF.t('restake')+'   +1', canR?'#c884f6':'#5a4a6a', canR?'#9a3ce0':'#3e2e4a');
+  drawCoreIcon(ctx, L.hubReno.x+L.hubReno.w-26*S, L.hubReno.y+L.hubReno.h/2, 9*S, true);
+  ctx.fillStyle='#9ab'; ctx.font=clampF(11*S,10,14)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('need')+' '+fmt(restakeReq())+'  ('+fmt(totalMined)+')', W*0.5, p.py+148*S);
+  L.hubHelp = { x:bx, y:p.py+176*S, w:bw, h:50*S };
+  bigBtn(L.hubHelp, GF.t('help'), '#7a5ce0','#5a3cc0');
+  L.hubClose = { x:bx, y:p.py+p.ph-58*S, w:bw, h:48*S };
+  bigBtn(L.hubClose, GF.t('close'), '#2ee07a','#23a657');
+  ctx.fillStyle='#c98ff6'; ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('cores')+': '+claimLevel, W*0.5, p.py+p.ph-90*S);
+}
+
+function drawRestakeConfirm(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('restake_confirm'));
+  ctx.fillStyle='#c8a8f6'; ctx.font=clampF(14*S,11,18)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  wrapLine(GF.t('restake_gain'), W*0.5, p.py+90*S, p.pw*0.84, clampF(20*S,16,26));
+  var bw=p.pw*0.7, bx=W*0.5-bw/2;
+  L.renoYes = { x:bx, y:p.py+p.ph-118*S, w:bw, h:52*S };
+  bigBtn(L.renoYes, GF.t('confirm'), '#c884f6','#9a3ce0');
+  L.renoNo = { x:bx, y:p.py+p.ph-56*S, w:bw, h:44*S };
+  bigBtn(L.renoNo, GF.t('cancel'), '#5a5470','#3a3450');
+}
+
+function drawHelp(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  var p=panel(GF.t('help'));
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  ctx.textAlign='left'; ctx.textBaseline='top';
+  var yy=p.py+56*S, lh=clampF(17*S,14,22);
+  for (var i=0;i<lines.length;i++){
+    ctx.fillStyle = i===4 ? '#8fe6b0' : '#cdd';
+    ctx.font=clampF(12.5*S,11,16)+'px Inter, system-ui, sans-serif';
+    yy = wrapLineLeft(lines[i], p.px+18*S, yy, p.pw-36*S, lh) + 8*S;
+  }
+  var bw=p.pw*0.7, bx=W*0.5-bw/2;
+  L.helpClose = { x:bx, y:p.py+p.ph-56*S, w:bw, h:46*S };
+  bigBtn(L.helpClose, GF.t('close'), '#2ee07a','#23a657');
+}
+
+function wrapLine(text, cx, cy, maxW, lh){
+  ctx.textAlign='center';
+  var words=String(text).split(/\s+/), lines=[], cur='';
+  for (var i=0;i<words.length;i++){ var pr=cur?cur+' '+words[i]:words[i];
+    if (ctx.measureText(pr).width>maxW && cur){ lines.push(cur); cur=words[i]; } else cur=pr; }
+  if (cur) lines.push(cur);
+  var sy=cy-(lines.length-1)*lh/2;
+  for (var j=0;j<lines.length;j++) ctx.fillText(lines[j], cx, sy+j*lh);
+}
+function wrapLineLeft(text, x, y, maxW, lh){
+  var words=String(text).split(/\s+/), cur='', yy=y;
+  for (var i=0;i<words.length;i++){ var pr=cur?cur+' '+words[i]:words[i];
+    if (ctx.measureText(pr).width>maxW && cur){ ctx.fillText(cur, x, yy); yy+=lh; cur=words[i]; } else cur=pr; }
+  if (cur){ ctx.fillText(cur, x, yy); yy+=lh; }
+  return yy;
+}
+
+// ── MAIN DRAW ─────────────────────────────────────────────────────────────────
+function layout(){
+  var S=GF.S, W=GF.W, H=GF.H;
+  L.topH = 64*S;
+  L.layerY = L.topH + 18*S;
+  L.instabY = L.layerY + 18*S;
+  L.shaftTop = L.instabY + 26*S;
+  L.shopY = Math.max(L.shaftTop + 220*S, H*0.54);
+  L.shopBot = H;
+  L.shaftBot = L.shopY - 26*S;   // leave room for the "Next" line
+}
+
+function draw(){
+  layout();
+  var S=GF.S, W=GF.W;
+  bgGrad();
+  drawTopBar();
+  drawLayerLabel(L.layerY);
+  drawInstability(L.instabY);
+  // shaft takes the LEFT ~58% of the play band; right side reserved for breathing room
+  var shaftX = 16*S, shaftW = Math.min(W*0.42, 180*S);
+  drawShaft(shaftX, L.shaftTop, shaftW, L.shaftBot);
+  // boost hint + tap zone label on the right of the shaft
+  drawBoostHint(shaftX+shaftW, L.shaftTop, W-(shaftX+shaftW)-12*S, L.shaftBot);
+  // next-goal line under the shaft
+  var goal = nextGoal();
+  ctx.fillStyle='#9ab'; ctx.font=clampF(12*S,10,16)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('next_goal')+': '+goal.name+'  '+fmt(goal.cost), W*0.5, L.shaftBot+14*S);
+
+  drawShop(L.shopY, L.shopBot);
+  drawFanfare();
+  drawCaveinFlash();
+
+  if (gs==='GAMEOVER') drawGameOver();
+  else if (gs==='HUB') { if (helpOpen) drawHelp(); else drawHub(); }
+  else if (gs==='RESTAKE') drawRestakeConfirm();
+  else if (helpOpen) drawHelp();
+
+  // tutorial overlay LAST
+  GF.tutorial.draw(ctx);
+}
+
+function drawBoostHint(x, top, w, bot){
+  var S=GF.S;
+  var midY = (top+bot)*0.5;
+  // big BOOST cue panel (the right column doubles as a visual affordance; the
+  // actual tap target is the whole shaft column, but this reads "tap to boost")
+  ctx.save();
+  var pulse = 0.5+0.5*Math.sin(performance.now()/400);
+  ctx.globalAlpha = 0.85;
+  var bw = Math.min(w, 120*S), bx = x + (w-bw)/2, bh=58*S, by=midY-bh/2;
+  var g=ctx.createLinearGradient(bx,by,bx,by+bh); g.addColorStop(0,'#3a86d8'); g.addColorStop(1,'#2050a0');
+  ctx.fillStyle=g; ctx.shadowColor='rgba(80,140,240,'+(0.4+0.4*pulse)+')'; ctx.shadowBlur=18*S;
+  GF.rr(ctx,bx,by,bw,bh,14*S); ctx.fill(); ctx.shadowBlur=0;
+  ctx.fillStyle='#fff'; ctx.font='bold '+clampF(17*S,13,22)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('boost'), bx+bw/2, by+bh*0.38);
+  ctx.fillStyle='#cfe2ff'; ctx.font=clampF(10*S,9,13)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('tap_shaft'), bx+bw/2, by+bh*0.72);
+  ctx.restore();
+  L.boostBtn = { x:bx, y:by, w:bw, h:bh };
+  // an up-arrow hint above the cart when the cart is full
+  if (cartGold >= cartCap()*0.9){
+    ctx.save(); ctx.globalAlpha=0.6+0.4*Math.sin(performance.now()/250);
+    ctx.fillStyle='#ffd86a'; ctx.font='bold '+clampF(16*S,12,22)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='center'; ctx.fillText('↑', (L.elevX||x)+0, top+18*S); ctx.restore();
+  }
+}
+
+// ===========================================================================
+//  INPUT
+// ===========================================================================
+function evtPos(e){
+  var rect = canvas.getBoundingClientRect();
+  var sx = canvas.width/rect.width, sy = canvas.height/rect.height;
+  var cx = (e.touches ? e.touches[0].clientX : e.clientX);
+  var cy = (e.touches ? e.touches[0].clientY : e.clientY);
+  return { x:(cx-rect.left)*sx, y:(cy-rect.top)*sy };
+}
+function hit(r,x,y){ return r && x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
+function hitScrolled(rect,x,y,sc){
+  if (!rect||!sc) return false;
+  if (!sc.contains(x,y)) return false;
+  var cy = sc.screenToContentY(y);
+  return x>=rect.x && x<=rect.x+rect.w && cy>=rect.y && cy<=rect.y+rect.h;
+}
+
+var pointerDown=false, TAP_SLOP=8, press=null;
+
+function onDown(x,y){
+  // tutorial routing (action-gated manual steps fall through to the real action)
+  if (GF.tutorial.active){
+    var stp = GF.tutorial.steps[GF.tutorial.step];
+    var sb = GF.tutorial._skipBtn;
+    if (sb && x>=sb.x && x<=sb.x+sb.w && y>=sb.y && y<=sb.y+sb.h){ GF.tutorial.handleClick(x,y); return; }
+    if (stp && stp.advance==='auto'){ return; }   // swallow during auto recap
+    // else manual step: fall through to the real boost/buy below
+  }
+  // overlays
+  if (helpOpen){ if (hit(L.helpClose,x,y)){ helpOpen=false; GF.sfx('tap'); } return; }
+  if (gs==='GAMEOVER'){
+    if (hit(L.goRestart,x,y)) restart();
+    else if (hit(L.goHelp,x,y)){ helpOpen=true; GF.sfx('tap'); }
+    return;
+  }
+  if (gs==='RESTAKE'){
+    if (hit(L.renoYes,x,y)) doRestake();
+    else if (hit(L.renoNo,x,y)){ gs='PLAYING'; GF.sfx('tap'); }
+    return;
+  }
+  if (gs==='HUB'){
+    if (hit(L.hubReno,x,y)){ if (canRestake()){ gs='RESTAKE'; GF.sfx('tap'); } else GF.sfx('error'); }
+    else if (hit(L.hubHelp,x,y)){ helpOpen=true; GF.sfx('tap'); }
+    else if (hit(L.hubClose,x,y)){ gs='PLAYING'; GF.sfx('tap'); }
+    return;
+  }
+  // PLAYING:
+  if (muteBtn && hit(muteBtn,x,y)){ var m=GF.toggleMute(); GF.setMusicMuted(m); GF.sfx('tap'); return; }
+  if (helpBtn && hit(helpBtn,x,y)){ helpOpen=true; GF.sfx('tap'); return; }
+  if (hit(L.homeBtn,x,y)){ gs='HUB'; GF.sfx('tap'); return; }
+  // shop list: start a press that may become a scroll-drag or a tap
+  if (shopScroll && shopScroll.contains(x,y)){
+    press = { x0:x, y0:y, scroll:shopScroll, moved:false };
+    return;
+  }
+  // tap the shaft / boost zone -> boost
+  boost();
+}
+
+function onMove(x,y){
+  if (press){
+    if (!press.moved && (Math.abs(x-press.x0)>TAP_SLOP || Math.abs(y-press.y0)>TAP_SLOP)){
+      press.moved=true; if (press.scroll) press.scroll.dragStart(press.y0);
+    }
+    if (press.moved && press.scroll) press.scroll.dragMove(y);
+  }
+}
+function onUp(x,y){
+  if (press){
+    if (press.scroll) press.scroll.dragEnd();
+    if (!press.moved){ shopTap(x,y); }
+    press=null;
+  }
+}
+function shopTap(x,y){
+  if (!L.shopRows || !shopScroll) return;
+  for (var i=0;i<L.shopRows.length;i++){
+    var sr=L.shopRows[i];
+    if (hitScrolled(sr, x, y, shopScroll)){
+      var row=sr.row;
+      if (row.type==='dig'){ digDeeper(); }
+      else if (row.type==='support'){ buySupport(); }
+      else if (row.type==='restake'){ if (canRestake()){ gs='RESTAKE'; GF.sfx('tap'); } else GF.sfx('error'); }
+      else if (row.type==='up' && !row.locked){
+        var u=row.u; var ok = buyUpgrade(u);
+        if (ok){ u._seen=true; u._new=false; }
+      } else { GF.sfx('error'); }
+      return;
+    }
+  }
+}
+function onWheel(dy){ if (shopScroll && gs==='PLAYING' && !helpOpen) shopScroll.handleWheel(dy); }
+
+canvas.addEventListener('mousedown', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); });
+window.addEventListener('mousemove', function(e){ if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); });
+window.addEventListener('mouseup', function(e){ if(!pointerDown) return; pointerDown=false; var p=evtPos(e); onUp(p.x,p.y); });
+canvas.addEventListener('touchstart', function(e){ e.preventDefault(); var p=evtPos(e); pointerDown=true; onDown(p.x,p.y); }, {passive:false});
+canvas.addEventListener('touchmove', function(e){ e.preventDefault(); if(!pointerDown) return; var p=evtPos(e); onMove(p.x,p.y); }, {passive:false});
+canvas.addEventListener('touchend', function(e){ e.preventDefault(); if(!pointerDown) return; pointerDown=false; var t=e.changedTouches[0]; var rect=canvas.getBoundingClientRect(); var sx=canvas.width/rect.width, sy=canvas.height/rect.height; onUp((t.clientX-rect.left)*sx,(t.clientY-rect.top)*sy); }, {passive:false});
+canvas.addEventListener('wheel', function(e){ var rect=canvas.getBoundingClientRect(); var sy=canvas.height/rect.height; onWheel(e.deltaY*sy); }, {passive:false});
+
+// ===========================================================================
+//  TUTORIAL (demo hand, action-gated)
+// ===========================================================================
+function startTutorial(force){
+  GF.tutorial.start([
+    { text: GF.t('tut_step_boost'),
+      target: function(){ return { x:(L.boostBtn?L.boostBtn.x+L.boostBtn.w/2:GF.W*0.6), y:(L.boostBtn?L.boostBtn.y+L.boostBtn.h/2:GF.H*0.4), r:46*GF.S }; },
+      gesture:'tap', advance:'manual' },
+    { text: GF.t('tut_step_support'),
+      target: function(){
+        var sc=shopScroll; var ry=null;
+        if (L.shopRows){ for (var i=0;i<L.shopRows.length;i++){ var r=L.shopRows[i]; if (r.row.type==='support'){ ry=r; break; } } }
+        if (ry && sc){ var sy=sc.contentToScreenY(ry.y+ry.h/2); return { x:GF.W*0.5, y:sy, r:40*GF.S }; }
+        return { x:GF.W*0.5, y:GF.H*0.72, r:40*GF.S };
+      },
+      gesture:'tap', advance:'manual' },
+    { text: GF.t('tut_step_done'), advance:'auto', after:2200,
+      target: function(){ return { x:GF.W*0.5, y:GF.H*0.42, r:50*GF.S }; } },
+  ], { storageKey: TUT_KEY, force: !!force });
+}
+
+// ===========================================================================
+//  REACHABILITY GATE
+// ===========================================================================
+function _ri(id,r,pinned){ if(!r) return null; return { id:id, x:r.x, y:r.y, w:r.w, h:r.h, pinned:!!pinned }; }
+function _push(a,it){ if(it) a.push(it); }
+function reachState(){
+  var H=GF.H, items=[], res={ screen:gs+(helpOpen?'_HELP':''), items:items, screenH:H, viewportH:H };
+  if (helpOpen){ _push(items,_ri('help_close',L.helpClose,true)); return res; }
+  if (gs==='GAMEOVER'){ _push(items,_ri('restart',L.goRestart,true)); _push(items,_ri('help',L.goHelp,true)); return res; }
+  if (gs==='HUB'){ _push(items,_ri('reno',L.hubReno,true)); _push(items,_ri('help',L.hubHelp,true)); _push(items,_ri('close',L.hubClose,true)); return res; }
+  if (gs==='RESTAKE'){ _push(items,_ri('yes',L.renoYes,true)); _push(items,_ri('no',L.renoNo,true)); return res; }
+  // PLAYING — pinned HUD + scrollable shop rows
+  _push(items,_ri('mute',muteBtn,true));
+  _push(items,_ri('help',helpBtn,true));
+  _push(items,_ri('home',L.homeBtn,true));
+  if (L.boostBtn) _push(items,_ri('boost', L.boostBtn, true));
+  if (L.shaftX) _push(items,_ri('shaft', { x:16*GF.S, y:L.shaftTop, w:Math.min(GF.W*0.42,180*GF.S), h:L.shaftBot-L.shaftTop }, true));
+  if (L.shopRows && shopScroll){
+    res.scrollId='shop_list';
+    res.viewportH = shopScroll.vp.h;
+    for (var i=0;i<L.shopRows.length;i++){ var sr=L.shopRows[i]; _push(items,_ri('shoprow_'+i, { x:sr.x, y:sr.y, w:sr.w, h:sr.h })); }
+  }
+  return res;
+}
+var REACH_TOUR = [
+  { name:'playing',   go:function(){ helpOpen=false; gs='PLAYING'; if(shopScroll) shopScroll.scrollTo(0); GF.tutorial.active=false; } },
+  { name:'shop_bottom', go:function(){ helpOpen=false; gs='PLAYING'; GF.tutorial.active=false; if(shopScroll) shopScroll.scrollTo(shopScroll.maxOffset()); } },
+  { name:'hub',       go:function(){ helpOpen=false; gs='HUB'; } },
+  { name:'help',      go:function(){ gs='HUB'; helpOpen=true; } },
+  { name:'gameover',  go:function(){ helpOpen=false; gs='GAMEOVER'; } },
+  { name:'restake',   go:function(){ helpOpen=false; gs='RESTAKE'; } },
+];
+
+// ===========================================================================
+//  BOT CONTRACT (progression probe)
+// ===========================================================================
+function botActions(){
+  var a = ['boost'];
+  if (gold >= curSupportCost()) a.push('buy_support');
+  if (depth<LAYERS.length-1 && gold>=LAYERS[depth+1].digCost) a.push('dig_deeper');
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.gate<=depth && gold>=upgradeCost(u)) a.push('buy_'+u.id); }
+  if (canRestake()) a.push('restake');
+  return a;
+}
+function botAct(a){
+  if (a==='boost'){ boost(); return; }
+  if (a==='buy_support'){ buySupport(); return; }
+  if (a==='dig_deeper'){ digDeeper(); return; }
+  if (a==='restake'){ doRestake(); return; }
+  if (a && a.indexOf('buy_')===0){
+    var id=a.slice(4);
+    for (var i=0;i<UPGRADES.length;i++){ if (UPGRADES[i].id===id){ var ok=buyUpgrade(UPGRADES[i]); if(ok){UPGRADES[i]._seen=true;} return; } }
+  }
+}
+
+// ===========================================================================
+//  BOOT
+// ===========================================================================
+GF.init({
+  designW: 393, designH: 852,
+  strings: STRINGS,
+  saveKey: BEST_KEY,
+  sprites: [],
+  onReady: function(){
+    loadBest();
+    // Fresh start: a tiny gold cushion so the FIRST buy (Hire Miner / Support)
+    // is affordable right after the first boost — instant dopamine, no wall.
+    gold = 10; goldDisplay = gold;
+    GF.startMusic({ preset:'synth', muted:GF.muted });
+
+    GF.exposeState(function(){
+      return {
+        gs: gs, gold: Math.floor(gold), totalMined: Math.floor(totalMined), bestGold: Math.floor(bestGold),
+        depth: depth, claimLevel: claimLevel, crew: crew,
+        instability: Math.round(instability), cartGold: Math.round(cartGold), cartCap: Math.round(cartCap()),
+        gemValue: Math.round(gemValue()*100)/100, goldPerSec: Math.round(goldPerSec()*10)/10,
+        minerDigRate: Math.round(minerDigRate()*100)/100, elevFactor: Math.round(elevFactor()*100)/100,
+        foremanGps: Math.round(foremanGps()*10)/10, instabRate: Math.round(instabRate()*10)/10,
+        supportsBought: supportsBought, layersUnlocked: depth+1, layerCount: LAYERS.length,
+        // tunables (so the post-build gate can cross-check DESIGN.md)
+        baseGemValue: baseGemValue, minerSpeed: minerSpeed, cartCapacity: cartCapacity,
+        elevatorSpeed: elevatorSpeed, instabilityRate: instabilityRate, supportCost: supportCost,
+        layerCount2: layerCount, upgradeCostGrowth: upgradeCostGrowth, prestigeMultStep: prestigeMultStep,
+        hazardChance: hazardChance,
+      };
+    });
+    GF.exposeReach(reachState);
+    GF.exposeTour(REACH_TOUR);
+    GF.exposeBot(botActions, botAct);
+
+    bootDone = true;
+    // first-run tutorial (taught over live play; once via TUT_KEY)
+    var seen=false; try { seen = !!localStorage.getItem(TUT_KEY); } catch(e){}
+    if (!seen && !window._silent && !window.__GF_AUTOSTART){
+      setTimeout(function(){ startTutorial(false); }, 120);
+    }
+    // AUTOSTART: platform builds drop straight into play (no menu, suppress tut)
+    if (window.__GF_AUTOSTART && !window._silent){
+      gs='PLAYING';
+      try { localStorage.setItem(TUT_KEY,'1'); } catch(e){}
+    }
+  },
+  onUpdate: update,
+  onDraw: function(c){ draw(); },
+});
+
+// screenshot / gate seam: land on a populated mid-game state (Yandex 5.1.1 — a
+// busy shaft deep down, crew working, cart filling, instability mid, big numbers).
+window._setupForScreenshot = function(level){
+  window._silent = true;
+  GF.tutorial.active = false;
+  try { localStorage.setItem(TUT_KEY,'1'); } catch(e){}
+  var lv = level || 4;
+  depth = Math.min(lv, LAYERS.length-1);
+  claimLevel = lv>=5 ? 1 : 0;
+  crew = 3 + Math.floor(lv*1.5);
+  for (var i=0;i<UPGRADES.length;i++){ var u=UPGRADES[i]; if (u.gate<=depth){ u.lvl = Math.max(1, 5-u.gate); u._seen=true; if (u.kind==='miner') crew += u.gain*u.lvl; } }
+  supportsBought = 4;
+  gold = LAYERS[depth].digCost * 0.7 + 5000;
+  totalMined = gold * 3; bestGold = totalMined;
+  goldDisplay = gold;
+  cartGold = cartCap()*0.62; cartPos = 0.45; cartHauling = true;
+  instability = 58;
+  gs='PLAYING'; helpOpen=false;
+  window._silent = false;
+};
+// _jumpLevel(99) = terminal-state seam for the webapp gate: force a cave-in
+// cascade that kills the crew -> gs='GAMEOVER'. Lower n = mid-game screenshot.
+window._jumpLevel = function(n){
+  if (n >= 99){ window._silent=true; crew = 1; instability = 100; caveIn(); if (crew>0){ crew=0; triggerGameOver('crew'); } window._silent=false; return; }
+  window._setupForScreenshot(n||4);
+};
+window._setLang = function(l){ GF.lang = (l==='ru'?'ru':'en'); };
+window._setState = function(s){ gs = (s==='PLAYING'||s==='GAMEOVER'||s==='HUB'||s==='RESTAKE') ? s : gs; };
+window._getI18N = function(){ return STRINGS; };
+window._getFontBody = function(){ return 'sans-serif'; };
+window._cavernInfo = function(){ try { return window.__gfState(); } catch(e){ return null; } };
+
+})();
+</script>
+</body>
+</html>

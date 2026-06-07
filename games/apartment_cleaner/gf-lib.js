@@ -459,6 +459,207 @@ window.GF = {
   },
 };
 
+// ════════════════════════════════════════════════════════════════════════════
+// AUDIO + PERSIST + BOT (M1 add-on, 2026-06-07) — self-contained, no engine deps.
+// Ported from Shared/skills/game-factory/template/gf-lib.js so this game (which
+// predates the full lib) gets sound, save, and the bot contract without swapping
+// its self-contained engine. Extends window.GF in place.
+// ════════════════════════════════════════════════════════════════════════════
+(function () {
+  // ── Persist (Yandex 1.9 — survive refresh) ──
+  var _pKey = null, _pGet = null;
+  function persist(key, getState, applyState) {
+    _pKey = key; _pGet = getState;
+    try { var raw = localStorage.getItem(key); if (raw) { applyState(JSON.parse(raw)); return true; } } catch (_) {}
+    return false;
+  }
+  function saveRun() {
+    if (!_pKey || !_pGet) return;
+    try {
+      var s = _pGet();
+      if (s == null) { localStorage.removeItem(_pKey); return; }
+      localStorage.setItem(_pKey, JSON.stringify(s));
+    } catch (_) {}
+  }
+
+  // ── SFX synth (procedural WebAudio, no assets) ──
+  var _ac = null, AUDIO_MUTED = false, _extPaused = false;
+  try { AUDIO_MUTED = (localStorage.getItem('gf_muted') === '1'); } catch (e) {}
+  function audioCtx() {
+    if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch (e) {} }
+    return _ac;
+  }
+  function tone(freq, dur, type, gain, slideTo) {
+    if (AUDIO_MUTED || _extPaused) return;
+    var c = audioCtx(); if (!c) return;
+    try {
+      var g = c.createGain(), t0 = c.currentTime;
+      g.gain.setValueAtTime(gain || 0.12, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      g.connect(c.destination);
+      var o = c.createOscillator();
+      o.type = type || 'sine'; o.frequency.setValueAtTime(freq, t0);
+      if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+      o.connect(g); o.start(t0); o.stop(t0 + dur + 0.02);
+    } catch (e) {}
+  }
+  function arp(notes, step, dur, type, gain) {
+    for (var i = 0; i < notes.length; i++) (function (idx, f) {
+      setTimeout(function () { tone(f, dur || 0.16, type || 'sine', gain || 0.13); }, idx * (step || 70));
+    })(i, notes[i]);
+  }
+  var SFX_LIB = {
+    click:   function () { tone(660, 0.05, 'square', 0.05); },
+    tap:     function () { tone(520, 0.06, 'triangle', 0.07); },
+    sweep:   function () { tone(560, 0.05, 'triangle', 0.06, 760); },
+    spawn:   function () { tone(300, 0.08, 'sine', 0.08, 440); },
+    coin:    function () { tone(988, 0.07, 'square', 0.08, 1319); },
+    combo:   function () { tone(740, 0.07, 'triangle', 0.10, 1040); },
+    levelup: function () { arp([523, 659, 784, 1047], 80, 0.18, 'triangle', 0.14); },
+    unlock:  function () { arp([659, 988, 1319], 70, 0.18, 'sine', 0.15); },
+    reward:  function () { arp([784, 1047, 1319], 70, 0.16, 'triangle', 0.14); },
+    win:     function () { arp([523, 659, 784, 1047, 1319], 90, 0.20, 'triangle', 0.15); },
+    lose:    function () { tone(330, 0.45, 'sawtooth', 0.13, 90); },
+    error:   function () { tone(200, 0.12, 'square', 0.07, 140); },
+  };
+  function sfx(name) { var f = SFX_LIB[name]; if (f) f(); }
+  // rate-limited sfx for high-frequency events (dirt pickup) so it doesn't machine-gun
+  var _sfxLast = {};
+  function sfxRL(name, gapMs) {
+    var now = (performance && performance.now) ? performance.now() : Date.now();
+    if (_sfxLast[name] && now - _sfxLast[name] < (gapMs || 60)) return;
+    _sfxLast[name] = now; sfx(name);
+  }
+
+  // ── Procedural music bed (no-credit baseline) ──
+  var _mus = { ctx: null, master: null, on: false, muted: AUDIO_MUTED, timer: null, next: 0, step: 0, bar: 0, preset: null, started: false, _visBound: false };
+  var MUSIC_PRESETS = {
+    cozy:   { bpm: 82,  root: 196.00, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[5,0,2],[3,5,0],[4,6,1]], wave: 'triangle', bassWave: 'sine',     drums: false, gain: 0.16, arpDiv: 2 },
+    calm:   { bpm: 68,  root: 174.61, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[4,6,1],[5,0,2],[3,5,0]], wave: 'sine',     bassWave: 'sine',     drums: false, gain: 0.15, arpDiv: 2 },
+    arcade: { bpm: 132, root: 261.63, scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[3,5,0],[4,6,1],[0,2,4]], wave: 'square',   bassWave: 'triangle', drums: true,  gain: 0.11, arpDiv: 4 },
+  };
+  function _mf(root, n) { return root * Math.pow(2, n / 12); }
+  function _mt(freq, t, dur, wave, peak, o) {
+    o = o || {}; var c = _mus.ctx; if (!c) return;
+    var osc = c.createOscillator(), g = c.createGain();
+    osc.type = wave; osc.frequency.setValueAtTime(freq, t);
+    var a = o.attack != null ? o.attack : 0.02, r = o.release != null ? o.release : 0.12;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), t + a);
+    g.gain.setValueAtTime(Math.max(0.0002, peak), t + Math.max(a + 0.01, dur - r));
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    if (o.filter) { var f = c.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = o.filter; osc.connect(f); f.connect(g); }
+    else osc.connect(g);
+    g.connect(_mus.master); osc.start(t); osc.stop(t + dur + 0.05);
+  }
+  function _mSchedule() {
+    var p = _mus.preset, c = _mus.ctx; if (!p || !c) return;
+    var spb = 60 / p.bpm, stepDur = spb / 4;
+    while (_mus.next < c.currentTime + 0.25) {
+      var t = _mus.next, step = _mus.step % 16;
+      var chord = p.chords[_mus.bar % p.chords.length], sc = p.scale, L = sc.length;
+      var d2s = function (deg) { return sc[((deg % L) + L) % L] + 12 * Math.floor(deg / L); };
+      if (step === 0) {
+        for (var ci = 0; ci < chord.length; ci++) _mt(_mf(p.root, d2s(chord[ci])), t, spb * 4 * 0.96, p.wave, 0.085, { attack: 0.10, release: 0.5, filter: 1500 });
+        _mt(_mf(p.root, d2s(chord[0]) - 12), t, spb * 2 * 0.92, p.bassWave, 0.17, { attack: 0.02, release: 0.16, filter: 480 });
+      }
+      if (step === 8) _mt(_mf(p.root, d2s(chord[0]) - 12), t, spb * 2 * 0.9, p.bassWave, 0.15, { attack: 0.02, release: 0.16, filter: 480 });
+      var arpEvery = Math.max(1, Math.round(4 / p.arpDiv));
+      if (step % arpEvery === 0) {
+        var idx = Math.floor(step / arpEvery), deg = chord[idx % chord.length] + (idx % 6 >= 3 ? 7 : 0);
+        _mt(_mf(p.root, d2s(deg) + 12), t, stepDur * arpEvery * 0.85, p.wave, 0.05, { attack: 0.008, release: 0.06, filter: 2800 });
+      }
+      _mus.next += stepDur; _mus.step++;
+      if (_mus.step % 16 === 0) _mus.bar++;
+    }
+  }
+  function startMusic(opts) {
+    opts = opts || {};
+    _mus.preset = MUSIC_PRESETS[opts.preset] || MUSIC_PRESETS.cozy;
+    if (typeof opts.muted === 'boolean') _mus.muted = opts.muted;
+    if (_mus.started) return; _mus.started = true;
+    var begin = function () {
+      if (_mus.on) return;
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+        _mus.ctx = _mus.ctx || new AC();
+        if (_mus.ctx.state === 'suspended') _mus.ctx.resume();
+        _mus.master = _mus.ctx.createGain();
+        _mus.master.gain.value = _mus.muted ? 0.0001 : _mus.preset.gain;
+        _mus.master.connect(_mus.ctx.destination);
+        _mus.next = _mus.ctx.currentTime + 0.12; _mus.step = 0; _mus.bar = 0; _mus.on = true;
+        _mus.timer = setInterval(function () { try { if (_mus.on) _mSchedule(); } catch (e) {} }, 30);
+      } catch (e) {}
+    };
+    if (!_mus._visBound) {
+      _mus._visBound = true;
+      document.addEventListener('visibilitychange', function () {
+        if (!_mus.ctx) return;
+        try {
+          if (document.hidden) _mus.ctx.suspend();
+          else if (_mus.on && !_extPaused) { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; }
+        } catch (e) {}
+      });
+    }
+    var fire = function () { begin(); ['pointerdown','keydown','touchstart','mousedown'].forEach(function (ev) { document.removeEventListener(ev, fire, true); }); };
+    ['pointerdown','keydown','touchstart','mousedown'].forEach(function (ev) { document.addEventListener(ev, fire, true); });
+  }
+  function setMusicMuted(m) {
+    _mus.muted = !!m;
+    if (_mus.master && _mus.ctx) { try { _mus.master.gain.setTargetAtTime(m ? 0.0001 : (_mus.preset ? _mus.preset.gain : 0.15), _mus.ctx.currentTime, 0.04); } catch (e) {} }
+  }
+  function toggleMute() {
+    AUDIO_MUTED = !AUDIO_MUTED;
+    try { localStorage.setItem('gf_muted', AUDIO_MUTED ? '1' : '0'); } catch (e) {}
+    setMusicMuted(AUDIO_MUTED);
+    return AUDIO_MUTED;
+  }
+  function pauseAudio() {
+    if (_extPaused) return; _extPaused = true;
+    try { if (_mus.ctx && _mus.ctx.state === 'running') _mus.ctx.suspend(); } catch (e) {}
+    try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch (e) {}
+  }
+  function resumeAudio() {
+    if (!_extPaused) return; _extPaused = false;
+    try { if (_mus.ctx && _mus.on && _mus.ctx.state === 'suspended') { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; } } catch (e) {}
+    try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {}
+  }
+  function drawMuteIcon(c, x, y, r, muted) {
+    c.save(); c.translate(x, y); c.lineWidth = Math.max(1.5, r * 0.16);
+    c.strokeStyle = muted ? '#8a8a9a' : '#dfe7ff'; c.fillStyle = c.strokeStyle;
+    c.beginPath(); c.moveTo(-r*0.7,-r*0.28); c.lineTo(-r*0.3,-r*0.28); c.lineTo(0,-r*0.6); c.lineTo(0,r*0.6); c.lineTo(-r*0.3,r*0.28); c.lineTo(-r*0.7,r*0.28); c.closePath(); c.fill();
+    if (muted) { c.beginPath(); c.moveTo(r*0.22,-r*0.35); c.lineTo(r*0.72,r*0.35); c.moveTo(r*0.72,-r*0.35); c.lineTo(r*0.22,r*0.35); c.stroke(); }
+    else { c.beginPath(); c.arc(r*0.12,0,r*0.42,-0.9,0.9); c.stroke(); c.beginPath(); c.arc(r*0.12,0,r*0.72,-0.8,0.8); c.stroke(); }
+    c.restore();
+  }
+  // resume audio ctx on the first gesture (autoplay policy)
+  (function () {
+    var kick = function () { audioCtx(); };
+    window.addEventListener('pointerdown', kick, { passive: true });
+    window.addEventListener('touchstart', kick, { passive: true });
+    window.addEventListener('keydown', kick);
+  })();
+
+  // ── exposeBot (progression probe contract) ──
+  function exposeBot(getActions, doAction) {
+    window.__gfBot = {
+      actions: function () { try { var a = getActions(); return Array.isArray(a) ? a : []; } catch (e) { return []; } },
+      act: function (a) { try { return doAction(a); } catch (e) {} },
+    };
+  }
+
+  // Extend GF
+  var G = window.GF || (window.GF = {});
+  G.persist = persist; G.saveRun = saveRun;
+  G.sfx = sfx; G.sfxRL = sfxRL; G.tone = tone; G.arp = arp;
+  G.startMusic = startMusic; G.setMusicMuted = setMusicMuted;
+  G.toggleMute = toggleMute; G.drawMuteIcon = drawMuteIcon;
+  G.pauseAudio = pauseAudio; G.resumeAudio = resumeAudio;
+  G.exposeBot = exposeBot;
+  Object.defineProperty(G, 'muted', { get: function () { return AUDIO_MUTED; }, configurable: true });
+})();
+
 // Screenshot helpers — exposed at window for external tooling (take_screenshots.js)
 window._setLang = function(l) { lang = (l === 'ru' ? 'ru' : 'en'); };
 // _jumpLevel must be defined per-game (each game has its own level model).

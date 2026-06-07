@@ -23,18 +23,35 @@ var ctx = canvas.getContext('2d');
 var W = 0, H = 0, cx = 0, cy = 0, S = 1;
 var DESIGN_W = 800, DESIGN_H = 600;
 
+// The VISIBLE viewport size. On mobile, window.innerWidth/innerHeight report the
+// LAYOUT viewport, which does NOT shrink when the browser chrome (address bar)
+// shows on fullscreen-exit — so sizing the canvas to it left the canvas taller
+// than the visible area and the browser scaled it non-uniformly. visualViewport
+// reports the true visible box, killing Yandex 1.6.1.3 (deform on fullscreen-exit)
+// and 1.6.2.3 (stretch on resize) at the source.
+function _vpW() { var vv = window.visualViewport; return Math.max(1, Math.round((vv && vv.width)  ? vv.width  : window.innerWidth)); }
+function _vpH() { var vv = window.visualViewport; return Math.max(1, Math.round((vv && vv.height) ? vv.height : window.innerHeight)); }
 function resize() {
-  W = canvas.width  = window.innerWidth;
-  H = canvas.height = window.innerHeight;
+  W = _vpW(); H = _vpH();
+  canvas.width = W; canvas.height = H;
+  // Pin the CSS box to the SAME size as the backing store. With backing aspect
+  // == display aspect the browser can never stretch the canvas non-uniformly —
+  // visual elements stay proportional through every resize / orientation change.
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
   cx = W / 2; cy = H / 2;
   S = Math.min(W / DESIGN_W, H / DESIGN_H);
 }
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', resize);
-// Yandex 1.6.2.3 — on mobile, exiting fullscreen can leave the viewport at
-// the fullscreen dimensions because the resize event sometimes fires before
-// the browser settles. Fire resize on every dimension-changing transition
-// with two delayed retries so the canvas always matches the viewport.
+// visualViewport fires on the exact transitions window.resize misses on mobile
+// (address-bar show/hide, fullscreen-exit) — listen to both so the canvas tracks
+// the visible area immediately.
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', resize);
+  window.visualViewport.addEventListener('scroll', resize);
+}
+// Belt-and-suspenders for transitions that settle late: re-fire with two delays.
 function _gfForceResize() { setTimeout(resize, 60); setTimeout(resize, 250); }
 document.addEventListener('fullscreenchange',       _gfForceResize);
 document.addEventListener('webkitfullscreenchange', _gfForceResize);
@@ -377,6 +394,12 @@ var lastTs = 0, onUpdate = null, onDraw = null, isRunning = false;
 function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
   lastTs = ts;
+
+  // Re-sync the canvas to the live visible viewport BEFORE drawing, so no frame
+  // is ever rendered at a stale size. This eliminates the transient stretched /
+  // deformed frame a moderator catches mid-transition (Yandex 1.6.1.3 / 1.6.2.3).
+  // Cheap integer compare; resize() only runs on an actual dimension change.
+  if (W !== _vpW() || H !== _vpH()) resize();
 
   updateParticles(dt);
   updateFloats(dt);

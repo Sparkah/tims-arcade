@@ -51,6 +51,10 @@ var STRINGS = {
     bonus_streak_boost: 'Streak bonus',
     // Endless mode (playtime depth)
     endless: 'ENDLESS', endless_tag: 'LVL', go_deeper: 'tap to go deeper',
+    // Continuous progression (M7) — one infinite ladder, no 6-level wall
+    stage: 'STAGE', keep_going: 'KEEP GOING', new_game: 'NEW GAME',
+    campaign_clear: 'CAMPAIGN CLEARED!',
+    campaign_clear_sub: 'The puzzles now go on forever - each one harder than the last.',
     // Sealed-tube obstacle (Endless in-run mechanic)
     sealed_hint: 'Sealed tube - complete one pure tube to unlock it',
     // ── Reagent Kit (playtime-item retention milestone) ──
@@ -99,6 +103,10 @@ var STRINGS = {
     bonus_streak_boost: 'Бонус за серию',
     // Endless mode (playtime depth)
     endless: 'БЕЗ КОНЦА', endless_tag: 'УР', go_deeper: 'жми, чтобы углубиться',
+    // Continuous progression (M7) — one infinite ladder, no 6-level wall
+    stage: 'УР', keep_going: 'ПРОДОЛЖИТЬ', new_game: 'СНАЧАЛА',
+    campaign_clear: 'КАМПАНИЯ ПРОЙДЕНА!',
+    campaign_clear_sub: 'Дальше головоломки бесконечны - и каждая сложнее прошлой.',
     // Sealed-tube obstacle (Endless in-run mechanic)
     sealed_hint: 'Запечатана: собери одну чистую пробирку, чтобы открыть',
     // ── Reagent Kit (playtime-item retention milestone) ──
@@ -126,7 +134,9 @@ var SPRITE_NAMES = [];
 var POUR_BUDGET   = 12;    // base pours on level 1 (+2 per level)
 var TUBE_CAP      = 4;     // colour-layer slots per tube
 var START_TUBES   = 5;     // total tubes level 1 (colours + 2 empties)
-var WIN_LEVELS    = 6;     // clear level 6 to win
+var WIN_LEVELS    = 6;     // length of the gentle hand-tuned ON-RAMP; clearing it
+                           // flows STRAIGHT into the endless run (no win-wall) — the
+                           // game is one continuous infinite ladder (M7, 2026-06-07)
 var UNDO_MAX      = 3;     // undo charges per level
 var BLEND_PENALTY = 1;     // extra mixed layers a blend can create
 var POUR_ANIM_SEC = 0.34;  // pour animation duration
@@ -700,6 +710,9 @@ var locked = [];
 // the concrete reason the session keeps going past WIN toward the ~15-min target.
 var endlessLevel = 0;        // current endless level (1.. ), 0 = not in endless
 var endlessBest = 0;         // deepest endless level ever reached (persisted)
+var campaignJustCleared = false; // M7: true for the ONE LEVELEND beat after the on-ramp's
+                                 // last level — shows a "Campaign Cleared!" banner, then
+                                 // tapping flows into endless (no terminal WIN wall).
 var ENDLESS_MAX_FILLED = 7;  // cap on filled colour-tubes so the rack stays sane
 var SEAL_FROM_LEVEL = 3;     // endless level a SEALED (corked) tube first appears
 // Reset every tube to unsealed (campaign/daily/endless-before-threshold). Keeps the
@@ -1030,8 +1043,13 @@ function evaluate() {
       return;
     }
     if (level > bestLevel) { bestLevel = level; try { localStorage.setItem('hue_sort_best', bestLevel); } catch (e) {} }
-    if (level >= WIN_LEVELS) { gs = 'WIN'; GF.gameEnded(); GF.happytime(); }
-    else { gs = 'LEVELEND'; }
+    // CONTINUOUS PROGRESSION (M7): clearing the on-ramp's last level NO LONGER ends
+    // the game. It shows a "Campaign Cleared!" celebration beat on the LEVELEND
+    // screen, then tapping flows STRAIGHT into endless level 1 (nextStage) — so the
+    // game just keeps going, exactly as the player asked ("launch infinite straight
+    // away"). The old terminal WIN screen is kept reachable only for the gate/tour.
+    if (level >= WIN_LEVELS) { campaignJustCleared = true; GF.happytime(); }
+    gs = 'LEVELEND';
     GF.saveRun();
     return;
   }
@@ -1048,16 +1066,91 @@ function evaluate() {
   }
 }
 
-// ── LIFECYCLE ──────────────────────────────────────────────────────────────
-function startGame() {
-  mode = 'campaign';
-  level = 1;
-  buildLevel(level);
+// ── CONTINUOUS PROGRESSION — ONE INFINITE LADDER (M7, 2026-06-07) ───────────
+// The loudest, most-repeated player complaint was the FINITE 6-level cap:
+//   "why do you have fixed 6 levels mode? just launch infinite straight away,
+//    remove these levels which are useless" / "6 levels only? that is 2-3 minutes
+//    of gameplay, no reason to come back".
+// The infinite Endless content already existed — but it was BURIED behind beating
+// the campaign AND finding a separate ENDLESS button, so a new player hit the
+// 6-level wall, felt the game "end", and bounced before ever seeing the infinite
+// run. This pass RE-WIRES the progression flow (additive — the endless generator,
+// the meta, daily, kit are all untouched) so the campaign's 6 hand-tuned levels are
+// just the gentle ON-RAMP that flows STRAIGHT into the endless ladder with no
+// win-wall, no separate unlock, no menu detour. The game is now one continuous
+// progression the player asked for, and PLAY resumes the deepest point reached so a
+// returning player CONTINUES their run (the concrete reason-to-return).
+//
+// "Stage" = the player's absolute position on the unified ladder:
+//   stages 1..WIN_LEVELS  → campaign on-ramp (level = stage)
+//   stages WIN_LEVELS+1.. → endless (endlessLevel = stage - WIN_LEVELS)
+// `progressBest` (own key hue_sort_progress) is the deepest STAGE ever reached; it
+// is what PLAY resumes to. It supersedes — but stays consistent with — bestLevel
+// (campaign high-water) and endlessBest (endless high-water), which are still kept.
+var progressBest = 1;      // deepest STAGE ever reached on the unified ladder (persisted)
+
+function loadProgress() {
+  try { progressBest = parseInt(localStorage.getItem('hue_sort_progress') || '0') || 0; } catch (e) {}
+  // Backfill from the older high-water keys so veterans resume where they actually
+  // were even on first run of this build (campaign best = its stage; endless best
+  // sits past the on-ramp). max() keeps it monotonic.
+  var fromCampaign = Math.min(bestLevel, WIN_LEVELS);
+  var fromEndless = endlessBest > 0 ? WIN_LEVELS + endlessBest : 0;
+  progressBest = Math.max(progressBest, fromCampaign, fromEndless, 1);
+}
+function saveProgress() {
+  try { localStorage.setItem('hue_sort_progress', String(progressBest)); } catch (e) {}
+}
+// Record reaching a stage (called whenever a board for a stage is built). Monotonic.
+function reachStage(stage) {
+  if (stage > progressBest) { progressBest = stage; saveProgress(); }
+}
+// The player's CURRENT stage from the live mode/level/endlessLevel.
+function currentStage() {
+  if (mode === 'endless') return WIN_LEVELS + Math.max(1, endlessLevel);
+  return Math.min(level, WIN_LEVELS);
+}
+// Build + enter the board for an absolute STAGE, routing to the campaign or endless
+// generator and setting mode/level/endlessLevel coherently. The single entry point
+// the continuous flow uses so campaign↔endless is seamless.
+function enterStage(stage) {
+  campaignJustCleared = false;   // a fresh board clears the one-shot "campaign cleared" banner
+  stage = Math.max(1, stage | 0);
+  if (stage <= WIN_LEVELS) {
+    mode = 'campaign';
+    level = stage;
+    endlessLevel = 0;
+    buildLevel(level);
+  } else {
+    mode = 'endless';
+    endlessLevel = stage - WIN_LEVELS;
+    buildEndlessLevel(endlessLevel);
+    saveEndlessBest();
+  }
+  reachStage(stage);
   gs = 'PLAYING';
   GF.gameStarted();
   GF.saveRun();
 }
+// Advance to the next stage on the unified ladder — the seamless campaign→endless
+// hand-off. When the on-ramp's last level is cleared we cross into endless level 1
+// with NO terminal WIN screen, so the game simply keeps going.
+function nextStage() { enterStage(currentStage() + 1); }
+
+// ── LIFECYCLE ──────────────────────────────────────────────────────────────
+// PLAY is now "keep going": it RESUMES the deepest stage the player ever reached on
+// the unified ladder, so a returning player continues their run (a fresh player has
+// progressBest=1 and starts at level 1 as before). This is the continuous-
+// progression answer to "no reason to come back" — you pick up where you left off.
+function startGame() {
+  enterStage(Math.max(1, progressBest));
+}
+// Always restart the on-ramp from stage 1 (the WIN/again "play again" path).
+function restartFromStart() {
+  enterStage(1);
+}
 function startDaily() {
+  campaignJustCleared = false;
   mode = 'daily';
   level = DAILY_LEVEL;       // for the LVL/budget HUD only; daily board is seeded
   buildDailyLevel();
@@ -1065,35 +1158,23 @@ function startDaily() {
   GF.gameStarted();
   GF.saveRun();
 }
-function nextLevel() {
-  level++;
-  if (level > WIN_LEVELS) { gs = 'WIN'; GF.gameEnded(); return; }
-  buildLevel(level);
-  gs = 'PLAYING';
-  GF.gameStarted();
-  GF.saveRun();
-}
+// Advance the campaign on-ramp. Crossing the last on-ramp level flows STRAIGHT into
+// endless (no WIN wall) via the unified-ladder nextStage() — the game keeps going.
+function nextLevel() { nextStage(); }
 function startEndless() {
-  // Begin (or continue) the post-campaign endless run from level 1.
-  mode = 'endless';
-  endlessLevel = 1;
-  buildEndlessLevel(endlessLevel);
-  gs = 'PLAYING';
-  GF.gameStarted();
-  GF.saveRun();
+  // Jump straight into the endless ladder (the explicit ENDLESS entry still works).
+  // First endless stage sits just past the on-ramp; resume the deepest endless depth
+  // reached so this entry also continues rather than always restarting at depth 1.
+  var stage = Math.max(WIN_LEVELS + 1, WIN_LEVELS + endlessBest, progressBest > WIN_LEVELS ? progressBest : 0);
+  enterStage(stage);
 }
-function nextEndless() {
-  endlessLevel++;
-  saveEndlessBest();
-  buildEndlessLevel(endlessLevel);
-  gs = 'PLAYING';
-  GF.gameStarted();
-  GF.saveRun();
-}
+// Advance one endless level — routed through the unified ladder so progressBest tracks.
+function nextEndless() { nextStage(); }
 function retryLevel() {
   // Re-deal the SAME-difficulty board the player just lost: daily re-seeds today's
   // puzzle, endless re-rolls the current endless level, campaign re-scrambles its
   // level. (Daily streak / endless best are only banked on a win.)
+  campaignJustCleared = false;
   if (mode === 'daily') buildDailyLevel();
   else if (mode === 'endless') buildEndlessLevel(endlessLevel);
   else buildLevel(level);
@@ -1115,6 +1196,18 @@ window._jumpLevel = function(n) {
   level = GF.clamp(n || 3, 1, WIN_LEVELS);
   buildLevel(level);
   gs = 'PLAYING';
+};
+// Test-only (M7): force the "Campaign Cleared!" LEVELEND beat for headless QA of the
+// continuous-progression hand-off (the real path fires it from evaluate() on solving
+// the on-ramp's last level). Safe to ship like the other _ hooks.
+window.__forceCampaignClear = function() {
+  GF.tutorial.active = false;
+  mode = 'campaign';
+  level = WIN_LEVELS;
+  buildLevel(level);
+  campaignJustCleared = true;
+  gs = 'LEVELEND';
+  computeLayout();
 };
 // Test-only: jump straight into an endless level n (drives the sealed-tube path
 // for headless QA). Mirrors _jumpLevel; safe to ship like the other _ hooks.
@@ -1219,6 +1312,8 @@ var _playBtn = null, _retryBtn = null, _againBtn = null, _dailyBtn = null;
 var _hudMenuBtn = null, _hudHelpBtn = null, _undoBtn = null, _gmMenuBtn = null, _winMenuBtn = null;
 var _dailyMenuBtn = null, _bonusBtn = null, _winEndlessBtn = null, _menuEndlessBtn = null;
 var _bonusPulse = 0; // cosmetic pulse phase for the claimable chest
+var _menuContentBot = 0; // M7: previous frame's measured menu-content bottom (px), used
+                         // to vertically center the portrait menu (iphone-offset fix)
 // Reagent Kit UI hit-rects (recomputed each frame they draw)
 var _hudKitBtn = null, _muteBtn = null, _menuKitBtn = null, _kitResumeBtn = null;
 var _kitTabRects = [];      // [{tab,x,y,w,h}]
@@ -1372,18 +1467,19 @@ function drawHUD(ctx) {
   ctx.font = 'bold ' + fs + 'px sans-serif';
   ctx.textAlign = 'left';
   if (mode === 'daily') {
-    // Daily mode: show the DAILY tag (+ current streak) instead of LVL n/6.
+    // Daily mode: show the DAILY tag (+ current streak) instead of a stage number.
     ctx.fillStyle = '#ffb454';
     var tag = GF.t('daily_tag');
     if (dailyStreak > 0) tag += '  🔥' + dailyStreak;
     ctx.fillText(tag, pad, pad);
-  } else if (mode === 'endless') {
-    // Endless mode: show the endless-depth tag (∞ N) instead of the finite LVL n/6.
-    ctx.fillStyle = '#9fe8b5';
-    ctx.fillText(GF.t('endless_tag') + ' ' + endlessLevel, pad, pad);
   } else {
-    ctx.fillStyle = '#cfe0ff';
-    ctx.fillText(GF.t('level') + ' ' + level + '/' + WIN_LEVELS, pad, pad);
+    // CONTINUOUS PROGRESSION (M7): campaign + endless are ONE infinite ladder, so the
+    // HUD shows a single continuous "STAGE n" (no "/6" ceiling that made the game read
+    // as 6 levels). Tint shifts green once past the on-ramp so the player feels the
+    // endless run, but the NUMBER never resets — it just keeps climbing.
+    var st = currentStage();
+    ctx.fillStyle = (st > WIN_LEVELS) ? '#9fe8b5' : '#cfe0ff';
+    ctx.fillText(GF.t('stage') + ' ' + st, pad, pad);
   }
 
   // Pour budget depends on the active loop's generator (campaign / daily / endless).
@@ -1643,10 +1739,31 @@ function drawMenu(ctx) {
   ctx.strokeStyle = 'rgba(150,180,230,0.4)'; ctx.lineWidth = 1.3 * S; ctx.stroke();
   GF.drawMuteIcon(ctx, _muteBtn.x + mbtn / 2, _muteBtn.y + mbtn / 2, mbtn * 0.30, GF.muted);
 
+  // ── iPhone MENU-OFFSET FIX (M7) ──
+  // The player reported "on iphone the menu of the game itself is a bit off". The
+  // portrait menu flows top-down from a fixed titleY, so on a tall screen the whole
+  // stack floated to the top with a big dead void at the BOTTOM (top-heavy, unbalanced).
+  // Fix: vertically CENTER the content block in portrait by shifting the top anchor
+  // down by half the leftover space. We use the previous frame's measured content
+  // bottom (_menuContentBot) so the shift is one frame behind — invisible to the eye,
+  // and it self-corrects within a frame of any content change (e.g. a chest appearing).
+  // Desktop (_wide) keeps its existing tuned layout (it has no such void).
+  var baseTitleY = H * 0.075;
+  var titleY = baseTitleY;
+  var _menuShift = 0;   // how far we pushed the stack down THIS frame (subtracted out
+                        // when we record _menuContentBot, so the measurement stays in
+                        // stable UNSHIFTED coordinates and the centering can't oscillate)
+  if (!_wideMenu() && _menuContentBot > 0) {
+    var blockH = _menuContentBot - baseTitleY;   // _menuContentBot is unshifted (see end)
+    var freeSpace = H - blockH;
+    // center the leftover space, but keep the existing top margin and cap the push so
+    // it stays gentle (never slams the stack to the vertical middle on a short screen).
+    _menuShift = GF.clamp((freeSpace - baseTitleY) * 0.5, 0, H * 0.12);
+    titleY = baseTitleY + _menuShift;
+  }
   ctx.shadowColor = 'rgba(63,184,106,0.5)'; ctx.shadowBlur = 28 * S;
   ctx.font = 'bold ' + GF.clamp(40 * S, 26, 56) + 'px sans-serif';
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  var titleY = H * 0.075;
   ctx.fillText(GF.t('title'), cx, titleY);
   ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
   var tubeBlockY = titleY + GF.clamp(52 * S, 38, 68);
@@ -1701,11 +1818,11 @@ function drawMenu(ctx) {
     ctx.restore();
     ctx.font = 'bold ' + GF.clamp(22 * S, 15, 30) + 'px sans-serif';
     ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText('▶ ' + GF.t('play'), _px + _playBw / 2, _py + bh / 2);
+    ctx.fillText('▶ ' + playLabel(), _px + _playBw / 2, _py + bh / 2);
     ctx.textBaseline = 'top';
     _playBtn = { x: _px, y: _py, w: _playBw, h: bh };
   } else {
-    _playBtn = drawPairButton(ctx, GF.t('play'), leftX, btnY, bw, bh, 'play', false);
+    _playBtn = drawPairButton(ctx, playLabel(), leftX, btnY, bw, bh, 'play', false);
   }
   // Daily: dim when today's puzzle is already solved (still tappable to replay,
   // but visually signals "done" — the FOMO is in the streak, not a hard lock).
@@ -1733,29 +1850,49 @@ function drawMenu(ctx) {
     ctx.fillText('🔥 ' + dailyStreak + ' ' + unit + ' ' + GF.t('streak'), cx, capY);
     capY += GF.clamp(18 * S, 13, 24);
   }
-  if (bestLevel > 0) {
+  // Deepest-stage caption (continuous ladder — no "/6" ceiling). Only shown once the
+  // player has climbed past the very first stage, so it reads as a growing record.
+  if (progressBest > 1) {
     ctx.font = GF.clamp(12 * S, 9, 15) + 'px sans-serif';
     ctx.fillStyle = '#7f93b5';
-    ctx.fillText(GF.t('best') + ': ' + bestLevel + '/' + WIN_LEVELS, cx, capY);
+    ctx.fillText(GF.t('best') + ': ' + GF.t('stage') + ' ' + progressBest, cx, capY);
     capY += GF.clamp(18 * S, 13, 24);
   }
-  // ENDLESS entry on the MENU — unlocked once the campaign has been cleared (or an
-  // endless run already started). Gated so it never clutters the first-run menu;
-  // when shown it sits below the captions (only after the player has the screen
-  // room budget freed by having finished the tutorial-era first run).
+  // CONTINUOUS PROGRESSION (M7): PLAY now RESUMES the deepest stage, so the old
+  // separate ENDLESS unlock button is no longer how you reach the infinite content —
+  // you're always on the one ladder. Once the player has progress, offer a small
+  // "NEW GAME" pill to restart the on-ramp from stage 1 (the only reason to NOT
+  // continue). On a fresh save (progressBest===1) nothing shows, so the first-run
+  // menu stays clean. _menuEndlessBtn retained (now the NEW GAME hit-rect) so the tap
+  // handler + reachability tour keep working without a rename churn.
   _menuEndlessBtn = null;
-  if (endlessUnlocked()) {
+  if (progressBest > 1) {
     var ebh = GF.clamp(40 * S, 34, 52);
-    var ebw = Math.min(W * 0.7, GF.clamp(240 * S, 180, 300));
+    var ebw = Math.min(W * 0.7, GF.clamp(200 * S, 150, 260));
     var eby = Math.min(capY + GF.clamp(4 * S, 2, 8), H - ebh - GF.clamp(10 * S, 8, 16));
-    _menuEndlessBtn = drawPairButton(ctx, GF.t('endless') +
-      (endlessBest > 0 ? ('  ∞' + endlessBest) : ''),
-      cx - ebw / 2, eby, ebw, ebh, 'endless_blue', false);
+    _menuEndlessBtn = drawPairButton(ctx, GF.t('new_game'),
+      cx - ebw / 2, eby, ebw, ebh, null, true);
+    capY = eby + ebh;
   }
+  // Record where the menu content actually ends (in UNSHIFTED coordinates — subtract
+  // the shift we applied this frame) so the NEXT frame can vertically center the
+  // portrait stack (iphone-offset fix) without oscillating. The bottom is the lowest
+  // of the caption cursor and any drawn buttons/pills.
+  var _bot = Math.max(capY, _playBtn ? (_playBtn.y + _playBtn.h) : 0,
+    _menuEndlessBtn ? (_menuEndlessBtn.y + _menuEndlessBtn.h) : 0);
+  _menuContentBot = _bot - _menuShift;
 }
 // Endless is unlocked after the player has cleared the finite campaign at least
-// once (bestLevel hit the cap) or already has an endless run on record.
-function endlessUnlocked() { return endlessBest > 0 || bestLevel >= WIN_LEVELS; }
+// once (bestLevel hit the cap) or already has an endless run on record. (Retained
+// for GF.exposeState + back-compat; the continuous ladder no longer gates on it.)
+function endlessUnlocked() { return endlessBest > 0 || bestLevel >= WIN_LEVELS || progressBest > WIN_LEVELS; }
+// Menu PLAY label: "KEEP GOING" once the player has a run to resume, else "PLAY" for
+// a fresh save — the continuous-progression "pick up where you left off".
+function playLabel() {
+  return progressBest > 1 ? (GF.t('keep_going')) : GF.t('play');
+}
+// Is the menu in landscape/desktop layout? (kept identical to the inline `_wide` test.)
+function _wideMenu() { return GF.W / GF.H > 1.15; }
 
 // The claimable daily-bonus chest button on the MENU. A warm gold pill with a
 // gift glyph, a gentle pulse, and the streak-scaled reward amount baked into the
@@ -1875,8 +2012,31 @@ function drawRankPanel(ctx, cx, y, maxW) {
 function drawLevelEnd(ctx) {
   drawScrim(ctx, 0.7);
   var S = GF.S, H = GF.H, cx = GF.W / 2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // CONTINUOUS PROGRESSION (M7): the beat right after clearing the on-ramp's last
+  // level is a "Campaign Cleared!" milestone celebration — but it's a PASSING beat,
+  // not a dead end. Tapping flows straight into the endless ladder, so the run keeps
+  // going (the old terminal WIN wall is gone).
+  if (campaignJustCleared) {
+    ctx.shadowColor = 'rgba(63,184,106,0.6)'; ctx.shadowBlur = 28 * S;
+    ctx.font = 'bold ' + GF.clamp(34 * S, 22, 48) + 'px sans-serif';
+    ctx.fillStyle = '#9fe8b5';
+    ctx.fillText(GF.t('campaign_clear'), cx, H * 0.40);
+    ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    ctx.font = GF.clamp(15 * S, 12, 20) + 'px sans-serif';
+    ctx.fillStyle = '#cfe0ff';
+    var ccLines = wrapLines(ctx, GF.t('campaign_clear_sub'), Math.min(GF.W * 0.82, 400));
+    var ccY = H * 0.40 + GF.clamp(42 * S, 30, 58);
+    var ccLh = GF.clamp(20 * S, 15, 26);
+    for (var i = 0; i < ccLines.length; i++) { ctx.fillText(ccLines[i], cx, ccY); ccY += ccLh; }
+    ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif';
+    ctx.fillStyle = '#5fd0ff';
+    ctx.fillText(GF.t('go_deeper'), cx, ccY + ccLh * 0.6);
+    ctx.textBaseline = 'top';
+    return;
+  }
   ctx.font = 'bold ' + GF.clamp(34 * S, 22, 48) + 'px sans-serif';
-  ctx.fillStyle = '#9fe8b5'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#9fe8b5';
   // Endless boards have no fixed number — celebrate the depth reached + "go deeper".
   var head = (mode === 'endless')
     ? (GF.t('endless_tag') + ' ' + endlessLevel + ' ' + GF.t('solved'))
@@ -1922,7 +2082,9 @@ function drawGameOver(ctx) {
   ctx.fillText(GF.t('gameover'), cx, H * 0.30);
   ctx.font = GF.clamp(16 * S, 12, 20) + 'px sans-serif';
   ctx.fillStyle = '#bcd';
-  ctx.fillText(GF.t('level') + ' ' + level + '/' + WIN_LEVELS, cx, H * 0.30 + GF.clamp(50 * S, 38, 66));
+  // Continuous ladder (M7): show the unified STAGE, not "LVL n/6" (daily keeps its tag).
+  var goLabel = (mode === 'daily') ? GF.t('daily_tag') : (GF.t('stage') + ' ' + currentStage());
+  ctx.fillText(goLabel, cx, H * 0.30 + GF.clamp(50 * S, 38, 66));
   _retryBtn = drawButton(ctx, GF.t('retry'), cx, H * 0.52, '#e88a3a');
   _gmMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + _retryBtn.h + GF.clamp(18 * S, 12, 26));
   // Session-end hook: tease the claimable daily bonus / preview tomorrow's.
@@ -2350,7 +2512,8 @@ function onTap(x, y) {
     if (hit(_muteBtn, x, y)) { GF.setMusicMuted(GF.toggleMute()); GF.sfx('tap'); return; }
     if (hit(_bonusBtn, x, y)) { claimBonus(); return; }
     if (hit(_menuKitBtn, x, y)) { openKit('reagents'); return; }
-    if (hit(_menuEndlessBtn, x, y)) { startEndless(); return; }
+    // _menuEndlessBtn is now the "NEW GAME" pill (M7): restart the on-ramp from stage 1.
+    if (hit(_menuEndlessBtn, x, y)) { restartFromStart(); return; }
     if (hit(_playBtn, x, y)) { startGame(); return; }
     if (hit(_dailyBtn, x, y)) { startDaily(); return; }
     return;
@@ -2359,15 +2522,20 @@ function onTap(x, y) {
     if (hit(_dailyMenuBtn, x, y)) { toMenu(); return; }
     return;
   }
-  if (gs === 'LEVELEND') { if (mode === 'endless') nextEndless(); else nextLevel(); return; }
+  // CONTINUOUS PROGRESSION (M7): a LEVELEND tap always advances ONE stage on the
+  // unified ladder — campaign→campaign, campaign-last→endless-1, endless→endless+1 —
+  // so there is no win-wall; the game keeps going.
+  if (gs === 'LEVELEND') { nextStage(); return; }
   if (gs === 'GAMEOVER') {
     if (hit(_retryBtn, x, y)) { retryLevel(); return; }
     if (hit(_gmMenuBtn, x, y)) { toMenu(); return; }
     return;
   }
   if (gs === 'WIN') {
+    // WIN is no longer hit in normal play (the on-ramp flows into endless); kept only
+    // for the gate/tour. ENDLESS continues the ladder, AGAIN restarts the on-ramp.
     if (hit(_winEndlessBtn, x, y)) { startEndless(); return; }
-    if (hit(_againBtn, x, y)) { startGame(); return; }
+    if (hit(_againBtn, x, y)) { restartFromStart(); return; }
     if (hit(_winMenuBtn, x, y)) { toMenu(); return; }
     return;
   }
@@ -2446,6 +2614,10 @@ GF.exposeState(function() {
     endlessLevel: endlessLevel,
     endlessBest: endlessBest,
     endlessUnlocked: endlessUnlocked(),
+    // Continuous progression (M7) — one infinite ladder
+    progressBest: progressBest,
+    stage: currentStage(),
+    campaignJustCleared: campaignJustCleared,
     sealedTubes: locked.filter(Boolean).length,
     anyLocked: anyLocked(),
     SEAL_FROM_LEVEL: SEAL_FROM_LEVEL,
@@ -2608,6 +2780,8 @@ GF.init({
     loadDaily();    // restore day-streak + whether today's daily is already solved
     loadBonus();    // restore whether today's daily login bonus is still claimable
     loadEndless();  // restore deepest endless level ever reached (the unlock + best)
+    loadProgress(); // M7: deepest STAGE on the unified ladder (PLAY resumes here);
+                    // must run AFTER bestLevel + loadEndless so it can backfill from both
     kit = loadKit(); flux = kit.flux;   // Reagent Kit: collection + FLUX + quests
     maybeRollQuests();                  // fresh daily quests if the set is from a past UTC day
     checkReagentUnlocks();              // grant any reagent already earned by past playtime
