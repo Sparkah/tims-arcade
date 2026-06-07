@@ -63,6 +63,13 @@ var STRINGS = {
     quest_pockets: 'grab {n} air pockets',
     quest_bonus: 'quest done: +{air} bonus air',
     run_bonus: '+{air} SUPPLY AIR',
+    endless_unlocked: 'ENDLESS DESCENT UNLOCKED',
+    cont_endless: 'DIVE DEEPER',
+    depth_m: 'DEPTH',
+    best_dive: 'BEST DIVE',
+    new_record: 'NEW DEPTH RECORD!',
+    endless_goal_next: 'NEXT GOAL: beat your best dive — {m}m down',
+    endless_goal_first: 'NEXT GOAL: surface Lvl 5 to open the Endless Descent',
   },
   ru: {
     title: 'Всплытие',
@@ -105,6 +112,13 @@ var STRINGS = {
     quest_pockets: 'соберите {n} пузырей воздуха',
     quest_bonus: 'задание выполнено: +{air} воздуха',
     run_bonus: '+{air} ЗАПАСНОГО ВОЗДУХА',
+    endless_unlocked: 'ОТКРЫТ БЕСКОНЕЧНЫЙ СПУСК',
+    cont_endless: 'ГЛУБЖЕ',
+    depth_m: 'ГЛУБИНА',
+    best_dive: 'ЛУЧШИЙ ЗАПЛЫВ',
+    new_record: 'НОВЫЙ РЕКОРД ГЛУБИНЫ!',
+    endless_goal_next: 'ЦЕЛЬ: побейте свой рекорд — {m}м вглубь',
+    endless_goal_first: 'ЦЕЛЬ: всплыть с ур. 5, чтобы открыть Бесконечный спуск',
   },
 };
 
@@ -230,6 +244,25 @@ var bestLevel = 0;            // max level ever REACHED (cleared up to)
 var O2_MILESTONE = [0, 0, 10, 20, 30, 40];  // index by level (1..5)
 var bestBeatenThisRun = false;  // banner latch: hit a new best this run
 var lastBankedAir = 0;          // air newly banked on the level just cleared (for WON banner)
+
+// ── ENDLESS DESCENT (playtime-deepening pass) ───────────────────────────────
+// The 5-level campaign was a hard ceiling: surface Lvl 5 → "YOU SURFACED!" →
+// RETRY back to Lvl 1, with nothing left for a player who has mastered the loop.
+// That capped session length. Endless Descent turns surfacing Lvl 5 into the
+// GATEWAY to an open-ended skill ladder: levels keep going (6, 7, 8 …) with
+// hardness/fall-chance already at their ceiling, so each one is a pure
+// execution test. A new OWNED cross-session record — the DEEPEST DIVE (in
+// metres) — is banked across sessions, giving the skilled player a number to
+// chase run after run (the lever that pushes avg session toward the ~15-min
+// target). The 5-level campaign + its career-air milestones are unchanged;
+// this layers an endless tail on top of the existing win.
+var ENDLESS_DEPTH_PER_LV = 10;  // metres of "depth" credited per level cleared
+var bestDepth = 0;              // deepest dive ever (in metres) — persists
+var recordBeatenThisRun = false;// latch: beat the all-time depth record this run
+// Depth (metres) for the level the diver is CURRENTLY on (1-based: clearing
+// level N = N*PER_LV metres surfaced-through). Endless levels keep counting.
+function depthMetres(lv) { return (lv || level) * ENDLESS_DEPTH_PER_LV; }
+function isEndless() { return level > MAX_LEVEL; }
 
 // ── M2 — REASON TO RETURN (iteration #2, the habit engine) ──────────────────
 // Three mechanics designed as ONE loop, all feeding the existing AIR economy so
@@ -368,6 +401,7 @@ function loadMeta() {
     if (!raw) return;
     var m = JSON.parse(raw);
     if (m && typeof m.bestLevel === 'number') bestLevel = Math.max(0, Math.min(MAX_LEVEL, m.bestLevel | 0));
+    if (typeof m.bestDepth === 'number') bestDepth = Math.max(0, m.bestDepth | 0);
     if (typeof m.dayStreak === 'number') dayStreak = Math.max(0, Math.min(DAILY_MAX_DAYS, m.dayStreak | 0));
     if (typeof m.lastPlayDay === 'number') lastPlayDay = m.lastPlayDay | 0;
     if (typeof m.dailyClaimedToday === 'boolean') dailyClaimedToday = m.dailyClaimedToday;
@@ -382,6 +416,7 @@ function saveMeta() {
   try {
     localStorage.setItem(META_KEY, JSON.stringify({
       bestLevel: bestLevel,
+      bestDepth: bestDepth,
       dayStreak: dayStreak,
       lastPlayDay: lastPlayDay,
       dailyClaimedToday: dailyClaimedToday,
@@ -413,7 +448,13 @@ function subst(str, map) {
 // The concrete cross-session pull, shown on MENU + GAMEOVER. Tells the player
 // exactly which depth to aim for next and what air it banks (clarity + goal).
 function nextGoalText() {
-  if (bestLevel >= MAX_LEVEL) return GF.t('goal_done');
+  // Once the campaign is mastered the goal flips to the ENDLESS chase: beat your
+  // own deepest dive. This replaces the old terminal "CAREER COMPLETE" dead-end
+  // so there is ALWAYS a concrete number to come back for.
+  if (bestLevel >= MAX_LEVEL) {
+    if (bestDepth > 0) return subst(GF.t('endless_goal_next'), { m: bestDepth });
+    return GF.t('endless_goal_first');
+  }
   // Aim at the next level that actually banks air (L1 grants 0), so the goal is
   // always a concrete reward and never reads "+0".
   var nextLv = bestLevel + 1;
@@ -479,6 +520,7 @@ function startGame() {
   mode = 'dig';
   fullWin = false;
   bestBeatenThisRun = false;
+  recordBeatenThisRun = false;
   lastBankedAir = 0;
   // Reset per-run quest progress trackers (M2).
   runAirGained = 0;
@@ -498,7 +540,10 @@ function startGame() {
   GF.saveRun();
 }
 function nextLevel() {
-  if (level >= MAX_LEVEL) { fullWin = true; gs = 'WON'; GF.saveRun(); return; }
+  // Endless Descent: there is no terminal "you win" any more — surfacing Lvl 5
+  // opens an open-ended descent (6, 7, 8 …). CONTINUE always carves a deeper
+  // level. (The Lvl-5 WIN screen still celebrates the campaign clear; it just
+  // routes into the endless tail instead of dead-ending on RETRY.)
   oxygen = Math.min(effectiveStartOxy(), oxygen + 30);
   buildLevel(level + 1);
   gs = 'PLAYING';
@@ -515,9 +560,18 @@ function loseGame(cause) {
 }
 function winLevel() {
   gs = 'WON';
-  fullWin = (level >= MAX_LEVEL);
-  // Clearing level `level` banks the depth milestone for `level` (you reached it).
+  // `fullWin` now means "campaign just cleared THIS surfacing" (exactly Lvl 5) —
+  // it triggers the one-time "YOU SURFACED! / ENDLESS DESCENT UNLOCKED" splash.
+  // Endless levels (6+) clear with the normal per-level WON screen. The CONTINUE
+  // button always dives deeper now (no terminal RETRY-only state).
+  fullWin = (level === MAX_LEVEL);
+  // Clearing level `level` banks the M1 career-depth milestone (capped at Lvl 5
+  // inside recordDepth — endless levels add no extra start-air, by design).
   lastBankedAir = recordDepth(level);
+  // ENDLESS: bank the deepest dive ever (metres). Surfacing level N = N*PER_LV
+  // metres conquered. This is the new owned cross-session record to chase.
+  var dm = depthMetres(level);
+  if (dm > bestDepth) { bestDepth = dm; recordBeatenThisRun = true; saveMeta(); }
   // M2 quest progress: cleared levels this dive = `level` (run always starts at 1
   // and rises monotonically). Drives both the depth and survive quests.
   questProgressDepth = Math.max(questProgressDepth, level);
@@ -744,6 +798,42 @@ window._jumpLevel = function (lv) {
   modeSwitched = true;
 };
 window._setupForScreenshot = window._jumpLevel;
+// Test/screenshot-only seam: set up an arbitrary endless level (lv may exceed
+// MAX_LEVEL) for visual verification of the Endless Descent UI. Optional 2nd arg
+// pre-seeds bestDepth so the record-record paths can be screenshotted. Never
+// reached in normal play (console/puppeteer only) — like _jumpLevel above.
+window._jumpEndless = function (lv, seedBest) {
+  lv = Math.max(1, lv || (MAX_LEVEL + 1));
+  startGame();
+  if (typeof seedBest === 'number') { bestDepth = seedBest; saveMeta(); }
+  buildLevel(lv);
+  level = lv;
+  gs = 'PLAYING';
+  recomputeLayout();
+  // carve a believable shaft so the board reads mid-dive
+  var carved = 0, maxCarve = Math.floor(GRID_H * 0.5);
+  while (diverRow > Math.floor(GRID_H * 0.45) && carved < maxCarve) {
+    var cell = cellAt(diverRow - 1, diverCol);
+    if (cell) setCell(diverRow - 1, diverCol, null);
+    diverRow -= 1; carved++;
+  }
+  oxygen = Math.round(START_OXY * 0.6);
+  crushLives = 2; mode = 'dig';
+  firstActionDone = true; modeSwitched = true;
+};
+// Test/screenshot-only seam: carve straight to the surface and trigger a real
+// level win (so fullWin / record / banked-air latches set authentically for the
+// WON-screen screenshots). Console/puppeteer only — never reached in play.
+window._winNow = function () {
+  if (gs !== 'PLAYING') return;
+  var safety = 0;
+  while (diverRow > SURFACE_ROW && safety < GRID_H * 2) {
+    var tr = diverRow - 1;
+    if (cellAt(tr, diverCol)) setCell(tr, diverCol, null);
+    diverRow -= 1; safety++;
+  }
+  winLevel();
+};
 window._setLang = function (l) { GF.lang = l; };
 window._setState = function (s) { gs = s; };
 window._getI18N = function () { return STRINGS; };
@@ -821,7 +911,7 @@ function onPress(x, y) {
     var bw2 = GF.clamp(240 * GF.S, 170, 320), bh2 = GF.clamp(52 * GF.S, 40, 64);
     var bx2 = (GF.W - bw2) / 2, by2 = GF.H * 0.72;
     if (x >= bx2 && x <= bx2 + bw2 && y >= by2 && y <= by2 + bh2) {
-      if (fullWin) startGame(); else nextLevel();
+      nextLevel();   // ENDLESS: CONTINUE always dives deeper (incl. past Lvl 5)
     }
     return;
   }
@@ -887,7 +977,7 @@ function handleMenuKeys() {
       if (dailyAvailable) collectDaily();   // auto-load the waiting daily supply
       startGame();
     } else if (gs === 'WON') {
-      if (fullWin) startGame(); else nextLevel();
+      nextLevel();   // ENDLESS: CONTINUE always dives deeper (incl. past Lvl 5)
     } else if (gs === 'GAMEOVER') {
       startGame();
     }
@@ -1177,7 +1267,14 @@ function drawHUD(c) {
   c.fillText(hearts, rightX, pad);
   c.fillStyle = '#bcd';
   c.font = fs + 'px sans-serif';
-  c.fillText(GF.t('lvl') + ' ' + level + '/' + MAX_LEVEL, rightX, pad + fs + 6);
+  // In the 5-level campaign show "LVL n/5"; once endless, show metres-down so the
+  // counter keeps climbing meaningfully instead of reading a broken "LVL 7/5".
+  if (isEndless()) {
+    c.fillStyle = '#ffe06a';
+    c.fillText(GF.t('depth_m') + ' ' + depthMetres() + 'm', rightX, pad + fs + 6);
+  } else {
+    c.fillText(GF.t('lvl') + ' ' + level + '/' + MAX_LEVEL, rightX, pad + fs + 6);
+  }
 
   // Top-center: a persistent OBJECTIVE banner (always on screen) + the rows-to-
   // surface count under it. The banner answers "what am I doing here" at a glance
@@ -1460,6 +1557,14 @@ function drawMetaBlock(c, cx, y, maxW) {
   if (bonus > 0) bestStr += '   ·   ' + GF.t('career_max') + ' ' + START_OXY + '→' + (START_OXY + bonus);
   c.fillText(bestStr, cx, y);
   y += fsHead + GF.clamp(7 * GF.S, 4, 11);
+  // ENDLESS: once the player has a deepest-dive record, show it on its own line —
+  // the owned number they keep coming back to beat.
+  if (bestDepth > 0) {
+    c.fillStyle = '#7af5ff';
+    c.font = 'bold ' + GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+    c.fillText(GF.t('best_dive') + ': ' + bestDepth + 'm', cx, y);
+    y += GF.clamp(17 * GF.S, 13, 21);
+  }
   // NEXT GOAL line (wrapped) — the concrete "what to aim for".
   var fsGoal = GF.clamp(13 * GF.S, 11, 17);
   c.font = (bestLevel >= MAX_LEVEL ? 'bold ' : '') + fsGoal + 'px sans-serif';
@@ -1491,22 +1596,44 @@ function drawEnd(c) {
   c.fillStyle = '#cfe8f0';
   c.font = GF.clamp(17 * GF.S, 13, 22) + 'px sans-serif';
   var line2;
-  if (win) line2 = GF.t('lvl') + ' ' + level + '/' + MAX_LEVEL + '  ·  ' + GF.t('o2') + ' ' + Math.ceil(oxygen);
-  else line2 = (loseCause === 'oxy' ? GF.t('cause_oxy') : GF.t('cause_crush'));
+  if (win) {
+    var lvStr = isEndless() ? (GF.t('depth_m') + ' ' + depthMetres() + 'm')
+                            : (GF.t('lvl') + ' ' + level + '/' + MAX_LEVEL);
+    line2 = lvStr + '  ·  ' + GF.t('o2') + ' ' + Math.ceil(oxygen);
+  } else {
+    var deep = depthMetres();
+    line2 = (loseCause === 'oxy' ? GF.t('cause_oxy') : GF.t('cause_crush')) + '  ·  ' + GF.t('depth_m') + ' ' + deep + 'm';
+  }
   c.fillText(line2, W / 2, H * 0.475);
+
+  // On the one-time campaign clear (surfaced Lvl 5), announce the Endless Descent
+  // is now open so the player knows CONTINUE keeps diving rather than restarting.
+  if (win && fullWin) {
+    c.textAlign = 'center'; c.textBaseline = 'top';
+    c.fillStyle = '#7af5ff';
+    c.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+    c.fillText(GF.t('endless_unlocked'), W / 2, H * 0.505);
+  }
 
   // Reward feedback: a freshly-banked air milestone this run gets a gold banner
   // (and NEW BEST if the depth itself advanced) — makes the persistent meta payoff
-  // legible at the exact moment it happens.
+  // legible at the exact moment it happens. ENDLESS adds a depth-record banner so
+  // beating your all-time deepest dive is celebrated on win OR loss.
   c.textAlign = 'center'; c.textBaseline = 'top';
-  if (win && lastBankedAir > 0) {
+  var rewardY = (win && fullWin) ? H * 0.535 : H * 0.525;
+  if (recordBeatenThisRun) {
+    // Strongest payoff: a new all-time deepest dive (works on win and gameover).
+    c.fillStyle = '#7af5ff';
+    c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 21) + 'px sans-serif';
+    c.fillText(GF.t('new_record'), W / 2, rewardY);
+  } else if (win && lastBankedAir > 0) {
     c.fillStyle = '#ffe06a';
     c.font = 'bold ' + GF.clamp(16 * GF.S, 12, 21) + 'px sans-serif';
-    c.fillText(subst(GF.t('air_banked'), { air: lastBankedAir }), W / 2, H * 0.525);
+    c.fillText(subst(GF.t('air_banked'), { air: lastBankedAir }), W / 2, rewardY);
   } else if (!win && bestBeatenThisRun) {
     c.fillStyle = '#7af5ff';
     c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
-    c.fillText(GF.t('new_best'), W / 2, H * 0.525);
+    c.fillText(GF.t('new_best'), W / 2, rewardY);
   }
 
   // Persistent meta line: BEST DEPTH + the concrete NEXT GOAL to chase next run.
@@ -1514,7 +1641,11 @@ function drawEnd(c) {
   drawMetaBlock(c, W / 2, H * 0.565, maxW);
 
   var bw = GF.clamp(240 * GF.S, 170, 320), bh = GF.clamp(52 * GF.S, 40, 64);
-  var label = win ? (fullWin ? GF.t('retry') : GF.t('cont')) : GF.t('retry');
+  // WON always continues deeper now (campaign clear → Endless Descent → 6,7,8…),
+  // so the win label is "DIVE DEEPER" once at/past Lvl 5, "CONTINUE" mid-campaign.
+  var label;
+  if (win) label = (fullWin || isEndless()) ? GF.t('cont_endless') : GF.t('cont');
+  else label = GF.t('retry');
   drawButton(c, (W - bw) / 2, H * 0.72, bw, bh, label, true);
 }
 
@@ -1637,6 +1768,12 @@ GF.exposeState(function () {
     bestLevel: bestLevel,
     careerO2Bonus: careerO2Bonus(),
     effectiveStartOxy: effectiveStartOxy(),
+    // Endless Descent (playtime-deepening pass)
+    bestDepth: bestDepth,
+    depthMetres: depthMetres(),
+    isEndless: isEndless(),
+    recordBeatenThisRun: recordBeatenThisRun,
+    ENDLESS_DEPTH_PER_LV: ENDLESS_DEPTH_PER_LV,
     // M2 — reason to return (daily/streak/cache/quest)
     dayStreak: dayStreak,
     dailyAvailable: dailyAvailable,

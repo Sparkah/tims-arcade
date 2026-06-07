@@ -816,22 +816,28 @@ function showAd(type) {
     // resumeAudio are idempotent.
     var _resolved = false;
     var ok = function (res) { if (_resolved) return; _resolved = true; resumeAudio(); rawOk(res); };
-    var willShow = (platform === 'gamepush' && window.gp && window.gp.ads) ||
-                   (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad) ||
-                   (platform === 'yandex' && window.ysdk && window.ysdk.adv);
-    if (willShow) pauseAudio();
+    // Pause audio when the ad actually STARTS, not at request time — a no-fill /
+    // adblock / 30s-watchdog path must never mute with no visible ad (CG: mute on
+    // ad start; Yandex: pause on onOpen). GamePush's promise API has no reliable
+    // "started" hook, so for GP we pause at request time (best available) — its
+    // promise resolves only when the ad is actually done, so a no-fill there is
+    // rare and the resume on every exit still fires.
     try {
       // GamePush — preferred when present. Routes to whichever ad network
       // the active platform supports. showRewardedVideo resolves to bool.
       if (platform === 'gamepush' && window.gp && window.gp.ads) {
         if (type === 'rewarded' && typeof window.gp.ads.showRewardedVideo === 'function') {
+          pauseAudio();
           window.gp.ads.showRewardedVideo()
             .then(function (success) { ok({ shown: true, rewarded: !!success }); })
             .catch(function () { ok({ shown: false, rewarded: false }); });
           setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
           return;
         }
-        if (typeof window.gp.ads.showFullscreen === 'function') {
+        // A rewarded request must NEVER fall through to a fullscreen ad (that
+        // shows an unrewarded ad on a reward button). Only fullscreen for non-rewarded.
+        if (type !== 'rewarded' && typeof window.gp.ads.showFullscreen === 'function') {
+          pauseAudio();
           window.gp.ads.showFullscreen()
             .then(function () { ok({ shown: true, rewarded: false }); })
             .catch(function () { ok({ shown: false, rewarded: false }); });
@@ -841,17 +847,41 @@ function showAd(type) {
       }
       if (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad) {
         window.CrazyGames.SDK.ad.requestAd(type, {
+          adStarted:  function () { pauseAudio(); },   // mute only once the ad is on screen
           adFinished: function () { ok({ shown: true, rewarded: type === 'rewarded' }); },
           adError:    function () { ok({ shown: false, rewarded: false }); },
-          adStarted:  function () {},
         });
         setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
         return;
       }
       if (platform === 'yandex' && window.ysdk && window.ysdk.adv) {
+        if (type === 'rewarded') {
+          // A rewarded request must route to showRewardedVideo (the reward is
+          // granted ONLY in onRewarded). NEVER fall through to showFullscreenAdv,
+          // which can't pay out → a reward button would show an unrewarded ad. If
+          // the rewarded API is missing, resolve cleanly so the UI recovers.
+          if (typeof window.ysdk.adv.showRewardedVideo !== 'function') { ok({ shown: false, rewarded: false }); return; }
+          var _granted = false;
+          window.ysdk.adv.showRewardedVideo({
+            callbacks: {
+              onOpen:     function () { pauseAudio(); },
+              onRewarded: function () { _granted = true; },
+              // onClose's arg isn't reliably passed for rewarded; _granted is the
+              // source of truth for whether it actually played + paid out.
+              onClose:    function () { ok({ shown: _granted, rewarded: _granted }); },
+              onError:    function () { ok({ shown: false, rewarded: false }); },
+            },
+          });
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+          return;
+        }
         window.ysdk.adv.showFullscreenAdv({
           callbacks: {
-            onClose: function () { ok({ shown: true, rewarded: false }); },
+            // Yandex passes wasShown=false when no ad actually displayed (e.g. an
+            // over-frequent call) — honour it so the cap layer doesn't count a
+            // phantom impression.
+            onOpen:  function () { pauseAudio(); },
+            onClose: function (wasShown) { ok({ shown: wasShown !== false, rewarded: false }); },
             onError: function () { ok({ shown: false, rewarded: false }); },
           },
         });
@@ -871,6 +901,120 @@ function rewardedAd(onReward, onSkip) {
     return r;
   });
 }
+
+// ── AD MONETIZATION (GF.ads) — frequency-capped, default-on monetization ────
+// A thin POLICY layer on top of showAd(): showAd already routes per platform
+// (Yandex showFullscreenAdv / CrazyGames requestAd / GamePush) using the gf-lib
+// SDK adapter (the `platform` var set during init — NOT re-detected here),
+// brackets audio with pauseAudio/resumeAudio (Yandex 1.3 + 4.7), and has a 30s
+// no-fill watchdog that resolves cleanly. GF.ads adds:
+//   - a session-aware frequency CAP for interstitials (the thing a game would
+//     otherwise get wrong and either spam ads → Yandex 4.4 / CG reject, or never
+//     monetize). Default: min 60s BETWEEN interstitials + a 45s startup grace so
+//     the player never eats an ad in the opening seconds of a session.
+//   - clean rewarded semantics (onReward only on a real reward; onClose always),
+//     so a no-fill / adblock / missing-SDK degrades to "continue/bonus button did
+//     nothing bad" instead of stranding the UI.
+// Every promise RESOLVES (never rejects) so gameplay never blocks on ads. With no
+// ad SDK present (gallery / local / standalone) both are safe no-ops.
+//
+// Yandex 4.4-safe by CONTRACT: the helper only rate-limits — the CALLER is
+// responsible for only invoking interstitial() at a natural break (round-end /
+// game-over / level-complete), NEVER from the per-frame loop or mid-action.
+var _ads = {
+  sessionStart: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+  lastInterstitial: 0,          // timestamp (same clock) of the last SHOWN interstitial
+  minGapMs: 60000,              // min ms between interstitials (default ~60s)
+  startupGraceMs: 45000,        // no interstitial within the first ~45s of a session
+  inFlight: false,              // an ad (either kind) is currently open — never overlap
+};
+function _adsNow() { return (typeof performance !== 'undefined' ? performance.now() : Date.now()); }
+// Is an ad SDK actually READY to serve right now? `platform` flips to
+// yandex/crazygames/gamepush before the SDK's init() promise resolves, so
+// checking `platform !== 'local'` alone can be true while the ad object is still
+// missing — gate on the concrete ad API existing.
+function _adsSdkReady() {
+  try {
+    if (platform === 'gamepush')   return !!(window.gp && window.gp.ads);
+    if (platform === 'crazygames') return !!(window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad);
+    if (platform === 'yandex')     return !!(window.ysdk && window.ysdk.adv);
+  } catch (e) {}
+  return false;
+}
+var adsApi = {
+  // Tune the cap once (e.g. from a game's onReady) if 60s/45s doesn't fit the
+  // loop length. Pass any subset: { minGapMs, startupGraceMs }.
+  configure: function (opts) {
+    opts = opts || {};
+    if (typeof opts.minGapMs === 'number' && opts.minGapMs >= 0) _ads.minGapMs = opts.minGapMs;
+    if (typeof opts.startupGraceMs === 'number' && opts.startupGraceMs >= 0) _ads.startupGraceMs = opts.startupGraceMs;
+    return adsApi;
+  },
+  // True iff an interstitial WOULD show right now (cap satisfied, none in flight,
+  // an ad SDK is present). Lets a game decide UI flow without firing an ad.
+  canShowInterstitial: function () {
+    if (_ads.inFlight) return false;
+    if (!_adsSdkReady()) return false;
+    var now = _adsNow();
+    if (now - _ads.sessionStart < _ads.startupGraceMs) return false;
+    if (_ads.lastInterstitial && now - _ads.lastInterstitial < _ads.minGapMs) return false;
+    return true;
+  },
+  // Show a fullscreen/interstitial ad IF the frequency cap allows, else resolve
+  // immediately without showing. Call ONLY at a natural break (round-end /
+  // game-over) — the helper rate-limits, it does not police WHERE you call it.
+  // opts: { force?: bool } — force:true bypasses the cap (use sparingly, e.g. a
+  // big "you died" wall), but still respects inFlight + SDK presence + audio.
+  // Resolves to { shown: bool } and NEVER rejects.
+  interstitial: function (opts) {
+    opts = opts || {};
+    if (_ads.inFlight) return Promise.resolve({ shown: false });
+    // force bypasses the CAP, but never the SDK-readiness / overlap guards — we
+    // must not claim a shown ad (or churn audio) when no ad SDK can serve.
+    if (!_adsSdkReady()) return Promise.resolve({ shown: false });
+    if (!opts.force && !adsApi.canShowInterstitial()) return Promise.resolve({ shown: false });
+    // Mark the timestamp at REQUEST time so a slow no-fill can't let a second
+    // call slip through the gap window while the first is still open.
+    _ads.inFlight = true;
+    _ads.lastInterstitial = _adsNow();
+    // showAd is built never to reject, but enforce it at the public boundary so
+    // inFlight always clears and the caller's onClose always runs.
+    return showAd('midgame').catch(function () { return { shown: false }; }).then(function (r) {
+      _ads.inFlight = false;
+      var shown = !!(r && r.shown);
+      // If nothing actually showed (no-fill/adblock), don't burn the cap — let
+      // the next natural break try again rather than enforcing a 60s dead zone
+      // off a phantom impression.
+      if (!shown) _ads.lastInterstitial = 0;
+      if (typeof opts.onClose === 'function') { try { opts.onClose(shown); } catch (e) {} }
+      return { shown: shown };
+    });
+  },
+  // Opt-in rewarded video — call FROM A USER CLICK (continue / double / bonus).
+  // onReward fires ONLY on a confirmed reward; onClose ALWAYS fires once at the
+  // end (reward, skip, no-fill, adblock, or missing SDK) so the UI can recover.
+  // Resolves to { shown, rewarded } and NEVER rejects.
+  rewarded: function (opts) {
+    opts = opts || {};
+    var onReward = opts.onReward, onClose = opts.onClose;
+    if (_ads.inFlight) {            // an ad is already open — don't overlap
+      if (typeof onClose === 'function') { try { onClose(false); } catch (e) {} }
+      return Promise.resolve({ shown: false, rewarded: false });
+    }
+    _ads.inFlight = true;
+    return showAd('rewarded').catch(function () { return { shown: false, rewarded: false }; }).then(function (r) {
+      _ads.inFlight = false;
+      var shown = !!(r && r.shown), rewarded = !!(r && r.rewarded);
+      // CG/Yandex reject CHAINED ads — a rewarded that actually played arms the
+      // interstitial cooldown too, so a reward-then-game-over can't fire a midgame
+      // ad back-to-back.
+      if (shown) _ads.lastInterstitial = _adsNow();
+      if (rewarded && typeof onReward === 'function') { try { onReward(); } catch (e) {} }
+      if (typeof onClose === 'function') { try { onClose(rewarded); } catch (e) {} }
+      return { shown: shown, rewarded: rewarded };
+    });
+  },
+};
 
 // ── GamePush wrappers ────────────────────────────────────────────────────
 // Thin convenience layer so games can call GF.gp.leaderboard.publish(...)
@@ -1238,6 +1382,16 @@ window.GF = {
   // Rewarded ad with callbacks: GF.rewardedAd(onReward[, onSkip]). onReward
   // fires only on a confirmed reward; audio + no-fill watchdog handled inside.
   rewardedAd: rewardedAd,
+  // ── Default-on ad monetization (frequency-capped). EVERY new game should:
+  //   onGameOver/roundEnd:  GF.ads.interstitial();          // capped, safe no-op
+  //   continue/2x/bonus btn: GF.ads.rewarded({ onReward: grant, onClose: resume });
+  // Interstitial respects a cap (min 60s apart + 45s startup grace) and only
+  // shows at the natural break the CALLER picks (never mid-gameplay = Yandex 4.4).
+  // Routes via the existing SDK adapter (Yandex/CrazyGames/GamePush); audio
+  // pause/resume + no-fill are handled inside showAd; no SDK = clean no-op.
+  // Also: GF.ads.canShowInterstitial() (peek without firing),
+  // GF.ads.configure({ minGapMs, startupGraceMs }) (tune the cap).
+  ads: adsApi,
   // CrazyGames "happy moment" — triggers their confetti animation on victory
   // / new high score. Use sparingly (CG rejects games that fire it on every
   // level clear). Safe no-op on other platforms.

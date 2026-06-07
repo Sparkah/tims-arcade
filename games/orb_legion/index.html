@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Orb Champions</title>
-  <!-- PLATFORM_SDK -->
+  <script src="/sdk.js"></script>
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
@@ -101,6 +101,9 @@ var STRINGS = {
     collhint:'Tap a champion to add to your team. Dupes raise stars (power).',
     enemyhp:'HP', start:'START STAGE', noenergy:'', summonhint:'Every 30 summons guarantees a 5-star champion (pity).',
     rerollteam:'Auto Team', mute:'Sound',
+    sanctum:'SANCTUM', sanctumhint:'Spend Essence to permanently empower every champion of an element. These bonuses are yours forever and stack across all your runs.',
+    sigil:'Sigil', vault:'Vault', lvl:'Lv', maxlvl:'MAX', upgrade:'Upgrade', sigilatk:'team ATK', sigilheal:'orb heal', sigilhp:'team HP',
+    sanctumnext:'Next upgrade', sanctumafford:'ready to upgrade', empowered:'EMPOWERED!', sigilup:'SIGIL UP!',
   },
   ru: {
     title:'Орб-Чемпионы', sub:'Собирай орбы, усиливай чемпионов, пройди арену',
@@ -120,6 +123,9 @@ var STRINGS = {
     collhint:'Нажми чемпиона, чтобы добавить в отряд. Дубли дают звёзды (силу).',
     enemyhp:'HP', start:'НАЧАТЬ ЭТАП', noenergy:'', summonhint:'Каждые 30 призывов гарантируют 5-зв чемпиона (гарант).',
     rerollteam:'Авто-отряд', mute:'Звук',
+    sanctum:'СВЯТИЛИЩЕ', sanctumhint:'Трать Эссенцию, чтобы навсегда усилить всех чемпионов стихии. Эти бонусы твои навсегда и действуют во всех твоих боях.',
+    sigil:'Печать', vault:'Оплот', lvl:'Ур', maxlvl:'МАКС', upgrade:'Улучшить', sigilatk:'атака отряда', sigilheal:'лечение', sigilhp:'здоровье отряда',
+    sanctumnext:'След. улучшение', sanctumafford:'можно улучшить', empowered:'УСИЛЕНО!', sigilup:'ПЕЧАТЬ+!',
   },
 };
 
@@ -192,6 +198,14 @@ var meta = {
   lastDailyClear: 0,// day-number the Daily Trial was last cleared (streak driver)
   dailyStreak: 0,   // consecutive days the Daily Trial was cleared (D1/D7 hook)
   seenTut: false,
+  // ── SANCTUM (M1 core-meta loop, iter#1) ──────────────────────────────────
+  // Permanent, OWNED, deterministic power progression — separate from gacha RNG.
+  // 7 upgrade tracks the player builds with Essence and KEEPS across every run:
+  //   sigils[0..4] = +ATK% to all champions of that element (fire/water/wood/light/dark)
+  //   sigils[5]    = +heal% from heart orbs
+  //   sigils[6]    = Vault: +team max HP% (a global survivability sink)
+  // This is the currency SINK + ownership pull the gacha-only economy lacked.
+  sigils: [0,0,0,0,0,0,0],  // level per track (0 = not yet bought; cap SIGIL_MAX)
 };
 var SAVE_KEY = 'orbchamp_v1';
 
@@ -214,6 +228,9 @@ function loadMeta() {
         meta.lastDailyClear = s.lastDailyClear|0;
         meta.dailyStreak = Math.max(0, s.dailyStreak|0);
         meta.seenTut = !!s.seenTut;
+        // SANCTUM sigils: restore + clamp; tolerate old saves with no sigils key.
+        meta.sigils = [0,0,0,0,0,0,0];
+        if (Array.isArray(s.sigils)) for (var si=0; si<7; si++) meta.sigils[si] = GF.clamp(s.sigils[si]|0, 0, SIGIL_MAX);
       }
     }
   } catch (e) {}
@@ -295,9 +312,67 @@ function doSummon(n) {
 }
 
 // ===========================================================================
+//  SANCTUM — permanent owned power progression (M1 core-meta loop, iter#1)
+// ===========================================================================
+// The reason-to-return third leg: a deterministic upgrade tree the player BUILDS
+// and OWNS with Essence (not gacha RNG). Closes the daily<->collection<->upgrade
+// triangle the gacha-only economy was missing (Essence had one sink: gambling).
+// 7 tracks. Each level adds a permanent bonus that folds into every future run.
+var SIGIL_MAX = 10;
+// per-track: id, element (for the 5 ATK sigils + heart), stat key, per-level value,
+// base/step cost factors. ATK/heal/hp values are FRACTIONS (0.05 = +5%).
+var SIGIL_DEFS = [
+  { id:'fire',  el:EL.FIRE,  stat:'atk', per:0.05, costBase:60,  costK:30 },
+  { id:'water', el:EL.WATER, stat:'atk', per:0.05, costBase:60,  costK:30 },
+  { id:'wood',  el:EL.WOOD,  stat:'atk', per:0.05, costBase:60,  costK:30 },
+  { id:'light', el:EL.LIGHT, stat:'atk', per:0.05, costBase:60,  costK:30 },
+  { id:'dark',  el:EL.DARK,  stat:'atk', per:0.05, costBase:60,  costK:30 },
+  { id:'heart', el:EL.HEART, stat:'heal',per:0.07, costBase:80,  costK:36 },
+  { id:'vault', el:-1,       stat:'hp',  per:0.04, costBase:90,  costK:42 }, // global team HP
+];
+// cost to raise a track from level L to L+1 (L = current level). Scales so early
+// levels land in 1-2 wins; deep levels span many sessions = the long-term sink.
+function sigilCost(defIdx){
+  var d=SIGIL_DEFS[defIdx], L=meta.sigils[defIdx];
+  return Math.round((d.costBase + L*d.costK) * Math.pow(1.55, L));
+}
+function sigilMaxed(defIdx){ return meta.sigils[defIdx] >= SIGIL_MAX; }
+function canUpgradeSigil(defIdx){ return !sigilMaxed(defIdx) && meta.essence >= sigilCost(defIdx); }
+// any track affordable right now? -> hub badge + session-end nudge
+function anySigilAffordable(){ for (var i=0;i<SIGIL_DEFS.length;i++) if (canUpgradeSigil(i)) return true; return false; }
+// the CHEAPEST upgrade the player can't yet afford -> "next upgrade in N essence"
+function nextSigilHint(){
+  var best=null;
+  for (var i=0;i<SIGIL_DEFS.length;i++){
+    if (sigilMaxed(i)) continue;
+    var c=sigilCost(i), need=c-meta.essence;
+    if (need<=0) return { idx:i, need:0, cost:c };       // already affordable
+    if (!best || need<best.need) best={ idx:i, need:need, cost:c };
+  }
+  return best;
+}
+function buySigil(defIdx){
+  if (!canUpgradeSigil(defIdx)) { GF.sfx('error'); return false; }
+  meta.essence -= sigilCost(defIdx);
+  meta.sigils[defIdx]++;
+  saveMeta();
+  GF.sfx('levelup'); GF.happytime();
+  sanctumPulse = { idx:defIdx, t:0 };
+  return true;
+}
+// ATK multiplier applied to all champions of `el` from the matching element sigil.
+function sigilAtkMult(el){
+  for (var i=0;i<SIGIL_DEFS.length;i++){ var d=SIGIL_DEFS[i]; if (d.stat==='atk' && d.el===el) return 1 + d.per*meta.sigils[i]; }
+  return 1;
+}
+function sigilHealMult(){ return 1 + SIGIL_DEFS[5].per*meta.sigils[5]; }   // heart sigil
+function sigilHpMult(){ return 1 + SIGIL_DEFS[6].per*meta.sigils[6]; }     // vault
+var sanctumPulse = null;   // {idx,t} celebratory pulse on an upgraded track
+
+// ===========================================================================
 //  GAME / BATTLE STATE
 // ===========================================================================
-var gs = 'MENU'; // MENU | STAGESEL | TEAM | COLLECTION | SUMMON | BATTLE
+var gs = 'MENU'; // MENU | STAGESEL | TEAM | COLLECTION | SUMMON | SANCTUM | BATTLE
 var battle = null;
 var pullReveal = null;     // {id,isNew,stars,t}
 var summonResult = null;   // x10 summary overlay {got,...,t}
@@ -322,10 +397,16 @@ function newBattle(stageIdx, dailyStage) {
   var st = dailyStage || STAGES[stageIdx];
   // deep copy waves so hp resets per battle
   var waves = st.waves.map(function(w){ return w.map(function(e){ return mkEnemy(e.el, e.hpMax, e.atk, e.turns, e.boss); }); });
-  // team units with current stats + current hp
+  // team units with current stats + current hp. SANCTUM sigils fold in here:
+  // the element ATK sigil multiplies each unit's atk; the Vault sigil multiplies
+  // every unit's HP. Both are permanent, owned bonuses (iter#1 core-meta loop).
+  var hpMul = sigilHpMult();
   var units = meta.team.slice(0,5).map(function(id){
     var s = unitStats(id, meta.owned[id]?meta.owned[id].stars:1);
-    return { id:id, el:rosterById(id).el, atk:s.atk, hpMax:s.hp, hp:s.hp, art:rosterById(id).art, hitFlash:0, atkAnim:0 };
+    var el = rosterById(id).el;
+    var atk = Math.round(s.atk * sigilAtkMult(el));
+    var hp = Math.round(s.hp * hpMul);
+    return { id:id, el:el, atk:atk, hpMax:hp, hp:hp, art:rosterById(id).art, hitFlash:0, atkAnim:0 };
   });
   var teamHpMax = units.reduce(function(a,u){return a+u.hpMax;},0) || 1;
   battle = {
@@ -583,9 +664,9 @@ function applyDamage() {
   battle._dmgApplied = true;
   var hits = battle._elementHits, comboMult = battle._comboMult;
   var healOrbs = hits[EL.HEART] || 0;
-  // heal team from heart orbs
+  // heal team from heart orbs (Heart Sigil boosts heal — iter#1 Sanctum bonus)
   if (healOrbs > 0) {
-    var heal = Math.round(healOrbs * 60 * comboMult);
+    var heal = Math.round(healOrbs * 60 * comboMult * sigilHealMult());
     battle.teamHp = Math.min(battle.teamHpMax, battle.teamHp + heal);
     floatUp(L.teamY, '+'+heal, '#ff8cbe');
     GF.sfx('pickup');
@@ -804,6 +885,7 @@ var press = null;   // { x0, y0, scroll, moved }
 function activeScroll() {
   if (gs === 'TEAM') return teamScroll;
   if (gs === 'COLLECTION') return collScroll;
+  if (gs === 'SANCTUM') return sanctumScroll;
   return null;
 }
 
@@ -855,6 +937,7 @@ function onUp(x,y) {
     if (!press.moved) {   // a genuine tap -> route to the screen's click handler
       if (gs === 'TEAM') teamClick(x,y);
       else if (gs === 'COLLECTION') collClick(x,y);
+      else if (gs === 'SANCTUM') sanctumClick(x,y);
     }
     press = null;
     return;
@@ -930,6 +1013,7 @@ function update(dt) {
   if (dailyToast>0) dailyToast -= dt;
   if (pullReveal) { pullReveal.t += dt; }
   if (summonResult) { summonResult.t += dt; }
+  if (sanctumPulse) { sanctumPulse.t += dt; if (sanctumPulse.t>0.7) sanctumPulse=null; }
   if (gs !== 'BATTLE' || !battle) return;
   var b = battle;
   // animate unit/enemy flashes
@@ -987,6 +1071,7 @@ function draw() {
   else if (gs==='TEAM') drawTeam();
   else if (gs==='COLLECTION') drawCollection();
   else if (gs==='SUMMON') drawSummon();
+  else if (gs==='SANCTUM') drawSanctum();
   // global mute icon top-right
   drawMute();
   // overlays
@@ -1239,6 +1324,23 @@ function drawElPip(x,y,el,r){
   drawElGlyph(x,y,r*0.7,el); ctx.restore();
 }
 
+// Session-end SANCTUM nudge: a one-line "next upgrade in N essence" (or "ready to
+// upgrade!" when affordable) so every battle plants the reason to invest/return.
+// Drawn centered at vertical position `y`. iter#1 core-meta session-end hook.
+function drawSanctumNudge(y){
+  var S=GF.S; var hint=nextSigilHint();
+  ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
+  if (hint && hint.need<=0){
+    ctx.font='bold '+clampF(13.5*S,11,18)+'px Inter, system-ui'; ctx.fillStyle='#2ee07a';
+    ctx.fillText(GF.t('sanctum')+': '+GF.t('sanctumafford')+'!', GF.cx, y);
+  } else if (hint){
+    var label = sigilTrackLabel(hint.idx);
+    ctx.font=clampF(13*S,10,17)+'px Inter, system-ui'; ctx.fillStyle='#ffd9a0';
+    ctx.fillText(GF.t('sanctumnext')+': '+label+' — '+hint.need+' '+GF.t('essence'), GF.cx, y);
+  }
+  ctx.restore();
+}
+
 // ── WIN / LOSE OVERLAYS ──────────────────────────────────────────────────────
 function drawWinOverlay() {
   var S=GF.S, W=GF.W, H=GF.H, b=battle;
@@ -1265,14 +1367,21 @@ function drawWinOverlay() {
     ctx.font='bold '+clampF(18*S,13,24)+'px Inter, system-ui'; ctx.fillStyle='#fff';
     ctx.fillText('+'+ (b._rewardEss||0) +' '+GF.t('essence')+'   ·   +'+(b._rewardTk||1)+' '+GF.t('tickets'), GF.cx, H*0.42);
   }
-  // buttons: summon, continue/next
-  var bw=Math.min(W*0.78,330*S), bh=54*S, bx=GF.cx-bw/2;
-  L.winSummon = { x:bx, y:H*0.52, w:bw, h:bh };
+  // session-end Sanctum nudge — the reason to invest the essence just earned
+  drawSanctumNudge(H*0.515);
+  // buttons: sanctum, summon, continue/next (Sanctum first = the M1 owned-meta CTA)
+  var bw=Math.min(W*0.78,330*S), bh=48*S, bx=GF.cx-bw/2, gapb=10*S;
+  var by0=H*0.55;
+  L.winSanctum = { x:bx, y:by0, w:bw, h:bh };
+  drawBigBtn(L.winSanctum, GF.t('sanctum'), '#ffb028','#e0830a');
+  if (anySigilAffordable()) drawAffordBadge(L.winSanctum);
+  L.winSummon = { x:bx, y:by0+(bh+gapb), w:bw, h:bh };
   drawBigBtn(L.winSummon, GF.t('summon'), '#a05cff','#7e3ce0');
-  L.winNext = { x:bx, y:H*0.52+bh+14*S, w:bw, h:bh };
+  L.winNext = { x:bx, y:by0+(bh+gapb)*2, w:bw, h:bh };
   drawBigBtn(L.winNext, last?GF.t('hub'):GF.t('cont'), '#2ee07a','#23a657');
 }
 function winClick(x,y) {
+  if (hit(L.winSanctum,x,y)) { battle=null; sanctumReturn='STAGESEL'; gs='SANCTUM'; GF.sfx('tap'); return; }
   if (hit(L.winSummon,x,y)) { openSummon(); return; }
   if (hit(L.winNext,x,y)) { gs='STAGESEL'; battle=null; GF.sfx('tap'); return; }
 }
@@ -1282,6 +1391,8 @@ function drawLoseOverlay() {
   ctx.textAlign='center';
   ctx.font='bold '+clampF(36*S,22,52)+'px Inter, system-ui'; ctx.fillStyle='#ff6a6a';
   ctx.fillText(GF.t('defeat'), GF.cx, H*0.32);
+  // session-end Sanctum nudge — permanent power is the answer to a hard wall
+  drawSanctumNudge(H*0.39);
   var bw=Math.min(W*0.78,330*S), bh=54*S, bx=GF.cx-bw/2;
   // revive via ad (once)
   var yy = H*0.46;
@@ -1376,6 +1487,20 @@ function drawMenu() {
   drawBigBtn(L.menuColl, GF.t('collection'), '#37a8ff','#1e7fd0');
   L.menuSummon = { x:bx+sbw+12*S, y:sby, w:sbw, h:sbh };
   drawBigBtn(L.menuSummon, GF.t('summon'), '#a05cff','#7e3ce0');
+  // second sub-row: SANCTUM (permanent upgrades — iter#1 core-meta loop), full
+  // width, with a "ready to upgrade" badge when an upgrade is affordable.
+  var sby2=sby+sbh+12*S;
+  L.menuSanctum = { x:bx, y:sby2, w:bw, h:sbh };
+  drawBigBtn(L.menuSanctum, GF.t('sanctum'), '#ffb028','#e0830a');
+  if (anySigilAffordable()) drawAffordBadge(L.menuSanctum);
+}
+// small "!" badge top-right of a button when a Sanctum upgrade is affordable.
+function drawAffordBadge(r){
+  var S=GF.S, bx=r.x+r.w-12*S, by=r.y+10*S;
+  ctx.save(); ctx.beginPath(); ctx.arc(bx,by,9*S,0,Math.PI*2);
+  ctx.fillStyle='#2ee07a'; ctx.fill(); ctx.lineWidth=1.5*S; ctx.strokeStyle='#0a0a14'; ctx.stroke();
+  ctx.fillStyle='#0a2a14'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font='bold '+clampF(12*S,9,15)+'px Inter, system-ui';
+  ctx.fillText('!', bx, by+0.5*S); ctx.restore();
 }
 function menuClick(x,y) {
   if (hit(L.menuPlay,x,y)) {
@@ -1387,6 +1512,7 @@ function menuClick(x,y) {
   }
   if (hit(L.menuColl,x,y)) { gs='COLLECTION'; GF.sfx('tap'); return; }
   if (hit(L.menuSummon,x,y)) { openSummon(); return; }
+  if (hit(L.menuSanctum,x,y)) { openSanctum(); return; }
 }
 
 // ── STAGE SELECT ─────────────────────────────────────────────────────────────
@@ -1444,11 +1570,15 @@ function drawStageSel() {
     }
     ctx.restore();
   }
-  // bottom: team + back
-  var bw=(cardW-12*S)/2, bx=cardX, bh=50*S;
+  // bottom: team + sanctum + back (3-col so the permanent-upgrades screen is
+  // reachable mid-run, not only from the main menu — iter#1 core-meta loop)
+  var gap3=8*S, bw=(cardW-gap3*2)/3, bx=cardX, bh=50*S;
   L.ssTeam={ x:bx, y:by, w:bw, h:bh };
-  drawBigBtn(L.ssTeam, GF.t('team')+' ('+meta.team.length+'/5)', '#37a8ff','#1e7fd0');
-  L.ssBack={ x:bx+bw+12*S, y:by, w:bw, h:bh };
+  drawBigBtn(L.ssTeam, GF.t('team')+' '+meta.team.length+'/5', '#37a8ff','#1e7fd0');
+  L.ssSanctum={ x:bx+bw+gap3, y:by, w:bw, h:bh };
+  drawBigBtn(L.ssSanctum, GF.t('sanctum'), '#ffb028','#e0830a');
+  if (anySigilAffordable()) drawAffordBadge(L.ssSanctum);
+  L.ssBack={ x:bx+(bw+gap3)*2, y:by, w:bw, h:bh };
   drawBigBtn(L.ssBack, GF.t('hub'), '#555','#333');
 }
 // Daily Trial card: shows the day's fresh procedural level + current streak.
@@ -1489,6 +1619,7 @@ function stageSelClick(x,y) {
     if (hit(sc.rect,x,y)) { if (sc.locked){ GF.sfx('error'); } else { startBattle(sc.idx); } return; }
   }
   if (hit(L.ssTeam,x,y)) { gs='TEAM'; GF.sfx('tap'); return; }
+  if (hit(L.ssSanctum,x,y)) { openSanctum(); return; }
   if (hit(L.ssBack,x,y)) { gs='MENU'; GF.sfx('tap'); return; }
 }
 function claimDaily() {
@@ -1548,10 +1679,11 @@ function drawTeam() {
 // gf-lib makeScroll registers them for the reachability gate). The grid cells
 // (L.teamGridCells / L.collGridCells) are recorded in CONTENT space; hit-testing
 // converts the tap to content space via the controller's offset.
-var teamScroll = null, collScroll = null;
+var teamScroll = null, collScroll = null, sanctumScroll = null;
 function ensureScrolls() {
   if (!teamScroll) teamScroll = GF.makeScroll('team_roster', {x:0,y:0,w:0,h:0});
   if (!collScroll) collScroll = GF.makeScroll('coll_roster', {x:0,y:0,w:0,h:0});
+  if (!sanctumScroll) sanctumScroll = GF.makeScroll('sanctum_list', {x:0,y:0,w:0,h:0});
 }
 // hit-test a CONTENT-space rect against a SCREEN-space tap, via the controller.
 // The tap must land inside the viewport AND map (screen->content) into the rect.
@@ -1836,6 +1968,123 @@ function drawSummonResult() {
   if (sr.t>0.7){ ctx.fillStyle='#9ab'; ctx.font=clampF(13*S,11,17)+'px Inter, system-ui'; ctx.textAlign='center'; ctx.fillText(GF.lang==='ru'?'нажми чтобы продолжить':'tap to continue', GF.cx, H*0.9); }
 }
 
+// ── SANCTUM SCREEN (permanent owned upgrades — iter#1 core-meta loop) ─────────
+var sanctumReturn = 'MENU';
+function openSanctum() { sanctumReturn = (gs==='BATTLE'?'STAGESEL':gs); gs='SANCTUM'; GF.sfx('tap'); }
+// vector sigil glyph for the non-element tracks (Vault = a shield).
+function drawShield(x,y,r){
+  ctx.save(); ctx.translate(x,y); ctx.beginPath();
+  ctx.moveTo(0,-r); ctx.lineTo(r*0.82,-r*0.5); ctx.lineTo(r*0.82,r*0.25);
+  ctx.quadraticCurveTo(r*0.82,r*0.85, 0,r*1.05);
+  ctx.quadraticCurveTo(-r*0.82,r*0.85, -r*0.82,r*0.25);
+  ctx.lineTo(-r*0.82,-r*0.5); ctx.closePath();
+  var g=ctx.createLinearGradient(0,-r,0,r); g.addColorStop(0,'#cfe6ff'); g.addColorStop(1,'#5a86c0');
+  ctx.fillStyle=g; ctx.fill(); ctx.lineWidth=Math.max(1.5,r*0.12); ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.stroke();
+  ctx.restore();
+}
+function sigilTrackLabel(i){
+  var d=SIGIL_DEFS[i];
+  if (d.id==='vault') return GF.t('vault');
+  if (d.id==='heart') return GF.t('sigil')+': '+EL_NAME[EL.HEART].toUpperCase();
+  return GF.t('sigil')+': '+EL_NAME[d.el].toUpperCase();
+}
+function sigilEffectLabel(i){
+  var d=SIGIL_DEFS[i], lvl=meta.sigils[i];
+  var pctNow = Math.round(d.per*lvl*100);
+  var statTxt = d.stat==='atk'?GF.t('sigilatk'):(d.stat==='heal'?GF.t('sigilheal'):GF.t('sigilhp'));
+  return '+'+pctNow+'% '+statTxt;
+}
+function drawSanctum() {
+  drawHubBg(); drawTopBar();
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.font='bold '+clampF(20*S,15,28)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText(GF.t('sanctum'), GF.cx, 56*S);
+  ctx.font=clampF(11.5*S,9,15)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
+  wrapText(GF.t('sanctumhint'), GF.cx, 84*S, W*0.9, clampF(15*S,12,19));
+  ensureScrolls();
+  // scrollable list of the 7 tracks. Rows are tall enough for label + effect +
+  // an Upgrade button on the right. Cell rects stored in CONTENT space.
+  var top=124*S, bottom=H-78*S;
+  var rowH=64*S, gap=8*S, W2=W-20*S, x0=10*S;
+  var rows=SIGIL_DEFS.length;
+  var contentH = rows*(rowH+gap) - gap + 8*S;
+  sanctumScroll.setViewport({x:0, y:top, w:W, h:bottom-top});
+  sanctumScroll.setContentHeight(contentH);
+  sanctumScroll.update();
+  L.sigilRows=[];
+  sanctumScroll.begin(ctx);
+  for (var i=0;i<rows;i++){
+    var d=SIGIL_DEFS[i], lvl=meta.sigils[i], maxed=sigilMaxed(i);
+    var y=i*(rowH+gap);
+    var rect={x:x0,y:y,w:W2,h:rowH};
+    // card bg
+    ctx.save();
+    GF.rr(ctx,x0,y,W2,rowH,12*S);
+    var aff=canUpgradeSigil(i);
+    ctx.fillStyle = 'rgba(18,20,38,0.95)'; ctx.fill();
+    GF.rr(ctx,x0,y,W2,rowH,12*S); ctx.lineWidth=2*S;
+    ctx.strokeStyle = maxed?'#ffd23a':(aff?'#7cf0ff':'#33384e'); ctx.stroke();
+    // sigil icon (element pip, or shield for vault)
+    var icx=x0+30*S, icy=y+rowH*0.5;
+    if (d.el>=0) drawElPip(icx, icy, d.el, 15*S);
+    else drawShield(icx, icy, 14*S);
+    // label + effect
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+    ctx.fillText(sigilTrackLabel(i)+'  '+GF.t('lvl')+' '+lvl, x0+54*S, y+rowH*0.40);
+    ctx.font=clampF(12*S,10,16)+'px Inter, system-ui'; ctx.fillStyle='#9fe6c0';
+    ctx.fillText(sigilEffectLabel(i), x0+54*S, y+rowH*0.66);
+    // level pips (10) under the label
+    var pipW=W2*0.40, pgap=2*S, pw=(pipW-pgap*(SIGIL_MAX-1))/SIGIL_MAX, py2=y+rowH*0.80;
+    for (var p=0;p<SIGIL_MAX;p++){ ctx.fillStyle = p<lvl?(maxed?'#ffd23a':'#7cf0ff'):'#2a2e44';
+      GF.rr(ctx, x0+54*S+p*(pw+pgap), py2, pw, 4*S, 2*S); ctx.fill(); }
+    // upgrade button (right side) or MAX tag
+    var bw=92*S, bh=40*S, bx=x0+W2-bw-10*S, by=y+(rowH-bh)/2;
+    var btnRect={x:bx,y:by,w:bw,h:bh};
+    if (maxed){
+      ctx.fillStyle='#ffd23a'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui';
+      ctx.fillText(GF.t('maxlvl'), bx+bw/2, by+bh/2);
+      L.sigilRows.push({rect:rect, idx:i, btn:null, maxed:true});
+    } else {
+      var ca=aff?'#2ee07a':'#3a3a44', cb=aff?'#23a657':'#26262e';
+      var g2=ctx.createLinearGradient(bx,by,bx,by+bh); g2.addColorStop(0,ca); g2.addColorStop(1,cb);
+      GF.rr(ctx,bx,by,bw,bh,10*S); ctx.fillStyle=g2; ctx.fill();
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.font='bold '+clampF(13*S,10,17)+'px Inter, system-ui'; ctx.fillStyle=aff?'#fff':'#888';
+      ctx.fillText(GF.t('upgrade'), bx+bw/2, by+bh*0.33);
+      // cost row: essence icon + amount
+      ctx.font='bold '+clampF(11*S,9,14)+'px Inter, system-ui';
+      var cost=sigilCost(i), ctxt=''+cost;
+      var cw2=ctx.measureText(ctxt).width;
+      drawEssenceIcon(bx+bw/2 - cw2/2 - 8*S, by+bh*0.70, 6*S);
+      ctx.fillStyle=aff?'#cfe6ff':'#7a7a86'; ctx.textAlign='left';
+      ctx.fillText(ctxt, bx+bw/2 - cw2/2 + 2*S, by+bh*0.70);
+      L.sigilRows.push({rect:rect, idx:i, btn:btnRect, maxed:false});
+    }
+    // celebratory pulse ring on a just-upgraded track
+    if (sanctumPulse && sanctumPulse.idx===i && sanctumPulse.t<0.7){
+      var a2=1-sanctumPulse.t/0.7;
+      ctx.globalAlpha=a2*0.9; ctx.lineWidth=3*S; ctx.strokeStyle='#ffd23a';
+      GF.rr(ctx,x0-2*S,y-2*S,W2+4*S,rowH+4*S,13*S); ctx.stroke(); ctx.globalAlpha=1;
+    }
+    ctx.restore();
+  }
+  sanctumScroll.end(ctx);
+  sanctumScroll.draw(ctx);
+  // back button (pinned)
+  var by3=H-66*S, bw3=W*0.86, bx3=W*0.07, bh3=52*S;
+  L.sanctumBack = { x:bx3, y:by3, w:bw3, h:bh3 };
+  drawBigBtn(L.sanctumBack, GF.t('back'), '#2ee07a','#23a657');
+}
+function sanctumClick(x,y) {
+  if (hit(L.sanctumBack,x,y)) { gs=sanctumReturn; GF.sfx('tap'); return; }
+  for (var i=0;i<L.sigilRows.length;i++){ var sr=L.sigilRows[i];
+    if (sr.btn && hitScrolled(sr.btn,x,y,sanctumScroll)){ buySigil(sr.idx); return; }
+  }
+}
+
 function drawDailyToast() {
   var S=GF.S;
   ctx.save(); ctx.globalAlpha=Math.min(1,dailyToast);
@@ -1982,8 +2231,15 @@ function reachState(){
   } else if (gs==='SUMMON'){
     _push(items,_ri('summon1',L.sumOne)); _push(items,_ri('summon10',L.sumTen));
     _push(items,_ri('ad',L.sumAd)); _push(items,_ri('back',L.sumBack));
+  } else if (gs==='SANCTUM'){
+    res.scrollId='sanctum_list';
+    res.viewportH = sanctumScroll ? sanctumScroll.vp.h : H;
+    _push(items,_ri('back',L.sanctumBack,true));
+    // each track's upgrade button lives in CONTENT space (y from region top)
+    for (var sg=0; sg<(L.sigilRows||[]).length; sg++){ var rw=L.sigilRows[sg];
+      if (rw.btn) _push(items,_ri('sigil_'+rw.idx, rw.btn)); }
   } else if (gs==='BATTLE' && battle){
-    if (battle.phase==='WIN'){ _push(items,_ri('win_summon',L.winSummon)); _push(items,_ri('win_next',L.winNext)); }
+    if (battle.phase==='WIN'){ _push(items,_ri('win_sanctum',L.winSanctum)); _push(items,_ri('win_summon',L.winSummon)); _push(items,_ri('win_next',L.winNext)); }
     else if (battle.phase==='LOSE'){ if(L.loseRevive) _push(items,_ri('lose_revive',L.loseRevive)); _push(items,_ri('lose_retry',L.loseRetry)); _push(items,_ri('lose_hub',L.loseHub)); }
     else { _push(items,_ri('back',L.backBtn)); if(L.helpBtn) _push(items,_ri('help',L.helpBtn)); }
   }
@@ -1999,6 +2255,7 @@ var REACH_TOUR = [
   { name:'team',       go:function(){ battle=null; gs='TEAM'; if(teamScroll) teamScroll.scrollTo(0); } },
   { name:'collection', go:function(){ battle=null; gs='COLLECTION'; if(collScroll) collScroll.scrollTo(0); } },
   { name:'summon',     go:function(){ summonReturn='MENU'; gs='SUMMON'; } },
+  { name:'sanctum',    go:function(){ battle=null; sanctumReturn='MENU'; gs='SANCTUM'; if(sanctumScroll) sanctumScroll.scrollTo(0); } },
   { name:'battle',     go:function(){ _ensureBattle(); if(GF.tutorial) GF.tutorial.active=false; tutorialActive=false; battle.phase='INPUT'; gs='BATTLE'; } },
   { name:'battle_win', go:function(){ _ensureBattle(); battle.phase='WIN'; battle._rewardEss=battle._rewardEss||60; gs='BATTLE'; } },
   { name:'battle_lose',go:function(){ _ensureBattle(); battle.phase='LOSE'; battle.reviveUsed=false; gs='BATTLE'; } },
@@ -2042,12 +2299,20 @@ GF.init({
         team: meta.team.length,
         essence: meta.essence, tickets: meta.tickets, summons: meta.summons,
         stageUnlocked: meta.stageUnlocked,
+        sigils: meta.sigils.slice(),                                  // per-track levels (owned meta)
+        sigilTotal: meta.sigils.reduce(function(a,v){return a+v;},0), // total upgrades owned
       };
     });
     // reachability gate: expose the per-screen hit-rects + a screen tour so
     // reachability_check.js can prove all UI is reachable (no clipped buttons).
     GF.exposeReach(reachState);
     GF.exposeTour(REACH_TOUR);
+    // bot contract for the progression probe (#276): drive the FULL loop in
+    // __gfStep. A match-orb board can't be dragged in fast-forward, so the bot
+    // resolves a real on-board move programmatically (auto_match), advances
+    // wave/win/lose overlays, and spends earned essence on Sanctum upgrades —
+    // exercising the core combat curve AND the M1 owned-meta sink.
+    GF.exposeBot(botActions, botAct);
     // load images then maybe autostart
     loadImages().then(function(){
       if (window.__GF_AUTOSTART && !window._silent) {
@@ -2077,6 +2342,44 @@ startBattle = function(idx){
   _origStart(idx);
   if (armTut) setTimeout(startTutorial, 80);
 };
+
+// ── BOT CONTRACT (progression probe, #276) ───────────────────────────────────
+// Perform a real on-board move: find an adjacent swap that creates a >=3 match,
+// apply it, then run the normal resolve so damage/combos/rewards all happen.
+// Returns true if a move was made.
+function botDoMatch(){
+  if (!battle || battle.phase!=='INPUT') return false;
+  for (var r=0;r<BR;r++) for (var c=0;c<BC;c++){
+    if (c+1<BC){ swap(r,c,r,c+1); if (findMatches().cells.length>0){ battle.dragOrb=null; battle.phase='PRERESOLVE'; battle._preT=99; resolveMove(); return true; } swap(r,c,r,c+1); }
+    if (r+1<BR){ swap(r,c,r+1,c); if (findMatches().cells.length>0){ battle.dragOrb=null; battle.phase='PRERESOLVE'; battle._preT=99; resolveMove(); return true; } swap(r,c,r+1,c); }
+  }
+  return false;
+}
+function botActions(){
+  var a=[];
+  if (gs==='BATTLE' && battle){
+    if (battle.phase==='INPUT') a.push('auto_match');
+    else if (battle.phase==='WIN') a.push('continue');
+    else if (battle.phase==='LOSE') a.push('retry');
+    else if (battle.phase==='WAVECLEAR') a.push('advance_wave');
+  } else {
+    // between battles: spend essence on the owned-meta sink, then fight again
+    if (anySigilAffordable()) a.push('upgrade_sigil');
+    a.push('start_battle');
+  }
+  return a;
+}
+function botAct(action){
+  if (action==='auto_match'){ botDoMatch(); return; }
+  if (action==='continue'){ gs='STAGESEL'; battle=null; return; }
+  if (action==='retry'){ if (battle && battle.daily) startDaily(); else if (battle) startBattle(battle.stageIdx); return; }
+  if (action==='advance_wave'){ if (battle){ battle.waveBanner=0; battle.phase='INPUT'; battle.moveTimer=0; ensurePlayableBoard(); } return; }
+  if (action==='upgrade_sigil'){ // buy the cheapest affordable track
+    var best=-1, bc=Infinity; for (var i=0;i<SIGIL_DEFS.length;i++){ if (canUpgradeSigil(i)){ var c=sigilCost(i); if (c<bc){ bc=c; best=i; } } }
+    if (best>=0) buySigil(best); return;
+  }
+  if (action==='start_battle'){ window._silent=true; startBattle(Math.min(meta.stageUnlocked,STAGES.length-1)); window._silent=false; if(GF.tutorial) GF.tutorial.active=false; tutorialActive=false; if(battle){ battle.phase='INPUT'; battle.moveTimer=0; } return; }
+}
 
 // test seam: jump straight into a battle, or force a game-over (used by screenshot/gate tooling).
 // n=99 (or any value >=99) = force LOSE phase so forceGameOver() triggers GAMEOVER state.
@@ -2133,18 +2436,35 @@ window._orbGrant = function(id){ grantUnit(id,true); rebuildTeamIfNeeded(); save
 window._orbBoard = function(){ return board.map(function(r){return r.slice();}); };
 window._orbSetBoard = function(b){ board=b; };
 window._orbForceWin = function(){ if(battle){ battle.enemies.forEach(function(e){e.hp=0;}); } };
+// directly show the WIN overlay (for screenshot/visual gate) — fills the reward
+// fields the overlay reads, mirroring the win flow without a full resolve cycle.
+window._orbForceWinOverlay = function(){
+  if (gs!=='BATTLE' || !battle){ window._silent=true; startBattle(Math.min(meta.stageUnlocked,STAGES.length-1)); window._silent=false; }
+  if (battle){ battle.daily=false; battle.stageIdx=Math.min(meta.stageUnlocked,STAGES.length-1);
+    battle._rewardEss=battle._rewardEss||120; battle._rewardTk=battle._rewardTk||1; battle.phase='WIN'; }
+};
 window._orbStartStage = function(i){ startBattle(GF.clamp(i|0,0,STAGES.length-1)); };
 window._orbGoto = function(s){ gs=s; };
 window._orbGeom = function(r,c){ var cc=cellCenter(r,c); return { x:cc.x, y:cc.y, cell:L.cell, BR:BR, BC:BC, boardX:L.boardX, boardY:L.boardY }; };
 window._orbButtons = function(){ // current screen's primary buttons (game-space rects) for the harness to tap
-  return { menuPlay:L.menuPlay, menuColl:L.menuColl, menuSummon:L.menuSummon,
-    ssTeam:L.ssTeam, ssBack:L.ssBack, dailyBtn:L.dailyBtn, dailyStage:L.dailyStage, stageCards:L.stageCards,
+  return { menuPlay:L.menuPlay, menuColl:L.menuColl, menuSummon:L.menuSummon, menuSanctum:L.menuSanctum,
+    ssTeam:L.ssTeam, ssSanctum:L.ssSanctum, ssBack:L.ssBack, dailyBtn:L.dailyBtn, dailyStage:L.dailyStage, stageCards:L.stageCards,
     sumOne:L.sumOne, sumTen:L.sumTen, sumAd:L.sumAd, sumBack:L.sumBack,
-    winSummon:L.winSummon, winNext:L.winNext, loseRetry:L.loseRetry, loseHub:L.loseHub, loseRevive:L.loseRevive,
-    collSummon:L.collSummon, collBack:L.collBack, teamBack:L.teamBack, teamAuto:L.teamAuto }; };
+    winSanctum:L.winSanctum, winSummon:L.winSummon, winNext:L.winNext, loseRetry:L.loseRetry, loseHub:L.loseHub, loseRevive:L.loseRevive,
+    collSummon:L.collSummon, collBack:L.collBack, teamBack:L.teamBack, teamAuto:L.teamAuto, sanctumBack:L.sanctumBack }; };
 window._orbDismissOverlay = function(){ if(pullReveal&&pullReveal.t>0.1){pullReveal.t=1;pullReveal=null;return 'pull';} if(summonResult&&summonResult.t>0.1){summonResult.t=1;summonResult=null;return 'summon';} return null; };
 // test seams to manipulate persisted meta (it's IIFE-private) + read combo info
-window._orbMeta = function(patch){ if(patch){ for(var k in patch) meta[k]=patch[k]; saveMeta(); } return { tickets:meta.tickets, essence:meta.essence, lastDaily:meta.lastDaily, lastDailyClear:meta.lastDailyClear, dailyStreak:meta.dailyStreak, team:meta.team.slice(), owned:Object.keys(meta.owned).length, stageUnlocked:meta.stageUnlocked, summons:meta.summons }; };
+window._orbMeta = function(patch){ if(patch){ for(var k in patch) meta[k]=patch[k]; saveMeta(); } return { tickets:meta.tickets, essence:meta.essence, lastDaily:meta.lastDaily, lastDailyClear:meta.lastDailyClear, dailyStreak:meta.dailyStreak, team:meta.team.slice(), owned:Object.keys(meta.owned).length, stageUnlocked:meta.stageUnlocked, summons:meta.summons, sigils:meta.sigils.slice() }; };
+// SANCTUM verification seams (iter#1): read track state, buy an upgrade, sample
+// the live ATK/HP/heal multipliers so a test can prove a sigil actually changed
+// the run's stats. setLvl forces a level for deterministic verification.
+window._orbSigil = function(action, idx){
+  if (action==='buy') return buySigil(idx|0);
+  if (action==='setLvl' && typeof idx==='object'){ meta.sigils[idx.i|0]=GF.clamp(idx.lvl|0,0,SIGIL_MAX); saveMeta(); return meta.sigils.slice(); }
+  return { sigils:meta.sigils.slice(), costs:SIGIL_DEFS.map(function(_,i){return sigilMaxed(i)?null:sigilCost(i);}),
+    mult:{ fireAtk:sigilAtkMult(EL.FIRE), waterAtk:sigilAtkMult(EL.WATER), heal:sigilHealMult(), hp:sigilHpMult() },
+    affordable:anySigilAffordable(), next:nextSigilHint() };
+};
 window._orbCombo = function(){ return battle?{count:battle.lastComboCount, flash:battle.comboFlash}:null; };
 window._orbTeamEls = function(){ return battle?battle.units.map(function(u){return u.el;}):[]; };
 // tutorial verification seams

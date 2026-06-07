@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-05T10:08:36.305007+00:00",
+  "generated": "2026-06-07T10:27:11.360584+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -19,6 +19,7 @@ export default {
         "crazygames": {
           "url": "https://www.crazygames.com/game/battle-merge",
           "approvedOn": "2026-04-05",
+          "rejectedOn": "2026-06-05",
           "status": "removed"
         },
         "gamedistribution": {
@@ -39,11 +40,14 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
+          "url": "https://yandex.com/games/app/493910",
           "submittedOn": "2026-05-20",
-          "status": "submitted"
+          "approvedOn": "2026-06-06",
+          "status": "live"
         },
         "crazygames": {
-          "status": "submitted"
+          "rejectedOn": "2026-06-05",
+          "status": "rejected"
         },
         "gamedistribution": {
           "status": "submitted"
@@ -63,12 +67,13 @@ export default {
       "platforms": {
         "yandex": {
           "submittedOn": "2026-05-20",
-          "status": "submitted"
+          "rejectedOn": "2026-06-06",
+          "status": "rejected"
         },
         "crazygames": {
           "submittedOn": "2026-05-26",
-          "rejectedOn": "2026-05-26",
-          "status": "submitted"
+          "rejectedOn": "2026-06-05",
+          "status": "rejected"
         },
         "gamedistribution": {
           "status": "not_started"
@@ -115,8 +120,10 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
+          "url": "https://yandex.com/games/app/528397",
+          "approvedOn": "2026-06-06",
           "rejectedOn": "2026-05-22",
-          "status": "rejected"
+          "status": "live"
         },
         "crazygames": {
           "status": "not_started"
@@ -167,7 +174,8 @@ export default {
       "platforms": {
         "yandex": {
           "submittedOn": "2026-05-20",
-          "status": "submitted"
+          "rejectedOn": "2026-06-06",
+          "status": "rejected"
         },
         "crazygames": {
           "status": "not_started"
@@ -266,15 +274,16 @@ export default {
     "backrooms": {
       "gameDir": "Games/128_backrooms",
       "engagement": {
-        "plays7d": 4,
+        "plays7d": 5,
         "likes": 0,
         "dislikes": 0,
-        "seconds": 325,
+        "seconds": 450,
         "genre": "other"
       },
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-05",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -288,7 +297,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -306,7 +314,7 @@ export default {
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-03",
-          "status": "built"
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -320,7 +328,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -373,7 +380,8 @@ export default {
         },
         "crazygames": {
           "submittedOn": "2026-06-05",
-          "status": "submitted"
+          "rejectedOn": "2026-06-05",
+          "status": "built"
         },
         "gamedistribution": {
           "status": "not_started"
@@ -384,19 +392,14 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
+        "crazygames",
         "gamedistribution",
         "gamepush"
       ]
     },
     "flip_dash": {
       "gameDir": "Games/116_flip_dash",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 180,
-        "genre": "other"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-04",
@@ -404,7 +407,8 @@ export default {
         },
         "crazygames": {
           "submittedOn": "2026-06-05",
-          "status": "submitted"
+          "rejectedOn": "2026-06-05",
+          "status": "built"
         },
         "gamedistribution": {
           "status": "not_started"
@@ -415,6 +419,7 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
+        "crazygames",
         "gamedistribution",
         "gamepush"
       ]
@@ -449,7 +454,8 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-05",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -463,7 +469,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -471,16 +476,11 @@ export default {
     },
     "bolus": {
       "gameDir": "Games/126_bolus",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 0,
-        "dislikes": 1,
-        "seconds": 135,
-        "genre": "dodge"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-05",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -494,7 +494,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -503,7 +502,7 @@ export default {
     "rage_room": {
       "gameDir": "Games/131_rage_room",
       "engagement": {
-        "plays7d": 1,
+        "plays7d": 2,
         "likes": 1,
         "dislikes": 0,
         "seconds": 195,
@@ -530,9 +529,199 @@ export default {
         "gamedistribution",
         "gamepush"
       ]
+    },
+    "relic_restore": {
+      "gameDir": "Games/133_relic_restore",
+      "engagement": {
+        "plays7d": 1,
+        "likes": 0,
+        "dislikes": 1,
+        "seconds": 240,
+        "genre": "restoration"
+      },
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
+    },
+    "hoard": {
+      "gameDir": "Games/122_hoard",
+      "engagement": null,
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
+    },
+    "critter_siege": {
+      "gameDir": "Games/129_critter_siege",
+      "engagement": {
+        "plays7d": 2,
+        "likes": 1,
+        "dislikes": 0,
+        "seconds": 155,
+        "genre": "other"
+      },
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
+    },
+    "smelter_tycoon": {
+      "gameDir": "Games/123_smelter_tycoon",
+      "engagement": null,
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
+    },
+    "orb_legion": {
+      "gameDir": "Games/135_orb_legion",
+      "engagement": {
+        "plays7d": 7,
+        "likes": 2,
+        "dislikes": 0,
+        "seconds": 415,
+        "genre": "puzzle"
+      },
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
+    },
+    "deep_vein": {
+      "gameDir": "Games/121_deep_vein",
+      "engagement": null,
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
     }
   },
   "untracked": [
+    {
+      "slug": "merge_diner",
+      "folder": "132_merge_diner",
+      "engagement": {
+        "plays7d": 2,
+        "likes": 2,
+        "dislikes": 0,
+        "seconds": 365,
+        "genre": "other"
+      }
+    },
+    {
+      "slug": "date_the_look",
+      "folder": "136_date_the_look",
+      "engagement": {
+        "plays7d": 3,
+        "likes": 1,
+        "dislikes": 0,
+        "seconds": 285,
+        "genre": "simulation"
+      }
+    },
     {
       "slug": "hue_sort",
       "folder": "93_hue_sort",
@@ -540,30 +729,41 @@ export default {
         "plays7d": 8,
         "likes": 1,
         "dislikes": 1,
-        "seconds": 310,
+        "seconds": 265,
         "genre": "sort"
-      }
-    },
-    {
-      "slug": "critter_siege",
-      "folder": "129_critter_siege",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 155,
-        "genre": "other"
       }
     },
     {
       "slug": "deck_of_dread",
       "folder": "126_deck_of_dread",
       "engagement": {
-        "plays7d": 1,
+        "plays7d": 3,
+        "likes": 2,
+        "dislikes": 0,
+        "seconds": 210,
+        "genre": "other"
+      }
+    },
+    {
+      "slug": "starbound_hearts",
+      "folder": "137_starbound_hearts",
+      "engagement": {
+        "plays7d": 2,
         "likes": 1,
         "dislikes": 0,
-        "seconds": 150,
-        "genre": "other"
+        "seconds": 185,
+        "genre": "simulation"
+      }
+    },
+    {
+      "slug": "tight_spot",
+      "folder": "109_tight_spot",
+      "engagement": {
+        "plays7d": 4,
+        "likes": 1,
+        "dislikes": 1,
+        "seconds": 180,
+        "genre": "racing"
       }
     },
     {
@@ -576,55 +776,22 @@ export default {
         "seconds": 145,
         "genre": "other"
       }
-    },
-    {
-      "slug": "pendulum_sniper",
-      "folder": "51_pendulum_sniper",
-      "engagement": {
-        "plays7d": 6,
-        "likes": 0,
-        "dislikes": 1,
-        "seconds": 120,
-        "genre": "aim"
-      }
-    },
-    {
-      "slug": "coin_cascade",
-      "folder": "125_coin_cascade",
-      "engagement": {
-        "plays7d": 1,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 110,
-        "genre": "other"
-      }
-    },
-    {
-      "slug": "difficulty_curve",
-      "folder": "54_difficulty_curve",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 0,
-        "dislikes": 1,
-        "seconds": 100,
-        "genre": "gamedev_meta"
-      }
     }
   ],
   "summary": {
     "yandex": {
-      "live": 2,
+      "live": 4,
       "approved": 0,
-      "submitted": 11,
-      "rejected": 1,
-      "built": 5
+      "submitted": 12,
+      "rejected": 2,
+      "built": 7
     },
     "crazygames": {
       "live": 0,
       "approved": 0,
-      "submitted": 4,
-      "rejected": 1,
-      "built": 2
+      "submitted": 0,
+      "rejected": 3,
+      "built": 4
     },
     "gamedistribution": {
       "live": 0,

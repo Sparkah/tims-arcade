@@ -1,0 +1,1466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Grain Road</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #2a1d12; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ===========================================================================
+// GRAIN ROAD — Silk Road grain-arbitrage trading sim.
+// Buy cheap in surplus cities, haul by caravan, sell dear in deficit cities.
+// THE TWIST: your own bulk trades move the price against you (buying spikes the
+// price up, selling crashes it down). Split orders, read the spread, don't
+// starve the cities you neglect, stay solvent or go bankrupt.
+// Vanilla JS canvas. Mobile-portrait first (390x844). gf-lib handles canvas,
+// resize, SFX, music, tutorial, particles, shake, persist.
+// ===========================================================================
+
+var ctx = GF.ctx, canvas = GF.canvas;
+function S(){ return GF.S; }
+function clampF(v, lo, hi){ return GF.clamp(v, lo, hi); }
+
+// ── TUNABLES (mirrored from DESIGN.md) ──────────────────────────────────────
+var START_CASH     = 120;
+var MIN_CASH       = 0;
+var GOAL_NET       = 2000;
+var CARAVAN_CAP    = 10;
+var MOVES_PER_DAY  = 4;
+var UPKEEP_PER_DAY = 8;
+var IMPACT_COEF    = 0.045;
+var PRICE_RECOVER  = 0.18;
+var DEMAND_VOL     = 0.12;
+var SPOIL_RATE     = 0.04;
+var EVENT_EVERY    = 2;
+var LOAN_INTEREST  = 0.10;
+var FAMINE_PENALTY = 14;
+var TIER_THRESH    = [0, 250, 500, 900, 1400, 2000];
+var CARAVAN_R      = 16;
+var CITY_R         = 26;
+
+// ── CITY DATA ───────────────────────────────────────────────────────────────
+// pos = normalized 0..1 (mapped into the map rect). base = base grain price.
+// bias: <0 = surplus (cheap, lots of stock), >0 = deficit (dear, low stock).
+// tier = wealth tier at which this city unlocks (0 = available from start).
+var CITY_DEFS = [
+  { id:'kashgar',  en:'Kashgar',   ru:'Кашгар',    pos:[0.18,0.30], base:9,  bias:-1.0, tier:0 },
+  { id:'turfan',   en:'Turfan',    ru:'Турфан',    pos:[0.50,0.20], base:18, bias: 0.9, tier:0 },
+  { id:'khotan',   en:'Khotan',    ru:'Хотан',     pos:[0.30,0.62], base:11, bias:-0.6, tier:0 },
+  { id:'dunhuang', en:'Dunhuang',  ru:'Дуньхуан',  pos:[0.74,0.40], base:20, bias: 1.0, tier:1 },
+  { id:'merv',     en:'Merv',      ru:'Мерв',      pos:[0.12,0.74], base:8,  bias:-1.0, tier:2 },
+  { id:'samarkand',en:'Samarkand', ru:'Самарканд', pos:[0.55,0.78], base:15, bias: 0.3, tier:2 },
+  { id:'kucha',    en:'Kucha',     ru:'Куча',      pos:[0.62,0.56], base:13, bias: 0.5, tier:3 },
+  { id:'balkh',    en:'Balkh',     ru:'Балх',      pos:[0.85,0.72], base:22, bias: 1.0, tier:4 },
+];
+// route edges (undirected) by city index. dist = days/moves to traverse.
+var EDGES = [
+  [0,2,1],[0,1,1],[2,1,1],[1,3,1],[2,4,1],[4,5,1],[2,5,1],
+  [1,6,1],[6,3,1],[6,5,1],[5,7,1],[3,7,1],[6,7,1],[4,2,1],
+];
+
+// ── STRINGS ──────────────────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title:'Grain Road', sub:'Buy grain cheap, haul it, sell it dear - but don\'t crash the price.',
+    play:'PLAY', retry:'NEW RUN', cont:'KEEP TRADING',
+    cash:'Cash', net:'Net', day:'Day', moves:'Moves', cargo:'Cargo',
+    buy:'BUY', sell:'SELL', move:'TRAVEL', here:'You are here', endday:'END DAY',
+    loan:'LOAN +100', repay:'REPAY', debt:'Debt', spread:'Spread/unit', profit:'Profit',
+    gameover:'BANKRUPT', win:'WEALTH GOAL!', bankruptsub:'You ran out of coin.',
+    winsub:'You reached Silk Baron riches!', tonext:'to', starving:'STARVING',
+    surplus:'cheap', deficit:'dear', tier0:'Peddler', tier1:'Trader', tier2:'Merchant',
+    tier3:'Caravan Master', tier4:'Silk Baron', tier5:'Road Legend',
+    ev_famine:'FAMINE', ev_harvest:'BUMPER HARVEST', ev_bandits:'BANDITS', ev_festival:'FESTIVAL',
+    ev_famine_d:'demand spikes - price up', ev_harvest_d:'glut - price crashes',
+    ev_bandits_d:'route risky - cargo at risk', ev_festival_d:'feast drives demand up',
+    unlock:'NEW CITY UNLOCKED', tierup:'WEALTH TIER UP', rival:'A RIVAL TRADER appears!',
+    spoiled:'spoiled', far:'too far (1 move)', nocargo:'no cargo', full:'caravan full',
+    nocash:'not enough cash', sold:'sold out here', maxqty:'MAX',
+    tut_goal:'GOAL: buy grain cheap, carry it, sell it dear.',
+    tut_controls:'Tap a city to inspect or travel. Use BUY / SELL / TRAVEL / END DAY.',
+    tut_win:'WIN: grow your wealth to 2000 net worth.',
+    tut_lose:'LOSE: go bankrupt - cash below 0 at day-end.',
+    tut_tip:'Your big trades move the price! Split orders, read the spread.',
+    t_step_sell:'You have cargo here paying well. Tap SELL to cash in.',
+    t_step_pickcheap:'Now tap the green CHEAP city to plan a buy.',
+    t_step_travel:'Tap TRAVEL to move your caravan there.',
+    t_step_buy:'Buy low here. Tap BUY a few times - watch the price climb!',
+    t_done:'Now haul it to a dear city and sell. Get rich!',
+    howto:'HOW TO PLAY', back:'OK', mute:'Sound',
+  },
+  ru: {
+    title:'Зерновой путь', sub:'Покупай зерно дёшево, вези и продавай дорого - но не обрушь цену.',
+    play:'ИГРАТЬ', retry:'НОВЫЙ ЗАБЕГ', cont:'ПРОДОЛЖИТЬ',
+    cash:'Деньги', net:'Капитал', day:'День', moves:'Ходы', cargo:'Груз',
+    buy:'КУПИТЬ', sell:'ПРОДАТЬ', move:'ЕХАТЬ', here:'Вы здесь', endday:'КОНЕЦ ДНЯ',
+    loan:'ЗАЙМ +100', repay:'ВЕРНУТЬ', debt:'Долг', spread:'Спред/ед.', profit:'Прибыль',
+    gameover:'БАНКРОТ', win:'ЦЕЛЬ ДОСТИГНУТА!', bankruptsub:'Деньги кончились.',
+    winsub:'Вы достигли богатства Барона!', tonext:'до', starving:'ГОЛОД',
+    surplus:'дёшево', deficit:'дорого', tier0:'Разносчик', tier1:'Торговец', tier2:'Купец',
+    tier3:'Караванщик', tier4:'Барон шёлка', tier5:'Легенда пути',
+    ev_famine:'ГОЛОД', ev_harvest:'УРОЖАЙ', ev_bandits:'РАЗБОЙНИКИ', ev_festival:'ПРАЗДНИК',
+    ev_famine_d:'спрос растёт - цена вверх', ev_harvest_d:'избыток - цена падает',
+    ev_bandits_d:'путь опасен - груз в риске', ev_festival_d:'пир поднимает спрос',
+    unlock:'НОВЫЙ ГОРОД ОТКРЫТ', tierup:'НОВЫЙ РАНГ БОГАТСТВА', rival:'Появился КОНКУРЕНТ!',
+    spoiled:'испортилось', far:'далеко (1 ход)', nocargo:'нет груза', full:'караван полон',
+    nocash:'мало денег', sold:'тут раскуплено', maxqty:'МАКС',
+    tut_goal:'ЦЕЛЬ: покупай зерно дёшево, вези, продавай дорого.',
+    tut_controls:'Нажми на город, чтобы изучить или ехать. КУПИТЬ / ПРОДАТЬ / ЕХАТЬ / КОНЕЦ ДНЯ.',
+    tut_win:'ПОБЕДА: набери 2000 капитала.',
+    tut_lose:'ПОРАЖЕНИЕ: банкротство - деньги ниже 0 в конце дня.',
+    tut_tip:'Крупные сделки двигают цену! Дроби заказы, читай спред.',
+    t_step_sell:'Тут груз продаётся выгодно. Жми ПРОДАТЬ.',
+    t_step_pickcheap:'Теперь нажми на зелёный ДЕШЁВЫЙ город.',
+    t_step_travel:'Жми ЕХАТЬ, чтобы перегнать караван.',
+    t_step_buy:'Покупай дёшево. Жми КУПИТЬ - смотри как цена растёт!',
+    t_done:'Теперь вези в дорогой город и продай. Богатей!',
+    howto:'КАК ИГРАТЬ', back:'ОК', mute:'Звук',
+  },
+};
+
+// ── GAME STATE ───────────────────────────────────────────────────────────────
+var gs = 'MENU';      // MENU | PLAYING | GAMEOVER | WIN
+var cash = START_CASH;
+var debt = 0;
+var day = 1;
+var movesLeft = MOVES_PER_DAY;
+var tier = 0;
+var cargo = 0;
+var caravanCity = 0;        // index of city the caravan sits in
+var selCity = 0;            // index of currently selected/inspected city
+var cities = [];           // live city objects
+var qty = 1;               // trade quantity in panel
+var rivalActive = false;
+var rivalCity = 0;
+var bestPair = null;       // {from,to} highlighted best spread
+var banner = null;         // {title, desc, col, t}
+var floats = [];           // local floating texts {x,y,txt,col,life,vy}
+var caravanAnim = { x:0, y:0 };  // smoothed pixel pos for the token
+var tutOn = false;         // hands-on tutorial running
+var SAVE_KEY = 'grain_road';
+var SEEN_TUT_KEY = 'grain_road_seen_tutorial';
+var L = {};                // layout rects (recomputed each frame)
+var travelFx = null;       // {x0,y0,x1,y1,t} caravan travel tween
+var winShown = false;
+
+// ── HELPERS ────────────────────────────────────────────────────────────────
+function tierName(tk){ return GF.t('tier'+GF.clamp(tk,0,5)); }
+function netWorth(){
+  // cargo valued at the average sellable price across deficit cities (cargoValue)
+  var v = cash - debt;
+  v += cargo * cargoUnitValue();
+  return Math.round(v);
+}
+function cargoUnitValue(){
+  // value cargo at the best price we could realistically get right now
+  var best = 0;
+  for (var i=0;i<cities.length;i++){ if(!cities[i].unlocked) continue; if(cities[i].price>best) best=cities[i].price; }
+  return best || 12;
+}
+function unlockedCount(){ var n=0; for(var i=0;i<cities.length;i++) if(cities[i].unlocked) n++; return n; }
+function maxTierForCities(){ // highest tier whose cities should be unlocked
+  return tier;
+}
+function edgeDist(a,b){
+  for(var i=0;i<EDGES.length;i++){ var e=EDGES[i]; if((e[0]===a&&e[1]===b)||(e[0]===b&&e[1]===a)) return e[2]; }
+  return 99;
+}
+function adjacent(a,b){ return edgeDist(a,b) < 99; }
+function neighbors(a){
+  var out=[]; for(var i=0;i<EDGES.length;i++){ var e=EDGES[i]; if(e[0]===a) out.push(e[1]); else if(e[1]===a) out.push(e[0]); } return out;
+}
+
+// ── INIT / RESET ─────────────────────────────────────────────────────────────
+function buildCities(){
+  cities = [];
+  for (var i=0;i<CITY_DEFS.length;i++){
+    var d = CITY_DEFS[i];
+    var base = d.base;
+    var stock = d.bias < 0 ? (30 + Math.round(-d.bias*30)) : Math.max(2, Math.round(12 - d.bias*8));
+    cities.push({
+      id:d.id, en:d.en, ru:d.ru, pos:d.pos, base:base, bias:d.bias,
+      price: base, prevPrice: base, stock: stock, starving:false,
+      unlocked: d.tier === 0, unlockTier: d.tier,
+      bandit:0, eventPriceMul:1,
+    });
+  }
+}
+function startRun(silent){
+  cash = START_CASH; debt = 0; day = 1; movesLeft = MOVES_PER_DAY;
+  tier = 0; cargo = 0; qty = 1; rivalActive = false; banner = null; winShown=false;
+  floats.length = 0;
+  buildCities();
+  // open MID-ACTION so the very first tap is a profitable SELL (time-to-first-fun
+  // <15s): the caravan ARRIVES at dear Turfan(1) already loaded with grain it
+  // bought cheap, sitting one hop from cheap green Kashgar(0). selCity == caravan
+  // city -> SELL is immediately valid + profitable; the tutorial points at it.
+  caravanCity = 1; selCity = 1; cargo = 5;
+  cities[1].price = cities[1].base * 1.45;     // dear: pays a fat premium right now
+  cities[0].price = cities[0].base * 0.85;     // cheap green neighbour for the next leg
+  _lastBuyAvg = cities[0].base * 0.9;          // pretend the load was bought cheap -> visible profit
+  recomputeBest();
+  var p = cityPx(cities[caravanCity]);
+  caravanAnim.x = p.x; caravanAnim.y = p.y;
+  gs = 'PLAYING';
+  GF.gameStarted();
+  if (!silent) maybeStartTutorial();
+  saveRun();
+}
+
+// ── MARKET / PRICE-IMPACT CORE ───────────────────────────────────────────────
+// Buying pushes price UP, selling pushes it DOWN. Marginal price for the next
+// unit: price * (1 + IMPACT_COEF) per bought unit (compounded), or
+// price * (1 - IMPACT_COEF) per sold unit. We integrate over `n` units so a
+// big single order is strictly worse than splitting across cities/visits.
+function buyCost(city, n){
+  var total = 0, p = city.price;
+  for (var i=0;i<n;i++){ total += p; p = p * (1 + IMPACT_COEF); }
+  return { total: total, newPrice: p, avg: n? total/n : p };
+}
+function sellRevenue(city, n){
+  var total = 0, p = city.price;
+  for (var i=0;i<n;i++){ total += p; p = p * (1 - IMPACT_COEF); if (p < 1) p = 1; }
+  return { total: total, newPrice: p, avg: n? total/n : p };
+}
+function spreadPerUnit(){
+  // profit/unit if you buy 1 in caravan city and sell 1 in selected city
+  var from = cities[caravanCity], to = cities[selCity];
+  return to.price - from.price;
+}
+
+function recomputeBest(){
+  bestPair = null; var bestGap = 0.0001;
+  for (var i=0;i<cities.length;i++){
+    if(!cities[i].unlocked) continue;
+    for (var j=0;j<cities.length;j++){
+      if(i===j || !cities[j].unlocked) continue;
+      var gap = cities[j].price - cities[i].price;
+      if (gap > bestGap){ bestGap = gap; bestPair = { from:i, to:j }; }
+    }
+  }
+}
+
+// ── DAY END: upkeep, interest, spoilage, mean-reversion, events, famine ──────
+function endDay(){
+  if (gs !== 'PLAYING') return;
+  // spoilage on cargo
+  if (cargo > 0){
+    var lost = Math.floor(cargo * SPOIL_RATE + 0.5);
+    if (lost > 0){ cargo -= lost; addFloat(GF.t('spoiled')+' -'+lost, '#d98a5a'); }
+  }
+  // mean-reversion + daily volatility toward base
+  for (var i=0;i<cities.length;i++){
+    var c = cities[i];
+    c.prevPrice = c.price;
+    var target = c.base * c.eventPriceMul;
+    c.price = c.price + (target - c.price) * PRICE_RECOVER;
+    var vol = (Math.random()*2-1) * DEMAND_VOL * c.base;
+    c.price = Math.max(2, c.price + vol);
+    c.eventPriceMul = c.eventPriceMul + (1 - c.eventPriceMul) * 0.4; // decay event mul
+    // stock dynamics: deficit cities lose stock (consumption), surplus refill
+    if (c.bias > 0){ c.stock -= (1 + Math.round(c.bias*2)); }
+    else { c.stock += 4; }
+    if (c.stock < 0) c.stock = 0;
+    if (c.bias > 0 && c.stock <= 0) c.starving = true; else if (c.stock > 3) c.starving = false;
+    if (c.bandit > 0) c.bandit--;
+  }
+  // famine penalties from starving cities you neglected
+  var fam = 0;
+  for (var k=0;k<cities.length;k++){ if(cities[k].unlocked && cities[k].starving) fam += FAMINE_PENALTY; }
+  if (fam > 0){ cash -= fam; addFloat('-'+fam+' '+GF.t('ev_famine'), '#ff6a6a'); GF.sfx('hurt'); }
+  // loan interest
+  if (debt > 0){ var intr = Math.ceil(debt * LOAN_INTEREST); debt += intr; }
+  // caravan upkeep
+  cash -= UPKEEP_PER_DAY;
+
+  day++;
+  movesLeft = MOVES_PER_DAY;
+
+  // rival activity (moves prices once active)
+  if (rivalActive) rivalTurn();
+
+  // escalating content schedule
+  scheduleContent();
+
+  // events
+  if (day % EVENT_EVERY === 0) fireEvent();
+
+  recomputeBest();
+  GF.sfx('tap');
+
+  // insolvency check at the mandatory expense moment
+  if (cash < MIN_CASH){ doGameOver(); saveRun(); return; }
+  checkWin();
+  saveRun();
+}
+
+function scheduleContent(){
+  // tier-based city unlocks happen via checkTier(); here we gate the rival + seasons
+  if (!rivalActive && day >= 4){
+    rivalActive = true;
+    rivalCity = pickUnlocked();
+    showBanner(GF.t('rival'), '', '#c98cff');
+    GF.sfx('unlock');
+  }
+}
+
+function pickUnlocked(){
+  var u=[]; for(var i=0;i<cities.length;i++) if(cities[i].unlocked) u.push(i);
+  return u.length? u[(Math.random()*u.length)|0] : 0;
+}
+
+function rivalTurn(){
+  // rival buys in the cheapest unlocked city (raising it) and sells in the dearest
+  // (lowering it) — competing for the spread, nudging prices toward equilibrium.
+  var lo=-1, hi=-1, loP=1e9, hiP=-1;
+  for (var i=0;i<cities.length;i++){ if(!cities[i].unlocked) continue;
+    if (cities[i].price < loP){ loP=cities[i].price; lo=i; }
+    if (cities[i].price > hiP){ hiP=cities[i].price; hi=i; }
+  }
+  if (lo>=0){ cities[lo].price *= (1 + IMPACT_COEF*3); rivalCity=lo; }
+  if (hi>=0 && hi!==lo){ cities[hi].price *= (1 - IMPACT_COEF*3); }
+}
+
+function fireEvent(){
+  // choose an unlocked city + an event type
+  var u=[]; for(var i=0;i<cities.length;i++) if(cities[i].unlocked) u.push(i);
+  if (!u.length) return;
+  var ci = u[(Math.random()*u.length)|0];
+  var c = cities[ci];
+  var roll = Math.random();
+  if (roll < 0.34 && c.bias >= 0){ // famine spike on a deficit city
+    c.eventPriceMul = 1.9; c.price *= 1.7; c.stock = Math.max(0, c.stock-6); c.starving = c.stock<=0;
+    showBanner(GF.t('ev_famine')+': '+cityName(c), GF.t('ev_famine_d'), '#ff7a4a');
+  } else if (roll < 0.62 && c.bias <= 0){ // bumper harvest on a surplus city
+    c.eventPriceMul = 0.45; c.price *= 0.55; c.stock += 20;
+    showBanner(GF.t('ev_harvest')+': '+cityName(c), GF.t('ev_harvest_d'), '#8ad96a');
+  } else if (roll < 0.82){ // bandits threaten a random edge from this city
+    c.bandit = 2;
+    showBanner(GF.t('ev_bandits')+': '+cityName(c), GF.t('ev_bandits_d'), '#d98a5a');
+  } else { // festival: demand up
+    c.eventPriceMul = 1.5; c.price *= 1.4;
+    showBanner(GF.t('ev_festival')+': '+cityName(c), GF.t('ev_festival_d'), '#ffd23a');
+  }
+  GF.sfx('coin');
+}
+
+function checkTier(){
+  var nw = netWorth();
+  var newTier = 0;
+  for (var i=0;i<TIER_THRESH.length;i++){ if (nw >= TIER_THRESH[i]) newTier = i; }
+  if (newTier > tier){
+    var prev = tier; tier = newTier;
+    // unlock cities up to this tier + bump capacity
+    var unlockedAny = false;
+    for (var c=0;c<cities.length;c++){
+      if (!cities[c].unlocked && cities[c].unlockTier <= tier){ cities[c].unlocked = true; unlockedAny = true; }
+    }
+    CARAVAN_CAP = 10 + tier*2;
+    showBanner(GF.t('tierup')+': '+tierName(tier), unlockedAny? GF.t('unlock') : '', '#ffd23a');
+    GF.sfx('levelup');
+    recomputeBest();
+  }
+}
+
+function checkWin(){
+  if (gs!=='PLAYING') return;
+  if (netWorth() >= GOAL_NET && !winShown){
+    winShown = true;
+    gs = 'WIN';
+    GF.sfx('win'); GF.happytime();
+    GF.gameEnded();
+  }
+}
+
+function doGameOver(){
+  gs = 'GAMEOVER';
+  GF.sfx('lose');
+  GF.gameEnded();
+}
+
+// ── TRADE ACTIONS ────────────────────────────────────────────────────────────
+function clampQty(){
+  if (qty < 1) qty = 1;
+  if (qty > 99) qty = 99;
+}
+function maxBuyable(){
+  var c = cities[caravanCity];
+  var room = CARAVAN_CAP - cargo;
+  var n = Math.min(room, c.stock);
+  // also cash-limited (approx using avg ramp)
+  var afford = 0; var pp = c.price; var spent = 0;
+  while (afford < n){ spent += pp; if (spent > cash) break; pp *= (1+IMPACT_COEF); afford++; }
+  return Math.max(0, afford);
+}
+function doBuy(){
+  if (gs!=='PLAYING') return false;
+  var c = cities[caravanCity];
+  var n = qty;
+  if (cargo + n > CARAVAN_CAP){ addFloat(GF.t('full'), '#ff6a6a'); GF.sfx('error'); return false; }
+  if (n > c.stock){ addFloat(GF.t('sold'), '#ff6a6a'); GF.sfx('error'); return false; }
+  var r = buyCost(c, n);
+  if (r.total > cash){ addFloat(GF.t('nocash'), '#ff6a6a'); GF.sfx('error'); return false; }
+  cash -= r.total;
+  cargo += n;
+  c.stock -= n;
+  c.prevPrice = c.price;
+  c.price = r.newPrice;           // price climbs from your buy
+  addFloatAt(cityPx(c).x, cityPx(c).y-CITY_R*S()-10*S(), '-'+Math.round(r.total), '#ffd27a');
+  GF.sfx('coin'); GF.spawnParticles(cityPx(c).x, cityPx(c).y, '#ffd27a', 8);
+  recomputeBest();
+  if (tutOn && tutStep===3) advanceTut();
+  checkTier(); saveRun();
+  return true;
+}
+function doSell(){
+  if (gs!=='PLAYING') return false;
+  var c = cities[caravanCity];
+  if (cargo <= 0){ addFloat(GF.t('nocargo'), '#ff6a6a'); GF.sfx('error'); return false; }
+  var n = Math.min(qty, cargo);
+  var r = sellRevenue(c, n);
+  var costBasis = buyCostBasisEstimate(n); // for profit float
+  cash += r.total;
+  cargo -= n;
+  c.stock += n;                   // selling relieves the city (refills stock)
+  if (c.stock > 3) c.starving = false;
+  c.prevPrice = c.price;
+  c.price = r.newPrice;           // price drops from your sell
+  var profit = Math.round(r.total - costBasis);
+  var pcol = profit >= 0 ? '#8ce86a' : '#ff8a6a';
+  addFloatAt(cityPx(c).x, cityPx(c).y-CITY_R*S()-10*S(), (profit>=0?'+':'')+Math.round(r.total), '#8ce86a');
+  if (profit !== 0) addFloatAt(cityPx(c).x, cityPx(c).y-CITY_R*S()-30*S(), (profit>=0?'+':'')+profit+' '+GF.t('profit'), pcol);
+  GF.sfx(profit>=0?'reward':'tap'); GF.spawnParticles(cityPx(c).x, cityPx(c).y, '#8ce86a', 10);
+  recomputeBest();
+  if (tutOn && tutStep===0) advanceTut();
+  checkTier(); checkWin(); saveRun();
+  return true;
+}
+var _lastBuyAvg = 12;
+function buyCostBasisEstimate(n){ return _lastBuyAvg * n; }
+
+function doMove(target){
+  if (gs!=='PLAYING') return false;
+  if (target === caravanCity) return false;
+  if (!cities[target].unlocked) return false;
+  if (!adjacent(caravanCity, target)){ addFloat(GF.t('far'), '#ff6a6a'); GF.sfx('error'); return false; }
+  // bandit risk on the origin city's threatened routes
+  if (cities[caravanCity].bandit > 0 && cargo > 0 && Math.random() < 0.5){
+    var lost = Math.max(1, Math.floor(cargo*0.4));
+    cargo -= lost; addFloat(GF.t('ev_bandits')+' -'+lost, '#ff6a6a'); GF.sfx('hurt'); GF.setShake(0.5);
+  }
+  var from = cities[caravanCity];
+  travelFx = { x0:cityPx(from).x, y0:cityPx(from).y, x1:cityPx(cities[target]).x, y1:cityPx(cities[target]).y, t:0 };
+  caravanCity = target;
+  selCity = target;
+  movesLeft--;
+  GF.sfx('spawn');
+  if (tutOn && tutStep===2) advanceTut();
+  if (movesLeft <= 0){ endDay(); }
+  else { recomputeBest(); saveRun(); }
+  return true;
+}
+
+function doLoan(){
+  if (gs!=='PLAYING') return false;
+  cash += 100; debt += 100;
+  addFloat('+100 ('+GF.t('debt')+')', '#ffd27a'); GF.sfx('coin'); saveRun();
+  return true;
+}
+function doRepay(){
+  if (gs!=='PLAYING' || debt<=0) return false;
+  var pay = Math.min(cash, debt);
+  if (pay <= 0){ GF.sfx('error'); return false; }
+  cash -= pay; debt -= pay; addFloat('-'+pay+' '+GF.t('debt'), '#9ad'); GF.sfx('tap'); saveRun();
+  return true;
+}
+
+// ── FLOATS / BANNER ──────────────────────────────────────────────────────────
+function addFloat(txt, col){ addFloatAt(GF.W/2, GF.H*0.42, txt, col); }
+function addFloatAt(x,y,txt,col){ floats.push({ x:x, y:y, txt:txt, col:col||'#fff', life:1.4, vy:-1.4*S() }); }
+function showBanner(title, desc, col){ banner = { title:title, desc:desc, col:col||'#ffd23a', t:0 }; }
+
+// ── TUTORIAL (hands-on, action-gated) ────────────────────────────────────────
+var tutStep = 0;
+var TUT_STEPS = ['t_step_sell','t_step_pickcheap','t_step_travel','t_step_buy','t_done'];
+function maybeStartTutorial(){
+  var seen=false; try{ seen = !!localStorage.getItem(SEEN_TUT_KEY); }catch(e){}
+  if (seen) { tutOn=false; return; }
+  tutOn = true; tutStep = 0;
+}
+function advanceTut(){
+  tutStep++;
+  if (tutStep >= TUT_STEPS.length){
+    tutOn = false;
+    try{ localStorage.setItem(SEEN_TUT_KEY,'1'); }catch(e){}
+  }
+}
+function endTutorial(){ tutOn=false; try{ localStorage.setItem(SEEN_TUT_KEY,'1'); }catch(e){} }
+var showHowto = false; // reopened via ? button (info panel overlay)
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────────
+function layout(){
+  var W=GF.W, H=GF.H, s=S();
+  L.topH = clampF(64*s, 52, 92);
+  L.panelH = clampF(186*s, 150, 240);
+  L.mapY = L.topH;
+  L.mapH = H - L.topH - L.panelH;
+  L.mapX = 0; L.mapW = W;
+  // help + mute buttons
+  var bb = clampF(30*s, 26, 40);
+  L.muteBtn = { x: W - bb - 8*s, y: 8*s, w: bb, h: bb };
+  L.helpBtn = { x: W - bb*2 - 16*s, y: 8*s, w: bb, h: bb };
+  // panel buttons
+  var px=10*s, pw=W-20*s, py=L.mapY+L.mapH+10*s;
+  L.panel = { x:px, y:py, w:pw, h:L.panelH-16*s };
+}
+function cityPx(c){
+  var W=L.mapW||GF.W, H=L.mapH||GF.H, ox=L.mapX||0, oy=L.mapY||0;
+  var pad = 46*S();
+  return { x: ox + pad + c.pos[0]*(W-pad*2), y: oy + pad*0.7 + c.pos[1]*(H-pad*1.2) };
+}
+
+// ── INPUT ─────────────────────────────────────────────────────────────────────
+function evtPos(e){
+  var rect = canvas.getBoundingClientRect();
+  var sx = canvas.width/rect.width, sy = canvas.height/rect.height;
+  var cx = (e.touches&&e.touches[0]) ? e.touches[0].clientX : e.clientX;
+  var cy = (e.touches&&e.touches[0]) ? e.touches[0].clientY : e.clientY;
+  return { x:(cx-rect.left)*sx, y:(cy-rect.top)*sy };
+}
+function hit(r,x,y){ return r && x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h; }
+
+function onDown(x,y){
+  // overlays (MENU/GAMEOVER/WIN) are handled by gf-lib's button click handler.
+  if (gs!=='PLAYING') return;
+  // howto panel intercepts everything
+  if (showHowto){ showHowto=false; GF.sfx('tap'); return; }
+  // top buttons
+  if (hit(L.muteBtn,x,y)){ var m=GF.toggleMute(); GF.setMusicMuted(m); GF.sfx('tap'); return; }
+  if (hit(L.helpBtn,x,y)){ showHowto=true; GF.sfx('tap'); return; }
+  // panel buttons
+  if (panelClick(x,y)) return;
+  // map: tap a city node
+  for (var i=0;i<cities.length;i++){
+    if (!cities[i].unlocked) continue;
+    var p = cityPx(cities[i]);
+    var dx=x-p.x, dy=y-p.y, rr=(CITY_R+14)*S();
+    if (dx*dx+dy*dy <= rr*rr){
+      selCity = i;
+      qty = 1; clampQty();
+      GF.sfx('tap');
+      if (tutOn && tutStep===1 && cities[i].bias < 0) advanceTut();
+      recomputeBest();
+      return;
+    }
+  }
+}
+
+function panelClick(x,y){
+  if (!L.btns) return false;
+  var b = L.btns;
+  // quantity stepper
+  if (hit(b.minus,x,y)){ qty--; clampQty(); GF.sfx('click'); return true; }
+  if (hit(b.plus,x,y)){ qty++; clampQty(); GF.sfx('click'); return true; }
+  if (hit(b.maxq,x,y)){ qty = Math.max(1, (selCity===caravanCity)? Math.max(maxBuyable(),cargo) : cargo||1); clampQty(); GF.sfx('click'); return true; }
+  if (b.buy && hit(b.buy,x,y)){ doBuy(); return true; }
+  if (b.sell && hit(b.sell,x,y)){ doSell(); return true; }
+  if (b.move && hit(b.move,x,y)){ doMove(selCity); return true; }
+  if (b.endday && hit(b.endday,x,y)){ endDay(); return true; }
+  if (b.loan && hit(b.loan,x,y)){ if(debt>0) doRepay(); else doLoan(); return true; }
+  return false;
+}
+
+// keyboard (desktop nicety)
+document.addEventListener('keydown', function(e){
+  if (gs!=='PLAYING') return;
+  if (e.code==='Equal'||e.code==='ArrowUp'){ qty++; clampQty(); }
+  else if (e.code==='Minus'||e.code==='ArrowDown'){ qty--; clampQty(); }
+  else if (e.code==='KeyB'){ doBuy(); }
+  else if (e.code==='KeyS'){ doSell(); }
+  else if (e.code==='KeyM'){ doMove(selCity); }
+  else if (e.code==='Space'||e.code==='Enter'){ endDay(); }
+});
+
+// pointer wiring (custom, for PLAYING map/panel taps; overlays via gf-lib)
+var _pdown=false;
+canvas.addEventListener('mousedown', function(e){ e.preventDefault(); var p=evtPos(e); _pdown=true; onDown(p.x,p.y); });
+window.addEventListener('mouseup', function(){ _pdown=false; });
+canvas.addEventListener('touchstart', function(e){ if(gs==='PLAYING'){ /* let gf-lib also see it for audio kick */ } var p=evtPos(e); _pdown=true; onDown(p.x,p.y); }, {passive:true});
+canvas.addEventListener('touchend', function(){ _pdown=false; }, {passive:true});
+
+// ── UPDATE ─────────────────────────────────────────────────────────────────────
+function update(dt){
+  // animate caravan token toward its city (or along travel tween)
+  if (travelFx){
+    travelFx.t += dt*2.6;
+    var tt = GF.clamp(travelFx.t,0,1);
+    caravanAnim.x = GF.lerp(travelFx.x0, travelFx.x1, tt);
+    caravanAnim.y = GF.lerp(travelFx.y0, travelFx.y1, tt);
+    if (tt>=1) travelFx=null;
+  } else if (gs==='PLAYING'){
+    var p = cityPx(cities[caravanCity]);
+    caravanAnim.x += (p.x-caravanAnim.x)*Math.min(1,dt*8);
+    caravanAnim.y += (p.y-caravanAnim.y)*Math.min(1,dt*8);
+  }
+  // floats
+  for (var i=floats.length-1;i>=0;i--){ var f=floats[i]; f.y+=f.vy; f.life-=dt*1.1; if(f.life<=0) floats.splice(i,1); }
+  // banner timer
+  if (banner){ banner.t += dt; if (banner.t > 3.0) banner = null; }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────────
+function draw(c){
+  layout();
+  drawBackdrop(c);
+  if (gs==='PLAYING' || gs==='GAMEOVER' || gs==='WIN'){
+    drawMap(c);
+    drawTopBar(c);
+    drawPanel(c);
+    drawFloats(c);
+    drawBanner(c);
+    drawTopButtons(c);
+    if (tutOn) drawTutorial(c);
+  }
+  if (gs==='MENU') drawMenu(c);
+  if (gs==='GAMEOVER') drawEndOverlay(c, false);
+  if (gs==='WIN') drawEndOverlay(c, true);
+  if (showHowto) drawHowto(c);
+}
+
+function drawBackdrop(c){
+  var W=GF.W, H=GF.H;
+  var g = c.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, '#4a2f1c');
+  g.addColorStop(0.45, '#7a4e28');
+  g.addColorStop(0.7, '#c8893f');
+  g.addColorStop(1, '#e7b96a');
+  c.fillStyle = g; c.fillRect(0,0,W,H);
+  // faint dune curves
+  c.save(); c.globalAlpha = 0.10; c.fillStyle = '#000';
+  for (var i=0;i<4;i++){
+    var yy = H*0.55 + i*H*0.1;
+    c.beginPath(); c.moveTo(0,yy);
+    c.bezierCurveTo(W*0.3, yy-30*S(), W*0.6, yy+30*S(), W, yy-10*S());
+    c.lineTo(W,H); c.lineTo(0,H); c.closePath(); c.fill();
+  }
+  c.restore();
+}
+
+function cityName(c){ return GF.lang==='ru' ? c.ru : c.en; }
+
+function drawMap(c){
+  var s=S();
+  // edges
+  c.save();
+  c.lineWidth = 3*s; c.strokeStyle='rgba(60,38,18,0.45)';
+  c.setLineDash([8*s,7*s]);
+  for (var i=0;i<EDGES.length;i++){
+    var e=EDGES[i], a=cities[e[0]], b=cities[e[1]];
+    if (!a.unlocked || !b.unlocked) continue;
+    var pa=cityPx(a), pb=cityPx(b);
+    c.beginPath(); c.moveTo(pa.x,pa.y); c.lineTo(pb.x,pb.y); c.stroke();
+  }
+  c.setLineDash([]);
+  // highlight best spread route between bestPair if adjacent or just glow nodes
+  c.restore();
+
+  // city nodes
+  for (var k=0;k<cities.length;k++){
+    var ci = cities[k];
+    if (!ci.unlocked) { drawLockedCity(c, ci); continue; }
+    drawCity(c, ci, k);
+  }
+
+  // caravan token
+  drawCaravan(c);
+}
+
+function drawLockedCity(c, ci){
+  var p=cityPx(ci), s=S(), r=CITY_R*s*0.7;
+  c.save(); c.globalAlpha=0.35;
+  c.fillStyle='#5a4a3a'; c.beginPath(); c.arc(p.x,p.y,r,0,Math.PI*2); c.fill();
+  c.fillStyle='#2a2018'; c.font='bold '+(13*s)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  // lock glyph (vector padlock)
+  c.strokeStyle='#2a2018'; c.lineWidth=2*s;
+  c.beginPath(); c.arc(p.x,p.y-3*s,5*s,Math.PI,0); c.stroke();
+  GF.rr(c, p.x-7*s, p.y-2*s, 14*s, 11*s, 2*s); c.fill();
+  c.restore();
+}
+
+function drawCity(c, ci, idx){
+  var p=cityPx(ci), s=S();
+  var isCheap = ci.price < ci.base*0.98;
+  var isDear  = ci.price > ci.base*1.02;
+  var baseCol = isCheap ? '#3f8f4a' : (isDear ? '#b8533a' : '#9a7a3a');
+  var glow = isCheap ? '#6ad96a' : (isDear ? '#ff7a4a' : '#ffd27a');
+  var r = CITY_R*s;
+  // best-spread highlight ring
+  if (bestPair && (bestPair.from===idx || bestPair.to===idx)){
+    c.save(); c.globalAlpha=0.5+0.3*Math.sin(performance.now()/300);
+    c.strokeStyle = bestPair.to===idx ? '#ffe27a' : '#9af07a'; c.lineWidth=3*s;
+    c.beginPath(); c.arc(p.x,p.y,r+7*s,0,Math.PI*2); c.stroke(); c.restore();
+  }
+  // starving pulse
+  if (ci.starving){ c.save(); c.globalAlpha=0.4+0.4*Math.sin(performance.now()/180);
+    c.fillStyle='#ff3a3a'; c.beginPath(); c.arc(p.x,p.y,r+10*s,0,Math.PI*2); c.fill(); c.restore(); }
+  // node body (dome/tent shape)
+  c.save();
+  c.shadowColor='rgba(0,0,0,0.35)'; c.shadowBlur=8*s; c.shadowOffsetY=3*s;
+  var g=c.createLinearGradient(p.x,p.y-r,p.x,p.y+r);
+  g.addColorStop(0, lighten(baseCol,30)); g.addColorStop(1, baseCol);
+  c.fillStyle=g;
+  c.beginPath(); c.arc(p.x,p.y,r,0,Math.PI*2); c.fill();
+  c.restore();
+  // dome cap highlight
+  c.fillStyle='rgba(255,255,255,0.18)';
+  c.beginPath(); c.arc(p.x, p.y-r*0.35, r*0.55, 0, Math.PI*2); c.fill();
+  // bandit marker
+  if (ci.bandit>0){ c.fillStyle='#2a1a10'; c.font='bold '+(12*s)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+    c.beginPath(); c.moveTo(p.x-6*s,p.y+r*0.1); c.lineTo(p.x,p.y-r*0.2); c.lineTo(p.x+6*s,p.y+r*0.1); c.strokeStyle='#2a1a10'; c.lineWidth=2*s; c.stroke(); }
+
+  // price label above
+  c.textAlign='center';
+  var pf = clampF(13*s,11,17);
+  // trend arrow
+  var up = ci.price > ci.prevPrice+0.01, dn = ci.price < ci.prevPrice-0.01;
+  c.font='bold '+pf+'px sans-serif';
+  var label = Math.round(ci.price);
+  var lw = c.measureText(label).width;
+  // coin chip background
+  c.save();
+  c.fillStyle='rgba(20,12,6,0.72)';
+  GF.rr(c, p.x-lw/2-16*s, p.y-r-pf-12*s, lw+30*s, pf+8*s, (pf+8*s)/2); c.fill();
+  c.restore();
+  drawCoin(c, p.x-lw/2-9*s, p.y-r-pf*0.5-8*s, 5*s);
+  c.fillStyle = up?'#ff9a6a':(dn?'#8ce86a':'#fff');
+  c.textBaseline='middle';
+  c.fillText(label, p.x+5*s, p.y-r-pf*0.5-8*s);
+  if (up){ drawTri(c, p.x+lw/2+10*s, p.y-r-pf*0.5-8*s, 4*s, true, '#ff9a6a'); }
+  else if (dn){ drawTri(c, p.x+lw/2+10*s, p.y-r-pf*0.5-8*s, 4*s, false, '#8ce86a'); }
+
+  // city name below
+  c.font='bold '+clampF(12*s,10,15)+'px sans-serif';
+  c.fillStyle='#2a1a0e'; c.textBaseline='top';
+  c.fillText(cityName(ci), p.x, p.y+r+5*s);
+  // selection ring
+  if (idx===selCity){ c.save(); c.strokeStyle='#fff'; c.lineWidth=3*s; c.globalAlpha=0.9;
+    c.beginPath(); c.arc(p.x,p.y,r+3*s,0,Math.PI*2); c.stroke(); c.restore(); }
+}
+
+function drawCaravan(c){
+  var s=S(), x=caravanAnim.x, y=caravanAnim.y, r=CARAVAN_R*s;
+  c.save();
+  c.translate(x, y - CITY_R*s - 4*s);
+  // camel-ish body (vector): humps + load
+  c.shadowColor='rgba(0,0,0,0.35)'; c.shadowBlur=6*s; c.shadowOffsetY=3*s;
+  c.fillStyle='#d9a55a';
+  c.beginPath();
+  c.ellipse(0, 0, r, r*0.7, 0, 0, Math.PI*2); c.fill();
+  c.shadowColor='transparent';
+  // load (grain sack) on top
+  c.fillStyle='#caa05a';
+  GF.rr(c, -r*0.55, -r*0.95, r*1.1, r*0.7, 3*s); c.fill();
+  // cargo count text
+  c.fillStyle='#2a1a0e'; c.font='bold '+(11*s)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText(cargo+'/'+CARAVAN_CAP, 0, -r*0.6);
+  c.restore();
+  // rival token
+  if (rivalActive){
+    var rp = cityPx(cities[rivalCity]);
+    c.save(); c.translate(rp.x+CITY_R*s*0.7, rp.y-CITY_R*s*0.7);
+    c.fillStyle='#9b6ad9'; c.beginPath(); c.ellipse(0,0,r*0.7,r*0.5,0,0,Math.PI*2); c.fill();
+    c.restore();
+  }
+}
+
+function drawTopBar(c){
+  var W=GF.W, s=S(), h=L.topH;
+  c.save();
+  c.fillStyle='rgba(28,18,9,0.82)'; c.fillRect(0,0,W,h);
+  c.fillStyle='rgba(255,210,120,0.25)'; c.fillRect(0,h-2*s,W,2*s);
+  // cash (left)
+  var fs = clampF(17*s,13,22);
+  drawCoin(c, 16*s, h*0.34, 7*s);
+  var lowCash = cash < UPKEEP_PER_DAY;
+  c.fillStyle = lowCash ? (Math.sin(performance.now()/180)>0?'#ff6a6a':'#ffb0b0') : '#ffe2a0';
+  c.font='bold '+fs+'px sans-serif'; c.textAlign='left'; c.textBaseline='middle';
+  c.fillText(Math.round(cash), 28*s, h*0.34);
+  // debt
+  if (debt>0){ c.fillStyle='#ff9a6a'; c.font='bold '+clampF(12*s,10,15)+'px sans-serif';
+    c.fillText(GF.t('debt')+' '+Math.round(debt), 28*s, h*0.68); }
+  // day + moves (center)
+  c.textAlign='center';
+  c.fillStyle='#fff'; c.font='bold '+clampF(14*s,11,18)+'px sans-serif';
+  c.fillText(GF.t('day')+' '+day, W/2, h*0.30);
+  // moves pips
+  var pipR=4*s, gap=12*s, totalW=(MOVES_PER_DAY-1)*gap;
+  for (var i=0;i<MOVES_PER_DAY;i++){
+    var px=W/2 - totalW/2 + i*gap;
+    c.beginPath(); c.arc(px, h*0.62, pipR, 0, Math.PI*2);
+    c.fillStyle = i < movesLeft ? '#ffd23a' : 'rgba(255,255,255,0.25)'; c.fill();
+  }
+  // net worth + tier bar (right)
+  var nw = netWorth();
+  c.textAlign='right'; c.fillStyle='#cdebc0'; c.font='bold '+clampF(13*s,11,17)+'px sans-serif';
+  c.fillText(GF.t('net')+' '+nw, W-58*s, h*0.30);
+  // tier label
+  c.fillStyle='#ffe2a0'; c.font='bold '+clampF(11*s,9,14)+'px sans-serif';
+  c.fillText(tierName(tier), W-58*s, h*0.60);
+  // progress bar to next tier (or to goal at max)
+  var barW=clampF(86*s,60,140), barH=6*s, barX=W-58*s-barW, barY=h*0.74;
+  var lo = TIER_THRESH[tier], hi = (tier<TIER_THRESH.length-1)? TIER_THRESH[tier+1] : GOAL_NET;
+  var frac = GF.clamp((nw-lo)/Math.max(1,(hi-lo)),0,1);
+  c.fillStyle='rgba(0,0,0,0.4)'; GF.rr(c, barX, barY, barW, barH, barH/2); c.fill();
+  c.fillStyle='#ffd23a'; GF.rr(c, barX, barY, barW*frac, barH, barH/2); c.fill();
+  c.restore();
+}
+
+function drawTopButtons(c){
+  var s=S();
+  // help
+  c.save();
+  c.fillStyle='rgba(28,18,9,0.85)';
+  c.beginPath(); c.arc(L.helpBtn.x+L.helpBtn.w/2, L.helpBtn.y+L.helpBtn.h/2, L.helpBtn.w/2, 0, Math.PI*2); c.fill();
+  c.fillStyle='#ffe2a0'; c.font='bold '+(16*s)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText('?', L.helpBtn.x+L.helpBtn.w/2, L.helpBtn.y+L.helpBtn.h/2+1*s);
+  // mute
+  c.fillStyle='rgba(28,18,9,0.85)';
+  c.beginPath(); c.arc(L.muteBtn.x+L.muteBtn.w/2, L.muteBtn.y+L.muteBtn.h/2, L.muteBtn.w/2, 0, Math.PI*2); c.fill();
+  GF.drawMuteIcon(c, L.muteBtn.x+L.muteBtn.w/2, L.muteBtn.y+L.muteBtn.h/2, L.muteBtn.w*0.32, GF.muted);
+  c.restore();
+}
+
+function drawPanel(c){
+  var s=S(), p=L.panel;
+  var atHome = (selCity === caravanCity);
+  var city = cities[selCity];
+  // panel bg
+  c.save();
+  c.fillStyle='rgba(24,15,7,0.92)';
+  GF.rr(c, p.x, p.y, p.w, p.h, 14*s); c.fill();
+  c.strokeStyle='rgba(255,210,120,0.25)'; c.lineWidth=1.5*s; GF.rr(c, p.x, p.y, p.w, p.h, 14*s); c.stroke();
+  c.restore();
+
+  var padX = 14*s, ty = p.y+12*s;
+  // header: city name + state chip
+  c.textAlign='left'; c.textBaseline='top';
+  c.fillStyle='#fff'; c.font='bold '+clampF(17*s,14,22)+'px sans-serif';
+  var nameW = c.measureText(cityName(city)).width;
+  c.fillText(cityName(city), p.x+padX, ty);
+  // cheap/dear chip drawn just right of the name
+  var chipTxt = city.price < city.base*0.98 ? GF.t('surplus') : (city.price>city.base*1.02? GF.t('deficit') : '');
+  if (chipTxt){
+    var chipCol = chipTxt===GF.t('surplus') ? '#3f8f4a' : '#b8533a';
+    c.font='bold '+clampF(11*s,9,14)+'px sans-serif';
+    var cw = c.measureText(chipTxt).width+14*s;
+    var chx = p.x+padX+nameW+8*s;
+    c.fillStyle=chipCol; GF.rr(c, chx, ty+1*s, cw, clampF(16*s,13,20), 8*s); c.fill();
+    c.fillStyle='#fff'; c.textAlign='left'; c.textBaseline='middle';
+    c.fillText(chipTxt, chx+7*s, ty+1*s+clampF(8*s,7,10));
+    c.textBaseline='top';
+  }
+  // current price + you-are-here marker
+  c.textAlign='right'; c.font='bold '+clampF(14*s,11,18)+'px sans-serif';
+  c.fillStyle='#ffe2a0';
+  drawCoin(c, p.x+p.w-padX-c.measureText(Math.round(city.price)).width-10*s, ty+8*s, 5*s);
+  c.fillText(Math.round(city.price), p.x+p.w-padX, ty);
+
+  // spread / profit readout line
+  var ly = ty+clampF(26*s,20,34);
+  c.textAlign='left'; c.textBaseline='middle';
+  var spread = spreadPerUnit();
+  var spLabel = GF.t('spread')+': ';
+  c.font='bold '+clampF(13*s,11,17)+'px sans-serif'; c.fillStyle='#cdd';
+  c.fillText(spLabel, p.x+padX, ly+8*s);
+  var spVal = (spread>=0?'+':'')+Math.round(spread);
+  c.font='bold '+clampF(20*s,15,28)+'px sans-serif';
+  c.fillStyle = spread>0 ? '#8ce86a' : (spread<0?'#ff8a6a':'#fff');
+  c.fillText(spVal, p.x+padX+c.measureText(spLabel).width+6*s, ly+8*s);
+  // cargo + cash mini
+  c.textAlign='right'; c.font='bold '+clampF(12*s,10,15)+'px sans-serif'; c.fillStyle='#ffd27a';
+  c.fillText(GF.t('cargo')+' '+cargo+'/'+CARAVAN_CAP, p.x+p.w-padX, ly+8*s);
+
+  // ── action row: quantity stepper + buttons ──
+  layoutPanelButtons(p);
+  var b=L.btns;
+  // quantity stepper box
+  drawStepper(c, b);
+  // primary buttons depend on whether we're at the selected city
+  if (atHome){
+    drawBtn(c, b.buy, GF.t('buy'), '#3f8f4a', '#2d6e38', false, buyPreview());
+    drawBtn(c, b.sell, GF.t('sell'), '#b8533a', '#933f2d', cargo<=0, sellPreview());
+  } else {
+    var canMove = adjacent(caravanCity, selCity);
+    drawBtn(c, b.move, GF.t('move'), '#3a6db8', '#2d549a', !canMove, canMove? '1 '+GF.t('moves').toLowerCase() : GF.t('far'));
+    // still allow selling from selected? No — must be present. Show "you are here" hint disabled sell
+    drawBtn(c, b.sell, GF.t('sell'), '#6a5a4a', '#4a3e32', true, GF.t('here'));
+  }
+  // secondary row: endday + loan/repay
+  drawBtn(c, b.endday, GF.t('endday'), '#7a5a2a', '#5e451f', false, GF.t('moves')+' '+movesLeft);
+  drawBtn(c, b.loan, debt>0?GF.t('repay'):GF.t('loan'), '#5a4a7a', '#43365e', false, debt>0?(GF.t('debt')+' '+Math.round(debt)):'');
+}
+
+function buyPreview(){
+  var c=cities[caravanCity]; if(selCity!==caravanCity) return '';
+  var r=buyCost(c, Math.min(qty, Math.max(1,CARAVAN_CAP-cargo)));
+  _lastBuyAvg = r.avg; // keep last avg for profit estimate
+  return '-'+Math.round(r.total);
+}
+function sellPreview(){
+  var c=cities[caravanCity]; if(cargo<=0) return '';
+  var r=sellRevenue(c, Math.min(qty,cargo));
+  return '+'+Math.round(r.total);
+}
+
+function layoutPanelButtons(p){
+  var s=S();
+  var rowGap=8*s;
+  var stepY = p.y + clampF(56*s,46,72);
+  var stepH = clampF(34*s,30,46);
+  // stepper occupies left ~38%
+  var stW = p.w*0.40;
+  var minusW = stepH;
+  L.btns = L.btns || {};
+  var b = L.btns;
+  b.minus = { x:p.x+12*s, y:stepY, w:minusW, h:stepH };
+  b.plus  = { x:p.x+12*s+stW-minusW, y:stepY, w:minusW, h:stepH };
+  b.qtybox= { x:b.minus.x+minusW, y:stepY, w:stW-minusW*2, h:stepH };
+  b.maxq  = { x:p.x+12*s+stW+8*s, y:stepY, w:p.w*0.18, h:stepH };
+  // primary 2 buttons fill the right side
+  var rx = b.maxq.x + b.maxq.w + 8*s;
+  var rw = (p.x+p.w-12*s) - rx;
+  var halfW = (rw-rowGap)/2;
+  b.buy  = { x:rx, y:stepY, w:halfW, h:stepH };
+  b.sell = { x:rx+halfW+rowGap, y:stepY, w:halfW, h:stepH };
+  b.move = { x:rx, y:stepY, w:halfW, h:stepH };
+  // secondary row
+  var row2Y = stepY + stepH + rowGap;
+  var row2H = clampF(34*s,30,46);
+  var fullW = p.w-24*s;
+  var h2 = (fullW-rowGap)/2;
+  b.endday = { x:p.x+12*s, y:row2Y, w:h2, h:row2H };
+  b.loan   = { x:p.x+12*s+h2+rowGap, y:row2Y, w:h2, h:row2H };
+}
+
+function drawStepper(c, b){
+  var s=S();
+  // minus
+  drawSmallBtn(c, b.minus, '−');
+  drawSmallBtn(c, b.plus, '+');
+  // qty box
+  c.fillStyle='rgba(0,0,0,0.4)'; GF.rr(c, b.qtybox.x, b.qtybox.y, b.qtybox.w, b.qtybox.h, 6*s); c.fill();
+  c.fillStyle='#fff'; c.font='bold '+clampF(18*s,14,24)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText(qty, b.qtybox.x+b.qtybox.w/2, b.qtybox.y+b.qtybox.h/2+1*s);
+  // max button
+  drawSmallBtn(c, b.maxq, GF.t('maxqty'));
+}
+function drawSmallBtn(c, r, label){
+  var s=S();
+  c.fillStyle='rgba(90,70,45,0.9)'; GF.rr(c, r.x, r.y, r.w, r.h, 6*s); c.fill();
+  c.strokeStyle='rgba(255,210,120,0.3)'; c.lineWidth=1*s; GF.rr(c, r.x, r.y, r.w, r.h, 6*s); c.stroke();
+  c.fillStyle='#ffe2a0'; c.font='bold '+clampF(15*s,12,20)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText(label, r.x+r.w/2, r.y+r.h/2+1*s);
+}
+function drawBtn(c, r, label, ca, cb, disabled, sub){
+  if (!r) return;
+  var s=S();
+  c.save();
+  if (disabled) c.globalAlpha=0.5;
+  var g=c.createLinearGradient(r.x,r.y,r.x,r.y+r.h);
+  g.addColorStop(0,ca); g.addColorStop(1,cb);
+  c.fillStyle=g; GF.rr(c, r.x, r.y, r.w, r.h, 8*s); c.fill();
+  c.strokeStyle='rgba(255,255,255,0.18)'; c.lineWidth=1*s; GF.rr(c, r.x, r.y, r.w, r.h, 8*s); c.stroke();
+  c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle';
+  if (sub){
+    c.font='bold '+clampF(14*s,11,18)+'px sans-serif';
+    c.fillText(label, r.x+r.w/2, r.y+r.h*0.36);
+    c.font='bold '+clampF(11*s,9,14)+'px sans-serif'; c.fillStyle='rgba(255,255,255,0.85)';
+    c.fillText(sub, r.x+r.w/2, r.y+r.h*0.72);
+  } else {
+    c.font='bold '+clampF(15*s,12,20)+'px sans-serif';
+    c.fillText(label, r.x+r.w/2, r.y+r.h/2+1*s);
+  }
+  c.restore();
+}
+
+function drawFloats(c){
+  var s=S();
+  for (var i=0;i<floats.length;i++){
+    var f=floats[i];
+    c.save(); c.globalAlpha=GF.clamp(f.life,0,1);
+    c.font='bold '+clampF(17*s,13,24)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+    c.fillStyle='rgba(0,0,0,0.5)'; c.fillText(f.txt, f.x+1*s, f.y+1*s);
+    c.fillStyle=f.col; c.fillText(f.txt, f.x, f.y);
+    c.restore();
+  }
+}
+
+function drawBanner(c){
+  if (!banner) return;
+  var s=S(), W=GF.W;
+  var a = banner.t<0.3 ? banner.t/0.3 : (banner.t>2.6 ? (3.0-banner.t)/0.4 : 1);
+  a = GF.clamp(a,0,1);
+  var by = L.topH + 12*s;
+  c.save(); c.globalAlpha=a;
+  c.font='bold '+clampF(18*s,14,24)+'px sans-serif';
+  var tw = c.measureText(banner.title).width;
+  var dw = banner.desc? c.measureText(banner.desc).width : 0;
+  var bw = Math.max(tw,dw)+40*s;
+  var bh = banner.desc? clampF(54*s,44,72) : clampF(36*s,30,48);
+  var bx = W/2-bw/2;
+  c.fillStyle='rgba(20,12,6,0.9)'; GF.rr(c, bx, by, bw, bh, 10*s); c.fill();
+  c.strokeStyle=banner.col; c.lineWidth=2*s; GF.rr(c, bx, by, bw, bh, 10*s); c.stroke();
+  c.fillStyle=banner.col; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText(banner.title, W/2, by + (banner.desc? bh*0.34 : bh/2));
+  if (banner.desc){ c.font=clampF(13*s,11,17)+'px sans-serif'; c.fillStyle='#eee';
+    c.fillText(banner.desc, W/2, by+bh*0.7); }
+  c.restore();
+}
+
+// ── ICON HELPERS (vector, never emoji) ───────────────────────────────────────
+function drawCoin(c, x, y, r){
+  c.save();
+  c.fillStyle='#ffcf3a'; c.beginPath(); c.arc(x,y,r,0,Math.PI*2); c.fill();
+  c.strokeStyle='#c89a1a'; c.lineWidth=Math.max(1,r*0.18); c.stroke();
+  c.fillStyle='#e8b520'; c.font='bold '+(r*1.3)+'px serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.restore();
+}
+function drawGrain(c, x, y, r){
+  c.save(); c.fillStyle='#e8c66a';
+  c.beginPath(); c.ellipse(x,y,r*0.55,r,0,0,Math.PI*2); c.fill();
+  c.strokeStyle='#b8924a'; c.lineWidth=Math.max(1,r*0.12);
+  c.beginPath(); c.moveTo(x,y-r); c.lineTo(x,y+r); c.stroke();
+  c.restore();
+}
+function drawTri(c, x, y, r, up, col){
+  c.save(); c.fillStyle=col; c.beginPath();
+  if (up){ c.moveTo(x,y-r); c.lineTo(x-r,y+r); c.lineTo(x+r,y+r); }
+  else { c.moveTo(x,y+r); c.lineTo(x-r,y-r); c.lineTo(x+r,y-r); }
+  c.closePath(); c.fill(); c.restore();
+}
+function lighten(hex, amt){
+  var n=parseInt(hex.slice(1),16); var r=(n>>16)+amt, g=((n>>8)&255)+amt, b=(n&255)+amt;
+  r=GF.clamp(r,0,255); g=GF.clamp(g,0,255); b=GF.clamp(b,0,255);
+  return 'rgb('+r+','+g+','+b+')';
+}
+
+// ── TUTORIAL OVERLAY (hands-on, points at the action) ────────────────────────
+function drawTutorial(c){
+  var s=S();
+  c.save(); c.fillStyle='rgba(0,0,0,0.32)'; c.fillRect(0,0,GF.W,GF.H); c.restore();
+  var step = TUT_STEPS[tutStep];
+  var tgt = tutTarget();
+  // pulse ring + hand on the target
+  if (tgt){
+    var pulse=0.5+0.5*Math.sin(performance.now()/200);
+    c.save(); c.strokeStyle='#ffeb3b'; c.lineWidth=3*s+pulse*2*s; c.globalAlpha=0.9;
+    c.shadowColor='#ffeb3b'; c.shadowBlur=14*s;
+    if (tgt.r){ c.beginPath(); c.arc(tgt.x,tgt.y,tgt.r+pulse*10*s,0,Math.PI*2); c.stroke(); }
+    else { GF.rr(c, tgt.x-4*s, tgt.y-4*s, tgt.w+8*s, tgt.h+8*s, 8*s); c.stroke(); }
+    c.restore();
+    drawTutHand(c, tgt.x + (tgt.w?tgt.w/2:0), (tgt.y + (tgt.h?tgt.h/2:0)) + 18*s);
+  }
+  // caption pill
+  var txt = GF.t(step);
+  c.font='bold '+clampF(15*s,12,19)+'px sans-serif';
+  var tw=c.measureText(txt).width;
+  var maxW=GF.W*0.86;
+  if (tw>maxW){ /* keep simple, font fits mostly */ }
+  var pillW=Math.min(tw+28*s, GF.W-20*s), pillH=clampF(38*s,32,50);
+  var pillX=GF.W/2-pillW/2, pillY = tgt? GF.clamp((tgt.y - (tgt.r||0) - pillH-16*s), L.topH+6*s, GF.H-pillH-10*s) : GF.H*0.4;
+  if (tgt && tgt.h && pillY < L.topH+6*s) pillY = tgt.y + tgt.h + 16*s;
+  c.save(); c.fillStyle='rgba(16,20,30,0.92)'; GF.rr(c, pillX, pillY, pillW, pillH, pillH/2); c.fill();
+  c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle';
+  c.font='bold '+clampF(14*s,11,18)+'px sans-serif';
+  c.fillText(txt, GF.W/2, pillY+pillH/2+1*s);
+  c.restore();
+}
+function tutTarget(){
+  layoutPanelButtons(L.panel);
+  var b=L.btns;
+  if (tutStep===0){ return rectCenter(b.sell); }            // SELL here
+  if (tutStep===1){ // point at a cheap (surplus) city
+    for (var i=0;i<cities.length;i++){ if(cities[i].unlocked && cities[i].bias<0 && i!==caravanCity){ var p=cityPx(cities[i]); return {x:p.x,y:p.y,r:CITY_R*S()}; } }
+    return null;
+  }
+  if (tutStep===2){ return rectCenter(b.move); }            // TRAVEL
+  if (tutStep===3){ return rectCenter(b.buy); }             // BUY
+  return null;
+}
+function rectCenter(r){ if(!r) return null; return { x:r.x, y:r.y, w:r.w, h:r.h }; }
+function drawTutHand(c, x, y){
+  var s=S(), pulse=(performance.now()%1300)/1300, press=pulse<0.22;
+  c.save(); c.translate(x, y + (press?0:8*s)); c.scale(s*(press?0.9:1), s*(press?0.9:1)); c.rotate(-0.26);
+  c.lineJoin='round'; c.lineCap='round';
+  c.shadowColor='rgba(0,0,0,0.32)'; c.shadowBlur=7; c.shadowOffsetX=2; c.shadowOffsetY=4;
+  c.fillStyle='#ffd9b0'; c.strokeStyle='#7a4e2c'; c.lineWidth=2.4;
+  rrPath(c,-15,23,30,33,13); c.fill(); c.stroke();
+  rrPath(c,-6,0,12,30,6); c.fill(); c.stroke();
+  c.restore();
+}
+function rrPath(c,x,y,w,h,r){ r=Math.min(r,w/2,h/2); c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); }
+
+// ── HOW-TO PANEL (reopened by ? button) ──────────────────────────────────────
+function drawHowto(c){
+  var s=S(), W=GF.W, H=GF.H;
+  c.save(); c.fillStyle='rgba(0,0,0,0.72)'; c.fillRect(0,0,W,H);
+  var pw=Math.min(W*0.9, 460*s), ph=Math.min(H*0.8, 440*s);
+  var px=W/2-pw/2, py=H/2-ph/2;
+  c.fillStyle='#241a10'; GF.rr(c, px, py, pw, ph, 16*s); c.fill();
+  c.strokeStyle='rgba(255,210,120,0.4)'; c.lineWidth=2*s; GF.rr(c, px, py, pw, ph, 16*s); c.stroke();
+  c.fillStyle='#ffd23a'; c.font='bold '+clampF(22*s,16,30)+'px sans-serif'; c.textAlign='center'; c.textBaseline='top';
+  c.fillText(GF.t('howto'), W/2, py+18*s);
+  var lines=[GF.t('tut_goal'),GF.t('tut_controls'),GF.t('tut_win'),GF.t('tut_lose'),GF.t('tut_tip')];
+  c.textAlign='left'; var ly=py+58*s; var lh=clampF(30*s,24,42);
+  c.font=clampF(14*s,11,18)+'px sans-serif';
+  for (var i=0;i<lines.length;i++){
+    c.fillStyle = i===4? '#ffe2a0' : '#eee';
+    wrapText(c, lines[i], px+20*s, ly, pw-40*s, clampF(19*s,15,24));
+    ly += lh + measureWrapExtra(c, lines[i], pw-40*s, clampF(19*s,15,24));
+  }
+  // OK button
+  var bw=clampF(140*s,110,200), bh=clampF(46*s,40,60), bx=W/2-bw/2, by=py+ph-bh-16*s;
+  var g=c.createLinearGradient(bx,by,bx,by+bh); g.addColorStop(0,'#3f8f4a'); g.addColorStop(1,'#2d6e38');
+  c.fillStyle=g; GF.rr(c, bx, by, bw, bh, 10*s); c.fill();
+  c.fillStyle='#fff'; c.font='bold '+clampF(17*s,13,22)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText(GF.t('back'), W/2, by+bh/2+1*s);
+  c.restore();
+  L.howtoOk = { x:bx, y:by, w:bw, h:bh };
+}
+function wrapText(c, text, x, y, maxW, lh){
+  var words=String(text).split(/\s+/), line='', yy=y;
+  for (var i=0;i<words.length;i++){
+    var probe=line?line+' '+words[i]:words[i];
+    if (c.measureText(probe).width>maxW && line){ c.fillText(line,x,yy); line=words[i]; yy+=lh; }
+    else line=probe;
+  }
+  if (line) c.fillText(line,x,yy);
+}
+function measureWrapExtra(c, text, maxW, lh){
+  var words=String(text).split(/\s+/), line='', lines=0;
+  for (var i=0;i<words.length;i++){
+    var probe=line?line+' '+words[i]:words[i];
+    if (c.measureText(probe).width>maxW && line){ lines++; line=words[i]; } else line=probe;
+  }
+  return lines*lh;
+}
+
+// ── MENU / END OVERLAYS ──────────────────────────────────────────────────────
+function drawMenu(c){
+  var s=S(), W=GF.W, H=GF.H;
+  // title
+  c.textAlign='center';
+  c.fillStyle='#fff'; c.shadowColor='#7a4e28'; c.shadowBlur=20*s;
+  c.font='bold '+clampF(44*s,28,64)+'px Georgia, serif'; c.textBaseline='middle';
+  c.fillText(GF.t('title'), W/2, H*0.16); c.shadowBlur=0;
+  c.fillStyle='#ffe2a0'; c.font=clampF(14*s,11,18)+'px sans-serif';
+  wrapText2(c, GF.t('sub'), W/2, H*0.225, W*0.84, clampF(19*s,15,24));
+
+  // how-to box on the menu (under title, above PLAY) — HARD RULE
+  var bw=Math.min(W*0.86, 440*s);
+  var bx=W/2-bw/2, by=H*0.30;
+  var lines=[GF.t('tut_goal'),GF.t('tut_controls'),GF.t('tut_win'),GF.t('tut_lose'),GF.t('tut_tip')];
+  // compute height
+  c.font=clampF(13.5*s,11,17)+'px sans-serif';
+  var totalH=14*s; var lhs=[];
+  for (var i=0;i<lines.length;i++){ var ex=measureWrapExtra(c, lines[i], bw-28*s, clampF(18*s,14,22))+clampF(18*s,14,22); lhs.push(ex); totalH+=ex; }
+  c.fillStyle='rgba(24,15,7,0.8)'; GF.rr(c, bx, by, bw, totalH+10*s, 12*s); c.fill();
+  c.strokeStyle='rgba(255,210,120,0.25)'; c.lineWidth=1.5*s; GF.rr(c, bx, by, bw, totalH+10*s, 12*s); c.stroke();
+  c.textAlign='left'; var ly=by+12*s;
+  for (var j=0;j<lines.length;j++){
+    c.fillStyle = j===4? '#ffe2a0':'#eee';
+    wrapText(c, lines[j], bx+14*s, ly, bw-28*s, clampF(18*s,14,22));
+    ly += lhs[j];
+  }
+
+  // PLAY button via gf-lib overlay-style (but we draw our own + register button)
+  var pbw=Math.min(W*0.7, 300*s), pbh=clampF(58*s,46,76);
+  var pbx=W/2-pbw/2, pby=by+totalH+34*s;
+  if (pby+pbh > H-20*s) pby = H-pbh-20*s;
+  drawPlayBtn(c, pbx, pby, pbw, pbh, GF.t('play'));
+  // register with gf-lib's buttons array so __gfPlayRect + click handler work
+  registerOverlayButton(pbx, pby, pbw, pbh, function(){ startRun(false); });
+  // mute hint corner
+  drawTopButtonsMenu(c);
+}
+function drawEndOverlay(c, win){
+  var s=S(), W=GF.W, H=GF.H;
+  c.save(); c.fillStyle='rgba(0,0,0,0.6)'; c.fillRect(0,0,W,H); c.restore();
+  c.textAlign='center';
+  c.fillStyle = win? '#ffd23a':'#ff7a6a'; c.shadowColor=win?'#ffd23a':'#ff5a4a'; c.shadowBlur=24*s;
+  c.font='bold '+clampF(40*s,26,58)+'px Georgia, serif'; c.textBaseline='middle';
+  c.fillText(win?GF.t('win'):GF.t('gameover'), W/2, H*0.30); c.shadowBlur=0;
+  c.fillStyle='#fff'; c.font=clampF(16*s,12,22)+'px sans-serif';
+  c.fillText(win?GF.t('winsub'):GF.t('bankruptsub'), W/2, H*0.40);
+  // stats
+  c.fillStyle='#ffe2a0'; c.font='bold '+clampF(18*s,14,24)+'px sans-serif';
+  c.fillText(GF.t('net')+': '+netWorth()+'   ·   '+GF.t('day')+' '+day, W/2, H*0.48);
+  c.fillStyle='#cdd'; c.font=clampF(14*s,11,18)+'px sans-serif';
+  c.fillText(tierName(tier), W/2, H*0.535);
+  // buttons
+  var pbw=Math.min(W*0.7, 300*s), pbh=clampF(56*s,46,72);
+  var pbx=W/2-pbw/2, pby=H*0.60;
+  registerOverlayButton(pbx, pby, pbw, pbh, function(){ startRun(false); });
+  drawPlayBtn(c, pbx, pby, pbw, pbh, GF.t('retry'));
+  if (win){
+    var pby2=pby+pbh+12*s;
+    registerOverlayButton(pbx, pby2, pbw, pbh, function(){ winShown=false; gs='PLAYING'; GF.gameStarted(); GF.sfx('tap'); saveRun(); });
+    drawPlayBtn2(c, pbx, pby2, pbw, pbh, GF.t('cont'));
+  }
+}
+function drawPlayBtn(c, x, y, w, h, label){
+  var s=S();
+  var g=c.createLinearGradient(x,y,x,y+h); g.addColorStop(0,'#3f9f4a'); g.addColorStop(1,'#2d7e38');
+  c.fillStyle=g; GF.rr(c, x, y, w, h, 12*s); c.fill();
+  c.strokeStyle='rgba(255,255,255,0.25)'; c.lineWidth=1.5*s; GF.rr(c, x, y, w, h, 12*s); c.stroke();
+  c.fillStyle='#fff'; c.font='bold '+clampF(20*s,15,28)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText(label, x+w/2, y+h/2+1*s);
+}
+function drawPlayBtn2(c, x, y, w, h, label){
+  var s=S();
+  var g=c.createLinearGradient(x,y,x,y+h); g.addColorStop(0,'#5a4a7a'); g.addColorStop(1,'#43365e');
+  c.fillStyle=g; GF.rr(c, x, y, w, h, 12*s); c.fill();
+  c.fillStyle='#fff'; c.font='bold '+clampF(18*s,14,24)+'px sans-serif'; c.textAlign='center'; c.textBaseline='middle';
+  c.fillText(label, x+w/2, y+h/2+1*s);
+}
+function drawTopButtonsMenu(c){
+  // mute button in menu corner
+  var s=S(), bb=clampF(30*s,26,40);
+  var r={ x:GF.W-bb-8*s, y:8*s, w:bb, h:bb };
+  c.save(); c.fillStyle='rgba(28,18,9,0.85)';
+  c.beginPath(); c.arc(r.x+r.w/2, r.y+r.h/2, r.w/2, 0, Math.PI*2); c.fill();
+  GF.drawMuteIcon(c, r.x+r.w/2, r.y+r.h/2, r.w*0.32, GF.muted); c.restore();
+  L.menuMute = r;
+}
+function wrapText2(c, text, x, y, maxW, lh){ wrapText(c, text, x, y, maxW, lh); }
+
+// Overlay (MENU/GAMEOVER/WIN) buttons live in our own registry — gf-lib's
+// `buttons[]` is private to the lib. Each draw frame re-registers them; the
+// real implementation + the click handler are wired near the IIFE close so
+// __gfPlayRect + QA gate taps resolve the PRIMARY button.
+var registerOverlayButton = function(){};
+var _frameId = 0;
+
+// ── PERSIST ──────────────────────────────────────────────────────────────────
+function saveRun(){ if (GF.saveRun) GF.saveRun(); }
+
+// ── BOT HOOKS (balance probe) ────────────────────────────────────────────────
+function botActions(){
+  if (gs!=='PLAYING') return [];
+  var acts=[];
+  var here=cities[caravanCity];
+  if (cargo>0) acts.push('sell');
+  if (cargo<CARAVAN_CAP && here.stock>0 && cash>here.price) acts.push('buy');
+  // moves to adjacent unlocked cities
+  var ns=neighbors(caravanCity);
+  for (var i=0;i<ns.length;i++){ if(cities[ns[i]].unlocked) acts.push('move@'+ns[i]); }
+  acts.push('endday');
+  return acts;
+}
+function botDo(a){
+  if (gs!=='PLAYING') return;
+  if (a==='sell'){ qty=Math.min(cargo,4); doSell(); }
+  else if (a==='buy'){ qty=Math.min(4, CARAVAN_CAP-cargo, Math.max(1,maxBuyable())); doBuy(); }
+  else if (a==='endday'){ endDay(); }
+  else if (a && a.indexOf('move@')===0){ var idx=parseInt(a.slice(5),10); selCity=idx; doMove(idx); }
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 390, designH: 844,
+  strings: STRINGS,
+  saveKey: SAVE_KEY,
+  onReady: function(){
+    // restore mute pref handled by gf-lib; build a fresh world for menu
+    buildCities();
+    var p = cityPx(cities[0]); caravanAnim.x=p.x; caravanAnim.y=p.y;
+    GF.startMusic({ preset:'cozy', muted:GF.muted });
+
+    // persist run state across reload (Yandex 1.9)
+    GF.persist(SAVE_KEY+'_run_v1',
+      function(){
+        return {
+          gs:gs, cash:cash, debt:debt, day:day, movesLeft:movesLeft, tier:tier,
+          cargo:cargo, caravanCity:caravanCity, selCity:selCity, qty:qty,
+          rivalActive:rivalActive, rivalCity:rivalCity, cap:CARAVAN_CAP,
+          cities: cities.map(function(c){ return { price:c.price, prevPrice:c.prevPrice, stock:c.stock,
+            starving:c.starving, unlocked:c.unlocked, bandit:c.bandit, eventPriceMul:c.eventPriceMul }; }),
+        };
+      },
+      function(s){
+        if (!s) return;
+        buildCities();
+        gs = (s.gs==='PLAYING'||s.gs==='WIN') ? s.gs : (s.gs==='GAMEOVER'?'GAMEOVER':'MENU');
+        cash=s.cash; debt=s.debt||0; day=s.day||1; movesLeft=(s.movesLeft==null?MOVES_PER_DAY:s.movesLeft);
+        tier=s.tier||0; cargo=s.cargo||0; caravanCity=s.caravanCity||0; selCity=s.selCity||0;
+        qty=s.qty||1; rivalActive=!!s.rivalActive; rivalCity=s.rivalCity||0;
+        if (s.cap) CARAVAN_CAP=s.cap;
+        if (s.cities){ for (var i=0;i<cities.length && i<s.cities.length;i++){ var sc=s.cities[i], cc=cities[i];
+          cc.price=sc.price; cc.prevPrice=sc.prevPrice; cc.stock=sc.stock; cc.starving=sc.starving;
+          cc.unlocked=sc.unlocked; cc.bandit=sc.bandit||0; cc.eventPriceMul=sc.eventPriceMul||1; } }
+        recomputeBest();
+        var pp=cityPx(cities[caravanCity]); caravanAnim.x=pp.x; caravanAnim.y=pp.y;
+      }
+    );
+    if (gs==='PLAYING') gs='PLAYING'; else if (gs!=='WIN' && gs!=='GAMEOVER') gs='MENU';
+
+    GF.exposeState(function(){
+      return {
+        gs: gs,
+        cash: Math.round(cash), debt: Math.round(debt), netWorth: netWorth(),
+        day: day, movesLeft: movesLeft, tier: tier, cargo: cargo,
+        caravanCity: caravanCity, selCity: selCity, qty: qty,
+        rivalActive: rivalActive, cap: CARAVAN_CAP, unlockedCities: unlockedCount(),
+        spread: Math.round(spreadPerUnit()),
+        START_CASH:START_CASH, MIN_CASH:MIN_CASH, GOAL_NET:GOAL_NET, CARAVAN_CAP:CARAVAN_CAP,
+        MOVES_PER_DAY:MOVES_PER_DAY, UPKEEP_PER_DAY:UPKEEP_PER_DAY, IMPACT_COEF:IMPACT_COEF,
+        PRICE_RECOVER:PRICE_RECOVER, DEMAND_VOL:DEMAND_VOL, SPOIL_RATE:SPOIL_RATE,
+        EVENT_EVERY:EVENT_EVERY, LOAN_INTEREST:LOAN_INTEREST, FAMINE_PENALTY:FAMINE_PENALTY,
+        TIER_THRESH:TIER_THRESH,
+      };
+    });
+    GF.exposeBot(botActions, botDo);
+
+    // reachability gate: every interactive rect on the current screen, all in
+    // screen px (no scroll regions in this game -> scrollMaxY 0).
+    GF.exposeReach(function(){
+      layout();
+      var items=[];
+      if (gs==='PLAYING'){
+        layoutPanelButtons(L.panel);
+        var b=L.btns;
+        ['minus','plus','qtybox','maxq','buy','sell','move','endday','loan'].forEach(function(k){
+          if (b[k]) items.push({ id:k, x:b[k].x, y:b[k].y, w:b[k].w, h:b[k].h });
+        });
+        items.push({ id:'help', x:L.helpBtn.x, y:L.helpBtn.y, w:L.helpBtn.w, h:L.helpBtn.h });
+        items.push({ id:'mute', x:L.muteBtn.x, y:L.muteBtn.y, w:L.muteBtn.w, h:L.muteBtn.h });
+        for (var i=0;i<cities.length;i++){ if(!cities[i].unlocked) continue; var p=cityPx(cities[i]);
+          items.push({ id:'city_'+cities[i].id, x:p.x-CITY_R*S(), y:p.y-CITY_R*S(), w:CITY_R*2*S(), h:CITY_R*2*S() }); }
+      } else {
+        for (var j=0;j<_overlayBtns.length;j++){ var o=_overlayBtns[j]; items.push({ id:'btn'+j, x:o.x, y:o.y, w:o.w, h:o.h }); }
+      }
+      return { screen: gs, items: items, viewportH: GF.H, scrollMaxY: 0 };
+    });
+    GF.exposeTour([
+      { name:'menu', go:function(){ gs='MENU'; } },
+      { name:'play', go:function(){ window._silent=true; startRun(true); window._silent=false; } },
+      { name:'gameover', go:function(){ window._silent=true; startRun(true); cash=-5; doGameOver(); window._silent=false; } },
+    ]);
+
+    if (window.__GF_AUTOSTART && !window._silent){
+      try{ localStorage.setItem(SEEN_TUT_KEY,'1'); }catch(e){}
+      startRun(true);   // drop straight into PLAYING, suppress tutorial
+    }
+  },
+  onUpdate: function(dt){ _frameId++; update(dt); },
+  onDraw: draw,
+});
+
+// gf-lib doesn't expose button push/clear; add minimal hooks so our overlays
+// integrate with its click handler + __gfPlayRect. We monkey-bridge via a tiny
+// shared array on window that gf-lib's checkButtons reads — but since gf-lib owns
+// `buttons`, we instead handle overlay taps ourselves AND mirror to __gfPlayRect.
+// (Simpler + robust: our own click handler already covers PLAYING; for overlays
+// we add a dedicated handler here.)
+(function(){
+  function overlayTap(x,y){
+    if (gs==='MENU' || gs==='GAMEOVER' || gs==='WIN'){
+      // menu mute
+      if (gs==='MENU' && L.menuMute && hit(L.menuMute,x,y)){ var m=GF.toggleMute(); GF.setMusicMuted(m); GF.sfx('tap'); return true; }
+      if (_overlayBtns){
+        for (var i=0;i<_overlayBtns.length;i++){ var b=_overlayBtns[i]; if (hit(b,x,y)){ b.fn(); return true; } }
+      }
+    }
+    return false;
+  }
+  canvas.addEventListener('mousedown', function(e){ var p=evtPos(e); overlayTap(p.x,p.y); });
+  canvas.addEventListener('touchstart', function(e){ var p=evtPos(e); overlayTap(p.x,p.y); }, {passive:true});
+  // howto OK tap
+  function howtoTap(x,y){ if (showHowto && L.howtoOk && hit(L.howtoOk,x,y)){ showHowto=false; GF.sfx('tap'); return true; } return false; }
+  canvas.addEventListener('mousedown', function(e){ var p=evtPos(e); howtoTap(p.x,p.y); });
+  canvas.addEventListener('touchstart', function(e){ var p=evtPos(e); howtoTap(p.x,p.y); }, {passive:true});
+})();
+
+// overlay button registry (our own, since gf-lib's `buttons` is private).
+// Cleared once per draw frame, then re-filled by the overlay draw fns.
+var _overlayBtns = [];
+var _ovFrame = -1;
+registerOverlayButton = function(x,y,w,h,fn){
+  if (_ovFrame !== _frameId){ _ovFrame=_frameId; _overlayBtns.length=0; }
+  _overlayBtns.push({ x:x,y:y,w:w,h:h,fn:fn });
+};
+// expose PLAY rect for QA gates (primary overlay button = first registered)
+window.__gfPlayRect = function(){
+  try{
+    if (!_overlayBtns.length) return null;
+    var b=_overlayBtns[0], r=canvas.getBoundingClientRect();
+    if (!r.width || !canvas.width) return null;
+    var sx=r.width/canvas.width, sy=r.height/canvas.height;
+    return { x:r.left+b.x*sx, y:r.top+b.y*sy, w:b.w*sx, h:b.h*sy,
+             cx:r.left+(b.x+b.w/2)*sx, cy:r.top+(b.y+b.h/2)*sy };
+  }catch(e){ return null; }
+};
+
+// ── TEST / SCREENSHOT SEAMS ──────────────────────────────────────────────────
+window._jumpLevel = function(n){
+  window._silent=true;
+  startRun(true);
+  // advance a few days so the map is populated + a tier or two crossed
+  var steps = (n|0)>=99 ? 0 : 3;
+  if ((n|0) >= 99){
+    // force bankruptcy
+    cash = -5; doGameOver();
+  } else {
+    cash = 600; tier=1; cities[3].unlocked=true; recomputeBest();
+    cargo = 6; selCity = 1;
+  }
+  window._silent=false;
+};
+window._setupForScreenshot = function(level){
+  window._silent=true;
+  startRun(true);
+  try{ localStorage.setItem(SEEN_TUT_KEY,'1'); }catch(e){}
+  tutOn=false;
+  // mid-trade populated state: some wealth, multiple cities, a cargo load, an event banner
+  cash = 480; tier = 2; CARAVAN_CAP = 14;
+  for (var i=0;i<cities.length;i++){ if (cities[i].unlockTier<=2) cities[i].unlocked=true; }
+  cargo = 8;
+  cities[3].price = cities[3].base*1.7;     // dear famine spike (Dunhuang)
+  cities[0].price = cities[0].base*0.85;    // cheap green Kashgar
+  cities[2].price = cities[2].base*0.88;    // another cheap node (Khotan)
+  cities[1].price = cities[1].base*1.5;     // dear Turfan
+  _lastBuyAvg = 10;                          // low basis -> visible profit on the sell
+  cities[1].starving = false;
+  rivalActive = true; rivalCity = 5;
+  qty = 4;
+  showBanner(GF.t('ev_famine')+': '+cityName(cities[3]), GF.t('ev_famine_d'), '#ff7a4a');
+  // variant via `level`: 0 = sitting in cheap Kashgar with dear Turfan SELECTED
+  //   (shows a big +spread + TRAVEL); 1 = AT dear Dunhuang ready to SELL (+revenue).
+  if ((level|0) === 0){
+    caravanCity = 0; selCity = 1;            // cheap -> dear, adjacent (edge 0-1)
+  } else {
+    caravanCity = 3; selCity = 3;            // at the dear famine city -> SELL active
+  }
+  recomputeBest();
+  var p=cityPx(cities[caravanCity]); caravanAnim.x=p.x; caravanAnim.y=p.y;
+  window._silent=false;
+};
+
+})();
+</script>
+</body>
+</html>
