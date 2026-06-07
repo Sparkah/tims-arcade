@@ -23,6 +23,7 @@
 import { parseCookie } from '../_lib/cookie.js';
 import { creditTokens } from '../_lib/meta.js';
 import { isValidSlug } from '../_lib/validate.js';
+import { recordActiveDay } from '../_lib/cohort.js';
 import { checkRate } from '../_lib/rateLimit.js';
 
 export async function onRequestPost({ request, env }) {
@@ -65,6 +66,10 @@ export async function onRequestPost({ request, env }) {
       if (featured === slug) minutes *= 2;
       await creditTokens(env, uid, minutes);
     }
+    // Retention cohort: log today as an active day for this uid. recordActiveDay
+    // write-gates to ~1 KV write/uid/day (no-ops once today is already recorded),
+    // and ANY visible-time heartbeat counts the return so short sessions aren't missed.
+    await recordActiveDay(env, uid, dateUtc);
   }
 
   return new Response(null, { status: 204 });
