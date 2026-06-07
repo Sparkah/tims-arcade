@@ -32,8 +32,12 @@ summary=""
 
 for a in $ASSETS; do
   [[ -f "$a" ]] || continue
-  # macOS BSD md5 -q; pin to first 8 hex chars for short query strings
-  h=$(md5 -q "$a" | cut -c1-8)
+  # Content hash, first 8 hex chars. md5 (macOS BSD) is in /sbin which launchd's
+  # minimal PATH omits — fall back to md5sum (Linux) / shasum (everywhere) so a
+  # cron/launchd run never silently skips cachebusting and ships stale CSS/JS.
+  if command -v md5 >/dev/null 2>&1; then h=$(md5 -q "$a" | cut -c1-8)
+  elif command -v md5sum >/dev/null 2>&1; then h=$(md5sum "$a" | cut -c1-8)
+  else h=$(shasum "$a" | cut -c1-8); fi
   # Escape dots for the regex
   escaped="${a//./\\.}"
   for html in *.html; do
