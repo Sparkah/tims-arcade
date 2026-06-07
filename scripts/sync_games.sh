@@ -33,6 +33,45 @@ if ! command -v jq >/dev/null; then
   exit 1
 fi
 
+# ── Anti-race guard: never copy a half-written game source ────────────────────
+# A build / iterate / promo sub-agent may be MID-WRITE on Games/<N>_<slug>/
+# index.html when sync runs (sync re-copies EVERY game every run, not just the
+# one being built — see recover_unshipped.sh:150). The Write tool truncates the
+# file then streams it, so for a window the source is incomplete; copying it then
+# ships a truncated source that references symbols defined LOWER in the file but
+# not yet flushed → "X is not defined" on the live gallery (2026-06-04 incident).
+#
+# Completeness sentinel: every finished game index.html ends with the closing
+# </html> tag (head → inline <script> → IIFE → </script></body></html>). A
+# truncated mid-stream write cannot contain that trailing tag, so this is a
+# reliable "is the source fully written?" probe — preferred over an mtime timing
+# heuristic. We scan the last bytes (locale-safe via LC_ALL=C; tolerant of
+# trailing whitespace/newlines) so we don't read the whole multi-hundred-KB file.
+src_is_complete() {
+  local f="$1"
+  [[ -s "$f" ]] || return 1                      # missing / zero-length = not ready
+  # Last 512 bytes, strip trailing ASCII whitespace, require it to END in </html>.
+  local tail_clean
+  tail_clean=$(LC_ALL=C tail -c 512 "$f" 2>/dev/null | LC_ALL=C tr -d ' \t\r\n')
+  [[ "$tail_clean" == *'</html>' ]]
+}
+
+# Atomic publish of text content into a gallery path: write to a temp sibling in
+# the SAME directory (so mv is a same-filesystem rename, i.e. atomic) then mv
+# over the destination. A concurrent reader / CF deploy never sees a partial
+# gallery file. Reads stdin → $1.
+publish_atomic() {
+  local dest="$1"
+  local tmp
+  tmp="$(mktemp "${dest}.sync.XXXXXX")" || return 1
+  if cat > "$tmp"; then
+    mv -f "$tmp" "$dest"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
 # Iterate entries
 COUNT=$(jq 'length' "$SRC")
 echo "Syncing $COUNT games from $SRC..."
@@ -66,12 +105,22 @@ for ((i = 0; i < COUNT; i++)); do
   # Copy index.html. If the source uses the multi-platform placeholder
   # (<!-- PLATFORM_SDK -->), substitute the gallery's SDK stub so the game
   # boots inside the iframe without hitting Yandex's real /sdk.js.
+  #
+  # GUARD: skip the copy if the source looks half-written (a build/iterate is
+  # mid-write). Keeping the PREVIOUS good gallery copy is strictly safer than
+  # overwriting it with a truncated one that throws "X is not defined" live.
   mkdir -p "$OUT_GAMES/$SLUG"
-  if grep -q '<!-- PLATFORM_SDK -->' "$GAME_DIR/index.html"; then
+  if ! src_is_complete "$GAME_DIR/index.html"; then
+    if [[ -f "$OUT_GAMES/$SLUG/index.html" ]]; then
+      echo "  ⚠ skip $SLUG index.html — source incomplete (mid-write?); kept existing gallery copy"
+    else
+      echo "  ⚠ skip $SLUG index.html — source incomplete (mid-write?) and no prior copy"
+    fi
+  elif grep -q '<!-- PLATFORM_SDK -->' "$GAME_DIR/index.html"; then
     sed 's|<!-- PLATFORM_SDK -->|<script src="/sdk.js"></script>|' \
-      "$GAME_DIR/index.html" > "$OUT_GAMES/$SLUG/index.html"
+      "$GAME_DIR/index.html" | publish_atomic "$OUT_GAMES/$SLUG/index.html"
   else
-    cp "$GAME_DIR/index.html" "$OUT_GAMES/$SLUG/index.html"
+    publish_atomic "$OUT_GAMES/$SLUG/index.html" < "$GAME_DIR/index.html"
   fi
 
   # Copy optional asset folders if they exist
@@ -84,9 +133,21 @@ for ((i = 0; i < COUNT; i++)); do
   # Suno task_id + account credit balance. Keep both in the Games/ source only.
   rm -f "$OUT_GAMES/$SLUG/audio/bg_full.mp3" "$OUT_GAMES/$SLUG/audio/audio_manifest.json"
 
-  # Copy optional sibling files used by the game-factory framework
+  # Copy optional sibling files used by the game-factory framework.
+  # gf-lib.js is a hard runtime dependency (defines GF.*), so a half-written
+  # copy breaks the game just like a truncated index.html ("GF is not defined").
+  # Same guard: the lib is an IIFE that closes with "})();", which a truncated
+  # mid-write cannot contain — skip + keep the prior good copy if it's missing.
   for sibling in gf-lib.js; do
-    [[ -f "$GAME_DIR/$sibling" ]] && cp "$GAME_DIR/$sibling" "$OUT_GAMES/$SLUG/$sibling"
+    [[ -f "$GAME_DIR/$sibling" ]] || continue
+    last_lib=$(LC_ALL=C tail -c 64 "$GAME_DIR/$sibling" 2>/dev/null | LC_ALL=C tr -d ' \t\r\n')
+    if [[ -s "$GAME_DIR/$sibling" && "$last_lib" == *'})();' ]]; then
+      publish_atomic "$OUT_GAMES/$SLUG/$sibling" < "$GAME_DIR/$sibling"
+    elif [[ -f "$OUT_GAMES/$SLUG/$sibling" ]]; then
+      echo "  ⚠ skip $SLUG $sibling — source incomplete (mid-write?); kept existing copy"
+    else
+      echo "  ⚠ skip $SLUG $sibling — source incomplete (mid-write?) and no prior copy"
+    fi
   done
 
   # ── Lab page artefacts (genesis + iteration log) ─────────────────────────
