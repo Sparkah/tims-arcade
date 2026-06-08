@@ -212,6 +212,83 @@ var CROWN_MULT       = 0.35; // each Crown adds +35% to delivery coins AND merge
 var ASCEND_CLEAR_TOP = 6;    // on ascend, also clear up to this many of the highest-tier critters (board relief)
 function crownMult() { return 1 + crowns * CROWN_MULT; }   // run multiplier from Crowns earned this run
 
+// ── PLAYTIME-DEEPENING - THE BAZAAR LEDGER (in-run contract chain) ──────────
+// The session was paced flat: after the shop (40 coins) and before the first
+// ascension (tier 10) the only goal was the slowly-ramping order tier, so a long
+// 10-15 min run was a uniform delivery grind with no near-term target. The LEDGER
+// adds an always-visible, escalating CONTRACT CHAIN scaled to a full session: one
+// active contract at a time (deliver N / merge N / reach tier T / earn N coins /
+// chain a combo / ascend), completing it pays an in-run COIN LUMP that grows with
+// chain depth AND lights a brief LEDGER BONUS (a temporary run coin/merge multiplier)
+// so completion bursts and accelerates the next stretch - then the next, harder
+// contract reveals. The chain is long enough that its last rungs land at ~12-15 min,
+// giving the late session a cadence of "next goal in N". PURELY IN-RUN: it resets
+// every run, banks NOTHING to the meta, and touches none of the meta/idle/daily/
+// festival/charm/monetization systems - it amplifies the EXISTING coin loop only.
+// kind ∈ deliver | merge | tier | earn | combo | crowns  (all already-tracked run metrics).
+var LEDGER_DEFS = [
+  { kind: 'deliver', goal: 3,   en: 'Fill 3 orders',        ru: 'Выполни 3 заказа' },
+  { kind: 'merge',   goal: 10,  en: 'Merge 10 times',       ru: 'Слей 10 раз' },
+  { kind: 'tier',    goal: 4,   en: 'Raise a Tuskling',     ru: 'Выведи Клычка' },
+  { kind: 'deliver', goal: 8,   en: 'Fill 8 orders',        ru: 'Выполни 8 заказов' },
+  { kind: 'earn',    goal: 300, en: 'Earn 300 coins',       ru: 'Заработай 300 монет' },
+  { kind: 'combo',   goal: 3,   en: 'Chain a x3 combo',     ru: 'Собери комбо x3' },
+  { kind: 'tier',    goal: 6,   en: 'Raise a Grumbeast',    ru: 'Выведи Ворчуна' },
+  { kind: 'deliver', goal: 16,  en: 'Fill 16 orders',       ru: 'Выполни 16 заказов' },
+  { kind: 'merge',   goal: 40,  en: 'Merge 40 times',       ru: 'Слей 40 раз' },
+  { kind: 'tier',    goal: 8,   en: 'Raise a Cragjaw',      ru: 'Выведи Скалозуба' },
+  { kind: 'earn',    goal: 1200,en: 'Earn 1200 coins',      ru: 'Заработай 1200 монет' },
+  { kind: 'combo',   goal: 5,   en: 'Chain a x5 combo',     ru: 'Собери комбо x5' },
+  { kind: 'tier',    goal: 10,  en: 'Crown a Bazaar King',  ru: 'Выведи Короля Базара' },
+  { kind: 'deliver', goal: 30,  en: 'Fill 30 orders',       ru: 'Выполни 30 заказов' },
+  { kind: 'crowns',  goal: 1,   en: 'Ascend once',          ru: 'Вознесись 1 раз' },
+  { kind: 'merge',   goal: 90,  en: 'Merge 90 times',       ru: 'Слей 90 раз' },
+  { kind: 'deliver', goal: 50,  en: 'Fill 50 orders',       ru: 'Выполни 50 заказов' },
+  { kind: 'crowns',  goal: 3,   en: 'Ascend 3 times',       ru: 'Вознесись 3 раза' },
+];
+var LEDGER_BONUS_MULT = 0.5;  // a completed contract grants +50% coins+merge gold...
+var LEDGER_BONUS_SEC  = 12;   // ...for this many seconds (the burst that accelerates the next stretch)
+var ledgerIdx = 0;            // index of the CURRENT (active) contract this run
+var ledgerProg = 0;           // progress on the current contract (delivers/merges count; tier/combo track a max)
+var ledgerBonusT = 0;         // seconds remaining on the active LEDGER BONUS multiplier
+var ledgerToast = null;       // { def, reward, t } - completion flourish (drawn mid-run)
+function ledgerCur() { return LEDGER_DEFS[ledgerIdx] || null; }   // the active contract, or null once all cleared
+function ledgerName(def) { return (GF.lang === 'ru' ? def.ru : def.en) || def.en; }
+// the in-run coin reward for completing the contract at index i - scales with chain
+// depth so late contracts pay enough to matter against a late-game coin balance.
+function ledgerReward(i) { return Math.round(40 * (1 + i * 0.9)); }
+// the multiplier the Ledger Bonus contributes RIGHT NOW (folds into coins + merge gold)
+function ledgerMult() { return ledgerBonusT > 0 ? (1 + LEDGER_BONUS_MULT) : 1; }
+// advance the active contract; kinds 'tier'/'combo'/'crowns' track a running MAX
+// (pass the absolute current value), the rest ACCUMULATE (pass +1 / +amount).
+function ledgerProgress(kind, amount) {
+  if (gs !== 'PLAYING') return;
+  var def = ledgerCur(); if (!def || def.kind !== kind) return;
+  if (kind === 'tier' || kind === 'combo' || kind === 'crowns') ledgerProg = Math.max(ledgerProg, amount);
+  else ledgerProg += amount;
+  if (ledgerProg >= def.goal) completeLedger();
+}
+function completeLedger() {
+  var def = ledgerCur(); if (!def) return;
+  var reward = ledgerReward(ledgerIdx);
+  coins += reward; score += reward;                 // in-run coin lump (feeds the existing shop / score)
+  ledgerBonusT = LEDGER_BONUS_SEC;                  // light the brief coin/merge burst
+  ledgerToast = { def: def, reward: reward, t: 3.4 };
+  ledgerIdx += 1;                                   // reveal the next, harder contract
+  ledgerProg = 0;
+  // re-seed progress for MAX-tracked kinds so an already-satisfied next contract fires
+  var nx = ledgerCur();
+  if (nx) {
+    if (nx.kind === 'tier')   ledgerProgress('tier', maxTierReached);
+    else if (nx.kind === 'crowns') ledgerProgress('crowns', crowns);
+    else if (nx.kind === 'combo')  ledgerProgress('combo', bestCombo);
+  }
+  GF.sfx('reward'); if (GF.happytime) GF.happytime();
+  GF.setShake(0.5);
+  GF.spawnFloat(GF.cx, (L.boardY || GF.cy) - 8 * GF.S, '+' + reward, '#ffd700');
+  GF.saveRun();
+}
+
 // ── M3 THE COLLECTION - playtime-unlocked, equippable Charms ───────────────
 // The multi-DAY pull. Charms unlock on a FIXED ladder of CUMULATIVE PLAYTIME
 // (meta.totalPlaySec), so "next charm in N min" is always a visible goal. Each
@@ -799,14 +876,17 @@ function tryActOn(srcIdx, dstKind, dstRef) {
   merges++;
   questProgress('merge', 1);
   questProgress('tier', resultTier);
+  ledgerProgress('merge', 1);            // Bazaar Ledger contract chain (in-run pacing)
+  ledgerProgress('tier', resultTier);
   if (resultTier >= 3) festEarn(1);   // big merges feed the festival track
   GF.sfx('merge');
   // combo
   combo = (comboTimer > 0) ? combo + 1 : 1;
   comboTimer = comboWindowMs;
   if (combo > bestCombo) bestCombo = combo;
-  // equipped Charm: flat gold per merge (Trade Gem / Midas Star), scaled by Crowns
-  var mg = Math.round(permMergeGold() * crownMult());
+  ledgerProgress('combo', combo);        // a fast merge chain can satisfy a combo contract
+  // equipped Charm: flat gold per merge (Trade Gem / Midas Star), scaled by Crowns + Ledger bonus
+  var mg = Math.round(permMergeGold() * crownMult() * ledgerMult());
   if (mg > 0) { coins += mg; score += mg; GF.spawnFloat(p2.x, p2.y - L.cell * 0.55, '+' + mg, '#ffd700'); }
   // first merge → unlock orders (progressive disclosure)
   if (!firstMergeDone) { firstMergeDone = true; refillOrders(); }
@@ -835,12 +915,14 @@ function deliverTo(srcIdx, order) {
   if (GF.tutorial.active && GF.tutorial.step === 2) GF.tutorial.next();   // a real delivery completes the tutorial
   GF.spawnParticles(L.boardX + L.boardW / 2, order._cy || L.trayY, '#ffd700', 12);
   if (order.have >= order.need) {
-    // order complete → coins (× permanent sell-bonus upgrade × in-run Crown multiplier)
-    var gain = Math.round(coinPerDelivery * Math.max(1, order.tier) * (combo >= 2 ? combo : 1) * permSellMult() * crownMult());
+    // order complete → coins (× permanent sell-bonus × in-run Crown multiplier × Ledger bonus)
+    var gain = Math.round(coinPerDelivery * Math.max(1, order.tier) * (combo >= 2 ? combo : 1) * permSellMult() * crownMult() * ledgerMult());
     coins += gain; score += gain; GF.sfx('coin');
     deliveries++;
     questProgress('deliver', 1);
     questProgress('earn', gain);
+    ledgerProgress('deliver', 1);      // Bazaar Ledger contract chain (in-run pacing)
+    ledgerProgress('earn', gain);
     festEarn(1);                       // every fulfilled order feeds the festival track
     if (!firstDeliveryDone) { firstDeliveryDone = true; }
     GF.spawnFloat(order._cx || (L.boardX + L.boardW / 2), (order._cy || L.trayY) + 6, '+' + gain, '#ffd700');
@@ -875,10 +957,12 @@ function ascendCrown(srcIdx, dstIdx) {
   idxs.sort(function (a, b) { return (board[b].tier | 0) - (board[a].tier | 0); });   // highest first
   var clear = Math.min(ASCEND_CLEAR_TOP, idxs.length);
   for (var k = 0; k < clear; k++) board[idxs[k]] = null;
-  // reward: a score/coin bonus that scales with the (now higher) Crown multiplier
-  var bonus = Math.round(coinPerDelivery * (maxTier + 1) * crownMult());
+  // reward: a score/coin bonus that scales with the (now higher) Crown multiplier + Ledger bonus
+  var bonus = Math.round(coinPerDelivery * (maxTier + 1) * crownMult() * ledgerMult());
   coins += bonus; score += bonus;
   questProgress('earn', bonus);
+  ledgerProgress('crowns', crowns);     // Bazaar Ledger: ascension contracts
+  ledgerProgress('earn', bonus);
   // VFX + audio
   var pc = cellCenter(dstIdx);
   ascendFlash = 1.6; newBeastFlash = 0;   // ascend flourish supersedes the new-beast one
@@ -925,6 +1009,7 @@ function startGame() {
   combo = 0; bestCombo = 0; comboTimer = 0;
   maxTierReached = 0; shopUnlocked = false; wildcardSeen = false; continueUsed = false; paused = false;
   crowns = 0; ascendFlash = 0;
+  ledgerIdx = 0; ledgerProg = 0; ledgerBonusT = 0; ledgerToast = null;   // fresh in-run contract chain
   revealedTier = {}; revealQueue = []; newBeastFlash = 0;
   rows = boardRows; nests = 1;
   genRechargeMs = 650;
@@ -1169,6 +1254,7 @@ function onUp(x, y) {
 function update(dt) {
   if (charmToast) { charmToast.t -= dt; if (charmToast.t <= 0) charmToast = null; }
   if (questToast) { questToast.t -= dt; if (questToast.t <= 0) questToast = null; }
+  if (ledgerToast) { ledgerToast.t -= dt; if (ledgerToast.t <= 0) ledgerToast = null; }
   if (bootBannerT > 0) bootBannerT = Math.max(0, bootBannerT - dt);
   if (festTokenPulse > 0) festTokenPulse = Math.max(0, festTokenPulse - dt);
   if (festCharmFlash > 0) festCharmFlash = Math.max(0, festCharmFlash - dt);
@@ -1181,6 +1267,7 @@ function update(dt) {
 
   // accrue playtime → unlock Charms on the cumulative-time ladder (the multi-day pull)
   runPlaySec += dt;
+  if (ledgerBonusT > 0) ledgerBonusT = Math.max(0, ledgerBonusT - dt);   // Ledger Bonus burst decays only during active play
   var fresh = checkCharmUnlocks();
   if (fresh.length) { charmToast = { def: fresh[fresh.length - 1], t: 3.4 }; GF.sfx('unlock'); GF.happytime && GF.happytime(); }
 
@@ -1256,6 +1343,7 @@ function draw(ctx) {
     drawBoard(ctx);
     drawBottom(ctx);
     drawTopHUD(ctx);
+    if (gs === 'PLAYING' && !(GF.tutorial && GF.tutorial.active)) drawLedgerHUD(ctx);   // always-visible in-run contract goal (hidden during the focused tutorial)
     drawHelpBtn(ctx);
     if (gs === 'PLAYING') drawVaultBtn(ctx);
     drawDrag(ctx);
@@ -1269,6 +1357,7 @@ function draw(ctx) {
   if (continueBannerUntil && nowMs() < continueBannerUntil && gs === 'PLAYING') drawContinueBanner(ctx);
   if (charmToast && !paused) drawCharmToast(ctx);
   else if (questToast && !paused) drawQuestToast(ctx);   // charm toast wins if both fire same frame
+  if (ledgerToast && !paused && gs === 'PLAYING') drawLedgerToast(ctx);   // its own lower anchor - no collision with charm/quest toasts
   if (bootBannerT > 0 && !paused && gs !== 'GAMEOVER') drawBootBanner(ctx);
 }
 
@@ -1367,6 +1456,93 @@ function drawQuestToast(ctx) {
   ctx.fillText((ru ? 'ЗАДАНИЕ ВЫПОЛНЕНО' : 'QUEST DONE') + '  ·  +' + q.reward + ' ' + GF.t('goldUnit'), x + 14 * S, y + h * 0.36);
   ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
   ctx.fillText(questLabel(q) + (ru ? '  - забери в Казне' : '  - claim in the Vault'), x + 14 * S, y + h * 0.68);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
+// current-progress count shown on the Ledger HUD (max-tracked kinds show their running max).
+function ledgerProgText() {
+  var def = ledgerCur(); if (!def) return '';
+  if (def.kind === 'tier' || def.kind === 'combo' || def.kind === 'crowns') return Math.min(ledgerProg, def.goal) + '/' + def.goal;
+  return Math.min(ledgerProg, def.goal) + '/' + def.goal;
+}
+// always-visible LEDGER HUD strip: the current in-run contract + progress, in the gap
+// just above the board panel so it never collides with the top HUD or the order tray.
+// A small scroll-icon badge + the contract text + a thin progress bar. When the Ledger
+// Bonus is live it tints gold + appends a "x1.5" burst tag. Drawn only while PLAYING.
+function drawLedgerHUD(ctx) {
+  var S = GF.S, ru = (GF.lang === 'ru');
+  var def = ledgerCur();
+  var y = (L.boardY || 0) - GF.clamp(15 * S, 12, 20);   // sit in the tray↔board gap, above the stall panel
+  if (y < L.trayY + L.trayH) y = L.trayY + L.trayH + GF.clamp(9 * S, 7, 12);   // fallback if the gap is tight
+  var bonus = ledgerBonusT > 0;
+  var col = bonus ? '#ffd700' : '#caa86a';
+  ctx.textBaseline = 'middle';
+  if (!def) {
+    // all contracts cleared - quiet "ledger complete" line, no bar
+    ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+    ctx.fillStyle = '#ffd166'; ctx.textAlign = 'center';
+    ctx.fillText('★ ' + (ru ? 'РЕЕСТР ВЫПОЛНЕН' : 'LEDGER COMPLETE') + ' ★', GF.cx, y);
+    ctx.textBaseline = 'alphabetic'; return;
+  }
+  var label = ledgerName(def);
+  var prog = ledgerProgText();
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  var bw = ctx.measureText(label).width;
+  ctx.font = GF.clamp(10 * S, 8, 13) + 'px sans-serif';
+  var pw = ctx.measureText(prog).width;
+  var iconR = GF.clamp(6.5 * S, 5.5, 9);
+  var gapA = 6 * S, totalW = iconR * 2 + gapA + bw + gapA + pw;
+  var sx = GF.cx - totalW / 2;
+  // scroll/ledger icon
+  drawLedgerIcon(ctx, sx + iconR, y, iconR, col);
+  // "LEDGER" contract label
+  ctx.textAlign = 'left'; ctx.fillStyle = col;
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.fillText(label, sx + iconR * 2 + gapA, y);
+  // progress count
+  ctx.fillStyle = '#9ab'; ctx.font = GF.clamp(10 * S, 8, 13) + 'px sans-serif';
+  ctx.fillText(prog, sx + iconR * 2 + gapA + bw + gapA, y);
+  // thin progress bar under the line
+  var barW = GF.clamp(118 * S, 90, 170), barH = GF.clamp(3.5 * S, 3, 5);
+  var barX = GF.cx - barW / 2, barY = y + GF.clamp(9 * S, 7, 12);
+  GF.rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+  var frac = GF.clamp((def.goal ? ledgerProg / def.goal : 0), 0, 1);
+  if (frac > 0) { GF.rr(ctx, barX, barY, Math.max(barH, barW * frac), barH, barH / 2); ctx.fillStyle = col; ctx.fill(); }
+  // active Ledger Bonus tag
+  if (bonus) {
+    ctx.textAlign = 'left'; ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold ' + GF.clamp(9.5 * S, 8, 12) + 'px sans-serif';
+    ctx.fillText('x' + (1 + LEDGER_BONUS_MULT).toFixed(1), barX + barW + 6 * S, y);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+// little scroll glyph for the Ledger (vector, never emoji)
+function drawLedgerIcon(ctx, x, y, r, col) {
+  ctx.save();
+  GF.rr(ctx, x - r * 0.85, y - r, r * 1.7, r * 2, r * 0.35);
+  ctx.fillStyle = 'rgba(40,25,16,0.9)'; ctx.fill();
+  ctx.strokeStyle = col || '#caa86a'; ctx.lineWidth = Math.max(1, r * 0.18); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - r * 0.45, y - r * 0.4); ctx.lineTo(x + r * 0.45, y - r * 0.4);
+  ctx.moveTo(x - r * 0.45, y);           ctx.lineTo(x + r * 0.45, y);
+  ctx.moveTo(x - r * 0.45, y + r * 0.4); ctx.lineTo(x + r * 0.2,  y + r * 0.4);
+  ctx.strokeStyle = col || '#caa86a'; ctx.lineWidth = Math.max(1, r * 0.16); ctx.stroke();
+  ctx.restore();
+}
+// "CONTRACT DONE" flourish when a Ledger contract completes mid-run (non-blocking).
+function drawLedgerToast(ctx) {
+  var S = GF.S, def = ledgerToast.def, ru = (GF.lang === 'ru');
+  var w = GF.clamp(262 * S, 204, 324), h = GF.clamp(52 * S, 46, 64);
+  var x = GF.cx - w / 2, y = GF.clamp(GF.H * 0.235, 96, 210);
+  var a = GF.clamp(ledgerToast.t / 0.4, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, 12 * S); ctx.fillStyle = 'rgba(34,26,12,0.96)'; ctx.fill();
+  ctx.strokeStyle = '#ffd700'; ctx.lineWidth = 2 * S; ctx.stroke();
+  drawLedgerIcon(ctx, x + h * 0.5, y + h / 2, h * 0.28, '#ffd700');
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText((ru ? 'КОНТРАКТ ВЫПОЛНЕН' : 'CONTRACT DONE') + '  ·  +' + ledgerToast.reward, x + h, y + h * 0.36);
+  ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(10.5 * S, 9, 13.5) + 'px sans-serif';
+  ctx.fillText(ledgerName(def) + (ru ? '  - бонус x1.5!' : '  - x1.5 boost!'), x + h, y + h * 0.68);
   ctx.restore(); ctx.textBaseline = 'alphabetic';
 }
 // "Welcome back" banner at boot: overnight idle income + daily streak bonus (the reason
@@ -2311,6 +2487,13 @@ function drawGameOver(ctx) {
     ctx.textAlign = 'center';
     sy0 += 22 * S;   // push score/best down to make room
   }
+  // Bazaar Ledger: contracts cleared this run (the session-pacing payoff) - only if any
+  if (ledgerIdx > 0) {
+    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#caa86a'; ctx.textAlign = 'center';
+    ctx.fillText('★ ' + (ru ? 'Контрактов: ' : 'Contracts: ') + ledgerIdx + ' / ' + LEDGER_DEFS.length, GF.cx, sy0 + 36 * S);
+    sy0 += 20 * S;
+  }
   // score
   ctx.fillStyle = '#fff'; ctx.font = GF.clamp(18 * S, 13, 26) + 'px sans-serif';
   ctx.fillText(GF.t('score') + ': ' + score, GF.cx, sy0 + 50 * S);
@@ -2466,8 +2649,15 @@ window._bbInfo = function () {
     // DEPTH - Ascension state
     crowns: crowns, crownMult: crownMult(), maxTier: maxTier,
     lifeCrowns: meta ? (meta.lifeCrowns || 0) : 0, bestCrowns: meta ? (meta.bestCrowns || 0) : 0,
+    // PLAYTIME-DEEPENING - Bazaar Ledger contract chain (in-run pacing)
+    ledgerIdx: ledgerIdx, ledgerProg: ledgerProg, ledgerKind: ledgerCur() ? ledgerCur().kind : 'done',
+    ledgerGoal: ledgerCur() ? ledgerCur().goal : 0, ledgerBonusT: Math.round(ledgerBonusT * 10) / 10,
+    ledgerCount: LEDGER_DEFS.length,
   };
 };
+// Test seam: set the active Ledger contract to index i and reset its progress, so a
+// harness can drive a SPECIFIC contract (e.g. the 'crowns' one) without grinding to it.
+window._bbSetLedger = function (i) { ledgerIdx = GF.clamp(i | 0, 0, LEDGER_DEFS.length); ledgerProg = 0; ledgerBonusT = 0; };
 // Test seam: drop two Bazaar Kings onto adjacent free cells (so a real merge of
 // them triggers ascendCrown via tryActOn). Returns the two cell indices. No console.
 window._bbSeedKings = function () {
@@ -2590,6 +2780,7 @@ GF.init({
           gs: gs, score: score, coins: coins, merges: merges, deliveries: deliveries,
           maxTierReached: maxTierReached, shopUnlocked: shopUnlocked, wildcardSeen: wildcardSeen,
           crowns: crowns, bestCombo: bestCombo, rows: rows, nests: nests, genRechargeMs: genRechargeMs,
+          ledgerIdx: ledgerIdx, ledgerProg: ledgerProg, ledgerBonusT: ledgerBonusT,
           board: board.map(function (c) { return c ? { t: c.tier, w: c.wild ? 1 : 0 } : 0; }),
           orders: orders.map(function (o) { return { t: o.tier, n: o.need, h: o.have, id: o.id }; }),
           nestCharges: nestCharges, firstMergeDone: firstMergeDone, firstDeliveryDone: firstDeliveryDone,
@@ -2602,6 +2793,7 @@ GF.init({
         score = s.score || 0; coins = s.coins || 0; merges = s.merges || 0; deliveries = s.deliveries || 0;
         maxTierReached = s.maxTierReached || 0; shopUnlocked = !!s.shopUnlocked; wildcardSeen = !!s.wildcardSeen;
         crowns = s.crowns || 0;
+        ledgerIdx = GF.clamp(s.ledgerIdx | 0, 0, LEDGER_DEFS.length); ledgerProg = Math.max(0, s.ledgerProg | 0); ledgerBonusT = Math.max(0, +s.ledgerBonusT || 0);
         bestCombo = s.bestCombo || 0; rows = s.rows || boardRows; nests = s.nests || 1;
         genRechargeMs = s.genRechargeMs || 650;
         firstMergeDone = !!s.firstMergeDone; firstDeliveryDone = !!s.firstDeliveryDone;
@@ -2637,6 +2829,8 @@ GF.exposeState(function () {
     merges: merges, deliveries: deliveries, combo: combo, bestCombo: bestCombo,
     freeCells: freeCells(), shopUnlocked: shopUnlocked, wildcardSeen: wildcardSeen,
     crowns: crowns, crownMult: crownMult(),
+    ledgerIdx: ledgerIdx, ledgerProg: ledgerProg, ledgerGoal: ledgerCur() ? ledgerCur().goal : 0,
+    ledgerKind: ledgerCur() ? ledgerCur().kind : 'done', ledgerBonus: ledgerBonusT > 0, ledgerMult: ledgerMult(),
     lifeCrowns: meta ? (meta.lifeCrowns || 0) : 0, bestCrowns: meta ? (meta.bestCrowns || 0) : 0,
     festTokens: (meta && meta.fest) ? meta.fest.tokens : 0,
     festClaimable: festClaimable(), festTheme: festTheme().id, festHoursLeft: Math.round(festHoursLeft()),

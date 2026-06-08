@@ -95,7 +95,16 @@ var STRINGS = {
     renown: 'RENOWN', renownStars: 'Renown', renownBonus: '+{v}% all Stars (forever)',
     renownDo: 'GAIN RENOWN', renownReady: 'Reset Mastery → +{v} Renown',
     renownLocked: 'Reach {v} Mastery levels to earn Renown',
-    renownGot: 'RENOWN EARNED', renownDesc: 'Renown gives +5% Stars forever and resets Café Mastery to push higher.'
+    renownGot: 'RENOWN EARNED', renownDesc: 'Renown gives +5% Stars forever and resets Café Mastery to push higher.',
+    // ── SIGNATURE MENU tab (M3 content axis: named recipes + per-run special) ──
+    tabMenu: 'MENU', sigHead: 'SIGNATURE MENU', sigHint: 'Unlock named drinks. Guests order them for big Star tips — and one is today’s Special.',
+    sigOwned: 'On the menu', sigLocked: 'Locked', sigUnlock: 'UNLOCK',
+    sigReward: '+{v}★ per serve', sigRecipe: 'Recipe',
+    sigRenownLock: 'Needs {v} Renown', sigFeatured: 'TODAY’S SPECIAL',
+    sigGotUnlock: 'NEW SIGNATURE', sigServed: 'Special served',
+    sigBonusEnd: 'Special bonus', sigGoalHud: 'Special',
+    sigNoneYet: 'Unlock a signature to feature a daily Special.',
+    sigCrownHint: 'Signature order!'
   },
   ru: {
     title: 'Боба Бум',
@@ -163,7 +172,16 @@ var STRINGS = {
     renown: 'СЛАВА', renownStars: 'Слава', renownBonus: '+{v}% ко всем звёздам (навсегда)',
     renownDo: 'ПОЛУЧИТЬ СЛАВУ', renownReady: 'Сброс мастерства → +{v} славы',
     renownLocked: 'Набери {v} уровней мастерства для славы',
-    renownGot: 'СЛАВА ПОЛУЧЕНА', renownDesc: 'Слава даёт +5% звёзд навсегда и сбрасывает мастерство для нового рывка.'
+    renownGot: 'СЛАВА ПОЛУЧЕНА', renownDesc: 'Слава даёт +5% звёзд навсегда и сбрасывает мастерство для нового рывка.',
+    // ── SIGNATURE MENU tab (M3 content axis: named recipes + per-run special) ──
+    tabMenu: 'МЕНЮ', sigHead: 'ФИРМЕННОЕ МЕНЮ', sigHint: 'Открывай фирменные напитки. Гости заказывают их за крупные звёзды — а один из них Спецнапиток дня.',
+    sigOwned: 'В меню', sigLocked: 'Закрыто', sigUnlock: 'ОТКРЫТЬ',
+    sigReward: '+{v}★ за подачу', sigRecipe: 'Рецепт',
+    sigRenownLock: 'Нужна слава: {v}', sigFeatured: 'СПЕЦ ДНЯ',
+    sigGotUnlock: 'НОВЫЙ НАПИТОК', sigServed: 'Спец подан',
+    sigBonusEnd: 'Бонус за спец', sigGoalHud: 'Спец',
+    sigNoneYet: 'Открой фирменный напиток, чтобы появился Спец дня.',
+    sigCrownHint: 'Фирменный заказ!'
   }
 };
 
@@ -217,6 +235,7 @@ var customersServed = 0;
 var strikes = 0;
 var combo = 0;
 var comboEarned = 0;        // combo built from REAL serves this run (NOT the seeded Regulars head-start) — drives the daily combo task (H2 fix)
+var runSigStars = 0;        // M3: direct Stars banked from signature orders THIS run (for the GAMEOVER readout)
 var runCountedThisRun = false; // the daily 'runs' task credits on the FIRST real serve, not at startGame (anti start-and-abandon farm, H1 fix)
 var elapsed = 0;            // seconds since rush start
 var spawnTimer = 0;
@@ -332,7 +351,14 @@ function spawnCustomer() {
   var stampN = toolVal('stamp');
   var luckyGuest = stampN > 0 && (stampCounter % stampN === 0);
   var isVip = luckyGuest || (elapsed >= VIP_AT && Math.random() < 0.22);
-  var order = luckyGuest ? { base: unlockedBases()[0].id, toppings: [] } : makeOrder(isVip);
+  // M3: a fraction of regular guests request a NAMED signature drink (big Star tip).
+  // Lucky-stamp guests keep their guaranteed easy plain order; signature takes
+  // precedence over a random order for everyone else when the roll hits.
+  var sigOrder = (!luckyGuest && Math.random() < sigOrderChance()) ? makeSignatureOrder() : null;
+  var order = luckyGuest ? { base: unlockedBases()[0].id, toppings: [] }
+            : (sigOrder || makeOrder(isVip));
+  // a signature guest is treated as a VIP-tier visit (golden glow) for flavour
+  if (sigOrder) isVip = true;
   // Comfy Seats (permanent café upgrade) raises every guest's patience window.
   var pat = BASE_PATIENCE * (isVip ? 1.25 : 1) * permPatienceMult();
   // each creature gets a stable colour + bob phase for life
@@ -416,9 +442,33 @@ function serveCustomer(cust) {
     var strawChance = toolVal('straw');
     var bigTip = 0;
     if (strawChance > 0 && Math.random() * 100 < strawChance) bigTip = Math.round(pay * 0.5) + 2;
+    // M3 SIGNATURE ORDER: a named drink pays SIG_COIN_MULT× the normal coin
+    // payout (before Generous Tips multiplies it) AND banks a DIRECT Star bonus
+    // right now (multiplied by Star Polish + Renown — the same masteryStarMult
+    // used at game-over). This is the new mid-run Star income axis.
+    var sigDef = cust.order.sig ? SIG_BY_ID[cust.order.sig] : null;
+    var basePay = pay + tip + bigTip;
+    if (sigDef) basePay = Math.round(basePay * SIG_COIN_MULT);
     // MASTERY: Generous Tips — endless +%/lvl on every serve's payout.
-    var gain = Math.round((pay + tip + bigTip) * masteryTipMult());
+    var gain = Math.round(basePay * masteryTipMult());
     coins += gain;
+    if (sigDef && meta) {
+      var sigStars = Math.max(1, Math.round(SIG_STAR_BONUS * masteryStarMult()));
+      meta.stars += sigStars;
+      runSigStars += sigStars;
+      sigCrownToast = 1.1;
+      GF.spawnFloat((cust.sx || GF.cx) + 8 * GF.S, (cust.sy || GF.cy) - 92 * GF.S, '+' + sigStars + '★', '#ffe08a');
+      beep(980, 0.07); beep(1240, 0.06, 0.05);
+      // TODAY'S SPECIAL progress — serving the featured signature fills the run goal
+      if (featuredSig && cust.order.sig === featuredSig.id && specialServed < featuredSig.goal) {
+        specialServed++;
+        if (specialServed >= featuredSig.goal) {
+          GF.spawnFloat(GF.cx, GF.H * 0.34, GF.t('sigFeatured') + ' ✓', '#ffd24a');
+          GF.setShake(0.2); beep(720, 0.1); beep(960, 0.09, 0.07); beep(1200, 0.1, 0.14);
+        }
+      }
+      saveMeta();
+    }
     customersServed++;
     servesSinceShop++;
     if (!runCountedThisRun) { runCountedThisRun = true; taskProgress('runs', 1); }  // H1: credit the daily 'runs' task on the FIRST real serve
@@ -529,6 +579,10 @@ function startGame() {
   stampCounter = 0;                       // re-arm the Lucky Stamp every shift
   runPlaySec = 0;
   comboEarned = 0; runCountedThisRun = false;
+  // M3 SIGNATURE: rotate the per-run salt then pick TODAY'S SPECIAL from owned sigs
+  runSigStars = 0; specialServed = 0; sigCrownToast = 0;
+  if (meta) { meta.sigRunSalt = ((meta.sigRunSalt || 0) + 1) % 1000000; }
+  pickFeaturedSig();
   metaOpen = false;
   screenshotMode = false;
   freshCup();
@@ -584,6 +638,13 @@ function gameOver() {
     var earned = Math.round(baseStars * (1 + loyalty / 100) * masteryStarMult());
     lastStarsEarned = Math.max(0, earned);
     meta.stars += lastStarsEarned;
+    // M3 TODAY'S SPECIAL: if the featured-special goal was completed this run, bank
+    // a chunky bonus (scaled by Star Polish + Renown). Surfaced on the GAMEOVER line.
+    specialBonusBanked = 0;
+    if (featuredSig && specialServed >= featuredSig.goal) {
+      specialBonusBanked = Math.max(1, Math.round(SIG_SPECIAL_BONUS * masteryStarMult()));
+      meta.stars += specialBonusBanked;
+    }
     // DAILY TASK: coins earned across shifts today (count this shift's coins).
     taskProgress('coins', coins);
     bankRunPlaytime();                          // fold this run's real seconds in
@@ -634,6 +695,7 @@ var lastStarsEarned = 0;    // Stars banked by the most recent game-over (for GA
 var toolToast = null;       // { def, t } NEW TOOL flourish on a playtime unlock
 var taskToast = null;       // { q, t }   TASK DONE flourish
 var renownToast = 0;        // seconds remaining on the RENOWN-earned flourish
+var sigUnlockToast = null;  // { def, t }  NEW SIGNATURE flourish (M3)
 var metaOpen = false;       // CAFÉ overlay open
 var metaTab = 'up';         // 'up' | 'tools' | 'tasks'
 
@@ -748,6 +810,135 @@ function masterySpeedBonus()  { return masteryValue('speed') / 100; }   // extra
 function masteryTipMult()     { return 1 + masteryValue('tips') / 100; } // coin multiplier
 function masteryRoomSlots()   { return masteryLvl('room'); }            // extra queue slots
 function masteryStarMult()    { return 1 + masteryValue('polish') / 100 + renownCount() * RENOWN_STAR_MULT; } // Stars banked + Renown
+
+// ── SIGNATURE MENU (M3 DEPTH — a CONTENT axis on top of the stat sinks) ─────
+// Named recipes you UNLOCK with Stars (a permanent, owned collection — the new
+// place to pour Stars/Renown besides the endless stat tracks). Each owned
+// signature does two things that interact with the existing systems:
+//   1) In-run SIGNATURE ORDERS — a fraction of guests (scaling with how many
+//      you own, capped) request a NAMED drink. Its exact recipe is just a
+//      base+toppings set, so cupMatchesOrder() handles it UNCHANGED — a signature
+//      is a recognizable, higher-value order, not a new match rule. Serving one
+//      pays bonus coins (multiplied by Generous Tips) AND banks a DIRECT Star
+//      bonus right then (multiplied by Star Polish + Renown) → a NEW mid-run Star
+//      income axis that makes the M2 sink feel earned in the run.
+//   2) TODAY'S SPECIAL — each shift features ONE owned signature (rotates daily +
+//      per-run). Serve `goal` of the featured special during the run → bank a
+//      chunky bonus Star payout at game-over (shown on GAMEOVER) → a FRESH per-run
+//      objective so a 15-min session always has a goal beyond raw survival.
+// Recipes are built only from ingredients the run has actually unlocked, so a
+// signature order never asks for a base/topping the player can't make yet.
+// Names carry their own en/ru (not t() keys) so the table stays self-contained.
+var SIG_DEFS = [
+  // base+toppings = the exact recipe; cost in Stars; renown = Renown gate (0 = none)
+  { id:'pearlmilk', base:'milk',  tops:['pearls'],          col:'#e8c9a0', cost:60,   renown:0, goal:3, en:'Pearl Milk Tea',  ru:'Жемчужный молочный' },
+  { id:'matchajoy', base:'green', tops:['jelly'],           col:'#9bd17a', cost:140,  renown:0, goal:3, en:'Matcha Joy',      ru:'Матча Радость'      },
+  { id:'tarostorm', base:'taro',  tops:['pearls','jelly'],  col:'#b89be0', cost:320,  renown:0, goal:3, en:'Taro Storm',      ru:'Таро Шторм'         },
+  { id:'sunsetpop', base:'mango', tops:['pop'],             col:'#ffb347', cost:620,  renown:0, goal:2, en:'Sunset Pop',      ru:'Закатный Поп'       },
+  { id:'creampearl',base:'milk',  tops:['cream','pearls'],  col:'#fff0d8', cost:1100, renown:1, goal:2, en:'Cream Cloud',     ru:'Сливочное Облако'   },
+  { id:'royaltaro', base:'taro',  tops:['pop','cream'],     col:'#caa9f0', cost:2400, renown:2, goal:2, en:'Royal Taro',      ru:'Королевский Таро'   }
+];
+var SIG_BY_ID = {};
+for (var _si = 0; _si < SIG_DEFS.length; _si++) SIG_BY_ID[SIG_DEFS[_si].id] = SIG_DEFS[_si];
+var SIG_STAR_BONUS = 4;     // base direct Stars banked on serving ANY signature order (before Star Polish/Renown)
+var SIG_COIN_MULT  = 2.0;   // a signature order pays this × the normal coin payout
+var SIG_SPECIAL_BONUS = 30; // base Stars banked at game-over for completing TODAY'S SPECIAL goal (before Star Polish/Renown)
+var SIG_ORDER_BASE_CHANCE = 0.10; // chance a spawn is a signature order, PER owned+craftable signature (capped)
+var SIG_ORDER_MAX_CHANCE  = 0.42;
+
+function sigOwned(id)   { return !!(meta && meta.sigs && meta.sigs[id]); }
+function sigUnlockable(id) {
+  var d = SIG_BY_ID[id]; if (!d || !meta) return false;
+  return !sigOwned(id) && renownCount() >= d.renown;
+}
+function buySignature(id) {
+  var d = SIG_BY_ID[id];
+  if (!d || !meta || sigOwned(id)) { beep(150, 0.1, 0, 'sawtooth'); return false; }
+  if (renownCount() < d.renown || meta.stars < d.cost) { beep(150, 0.1, 0, 'sawtooth'); return false; }
+  meta.stars -= d.cost; meta.sigs[id] = true;
+  saveMeta();
+  return true;
+}
+function ownedSigCount() {
+  if (!meta || !meta.sigs) return 0;
+  var n = 0; for (var i = 0; i < SIG_DEFS.length; i++) if (meta.sigs[SIG_DEFS[i].id]) n++;
+  return n;
+}
+// the cheapest signature the player can BUY right now (Renown gate satisfied), for the session-end hook
+function cheapestSig() {
+  var best = null;
+  for (var i = 0; i < SIG_DEFS.length; i++) {
+    var d = SIG_DEFS[i];
+    if (sigUnlockable(d.id)) { if (!best || d.cost < best.cost) best = { id: d.id, cost: d.cost }; }
+  }
+  return best;
+}
+// a signature is CRAFTABLE this run only if every ingredient it needs is unlocked NOW
+function sigCraftable(d) {
+  if (!d) return false;
+  var bases = unlockedBases(), ok = false;
+  for (var b = 0; b < bases.length; b++) if (bases[b].id === d.base) { ok = true; break; }
+  if (!ok) return false;
+  var tops = unlockedToppings();
+  for (var t = 0; t < d.tops.length; t++) {
+    var found = false;
+    for (var u = 0; u < tops.length; u++) if (tops[u].id === d.tops[t]) { found = true; break; }
+    if (!found) return false;
+  }
+  return true;
+}
+// owned signatures whose ingredients are all unlocked in THIS run
+function craftableOwnedSigs() {
+  var out = [];
+  for (var i = 0; i < SIG_DEFS.length; i++) {
+    var d = SIG_DEFS[i];
+    if (sigOwned(d.id) && sigCraftable(d)) out.push(d);
+  }
+  return out;
+}
+// ── per-run featured-special state (set in startGame, advanced on serve) ──
+var featuredSig = null;     // SIG_DEF chosen as TODAY'S SPECIAL for this run (null if none owned)
+var specialServed = 0;      // featured-special serves this run
+var specialBonusBanked = 0; // Stars banked at last game-over for the special goal (GAMEOVER line)
+var sigCrownToast = 0;      // brief "Signature order!" cue timer
+// pick the featured special for a shift: rotates by day + run count so it varies.
+function pickFeaturedSig() {
+  featuredSig = null; specialServed = 0;
+  var owned = [];
+  for (var i = 0; i < SIG_DEFS.length; i++) if (sigOwned(SIG_DEFS[i].id)) owned.push(SIG_DEFS[i]);
+  if (!owned.length) return;
+  // deterministic-ish rotation: day-of-year + a per-run salt so the special changes
+  var salt = (meta && meta.sigRunSalt) || 0;
+  featuredSig = owned[salt % owned.length];
+}
+// the special to SHOW in menus: the live one in-run, else a PREVIEW of what the
+// NEXT shift will feature (so owning signatures always surfaces a Special, even
+// on the MENU before this session's first run). Read-only — never mutates state.
+function displayFeaturedSig() {
+  if (featuredSig) return featuredSig;
+  var owned = [];
+  for (var i = 0; i < SIG_DEFS.length; i++) if (sigOwned(SIG_DEFS[i].id)) owned.push(SIG_DEFS[i]);
+  if (!owned.length) return null;
+  var salt = ((meta && meta.sigRunSalt) || 0) + 1;  // +1 = the NEXT run's salt
+  return owned[salt % owned.length];
+}
+// chance THIS spawn is a signature order (only when ≥1 owned sig is craftable now)
+function sigOrderChance() {
+  var c = craftableOwnedSigs().length;
+  if (c <= 0) return 0;
+  return Math.min(SIG_ORDER_MAX_CHANCE, SIG_ORDER_BASE_CHANCE * c);
+}
+// build a signature order object {base,toppings,sig:id} — prefers the featured
+// special so the per-run goal is reachable, else a random craftable owned sig.
+function makeSignatureOrder() {
+  var pool = craftableOwnedSigs();
+  if (!pool.length) return null;
+  var pick = null;
+  // ~55% of signature orders are the featured special (keeps the goal achievable)
+  if (featuredSig && sigCraftable(featuredSig) && Math.random() < 0.55) pick = featuredSig;
+  if (!pick) pick = pool[(Math.random() * pool.length) | 0];
+  return { base: pick.base, toppings: pick.tops.slice(), sig: pick.id };
+}
 
 // ── PLAYTIME-MILESTONE TOOLS (café-themed equippable gear) ──────────────────
 // Fixed ORDERED ladder unlocked as cumulative playtime crosses each `min`.
@@ -931,6 +1122,8 @@ function defaultMeta() {
     perm: { tipjar:0, comfy:0, prep:0, regulars:0, signature:0 },
     mastery: { speed:0, tips:0, room:0, polish:0 },  // endless Stars sink (M2)
     renown: 0,                                       // prestige count (each +5% Stars)
+    sigs: {},                                        // M3: unlocked signature drinks (id -> true)
+    sigRunSalt: 0,                                   // M3: rotates TODAY'S SPECIAL across runs
     tools: { owned:{}, level:{}, equipped:[null, null, null] },
     tasks: { day:'', list:[] },
     login: { lastDay:'', streak:0 },
@@ -961,6 +1154,15 @@ function loadMeta() {
           }
         }
         m.renown = Math.max(0, +s.renown || 0);
+        // M3 signatures (unlocked named recipes) + the run-salt — forward-compatible:
+        // old saves lack these and just start with an empty menu / salt 0.
+        if (s.sigs && typeof s.sigs === 'object') {
+          for (var sgk = 0; sgk < SIG_DEFS.length; sgk++) {
+            var sgid = SIG_DEFS[sgk].id;
+            if (s.sigs[sgid]) m.sigs[sgid] = true;
+          }
+        }
+        m.sigRunSalt = Math.max(0, +s.sigRunSalt || 0);
         if (s.tools && typeof s.tools === 'object') {
           if (s.tools.owned) for (var oid in s.tools.owned) { if (s.tools.owned.hasOwnProperty(oid) && TOOL_BY_ID[oid] && s.tools.owned[oid]) m.tools.owned[oid] = true; }
           if (s.tools.level) for (var lid in s.tools.level) { if (s.tools.level.hasOwnProperty(lid) && TOOL_BY_ID[lid]) m.tools.level[lid] = GF.clamp(+s.tools.level[lid] || 1, 1, TOOL_MAX_LVL); }
@@ -1112,8 +1314,13 @@ window._meta = function() {
     tipMult: masteryTipMult(), starMult: masteryStarMult(),
     roomSlots: masteryRoomSlots(), speedBonus: masterySpeedBonus(),
     nextSpecCost: (function() { var c = cheapestMastery(); return c ? c.cost : 0; })(),
-    canRenown: canRenown()
+    canRenown: canRenown(),
+    // signature menu content axis (M3)
+    sigsOwned: ownedSigCount(), featuredSig: featuredSig ? featuredSig.id : null,
+    specialServed: specialServed, runSigStars: runSigStars,
+    nextSigCost: (function() { var c = cheapestSig(); return c ? c.cost : 0; })()
   };
+  copy.sigs = meta.sigs;
   return copy;
 };
 // Force cumulative playtime (seconds) and run the SAME unlock path update() uses.
@@ -1139,6 +1346,34 @@ window._equipGear = function(id) { return toggleEquipTool(id); };
 // Buy a mastery level (endless sink) / trigger prestige. Return wiring-observable values.
 window._buyMastery = function(id) { return buyMastery(id) ? masteryLvl(id) : false; };
 window._renown = function() { return doRenown() ? renownCount() : false; };
+// M3: unlock a signature drink / read owned set / read this run's featured special.
+window._buySig = function(id) { return buySignature(id) ? ownedSigCount() : false; };
+// TEST SEAM: end the current run through the REAL game-over path (banks Stars +
+// the special-completion bonus) without forcing strikes — for harness assertions.
+window._endRun = function() { if (gs === 'PLAYING' || gs === 'SHOP') gameOver(); return gs; };
+// TEST SEAM: force a fresh guest into the queue (so a harness can serve repeatedly
+// without waiting on the spawn timer). Returns the queue length.
+window._spawnGuest = function() { if (gs === 'PLAYING' && queue.length < maxQueue) spawnCustomer(); return queue.length; };
+// TEST SEAM: rewrite the front customer's order to an owned signature's exact
+// recipe, build the matching cup, and serve through the REAL serveCustomer path
+// (exercises the signature coin/Star bonus + special-goal wiring deterministically).
+window._serveSig = function(id) {
+  var d = SIG_BY_ID[id]; if (!d || gs !== 'PLAYING') return false;
+  var c = null;
+  for (var i = 0; i < queue.length; i++) { if (queue[i].leaving === 0 && queue[i].angry === 0) { c = queue[i]; break; } }
+  if (!c) return false;
+  c.order = { base: d.base, toppings: d.tops.slice(), sig: d.id };
+  freshCup(); addBase(d.base);
+  for (var k = 0; k < d.tops.length; k++) addTopping(d.tops[k]);
+  serveCustomer(c);
+  return true;
+};
+window._sigState = function() {
+  return { owned: meta ? Object.keys(meta.sigs).filter(function(k){return meta.sigs[k];}) : [],
+           featured: featuredSig ? featuredSig.id : null, specialServed: specialServed,
+           specialGoal: featuredSig ? featuredSig.goal : 0, runSigStars: runSigStars,
+           specialBonusBanked: specialBonusBanked };
+};
 // Grant Stars (exercise the buy paths). No console output.
 window._grantStars = function(n) { if (meta) { meta.stars += (+n || 0); saveMeta(); return meta.stars; } return 0; };
 window._openCafe = function(tab) { metaOpen = true; metaTab = VALID_TABS[tab] ? tab : 'up'; };
@@ -1201,7 +1436,9 @@ function update(dt) {
   // the MENU and must not freeze when the run is paused).
   if (toolToast) { toolToast.t -= dt; if (toolToast.t <= 0) toolToast = null; }
   if (taskToast) { taskToast.t -= dt; if (taskToast.t <= 0) taskToast = null; }
+  if (sigUnlockToast) { sigUnlockToast.t -= dt; if (sigUnlockToast.t <= 0) sigUnlockToast = null; }
   if (renownToast > 0) renownToast = Math.max(0, renownToast - dt);
+  if (sigCrownToast > 0) sigCrownToast = Math.max(0, sigCrownToast - dt);
   if (bootBannerT > 0) bootBannerT = Math.max(0, bootBannerT - dt);
 
   if (gs !== 'PLAYING') return;
@@ -1333,9 +1570,10 @@ function draw(ctx) {
     if (toolToast) drawToolToast(ctx);
     else if (taskToast) drawTaskToast(ctx);
   }
-  // RENOWN flash fires from INSIDE the overlay (prestige happens there), so it
-  // draws on top of the modal too.
+  // RENOWN flash + SIGNATURE-unlock flash fire from INSIDE the overlay (the buy
+  // happens there), so they draw on top of the modal too.
   if (renownToast > 0) drawRenownToast(ctx);
+  if (sigUnlockToast) drawSignatureToast(ctx);
 }
 
 // Cozy boba-shop interior that FRAMES the playfield on wide/desktop screens.
@@ -1543,6 +1781,13 @@ function drawOrderBubble(ctx, c, x, y) {
   ctx.lineTo(x + 5 * S, by + bh - 1);
   ctx.lineTo(x, by + bh + 8 * S);
   ctx.closePath(); ctx.fill();
+  // M3: a SIGNATURE order gets a gold rim + a crown so it reads as a named,
+  // high-value drink (a stronger draw than a plain order).
+  if (c.order.sig) {
+    ctx.strokeStyle = '#ffd24a'; ctx.lineWidth = 2 * S;
+    GF.rr(ctx, bx, by, bw, bh, GF.clamp(10 * S, 6, 14)); ctx.stroke();
+    drawSigCrown(ctx, x, by - GF.clamp(4 * S, 2, 7), GF.clamp(9 * S, 7, 13));
+  }
   // draw mini cup (base colour) + topping symbols
   var ix = bx + pad + iconR;
   var iy = by + bh / 2;
@@ -1909,6 +2154,21 @@ function drawHUD(ctx) {
     ctx.fillText(ptxt, 0, 0);
     ctx.restore();
   }
+
+  // M3 TODAY'S SPECIAL chip — the per-run goal, just under the next-goal banner
+  // (only when the player owns ≥1 signature so a special is featured).
+  if (featuredSig) {
+    var done = specialServed >= featuredSig.goal;
+    var sname = (GF.lang === 'ru' ? featuredSig.ru : featuredSig.en);
+    var stxt = '★ ' + GF.t('sigGoalHud') + ': ' + sname + '  ' + Math.min(specialServed, featuredSig.goal) + '/' + featuredSig.goal + (done ? ' ✓' : '');
+    ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px sans-serif';
+    var sw = ctx.measureText(stxt).width + 20 * S;
+    var sy = by + GF.clamp(26 * S, 20, 34);
+    ctx.fillStyle = done ? 'rgba(110,160,80,0.9)' : 'rgba(150,110,40,0.85)';
+    GF.rr(ctx, GF.cx - sw / 2, sy, sw, GF.clamp(20 * S, 16, 26), 10 * S); ctx.fill();
+    ctx.fillStyle = done ? '#dfffc8' : '#ffe9a0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(stxt, GF.cx, sy + GF.clamp(10 * S, 8, 13));
+  }
 }
 
 // ── SHOP (between-rush upgrade strip) ──────────────────────────────────────
@@ -2060,7 +2320,8 @@ var equipSlotRects = [];       // [{slot,x,y,w,h}] — tap a filled slot to uneq
 var taskClaimRects = [];       // [{i,x,y,w,h,can}] — claim button
 var masteryRowRects = [];      // [{id,x,y,w,h,afford}] — endless mastery buy rows
 var renownRect = null;         // [{x,y,w,h,can}] — prestige button
-var VALID_TABS = { up:1, tools:1, master:1, tasks:1 };
+var sigRowRects = [];          // [{id,x,y,w,h,can}] — signature UNLOCK buttons (M3)
+var VALID_TABS = { up:1, tools:1, master:1, menu:1, tasks:1 };
 function openCafe(tab) { metaOpen = true; metaTab = VALID_TABS[tab] ? tab : 'up'; beep(560, 0.05); }
 function drawMenu(ctx) {
   var W = GF.W, H = GF.H, S = GF.S;
@@ -2275,22 +2536,41 @@ function drawGameOver(ctx) {
   ctx.fillStyle = '#ffe9a0'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillText(slabel, pillX + 14 * S + sr * 2 + 8 * S, starsY + pillH / 2 + 1 * S);
 
-  // ── SESSION-END HOOK: the single cheapest next Café Mastery buy (the always-
-  // visible "next thing" so leaving plants the reason to return — the endless
-  // sink that fixes "nothing left to upgrade"). Hidden only if every track maxed.
-  var cheap = cheapestMastery();
-  if (cheap) {
-    var have = meta ? meta.stars : 0;
-    var ready = have >= cheap.cost;
-    var htxt = GF.t('nextSpec') + ' ' + Math.max(0, cheap.cost - have) + (ready ? ' ✓' : '');
+  // M3: TODAY'S SPECIAL completion bonus — a green line right under the Stars pill
+  // when this run finished the featured-special goal (the per-run objective payoff).
+  var hookY = starsY + pillH + GF.clamp(16 * S, 12, 22);
+  if (specialBonusBanked > 0) {
+    var sbtxt = GF.t('sigBonusEnd') + ' +' + specialBonusBanked;
+    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
+    var sbw = ctx.measureText(sbtxt).width, sbsr = GF.clamp(6.5 * S, 5.5, 9);
+    var sblx = GF.cx - (sbw + sbsr * 2 + 6 * S) / 2;
+    drawStarIcon(ctx, sblx + sbsr, hookY, sbsr, '#9bd17a');
+    ctx.fillStyle = '#bff0a0'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(sbtxt, sblx + sbsr * 2 + 6 * S, hookY + 0.5 * S);
+    hookY += GF.clamp(20 * S, 15, 27);
+  }
+
+  // ── SESSION-END HOOK: the single cheapest next thing to buy — the always-visible
+  // "next thing" so leaving plants the reason to return. Prefers a buyable SIGNATURE
+  // (the new content axis) when one is cheaper than the next mastery level; else the
+  // endless mastery sink (the M2 fix for "nothing left to upgrade").
+  var cheapSig = cheapestSig(), cheapMas = cheapestMastery();
+  var have = meta ? meta.stars : 0;
+  var hookCost = null, hookIsSig = false;
+  if (cheapSig && (!cheapMas || cheapSig.cost <= cheapMas.cost)) { hookCost = cheapSig.cost; hookIsSig = true; }
+  else if (cheapMas) { hookCost = cheapMas.cost; }
+  if (hookCost != null) {
+    var ready = have >= hookCost;
+    var htxt = (hookIsSig ? GF.t('sigUnlock') + ' ' + GF.t('sigOwned').toLowerCase() : GF.t('nextSpec')) + ' ' + Math.max(0, hookCost - have) + (ready ? ' ✓' : '');
+    // keep it compact: just the cost-to-next using the existing Next-Specialty label
+    htxt = GF.t('nextSpec') + ' ' + Math.max(0, hookCost - have) + (ready ? ' ✓' : '');
     ctx.font = GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
     var hw = ctx.measureText(htxt).width, hsr = GF.clamp(6.5 * S, 5.5, 9);
     var hlx = GF.cx - (hw + hsr * 2 + 6 * S) / 2;
-    var hy = starsY + pillH + GF.clamp(16 * S, 12, 22);
-    drawStarIcon(ctx, hlx + hsr, hy, hsr, ready ? '#9bd17a' : 'rgba(255,233,160,0.85)');
+    drawStarIcon(ctx, hlx + hsr, hookY, hsr, ready ? '#9bd17a' : 'rgba(255,233,160,0.85)');
     ctx.fillStyle = ready ? '#bff0a0' : 'rgba(255,233,160,0.9)';
     ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillText(htxt, hlx + hsr * 2 + 6 * S, hy + 0.5 * S);
+    ctx.fillText(htxt, hlx + hsr * 2 + 6 * S, hookY + 0.5 * S);
   }
 
   // retry (bottom thumb zone — capped at H*0.85 center so it's inside the
@@ -2496,7 +2776,7 @@ function drawToolIcon(ctx, def, x, y, r) {
 function drawMetaOverlay(ctx) {
   var S = GF.S, W = GF.W, H = GF.H, cx = GF.cx;
   metaTabRects = []; permRects = []; toolTileRects = []; toolUpRects = []; equipSlotRects = []; taskClaimRects = [];
-  masteryRowRects = []; renownRect = null;
+  masteryRowRects = []; renownRect = null; sigRowRects = [];
   metaCloseRect = null; metaContentRect = null;
   // OPAQUE wash (solid fill, NOT <1 alpha) — flip_dash's <1.0 alpha ghosted.
   ctx.fillStyle = '#241510'; ctx.fillRect(0, 0, W, H);
@@ -2530,13 +2810,14 @@ function drawMetaOverlay(ctx) {
   // tab row (UPGRADES | TOOLS | TASKS) with claimable badge on TASKS
   var maxW = Math.min(W - 24 * S, 460 * S);
   var contentTop = y;
-  var nTabs = 4, tabGap = 5 * S;
+  var nTabs = 5, tabGap = 4 * S;
   var tabX = cx - maxW / 2, tabH = GF.clamp(34 * S, 28, 44), tabW = (maxW - tabGap * (nTabs - 1)) / nTabs;
   var cq = claimableTasks();
   var tabs = [
     { id: 'up',     label: GF.t('tabUpgrades') },
     { id: 'tools',  label: GF.t('tabGear') },
     { id: 'master', label: GF.t('tabMastery') },
+    { id: 'menu',   label: GF.t('tabMenu') },
     { id: 'tasks',  label: GF.t('tabQuests'), badge: cq }
   ];
   for (var t = 0; t < tabs.length; t++) {
@@ -2546,10 +2827,10 @@ function drawMetaOverlay(ctx) {
     ctx.strokeStyle = on ? '#ffb300' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5 * S;
     GF.rr(ctx, bxx, y, tabW, tabH, 9 * S); ctx.stroke();
     ctx.fillStyle = on ? '#fff' : 'rgba(240,225,205,0.7)';
-    // shrink the font to fit the longest label inside the (now narrower) 4-tab cell
-    var tFs = GF.clamp(11 * S, 8, 15);
+    // shrink the font to fit the longest label inside the (now narrower) 5-tab cell
+    var tFs = GF.clamp(10.5 * S, 7.5, 14);
     ctx.font = 'bold ' + tFs + 'px sans-serif';
-    while (tFs > 7 && ctx.measureText(tabs[t].label).width > tabW - 8 * S) { tFs -= 0.5; ctx.font = 'bold ' + tFs + 'px sans-serif'; }
+    while (tFs > 6 && ctx.measureText(tabs[t].label).width > tabW - 5 * S) { tFs -= 0.5; ctx.font = 'bold ' + tFs + 'px sans-serif'; }
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(tabs[t].label, bxx + tabW / 2, y + tabH / 2 + 1 * S);
     if (tabs[t].badge) drawBadge(ctx, bxx + tabW - 9 * S, y + 6 * S, tabs[t].badge);
@@ -2566,6 +2847,7 @@ function drawMetaOverlay(ctx) {
   if (metaTab === 'up')          drawUpgradesTab(ctx, y, contentBottom, maxW);
   else if (metaTab === 'tools')  drawToolsTab(ctx, y, contentBottom, maxW);
   else if (metaTab === 'master') drawMasteryTab(ctx, y, contentBottom, maxW);
+  else if (metaTab === 'menu')   drawSignatureTab(ctx, y, contentBottom, maxW);
   else                           drawTasksTab(ctx, y, contentBottom, maxW);
 
   // CLOSE
@@ -2842,6 +3124,154 @@ function drawMasteryIcon(ctx, id, cx, cy, r, col) {
   ctx.restore();
 }
 
+// SIGNATURE MENU tab (M3) — the content axis: a TODAY'S SPECIAL banner + the
+// list of named signature drinks you unlock with Stars. Owned ones get ordered
+// in-run for big Star tips; one is featured each shift as the Special.
+function drawSignatureTab(ctx, topY, bottomY, maxW) {
+  var S = GF.S, cx = GF.cx, x = cx - maxW / 2;
+  var y = topY;
+  // intro hint
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = 'rgba(245,230,210,0.82)';
+  ctx.font = GF.clamp(10 * S, 8.5, 12.5) + 'px sans-serif';
+  var hintLines = wrapLines(ctx, GF.t('sigHint'), maxW);
+  for (var hl = 0; hl < hintLines.length && hl < 2; hl++) ctx.fillText(hintLines[hl], x, y + hl * GF.clamp(12.5 * S, 10, 15));
+  y += GF.clamp(hintLines.length > 1 ? 28 * S : 16 * S, 14, 32);
+
+  // ── TODAY'S SPECIAL banner ── (live in-run, else a preview of the next shift)
+  var dispSig = displayFeaturedSig();
+  var banH = GF.clamp(46 * S, 40, 58);
+  GF.rr(ctx, x, y, maxW, banH, GF.clamp(10 * S, 8, 14));
+  ctx.fillStyle = dispSig ? 'rgba(255,210,74,0.14)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+  ctx.strokeStyle = dispSig ? '#ffd24a' : 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1.5 * S;
+  GF.rr(ctx, x, y, maxW, banH, GF.clamp(10 * S, 8, 14)); ctx.stroke();
+  var bpad = GF.clamp(12 * S, 9, 16);
+  if (dispSig) {
+    var fIcR = GF.clamp(14 * S, 11, 19), fIcX = x + bpad + fIcR, fIcY = y + banH / 2;
+    drawMiniCup(ctx, fIcX, fIcY, fIcR, baseById(dispSig.base));
+    drawSigCrown(ctx, fIcX, fIcY - fIcR * 1.25, fIcR * 0.6);
+    var ftx = fIcX + fIcR + GF.clamp(10 * S, 7, 14);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#ffd24a';
+    ctx.font = '900 ' + GF.clamp(10.5 * S, 8.5, 13) + 'px sans-serif';
+    ctx.fillText(GF.t('sigFeatured'), ftx, y + banH * 0.32);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
+    var fname = (GF.lang === 'ru' ? dispSig.ru : dispSig.en);
+    ctx.fillText(fname, ftx, y + banH * 0.66);
+    // progress N / goal — only meaningful when the special is LIVE this run
+    var live = featuredSig && (gs === 'PLAYING' || gs === 'SHOP');
+    var prog = live ? specialServed : 0;
+    var ptxt = GF.t('sigGoalHud') + ' ' + prog + '/' + dispSig.goal;
+    ctx.textAlign = 'right'; ctx.fillStyle = (live && prog >= dispSig.goal) ? '#9bd17a' : '#ffe9a0';
+    ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif';
+    ctx.fillText(ptxt + (live && prog >= dispSig.goal ? ' ✓' : ''), x + maxW - bpad, y + banH / 2);
+  } else {
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(240,225,205,0.78)';
+    ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+    var nLines = wrapLines(ctx, GF.t('sigNoneYet'), maxW - bpad * 2);
+    for (var nl = 0; nl < nLines.length && nl < 2; nl++) ctx.fillText(nLines[nl], x + bpad, y + banH / 2 - (nLines.length > 1 ? 7 * S : 0) + nl * GF.clamp(13 * S, 11, 16));
+  }
+  y += banH + GF.clamp(10 * S, 7, 14);
+
+  // ── signature rows ──
+  var n = SIG_DEFS.length, gap = GF.clamp(6 * S, 4, 9);
+  var rowH = GF.clamp((bottomY - y - gap * (n - 1)) / n, 40 * S, 64 * S);
+  for (var i = 0; i < n; i++) {
+    var d = SIG_DEFS[i], owned = sigOwned(d.id);
+    var renLocked = renownCount() < d.renown;
+    var can = !owned && !renLocked && meta && meta.stars >= d.cost;
+    var ry = y + i * (rowH + gap);
+    GF.rr(ctx, x, ry, maxW, rowH, GF.clamp(9 * S, 7, 13));
+    ctx.fillStyle = owned ? 'rgba(255,210,74,0.12)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = owned ? 'rgba(255,210,74,0.5)' : (renLocked ? 'rgba(180,155,224,0.4)' : 'rgba(255,255,255,0.14)'); ctx.lineWidth = 1.4 * S;
+    GF.rr(ctx, x, ry, maxW, rowH, GF.clamp(9 * S, 7, 13)); ctx.stroke();
+    // recipe icons: mini-cup (base) + topping glyphs
+    var icR = GF.clamp(13 * S, 10, 17), icX = x + GF.clamp(11 * S, 8, 15) + icR, icY = ry + rowH / 2;
+    drawMiniCup(ctx, icX, icY, icR, baseById(d.base));
+    var rix = icX;
+    for (var tt = 0; tt < d.tops.length; tt++) {
+      rix += icR * 1.7;
+      drawToppingIcon(ctx, rix, icY, icR * 0.82, topById(d.tops[tt]));
+    }
+    if (owned) drawSigCrown(ctx, icX, icY - icR * 1.3, icR * 0.55);
+    // name + reward / lock line
+    var tx = rix + icR + GF.clamp(10 * S, 7, 14);
+    var btnW = GF.clamp(78 * S, 60, 104), btnH = GF.clamp(28 * S, 24, 36);
+    var btnX = x + maxW - btnW - GF.clamp(10 * S, 7, 14), btnY = ry + (rowH - btnH) / 2;
+    var nameMaxW = btnX - tx - 8 * S;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = owned ? '#ffe9a0' : '#fff';
+    var nmFs = GF.clamp(12 * S, 10, 15.5); ctx.font = 'bold ' + nmFs + 'px sans-serif';
+    var dname = (GF.lang === 'ru' ? d.ru : d.en);
+    while (nmFs > 8 && ctx.measureText(dname).width > nameMaxW) { nmFs -= 0.5; ctx.font = 'bold ' + nmFs + 'px sans-serif'; }
+    ctx.fillText(dname, tx, ry + GF.clamp(8 * S, 6, 12));
+    ctx.fillStyle = 'rgba(240,225,205,0.78)'; ctx.font = GF.clamp(9.5 * S, 8, 12) + 'px sans-serif';
+    var sub = renLocked ? GF.t('sigRenownLock').replace('{v}', d.renown)
+                        : GF.t('sigReward').replace('{v}', Math.max(1, Math.round(SIG_STAR_BONUS * masteryStarMult())));
+    ctx.fillText(sub, tx, ry + rowH * 0.52);
+    // button: OWNED tag / UNLOCK cost / renown-lock
+    GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2);
+    if (owned) {
+      ctx.fillStyle = 'rgba(255,210,74,0.2)'; ctx.fill();
+      ctx.fillStyle = '#ffd24a'; ctx.font = 'bold ' + GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(GF.t('sigOwned'), btnX + btnW / 2, btnY + btnH / 2);
+    } else if (renLocked) {
+      ctx.fillStyle = 'rgba(180,155,224,0.14)'; ctx.fill();
+      drawSigLock(ctx, btnX + btnW / 2, btnY + btnH / 2, GF.clamp(8 * S, 6.5, 11), '#b89be0');
+    } else {
+      ctx.fillStyle = can ? 'rgba(255,210,74,0.22)' : 'rgba(255,255,255,0.06)'; ctx.fill();
+      if (can) { ctx.strokeStyle = '#ffd24a'; ctx.lineWidth = 1.4 * S; GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.stroke(); }
+      drawStarIcon(ctx, btnX + GF.clamp(15 * S, 12, 19), btnY + btnH / 2, GF.clamp(6.5 * S, 5.5, 9), can ? '#ffd24a' : '#9c8a70');
+      ctx.fillStyle = can ? '#ffd24a' : '#9c8a70'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14.5) + 'px sans-serif';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('' + d.cost, btnX + GF.clamp(24 * S, 19, 30), btnY + btnH / 2 + 0.5 * S);
+    }
+    sigRowRects.push({ id: d.id, x: btnX, y: btnY, w: btnW, h: btnH, can: can });
+  }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+}
+// tiny vector crown marking a signature (owned / featured / in-bubble)
+function drawSigCrown(ctx, cx, cy, r) {
+  ctx.save();
+  ctx.fillStyle = '#ffd24a';
+  ctx.beginPath();
+  ctx.moveTo(cx - r, cy + r * 0.5);
+  ctx.lineTo(cx - r, cy - r * 0.4);
+  ctx.lineTo(cx - r * 0.45, cy + r * 0.05);
+  ctx.lineTo(cx, cy - r * 0.6);
+  ctx.lineTo(cx + r * 0.45, cy + r * 0.05);
+  ctx.lineTo(cx + r, cy - r * 0.4);
+  ctx.lineTo(cx + r, cy + r * 0.5);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+// tiny vector padlock for renown-gated signatures
+function drawSigLock(ctx, cx, cy, r, col) {
+  ctx.save();
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = Math.max(1.4, r * 0.22);
+  ctx.beginPath(); ctx.arc(cx, cy - r * 0.2, r * 0.55, Math.PI, 0); ctx.stroke();
+  GF.rr(ctx, cx - r * 0.7, cy - r * 0.2, r * 1.4, r * 1.1, r * 0.25); ctx.fill();
+  ctx.restore();
+}
+// NEW SIGNATURE unlock flourish (a small celebratory pill)
+function drawSignatureToast(ctx) {
+  if (!sigUnlockToast) return;
+  var S = GF.S, a = GF.clamp(sigUnlockToast.t / 0.5, 0, 1);
+  var d = sigUnlockToast.def;
+  ctx.save(); ctx.globalAlpha = a;
+  var h = GF.clamp(40 * S, 34, 52), w = GF.clamp(230 * S, 180, 300);
+  var bx = GF.cx - w / 2, by = GF.H * 0.2;
+  ctx.shadowColor = 'rgba(255,210,74,0.6)'; ctx.shadowBlur = 18 * S;
+  ctx.fillStyle = 'rgba(58,36,24,0.96)'; GF.rr(ctx, bx, by, w, h, h / 2); ctx.fill();
+  ctx.shadowBlur = 0; ctx.strokeStyle = '#ffd24a'; ctx.lineWidth = 1.8 * S; GF.rr(ctx, bx, by, w, h, h / 2); ctx.stroke();
+  drawMiniCup(ctx, bx + h * 0.6, by + h / 2, h * 0.3, baseById(d.base));
+  drawSigCrown(ctx, bx + h * 0.6, by + h * 0.16, h * 0.18);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd24a'; ctx.font = '900 ' + GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+  ctx.fillText(GF.t('sigGotUnlock'), bx + h * 0.95 + 4 * S, by + h * 0.34);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif';
+  ctx.fillText((GF.lang === 'ru' ? d.ru : d.en), bx + h * 0.95 + 4 * S, by + h * 0.66);
+  ctx.restore();
+}
+
 // TASKS tab — 3 daily tasks, each a progress bar + a CLAIM button.
 function drawTasksTab(ctx, topY, bottomY, maxW) {
   var S = GF.S, cx = GF.cx, x = cx - maxW / 2;
@@ -3041,6 +3471,18 @@ function handleMetaPress(x, y) {
         renownToast = 3.4;
       } else beep(150, 0.08, 0, 'sawtooth');
       return;
+    }
+  } else if (metaTab === 'menu') {
+    for (var sr = 0; sr < sigRowRects.length; sr++) {
+      var srow = sigRowRects[sr];
+      if (hit(srow, x, y)) {
+        if (srow.can && buySignature(srow.id)) {
+          beep(680, 0.09); beep(920, 0.08, 0.06); beep(1180, 0.09, 0.13);
+          GF.spawnParticles(x, y, SIG_BY_ID[srow.id].col, 20);
+          sigUnlockToast = { def: SIG_BY_ID[srow.id], t: 2.6 };
+        } else beep(150, 0.08, 0, 'sawtooth');
+        return;
+      }
     }
   } else {
     for (var q = 0; q < taskClaimRects.length; q++) {
@@ -3450,6 +3892,14 @@ GF.exposeState(function() {
     renown: renownCount(),
     canRenown: canRenown(),
     nextSpecCost: (function() { var c = cheapestMastery(); return c ? c.cost : 0; })(),
+    // ── Signature Menu content axis (M3) ──
+    sigsOwned: ownedSigCount(),
+    featuredSig: featuredSig ? featuredSig.id : null,
+    specialServed: specialServed,
+    specialGoal: featuredSig ? featuredSig.goal : 0,
+    specialBonusBanked: specialBonusBanked,
+    runSigStars: runSigStars,
+    nextSigCost: (function() { var c = cheapestSig(); return c ? c.cost : 0; })(),
     metaOpen: metaOpen,
     muted: muted
   };
