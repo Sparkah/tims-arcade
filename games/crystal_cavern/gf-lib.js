@@ -143,7 +143,13 @@ canvas.addEventListener('touchend', function(e) {
 document.addEventListener('touchmove', function(e) { e.preventDefault(); }, { passive: false });
 
 // ── BUTTONS (declarative click-targets, populated by overlay screens) ───
+// drawOverlay() repopulates `buttons` each frame it draws. A non-overlay
+// (gameplay) frame must call GF.clearButtons() at the top of its draw so the
+// PREVIOUS overlay's rects (e.g. the centred PLAY/RETRY) don't linger as live
+// click targets over the playfield — otherwise a mid-game tap near screen-centre
+// re-fires startGame()/startPlaying() and silently resets the run.
 var buttons = [];
+function clearButtons() { buttons = []; }
 function checkButtons(x, y) {
   for (var i = 0; i < buttons.length; i++) {
     var b = buttons[i];
@@ -476,16 +482,26 @@ function drawOverlay(opts) {
   var wide    = W / H > 1.15;   // desktop/wide: a noticeably bigger CTA so PLAY is unmissable
   var btnW    = clamp((wide?320:248)*S, 170, 400), btnH = clamp((wide?64:54)*S, 42, 82);
   var btnX    = cx - btnW/2, btnY = cy + 22*S;
+  var maxTextW = W * 0.9;   // keep overlay copy off the canvas edges (no clipping)
 
-  // title with glow
+  // Shrink a font so `text` fits maxW (prefer fitted text to off-screen clipping).
+  function _fitFont(text, basePx, weight) {
+    var px = basePx;
+    ctx.font = (weight ? weight + ' ' : '') + px + 'px sans-serif';
+    var w = ctx.measureText(text).width;
+    if (w > maxTextW && w > 0) { px = Math.max(10, Math.floor(px * maxTextW / w)); ctx.font = (weight ? weight + ' ' : '') + px + 'px sans-serif'; }
+    return px;
+  }
+
+  // title with glow (fitted)
   ctx.shadowColor = 'rgba(46,204,113,0.4)'; ctx.shadowBlur = 30*S;
-  ctx.font = 'bold '+titleFs+'px sans-serif';
+  _fitFont(opts.title || '', titleFs, 'bold');
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.fillText(opts.title || '', cx, cy - 50*S);
   ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
-  if (opts.sub)  { ctx.font = subFs+'px sans-serif'; ctx.fillStyle = '#9ab'; ctx.fillText(opts.sub,  cx, cy - 16*S); }
-  if (opts.sub2) { ctx.font = subFs+'px sans-serif'; ctx.fillStyle = '#bcd'; ctx.fillText(opts.sub2, cx, cy + 2*S);  }
+  if (opts.sub)  { _fitFont(opts.sub,  subFs); ctx.fillStyle = '#9ab'; ctx.fillText(opts.sub,  cx, cy - 16*S); }
+  if (opts.sub2) { _fitFont(opts.sub2, subFs); ctx.fillStyle = '#bcd'; ctx.fillText(opts.sub2, cx, cy + 2*S);  }
 
   if (opts.btnText && opts.btnFn) {
     // gentle breathing pulse + glow so the eye lands on PLAY without hunting.
@@ -497,15 +513,20 @@ function drawOverlay(opts) {
     ctx.save(); ctx.shadowColor = 'rgba(46,224,122,'+(0.4+0.28*_k).toFixed(3)+')'; ctx.shadowBlur = (22+10*_k)*S;
     rr(ctx, _x, _y, _w, _h, _h/2);
     ctx.fillStyle = grad; ctx.fill(); ctx.restore();
-    ctx.font = 'bold '+clamp((wide?22:18)*S,14,30)+'px sans-serif'; ctx.fillStyle = '#fff';
+    // fit the CTA label inside the button (long localized labels must not overflow)
+    var _btnLabel = '▶ '+opts.btnText, _btnBase = clamp((wide?22:18)*S,14,30), _btnMaxW = btnW*0.86;
+    ctx.font = 'bold '+_btnBase+'px sans-serif';
+    var _lw = ctx.measureText(_btnLabel).width;
+    if (_lw > _btnMaxW && _lw > 0) ctx.font = 'bold '+Math.max(10, Math.floor(_btnBase*_btnMaxW/_lw))+'px sans-serif';
+    ctx.fillStyle = '#fff';
     ctx.textBaseline = 'middle';
-    ctx.fillText('▶ '+opts.btnText, cx, btnY + btnH/2);
+    ctx.fillText(_btnLabel, cx, btnY + btnH/2);
     ctx.textBaseline = 'alphabetic';
     buttons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: opts.btnFn });
   }
 
   if (opts.bestText) {
-    ctx.font = clamp(13*S,10,17)+'px sans-serif';
+    _fitFont(opts.bestText, clamp(13*S,10,17));
     ctx.fillStyle = '#557';
     ctx.fillText(opts.bestText, cx, btnY + btnH + 28*S);
   }
@@ -1379,6 +1400,9 @@ window.GF = {
   sprites: sprites,
   // Overlay
   drawOverlay: drawOverlay,
+  // Clear declarative overlay buttons — call at the top of any non-overlay
+  // (gameplay) draw so a stale centred PLAY/RETRY rect can't fire mid-game.
+  clearButtons: clearButtons,
   // Share card (Promise<Blob>)
   shareCard: shareCard,
   shareBlob: shareBlob,
