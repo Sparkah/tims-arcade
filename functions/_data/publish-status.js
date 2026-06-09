@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-07T18:53:27.537954+00:00",
+  "generated": "2026-06-09T20:17:25.202530+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -173,9 +173,9 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "submittedOn": "2026-05-20",
+          "submittedOn": "2026-06-09",
           "rejectedOn": "2026-06-06",
-          "status": "rejected"
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -308,7 +308,7 @@ export default {
         "plays7d": 3,
         "likes": 2,
         "dislikes": 0,
-        "seconds": 635,
+        "seconds": 160,
         "genre": "other"
       },
       "platforms": {
@@ -339,7 +339,7 @@ export default {
         "plays7d": 5,
         "likes": 1,
         "dislikes": 0,
-        "seconds": 665,
+        "seconds": 430,
         "genre": "merge"
       },
       "platforms": {
@@ -697,9 +697,45 @@ export default {
         "gamedistribution",
         "gamepush"
       ]
+    },
+    "parry_core": {
+      "gameDir": "Games/102_parry_core",
+      "engagement": null,
+      "platforms": {
+        "yandex": {
+          "submittedOn": "2026-06-09",
+          "status": "submitted"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
     }
   },
   "untracked": [
+    {
+      "slug": "crash_buggy",
+      "folder": "152_crash_buggy",
+      "engagement": {
+        "plays7d": 3,
+        "likes": 1,
+        "dislikes": 0,
+        "seconds": 440,
+        "genre": "other"
+      }
+    },
     {
       "slug": "merge_diner",
       "folder": "132_merge_diner",
@@ -765,25 +801,14 @@ export default {
         "seconds": 180,
         "genre": "racing"
       }
-    },
-    {
-      "slug": "spell_or_spoil",
-      "folder": "127_spell_or_spoil",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 0,
-        "dislikes": 1,
-        "seconds": 145,
-        "genre": "other"
-      }
     }
   ],
   "summary": {
     "yandex": {
       "live": 4,
       "approved": 0,
-      "submitted": 18,
-      "rejected": 2,
+      "submitted": 20,
+      "rejected": 1,
       "built": 1
     },
     "crazygames": {
