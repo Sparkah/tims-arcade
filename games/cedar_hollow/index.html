@@ -47,6 +47,8 @@ var STRINGS = {
     upg_packmule: 'Pack Mule', upg_packmule_d: 'Longer offline cap',
     upg_lantern: 'Lantern', upg_lantern_d: 'Better offline rate',
     offline_t: 'While you were away', claim: 'CLAIM',
+    off_rate: 'Rate', off_cap: 'Cap', off_capped: '(time capped)',
+    rations_free: 'Field rations +3 (free)',
     smithy: 'Smithy', campfire: 'Campfire', heals: 'Heals', requires: 'Needs', locked: 'Locked',
     clear_prev: 'Clear the previous zone', rec: 'Suggested', meals_w: 'meals',
     hint_hunt: 'Finish the hunt first - tap FLEE to leave',
@@ -88,6 +90,8 @@ var STRINGS = {
     upg_packmule: 'Вьючный мул', upg_packmule_d: 'Дольше копит офлайн',
     upg_lantern: 'Фонарь', upg_lantern_d: 'Быстрее копит офлайн',
     offline_t: 'Пока вас не было', claim: 'ЗАБРАТЬ',
+    off_rate: 'Темп', off_cap: 'Лимит', off_capped: '(время по лимиту)',
+    rations_free: 'Паёк +3 (бесплатно)',
     smithy: 'Кузница', campfire: 'Костёр', heals: 'Лечит', requires: 'Нужно', locked: 'Закрыто',
     clear_prev: 'Пройдите прошлую зону', rec: 'Совет', meals_w: 'еда',
     hint_hunt: 'Сначала закончите охоту - нажмите УЙТИ',
@@ -208,7 +212,8 @@ function freshState() {
     upg: { whetstone:0, packmule:0, lantern:0 },
     zonesCleared: 0, defeats: 0, killsTotal: 0, lifetimeCoins: 0,
     job: { skill:'woodcut', tier:0, prog:0 },
-    huntCoach: 0,
+    huntCoach: 0, freeRations: 0,
+    pendingOffline: null,   // unclaimed offline gains survive close/reload
     lastSeen: Date.now(),
   };
 }
@@ -513,8 +518,11 @@ function huntTick(dt) {
   if (hunt.hp <= 0) huntDefeat();
 }
 function retryHunt() {
-  gs = 'PLAYING'; tab = 'trail';
+  gs = 'PLAYING';
   GF.gameStarted();
+  // a 0-meal retry is always doomed (sim T4c) - route to the campfire instead
+  if (mealCount() === 0) { tab = 'camp'; toast(GF.t('no_meals')); GF.sfx('error'); saveRun(); return; }
+  tab = 'trail';
   if (lastDefeatZone <= st.zonesCleared) startHunt(lastDefeatZone);
   saveRun();
 }
@@ -529,7 +537,8 @@ function computeOffline() {
   var n = Math.floor(eff / actionTime(st.job.skill, st.job.tier) * rate);
   if (n <= 0) return null;
   var tr = BAL.skills[st.job.skill].tiers[st.job.tier];
-  return { n: n, res: tr.id, xp: n * tr.xp, skill: st.job.skill, awayS: elapsed };
+  return { n: n, res: tr.id, xp: n * tr.xp, skill: st.job.skill, awayS: elapsed,
+           rate: rate, capH: capS / 3600, capped: elapsed > capS };
 }
 function claimOffline() {
   if (!offlinePending) { modal = null; return; }
@@ -539,6 +548,7 @@ function claimOffline() {
   GF.sfx('reward'); GF.setShake(0.4);
   GF.spawnParticles(GF.cx, GF.cy, '#ffd84d', 30);
   offlinePending = null;
+  st.pendingOffline = null;
   modal = null;
   saveRun();
 }
@@ -1546,6 +1556,12 @@ function drawModal(c) {
     c.fillText('+' + fmt(o.n) + ' ' + GF.t('res_' + o.res), m.x + m.w / 2 - 42 * u, m.y + 110 * u);
     drawIcon(c, 'star', m.x + m.w / 2 - 64 * u, m.y + 150 * u, 28 * u);
     c.fillText('+' + fmt(o.xp) + ' XP', m.x + m.w / 2 - 42 * u, m.y + 150 * u);
+    // legible math: rate, cap, and whether the cap truncated the away time
+    c.fillStyle = 'rgba(255,255,255,0.45)'; c.font = Math.round(11 * u) + 'px sans-serif';
+    c.textAlign = 'center';
+    c.fillText(GF.t('off_rate') + ' ' + Math.round((o.rate || BAL.OFFLINE_RATE) * 100) + '%  /  ' +
+               GF.t('off_cap') + ' ' + (o.capH || BAL.OFFLINE_CAP_H) + 'h' +
+               (o.capped ? '  ' + GF.t('off_capped') : ''), m.x + m.w / 2, m.y + 186 * u);
     var cw2 = m.w * 0.6, ch2 = 50 * u;
     pill(c, m.x + (m.w - cw2) / 2, m.y + m.h - ch2 - 20 * u, cw2, ch2, GF.t('claim'), { bg: '#ffd84d', fg: '#1a0f08', glow: '#ffd84d' });
     pushBtn(m.x + (m.w - cw2) / 2, m.y + m.h - ch2 - 20 * u, cw2, ch2, claimOffline, 'claim');
@@ -1575,17 +1591,22 @@ function drawGameOver(c) {
   pushBtn(GF.cx - bw / 2, GF.cy + bh + 8 * u, bw, bh, function() {
     fireAdThen(function() { gs = 'PLAYING'; tab = 'camp'; GF.gameStarted(); saveRun(); });
   }, 'to_camp');
-  pill(c, GF.cx - bw / 2, GF.cy + (bh + 8 * u) * 2 + 6 * u, bw, bh * 0.8, GF.t('rations'), { bg: 'rgba(255,216,77,0.16)', fg: '#ffd84d' });
+  var freeRations = !st.freeRations;
+  pill(c, GF.cx - bw / 2, GF.cy + (bh + 8 * u) * 2 + 6 * u, bw, bh * 0.8,
+       GF.t(freeRations ? 'rations_free' : 'rations'),
+       { bg: freeRations ? 'rgba(255,216,77,0.3)' : 'rgba(255,216,77,0.16)', fg: '#ffd84d', glow: freeRations ? '#ffd84d' : null });
   pushBtn(GF.cx - bw / 2, GF.cy + (bh + 8 * u) * 2 + 6 * u, bw, bh * 0.8, function() {
-    GF.ads.rewarded({
-      onReward: function() {
-        var mi = 0;
-        for (var i = BAL.meals.length - 1; i >= 0; i--) if (BAL.meals[i].cookLvl <= lvlOf('cook')) { mi = i; break; }
-        st.meals[BAL.meals[mi].id] = (st.meals[BAL.meals[mi].id] || 0) + 3;
-        GF.sfx('reward'); toast('+3 ' + GF.t('meal_' + BAL.meals[mi].id));
-        saveRun();
-      },
-    });
+    var grant = function() {
+      var mi = 0;
+      for (var i = BAL.meals.length - 1; i >= 0; i--) if (BAL.meals[i].cookLvl <= lvlOf('cook')) { mi = i; break; }
+      st.meals[BAL.meals[mi].id] = (st.meals[BAL.meals[mi].id] || 0) + 3;
+      GF.sfx('reward'); toast('+3 ' + GF.t('meal_' + BAL.meals[mi].id));
+      saveRun();
+    };
+    // first failed hunt: rations are FREE (low-pressure monetization, Iktah-style);
+    // afterwards they come from a rewarded ad (user-click, never auto)
+    if (!st.freeRations) { st.freeRations = 1; grant(); return; }
+    GF.ads.rewarded({ onReward: grant });
   }, 'rations');
 }
 function fireAdThen(fn) {
@@ -1780,7 +1801,19 @@ GF.init({
     try { best = parseInt(localStorage.getItem('cedar_hollow_best') || '0') || 0; } catch (e) {}
     st = freshState();
     var restored = GF.persist('cedar_hollow_run_v1',
-      function() { return { st: st, score: score, tab: tab }; },
+      function() {
+        // mid-hunt saves return the packed meals to camp stock in the SNAPSHOT
+        // (reload drops the hunt, so the pack must not be silently lost; an
+        // actual DEFEAT still consumes it - that loss happens before this save)
+        var snapSt = st;
+        if (hunt && hunt.pack.length) {
+          var meals2 = {}, mk;
+          for (mk in st.meals) meals2[mk] = st.meals[mk];
+          hunt.pack.forEach(function(id) { meals2[id] = (meals2[id] || 0) + 1; });
+          snapSt = Object.assign({}, st, { meals: meals2 });
+        }
+        return { st: snapSt, score: score, tab: tab };
+      },
       function(s) {
         if (!s || !s.st) return;
         var f = freshState();
@@ -1795,8 +1828,10 @@ GF.init({
     gs = 'PLAYING';            // no boot menu - straight into gameplay (hard rule)
     hunt = null;               // hunts never persist; reload lands on a safe screen
     if (restored) {
-      offlinePending = computeOffline();
-      if (offlinePending) modal = 'offline';
+      // unclaimed gains PERSIST: compute once, store in the save, and keep
+      // re-showing until CLAIM - closing the tab can never eat the reward
+      if (!st.pendingOffline) st.pendingOffline = computeOffline();
+      if (st.pendingOffline) { offlinePending = st.pendingOffline; modal = 'offline'; }
     }
     st.lastSeen = Date.now();
     GF.saveRun();
