@@ -123,10 +123,10 @@ for ((i = 0; i < COUNT; i++)); do
     publish_atomic "$OUT_GAMES/$SLUG/index.html" < "$GAME_DIR/index.html"
   fi
 
-  # Bespoke-soundtrack backstop (2026-06-10): if THIS game wired GF.bgMusic to a
+  # Bespoke-soundtrack backstop (2026-06-10): if THIS game wired GF.music to a
   # bespoke track but the file was never generated (build agent skipped the step),
-  # render it now via synth_track.py so the copy below ships REAL music instead of
-  # the procedural fallback. Tightly scoped — only games that reference
+  # render it now via synth_track.py so the copy below ships the referenced mp3
+  # (there is NO automatic fallback if it's missing). Tightly scoped — only games that reference
   # audio/bg_track.mp3 AND lack it; old games (no such reference) skip instantly.
   # Graceful: a failure leaves the file absent and GF.bgMusic falls back, never silent.
   if grep -q "audio/bg_track\.mp3" "$GAME_DIR/index.html" 2>/dev/null && [[ ! -f "$GAME_DIR/audio/bg_track.mp3" ]]; then
