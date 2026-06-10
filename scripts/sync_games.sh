@@ -123,19 +123,6 @@ for ((i = 0; i < COUNT; i++)); do
     publish_atomic "$OUT_GAMES/$SLUG/index.html" < "$GAME_DIR/index.html"
   fi
 
-  # Bespoke-soundtrack backstop (2026-06-10): if THIS game wired GF.music to a
-  # bespoke track but the file was never generated (build agent skipped the step),
-  # render it now via synth_track.py so the copy below ships the referenced mp3.
-  # There is NO runtime fallback: gf-lib's music() has no load-error handler, so
-  # a missing mp3 ships a SILENT-music game (presubmit #12 would also flag it).
-  # Tightly scoped — only games that reference audio/bg_track.mp3 AND lack it;
-  # old games (no such reference) skip instantly.
-  if grep -q "audio/bg_track\.mp3" "$GAME_DIR/index.html" 2>/dev/null && [[ ! -f "$GAME_DIR/audio/bg_track.mp3" ]]; then
-    echo "  [$SLUG] bespoke track missing -> generating via synth_track.py"
-    bash "$ROOT/Shared/skills/game-factory/tools/gen_soundtrack.sh" "$GAME_DIR" \
-      || echo "  [$SLUG] gen_soundtrack FAILED -> $SLUG ships WITHOUT background music (no runtime fallback); regenerate before submitting"
-  fi
-
   # Copy optional asset folders if they exist
   for sub in fonts sounds audio data images assets sprites; do
     [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
