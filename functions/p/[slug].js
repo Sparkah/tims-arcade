@@ -146,10 +146,15 @@ export async function onRequest({ params, env, request }) {
 
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-	html,body{background:#0a0a14;color:#e7e7ee;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;min-height:100%;display:flex;align-items:center;justify-content:center;text-align:center}
-	body{min-height:100dvh}
-	.wrap{width:min(560px,100%);padding:32px 20px}
-	img{width:100%;max-width:100%;border-radius:12px;margin-bottom:18px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
+	html,body{background:#0a0a14;color:#e7e7ee;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;min-height:100%;text-align:center}
+	body{min-height:100dvh;display:flex;justify-content:center}
+	/* margin:auto (not align-items:center) so when content overflows the
+	   viewport it top-aligns and scrolls instead of clipping the top. */
+	.wrap{width:min(560px,100%);padding:32px 20px;margin:auto}
+	/* Cap cover height: portrait mobile-first thumbs (1080x1920) would render
+	   ~1000px tall at width:100% and push the Play button below the fold on
+	   desktop (crash_buggy 2026-06-10). Gate: scripts/check_play_visible.js */
+	img{width:100%;max-width:100%;max-height:min(38dvh,420px);object-fit:cover;border-radius:12px;margin-bottom:18px;box-shadow:0 8px 32px rgba(0,0,0,0.5)}
 h1{font-size:24px;margin-bottom:6px;color:#f7f7fa}
 p{color:#8a8aa0;font-size:15px;line-height:1.5;margin-bottom:18px}
 a.btn{display:inline-block;background:#4dd0e1;color:#0a0a14;padding:10px 22px;border-radius:999px;font-weight:700;text-decoration:none;font-size:15px}
@@ -181,7 +186,6 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
 .sg-status.ok{color:#7c7}.sg-status.err{color:#d77}
 	.sg-close{position:absolute;top:8px;right:12px;background:none;border:none;color:#8a8aa0;font-size:20px;cursor:pointer;line-height:1}
 	@media (max-width:600px){
-	  html,body{align-items:flex-start}
 	  .wrap{padding:18px 16px 22px}
 	  img{max-height:36dvh;object-fit:cover;margin-bottom:14px;border-radius:10px}
 	  h1{font-size:23px;line-height:1.15;margin-bottom:7px}
