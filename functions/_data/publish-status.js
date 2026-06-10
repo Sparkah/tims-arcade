@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-09T20:17:25.202530+00:00",
+  "generated": "2026-06-10T12:54:47.727170+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -274,10 +274,10 @@ export default {
     "backrooms": {
       "gameDir": "Games/128_backrooms",
       "engagement": {
-        "plays7d": 5,
-        "likes": 0,
+        "plays7d": 6,
+        "likes": 1,
         "dislikes": 0,
-        "seconds": 450,
+        "seconds": 480,
         "genre": "other"
       },
       "platforms": {
@@ -366,13 +366,7 @@ export default {
     },
     "boba_rush": {
       "gameDir": "Games/124_boba_rush",
-      "engagement": {
-        "plays7d": 5,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 320,
-        "genre": "other"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-04",
@@ -588,13 +582,7 @@ export default {
     },
     "critter_siege": {
       "gameDir": "Games/129_critter_siege",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 155,
-        "genre": "other"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-07",
@@ -722,28 +710,48 @@ export default {
         "gamedistribution",
         "gamepush"
       ]
+    },
+    "crash_buggy": {
+      "gameDir": "Games/152_crash_buggy",
+      "engagement": {
+        "plays7d": 8,
+        "likes": 2,
+        "dislikes": 0,
+        "seconds": 930,
+        "genre": "other"
+      },
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
     }
   },
   "untracked": [
     {
-      "slug": "crash_buggy",
-      "folder": "152_crash_buggy",
-      "engagement": {
-        "plays7d": 3,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 440,
-        "genre": "other"
-      }
-    },
-    {
       "slug": "merge_diner",
       "folder": "132_merge_diner",
       "engagement": {
-        "plays7d": 2,
+        "plays7d": 3,
         "likes": 2,
         "dislikes": 0,
-        "seconds": 365,
+        "seconds": 625,
         "genre": "other"
       }
     },
@@ -759,14 +767,25 @@ export default {
       }
     },
     {
-      "slug": "hue_sort",
-      "folder": "93_hue_sort",
+      "slug": "war_table",
+      "folder": "154_war_table",
       "engagement": {
-        "plays7d": 8,
+        "plays7d": 1,
         "likes": 1,
-        "dislikes": 1,
-        "seconds": 265,
-        "genre": "sort"
+        "dislikes": 0,
+        "seconds": 235,
+        "genre": "strategy"
+      }
+    },
+    {
+      "slug": "claw_tycoon",
+      "folder": "153_claw_tycoon",
+      "engagement": {
+        "plays7d": 1,
+        "likes": 1,
+        "dislikes": 0,
+        "seconds": 215,
+        "genre": "tycoon"
       }
     },
     {
@@ -781,6 +800,17 @@ export default {
       }
     },
     {
+      "slug": "tight_spot",
+      "folder": "109_tight_spot",
+      "engagement": {
+        "plays7d": 5,
+        "likes": 1,
+        "dislikes": 1,
+        "seconds": 185,
+        "genre": "racing"
+      }
+    },
+    {
       "slug": "starbound_hearts",
       "folder": "137_starbound_hearts",
       "engagement": {
@@ -792,14 +822,14 @@ export default {
       }
     },
     {
-      "slug": "tight_spot",
-      "folder": "109_tight_spot",
+      "slug": "hue_sort",
+      "folder": "93_hue_sort",
       "engagement": {
-        "plays7d": 4,
+        "plays7d": 8,
         "likes": 1,
         "dislikes": 1,
-        "seconds": 180,
-        "genre": "racing"
+        "seconds": 160,
+        "genre": "sort"
       }
     }
   ],
@@ -809,7 +839,7 @@ export default {
       "approved": 0,
       "submitted": 20,
       "rejected": 1,
-      "built": 1
+      "built": 2
     },
     "crazygames": {
       "live": 0,
