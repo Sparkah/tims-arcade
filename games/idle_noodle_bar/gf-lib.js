@@ -1101,7 +1101,18 @@ function sfx(name) { var f = SFX_LIB[name]; if (f) f(); }
 function music(url, vol) {
   if (!url) return;
   try {
-    if (!_music) { _music = new Audio(); _music.loop = true; _music.preload = 'auto'; }
+    if (!_music) {
+      _music = new Audio(); _music.loop = true; _music.preload = 'auto';
+      // Pause bg music on tab-hide, resume on return. GF.music games no longer
+      // call startMusic (which used to own this), so bind it here, once.
+      document.addEventListener('visibilitychange', function () {
+        if (!_music) return;
+        try {
+          if (document.hidden) _music.pause();
+          else if (!AUDIO_MUTED && _musicSrc) { var q = _music.play(); if (q && q.catch) q.catch(function () {}); }
+        } catch (e) {}
+      });
+    }
     if (vol != null) _musicVol = vol;
     _musicSrc = url; _music.src = url; _music.volume = _musicVol; _music.muted = AUDIO_MUTED;
     if (!AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
