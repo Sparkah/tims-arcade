@@ -19,8 +19,8 @@
  *      thumb URLs point at the local Gallery/thumbs/ dir (what will deploy).
  *   3. At scroll position 0, asserts `a.btn` (the Play link) is fully inside
  *      the viewport, has nonzero size, and is not covered by another element:
- *        - desktop 1280x720  (smallest desktop we guarantee; 1440x900 etc.
- *          only get MORE room)
+ *        - desktop 1280x720
+ *        - desktop-short 1280x600 (browser chrome on a 768px laptop screen)
  *        - mobile  393x852
  *
  * USAGE
@@ -42,8 +42,11 @@ const puppeteer = require(path.join(
 ));
 
 const VIEWPORTS = [
-  { w: 1280, h: 720, name: 'desktop-1280x720', isMobile: false },
-  { w: 393,  h: 852, name: 'mobile-393x852',   isMobile: true  },
+  { w: 1280, h: 720, name: 'desktop-1280x720',       isMobile: false },
+  // Real browser chrome eats ~100-150px: a 768px laptop screen leaves ~600px
+  // of page. Same short-desktop case the in-game reachability gate tests.
+  { w: 1280, h: 600, name: 'desktop-short-1280x600', isMobile: false },
+  { w: 393,  h: 852, name: 'mobile-393x852',         isMobile: true  },
 ];
 // Low concurrency on purpose: 4 tabs serving multi-MB PNGs through
 // request-interception hit protocol timeouts when run inside the pre-push
@@ -117,7 +120,13 @@ async function checkOne(browser, html, slug) {
       ));
       const verdict = await page.evaluate(() => {
         window.scrollTo(0, 0);
-        const btn = document.querySelector('a.btn');
+        // The cover MUST have actually loaded: a missing/broken image
+        // collapses to 0px tall, the button floats up, and the gate would
+        // false-PASS a page that breaks once the real thumb loads in prod.
+        const cover = document.querySelector('.wrap > img');
+        if (cover && !(cover.complete && cover.naturalWidth > 0))
+          return { ok: false, why: 'cover image failed to load in gate — layout not trustworthy' };
+        const btn = document.querySelector('a.btn[href^="/play.html"]') || document.querySelector('a.btn');
         if (!btn) return { ok: false, why: 'no a.btn play link in DOM' };
         const r = btn.getBoundingClientRect();
         if (r.width < 10 || r.height < 10) return { ok: false, why: `btn collapsed (${Math.round(r.width)}x${Math.round(r.height)})` };
@@ -126,7 +135,7 @@ async function checkOne(browser, html, slug) {
         if (r.left < 0 || r.right > window.innerWidth)
           return { ok: false, why: `btn outside horizontally: left=${Math.round(r.left)} right=${Math.round(r.right)} viewportW=${window.innerWidth}` };
         const el = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-        if (el !== btn && !btn.contains(el) && !(el && el.contains(btn)))
+        if (el !== btn && !btn.contains(el) && !(el && el.contains(btn)) && (!el || el.closest('a.btn') !== btn))
           return { ok: false, why: `btn covered by <${el ? el.tagName.toLowerCase() : 'null'}>` };
         return { ok: true };
       });
@@ -186,8 +195,8 @@ async function checkOne(browser, html, slug) {
     console.error(`\n🚫 PLAY-VISIBILITY GATE: ${allFails.length} failure(s) across ${slugs.length} game page(s):`);
     for (const f of allFails.sort()) console.error(`   ✗ ${f}`);
     console.error('\n   Rule: /p/<slug> must show the full Play button WITHOUT scrolling');
-    console.error('   at 1280x720 desktop and 393x852 mobile. Fix the page layout or');
-    console.error('   the offending thumb before pushing.');
+    console.error('   at 1280x720 + 1280x600 desktop and 393x852 mobile. Fix the page');
+    console.error('   layout or the offending thumb before pushing.');
     process.exit(2);
   }
   if (infraFails.length) {
