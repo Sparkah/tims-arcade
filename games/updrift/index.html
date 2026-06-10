@@ -37,6 +37,16 @@ var STRINGS = {
     mode_hint_dig: 'breaks 1 above',
     mode_hint_brace: 'stops the fall',
     mode_hint_blast: 'clears 3 above',
+    // Hands-on first-run onboarding (action-gated; played on the live board).
+    onb_dig: 'TAP THE ROCK ABOVE TO DIG UP',
+    onb_rise: 'KEEP TAPPING — DIG YOUR WAY UP',
+    onb_brace_chip: 'ROCK ABOVE IS LOOSE! TAP "BRACE" TO HOLD IT',
+    onb_brace_do: 'NOW TAP ABOVE TO BRACE THE CEILING',
+    onb_surface: 'NICE! NOW DIG UP TO THE BRIGHT SURFACE',
+    onb_done: "YOU'VE GOT IT — GOOD LUCK DOWN THERE",
+    brace_warn: 'BRACE!',
+    menu_learn: 'Tap PLAY — a quick hands-on guide walks you through it.',
+    menu_help_hint: 'Need the full rules? Tap ? any time.',
     best: 'BEST DEPTH', career_max: 'TANK',
     goal_next: 'NEXT GOAL: reach Lvl {lv} to bank +{air} max air',
     goal_done: 'CAREER COMPLETE — all depths mastered!',
@@ -86,6 +96,15 @@ var STRINGS = {
     mode_hint_dig: 'ломает 1 сверху',
     mode_hint_brace: 'держит свод',
     mode_hint_blast: 'сносит 3 сверху',
+    onb_dig: 'ТАПНИТЕ ПО КАМНЮ СВЕРХУ — КОПАТЬ ВВЕРХ',
+    onb_rise: 'ПРОДОЛЖАЙТЕ — ПРОРУБАЙТЕСЬ ВВЕРХ',
+    onb_brace_chip: 'СВОД РАСШАТАН! НАЖМИТЕ «УПОР», ЧТОБЫ УДЕРЖАТЬ',
+    onb_brace_do: 'ТЕПЕРЬ ТАПНИТЕ СВЕРХУ — ПОСТАВИТЬ УПОР',
+    onb_surface: 'ОТЛИЧНО! ТЕПЕРЬ КОПАЙТЕ К СВЕТЛОЙ ПОВЕРХНОСТИ',
+    onb_done: 'ВЫ РАЗОБРАЛИСЬ — УДАЧИ ТАМ ВНИЗУ',
+    brace_warn: 'УПОР!',
+    menu_learn: 'Нажмите ИГРАТЬ — короткое наглядное обучение всё покажет.',
+    menu_help_hint: 'Нужны полные правила? Нажмите ? в любой момент.',
     best: 'РЕКОРД ГЛУБИНЫ', career_max: 'БАК',
     goal_next: 'ЦЕЛЬ: дойдите до ур. {lv}, чтобы получить +{air} к запасу воздуха',
     goal_done: 'КАРЬЕРА ПРОЙДЕНА — все глубины покорены!',
@@ -230,6 +249,31 @@ var hitFlashT = 0;
 var firstActionDone = false;  // clarity: drives the in-board coach hint until the first dig
 var modeSwitched = false;     // clarity: true once the player has changed mode at least once
 var audioMuted = false;       // persisted mute flag (loaded from meta)
+
+// ── HANDS-ON ONBOARDING (iteration #5 — kill "unclear how to play / uncomfortable
+// dig-blast switching") ─────────────────────────────────────────────────────
+// The prior passes layered chips + a ghost + a one-line coach, but the FIRST-RUN
+// experience was still a passive wall of tutorial text on the MENU, then the
+// player was dropped onto a complex board cold — exactly the "tap-through text
+// tour" the build guide flags as bad. This replaces it with an ACTION-GATED,
+// played-on-the-live-board onboarding (Merge-Guns / demo-hand style): each step
+// advances ONLY when the player performs the REAL action, with an animated
+// pointing HAND at the exact target (the cell above, or the BRACE chip) + a slim
+// caption pill — NOT a frozen panel. It deliberately teaches the dig→rockfall→
+// brace cause-and-effect that the whole game hinges on, so mode-switching stops
+// feeling random. Runs once ever (updrift_onboarded flag); the ? panel stays as
+// a text reference and reopens it.
+var ONB_KEY = 'updrift_onboarded';
+var onbActive = false;        // an onboarding run is in progress
+var onbStep = 0;              // 0 dig · 1 rise · 2 tap-brace-chip · 3 do-brace · 4 surface · 5 done
+var onbRiseStart = 0;         // diverRow when the rise step began (to detect "rose enough")
+var onbBraceArmed = false;    // step 2/3: a loose chunk has been seeded above the diver
+var onbDoneT = 0;             // countdown for the final "you've got it" caption
+// Just-in-time BRACE danger cue (normal play): true when a falling chunk is in
+// the diver's column and about to crush — makes the mode switch REACTIVE to a
+// legible threat instead of a guess. Drives a pulsing BRACE chip + a "BRACE!"
+// flag near the diver.
+var braceDanger = false;
 
 // ── PERSISTENT META — "Career Depth" (iteration #1, retention pass) ─────────
 // The single cross-session progression the player OWNS: the deepest level ever
@@ -531,6 +575,11 @@ function startGame() {
   modeSwitched = false;
   buildLevel(1);
   gs = 'PLAYING';
+  // Hands-on onboarding on the FIRST ever dive (gallery PLAY or platform
+  // autostart both reach this) — played on the live board, action-gated. After
+  // that one run the flag is set and normal play resumes untutored.
+  if (!onbWasSeen() && !window._silent) onbStart();
+  else onbActive = false;
   audioInit(); audioResume();   // first dive = a user gesture → safe to start audio
   if (runStartBonus > 0) {
     GF.spawnFloat(GF.cx, GF.H * 0.42, subst(GF.t('run_bonus'), { air: runStartBonus }), '#7af5ff');
@@ -576,6 +625,10 @@ function winLevel() {
   // and rises monotonically). Drives both the depth and survive quests.
   questProgressDepth = Math.max(questProgressDepth, level);
   checkQuest();
+  // Onboarding: surfacing the very first level completes the lesson (any step
+  // still pending — e.g. the player rushed straight up — resolves here). Mark it
+  // seen so it never replays, but leave onbActive for one closing caption beat.
+  if (onbActive) { onbStep = 5; onbDoneT = 1.6; onbFinish(); }
   GF.spawnParticles(GF.cx, GF.H * 0.3, '#ffe06a', 56);
   sfx('win');
   GF.gameEnded();
@@ -625,6 +678,7 @@ function brace() {
   GF.spawnParticles(px, py, '#ffd24a', 8);
   sfx('brace');
   firstActionDone = true;
+  onbOnBrace();
   afterAction();
 }
 
@@ -652,6 +706,12 @@ function blast() {
   afterAction();
 }
 
+// Did the player just BRACE? Advance onboarding step 3 → 4 (the real action that
+// completes the brace lesson). Hooked from brace() below.
+function onbOnBrace() {
+  if (onbActive && onbStep === 3) onbAdvance();
+}
+
 function act() {
   if (mode === 'dig') digUp();
   else if (mode === 'brace') brace();
@@ -672,6 +732,52 @@ function selectMode(m) {
   mode = m;
   modeSwitched = true;
   sfx('mode');
+  // Onboarding step 2 → 3: the player tapped the BRACE chip as instructed.
+  if (onbActive && onbStep === 2 && m === 'brace') onbAdvance();
+}
+
+// ── ONBOARDING CONTROLLER ───────────────────────────────────────────────────
+function onbWasSeen() {
+  try { return localStorage.getItem(ONB_KEY) === '1'; } catch (e) { return false; }
+}
+// Persist "onboarding done" WITHOUT killing the active flag — the closing caption
+// (step 5) still shows for onbDoneT seconds; update() clears onbActive when the
+// timer expires. Persisting here means a reload mid-celebration won't replay it.
+function onbFinish() {
+  try { localStorage.setItem(ONB_KEY, '1'); localStorage.setItem('updrift_seen_tutorial', '1'); } catch (e) {}
+}
+// Begin the hands-on onboarding on the CURRENT live run (called from startGame on
+// the first ever dive). It does NOT freeze the game — the player performs the real
+// actions; we just gate the caption/hand on the real action and seed a loose chunk
+// at the brace step so that step is always completable.
+function onbStart() {
+  onbActive = true;
+  onbStep = 0;
+  onbRiseStart = diverRow;
+  onbBraceArmed = false;
+  onbDoneT = 0;
+}
+function onbAdvance() {
+  onbStep++;
+  if (onbStep === 1) { onbRiseStart = diverRow; }
+  if (onbStep === 2) {
+    // Force a teachable BRACE moment: drop a real falling chunk into the diver's
+    // column a couple rows up so "the ceiling is raining down — brace it" is TRUE,
+    // not abstract. selectMode('brace') advances 2→3; the brace action advances 3→4.
+    onbSeedBraceThreat();
+    onbBraceArmed = true;
+    if (mode === 'brace') onbStep = 3;   // already on brace → skip the chip-tap step
+  }
+  if (onbStep >= 5) { onbDoneT = 2.2; onbFinish(); }   // closing caption; mark seen so a reload won't replay
+}
+// Seed a loose falling chunk directly above the diver (clears any rock in the way
+// first so it actually falls), guaranteeing the brace lesson is reachable.
+function onbSeedBraceThreat() {
+  var col = diverCol;
+  var sr = Math.max(SURFACE_ROW + 1, diverRow - 3);   // a few rows up
+  // clear the column between the chunk and the diver so the chunk has room to drop
+  for (var r = sr; r < diverRow; r++) { if (cellAt(r, col)) setCell(r, col, null); }
+  if (!chunkAt(sr, col)) chunks.push({ col: col, row: sr });
 }
 
 function moveDiver(dx) {
@@ -684,9 +790,32 @@ function moveDiver(dx) {
 function afterAction() {
   actionsThisRun++;
   tryRise();
+  // Onboarding gating on the REAL dig/rise actions (kept here so it fires for
+  // dig, brace, and blast uniformly):
+  //  step 0 → 1: the player performed their first action (dig).
+  //  step 1 → 2: they have dug/risen a couple of rows (loop understood).
+  if (onbActive) {
+    if (onbStep === 0) onbAdvance();
+    else if (onbStep === 1 && (onbRiseStart - diverRow) >= 2) onbAdvance();
+  }
   if (oxygen <= 0) { oxygen = 0; loseGame('oxy'); return; }
   if (diverRow <= SURFACE_ROW) { winLevel(); return; }
   GF.saveRun();
+}
+
+// Recompute the just-in-time BRACE danger cue: is there a falling chunk in the
+// diver's column, close enough overhead that it will crush him within ~2 ticks?
+// (Only meaningful while playing and not already bracing.) This is what turns
+// "switch to brace" from a blind guess into a readable, reactive decision.
+function updateBraceDanger() {
+  braceDanger = false;
+  if (gs !== 'PLAYING') return;
+  for (var i = 0; i < chunks.length; i++) {
+    var ch = chunks[i];
+    if (ch.col === diverCol && ch.row < diverRow && (diverRow - ch.row) <= 2) {
+      braceDanger = true; return;
+    }
+  }
 }
 
 function tryRise() {
@@ -796,6 +925,7 @@ window._jumpLevel = function (lv) {
   mode = 'brace';
   firstActionDone = true;   // mid-game jump = past the first-action coach hint
   modeSwitched = true;
+  onbActive = false;        // mid-game jump is past onboarding (keep screenshots clean)
 };
 window._setupForScreenshot = window._jumpLevel;
 // Test/screenshot-only seam: set up an arbitrary endless level (lv may exceed
@@ -819,7 +949,7 @@ window._jumpEndless = function (lv, seedBest) {
   }
   oxygen = Math.round(START_OXY * 0.6);
   crushLives = 2; mode = 'dig';
-  firstActionDone = true; modeSwitched = true;
+  firstActionDone = true; modeSwitched = true; onbActive = false;
 };
 // Test/screenshot-only seam: carve straight to the surface and trigger a real
 // level win (so fullWin / record / banked-air latches set authentically for the
@@ -998,11 +1128,17 @@ function update(dt) {
   if (gs !== 'PLAYING') { handleMenuKeys(); return; }
   handleKeys();
   scheduleMusic();   // soft procedural bed, only while diving
+  // Close the onboarding once the final caption has been shown for its beat.
+  if (onbActive && onbStep >= 5) {
+    onbDoneT -= dt;
+    if (onbDoneT <= 0) onbActive = false;
+  }
   fallTimer += dt * 1000;
   if (fallTimer >= FALL_TICK_MS) {
     fallTimer -= FALL_TICK_MS;
     gravityTick();
   }
+  updateBraceDanger();   // recompute the just-in-time BRACE danger cue each frame
 }
 
 // ── DRAW ─────────────────────────────────────────────────────────────────
@@ -1200,6 +1336,153 @@ function drawCoach(c) {
   c.restore();
 }
 
+// Reactive "BRACE!" flag pinned over the diver when a chunk is about to crush him
+// (and he isn't already bracing). Pairs with the flashing BRACE chip so the player
+// always knows the moment to switch — the direct fix for "uncomfortable to switch
+// between dig/blast". Suppressed during onboarding to avoid double-prompting.
+function drawBraceWarn(c) {
+  var cell = layout.cell;
+  var cx = layout.gx + (diverCol + 0.5) * cell;
+  var py = layout.gy + (diverRow - 1.15) * cell;
+  if (py < layout.gy + cell * 0.4) py = layout.gy + (diverRow + 1.2) * cell;
+  var pulse = 0.5 + 0.5 * Math.sin(performance.now() / 110);
+  c.save();
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  var msg = GF.t('brace_warn');
+  var tw = c.measureText(msg).width;
+  var padX = GF.clamp(12 * GF.S, 8, 18), bh = GF.clamp(28 * GF.S, 22, 38);
+  var bw = tw + padX * 2;
+  var bx = GF.clamp(cx - bw / 2, 6, GF.W - bw - 6);
+  GF.rr(c, bx, py - bh / 2, bw, bh, bh / 2);
+  c.fillStyle = 'rgba(70,20,12,0.92)'; c.fill();
+  c.strokeStyle = 'rgba(255,210,80,' + (0.6 + 0.4 * pulse) + ')'; c.lineWidth = 2.5; c.stroke();
+  c.fillStyle = '#ffd24a';
+  c.fillText(msg, bx + bw / 2, py);
+  c.restore();
+}
+
+// An animated vector demo HAND that loops a "tap" press at (x,y): the hand drifts
+// in, presses (a small downward dip + a ripple ring), lifts, repeats. This is the
+// "show the gesture" affordance the build guide calls the good UX — far clearer
+// than a text instruction for a touch action. `pointUp` flips it to point upward
+// (used when the target is a board cell above the diver) vs downward (for a chip).
+function drawDemoHand(c, x, y, pointUp) {
+  var t = (performance.now() / 1000) % 1.4;     // 1.4s loop
+  var press = t < 0.45 ? (t / 0.45) : (t < 0.7 ? 1 - (t - 0.45) / 0.25 : 0);
+  var s = GF.clamp(26 * GF.S, 20, 38);
+  var dip = press * s * 0.5;
+  var dir = pointUp ? -1 : 1;                    // finger points toward the target
+  // ripple ring at the contact point when pressing
+  if (press > 0.05) {
+    c.save();
+    c.strokeStyle = 'rgba(255,255,255,' + (0.5 * press) + ')';
+    c.lineWidth = Math.max(2, s * 0.10);
+    c.beginPath(); c.arc(x, y, s * (0.3 + (1 - press) * 0.7), 0, Math.PI * 2); c.stroke();
+    c.restore();
+  }
+  // hand sits "below" (for up-pointing) or "above" (for down-pointing) the target,
+  // offset by the press dip so it visibly taps in.
+  var hx = x + s * 0.55;
+  var hy = y + dir * (s * 1.15) + dir * -dip;    // dip moves it toward the target
+  c.save();
+  c.translate(hx, hy);
+  if (pointUp) c.scale(1, -1);                   // mirror so the fingertip aims up
+  // fist
+  c.fillStyle = '#ffe0c0';
+  c.strokeStyle = 'rgba(0,0,0,0.35)';
+  c.lineWidth = Math.max(1.5, s * 0.06);
+  GF.rr(c, -s * 0.42, s * 0.05, s * 0.84, s * 0.7, s * 0.22); c.fill(); c.stroke();
+  // pointing finger (up in local space → toward the target after the mirror)
+  GF.rr(c, -s * 0.16, -s * 0.6, s * 0.32, s * 0.72, s * 0.16); c.fill(); c.stroke();
+  // cuff
+  c.fillStyle = '#1f6f8c';
+  GF.rr(c, -s * 0.46, s * 0.66, s * 0.92, s * 0.28, s * 0.1); c.fill();
+  c.restore();
+}
+
+// Hands-on onboarding overlay: a target ring + animated hand at the cell/chip the
+// current step wants, plus a slim caption pill anchored near the action and a
+// light scrim so the board stays visible. Action-gated — it never blocks the real
+// input (the dig/brace handlers fire through); it only POINTS.
+function drawOnboarding(c) {
+  if (!onbActive) return;
+  var cell = layout.cell, W = GF.W, H = GF.H;
+  // light scrim so the highlighted target pops without hiding the board
+  c.save();
+  c.fillStyle = 'rgba(4,10,18,0.26)';
+  c.fillRect(0, 0, W, H);
+  c.restore();
+
+  var msg, tx, ty, pointUp = true, ring = true, capY;
+  if (onbStep === 0 || onbStep === 1) {
+    // point at the rock directly above the diver
+    msg = GF.t(onbStep === 0 ? 'onb_dig' : 'onb_rise');
+    tx = layout.gx + (diverCol + 0.5) * cell;
+    ty = layout.gy + (diverRow - 0.5) * cell;
+    pointUp = true;
+  } else if (onbStep === 2) {
+    // point at the BRACE chip in the bottom bar
+    msg = GF.t('onb_brace_chip');
+    var bch = null;
+    for (var i = 0; i < layout.modeChips.length; i++) if (layout.modeChips[i].mode === 'brace') bch = layout.modeChips[i];
+    if (bch) { tx = bch.x + bch.w / 2; ty = bch.y + bch.h / 2; }
+    else { tx = W / 2; ty = H - 60; }
+    pointUp = false;
+  } else if (onbStep === 3) {
+    // brace mode selected → now tap the ceiling above to actually brace
+    msg = GF.t('onb_brace_do');
+    tx = layout.gx + (diverCol + 0.5) * cell;
+    ty = layout.gy + (diverRow - 0.5) * cell;
+    pointUp = true;
+  } else if (onbStep === 4) {
+    msg = GF.t('onb_surface');
+    tx = layout.gx + (diverCol + 0.5) * cell;
+    ty = layout.gy + cell * 0.5;     // point up toward the surface band
+    pointUp = true;
+    ring = false;                    // no single-cell ring; it's a "go up" prompt
+  } else {
+    msg = GF.t('onb_done');
+    tx = W / 2; ty = H * 0.5; ring = false;
+  }
+
+  // pulsing target ring at the cell/chip
+  if (ring && tx != null) {
+    var pulse = 0.5 + 0.5 * Math.sin(performance.now() / 240);
+    c.save();
+    c.strokeStyle = 'rgba(255,235,120,' + (0.6 + 0.35 * pulse) + ')';
+    c.lineWidth = Math.max(2.5, cell * 0.07);
+    GF.rr(c, tx - cell * 0.5, ty - cell * 0.5, cell, cell, Math.max(3, cell * 0.14));
+    c.stroke();
+    c.restore();
+    drawDemoHand(c, tx, ty, pointUp);
+  } else if (onbStep === 4) {
+    drawDemoHand(c, tx, ty, true);
+  }
+
+  // slim caption pill, anchored above the action (clamped on-screen)
+  c.save();
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  var lines = wrapLines(c, msg, Math.min(W * 0.82, 420 * GF.S));
+  var lh = GF.clamp(20 * GF.S, 16, 26);
+  var padX = GF.clamp(16 * GF.S, 11, 22), padY = GF.clamp(10 * GF.S, 7, 14);
+  var tw = 0;
+  for (var li = 0; li < lines.length; li++) tw = Math.max(tw, c.measureText(lines[li]).width);
+  var bw = tw + padX * 2, bh = lines.length * lh + padY * 2;
+  // place the pill above the target for up-prompts, below for the chip prompt
+  var pillY = (onbStep === 2) ? (ty - bh - cell * 0.7) : (ty - bh - cell * 0.9);
+  if (pillY < 8) pillY = ty + cell * 0.7;
+  pillY = GF.clamp(pillY, 8, H - bh - 8);
+  var bx = GF.clamp(tx - bw / 2, 8, W - bw - 8);
+  GF.rr(c, bx, pillY, bw, bh, GF.clamp(12 * GF.S, 8, 16));
+  c.fillStyle = 'rgba(8,26,38,0.94)'; c.fill();
+  c.strokeStyle = 'rgba(255,235,120,0.9)'; c.lineWidth = 2; c.stroke();
+  c.fillStyle = '#fff7e0';
+  for (var lj = 0; lj < lines.length; lj++) c.fillText(lines[lj], bx + bw / 2, pillY + padY + lh / 2 + lj * lh);
+  c.restore();
+}
+
 function drawDiver(c) {
   var cell = layout.cell;
   var x = layout.gx + diverCol * cell;
@@ -1317,6 +1600,10 @@ function drawHUD(c) {
     var ch = chips[i2];
     var m = ch.mode;
     var on = (mode === m);
+    // Just-in-time danger: when a chunk is about to crush the diver and he is NOT
+    // already bracing, make the BRACE chip flash urgently so the reactive switch is
+    // obvious (kills "uncomfortable / unclear when to switch dig↔brace").
+    var danger = (m === 'brace' && braceDanger && mode !== 'brace');
     var pal = m === 'dig' ? ['#2c83b0', '#164a66'] : (m === 'brace' ? ['#c79a28', '#7a5e12'] : ['#c0502a', '#7a2e14']);
     GF.rr(c, ch.x, ch.y, ch.w, ch.h, GF.clamp(12 * GF.S, 8, 16));
     if (on) {
@@ -1324,6 +1611,13 @@ function drawHUD(c) {
       cg.addColorStop(0, pal[0]); cg.addColorStop(1, pal[1]);
       c.fillStyle = cg; c.fill();
       c.strokeStyle = '#ffffff'; c.lineWidth = Math.max(2.5, ch.w * 0.018); c.stroke();
+    } else if (danger) {
+      var dp = 0.5 + 0.5 * Math.sin(performance.now() / 130);
+      var dg = c.createLinearGradient(ch.x, ch.y, ch.x, ch.y + ch.h);
+      dg.addColorStop(0, '#e0a82e'); dg.addColorStop(1, '#9a6e10');
+      c.fillStyle = dg; c.fill();
+      c.strokeStyle = 'rgba(255,230,120,' + (0.6 + 0.4 * dp) + ')';
+      c.lineWidth = Math.max(2.5, 2 + 2.5 * dp); c.stroke();
     } else {
       c.fillStyle = 'rgba(14,34,46,0.82)'; c.fill();
       c.strokeStyle = 'rgba(120,200,220,0.35)'; c.lineWidth = 1.5; c.stroke();
@@ -1443,14 +1737,27 @@ function drawMenu(c) {
   var seen = false;
   try { seen = localStorage.getItem('updrift_seen_tutorial') === '1'; } catch (e) {}
   var maxW = Math.min(W * 0.86, 520 * GF.S);
+  // First-run MENU is now uncluttered: instead of a 5-paragraph text wall (the
+  // "tap-through text tour" the build guide flags as bad), a first-timer sees only
+  // the GOAL + a short "learn by doing" line — the real teaching happens in the
+  // hands-on, action-gated in-game onboarding the moment they tap PLAY. The full
+  // rules still live one tap away under ? (drawTutorialPanel). Returning players
+  // get the same compact goal recap they had before.
+  c.fillStyle = '#cfe8f0';
+  c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+  c.textAlign = 'center'; c.textBaseline = 'top';
+  var tl = wrapLines(c, GF.t('tut_goal'), maxW);
+  var ky = H * 0.27;
+  for (var k = 0; k < tl.length; k++) { c.fillText(tl[k], W / 2, ky); ky += GF.clamp(18 * GF.S, 14, 22); }
   if (!seen) {
-    drawTutorialBlock(c, W / 2, H * 0.25, maxW);
-  } else {
+    ky += GF.clamp(8 * GF.S, 4, 12);
+    c.fillStyle = '#7af5ff';
+    c.font = 'bold ' + GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
+    var ll = wrapLines(c, GF.t('menu_learn'), maxW);
+    for (var li2 = 0; li2 < ll.length; li2++) { c.fillText(ll[li2], W / 2, ky); ky += GF.clamp(18 * GF.S, 14, 22); }
     c.fillStyle = '#8fb6c2';
-    c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
-    c.textAlign = 'center'; c.textBaseline = 'top';
-    var tl = wrapLines(c, GF.t('tut_goal'), maxW);
-    for (var k = 0; k < tl.length; k++) c.fillText(tl[k], W / 2, H * 0.30 + k * GF.clamp(18 * GF.S, 14, 22));
+    c.font = GF.clamp(11.5 * GF.S, 10, 15) + 'px sans-serif';
+    c.fillText(GF.t('menu_help_hint'), W / 2, ky);
   }
 
   // M2 daily panel — shown only to returning players (tutorial already seen) so
@@ -1672,8 +1979,10 @@ function draw(c) {
     drawActionGhost(c);   // clarity: show what the current tap will hit
     drawChunks(c);
     drawDiver(c);
+    if (!onbActive && braceDanger && mode !== 'brace') drawBraceWarn(c);  // reactive "BRACE!" flag
     drawCoach(c);         // clarity: first-run gesture hint (fades after first action)
     drawHUD(c);
+    drawOnboarding(c);    // hands-on action-gated first-run onboarding (over the HUD)
   } else {
     drawEnd(c);
   }
@@ -1765,6 +2074,10 @@ GF.exposeState(function () {
     firstActionDone: firstActionDone,
     modeSwitched: modeSwitched,
     audioMuted: audioMuted,
+    // hands-on onboarding + reactive brace cue (iteration #5)
+    onbActive: onbActive,
+    onbStep: onbStep,
+    braceDanger: braceDanger,
     bestLevel: bestLevel,
     careerO2Bonus: careerO2Bonus(),
     effectiveStartOxy: effectiveStartOxy(),

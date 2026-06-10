@@ -35,6 +35,10 @@ var STRINGS = {
     tut_lose:     'Lose: Scrape any wall, parked car, or cone and the level instantly resets - no penalty, just try again.',
     tut_tip:      'Tip: Go slow and steer early. Clean, short lines earn all 3 stars.',
     tap_close: '(tap anywhere to close)',
+    garage: 'GARAGE', coins: 'COINS', earned: 'EARNED', next_car: 'Next car',
+    away: 'away', owned: 'OWNED', drive: 'DRIVE', driving: 'DRIVING', locked: 'LOCKED',
+    unlock: 'UNLOCK', new_car: 'NEW CAR!', perk: 'Perk', close: 'CLOSE',
+    coins_short: 'c', back: 'BACK', desktop_hint: 'Hold the LEFT / RIGHT half of the window to steer',
   },
   ru: {
     title: 'Tight Spot',
@@ -49,6 +53,10 @@ var STRINGS = {
     tut_lose:     'Поражение: Заденешь стену, чужую машину или конус - уровень сразу сбросится, без штрафа, просто попробуй снова.',
     tut_tip:      'Совет: Не спеши и руль заранее. Чистые короткие траектории дают 3 звезды.',
     tap_close: '(нажми, чтобы закрыть)',
+    garage: 'ГАРАЖ', coins: 'МОНЕТЫ', earned: 'ПОЛУЧЕНО', next_car: 'След. авто',
+    away: 'осталось', owned: 'ЕСТЬ', drive: 'ВЫБРАТЬ', driving: 'В ИГРЕ', locked: 'ЗАКРЫТО',
+    unlock: 'ОТКРЫТЬ', new_car: 'НОВОЕ АВТО!', perk: 'Бонус', close: 'ЗАКРЫТЬ',
+    coins_short: 'м', back: 'НАЗАД', desktop_hint: 'Удерживай ЛЕВУЮ / ПРАВУЮ половину окна для руля',
   },
 };
 var SPRITE_NAMES = []; // procedural art
@@ -69,6 +77,9 @@ var CRASH_RESET_SEC = 0.65;  // sec crash freeze before auto-retry
 var AUTHORED_LEVELS = 14;    // hand-authored layouts before endless
 var WALL_THICK      = 8;     // wall half-width (design px) for swept test
 var PATH_PAR        = 1.55;  // path-length-to-straight ratio under which a star is kept
+// ── M1 meta economy ─────────────────────────────────────────────────────────
+var COIN_PER_STAR   = 8;     // coins per star earned on a park (3-star park = 24)
+var COIN_FIRST_CLR  = 12;    // bonus coins the first time a level is ever cleared
 
 // ── FIELD (the play box, authored coordinate space) ─────────────────────────
 // All level geometry is authored in field-local units 0..FIELD_W × 0..FIELD_H.
@@ -119,6 +130,92 @@ function loadTutorialSeen() {
   try { return localStorage.getItem('tight_spot_seen_tutorial') === '1'; } catch (e) { return false; }
 }
 function saveTutorialSeen() { try { localStorage.setItem('tight_spot_seen_tutorial', '1'); } catch (e) {} }
+
+// ── M1 GARAGE: persistent owned collection of cars (the come-back meta) ──────
+// A fixed ladder of cars unlocked with permanent COINS (earned per clean park).
+// Each car is OWNED forever and carries a real, felt handling perk. You DRIVE one
+// at a time (loadout choice) and its perk applies to every run. This is the cross-
+// session "my garage" pull — ownership, not just a number that goes up.
+// id 0 is the free starter (always owned). cost is in coins. perk multipliers fold
+// into the run at level-load. Icons are VECTOR-drawn (body color), never emoji.
+var CARS = [
+  { id: 0, cost: 0,    body: '#4aa3ff', roof: '#bfe0ff',
+    en: 'Hatchback',   ru: 'Хэтчбек',
+    perkEn: 'The trusty starter.',         perkRu: 'Надёжный старт.',
+    turn: 1.0,  creep: 1.0,  pos: 1.0,  ang: 1.0 },
+  { id: 1, cost: 120,  body: '#39d98a', roof: '#bff2da',
+    en: 'City Cruiser', ru: 'Круизер',
+    perkEn: '-15% creep speed — more time to line up.', perkRu: '-15% скорость — больше времени на манёвр.',
+    turn: 1.0,  creep: 0.85, pos: 1.0,  ang: 1.0 },
+  { id: 2, cost: 300,  body: '#ffd24a', roof: '#fff0bf',
+    en: 'Roadster',     ru: 'Родстер',
+    perkEn: '+18% sharper steering — tighter turns.',  perkRu: '+18% острее руль — круче повороты.',
+    turn: 1.18, creep: 1.0,  pos: 1.0,  ang: 1.0 },
+  { id: 3, cost: 650,  body: '#ff8a5e', roof: '#ffd6c4',
+    en: 'Compact',      ru: 'Компакт',
+    perkEn: '+30% park forgiveness — slot in easier.',  perkRu: '+30% допуск парковки — легче встать.',
+    turn: 1.0,  creep: 1.0,  pos: 1.30, ang: 1.30 },
+  { id: 4, cost: 1200, body: '#b06bff', roof: '#e0c8ff',
+    en: 'Drift Coupe',  ru: 'Дрифт-купе',
+    perkEn: 'Sharp steering + slower creep.',           perkRu: 'Острый руль + медленный ход.',
+    turn: 1.15, creep: 0.88, pos: 1.0,  ang: 1.0 },
+  { id: 5, cost: 2200, body: '#19d3e6', roof: '#bff4fa',
+    en: 'GT Prototype', ru: 'GT-Прототип',
+    perkEn: 'All-round: steering, creep, forgiveness.', perkRu: 'Всё сразу: руль, ход, допуск.',
+    turn: 1.12, creep: 0.9,  pos: 1.20, ang: 1.20 },
+];
+function carById(id) { for (var i = 0; i < CARS.length; i++) if (CARS[i].id === id) return CARS[i]; return CARS[0]; }
+function carName(c) { return GF.lang === 'ru' ? c.ru : c.en; }
+function carPerk(c) { return GF.lang === 'ru' ? c.perkRu : c.perkEn; }
+
+// owned-meta state (persisted)
+var coins = 0;                 // permanent soft currency
+var ownedCars = { 0: true };   // id -> true once unlocked (id 0 free)
+var activeCar = 0;             // id of the car currently driven
+var clearedOnce = {};          // level -> true once first-cleared (for the bonus)
+var lastEarned = 0;           // coins earned on the most recent park (session-end hook)
+var carToast = null;          // { car, t } — NEW CAR flourish on unlock
+var garageOpen = false;       // GARAGE overlay open?
+var garageScroll = 0;         // not used yet (list fits) — reserved
+
+// the active car's perk multipliers, folded into physics each frame
+function curCar() { return carById(activeCar); }
+
+// next not-yet-owned car on the ladder (the session-end "next car in N" hook)
+function nextLockedCar() {
+  for (var i = 0; i < CARS.length; i++) { if (!ownedCars[CARS[i].id]) return CARS[i]; }
+  return null;
+}
+function canAfford(c) { return c && coins >= c.cost; }
+
+// ── M1 meta persistence (separate key from the run-state save) ───────────────
+var META_KEY = 'tight_spot_meta_v1';
+function saveMeta() {
+  try {
+    localStorage.setItem(META_KEY, JSON.stringify({
+      coins: Math.round(coins), ownedCars: ownedCars, activeCar: activeCar,
+      clearedOnce: clearedOnce,
+    }));
+  } catch (e) {}
+}
+function loadMeta() {
+  try {
+    var raw = localStorage.getItem(META_KEY);
+    if (!raw) return;
+    var s = JSON.parse(raw);
+    if (!s || typeof s !== 'object') return;
+    coins = Math.max(0, +s.coins || 0);
+    ownedCars = { 0: true };
+    if (s.ownedCars && typeof s.ownedCars === 'object') {
+      for (var k in s.ownedCars) { if (s.ownedCars[k] && carById(+k).id === +k) ownedCars[+k] = true; }
+    }
+    activeCar = (s.activeCar != null && ownedCars[+s.activeCar]) ? +s.activeCar : 0;
+    clearedOnce = (s.clearedOnce && typeof s.clearedOnce === 'object') ? s.clearedOnce : {};
+  } catch (e) {}
+}
+// Flush deferred in-memory progress when the tab is hidden/closed (Build Hygiene #2).
+window.addEventListener('pagehide', function () { try { saveMeta(); } catch (e) {} });
+document.addEventListener('visibilitychange', function () { if (document.hidden) { try { saveMeta(); } catch (e) {} } });
 
 // ── LEVEL DATA ──────────────────────────────────────────────────────────────
 // Each level: outer border walls are auto-added; `data` lists interior walls,
@@ -335,6 +432,7 @@ function startLevel(n) {
   crashes = 0;
   stars = 3;
   attemptTimer = 0;
+  garageOpen = false; // entering gameplay always closes the garage overlay
   loadLevel(n);
   gs = 'PLAYING';
   GF.gameStarted();
@@ -441,12 +539,14 @@ function parkedInBay() {
   var bc = rectCorners(bay.x, bay.y, bay.w, bay.l, bay.heading);
   // all four car corners inside bay polygon
   for (var i = 0; i < 4; i++) if (!pointInPoly(corners[i].x, corners[i].y, bc)) return false;
+  // active-car forgiveness perk widens the heading/position tolerances (M1 garage)
+  var pc = curCar();
   // heading aligned (mod PI so either nose direction along the bay axis is OK)
   var dh = Math.abs(angDiff(car.heading, bay.heading));
   if (dh > PI / 2) dh = PI - dh;
-  if (dh > ANGLE_TOL) return false;
+  if (dh > ANGLE_TOL * pc.ang) return false;
   // center close to bay center
-  if (GF.dist(car.x, car.y, bay.x, bay.y) > POS_TOL) return false;
+  if (GF.dist(car.x, car.y, bay.x, bay.y) > POS_TOL * pc.pos) return false;
   return true;
 }
 function angDiff(a, b) {
@@ -458,7 +558,7 @@ function angDiff(a, b) {
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var steerLeft = false, steerRight = false;
-var helpBtn = null, menuBtn = null;
+var helpBtn = null, menuBtn = null, garageBtn = null, muteBtn = null;
 var uiButtons = [];
 var uiLockUntil = 0;
 // pointer id → 'L' | 'R' so multitouch steer halves track independently
@@ -478,6 +578,10 @@ function uiHit(px, py) {
 
 function pressDown(id, px, py) {
   pulseT = 0;
+  // GARAGE overlay swallows all input while open (reachable from MENU + mid-run).
+  if (garageOpen) { garageHit(px, py); return; }
+  // mute button is live on every screen (bottom-right), checked before anything else.
+  if (muteBtn && hitBtn(muteBtn, px, py)) { if (GF.toggleMute) GF.toggleMute(); return; }
   if (Date.now() < uiLockUntil && (gs === 'MENU' || gs === 'LEVELCLEAR' || gs === 'WIN')) return;
   if (gs === 'MENU') {
     if (tutorialOpen) { tutorialOpen = false; saveTutorialSeen(); return; }
@@ -492,6 +596,7 @@ function pressDown(id, px, py) {
   if (gs === 'PLAYING') {
     if (tutorialOpen) { tutorialOpen = false; return; }
     if (helpBtn && hitBtn(helpBtn, px, py)) { tutorialOpen = true; return; }
+    if (garageBtn && hitBtn(garageBtn, px, py)) { openGarage(); return; }
     if (menuBtn && hitBtn(menuBtn, px, py)) { goMenu(); return; }
     // steer half
     if (px < GF.W / 2) { activePointers[id] = 'L'; steerLeft = true; }
@@ -516,6 +621,7 @@ function hitBtn(b, px, py) { return px >= b.x && px <= b.x + b.w && py >= b.y &&
 
 function goMenu() {
   gs = 'MENU';
+  garageOpen = false;
   steerLeft = steerRight = false;
   activePointers = {};
   GF.gameEnded();
@@ -529,9 +635,11 @@ _canvas.addEventListener('pointercancel', function(e) { pressUp(e.pointerId); },
 // click is used for the overlay UI buttons on platforms that synthesize it;
 // pointerdown already covers it but keep a guarded fallback for menu taps.
 _canvas.addEventListener('click', function(e) {
+  if (garageOpen) return; // pointerdown already routes garage taps
   if (gs === 'MENU' || gs === 'LEVELCLEAR' || gs === 'WIN') {
     if (Date.now() < uiLockUntil) return;
     if (gs === 'MENU' && tutorialOpen) return;
+    if (muteBtn && hitBtn(muteBtn, e.clientX, e.clientY)) return; // handled on pointerdown
     uiHit(e.clientX, e.clientY);
   }
 });
@@ -581,6 +689,15 @@ function onParked() {
   lastParkPerfect = (crashes === 0 && ratio <= PATH_PAR);
   GF.spawnParticles(fx(car.x), fy(car.y), '#39d98a', 26);
   GF.spawnFloat(fx(car.x), fy(car.y) - 24 * GF.S, curStrings()[lastParkPerfect ? 'perfect' : 'parked'], '#39d98a');
+  if (GF.sfx) GF.sfx(lastParkPerfect ? 'win' : 'levelup');
+  // ── M1: bank permanent COINS (the meta currency) ──────────────────────────
+  var firstClear = !clearedOnce[lvl];
+  lastEarned = earnedStars * COIN_PER_STAR + (firstClear ? COIN_FIRST_CLR : 0);
+  coins += lastEarned;
+  clearedOnce[lvl] = true;
+  GF.spawnFloat(fx(car.x), fy(car.y) - 44 * GF.S, '+' + lastEarned + curStrings().coins_short, '#ffd24a');
+  if (GF.sfx) GF.sfx('coin');
+  checkCarUnlock();
   // persist best
   if (!endless) {
     if (earnedStars > (bestStars[lvl] || 0)) bestStars[lvl] = earnedStars;
@@ -594,8 +711,41 @@ function onParked() {
     if (lastParkPerfect) GF.happytime();
   }
   steerLeft = steerRight = false;
+  saveMeta();
   GF.gameEnded();
   GF.saveRun();
+}
+
+// ── M1 GARAGE actions ───────────────────────────────────────────────────────
+// Auto-grant any car whose cost is now affordable? No — unlock is a deliberate
+// player choice (spend coins) so the garage stays a destination. But fire a
+// "you can afford a new car" toast the moment one becomes affordable, so the
+// pull is felt OUTSIDE the menu.
+var _afforded = {}; // id -> true once we've toasted affordability (avoid spam)
+function checkCarUnlock() {
+  var nl = nextLockedCar();
+  if (nl && canAfford(nl) && !_afforded[nl.id]) {
+    _afforded[nl.id] = true;
+    carToast = { car: nl, t: 3.2, kind: 'afford' };
+  }
+}
+function buyCar(id) {
+  var c = carById(id);
+  if (ownedCars[id] || !canAfford(c)) return false;
+  coins -= c.cost;
+  ownedCars[id] = true;
+  activeCar = id; // auto-drive the new car so the perk is felt immediately
+  carToast = { car: c, t: 3.0, kind: 'unlock' };
+  if (GF.sfx) GF.sfx('unlock');
+  saveMeta();
+  return true;
+}
+function driveCar(id) {
+  if (!ownedCars[id]) return false;
+  activeCar = id;
+  if (GF.sfx) GF.sfx('tap');
+  saveMeta();
+  return true;
 }
 
 function advance() { // from LEVELCLEAR → next level
@@ -617,6 +767,7 @@ function showInterstitial(onDone) {
 function update(dt) {
   pulseT += dt;
   layoutField();
+  if (carToast) { carToast.t -= dt; if (carToast.t <= 0) carToast = null; }
   if (gs === 'CRASH') {
     crashT -= dt;
     if (crashT <= 0) {
@@ -636,12 +787,14 @@ function update(dt) {
   attemptTimer += dt;
   if (steerHintFade > 0) steerHintFade = Math.max(0, steerHintFade - dt * 0.6);
 
+  // active-car perks fold into handling here (M1 garage)
+  var pc = curCar();
   // steering
   var steer = (steerRight ? 1 : 0) - (steerLeft ? 1 : 0);
-  if (steer !== 0) car.heading += steer * TURN_RATE * dt;
+  if (steer !== 0) car.heading += steer * (TURN_RATE * pc.turn) * dt;
 
   // forward auto-creep; coast/settle friction when no input near the bay
-  var targetSpeed = CREEP_SPEED;
+  var targetSpeed = CREEP_SPEED * pc.creep;
   car.speed = targetSpeed; // constant creep - the held breath
   // integrate
   var vx = Math.sin(car.heading) * car.speed * dt;   // heading 0 = -y (up)
@@ -703,9 +856,46 @@ function draw(ctx) {
   if (gs === 'MENU') drawMenu(ctx);
   if (gs === 'LEVELCLEAR') drawLevelClear(ctx);
   if (gs === 'WIN') drawWin(ctx);
+
+  // GARAGE overlay can ride on top of MENU (and is reachable mid-run via HUD).
+  if (garageOpen) drawGarage(ctx);
+  // mute button + NEW CAR toast float above everything
+  drawMuteBtn(ctx);
+  if (carToast) drawCarToast(ctx);
+}
+
+// On desktop/wide windows the portrait field is a centered strip; fill the dead
+// side margins with a darker garage-wall gradient + a faint steer-half divider so
+// it never reads as a "broken" thin column (player comment: "fix desktop").
+function drawSideMargins(ctx) {
+  var leftW = fx(0), rightX = fx(FIELD_W), rightW = GF.W - rightX;
+  if (leftW < 2 && rightW < 2) return; // no margin (portrait) — nothing to do
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#0e1016'); g.addColorStop(0.5, '#12151c'); g.addColorStop(1, '#0b0d12');
+  ctx.fillStyle = g;
+  if (leftW > 0) ctx.fillRect(0, 0, leftW, GF.H);
+  if (rightW > 0) ctx.fillRect(rightX, 0, rightW, GF.H);
+  // subtle vertical "bay stripes" on the walls so the margin has texture
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)';
+  ctx.lineWidth = 1;
+  var step = 46 * GF.S;
+  for (var x = step; x < leftW; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, GF.H); ctx.stroke(); }
+  for (var x2 = rightX + step; x2 < GF.W; x2 += step) { ctx.beginPath(); ctx.moveTo(x2, 0); ctx.lineTo(x2, GF.H); ctx.stroke(); }
+  // a faint LEFT|RIGHT steer-half divider down the screen center (desktop affordance)
+  if (gs === 'PLAYING' && !tutorialOpen) {
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.setLineDash([6 * GF.S, 8 * GF.S]);
+    ctx.strokeStyle = 'rgba(120,150,200,0.20)';
+    ctx.lineWidth = 1.5 * GF.S;
+    ctx.beginPath(); ctx.moveTo(GF.cx, 0); ctx.lineTo(GF.cx, GF.H); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
 }
 
 function drawField(ctx) {
+  drawSideMargins(ctx);
   // asphalt panel
   ctx.fillStyle = '#1d2129';
   ctx.fillRect(fx(0), fy(0), FIELD_W * GF.S, FIELD_H * GF.S);
@@ -800,7 +990,8 @@ function drawCarBody(ctx, rx, ry, rh, w, l, body, roof) {
 
 function drawCar(ctx) {
   var hot = (gs === 'CRASH');
-  drawCarBody(ctx, car.x, car.y, car.heading, CAR_W, CAR_L, hot ? '#ff6b5e' : '#4aa3ff', hot ? '#ffd6d0' : '#bfe0ff');
+  var pc = curCar();
+  drawCarBody(ctx, car.x, car.y, car.heading, CAR_W, CAR_L, hot ? '#ff6b5e' : pc.body, hot ? '#ffd6d0' : pc.roof);
 }
 function drawObstacles(ctx) {
   for (var i = 0; i < obstacles.length; i++) {
@@ -879,6 +1070,33 @@ function drawStars(ctx, n, x, y, size) {
     drawStar(ctx, x + i * size * 1.25, y, size / 2, i < n ? '#ffd24a' : 'rgba(255,255,255,0.18)');
   }
 }
+// vector coin (never emoji) — a gold disc with a rim + a small "c"
+function drawCoin(ctx, cxp, cyp, r) {
+  ctx.save();
+  ctx.translate(cxp, cyp);
+  ctx.beginPath(); ctx.arc(0, 0, r, 0, PI * 2);
+  ctx.fillStyle = '#ffd24a'; ctx.fill();
+  ctx.lineWidth = Math.max(1, r * 0.16); ctx.strokeStyle = '#caa023'; ctx.stroke();
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.62, 0, PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = Math.max(1, r * 0.12); ctx.stroke();
+  ctx.restore();
+}
+// a little garage/car silhouette glyph for the GARAGE button (vector, not emoji)
+function drawCarGlyph(ctx, cxp, cyp, w, col) {
+  ctx.save();
+  ctx.translate(cxp, cyp);
+  var h = w * 0.5;
+  GF.rr(ctx, -w/2, -h*0.18, w, h*0.55, h * 0.22);
+  ctx.fillStyle = col || '#cfe'; ctx.fill();
+  // cabin
+  GF.rr(ctx, -w*0.22, -h*0.5, w*0.44, h*0.4, h * 0.14);
+  ctx.fill();
+  // wheels
+  ctx.fillStyle = '#1a1d25';
+  ctx.beginPath(); ctx.arc(-w*0.26, h*0.4, h*0.2, 0, PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(w*0.26, h*0.4, h*0.2, 0, PI*2); ctx.fill();
+  ctx.restore();
+}
 function drawStar(ctx, cxp, cyp, r, col) {
   ctx.save();
   ctx.translate(cxp, cyp);
@@ -904,17 +1122,40 @@ function drawHUD(ctx) {
   var label = endless ? (curStrings().daily + ' ' + (lvl - AUTHORED_LEVELS)) : (curStrings().lvl + ' ' + lvl);
   ctx.fillText(label, 14 * GF.S, 14 * GF.S);
 
+  // ── M1: permanent COIN readout (top-left, under LVL) ──────────────────────
+  var coinR = GF.clamp(8 * GF.S, 6, 12);
+  var coinY = 14 * GF.S + fs + 12 * GF.S;
+  drawCoin(ctx, 14 * GF.S + coinR, coinY + coinR, coinR);
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 21) + 'px sans-serif';
+  ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(String(Math.round(coins)), 14 * GF.S + coinR * 2 + 6 * GF.S, coinY + coinR + 1);
+  // "next car: N away" hint OUTSIDE the menu (the pull to keep playing)
+  var nl = nextLockedCar();
+  if (nl) {
+    var need = Math.max(0, nl.cost - Math.round(coins));
+    ctx.font = GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+    ctx.fillStyle = need === 0 ? '#39d98a' : '#9fb0c4';
+    ctx.textBaseline = 'top';
+    var hint = need === 0
+      ? (curStrings().garage + ': ' + carName(nl) + ' ' + curStrings().unlock + '!')
+      : (curStrings().next_car + ': ' + carName(nl) + ' (' + need + curStrings().coins_short + ' ' + curStrings().away + ')');
+    ctx.fillText(hint, 14 * GF.S, coinY + coinR * 2 + 6 * GF.S);
+  }
+  ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+
   // live star ceiling - top center
   var starSz = GF.clamp(16 * GF.S, 12, 22);
   drawStars(ctx, stars, GF.cx - starSz * 1.6, 14 * GF.S + starSz/2, starSz);
 
-  // help (?) button + menu button top-right
+  // help (?) + garage + menu buttons top-right
   var btn = GF.clamp(32 * GF.S, 26, 42);
-  var pad = 12 * GF.S;
-  helpBtn = { x: GF.W - pad - btn, y: 12 * GF.S, w: btn, h: btn };
-  menuBtn = { x: GF.W - pad - btn * 2 - 8 * GF.S, y: 12 * GF.S, w: btn, h: btn };
+  var pad = 12 * GF.S, gap = 8 * GF.S;
+  helpBtn   = { x: GF.W - pad - btn,                 y: 12 * GF.S, w: btn, h: btn };
+  garageBtn = { x: GF.W - pad - btn * 2 - gap,       y: 12 * GF.S, w: btn, h: btn };
+  menuBtn   = { x: GF.W - pad - btn * 3 - gap * 2,   y: 12 * GF.S, w: btn, h: btn };
   drawIconBtn(ctx, helpBtn, '?');
-  drawIconBtn(ctx, menuBtn, '≡'); // ≡
+  drawGarageBtn(ctx, garageBtn);
+  drawIconBtn(ctx, menuBtn, '≡');
 
   // crash dots (risk signal) under the buttons
   if (crashes > 0) {
@@ -925,6 +1166,21 @@ function drawHUD(ctx) {
       ctx.fillStyle = '#ff6b5e';
       ctx.fill();
     }
+  }
+}
+// garage icon button (car silhouette) — pulses gold when a car is affordable
+function drawGarageBtn(ctx, b) {
+  var nl = nextLockedCar();
+  var hot = nl && canAfford(nl);
+  GF.rr(ctx, b.x, b.y, b.w, b.h, 7 * GF.S);
+  ctx.fillStyle = hot ? 'rgba(60,80,52,0.92)' : 'rgba(40,48,64,0.85)'; ctx.fill();
+  ctx.strokeStyle = hot ? 'rgba(57,217,138,0.9)' : 'rgba(160,180,210,0.5)';
+  ctx.lineWidth = hot ? 2 : 1.5; ctx.stroke();
+  drawCarGlyph(ctx, b.x + b.w / 2, b.y + b.h / 2, b.w * 0.62, hot ? '#9af0c4' : '#cfe');
+  if (hot) {
+    // little gold dot badge
+    ctx.beginPath(); ctx.arc(b.x + b.w - 5 * GF.S, b.y + 5 * GF.S, 4 * GF.S, 0, PI * 2);
+    ctx.fillStyle = '#ffd24a'; ctx.fill();
   }
 }
 function drawIconBtn(ctx, b, glyph) {
@@ -1027,13 +1283,41 @@ function drawMenu(ctx) {
     drawPrimaryBtn(ctx, GF.cx - drawW / 2, drawY, drawW, drawH, curStrings().play);
   }
 
-  // best progress line
+  // ── M1: GARAGE button + coin balance on the menu ──────────────────────────
+  var gBtnW = GF.clamp(220 * GF.S, 150, 300), gBtnH = GF.clamp(46 * GF.S, 38, 58);
+  var gY = drawY + drawH + 16 * GF.S;
+  // keep it on-screen on short portraits
+  gY = Math.min(gY, GF.H - gBtnH - 44 * GF.S);
+  var gX = GF.cx - gBtnW / 2;
+  drawSecondaryBtn(ctx, gX, gY, gBtnW, gBtnH, curStrings().garage);
+  // a coin pip + balance on the right end of the garage button
+  var nl = nextLockedCar();
+  var badge = nl && canAfford(nl);
+  if (badge) {
+    ctx.beginPath(); ctx.arc(gX + gBtnW - 14 * GF.S, gY + 12 * GF.S, 5 * GF.S, 0, PI * 2);
+    ctx.fillStyle = '#ffd24a'; ctx.fill();
+  }
+  uiButtons.push({ x: gX, y: gY, w: gBtnW, h: gBtnH, fn: openGarage });
+
+  // coin balance line
   ctx.textBaseline = 'alphabetic';
+  var cbR = GF.clamp(7 * GF.S, 5, 10);
+  var cbY = gY + gBtnH + 20 * GF.S;
+  ctx.font = 'bold ' + GF.clamp(13 * GF.S, 11, 18) + 'px sans-serif';
+  var cbTxt = String(Math.round(coins));
+  var cbW = ctx.measureText(cbTxt).width;
+  var cbGroup = cbR * 2 + 6 * GF.S + cbW;
+  drawCoin(ctx, GF.cx - cbGroup / 2 + cbR, cbY - cbR + 1, cbR);
+  ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(cbTxt, GF.cx - cbGroup / 2 + cbR * 2 + 6 * GF.S, cbY - cbR + 2);
+
+  // best progress line
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
   ctx.fillStyle = '#667';
   var prog = endlessUnlocked() ? curStrings().campaign_done
     : (curStrings().lvl + ' ' + maxLevel + ' / ' + AUTHORED_LEVELS);
-  ctx.fillText(prog, GF.cx, drawY + drawH + 26 * GF.S);
+  ctx.fillText(prog, GF.cx, cbY + 22 * GF.S);
 }
 function endlessUnlocked() { return maxLevel > AUTHORED_LEVELS; }
 
@@ -1059,6 +1343,210 @@ function drawSecondaryBtn(ctx, x, y, w, h, label) {
   ctx.textBaseline = 'alphabetic';
 }
 
+// ── M1 GARAGE OVERLAY (the owned collection — reachable from MENU + mid-run) ──
+// Lays the 6-car ladder as a vertical list of rows. Each row: a colored car
+// swatch + name + perk + a status pill (DRIVE / DRIVING / UNLOCK <cost> / locked).
+// Populates uiButtons with the per-row actions + a CLOSE button.
+var garageBtns = []; // {x,y,w,h,fn}
+function drawGarage(ctx) {
+  garageBtns = [];
+  // fully opaque backdrop (gallery hygiene: no underlying screen bleed-through)
+  ctx.fillStyle = '#0b0d12';
+  ctx.fillRect(0, 0, GF.W, GF.H);
+
+  // header: GARAGE + coin balance
+  var titleFs = GF.clamp(26 * GF.S, 19, 38);
+  ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var topY = GF.H * 0.06;
+  ctx.fillText(curStrings().garage, GF.cx, topY);
+  // coin balance pill
+  var cr = GF.clamp(9 * GF.S, 7, 13);
+  var balY = topY + titleFs + 10 * GF.S;
+  ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 22) + 'px sans-serif';
+  var balTxt = String(Math.round(coins));
+  var balW = ctx.measureText(balTxt).width;
+  var groupW = cr * 2 + 7 * GF.S + balW;
+  drawCoin(ctx, GF.cx - groupW / 2 + cr, balY + cr, cr);
+  ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(balTxt, GF.cx - groupW / 2 + cr * 2 + 7 * GF.S, balY + cr + 1);
+
+  // rows
+  var listW = Math.min(GF.W * 0.92, 460 * GF.S);
+  var listX = GF.cx - listW / 2;
+  var rowH = GF.clamp(74 * GF.S, 56, 92);
+  var rowGap = 8 * GF.S;
+  var y = balY + cr * 2 + 14 * GF.S;
+  // CLOSE button sits at the bottom; cap the list so it never overlaps it
+  var closeH = GF.clamp(46 * GF.S, 38, 58);
+  var closeY = GF.H - closeH - 16 * GF.S;
+  var nameFs = GF.clamp(15 * GF.S, 12, 20);
+  var perkFs = GF.clamp(11 * GF.S, 9, 15);
+
+  for (var i = 0; i < CARS.length; i++) {
+    var c = CARS[i];
+    if (y + rowH > closeY - 4 * GF.S) break; // guard (6 rows fit 852; cap on tiny screens)
+    var owned = !!ownedCars[c.id];
+    var active = (activeCar === c.id);
+    // row card
+    GF.rr(ctx, listX, y, listW, rowH, 12 * GF.S);
+    ctx.fillStyle = active ? 'rgba(40,64,52,0.92)' : 'rgba(28,34,46,0.92)'; ctx.fill();
+    ctx.strokeStyle = active ? 'rgba(57,217,138,0.9)' : 'rgba(120,140,170,0.28)';
+    ctx.lineWidth = active ? 2 : 1; ctx.stroke();
+    // car swatch (mini top-down body in the car's colors; dimmed if locked)
+    ctx.save();
+    if (!owned) ctx.globalAlpha = 0.4;
+    drawCarGlyph(ctx, listX + rowH * 0.46, y + rowH / 2, rowH * 0.5, c.body);
+    ctx.restore();
+    // name + perk
+    ctx.textAlign = 'left';
+    ctx.font = 'bold ' + nameFs + 'px sans-serif';
+    ctx.fillStyle = owned ? '#fff' : '#9fb0c4'; ctx.textBaseline = 'top';
+    var tx = listX + rowH * 0.86;
+    ctx.fillText(carName(c), tx, y + rowH * 0.18);
+    ctx.font = perkFs + 'px sans-serif';
+    ctx.fillStyle = '#9fb0c4';
+    var perkLines = wrapLines(ctx, carPerk(c), listW - (tx - listX) - GF.clamp(96 * GF.S, 72, 120));
+    for (var pl = 0; pl < Math.min(2, perkLines.length); pl++) {
+      ctx.fillText(perkLines[pl], tx, y + rowH * 0.46 + pl * (perkFs + 2 * GF.S));
+    }
+    // status pill (right side)
+    var pillW = GF.clamp(92 * GF.S, 70, 116), pillH = GF.clamp(34 * GF.S, 28, 44);
+    var pillX = listX + listW - pillW - 10 * GF.S, pillY = y + (rowH - pillH) / 2;
+    (function(car, ownd, act, px, py, pw, ph) {
+      if (act) {
+        GF.rr(ctx, px, py, pw, ph, ph / 2); ctx.fillStyle = 'rgba(57,217,138,0.25)'; ctx.fill();
+        ctx.strokeStyle = '#39d98a'; ctx.lineWidth = 1.5; ctx.stroke();
+        pillLabel(ctx, curStrings().driving, '#9af0c4', px, py, pw, ph);
+      } else if (ownd) {
+        GF.rr(ctx, px, py, pw, ph, ph / 2); ctx.fillStyle = 'rgba(50,58,76,0.95)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(160,180,210,0.6)'; ctx.lineWidth = 1.5; ctx.stroke();
+        pillLabel(ctx, curStrings().drive, '#cfe', px, py, pw, ph);
+        garageBtns.push({ x: px, y: py, w: pw, h: ph, fn: function(){ driveCar(car.id); } });
+      } else {
+        var afford = canAfford(car);
+        var grad = ctx.createLinearGradient(px, py, px, py + ph);
+        if (afford) { grad.addColorStop(0, '#39d98a'); grad.addColorStop(1, '#23b06b'); }
+        else { grad.addColorStop(0, 'rgba(50,58,76,0.95)'); grad.addColorStop(1, 'rgba(40,48,64,0.95)'); }
+        GF.rr(ctx, px, py, pw, ph, ph / 2); ctx.fillStyle = grad; ctx.fill();
+        if (!afford) { ctx.strokeStyle = 'rgba(160,180,210,0.4)'; ctx.lineWidth = 1; ctx.stroke(); }
+        // coin + cost inside the pill
+        var icr = ph * 0.26;
+        ctx.font = 'bold ' + GF.clamp(13 * GF.S, 11, 18) + 'px sans-serif';
+        var costTxt = String(car.cost);
+        var cw = ctx.measureText(costTxt).width;
+        var gx = px + pw / 2 - (icr * 2 + 4 * GF.S + cw) / 2;
+        drawCoin(ctx, gx + icr, py + ph / 2, icr);
+        ctx.fillStyle = afford ? '#06140d' : '#ffd24a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText(costTxt, gx + icr * 2 + 4 * GF.S, py + ph / 2 + 1);
+        if (afford) garageBtns.push({ x: px, y: py, w: pw, h: ph, fn: function(){ buyCar(car.id); } });
+      }
+    })(c, owned, active, pillX, pillY, pillW, pillH);
+    y += rowH + rowGap;
+  }
+
+  // CLOSE button
+  var closeW = GF.clamp(200 * GF.S, 150, 280);
+  drawSecondaryBtn(ctx, GF.cx - closeW / 2, closeY, closeW, closeH, curStrings().close);
+  garageBtns.push({ x: GF.cx - closeW / 2, y: closeY, w: closeW, h: closeH, fn: closeGarage });
+}
+function pillLabel(ctx, txt, col, px, py, pw, ph) {
+  ctx.font = 'bold ' + GF.clamp(13 * GF.S, 11, 18) + 'px sans-serif';
+  ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(txt, px + pw / 2, py + ph / 2 + 1);
+}
+function openGarage() { garageOpen = true; if (GF.sfx) GF.sfx('tap'); }
+function closeGarage() { garageOpen = false; if (GF.sfx) GF.sfx('tap'); saveMeta(); }
+function garageHit(px, py) {
+  for (var i = 0; i < garageBtns.length; i++) {
+    var b = garageBtns[i];
+    if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) { b.fn(); return true; }
+  }
+  return false;
+}
+
+// ── MUTE BUTTON (on-screen, hygiene — was M-key only) ───────────────────────
+function drawMuteBtn(ctx) {
+  if (garageOpen) return; // keep the garage overlay clean
+  var r = GF.clamp(15 * GF.S, 12, 20);
+  var x = GF.W - r - 14 * GF.S;
+  // sit it at the bottom-right corner, clear of the HUD top buttons
+  var yb = GF.H - r - 14 * GF.S;
+  muteBtn = { x: x - r, y: yb - r, w: r * 2, h: r * 2 };
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x, yb, r, 0, PI * 2);
+  ctx.fillStyle = 'rgba(20,24,34,0.7)'; ctx.fill();
+  ctx.restore();
+  if (GF.drawMuteIcon) GF.drawMuteIcon(ctx, x, yb, r * 0.7, !!GF.muted);
+}
+
+// ── NEW-CAR / AFFORD TOAST (felt outside the menu) ──────────────────────────
+function drawCarToast(ctx) {
+  // toast is the IN-PLAYING pull; overlay screens carry their own garage messaging
+  // (earnings strip / menu button) so suppress it there to avoid title overlap.
+  if (!carToast || garageOpen || gs === 'LEVELCLEAR' || gs === 'WIN' || gs === 'MENU') return;
+  var a = GF.clamp(carToast.t / 0.5, 0, 1); // fade out in the last 0.5s
+  var c = carToast.car;
+  var unlock = carToast.kind === 'unlock';
+  var w = Math.min(GF.W * 0.82, 360 * GF.S), h = GF.clamp(58 * GF.S, 46, 74);
+  var x = GF.cx - w / 2, y = GF.H * 0.16;
+  ctx.save();
+  ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, 12 * GF.S);
+  ctx.fillStyle = unlock ? 'rgba(34,176,107,0.96)' : 'rgba(34,42,58,0.96)';
+  ctx.fill();
+  ctx.strokeStyle = unlock ? '#9af0c4' : 'rgba(57,217,138,0.8)'; ctx.lineWidth = 2; ctx.stroke();
+  drawCarGlyph(ctx, x + h * 0.55, y + h / 2, h * 0.6, c.body);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  ctx.fillStyle = unlock ? '#06140d' : '#fff';
+  ctx.fillText(unlock ? curStrings().new_car : (curStrings().garage + '!'), x + h * 0.95, y + h * 0.34);
+  ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  ctx.fillStyle = unlock ? 'rgba(6,20,13,0.85)' : '#9fb0c4';
+  ctx.fillText(carName(c) + (unlock ? '' : ' — ' + curStrings().unlock + '!'), x + h * 0.95, y + h * 0.66);
+  ctx.restore();
+}
+
+// ── M1 session-end earnings strip (the "what you earned / come back" moment) ─
+// Drawn centered at `cy`. Shows "+N earned" and the next-car progress bar +
+// "M coins away" so leaving plants the reason to return. Returns nothing.
+function drawEarningsStrip(ctx, cy) {
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  // +N earned (coin + amount)
+  var cr = GF.clamp(9 * GF.S, 7, 13);
+  ctx.font = 'bold ' + GF.clamp(18 * GF.S, 14, 26) + 'px sans-serif';
+  var eTxt = '+' + lastEarned;
+  var eW = ctx.measureText(eTxt).width;
+  var grp = cr * 2 + 7 * GF.S + eW;
+  drawCoin(ctx, GF.cx - grp / 2 + cr, cy, cr);
+  ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left';
+  ctx.fillText(eTxt, GF.cx - grp / 2 + cr * 2 + 7 * GF.S, cy + 1);
+  ctx.textAlign = 'center';
+  // EARNED caption above
+  ctx.font = GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+  ctx.fillStyle = '#8aa';
+  ctx.fillText(curStrings().earned, GF.cx, cy - cr - 12 * GF.S);
+
+  // next-car progress (the come-back hook)
+  var nl = nextLockedCar();
+  if (nl) {
+    var barW = Math.min(GF.W * 0.62, 300 * GF.S), barH = GF.clamp(8 * GF.S, 6, 12);
+    var barX = GF.cx - barW / 2, barY = cy + cr + 20 * GF.S;
+    var frac = GF.clamp(Math.round(coins) / nl.cost, 0, 1);
+    GF.rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.fill();
+    if (frac > 0) { GF.rr(ctx, barX, barY, Math.max(barH, barW * frac), barH, barH / 2); ctx.fillStyle = '#39d98a'; ctx.fill(); }
+    var need = Math.max(0, nl.cost - Math.round(coins));
+    ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = need === 0 ? '#39d98a' : '#9fb0c4';
+    var label = need === 0
+      ? (curStrings().garage + ': ' + carName(nl) + ' ' + curStrings().unlock + '!')
+      : (curStrings().next_car + ': ' + carName(nl) + ' — ' + need + curStrings().coins_short + ' ' + curStrings().away);
+    ctx.fillText(label, GF.cx, barY + barH + 14 * GF.S);
+  }
+  ctx.restore();
+}
+
 // ── LEVEL CLEAR ───────────────────────────────────────────────────────────
 function drawLevelClear(ctx) {
   uiButtons = [];
@@ -1068,14 +1556,17 @@ function drawLevelClear(ctx) {
   ctx.font = 'bold ' + titleFs + 'px sans-serif';
   ctx.fillStyle = '#39d98a';
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  ctx.fillText(curStrings()[lastParkPerfect ? 'perfect' : 'clear'], GF.cx, GF.H * 0.34);
+  ctx.fillText(curStrings()[lastParkPerfect ? 'perfect' : 'clear'], GF.cx, GF.H * 0.26);
 
-  var starSz = GF.clamp(34 * GF.S, 24, 50);
-  drawStars(ctx, earnedStars, GF.cx - starSz * 1.6, GF.H * 0.34 + starSz * 1.4, starSz);
+  var starSz = GF.clamp(32 * GF.S, 22, 48);
+  drawStars(ctx, earnedStars, GF.cx - starSz * 1.6, GF.H * 0.26 + starSz * 1.3, starSz);
+
+  // session-end earnings + next-car progress
+  drawEarningsStrip(ctx, GF.H * 0.49);
 
   var btnW = GF.clamp(220 * GF.S, 150, 300), btnH = GF.clamp(54 * GF.S, 42, 66);
   var btnX = GF.cx - btnW / 2;
-  var nextY = GF.H * 0.56;
+  var nextY = GF.H * 0.66;
   drawPrimaryBtn(ctx, btnX, nextY, btnW, btnH, curStrings().next);
   uiButtons.push({ x: btnX, y: nextY, w: btnW, h: btnH, fn: advance });
   var menuY = nextY + btnH + 14 * GF.S;
@@ -1093,17 +1584,23 @@ function drawWin(ctx) {
   ctx.fillStyle = '#ffd24a';
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.shadowColor = 'rgba(255,210,74,0.5)'; ctx.shadowBlur = 22 * GF.S;
-  ctx.fillText(curStrings().campaign_done, GF.cx, GF.H * 0.34);
+  ctx.fillText(curStrings().campaign_done, GF.cx, GF.H * 0.26);
   ctx.shadowBlur = 0;
 
-  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(54 * GF.S, 42, 66);
+  // session-end earnings + next-car progress
+  drawEarningsStrip(ctx, GF.H * 0.44);
+
+  var btnW = GF.clamp(240 * GF.S, 160, 320), btnH = GF.clamp(52 * GF.S, 42, 64);
   var btnX = GF.cx - btnW / 2;
-  var y1 = GF.H * 0.52;
+  var y1 = GF.H * 0.60;
   drawPrimaryBtn(ctx, btnX, y1, btnW, btnH, curStrings().endless);
   uiButtons.push({ x: btnX, y: y1, w: btnW, h: btnH, fn: startEndless });
-  var y2 = y1 + btnH + 14 * GF.S;
-  drawSecondaryBtn(ctx, btnX, y2, btnW, btnH * 0.85, curStrings().menu);
-  uiButtons.push({ x: btnX, y: y2, w: btnW, h: btnH * 0.85, fn: goMenu });
+  var y2 = y1 + btnH + 12 * GF.S;
+  drawSecondaryBtn(ctx, btnX, y2, btnW, btnH * 0.82, curStrings().garage);
+  uiButtons.push({ x: btnX, y: y2, w: btnW, h: btnH * 0.82, fn: openGarage });
+  var y3 = y2 + btnH * 0.82 + 12 * GF.S;
+  drawSecondaryBtn(ctx, btnX, y3, btnW, btnH * 0.82, curStrings().menu);
+  uiButtons.push({ x: btnX, y: y3, w: btnW, h: btnH * 0.82, fn: goMenu });
 }
 
 // ── TUTORIAL PANEL (in-game, via ? button) ──────────────────────────────────
@@ -1177,6 +1674,8 @@ GF.init({
     try {
       bestStars = JSON.parse(localStorage.getItem('tight_spot_stars') || '[]') || [];
     } catch (e) { bestStars = []; }
+    // M1: load the persistent garage meta (coins / owned cars / active car)
+    loadMeta();
     GF.persist('tight_spot_run_v1',
       function() {
         return { gs: (gs === 'PLAYING' || gs === 'CRASH') ? 'PLAYING' : gs,
@@ -1205,6 +1704,15 @@ GF.init({
     layoutField();
     // preload level geometry so MENU has something behind it if ever drawn
     loadLevel(Math.min(maxLevel, AUTHORED_LEVELS));
+    // ▶ PLATFORM AUTOSTART (CLAUDE.md #9): Yandex/CrazyGames inject __GF_AUTOSTART
+    // so the player drops STRAIGHT into gameplay (no menu landing). The gallery
+    // build never gets the flag, so it keeps its menu. Menu stays reachable in-run
+    // via the ≡ button. Suppress the first-session tutorial auto-open on platforms.
+    if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') {
+      saveTutorialSeen();
+      tutorialOpen = false;
+      startLevel(maxLevel);
+    }
   },
   onUpdate: update,
   onDraw: draw,
@@ -1230,6 +1738,10 @@ GF.exposeState(function() {
     parked: gs === 'PLAYING' ? parkedInBay() : false,
     obstacleCount: obstacles.length, coneCount: cones.length, wallCount: walls.length,
     tutorialOpen: tutorialOpen,
+    // M1 garage meta
+    coins: Math.round(coins), activeCar: activeCar,
+    ownedCount: Object.keys(ownedCars).length, lastEarned: lastEarned,
+    garageOpen: garageOpen, nextCarCost: (nextLockedCar() ? nextLockedCar().cost : 0),
     CREEP_SPEED: CREEP_SPEED, TURN_RATE: TURN_RATE, FRICTION: FRICTION,
     CAR_W: CAR_W, CAR_L: CAR_L, CONE_R: CONE_R,
     ANGLE_TOL: ANGLE_TOL, POS_TOL: POS_TOL, SETTLE_SEC: SETTLE_SEC,
@@ -1237,6 +1749,39 @@ GF.exposeState(function() {
     WALL_THICK: WALL_THICK, PATH_PAR: PATH_PAR,
   };
 });
+
+// ── PROGRESSION-PROBE BOT (balance-curve fast-forward) ──────────────────────
+// getActions() lists what the bot can do right now; doAction(a) performs one.
+// The bot drives the FULL meta loop: clear a level (teleport-park), buy the next
+// affordable car, then advance — so the probe can measure coin cadence + unlocks.
+GF.exposeBot(
+  function getActions() {
+    var acts = [];
+    if (gs === 'MENU' || gs === 'WIN') acts.push('play');
+    else if (gs === 'LEVELCLEAR') acts.push('next');
+    else if (gs === 'CRASH') acts.push('recover');   // never let the bot stall in the crash freeze
+    else if (gs === 'PLAYING' && !tutorialOpen) acts.push('park');
+    var nl = nextLockedCar();
+    if (nl && canAfford(nl) && (gs === 'PLAYING' || gs === 'LEVELCLEAR' || gs === 'WIN' || gs === 'MENU')) acts.push('buycar');
+    return acts;
+  },
+  function doAction(a) {
+    if (a === 'play') { startLevel(gs === 'WIN' ? AUTHORED_LEVELS + 1 : maxLevel); return; }
+    if (a === 'next') { advance(); return; }
+    if (a === 'buycar') { var nl = nextLockedCar(); if (nl) buyCar(nl.id); return; }
+    if (a === 'recover') { // skip the crash freeze straight back to PLAYING
+      var d = levelData(lvl); resetCar(d.start); gs = 'PLAYING'; return;
+    }
+    if (a === 'park') {
+      // teleport the car into the bay and force the settle so onParked() fires
+      if (gs !== 'PLAYING') return;
+      car.x = bay.x; car.y = bay.y; car.heading = bay.heading; car.speed = 0;
+      settleT = SETTLE_SEC + 1;
+      onParked(); // perks only widen tolerances, so a bay-center teleport always parks
+      return;
+    }
+  }
+);
 
 // Test/automation hooks (safe to ship - platforms don't reject these).
 window._setLang = function(l) { GF.lang = l; };
@@ -1248,7 +1793,29 @@ window._steer = function(side, on) {
   if (on) steerHintFade = 0;
 };
 window._startLevel = function(n) { startLevel(n || 1); };
+// M1 garage test seams (safe to ship)
+window._grant = function(n) { coins += (n || 100); saveMeta(); };
+window._buyCar = function(id) { return buyCar(id || 1); };
+window._driveCar = function(id) { return driveCar(id || 0); };
+window._openGarage = function() { openGarage(); };
+window._tightSpotInfo = function() {
+  return { coins: Math.round(coins), activeCar: activeCar, owned: Object.keys(ownedCars).map(Number),
+           garageOpen: garageOpen, nextCar: (nextLockedCar() ? nextLockedCar().id : -1),
+           nextCost: (nextLockedCar() ? nextLockedCar().cost : 0), gs: gs };
+};
 
+})();
+</script>
+<script>
+/* bespoke synth_track.py soundtrack: start on first gesture (autoplay policy).
+   On-screen mute button lives in the HUD/menu (GF.drawMuteIcon + GF.toggleMute,
+   bottom-right); the M key is a desktop shortcut for the same toggle. */
+(function(){
+  if(!window.GF||!GF.music) return;
+  var go=function(){ GF.music('audio/bg_track.mp3', 0.6);
+    ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){document.removeEventListener(ev,go,true);}); };
+  ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){document.addEventListener(ev,go,true);});
+  document.addEventListener('keydown',function(e){ if(e.code==='KeyM'&&GF.toggleMute){ GF.toggleMute(); } });
 })();
 </script>
 </body>

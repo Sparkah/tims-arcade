@@ -104,6 +104,7 @@ var STRINGS = {
     sanctum:'SANCTUM', sanctumhint:'Spend Essence to permanently empower every champion of an element. These bonuses are yours forever and stack across all your runs.',
     sigil:'Sigil', vault:'Vault', lvl:'Lv', maxlvl:'MAX', upgrade:'Upgrade', sigilatk:'team ATK', sigilheal:'orb heal', sigilhp:'team HP',
     sanctumnext:'Next upgrade', sanctumafford:'ready to upgrade', empowered:'EMPOWERED!', sigilup:'SIGIL UP!',
+    forge:'Forge', collect:'COLLECT', forgefull:'FULL!', quests:'Daily Quests', questhint:'Complete the day’s goals for Essence and tickets. New quests every day.', questdone:'QUEST COMPLETE!',
   },
   ru: {
     title:'Орб-Чемпионы', sub:'Собирай орбы, усиливай чемпионов, пройди арену',
@@ -126,6 +127,7 @@ var STRINGS = {
     sanctum:'СВЯТИЛИЩЕ', sanctumhint:'Трать Эссенцию, чтобы навсегда усилить всех чемпионов стихии. Эти бонусы твои навсегда и действуют во всех твоих боях.',
     sigil:'Печать', vault:'Оплот', lvl:'Ур', maxlvl:'МАКС', upgrade:'Улучшить', sigilatk:'атака отряда', sigilheal:'лечение', sigilhp:'здоровье отряда',
     sanctumnext:'След. улучшение', sanctumafford:'можно улучшить', empowered:'УСИЛЕНО!', sigilup:'ПЕЧАТЬ+!',
+    forge:'Горнило', collect:'ЗАБРАТЬ', forgefull:'ПОЛНО!', quests:'Задания дня', questhint:'Выполняй цели дня ради Эссенции и билетов. Новые задания каждый день.', questdone:'ЗАДАНИЕ ВЫПОЛНЕНО!',
   },
 };
 
@@ -198,6 +200,17 @@ var meta = {
   lastDailyClear: 0,// day-number the Daily Trial was last cleared (streak driver)
   dailyStreak: 0,   // consecutive days the Daily Trial was cleared (D1/D7 hook)
   seenTut: false,
+  // ── M2 REASON-TO-RETURN (iter#2) ─────────────────────────────────────────
+  // OVERNIGHT IDLE ACCRUAL: the Essence forge runs while you're away. We bank a
+  // per-ms rate from the LAST time the player collected/closed; on open, the
+  // accrued pile (capped ~10h) is offered to collect into the M1 owned economy.
+  // The CAP is the return trigger: leave it overflowing and you lose Essence,
+  // so tomorrow there's a concrete pile waiting. (Never per-frame saved.)
+  idleSince: 0,     // ms timestamp accrual has been banking since (last collect)
+  // DAILY QUESTS: 3 seeded goals that reset each calendar day. ~1 starts close
+  // to done (momentum transfer). Rewards Essence + tickets -> feed Sanctum/gacha.
+  questDay: -1,     // day-number the current quest set belongs to
+  quests: [],       // [{id, type, target, prog, claimed, ess, tk}]
   // ── SANCTUM (M1 core-meta loop, iter#1) ──────────────────────────────────
   // Permanent, OWNED, deterministic power progression — separate from gacha RNG.
   // 7 upgrade tracks the player builds with Essence and KEEPS across every run:
@@ -228,6 +241,10 @@ function loadMeta() {
         meta.lastDailyClear = s.lastDailyClear|0;
         meta.dailyStreak = Math.max(0, s.dailyStreak|0);
         meta.seenTut = !!s.seenTut;
+        // M2: idle accrual + daily quests (tolerate old saves with neither key)
+        meta.idleSince = (typeof s.idleSince==='number' && s.idleSince>0) ? s.idleSince : 0;
+        meta.questDay = (typeof s.questDay==='number') ? s.questDay : -1;
+        meta.quests = Array.isArray(s.quests) ? s.quests : [];
         // SANCTUM sigils: restore + clamp; tolerate old saves with no sigils key.
         meta.sigils = [0,0,0,0,0,0,0];
         if (Array.isArray(s.sigils)) for (var si=0; si<7; si++) meta.sigils[si] = GF.clamp(s.sigils[si]|0, 0, SIGIL_MAX);
@@ -242,6 +259,10 @@ function loadMeta() {
   }
   // Ensure a valid team (fill from owned).
   rebuildTeamIfNeeded();
+  // M2: start the idle forge clock the first time we ever load (so a returning
+  // player always opens to a small banked pile), and roll today's quest set.
+  if (!meta.idleSince) { meta.idleSince = Date.now(); saveMeta(); }
+  ensureQuests();
 }
 function dayNumber(){ return Math.floor(Date.now()/86400000); }
 
@@ -307,6 +328,7 @@ function doSummon(n) {
     if (rosterById(got[j]).rar > bestRar) { bestRar = rosterById(got[j]).rar; bestId = got[j]; }
   }
   rebuildTeamIfNeeded();
+  questBump('summon', 1);   // M2 quest: "summon a champion" (any pull, x1 or x10)
   saveMeta();
   return { got:got, bestId:bestId, bestRar:bestRar, anyNew:anyNew };
 }
@@ -355,6 +377,7 @@ function buySigil(defIdx){
   if (!canUpgradeSigil(defIdx)) { GF.sfx('error'); return false; }
   meta.essence -= sigilCost(defIdx);
   meta.sigils[defIdx]++;
+  questBump('sigil', 1);   // M2 quest: "upgrade a Sigil" (any track)
   saveMeta();
   GF.sfx('levelup'); GF.happytime();
   sanctumPulse = { idx:defIdx, t:0 };
@@ -370,9 +393,131 @@ function sigilHpMult(){ return 1 + SIGIL_DEFS[6].per*meta.sigils[6]; }     // va
 var sanctumPulse = null;   // {idx,t} celebratory pulse on an upgraded track
 
 // ===========================================================================
+//  M2 — REASON TO RETURN (iter#2): overnight idle accrual + daily quests
+// ===========================================================================
+// One coherent habit-engine layered on the M1 owned economy. It does NOT add a
+// new currency — both systems pour Essence into the Sanctum/gacha sinks M1 built,
+// so "come back tomorrow" cashes out as permanent power, not a dead number.
+//
+//  (1) OVERNIGHT IDLE ACCRUAL — the Essence forge keeps running while you're away.
+//      Rate scales with how far you've climbed (stageUnlocked) + the streak, so
+//      progress compounds the pull. Capped at IDLE_CAP_H hours: the cap IS the
+//      return trigger — a full forge wastes Essence, so tomorrow there's a pile
+//      waiting to collect. Banked from idleSince; collecting resets idleSince=now.
+//  (2) DAILY QUESTS — 3 seeded goals that reset at midnight. One starts ~near done
+//      (momentum transfer). Completing them is the day's checklist that funnels
+//      back into the Sanctum upgrade loop.
+var IDLE_CAP_H = 10;                         // accrual cap in hours (the return trigger)
+var IDLE_CAP_MS = IDLE_CAP_H*3600*1000;
+// Essence/hour: a base + a per-stage-cleared bump + a gentle streak bonus. Tuned
+// so an overnight (capped) collect is worth a couple of Sanctum levels early on
+// (meaningful) without trivialising active play (a stage win still pays more).
+function idleRatePerHour(){
+  var prog = GF.clamp(meta.stageUnlocked,0,STAGES.length-1);
+  var streak = activeStreak();
+  return Math.round(40 + prog*22 + Math.min(streak,7)*6);
+}
+// Essence currently banked in the forge (elapsed since idleSince, hard-capped).
+function idleAccrued(){
+  if (!meta.idleSince) return 0;
+  var elapsed = Math.min(Date.now()-meta.idleSince, IDLE_CAP_MS);
+  if (elapsed <= 0) return 0;
+  return Math.floor(idleRatePerHour() * (elapsed/3600000));
+}
+// true once the forge has banked something worth a collect tap (avoids a 0-pile card)
+function idleReady(){ return idleAccrued() >= 5; }
+// fraction of the cap currently filled (0..1) — drives the forge gauge fill.
+function idleFillFrac(){
+  if (!meta.idleSince) return 0;
+  return GF.clamp((Date.now()-meta.idleSince)/IDLE_CAP_MS, 0, 1);
+}
+function collectIdle(){
+  var amt = idleAccrued();
+  if (amt <= 0) { GF.sfx('error'); return 0; }
+  meta.essence += amt;
+  meta.idleSince = Date.now();   // restart the forge clock from the collect moment
+  saveMeta();
+  GF.sfx('coin'); GF.happytime();
+  idleCollectFx = { amt:amt, t:0 };
+  questBump('collect', 1);       // collecting also ticks the "collect the forge" quest
+  return amt;
+}
+var idleCollectFx = null;        // {amt,t} floating "+N Essence" burst after a collect
+
+// ── DAILY QUESTS ─────────────────────────────────────────────────────────────
+// Seeded by the day number so everyone gets the same 3 quests that day and they
+// rotate at midnight. Each is a {type,target} the player makes progress toward
+// during normal play; questBump(type,n) advances them from the action code.
+var QUEST_POOL = [
+  { type:'win',      target:3, ess:120, tk:1, en:'Win 3 battles',         ru:'Победи в 3 боях' },
+  { type:'combo',    target:4, ess:110, tk:1, en:'Make a 4+ combo',       ru:'Собери комбо 4+' },
+  { type:'daily',    target:1, ess:140, tk:1, en:'Clear the Daily Trial', ru:'Пройди Испытание дня' },
+  { type:'summon',   target:1, ess:80,  tk:1, en:'Summon a champion',     ru:'Призови чемпиона' },
+  { type:'sigil',    target:1, ess:130, tk:1, en:'Upgrade a Sigil',       ru:'Улучши Печать' },
+  { type:'clearwave',target:6, ess:120, tk:1, en:'Clear 6 waves',         ru:'Зачисти 6 волн' },
+  { type:'collect',  target:1, ess:90,  tk:1, en:'Collect the forge',     ru:'Забери из горнила' },
+];
+function questLabel(q){ return GF.lang==='ru' ? q.ru : q.en; }
+// (re)generate the day's quest set if it's a new calendar day. Picks 3 distinct
+// pool entries via the day-seed; pre-credits ~one so it starts close to done.
+function ensureQuests(){
+  var day = dayNumber();
+  if (meta.questDay === day && Array.isArray(meta.quests) && meta.quests.length) return;
+  var rnd = _mulberry32(((day*40503)>>>0) ^ 0x9e3779b9);
+  var idx = QUEST_POOL.map(function(_,i){return i;});
+  // Fisher-Yates with the seeded rng -> a stable daily shuffle
+  for (var i=idx.length-1;i>0;i--){ var j=Math.floor(rnd()*(i+1)); var t=idx[i]; idx[i]=idx[j]; idx[j]=t; }
+  var pick = idx.slice(0,3);
+  meta.quests = pick.map(function(pi){
+    var def = QUEST_POOL[pi];
+    return { id:def.type+'_'+day, type:def.type, target:def.target, prog:0, claimed:false, ess:def.ess, tk:def.tk };
+  });
+  // momentum transfer: seed the FIRST seedable quest most of the way to done so
+  // the day opens with visible progress (never a 'daily' quest — that one must be
+  // earned by clearing the trial — and never a target-1 quest, nothing to seed).
+  for (var s=0;s<meta.quests.length;s++){
+    var qq=meta.quests[s];
+    if (qq.type!=='daily' && qq.target>1){ qq.prog = qq.target-1; break; }
+  }
+  meta.questDay = day;
+  saveMeta();
+}
+function questDef(type){ for (var i=0;i<QUEST_POOL.length;i++) if (QUEST_POOL[i].type===type) return QUEST_POOL[i]; return null; }
+// advance every active quest of `type` by n (clamped to target). Fires a toast +
+// sfx when one ticks to complete. Safe to call from any action hook.
+function questBump(type, n){
+  if (!Array.isArray(meta.quests)) return;
+  var changed=false, completed=false;
+  for (var i=0;i<meta.quests.length;i++){
+    var q=meta.quests[i];
+    if (q.type!==type || q.claimed) continue;
+    if (q.prog>=q.target) continue;
+    q.prog = Math.min(q.target, q.prog + (n||1));
+    changed=true;
+    if (q.prog>=q.target) completed=true;
+  }
+  if (changed) saveMeta();
+  if (completed){ GF.sfx('levelup'); questToast = 1.6; }
+}
+function questReady(q){ return q.prog>=q.target && !q.claimed; }
+function anyQuestReady(){ if(!Array.isArray(meta.quests)) return false; for(var i=0;i<meta.quests.length;i++) if(questReady(meta.quests[i])) return true; return false; }
+function claimQuest(q){
+  if (!questReady(q)) { GF.sfx('error'); return false; }
+  q.claimed = true;
+  meta.essence += q.ess|0;
+  meta.tickets += q.tk|0;
+  saveMeta();
+  GF.sfx('reward'); GF.happytime();
+  questClaimFx = { id:q.id, t:0 };
+  return true;
+}
+var questToast = 0;       // brief "quest complete" banner timer
+var questClaimFx = null;  // {id,t} pulse on a just-claimed quest row
+
+// ===========================================================================
 //  GAME / BATTLE STATE
 // ===========================================================================
-var gs = 'MENU'; // MENU | STAGESEL | TEAM | COLLECTION | SUMMON | SANCTUM | BATTLE
+var gs = 'MENU'; // MENU | STAGESEL | TEAM | COLLECTION | SUMMON | SANCTUM | QUESTS | BATTLE
 var battle = null;
 var pullReveal = null;     // {id,isNew,stars,t}
 var summonResult = null;   // x10 summary overlay {got,...,t}
@@ -635,6 +780,9 @@ function resolveMove() {
     collapseBoard(m.cells);
   }
   battle.lastComboCount = comboCount;
+  // M2 quest: a big combo this move credits the "make a N+ combo" goal (highest
+  // combo reached, not cumulative — bump to that quest's target if we hit it).
+  if (comboCount>0){ var cq=questDef('combo'); if (cq && comboCount>=cq.target) questBump('combo', cq.target); }
   // compute damage AFTER combo count known (combo multiplier).
   // combo multiplier: +25% per combo beyond first
   var comboMult = 1 + 0.25*Math.max(0, comboCount-1);
@@ -712,6 +860,7 @@ function applyDamage() {
 }
 
 function advanceWaveOrWin() {
+  questBump('clearwave', 1);   // M2 quest: every wave cleared ticks "clear N waves"
   battle.waveIdx++;
   if (battle.waveIdx >= battle.waves.length) {
     battle.phase = 'WIN';
@@ -779,6 +928,7 @@ function ensurePlayableBoard(){
 
 function onBattleWin() {
   GF.sfx('win'); GF.happytime();
+  questBump('win', 1);   // M2 quest: "win N battles" (any stage win, daily included below)
   if (battle.daily) { onDailyWin(); return; }
   // rewards: essence + a ticket; unlock next stage
   var reward = 60 + battle.stageIdx*40;
@@ -797,6 +947,7 @@ function onDailyWin() {
   var today = (battle.st && typeof battle.st.day === 'number') ? battle.st.day : dayNumber();
   var first = (meta.lastDailyClear !== today);
   if (first) {
+    questBump('daily', 1);   // M2 quest: "clear the Daily Trial" (first clear of the day only)
     // streak = +1 if yesterday's trial was cleared, else reset to 1
     meta.dailyStreak = (meta.lastDailyClear === today - 1) ? (meta.dailyStreak|0) + 1 : 1;
     meta.lastDailyClear = today;
@@ -886,6 +1037,7 @@ function activeScroll() {
   if (gs === 'TEAM') return teamScroll;
   if (gs === 'COLLECTION') return collScroll;
   if (gs === 'SANCTUM') return sanctumScroll;
+  if (gs === 'QUESTS') return questScroll;
   return null;
 }
 
@@ -938,6 +1090,7 @@ function onUp(x,y) {
       if (gs === 'TEAM') teamClick(x,y);
       else if (gs === 'COLLECTION') collClick(x,y);
       else if (gs === 'SANCTUM') sanctumClick(x,y);
+      else if (gs === 'QUESTS') questsClick(x,y);
     }
     press = null;
     return;
@@ -1014,6 +1167,9 @@ function update(dt) {
   if (pullReveal) { pullReveal.t += dt; }
   if (summonResult) { summonResult.t += dt; }
   if (sanctumPulse) { sanctumPulse.t += dt; if (sanctumPulse.t>0.7) sanctumPulse=null; }
+  if (idleCollectFx) { idleCollectFx.t += dt; if (idleCollectFx.t>1.0) idleCollectFx=null; }
+  if (questToast>0) questToast -= dt;
+  if (questClaimFx) { questClaimFx.t += dt; if (questClaimFx.t>0.7) questClaimFx=null; }
   if (gs !== 'BATTLE' || !battle) return;
   var b = battle;
   // animate unit/enemy flashes
@@ -1072,12 +1228,15 @@ function draw() {
   else if (gs==='COLLECTION') drawCollection();
   else if (gs==='SUMMON') drawSummon();
   else if (gs==='SANCTUM') drawSanctum();
+  else if (gs==='QUESTS') drawQuests();
   // global mute icon top-right
   drawMute();
   // overlays
   if (pullReveal) drawPullReveal();
   if (summonResult) drawSummonResult();
   if (dailyToast>0) drawDailyToast();
+  if (idleCollectFx) drawIdleCollectFx();   // M2: floating "+N Essence" after a forge collect
+  if (questToast>0) drawQuestToast();        // M2: brief "quest complete" banner
   // tutorial overlay last
   GF.tutorial.draw(ctx);
 }
@@ -1533,6 +1692,16 @@ function drawStageSel() {
   var dailyAvail = meta.lastDaily !== dayNumber();
   if (dailyAvail){ var dbh=32*S; L.dailyBtn={x:cardX,y:topY,w:cardW,h:dbh}; drawBigBtn(L.dailyBtn, GF.t('daily')+' · '+GF.t('free')+' '+GF.t('summon'), '#ffb028','#e0830a'); topY += dbh+9*S; }
   else L.dailyBtn=null;
+  // M2 daily strip: [Forge collect] [Quests] — the two reason-to-return CTAs.
+  // Forge shows the banked Essence + fill gauge; tap collects. Quests opens the
+  // daily-goals screen; an affordance dot marks claimable quests.
+  ensureQuests();
+  var dsh=42*S, dgap=9*S, dcw=(cardW-dgap)/2;
+  L.forgeBtn={ x:cardX, y:topY, w:dcw, h:dsh };
+  drawForgeCard(L.forgeBtn);
+  L.questBtn={ x:cardX+dcw+dgap, y:topY, w:dcw, h:dsh };
+  drawQuestCard(L.questBtn);
+  topY += dsh + 9*S;
   // stage cards — 2-column grid so 8+ stages fit without scrolling
   var n=STAGES.length, cols=2, gap=9*S;
   var by=H-78*S;                          // bottom team/back buttons baseline
@@ -1612,9 +1781,88 @@ function drawDailyTrialCard(r){
   }
   ctx.restore();
 }
+// vector anvil/forge glyph (never an emoji — tofus in canvas on headless/Android)
+function drawAnvil(x,y,r){
+  ctx.save(); ctx.translate(x,y);
+  ctx.fillStyle='#cfd6e0';
+  // body
+  ctx.beginPath();
+  ctx.moveTo(-r,-r*0.5); ctx.lineTo(r*0.9,-r*0.5); ctx.lineTo(r*1.15,-r*0.18);
+  ctx.lineTo(r*0.2,-r*0.18); ctx.lineTo(r*0.2,r*0.05);
+  ctx.lineTo(r*0.55,r*0.18); ctx.lineTo(-r*0.55,r*0.18); ctx.lineTo(-r*0.2,r*0.05);
+  ctx.lineTo(-r*0.2,-r*0.18); ctx.lineTo(-r,-r*0.18); ctx.closePath(); ctx.fill();
+  // base
+  ctx.fillStyle='#9aa3b0';
+  GF.rr(ctx,-r*0.42,r*0.18,r*0.84,r*0.5,r*0.1); ctx.fill();
+  ctx.restore();
+}
+// FORGE card: shows banked idle Essence + a fill gauge toward the cap. Tap to
+// collect. Pulses gold/ready when there is a pile, dim when empty/just collected.
+function drawForgeCard(r){
+  var S=GF.S, ready=idleReady(), amt=idleAccrued(), frac=idleFillFrac(), full=frac>=0.999;
+  ctx.save();
+  GF.rr(ctx,r.x,r.y,r.w,r.h,11*S); ctx.save(); ctx.clip();
+  var g=ctx.createLinearGradient(r.x,r.y,r.x,r.y+r.h);
+  g.addColorStop(0, ready?'#2a2410':'#191c28'); g.addColorStop(1, ready?'#3e3414':'#12141d');
+  ctx.fillStyle=g; ctx.fillRect(r.x,r.y,r.w,r.h);
+  ctx.restore();
+  GF.rr(ctx,r.x,r.y,r.w,r.h,11*S); ctx.lineWidth=2*S;
+  ctx.strokeStyle = full?'#ff5a3c':(ready?'#ffd23a':'#33384e'); ctx.stroke();
+  drawAnvil(r.x+18*S, r.y+r.h*0.42, 11*S);
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillStyle= ready?'#ffe6a0':'#8a93a6';
+  if (ready){
+    drawEssenceIcon(r.x+36*S, r.y+r.h*0.40, 6.5*S);
+    ctx.fillText(' +'+amt, r.x+46*S, r.y+r.h*0.40);
+  } else {
+    ctx.fillText(GF.t('forge'), r.x+36*S, r.y+r.h*0.40);
+  }
+  // fill gauge along the bottom (how close to the cap = lost-Essence warning)
+  var gx=r.x+10*S, gy=r.y+r.h-9*S, gw=r.w-20*S, gh=4*S;
+  GF.rr(ctx,gx,gy,gw,gh,2*S); ctx.fillStyle='#0c0e16'; ctx.fill();
+  if (frac>0){ GF.rr(ctx,gx,gy,gw*frac,gh,2*S); ctx.fillStyle= full?'#ff5a3c':'#ffb028'; ctx.fill(); }
+  // sub: COLLECT when ready, else the rate so the player knows it's banking
+  ctx.font=clampF(9.5*S,8,13)+'px Inter, system-ui'; ctx.textAlign='right';
+  ctx.fillStyle= ready?'#7ae0a0':'#7a8296';
+  ctx.fillText(ready?(full?GF.t('forgefull'):GF.t('collect')):('+'+idleRatePerHour()+'/h'), r.x+r.w-10*S, r.y+r.h*0.40);
+  ctx.restore();
+}
+// QUESTS card: a compact entry button + progress dots + a claimable affordance.
+function drawQuestCard(r){
+  var S=GF.S, ready=anyQuestReady();
+  var qs=meta.quests||[], done=0; for(var i=0;i<qs.length;i++) if(qs[i].claimed) done++;
+  ctx.save();
+  GF.rr(ctx,r.x,r.y,r.w,r.h,11*S); ctx.save(); ctx.clip();
+  var g=ctx.createLinearGradient(r.x,r.y,r.x,r.y+r.h);
+  g.addColorStop(0, ready?'#10241a':'#191c28'); g.addColorStop(1, ready?'#123a26':'#12141d');
+  ctx.fillStyle=g; ctx.fillRect(r.x,r.y,r.w,r.h); ctx.restore();
+  GF.rr(ctx,r.x,r.y,r.w,r.h,11*S); ctx.lineWidth=2*S;
+  ctx.strokeStyle = ready?'#2ee07a':'#33384e'; ctx.stroke();
+  // checklist glyph
+  var ix=r.x+16*S, iy=r.y+r.h*0.42;
+  ctx.lineWidth=2*S; ctx.strokeStyle='#9fe6c0'; GF.rr(ctx,ix-7*S,iy-7*S,14*S,14*S,3*S); ctx.stroke();
+  ctx.lineCap='round'; ctx.beginPath(); ctx.moveTo(ix-3.5*S,iy); ctx.lineTo(ix-1*S,iy+3*S); ctx.lineTo(ix+4*S,iy-3.5*S); ctx.stroke();
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillStyle= ready?'#9fe6c0':'#8a93a6';
+  ctx.fillText(GF.t('quests'), r.x+30*S, r.y+r.h*0.40);
+  // progress dots (one per quest; filled = claimed, ring = ready, hollow = open)
+  var n=qs.length||3, dgx=r.x+10*S, dgy=r.y+r.h-9*S, dr=3.2*S, dstep=11*S;
+  for (var d=0; d<n; d++){
+    var q=qs[d], cx=dgx+dr+d*dstep, cy=dgy;
+    ctx.beginPath(); ctx.arc(cx,cy,dr,0,Math.PI*2);
+    if (q && q.claimed){ ctx.fillStyle='#2ee07a'; ctx.fill(); }
+    else if (q && questReady(q)){ ctx.lineWidth=2*S; ctx.strokeStyle='#ffd23a'; ctx.stroke(); }
+    else { ctx.lineWidth=1.5*S; ctx.strokeStyle='#55607a'; ctx.stroke(); }
+  }
+  ctx.font=clampF(9.5*S,8,13)+'px Inter, system-ui'; ctx.textAlign='right'; ctx.fillStyle= ready?'#7ae0a0':'#7a8296';
+  ctx.fillText(ready?GF.t('claim'):(done+'/'+n), r.x+r.w-10*S, r.y+r.h*0.40);
+  ctx.restore();
+}
 function stageSelClick(x,y) {
   if (L.dailyStage && hit(L.dailyStage,x,y)) { startDaily(); return; }
   if (L.dailyBtn && hit(L.dailyBtn,x,y)) { claimDaily(); return; }
+  if (L.forgeBtn && hit(L.forgeBtn,x,y)) { if (idleReady()) collectIdle(); else GF.sfx('tap'); return; }
+  if (L.questBtn && hit(L.questBtn,x,y)) { openQuests(); return; }
   for (var i=0;i<L.stageCards.length;i++){ var sc=L.stageCards[i];
     if (hit(sc.rect,x,y)) { if (sc.locked){ GF.sfx('error'); } else { startBattle(sc.idx); } return; }
   }
@@ -1679,11 +1927,12 @@ function drawTeam() {
 // gf-lib makeScroll registers them for the reachability gate). The grid cells
 // (L.teamGridCells / L.collGridCells) are recorded in CONTENT space; hit-testing
 // converts the tap to content space via the controller's offset.
-var teamScroll = null, collScroll = null, sanctumScroll = null;
+var teamScroll = null, collScroll = null, sanctumScroll = null, questScroll = null;
 function ensureScrolls() {
   if (!teamScroll) teamScroll = GF.makeScroll('team_roster', {x:0,y:0,w:0,h:0});
   if (!collScroll) collScroll = GF.makeScroll('coll_roster', {x:0,y:0,w:0,h:0});
   if (!sanctumScroll) sanctumScroll = GF.makeScroll('sanctum_list', {x:0,y:0,w:0,h:0});
+  if (!questScroll) questScroll = GF.makeScroll('quest_list', {x:0,y:0,w:0,h:0});
 }
 // hit-test a CONTENT-space rect against a SCREEN-space tap, via the controller.
 // The tap must land inside the viewport AND map (screen->content) into the rect.
@@ -2085,6 +2334,109 @@ function sanctumClick(x,y) {
   }
 }
 
+// ── DAILY QUESTS SCREEN (M2 reason-to-return, iter#2) ────────────────────────
+var questsReturn = 'STAGESEL';
+function openQuests(){ ensureQuests(); questsReturn = (gs==='BATTLE'?'STAGESEL':gs); gs='QUESTS'; GF.sfx('tap'); }
+function drawQuests(){
+  drawHubBg(); drawTopBar();
+  var S=GF.S, W=GF.W, H=GF.H;
+  ensureQuests();
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.font='bold '+clampF(20*S,15,28)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText(GF.t('quests'), GF.cx, 56*S);
+  ctx.font=clampF(11.5*S,9,15)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
+  wrapText(GF.t('questhint'), GF.cx, 84*S, W*0.9, clampF(15*S,12,19));
+  ensureScrolls();
+  // scrollable list of the day's quests (rows hold label + progress bar + claim btn)
+  var top=124*S, bottom=H-78*S;
+  var rowH=72*S, gap=10*S, W2=W-20*S, x0=10*S;
+  var qs=meta.quests||[], rows=qs.length;
+  var contentH = rows*(rowH+gap) - gap + 8*S;
+  questScroll.setViewport({x:0, y:top, w:W, h:bottom-top});
+  questScroll.setContentHeight(contentH);
+  questScroll.update();
+  L.questRows=[];
+  questScroll.begin(ctx);
+  for (var i=0;i<rows;i++){
+    var q=qs[i], def=questDef(q.type), ready=questReady(q), claimed=q.claimed;
+    var y=i*(rowH+gap);
+    var rect={x:x0,y:y,w:W2,h:rowH};
+    ctx.save();
+    GF.rr(ctx,x0,y,W2,rowH,12*S);
+    ctx.fillStyle = claimed?'rgba(14,22,16,0.92)':'rgba(18,20,38,0.95)'; ctx.fill();
+    GF.rr(ctx,x0,y,W2,rowH,12*S); ctx.lineWidth=2*S;
+    ctx.strokeStyle = claimed?'#2c5a3c':(ready?'#ffd23a':'#33384e'); ctx.stroke();
+    // label
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui'; ctx.fillStyle= claimed?'#7ea890':'#fff';
+    ctx.fillText(def?questLabel(def):q.type, x0+16*S, y+rowH*0.30);
+    // reward line
+    ctx.font=clampF(11.5*S,9,15)+'px Inter, system-ui'; ctx.fillStyle='#9fe6c0';
+    ctx.fillText('+'+q.ess+' '+GF.t('essence')+(q.tk?('  ·  +'+q.tk+' '+GF.t('tickets')):''), x0+16*S, y+rowH*0.50);
+    // progress bar
+    var pbx=x0+16*S, pby=y+rowH*0.66, pbw=W2*0.52, pbh=8*S;
+    GF.rr(ctx,pbx,pby,pbw,pbh,4*S); ctx.fillStyle='#0c0e16'; ctx.fill();
+    var frac=GF.clamp(q.prog/q.target,0,1);
+    if (frac>0){ GF.rr(ctx,pbx,pby,pbw*frac,pbh,4*S); ctx.fillStyle= claimed?'#3c8a5c':(ready?'#ffd23a':'#37a8ff'); ctx.fill(); }
+    ctx.font='bold '+clampF(10.5*S,9,14)+'px Inter, system-ui'; ctx.fillStyle='#9ab'; ctx.textBaseline='middle';
+    ctx.fillText(Math.min(q.prog,q.target)+'/'+q.target, pbx+pbw+8*S, pby+pbh/2);
+    // claim button / done tag (right side)
+    var bw=84*S, bh=42*S, bx=x0+W2-bw-12*S, by=y+(rowH-bh)/2;
+    var btnRect={x:bx,y:by,w:bw,h:bh};
+    if (claimed){
+      ctx.fillStyle='#2ee07a'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.lineWidth=3*S; ctx.strokeStyle='#2ee07a'; ctx.lineCap='round';
+      ctx.beginPath(); ctx.moveTo(bx+bw/2-10*S,by+bh/2); ctx.lineTo(bx+bw/2-2*S,by+bh/2+8*S); ctx.lineTo(bx+bw/2+11*S,by+bh/2-9*S); ctx.stroke();
+      L.questRows.push({rect:rect, idx:i, btn:null});
+    } else {
+      var ca=ready?'#2ee07a':'#3a3a44', cb=ready?'#23a657':'#26262e';
+      var g2=ctx.createLinearGradient(bx,by,bx,by+bh); g2.addColorStop(0,ca); g2.addColorStop(1,cb);
+      GF.rr(ctx,bx,by,bw,bh,10*S); ctx.fillStyle=g2; ctx.fill();
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.font='bold '+clampF(13*S,10,17)+'px Inter, system-ui'; ctx.fillStyle=ready?'#fff':'#888';
+      ctx.fillText(GF.t('claim'), bx+bw/2, by+bh/2);
+      L.questRows.push({rect:rect, idx:i, btn:btnRect});
+    }
+    // claim pulse
+    if (questClaimFx && questClaimFx.id===q.id && questClaimFx.t<0.7){
+      var a2=1-questClaimFx.t/0.7; ctx.globalAlpha=a2*0.9; ctx.lineWidth=3*S; ctx.strokeStyle='#2ee07a';
+      GF.rr(ctx,x0-2*S,y-2*S,W2+4*S,rowH+4*S,13*S); ctx.stroke(); ctx.globalAlpha=1;
+    }
+    ctx.restore();
+  }
+  questScroll.end(ctx);
+  questScroll.draw(ctx);
+  // back button (pinned)
+  var by3=H-66*S, bw3=W*0.86, bx3=W*0.07, bh3=52*S;
+  L.questsBack = { x:bx3, y:by3, w:bw3, h:bh3 };
+  drawBigBtn(L.questsBack, GF.t('back'), '#2ee07a','#23a657');
+}
+function questsClick(x,y){
+  if (hit(L.questsBack,x,y)) { gs=questsReturn; GF.sfx('tap'); return; }
+  for (var i=0;i<(L.questRows||[]).length;i++){ var qr=L.questRows[i];
+    if (qr.btn && hitScrolled(qr.btn,x,y,questScroll)){ claimQuest(meta.quests[qr.idx]); return; }
+  }
+}
+
+// M2 collect/quest celebratory effects (drawn over any screen)
+function drawIdleCollectFx(){
+  var S=GF.S, f=idleCollectFx, p=GF.clamp(f.t/1.0,0,1);
+  ctx.save(); ctx.globalAlpha=1-p; ctx.textAlign='center'; ctx.textBaseline='middle';
+  var y=GF.H*0.34 - p*40*S;
+  ctx.font='bold '+clampF(26*S,18,38)+'px Inter, system-ui'; ctx.fillStyle='#ffd23a';
+  ctx.shadowColor='#ffb028'; ctx.shadowBlur=18*S;
+  ctx.fillText('+'+f.amt+' '+GF.t('essence'), GF.cx, y);
+  ctx.restore();
+}
+function drawQuestToast(){
+  var S=GF.S; ctx.save(); ctx.globalAlpha=Math.min(1,questToast);
+  ctx.fillStyle='rgba(16,40,26,0.96)'; var w=GF.W*0.72, x=GF.cx-w/2, y=GF.H*0.10, h=44*S;
+  GF.rr(ctx,x,y,w,h,12*S); ctx.fill(); ctx.lineWidth=2*S; ctx.strokeStyle='#2ee07a';
+  GF.rr(ctx,x,y,w,h,12*S); ctx.stroke();
+  ctx.fillStyle='#9fe6c0'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font='bold '+clampF(14*S,11,19)+'px Inter, system-ui';
+  ctx.fillText(GF.t('questdone'), GF.cx, y+h/2); ctx.restore();
+}
+
 function drawDailyToast() {
   var S=GF.S;
   ctx.save(); ctx.globalAlpha=Math.min(1,dailyToast);
@@ -2211,8 +2563,10 @@ function reachState(){
   } else if (gs==='STAGESEL'){
     if (L.dailyStage) _push(items,_ri('daily_trial',L.dailyStage));
     if (L.dailyBtn) _push(items,_ri('daily',L.dailyBtn));
+    if (L.forgeBtn) _push(items,_ri('forge',L.forgeBtn));
+    if (L.questBtn) _push(items,_ri('quests',L.questBtn));
     for (var i=0;i<(L.stageCards||[]).length;i++) _push(items,_ri('stage_'+i, L.stageCards[i].rect));
-    _push(items,_ri('team',L.ssTeam)); _push(items,_ri('back',L.ssBack));
+    _push(items,_ri('team',L.ssTeam)); _push(items,_ri('sanctum',L.ssSanctum)); _push(items,_ri('back',L.ssBack));
   } else if (gs==='TEAM'){
     res.scrollId='team_roster';
     res.viewportH = teamScroll ? teamScroll.vp.h : H;       // region viewport height
@@ -2238,6 +2592,13 @@ function reachState(){
     // each track's upgrade button lives in CONTENT space (y from region top)
     for (var sg=0; sg<(L.sigilRows||[]).length; sg++){ var rw=L.sigilRows[sg];
       if (rw.btn) _push(items,_ri('sigil_'+rw.idx, rw.btn)); }
+  } else if (gs==='QUESTS'){
+    res.scrollId='quest_list';
+    res.viewportH = questScroll ? questScroll.vp.h : H;
+    _push(items,_ri('back',L.questsBack,true));
+    // each quest's claim button lives in CONTENT space (y from region top)
+    for (var qi=0; qi<(L.questRows||[]).length; qi++){ var qrw=L.questRows[qi];
+      if (qrw.btn) _push(items,_ri('quest_'+qrw.idx, qrw.btn)); }
   } else if (gs==='BATTLE' && battle){
     if (battle.phase==='WIN'){ _push(items,_ri('win_sanctum',L.winSanctum)); _push(items,_ri('win_summon',L.winSummon)); _push(items,_ri('win_next',L.winNext)); }
     else if (battle.phase==='LOSE'){ if(L.loseRevive) _push(items,_ri('lose_revive',L.loseRevive)); _push(items,_ri('lose_retry',L.loseRetry)); _push(items,_ri('lose_hub',L.loseHub)); }
@@ -2256,6 +2617,7 @@ var REACH_TOUR = [
   { name:'collection', go:function(){ battle=null; gs='COLLECTION'; if(collScroll) collScroll.scrollTo(0); } },
   { name:'summon',     go:function(){ summonReturn='MENU'; gs='SUMMON'; } },
   { name:'sanctum',    go:function(){ battle=null; sanctumReturn='MENU'; gs='SANCTUM'; if(sanctumScroll) sanctumScroll.scrollTo(0); } },
+  { name:'quests',     go:function(){ battle=null; questsReturn='STAGESEL'; ensureQuests(); gs='QUESTS'; if(questScroll) questScroll.scrollTo(0); } },
   { name:'battle',     go:function(){ _ensureBattle(); if(GF.tutorial) GF.tutorial.active=false; tutorialActive=false; battle.phase='INPUT'; gs='BATTLE'; } },
   { name:'battle_win', go:function(){ _ensureBattle(); battle.phase='WIN'; battle._rewardEss=battle._rewardEss||60; gs='BATTLE'; } },
   { name:'battle_lose',go:function(){ _ensureBattle(); battle.phase='LOSE'; battle.reviveUsed=false; gs='BATTLE'; } },
@@ -2301,6 +2663,13 @@ GF.init({
         stageUnlocked: meta.stageUnlocked,
         sigils: meta.sigils.slice(),                                  // per-track levels (owned meta)
         sigilTotal: meta.sigils.reduce(function(a,v){return a+v;},0), // total upgrades owned
+        // M2 reason-to-return (iter#2)
+        idleAccrued: idleAccrued(),                                   // Essence banked in the forge now
+        idleReady: idleReady(),                                       // forge has a collectable pile
+        questDay: meta.questDay,
+        questsDone: (meta.quests||[]).filter(function(q){return q.claimed;}).length,
+        questsReady: (meta.quests||[]).filter(function(q){return questReady(q);}).length,
+        questsTotal: (meta.quests||[]).length,
       };
     });
     // reachability gate: expose the per-screen hit-rects + a screen tour so
@@ -2363,7 +2732,10 @@ function botActions(){
     else if (battle.phase==='LOSE') a.push('retry');
     else if (battle.phase==='WAVECLEAR') a.push('advance_wave');
   } else {
-    // between battles: spend essence on the owned-meta sink, then fight again
+    // between battles: collect the idle forge + claim ready quests (M2), then
+    // spend essence on the owned-meta sink, then fight again.
+    if (idleReady()) a.push('collect_idle');
+    if (anyQuestReady()) a.push('claim_quest');
     if (anySigilAffordable()) a.push('upgrade_sigil');
     a.push('start_battle');
   }
@@ -2374,6 +2746,8 @@ function botAct(action){
   if (action==='continue'){ gs='STAGESEL'; battle=null; return; }
   if (action==='retry'){ if (battle && battle.daily) startDaily(); else if (battle) startBattle(battle.stageIdx); return; }
   if (action==='advance_wave'){ if (battle){ battle.waveBanner=0; battle.phase='INPUT'; battle.moveTimer=0; ensurePlayableBoard(); } return; }
+  if (action==='collect_idle'){ collectIdle(); return; }
+  if (action==='claim_quest'){ for (var qi=0;qi<(meta.quests||[]).length;qi++){ if (questReady(meta.quests[qi])){ claimQuest(meta.quests[qi]); return; } } return; }
   if (action==='upgrade_sigil'){ // buy the cheapest affordable track
     var best=-1, bc=Infinity; for (var i=0;i<SIGIL_DEFS.length;i++){ if (canUpgradeSigil(i)){ var c=sigilCost(i); if (c<bc){ bc=c; best=i; } } }
     if (best>=0) buySigil(best); return;
@@ -2449,6 +2823,7 @@ window._orbGeom = function(r,c){ var cc=cellCenter(r,c); return { x:cc.x, y:cc.y
 window._orbButtons = function(){ // current screen's primary buttons (game-space rects) for the harness to tap
   return { menuPlay:L.menuPlay, menuColl:L.menuColl, menuSummon:L.menuSummon, menuSanctum:L.menuSanctum,
     ssTeam:L.ssTeam, ssSanctum:L.ssSanctum, ssBack:L.ssBack, dailyBtn:L.dailyBtn, dailyStage:L.dailyStage, stageCards:L.stageCards,
+    forgeBtn:L.forgeBtn, questBtn:L.questBtn, questsBack:L.questsBack,
     sumOne:L.sumOne, sumTen:L.sumTen, sumAd:L.sumAd, sumBack:L.sumBack,
     winSanctum:L.winSanctum, winSummon:L.winSummon, winNext:L.winNext, loseRetry:L.loseRetry, loseHub:L.loseHub, loseRevive:L.loseRevive,
     collSummon:L.collSummon, collBack:L.collBack, teamBack:L.teamBack, teamAuto:L.teamAuto, sanctumBack:L.sanctumBack }; };
@@ -2464,6 +2839,27 @@ window._orbSigil = function(action, idx){
   return { sigils:meta.sigils.slice(), costs:SIGIL_DEFS.map(function(_,i){return sigilMaxed(i)?null:sigilCost(i);}),
     mult:{ fireAtk:sigilAtkMult(EL.FIRE), waterAtk:sigilAtkMult(EL.WATER), heal:sigilHealMult(), hp:sigilHpMult() },
     affordable:anySigilAffordable(), next:nextSigilHint() };
+};
+// M2 verification seams (iter#2): drive + read the idle forge and daily quests.
+//  _orbIdle('read')                 -> {accrued, rate, fillFrac, ready, capH, idleSince}
+//  _orbIdle('set', ageMs)           -> backdate idleSince by ageMs to simulate time away
+//  _orbIdle('collect')              -> collect the forge, returns Essence gained
+window._orbIdle = function(action, arg){
+  if (action==='set'){ meta.idleSince = Date.now() - (arg|0); saveMeta(); return idleAccrued(); }
+  if (action==='collect'){ return collectIdle(); }
+  return { accrued:idleAccrued(), rate:idleRatePerHour(), fillFrac:idleFillFrac(), ready:idleReady(), capH:IDLE_CAP_H, idleSince:meta.idleSince, essence:meta.essence };
+};
+//  _orbQuests('read')               -> {day, quests:[{type,target,prog,claimed,ess,tk,ready}], anyReady}
+//  _orbQuests('bump', {type,n})     -> advance a quest type (sim progress)
+//  _orbQuests('claim', idx)         -> claim quest at index; returns success bool
+//  _orbQuests('reset')              -> force-regenerate today's quest set
+window._orbQuests = function(action, arg){
+  ensureQuests();
+  if (action==='bump' && arg){ questBump(arg.type, arg.n||1); }
+  if (action==='claim'){ return claimQuest(meta.quests[arg|0]); }
+  if (action==='reset'){ meta.questDay=-1; meta.quests=[]; ensureQuests(); }
+  return { day:meta.questDay, anyReady:anyQuestReady(),
+    quests:(meta.quests||[]).map(function(q){ return { type:q.type, target:q.target, prog:q.prog, claimed:q.claimed, ess:q.ess, tk:q.tk, ready:questReady(q) }; }) };
 };
 window._orbCombo = function(){ return battle?{count:battle.lastComboCount, flash:battle.comboFlash}:null; };
 window._orbTeamEls = function(){ return battle?battle.units.map(function(u){return u.el;}):[]; };

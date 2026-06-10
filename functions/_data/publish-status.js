@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-10T12:54:47.727170+00:00",
+  "generated": "2026-06-10T21:12:52.281516+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
