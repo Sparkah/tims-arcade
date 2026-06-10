@@ -115,6 +115,35 @@ var sanctFlash = 0, sanctBand = 0;   // arrival banner timer (sec) + band reache
 function nextSanctIn() { return (Math.floor(floorN / SANCT_EVERY) + 1) * SANCT_EVERY - floorN; }   // floors until the next sanctuary floor (1..SANCT_EVERY)
 function isSanctuaryFloor(f) { return f >= SANCT_EVERY && (f % SANCT_EVERY === 0); }
 
+// ── PLAYTIME-DEEPENING (iter#4): SIGIL HUNT + ATTUNEMENT (in-run only) ──────
+// The descent used to be homogeneous - walk to the exit, grab supplies, repeat -
+// so a deep run had nothing to EXPLORE and no escalating tension to discover.
+// This layers a per-floor optional objective: from SIGIL_FROM on, each maze
+// hides ONE glowing Sigil deep in a dead end (placed FAR from both spawn and the
+// exit so reaching it is a real detour). Tracing it pays an escalating run-scoped
+// score bonus and fills a per-run ATTUNEMENT meter; crossing an attunement
+// threshold (ATTUNE_TIERS) grants an escalating run-scoped boon (sanity ward /
+// extra light / a phase charge). This is the "do I risk the deep detour or bolt
+// for the exit?" choice DESIGN.md promised but the floors never delivered, and a
+// reason to keep playing a floor instead of speed-running it (-> longer sessions).
+// PURELY RUN-SCOPED: like the sanctuary dive bonus, the sigil score is tracked in
+// sigilBonusScore and EXCLUDED from bankFragments, so it touches none of the
+// fragments / relic / ritual / daily / stash retention systems.
+var SIGIL_FROM = 2;                  // sigils start appearing on floor 2 (floor 1 stays a clean intro)
+var sigil = null;                    // {x,y,bob,got} this floor's sigil, or null
+var sigilsTraced = 0;                // sigils traced THIS run (the attunement count)
+var sigilBonusScore = 0;             // sigil score added this run (kept OUT of the fragment economy)
+var sigilFlash = 0;                  // trace-pop banner timer (sec)
+var attuneTier = 0;                  // highest attunement tier reached this run (0..ATTUNE_TIERS.length)
+// Each tier: the sigil count that unlocks it + the run-scoped boon it grants.
+var ATTUNE_TIERS = [
+  { n: 3,  boon: 'ward',  en: 'Warding',  ru: 'Оберег'   },   // sanity refill + a brief dark-ward
+  { n: 6,  boon: 'cell',  en: 'Overcharge', ru: 'Заряд'  },   // light refill + over-cap reserve this run
+  { n: 10, boon: 'phase', en: 'Untethered', ru: 'Вне тела' }, // a free Phase charge into the stash for this run
+];
+function sigilBonusFor(f) { return 40 + 20 * Math.max(0, f - SIGIL_FROM); }   // escalating, depth-scaled (deeper = richer)
+function nextAttune() { for (var i = 0; i < ATTUNE_TIERS.length; i++) if (sigilsTraced < ATTUNE_TIERS[i].n) return ATTUNE_TIERS[i]; return null; }
+
 // theme derived from floor (escalation: new look + rule deeper down)
 function theme() {
   var f = floorN;
@@ -243,6 +272,9 @@ function genMaze() {
   var nItems = 3 + Math.floor(floorN * 0.6);
   if (RIT && RIT.id === 'bountiful') nItems += 2;   // M3 ritual: supplies everywhere
   for (var it = 0; it < nItems; it++) { var fc = randFloorCell(4); if (fc) items.push({ x: fc.x + 0.5, y: fc.y + 0.5, type: (Math.random() < 0.55 ? 'almond' : 'battery'), got: false, bob: Math.random() * 6.28 }); }
+  // SIGIL HUNT (iter#4): one optional, far-flung relic shard per floor from SIGIL_FROM on.
+  sigil = null;
+  if (floorN >= SIGIL_FROM) { var sc = sigilCell(); if (sc) sigil = { x: sc.x + 0.5, y: sc.y + 0.5, bob: Math.random() * 6.28, got: false }; }
   hunters = [];
   var nH = floorN >= 4 ? 2 : 1;
   for (var h = 0; h < nH; h++) { var hc = randFloorCell(8) || randFloorCell(5) || { x: MW - 2, y: MH - 2 }; hunters.push({ x: hc.x + 0.5, y: hc.y + 0.5, aggro: 0, path: null, repathT: 0, wt: 0, wtx: hc.x + 0.5, wty: hc.y + 0.5 }); }
@@ -267,6 +299,26 @@ function randFloorCell(minD) {
     return { x: x, y: y };
   }
   return null;
+}
+// Sigil placement: pick the floor cell that maximises the DETOUR cost - far from
+// both the spawn (1,1) and the exit, and ideally a dead end (one open neighbour)
+// so reaching it is a deliberate side-trip, not on the critical path to the exit.
+function openNeighbours(x, y) { var n = 0, nb = [[0, 1], [0, -1], [1, 0], [-1, 0]]; for (var i = 0; i < 4; i++) { var ax = x + nb[i][0], ay = y + nb[i][1]; if (ax >= 0 && ax < MW && ay >= 0 && ay < MH && MAP[ay][ax] === 0) n++; } return n; }
+function sigilCell() {
+  var best = null, bestScore = -1, deadEndSeen = false;
+  for (var t = 0; t < 260; t++) {
+    var x = 1 + ((Math.random() * (MW - 2)) | 0), y = 1 + ((Math.random() * (MH - 2)) | 0);
+    if (MAP[y][x] !== 0) continue;
+    if (x === exitCell.x && y === exitCell.y) continue;
+    if (Math.abs(x - 1) + Math.abs(y - 1) < 3) continue;                 // not on top of the spawn
+    if (Math.abs(x - exitCell.x) + Math.abs(y - exitCell.y) < 2) continue; // not glued to the exit
+    var dead = openNeighbours(x, y) <= 1;
+    if (deadEndSeen && !dead) continue;                                  // once a dead end is found, only consider dead ends
+    var sc = (Math.abs(x - 1) + Math.abs(y - 1)) + (Math.abs(x - exitCell.x) + Math.abs(y - exitCell.y));   // far from BOTH = a real detour
+    if (dead) { sc += 100; deadEndSeen = true; }                         // strongly prefer dead ends
+    if (sc > bestScore) { bestScore = sc; best = { x: x, y: y }; }
+  }
+  return best;
 }
 function bfsNext(sx, sy, tx, ty) {
   if (sx === tx && sy === ty) return null;
@@ -299,6 +351,7 @@ function startRun(floorArg) {
   shotMode = false; jump = 0; flickerDark = 0; pauseMode = null; panel = null; menuView = 'main';
   reviveUsed = false; slowT = phaseT = flareT = compassT = 0;
   sanctReached = 0; sanctFlash = 0; sanctBand = 0; sanctBonusScore = 0;   // reset the in-run sanctuary cadence
+  sigil = null; sigilsTraced = 0; sigilBonusScore = 0; sigilFlash = 0; attuneTier = 0;   // reset the in-run sigil hunt / attunement
   RIT = ritualToday();              // M3: lock today's ritual modifier for this run
   meta.runs++; saveMeta();
   applyRelics();                    // M3: permanent relics buff the fresh run (battery/sanity/items/compass)
@@ -329,6 +382,38 @@ function reachSanctuary() {
   score += bonus; sanctBonusScore += bonus;        // remember it so it never inflates banked fragments
   sanctFlash = 3.4; flashFx(0.5); sfx('pickup');    // descend chime is played once by descend()
   floatTxt('+' + bonus + ' ' + L('DIVE', 'СПУСК'), '#ffd24a');
+  if (GF.happytime) try { GF.happytime(); } catch (e) {}
+}
+// Trace a sigil: pay an escalating run-scoped score bonus (excluded from
+// fragments), advance the per-run attunement count, and grant the tier boon when
+// the count crosses an ATTUNE_TIERS threshold. All effects are run-scoped; the
+// bonus is remembered in sigilBonusScore so it never inflates banked fragments.
+function traceSigil() {
+  if (!sigil || sigil.got) return;
+  sigil.got = true; sigilsTraced++;
+  var bonus = sigilBonusFor(floorN);
+  score += bonus; sigilBonusScore += bonus;
+  sigilFlash = 2.6; flashFx(0.3); sfx('pickup');
+  floatTxt('✶ +' + bonus + ' ' + L('SIGIL', 'ЗНАК'), '#c9a6ff');
+  // attunement ladder: grant each tier's run-scoped boon exactly once
+  for (var i = attuneTier; i < ATTUNE_TIERS.length; i++) {
+    var tier = ATTUNE_TIERS[i];
+    if (sigilsTraced >= tier.n) {
+      attuneTier = i + 1; grantAttuneBoon(tier);
+    } else break;
+  }
+  persistSave();
+}
+function grantAttuneBoon(tier) {
+  // ALL boons are strictly RUN-SCOPED - they mutate only the active run's resource
+  // timers/levels, never the persistent stash/inv (that's an M1 system this pass
+  // must not touch). Tier 3 fires an immediate untouchable burst (phaseT), it does
+  // NOT bank a stash consumable.
+  if (tier.boon === 'ward')  { sanity = sanityCap(); slowT = Math.max(slowT, 4); }                // restore + a brief breather
+  else if (tier.boon === 'cell')  { battery = batteryCap(); compassT = Math.max(compassT, 8); }   // top up the light + show the way
+  else if (tier.boon === 'phase') { phaseT = Math.max(phaseT, 6); for (var i = 0; i < hunters.length; i++) hunters[i].aggro = 0; }   // a long untouchable burst, here and now
+  sanctFlash = 0;   // don't let a stale sanctuary banner fight the attune banner
+  floatTxt('✦ ' + L('ATTUNED', 'НАСТРОЙКА') + ': ' + L(tier.en, tier.ru), '#ffd24a', 0.34);   // higher anchor so it never stacks on the trace float
   if (GF.happytime) try { GF.happytime(); } catch (e) {}
 }
 function gameOver(reason) {
@@ -367,6 +452,7 @@ function update(dt) {
   if (camShakeT > 0) camShakeT = Math.max(0, camShakeT - dt);
   if (dropFlash > 0) dropFlash -= dt; if (claimFlash > 0) claimFlash -= dt;
   if (sanctFlash > 0) sanctFlash -= dt;   // sanctuary arrival banner timer
+  if (sigilFlash > 0) sigilFlash -= dt;   // sigil-trace pulse timer
   if (relicScroll && relicsOpen()) relicScroll.update();   // inertial flick for the relic list
   if (gs !== 'PLAYING' || pauseMode || panel) { moving = false; return; }
   sinceFloorStart += dt; if (!shotMode) tickMeta(dt);
@@ -431,6 +517,8 @@ function update(dt) {
       sfx('pickup'); persistSave();
     }
   }
+  // SIGIL HUNT: trace the floor's hidden shard on contact (optional deep detour).
+  if (sigil && !sigil.got) { sigil.bob += dt * 2.4; if (!shotMode && Math.hypot(sigil.x - px, sigil.y - py) < 0.55) traceSigil(); }
 
   if (!shotMode && (px | 0) === exitCell.x && (py | 0) === exitCell.y) { descend(); return; }
   if (!shotMode && !coachActive) updateHunters(dt, lit);   // entity frozen during the coach so the first seconds are safe
@@ -481,6 +569,13 @@ function draw(ctx, dt) {
   else if (panel === 'relics') drawRelicsPanel(ctx, W, H);
   if (gs === 'GAMEOVER') drawGameOver(ctx, W, H);
   if (jump > 0) { ctx.fillStyle = 'rgba(120,10,10,' + (jump * 0.7).toFixed(3) + ')'; ctx.fillRect(0, 0, W, H); }
+  // sigil-trace violet edge pulse - a cheap, no-panel reinforcement of the trace.
+  if (sigilFlash > 0 && (gs === 'PLAYING') && !pauseMode && !panel) {
+    var sa = GF.clamp(sigilFlash / 2.6, 0, 1) * 0.5;
+    var vg = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.32, W / 2, H / 2, Math.max(W, H) * 0.62);
+    vg.addColorStop(0, 'rgba(150,120,255,0)'); vg.addColorStop(1, 'rgba(150,120,255,' + sa.toFixed(3) + ')');
+    ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+  }
   drawToasts(ctx, W, H);
 }
 function renderWorld(ctx, W, H) {
@@ -523,6 +618,7 @@ function renderWorld(ctx, W, H) {
 
   var sprites = [{ kind: 'exit', x: exitCell.x + 0.5, y: exitCell.y + 0.5 }];
   for (var i = 0; i < items.length; i++) if (!items[i].got) sprites.push({ kind: items[i].type, x: items[i].x, y: items[i].y, bob: items[i].bob });
+  if (sigil && !sigil.got) sprites.push({ kind: 'sigil', x: sigil.x, y: sigil.y, bob: sigil.bob });
   for (var j = 0; j < hunters.length; j++) sprites.push({ kind: 'ent', x: hunters[j].x, y: hunters[j].y });
   for (var sp = 0; sp < sprites.length; sp++) { var dd = sprites[sp]; dd.dist = (dd.x - px) * (dd.x - px) + (dd.y - py) * (dd.y - py); }
   sprites.sort(function (a, b) { return b.dist - a.dist; });
@@ -553,6 +649,27 @@ function drawBillboard(ctx, sp, W, H, horizon, projDist) {
   var tx = invDet * (dirY * dx - dirX * dy), tz = invDet * (-planeY * dx + planeX * dy);
   if (tz <= 0.1) return;
   var screenX = (W * 0.5) * (1 + tx / tz), vh = (projDist / tz);
+  // SIGIL: a procedural floating glyph (vector-drawn, no sprite sheet). Z-tested
+  // against the wall column it sits behind, with an additive aura so it reads as a
+  // beacon deep in a dead end - the thing worth detouring for.
+  if (sp.kind === 'sigil') {
+    var sci = Math.max(0, Math.min(Math.floor(screenX / COL), zbuf.length - 1));
+    if (tz >= zbuf[sci]) return;   // occluded by a wall
+    var bobY = Math.sin(sp.bob || 0) * vh * 0.05;
+    var cy = horizon + vh * 0.06 + bobY, rr0 = Math.max(4, vh * 0.10);
+    var pulse = 0.6 + 0.4 * Math.sin(performanceNow() * 0.006);
+    var prev0 = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'lighter';
+    var ag = ctx.createRadialGradient(screenX, cy, 1, screenX, cy, rr0 * 3.2);
+    ag.addColorStop(0, 'rgba(180,150,255,' + (0.55 * pulse).toFixed(3) + ')'); ag.addColorStop(1, 'rgba(150,120,255,0)');
+    ctx.fillStyle = ag; ctx.fillRect(screenX - rr0 * 3.2, cy - rr0 * 3.2, rr0 * 6.4, rr0 * 6.4);
+    // a four-point diamond shard
+    ctx.fillStyle = 'rgba(220,205,255,' + (0.85 * pulse).toFixed(3) + ')';
+    ctx.beginPath(); ctx.moveTo(screenX, cy - rr0 * 1.4); ctx.lineTo(screenX + rr0 * 0.7, cy); ctx.lineTo(screenX, cy + rr0 * 1.4); ctx.lineTo(screenX - rr0 * 0.7, cy); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.95)';
+    ctx.beginPath(); ctx.arc(screenX, cy, rr0 * 0.34, 0, 7); ctx.fill();
+    ctx.globalCompositeOperation = prev0;
+    return;
+  }
   var img, hScale, yoff = 0;
   if (sp.kind === 'ent') { img = sprEnt; hScale = 1.7; }
   else if (sp.kind === 'almond') { img = sprAlmond; hScale = 0.5; yoff = Math.sin(sp.bob || 0) * vh * 0.04; }
@@ -710,12 +827,19 @@ function drawGameOver(ctx, W, H) {
   // M3: fragments banked this run + total (the relic-shop currency draw)
   ctx.fillStyle = '#ffd24a'; ctx.font = 'bold ' + (GF.clamp(15 * S, 12, 19) | 0) + 'px ' + FONT_MONO;
   ctx.fillText('◆ +' + lastFragGain + '  ·  ' + meta.frags + ' ' + L('total', 'всего'), W / 2, H * 0.44 + GF.clamp(50 * S, 38, 64));
-  // per-run achievement: sanctuaries cleared this descent (the in-run milestone readout)
+  // per-run achievements: sanctuaries cleared + sigils traced this descent (in-run
+  // milestone readouts). Combined on one line so the gameover layout stays tight.
+  var goParts = [];
   if (sanctReached > 0) {
-    ctx.fillStyle = '#caa83a'; ctx.font = (GF.clamp(12 * S, 10, 15) | 0) + 'px ' + FONT_MONO;
     // EN pluralizes; RU uses a neutral "убежищ: N" label to dodge plural agreement (1/2-4/5+).
-    var sLbl = (GF.lang === 'ru') ? ('убежищ: ' + sanctReached) : (sanctReached + ' ' + (sanctReached === 1 ? 'sanctuary' : 'sanctuaries'));
-    ctx.fillText('⛨ ' + sLbl, W / 2, H * 0.44 + GF.clamp(70 * S, 54, 88));
+    goParts.push('⛨ ' + ((GF.lang === 'ru') ? ('убежищ: ' + sanctReached) : (sanctReached + ' ' + (sanctReached === 1 ? 'sanctuary' : 'sanctuaries'))));
+  }
+  if (sigilsTraced > 0) {
+    goParts.push('✶ ' + ((GF.lang === 'ru') ? ('знаков: ' + sigilsTraced) : (sigilsTraced + ' ' + (sigilsTraced === 1 ? 'sigil' : 'sigils'))));
+  }
+  if (goParts.length) {
+    ctx.fillStyle = '#caa83a'; ctx.font = (GF.clamp(12 * S, 10, 15) | 0) + 'px ' + FONT_MONO;
+    ctx.fillText(goParts.join('   ·   '), W / 2, H * 0.44 + GF.clamp(70 * S, 54, 88));
   }
   if (reviveAvail()) {
     reviveBtn(ctx, W, H, H * 0.585);
@@ -917,7 +1041,7 @@ function updateAudioState(dt, nearD, san) {
 }
 
 // ── small fx helpers ──
-function floatTxt(txt, col) { try { GF.spawnFloat(GF.W / 2, GF.H * 0.42, txt, col); } catch (e) {} }
+function floatTxt(txt, col, yfrac) { try { GF.spawnFloat(GF.W / 2, GF.H * (yfrac || 0.42), txt, col); } catch (e) {} }
 function flashFx(v) { jump = Math.max(jump, v); }
 var _t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
 function performanceNow() { return ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - _t0; }
@@ -1066,7 +1190,7 @@ function fragMult() {                                                        // 
   return diver * ritualToday().mult;
 }
 function bankFragments() {                                                   // called once at run end
-  var fragScore = Math.max(0, score - sanctBonusScore);   // exclude the in-run sanctuary dive bonus (keeps it run-scoped)
+  var fragScore = Math.max(0, score - sanctBonusScore - sigilBonusScore);   // exclude in-run sanctuary + sigil bonuses (keeps them run-scoped)
   var base = floorN * 5 + Math.floor(fragScore / 20);
   var got = Math.max(1, Math.round(base * fragMult()));
   meta.frags += got; lastFragGain = got; saveMeta(); return got;
@@ -1094,9 +1218,18 @@ function drawMetaHUD(ctx, W, H) {
   ctx.fillStyle = ni === 1 ? 'rgba(255,210,74,0.95)' : 'rgba(150,200,150,0.7)';
   ctx.font = 'bold ' + (GF.clamp(9 * S, 8, 12) | 0) + 'px ' + FONT_MONO;
   ctx.fillText('⛨ ' + (ni === 1 ? L('SANCTUARY NEXT', 'УБЕЖИЩЕ ДАЛЕЕ') : L('SANCTUARY IN ', 'УБЕЖИЩЕ ЧЕРЕЗ ') + ni), W / 2, shY);
-  // compass arrow toward the exit
+  // SIGIL HUNT cue: a per-run attunement readout + a "shard on this floor" prompt
+  // (the optional deep-detour goal). Only shows once sigils start (floor >= SIGIL_FROM).
+  if (floorN >= SIGIL_FROM) {
+    var sgY = shY + GF.clamp(13 * S, 11, 17), na = nextAttune(), here = (sigil && !sigil.got);
+    var sgTxt = here ? ('✶ ' + L('SIGIL ON THIS FLOOR', 'ЗНАК НА ЭТАЖЕ')) : ('✶ ' + sigilsTraced + (na ? '/' + na.n + ' ' + L('SIGILS', 'ЗНАКОВ') : ' ' + L('SIGILS', 'ЗНАКОВ')));
+    ctx.fillStyle = here ? 'rgba(201,166,255,0.95)' : 'rgba(170,150,210,0.66)';
+    ctx.font = 'bold ' + (GF.clamp(9 * S, 8, 12) | 0) + 'px ' + FONT_MONO;
+    ctx.fillText(sgTxt, W / 2, sgY);
+  }
+  // compass arrow toward the exit (nudged below the sigil line so they never collide)
   if (compassT > 0) {
-    var ax = W / 2, ay = pad + GF.clamp(48 * S, 40, 60);
+    var ax = W / 2, ay = pad + GF.clamp(62 * S, 52, 76);
     var ang = Math.atan2(exitCell.y + 0.5 - py, exitCell.x + 0.5 - px) - pa - Math.PI / 2;
     ctx.save(); ctx.translate(ax, ay); ctx.rotate(ang);
     ctx.fillStyle = 'rgba(140,255,180,' + (0.5 + 0.5 * Math.sin(performanceNow() * 0.01)).toFixed(2) + ')';
@@ -1382,16 +1515,17 @@ GF.init({
     buildTextures(); attachInput(); loadMeta();
     // Yandex 1.9  -  persist run across refresh; resume keeps depth, bounces to MENU.
     GF.persist('backrooms_run_v1',
-      function () { return { floorN: floorN, score: score, best: best, sanct: sanctReached, sanctBonus: sanctBonusScore, gs: (gs === 'PLAYING' ? 'PLAYING' : gs) }; },
+      function () { return { floorN: floorN, score: score, best: best, sanct: sanctReached, sanctBonus: sanctBonusScore, sigils: sigilsTraced, sigilBonus: sigilBonusScore, attune: attuneTier, gs: (gs === 'PLAYING' ? 'PLAYING' : gs) }; },
       function (s) { if (!s) return; best = Math.max(best, s.best || 1); if (s.gs === 'PLAYING' && s.floorN) _resume = s; }
     );
-    GF.exposeState(function () { return { gs: gs, floor: floorN, score: score, best: best, sanity: Math.round(sanity), battery: Math.round(battery), hunters: hunters.length, paused: !!pauseMode, items: invTotal(), streak: meta.streak, playMin: Math.floor(meta.playMs / 60000), frags: meta.frags, sanct: sanctReached, nextSanct: nextSanctIn(), relicTiers: (function () { var n = 0; for (var k in meta.relics) n += meta.relics[k] | 0; return n; })() }; });
+    GF.exposeState(function () { return { gs: gs, floor: floorN, score: score, best: best, sanity: Math.round(sanity), battery: Math.round(battery), hunters: hunters.length, paused: !!pauseMode, items: invTotal(), streak: meta.streak, playMin: Math.floor(meta.playMs / 60000), frags: meta.frags, sanct: sanctReached, nextSanct: nextSanctIn(), sigils: sigilsTraced, attune: attuneTier, sigilHere: !!(sigil && !sigil.got), relicTiers: (function () { var n = 0; for (var k in meta.relics) n += meta.relics[k] | 0; return n; })() }; });
     // Reachability gate: prove all UI on all screens is reachable (no clipped buttons).
     GF.exposeReach(reachState); GF.exposeTour(REACH_TOUR);
     // Boot straight into gameplay — no title/start-menu gate (Yandex rejects title screens on load).
     startRun((_resume && _resume.floorN) ? _resume.floorN : 1);
     if (_resume && _resume.score) { score = _resume.score; persistSave(); }   // re-save so resumed score survives a 2nd reload
     if (_resume) { sanctReached = _resume.sanct | 0; sanctBonusScore = _resume.sanctBonus | 0; }   // keep the in-run sanctuary count across a refresh
+    if (_resume) { sigilsTraced = _resume.sigils | 0; sigilBonusScore = _resume.sigilBonus | 0; attuneTier = _resume.attune | 0; }   // keep the in-run sigil/attunement progress across a refresh
     var seenIntro = false; try { seenIntro = !!localStorage.getItem('backrooms_seen_v1'); } catch (e) {}
     if (!seenIntro) { coachActive = true; coachStep = 0; coachT = 0; didMove = false; didLook = false; }   // first-run INTERACTIVE in-game coach (no menu / no text card)
   },
@@ -1410,9 +1544,24 @@ window._getI18N = function () { return STRINGS; };
 window._getFontBody = function () { return FONT_UI; };
 // test seam: run the real descend() once (used by the headless sanctuary check).
 window._descend = function () { if (gs === 'PLAYING') descend(); };
-// test seam: preview the run-end fragment bank (proves the sanctuary dive bonus is
-// excluded from the fragment economy — fragScore = score - sanctBonusScore).
-window._fragPreview = function () { return { score: score, sanctBonus: sanctBonusScore, fragScore: Math.max(0, score - sanctBonusScore), banked: (function () { var fs = Math.max(0, score - sanctBonusScore); return Math.max(1, Math.round((floorN * 5 + Math.floor(fs / 20)) * fragMult())); })() }; };
+// test seam: trace the current floor's sigil once (used by the headless sigil-hunt
+// check). Returns the run-scoped trace state so the test can assert it.
+window._traceSigil = function () { if (gs === 'PLAYING' && sigil && !sigil.got) traceSigil(); return { sigilsTraced: sigilsTraced, attuneTier: attuneTier, score: score, sigilBonus: sigilBonusScore }; };
+window._sigilInfo = function () { return { present: !!(sigil && !sigil.got), sigilsTraced: sigilsTraced, attuneTier: attuneTier, sigilBonus: sigilBonusScore, from: SIGIL_FROM, x: sigil ? sigil.x : null, y: sigil ? sigil.y : null }; };
+// test/visual seam: stand the player ~2 tiles from the sigil, facing it (for the
+// headless billboard capture). Snaps to the nearest standable cell short of it.
+window._faceSigil = function () {
+  if (gs !== 'PLAYING' || !sigil) return false;
+  var ang = Math.atan2(sigil.y - py, sigil.x - px);
+  for (var back = 2.4; back >= 0.8; back -= 0.2) {
+    var tx = sigil.x - Math.cos(ang) * back, ty = sigil.y - Math.sin(ang) * back;
+    if (canStand(tx, ty)) { px = tx; py = ty; pa = Math.atan2(sigil.y - py, sigil.x - px); return true; }
+  }
+  pa = ang; return true;
+};
+// test seam: preview the run-end fragment bank (proves the sanctuary + sigil bonuses
+// are excluded from the fragment economy — fragScore = score - sanctBonus - sigilBonus).
+window._fragPreview = function () { var ex = sanctBonusScore + sigilBonusScore; return { score: score, sanctBonus: sanctBonusScore, sigilBonus: sigilBonusScore, fragScore: Math.max(0, score - ex), banked: (function () { var fs = Math.max(0, score - ex); return Math.max(1, Math.round((floorN * 5 + Math.floor(fs / 20)) * fragMult())); })() }; };
 // _setLang provided by gf-lib.
 
 // ── YANDEX MUST-HAVES (load-bearing) ─────────────────────────────────────

@@ -58,6 +58,7 @@ var STRINGS = {
     evEndsIn: 'Festival ends in', evClaim: 'CLAIM', evClaimed: 'CLAIMED', evLocked: 'LOCKED',
     evHowto: 'Earn tokens this festival from deliveries and big merges, then claim the track. Tiers reset when a new festival begins.',
     evFestCharm: 'Festival favour', evRewardGold: 'gold', evExclusive: 'EVENT ONLY',
+    patronHere: 'PATRON!', patronLeft: 'left the bazaar', patronServed: 'Patrons served', patronFav: 'Lv',
   },
   ru: {
     title: 'Звериный Базар',
@@ -86,6 +87,7 @@ var STRINGS = {
     evEndsIn: 'Фестиваль завершится через', evClaim: 'ЗАБРАТЬ', evClaimed: 'ПОЛУЧЕНО', evLocked: 'ЗАКРЫТО',
     evHowto: 'Получай жетоны на фестивале за сдачи и крупные слияния, затем забирай награды. Ступени сбрасываются с новым фестивалем.',
     evFestCharm: 'Дар фестиваля', evRewardGold: 'золота', evExclusive: 'ТОЛЬКО НА ФЕСТ',
+    patronHere: 'ГОСТЬ!', patronLeft: 'покинул базар', patronServed: 'Гостей обслужено', patronFav: 'ур',
   },
 };
 
@@ -287,6 +289,140 @@ function completeLedger() {
   GF.setShake(0.5);
   GF.spawnFloat(GF.cx, (L.boardY || GF.cy) - 8 * GF.S, '+' + reward, '#ffd700');
   GF.saveRun();
+}
+
+// ── PLAYTIME-DEEPENING - MARQUEE PATRONS (recurring VIP customers) ───────────
+// The standard order tray is anonymous: tier + count, no characters, no reason
+// to HOLD a high beast in reserve, no recurring relationships - so a long mid/late
+// session was a flat stream of interchangeable demands. MARQUEE PATRONS layer a
+// ROSTER of six named, vector-iconed regulars on top of the EXISTING order/deliver
+// path. Periodically (paced to land mid-run, after the shop opens) one patron
+// arrives as a SPECIAL highlighted order: they want a usually-higher beast and pay
+// a fat premium - but they only linger for a generous PATIENCE bar, then leave with
+// NO penalty (the order just clears - honours the no-punishment rule). Serving a
+// patron before they leave banks the premium AND raises their per-run FAVOR tier,
+// which multiplies that patron's future payouts and nudges their wanted tier up -
+// so a repeat patron becomes a lucrative escalating relationship you want to keep
+// feeding ("save a Titanbeast for Old Tusk"). That is the new decision layer:
+// which patron to prioritise, and whether to hoard a beast for a juicy patron vs
+// burn it on a plain order. PURELY IN-RUN: resets every run, persists in the run-
+// save, banks NOTHING to the meta - touches none of meta/idle/daily/festival/charm/
+// crowns/ledger/monetization. It amplifies the EXISTING coin loop only. A patron is
+// just an orders[] entry with a `patron` id + patience, so all the drag/tap/deliver
+// wiring already handles it; only the reward/expiry/render differ.
+var PATRON_DEFS = [
+  { id: 'plush',  col: '#c77dff', en: 'Madam Plush',  ru: 'Мадам Плюш' },
+  { id: 'tusk',   col: '#e8985e', en: 'Old Tusk',     ru: 'Старый Клык' },
+  { id: 'coin',   col: '#ffd700', en: 'Goldhand',     ru: 'Златорук' },
+  { id: 'collect',col: '#6aa9e0', en: 'The Collector',ru: 'Коллекционер' },
+  { id: 'sprout', col: '#7ed957', en: 'Mossmother',   ru: 'Мать Мхов' },
+  { id: 'ember',  col: '#ff7b6b', en: 'Lady Ember',   ru: 'Леди Уголёк' },
+];
+var PATRON_BY_ID = {};
+for (var _pi = 0; _pi < PATRON_DEFS.length; _pi++) PATRON_BY_ID[PATRON_DEFS[_pi].id] = PATRON_DEFS[_pi];
+var PATRON_EVERY      = 5;    // a patron arrives every ~N standard deliveries (paced to land mid-run)
+var PATRON_FIRST_AT   = 4;    // ...but never before this many deliveries (let the core loop breathe first)
+var PATRON_PATIENCE   = 26;   // seconds a patron lingers before leaving (generous - never a death timer)
+var PATRON_BASE_MULT  = 3.0;  // a patron order pays this multiple of an equivalent standard delivery...
+var PATRON_FAVOR_MULT = 0.6;  // ...plus +60% per FAVOR tier already earned with that patron this run
+var PATRON_MAX_FAVOR  = 5;    // favor caps here (tier shown as pips on the tile)
+var patronFavor = {};         // patronId -> favor tier earned THIS run (resets each run)
+var patronsServed = 0;        // count of patron orders completed this run (gameover line)
+var bestPatronFavor = 0;      // highest favor tier reached with any patron this run
+var sinceLastPatron = 0;      // standard deliveries counted since the last patron arrival
+var patronToast = null;       // { def, t } - "PATRON!" arrival flourish (drawn mid-run)
+var patronOnBoard = false;    // true while an active patron order sits in the tray (one at a time)
+function patronName(def) { return (GF.lang === 'ru' ? def.ru : def.en) || def.en; }
+// the wanted tier for a patron: scales up with the favor already earned + run progress,
+// so a loyal patron asks for chonkier beasts (the "hold a big one in reserve" pull).
+function patronWantTier(fav) {
+  var base = GF.clamp(orderTierCeiling() + 1, baseOrderTier + 1, maxTier - 1);
+  return GF.clamp(base + Math.floor(fav / 2), baseOrderTier + 1, maxTier - 1);
+}
+// pick the patron whose turn it is: weight toward ones the player has ALREADY served
+// (so relationships deepen) but always allow a fresh face.
+function pickPatron() {
+  var pool = PATRON_DEFS.slice();
+  // 55% of the time, if any patron already has favor this run, prefer a returning one
+  var known = pool.filter(function (p) { return (patronFavor[p.id] || 0) > 0; });
+  if (known.length && Math.random() < 0.55) pool = known;
+  return pool[(Math.random() * pool.length) | 0];
+}
+// spawn a patron order into the tray (replaces the OLDEST standard order so the tray
+// never grows past MAX_ORDERS - layout is untouched). No-op if one is already active.
+function spawnPatron() {
+  if (patronOnBoard || gs !== 'PLAYING') return;
+  var def = pickPatron();
+  var fav = patronFavor[def.id] || 0;
+  var tier = patronWantTier(fav);
+  var need = tier >= 6 ? 1 : (1 + ((Math.random() * 2) | 0));   // chonkier patrons want fewer
+  var po = { tier: tier, need: need, have: 0, id: orderSeq++, patron: def.id,
+             patience: PATRON_PATIENCE, maxPatience: PATRON_PATIENCE };
+  // drop into a free slot if room, else overwrite the first NON-patron (standard) order
+  if (orders.length < MAX_ORDERS) orders.unshift(po);
+  else {
+    var rep = -1;
+    for (var i = 0; i < orders.length; i++) { if (!orders[i].patron) { rep = i; break; } }
+    if (rep < 0) return;   // (shouldn't happen - only one patron at a time)
+    orders[rep] = po;
+  }
+  patronOnBoard = true;
+  patronToast = { def: def, t: 3.0 };
+  GF.sfx('unlock'); GF.setShake(0.45);
+  GF.spawnFloat(GF.cx, (L.trayY || GF.cy) + (L.trayH || 40 * GF.S) * 0.5, GF.t('patronHere'), def.col);
+}
+// called from deliverTo when a PATRON order completes: pay the favor-scaled premium,
+// bump favor, fire the celebration. Returns the bonus coins paid.
+function completePatron(order) {
+  var def = PATRON_BY_ID[order.patron]; if (!def) return 0;
+  var fav = patronFavor[def.id] || 0;
+  // premium = standard delivery value x patron multiplier x (1 + favor bonus), folded
+  // through the same crown + ledger run multipliers as every other coin source.
+  var standard = coinPerDelivery * Math.max(1, order.tier) * permSellMult();
+  var mult = PATRON_BASE_MULT * (1 + fav * PATRON_FAVOR_MULT);
+  var gain = Math.round(standard * mult * crownMult() * ledgerMult());
+  coins += gain; score += gain;
+  patronsServed += 1;
+  if (fav < PATRON_MAX_FAVOR) { patronFavor[def.id] = fav + 1; }
+  bestPatronFavor = Math.max(bestPatronFavor, patronFavor[def.id] || 0);
+  patronOnBoard = false;
+  sinceLastPatron = 0;   // reset the cadence from the SERVE, not just the arrival
+  GF.sfx('reward'); if (GF.happytime) GF.happytime();
+  GF.setShake(0.6);
+  return gain;
+}
+// patron left without being served (patience ran out): clear with NO penalty.
+function patronExpired(order) {
+  var def = PATRON_BY_ID[order.patron];
+  patronOnBoard = false;
+  sinceLastPatron = 0;
+  var i = orders.indexOf(order);
+  if (i >= 0) orders.splice(i, 1);
+  refillOrders();
+  if (def) GF.spawnFloat(order._cx || GF.cx, order._cy || ((L.trayY || GF.cy) + 20 * GF.S),
+    patronName(def) + ' ' + GF.t('patronLeft'), '#b9a');
+}
+// per-frame patron upkeep (called from update while PLAYING): tick the cadence on
+// standard deliveries, spawn the next patron when due, decay the active patience bar.
+function updatePatrons(dt) {
+  // arrival: once enough standard deliveries have passed (and we're past the warm-up),
+  // and no patron is currently on the board, bring the next one in.
+  if (!patronOnBoard && deliveries >= PATRON_FIRST_AT && sinceLastPatron >= PATRON_EVERY) {
+    spawnPatron();
+  }
+  // patience decay on the active patron order
+  if (patronOnBoard) {
+    for (var i = 0; i < orders.length; i++) {
+      var o = orders[i];
+      if (!o.patron) continue;
+      o.patience -= dt;
+      if (o.patience <= 0) { patronExpired(o); break; }
+    }
+  }
+}
+function activePatronOrder() {
+  for (var i = 0; i < orders.length; i++) if (orders[i].patron) return orders[i];
+  return null;
 }
 
 // ── M3 THE COLLECTION - playtime-unlocked, equippable Charms ───────────────
@@ -915,9 +1051,18 @@ function deliverTo(srcIdx, order) {
   if (GF.tutorial.active && GF.tutorial.step === 2) GF.tutorial.next();   // a real delivery completes the tutorial
   GF.spawnParticles(L.boardX + L.boardW / 2, order._cy || L.trayY, '#ffd700', 12);
   if (order.have >= order.need) {
-    // order complete → coins (× permanent sell-bonus × in-run Crown multiplier × Ledger bonus)
-    var gain = Math.round(coinPerDelivery * Math.max(1, order.tier) * (combo >= 2 ? combo : 1) * permSellMult() * crownMult() * ledgerMult());
-    coins += gain; score += gain; GF.sfx('coin');
+    var gain;
+    if (order.patron) {
+      // MARQUEE PATRON order: pay the favor-scaled premium (raises favor) instead of
+      // the standard payout. Still counts as a delivery for every downstream system.
+      gain = completePatron(order);
+      GF.spawnParticles(order._cx || (L.boardX + L.boardW / 2), order._cy || L.trayY, PATRON_BY_ID[order.patron] ? PATRON_BY_ID[order.patron].col : '#ffd700', 26);
+    } else {
+      // standard order → coins (× permanent sell-bonus × in-run Crown multiplier × Ledger bonus)
+      gain = Math.round(coinPerDelivery * Math.max(1, order.tier) * (combo >= 2 ? combo : 1) * permSellMult() * crownMult() * ledgerMult());
+      coins += gain; score += gain; GF.sfx('coin');
+      sinceLastPatron++;               // pace the next patron arrival off standard deliveries
+    }
     deliveries++;
     questProgress('deliver', 1);
     questProgress('earn', gain);
@@ -1010,6 +1155,7 @@ function startGame() {
   maxTierReached = 0; shopUnlocked = false; wildcardSeen = false; continueUsed = false; paused = false;
   crowns = 0; ascendFlash = 0;
   ledgerIdx = 0; ledgerProg = 0; ledgerBonusT = 0; ledgerToast = null;   // fresh in-run contract chain
+  patronFavor = {}; patronsServed = 0; bestPatronFavor = 0; sinceLastPatron = 0; patronToast = null; patronOnBoard = false;   // fresh patron roster
   revealedTier = {}; revealQueue = []; newBeastFlash = 0;
   rows = boardRows; nests = 1;
   genRechargeMs = 650;
@@ -1255,6 +1401,7 @@ function update(dt) {
   if (charmToast) { charmToast.t -= dt; if (charmToast.t <= 0) charmToast = null; }
   if (questToast) { questToast.t -= dt; if (questToast.t <= 0) questToast = null; }
   if (ledgerToast) { ledgerToast.t -= dt; if (ledgerToast.t <= 0) ledgerToast = null; }
+  if (patronToast) { patronToast.t -= dt; if (patronToast.t <= 0) patronToast = null; }
   if (bootBannerT > 0) bootBannerT = Math.max(0, bootBannerT - dt);
   if (festTokenPulse > 0) festTokenPulse = Math.max(0, festTokenPulse - dt);
   if (festCharmFlash > 0) festCharmFlash = Math.max(0, festCharmFlash - dt);
@@ -1288,6 +1435,8 @@ function update(dt) {
   }
   // keep orders topped up
   refillOrders();
+  // Marquee Patrons: schedule arrivals + decay the active patron's patience
+  updatePatrons(dt);
   // continuous gridlock check
   checkGameOver();
 }
@@ -1358,6 +1507,7 @@ function draw(ctx) {
   if (charmToast && !paused) drawCharmToast(ctx);
   else if (questToast && !paused) drawQuestToast(ctx);   // charm toast wins if both fire same frame
   if (ledgerToast && !paused && gs === 'PLAYING') drawLedgerToast(ctx);   // its own lower anchor - no collision with charm/quest toasts
+  if (patronToast && !paused && gs === 'PLAYING') drawPatronToast(ctx);   // brief arrival flash, anchored just under the tray
   if (bootBannerT > 0 && !paused && gs !== 'GAMEOVER') drawBootBanner(ctx);
 }
 
@@ -1545,6 +1695,25 @@ function drawLedgerToast(ctx) {
   ctx.fillText(ledgerName(def) + (ru ? '  - бонус x1.5!' : '  - x1.5 boost!'), x + h, y + h * 0.68);
   ctx.restore(); ctx.textBaseline = 'alphabetic';
 }
+// "PATRON!" arrival flourish - a brief pill just below the order tray announcing the
+// VIP who just walked in. Anchored under the tray so it never collides with the
+// ledger/charm/quest toasts (which sit lower in the play column).
+function drawPatronToast(ctx) {
+  var S = GF.S, def = patronToast.def, ru = (GF.lang === 'ru');
+  var w = GF.clamp(244 * S, 188, 304), h = GF.clamp(48 * S, 42, 58);
+  var x = GF.cx - w / 2, y = (L.trayY || 60 * S) + (L.trayH || 50 * S) + 6 * S;
+  var a = GF.clamp(patronToast.t / 0.4, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, x, y, w, h, 12 * S); ctx.fillStyle = 'rgba(34,26,12,0.96)'; ctx.fill();
+  ctx.strokeStyle = def.col; ctx.lineWidth = 2 * S; ctx.stroke();
+  drawPatronIcon(ctx, def, x + h * 0.52, y + h / 2, h * 0.32);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = def.col; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+  ctx.fillText(GF.t('patronHere'), x + h, y + h * 0.34);
+  ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.fillText(patronName(def) + (ru ? ' пришёл' : ' has arrived'), x + h, y + h * 0.66);
+  ctx.restore(); ctx.textBaseline = 'alphabetic';
+}
 // "Welcome back" banner at boot: overnight idle income + daily streak bonus (the reason
 // to return), shown briefly so the daily reward is FELT even though there's no menu now.
 function drawBootBanner(ctx) {
@@ -1667,6 +1836,7 @@ function drawTray(ctx) {
     var o = orders[i];
     var x = startX + i * (tileW + gap);
     o._cx = x + tileW / 2; o._cy = ty + th / 2;
+    if (o.patron) { drawPatronTile(ctx, o, x, ty, tileW, th); orderRects.push({ x: x, y: ty, w: tileW, h: th, order: o }); continue; }
     // tile bg
     GF.rr(ctx, x, ty, tileW, th, 10 * S);
     ctx.fillStyle = 'rgba(255,250,235,0.10)'; ctx.fill();
@@ -1684,6 +1854,106 @@ function drawTray(ctx) {
     orderRects.push({ x: x, y: ty, w: tileW, h: th, order: o });
   }
   ctx.textBaseline = 'alphabetic';
+}
+
+// A MARQUEE PATRON order tile: a glowing portrait, the patron's name, FAVOR pips
+// (filled = favor tier already earned this run), the wanted beast + count, and a
+// PATIENCE ring around the portrait that drains as they wait. Visually distinct
+// from a standard order so the premium opportunity reads instantly.
+function drawPatronTile(ctx, o, x, ty, tileW, th) {
+  var S = GF.S;
+  var def = PATRON_BY_ID[o.patron] || PATRON_DEFS[0];
+  var fav = patronFavor[def.id] || 0;
+  var pulse = 0.5 + 0.5 * Math.sin(nowMs() * 0.006);
+  // tile bg - tinted toward the patron colour, glowing border
+  GF.rr(ctx, x, ty, tileW, th, 10 * S);
+  ctx.fillStyle = 'rgba(255,250,235,0.16)'; ctx.fill();
+  ctx.save();
+  ctx.shadowColor = def.col; ctx.shadowBlur = (6 + 8 * pulse) * S;
+  ctx.lineWidth = 2.6 * S; ctx.strokeStyle = def.col; ctx.stroke();
+  ctx.restore();
+  // portrait (left), with the draining patience ring around it
+  var pr = th * 0.34;
+  var px = x + pr + 6 * S, py = ty + th * 0.46;
+  if (o.maxPatience > 0) {
+    var frac = GF.clamp(o.patience / o.maxPatience, 0, 1);
+    ctx.beginPath();
+    ctx.arc(px, py, pr + 3.2 * S, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
+    ctx.lineWidth = 3 * S;
+    ctx.strokeStyle = frac > 0.33 ? def.col : '#ff6b6b';   // turns red when nearly out of patience
+    ctx.stroke();
+  }
+  drawPatronIcon(ctx, def, px, py, pr);
+  // text column to the right of the portrait
+  var tx = px + pr + 8 * S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  // name (clipped to fit)
+  ctx.fillStyle = def.col; ctx.font = 'bold ' + GF.clamp(10 * S, 8, 13) + 'px sans-serif';
+  var nm = patronName(def), maxNmW = x + tileW - tx - 6 * S;
+  while (nm.length > 4 && ctx.measureText(nm).width > maxNmW) nm = nm.slice(0, -1);
+  ctx.fillText(nm, tx, ty + th * 0.24);
+  // favor pips
+  var pipR = 2.4 * S, pipGap = 6.5 * S;
+  for (var p = 0; p < PATRON_MAX_FAVOR; p++) {
+    ctx.beginPath();
+    ctx.arc(tx + pipR + p * pipGap, ty + th * 0.5, pipR, 0, Math.PI * 2);
+    ctx.fillStyle = p < fav ? def.col : 'rgba(255,255,255,0.22)';
+    ctx.fill();
+  }
+  // wanted beast + count
+  var bs = th * 0.46;
+  drawBeast(ctx, tx + bs * 0.42, ty + th * 0.74, o.tier, false, bs, 0);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(12 * S, 10, 17) + 'px sans-serif';
+  ctx.fillText('×' + (o.need - o.have), tx + bs * 0.92, ty + th * 0.74);
+}
+
+// Vector patron portrait (NEVER emoji - emoji render as tofu in the game font).
+// A simple stylised face/bust on a coloured roundel, varied per patron by id.
+function drawPatronIcon(ctx, def, x, y, r) {
+  ctx.save();
+  // roundel
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = def.col; ctx.globalAlpha = 0.9; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.lineWidth = Math.max(1, r * 0.1); ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.stroke();
+  // face base
+  ctx.fillStyle = '#2a1a12';
+  // a little per-patron variety: hat brim / ears / horns suggested by id
+  var hb = r * 0.42;
+  if (def.id === 'tusk') {
+    // tusks: two small ivory triangles below
+    ctx.fillStyle = '#fff4e0';
+    ctx.beginPath(); ctx.moveTo(x - r * 0.34, y + r * 0.18); ctx.lineTo(x - r * 0.18, y + r * 0.6); ctx.lineTo(x - r * 0.5, y + r * 0.42); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(x + r * 0.34, y + r * 0.18); ctx.lineTo(x + r * 0.18, y + r * 0.6); ctx.lineTo(x + r * 0.5, y + r * 0.42); ctx.closePath(); ctx.fill();
+  } else if (def.id === 'ember') {
+    // flame tuft on top
+    ctx.fillStyle = '#fff4e0';
+    ctx.beginPath(); ctx.moveTo(x, y - r * 0.95); ctx.lineTo(x + r * 0.28, y - r * 0.4); ctx.lineTo(x - r * 0.28, y - r * 0.4); ctx.closePath(); ctx.fill();
+  } else if (def.id === 'collect') {
+    // monocle ring on the right eye
+    ctx.strokeStyle = '#fff4e0'; ctx.lineWidth = r * 0.1;
+    ctx.beginPath(); ctx.arc(x + r * 0.28, y - r * 0.05, r * 0.26, 0, Math.PI * 2); ctx.stroke();
+  } else if (def.id === 'sprout') {
+    // leaf sprout on top
+    ctx.fillStyle = '#cdebbf';
+    ctx.beginPath(); ctx.ellipse(x, y - r * 0.7, r * 0.16, r * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+  } else if (def.id === 'coin') {
+    // little crown notches
+    ctx.fillStyle = '#fff4e0';
+    ctx.beginPath(); ctx.moveTo(x - r * 0.5, y - r * 0.5); ctx.lineTo(x - r * 0.3, y - r * 0.78); ctx.lineTo(x - r * 0.1, y - r * 0.5);
+    ctx.lineTo(x + r * 0.1, y - r * 0.78); ctx.lineTo(x + r * 0.3, y - r * 0.5); ctx.lineTo(x + r * 0.5, y - r * 0.78); ctx.lineTo(x + r * 0.5, y - r * 0.45); ctx.lineTo(x - r * 0.5, y - r * 0.45); ctx.closePath(); ctx.fill();
+  } else {
+    // plush: rounded ears
+    ctx.fillStyle = def.col;
+    ctx.beginPath(); ctx.arc(x - r * 0.5, y - r * 0.5, r * 0.26, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + r * 0.5, y - r * 0.5, r * 0.26, 0, Math.PI * 2); ctx.fill();
+  }
+  // eyes (two dots) + smile
+  ctx.fillStyle = '#2a1a12';
+  ctx.beginPath(); ctx.arc(x - r * 0.26, y - r * 0.02, r * 0.13, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + r * 0.26, y - r * 0.02, r * 0.13, 0, Math.PI * 2); ctx.fill();
+  ctx.lineWidth = r * 0.12; ctx.strokeStyle = '#2a1a12'; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(x, y + r * 0.18, r * 0.32, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  ctx.restore();
 }
 
 function drawBoard(ctx) {
@@ -2494,6 +2764,13 @@ function drawGameOver(ctx) {
     ctx.fillText('★ ' + (ru ? 'Контрактов: ' : 'Contracts: ') + ledgerIdx + ' / ' + LEDGER_DEFS.length, GF.cx, sy0 + 36 * S);
     sy0 += 20 * S;
   }
+  // Marquee Patrons: how many VIPs served this run + the best favor reached - only if any
+  if (patronsServed > 0) {
+    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#c77dff'; ctx.textAlign = 'center';
+    ctx.fillText('★ ' + GF.t('patronServed') + ': ' + patronsServed + '   ' + GF.t('patronFav') + ' ' + bestPatronFavor, GF.cx, sy0 + 36 * S);
+    sy0 += 20 * S;
+  }
   // score
   ctx.fillStyle = '#fff'; ctx.font = GF.clamp(18 * S, 13, 26) + 'px sans-serif';
   ctx.fillText(GF.t('score') + ': ' + score, GF.cx, sy0 + 50 * S);
@@ -2619,9 +2896,12 @@ window._setupForScreenshot = function (level) {
     }
     if (board[12]) board[12] = (function () { var p = cellCenter(12); return { tier: 0, wild: true, sx: p.x, sy: p.y, pop: 0 }; })();
     combo = 3; bestCombo = 4; comboTimer = comboWindowMs;
-    orders = [ { tier: 2, need: 2, have: 1, id: orderSeq++ },
-               { tier: 5, need: 1, have: 0, id: orderSeq++ },
-               { tier: 6, need: 1, have: 0, id: orderSeq++ } ];
+    // a MARQUEE PATRON in the tray (with a little earned favor) so the screenshot
+    // showcases the VIP-customer feature - a real orders[] entry, not a faux draw.
+    patronFavor = { tusk: 2 }; bestPatronFavor = 2; patronsServed = 2; patronOnBoard = true;
+    orders = [ { tier: 6, need: 1, have: 0, id: orderSeq++, patron: 'tusk', patience: 19, maxPatience: PATRON_PATIENCE },
+               { tier: 2, need: 2, have: 1, id: orderSeq++ },
+               { tier: 5, need: 1, have: 0, id: orderSeq++ } ];
   }
   gs = 'PLAYING';
 };
@@ -2781,8 +3061,10 @@ GF.init({
           maxTierReached: maxTierReached, shopUnlocked: shopUnlocked, wildcardSeen: wildcardSeen,
           crowns: crowns, bestCombo: bestCombo, rows: rows, nests: nests, genRechargeMs: genRechargeMs,
           ledgerIdx: ledgerIdx, ledgerProg: ledgerProg, ledgerBonusT: ledgerBonusT,
+          patronFavor: patronFavor, patronsServed: patronsServed, bestPatronFavor: bestPatronFavor,
+          sinceLastPatron: sinceLastPatron, patronOnBoard: patronOnBoard,
           board: board.map(function (c) { return c ? { t: c.tier, w: c.wild ? 1 : 0 } : 0; }),
-          orders: orders.map(function (o) { return { t: o.tier, n: o.need, h: o.have, id: o.id }; }),
+          orders: orders.map(function (o) { return { t: o.tier, n: o.need, h: o.have, id: o.id, p: o.patron || 0, pt: o.patience || 0, mp: o.maxPatience || 0 }; }),
           nestCharges: nestCharges, firstMergeDone: firstMergeDone, firstDeliveryDone: firstDeliveryDone,
           revealedTier: revealedTier, orderSeq: orderSeq,
         };
@@ -2794,6 +3076,9 @@ GF.init({
         maxTierReached = s.maxTierReached || 0; shopUnlocked = !!s.shopUnlocked; wildcardSeen = !!s.wildcardSeen;
         crowns = s.crowns || 0;
         ledgerIdx = GF.clamp(s.ledgerIdx | 0, 0, LEDGER_DEFS.length); ledgerProg = Math.max(0, s.ledgerProg | 0); ledgerBonusT = Math.max(0, +s.ledgerBonusT || 0);
+        patronFavor = (s.patronFavor && typeof s.patronFavor === 'object') ? s.patronFavor : {};
+        patronsServed = Math.max(0, s.patronsServed | 0); bestPatronFavor = Math.max(0, s.bestPatronFavor | 0);
+        sinceLastPatron = Math.max(0, s.sinceLastPatron | 0); patronOnBoard = !!s.patronOnBoard;
         bestCombo = s.bestCombo || 0; rows = s.rows || boardRows; nests = s.nests || 1;
         genRechargeMs = s.genRechargeMs || 650;
         firstMergeDone = !!s.firstMergeDone; firstDeliveryDone = !!s.firstDeliveryDone;
@@ -2802,7 +3087,9 @@ GF.init({
         while (board.length < boardCols * rows) board.push(null);
         // recompute sprite positions on first layout (sx/sy filled lazily in draw via cellCenter)
         for (var i = 0; i < board.length; i++) { if (board[i]) { var p = cellCenter(i); board[i].sx = p.x; board[i].sy = p.y; } }
-        orders = (s.orders || []).map(function (o) { return { tier: o.t, need: o.n, have: o.h, id: o.id }; });
+        orders = (s.orders || []).map(function (o) { return { tier: o.t, need: o.n, have: o.h, id: o.id, patron: o.p || 0, patience: o.pt || 0, maxPatience: o.mp || 0 }; });
+        // reconcile the live patron flag with whatever orders actually carried a patron
+        patronOnBoard = !!activePatronOrder();
         nestCharges = s.nestCharges || [genCharge]; charge = []; for (var k = 0; k < nests; k++) charge[k] = 0;
         gs = 'PLAYING';
       }
@@ -2831,6 +3118,8 @@ GF.exposeState(function () {
     crowns: crowns, crownMult: crownMult(),
     ledgerIdx: ledgerIdx, ledgerProg: ledgerProg, ledgerGoal: ledgerCur() ? ledgerCur().goal : 0,
     ledgerKind: ledgerCur() ? ledgerCur().kind : 'done', ledgerBonus: ledgerBonusT > 0, ledgerMult: ledgerMult(),
+    patronOnBoard: patronOnBoard, patronsServed: patronsServed, bestPatronFavor: bestPatronFavor,
+    patronActive: activePatronOrder() ? activePatronOrder().patron : '', sinceLastPatron: sinceLastPatron,
     lifeCrowns: meta ? (meta.lifeCrowns || 0) : 0, bestCrowns: meta ? (meta.bestCrowns || 0) : 0,
     festTokens: (meta && meta.fest) ? meta.fest.tokens : 0,
     festClaimable: festClaimable(), festTheme: festTheme().id, festHoursLeft: Math.round(festHoursLeft()),

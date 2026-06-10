@@ -1118,7 +1118,7 @@ var gpApi = {
 // (browser autoplay policy). Mute-aware via setMusicMuted. This is the FACTORY
 // BASELINE so every shipped game has a theme — call GF.startMusic({preset}) in
 // onReady. Presets pick scale/chords/tempo/timbre; pass one matching the vibe.
-var _mus = { ctx: null, master: null, on: false, muted: false, timer: null, next: 0, step: 0, bar: 0, preset: null, root: 0, started: false, prog: null, contour: null, bpm: 0 };
+var _mus = { ctx: null, master: null, on: false, muted: false, timer: null, next: 0, step: 0, bar: 0, preset: null, root: 0, started: false };
 // Each preset carries a TABLE of roots (same mode, different key). startMusic
 // picks one via a stable per-game seed (see _musSeed) so two games on the same
 // preset play in DIFFERENT keys instead of being pitch-identical. The first
@@ -1137,33 +1137,6 @@ var MUSIC_PRESETS = {
   // tense pulse for horror/survival (E minor, driven, heavy bass)
   tense:  { bpm: 108, roots: [164.81, 174.61, 196.00, 220.00], scale: [0,2,3,5,7,8,10], chords: [[0,2,4],[3,5,0],[5,0,2],[4,6,1]], wave: 'sawtooth', bassWave: 'square',   drums: true,  gain: 0.10, arpDiv: 4 },
 };
-// Per-game CHORD PROGRESSIONS + lead CONTOURS. Before this, every game on a
-// preset played the SAME progression and SAME arp shape, only transposed to a
-// different key — so the whole portfolio sounded like ~2 songs. startMusic now
-// also picks a progression + contour from the per-game seed, so two games on
-// the same preset are genuinely different tunes (not the same tune in a new key).
-// Progressions are scale-degree ROOTS; each bar's triad is stacked in-scale
-// (deg, deg+2, deg+4), so the SAME progression auto-colors major OR minor from
-// whatever preset.scale is active. Roman-numeral hint is for the major case.
-var MUSIC_PROGS = [
-  [0, 5, 3, 4],   // I  - vi - IV - V    classic pop
-  [0, 3, 4, 0],   // I  - IV - V  - I    plagal/authentic
-  [0, 4, 5, 3],   // I  - V  - vi - IV   axis
-  [5, 3, 0, 4],   // vi - IV - I  - V    sensitive
-  [0, 3, 0, 4],   // I  - IV - I  - V    blues-ish
-  [0, 5, 1, 4],   // I  - vi - ii - V    jazz turnaround
-  [3, 4, 0, 5],   // IV - V  - I  - vi   uplifting
-  [0, 2, 3, 4],   // I  - iii- IV - V    stepwise climb
-];
-// Melodic contours over the bar's triad (indices into the 3-note chord).
-var MUSIC_CONTOURS = [
-  [0, 1, 2, 1, 0, 2, 1, 0],   // walk up then down (historical default)
-  [0, 2, 1, 2, 0, 1, 2, 1],   // zigzag
-  [2, 1, 0, 1, 2, 1, 0, 1],   // descending lean
-  [0, 0, 2, 2, 1, 1, 2, 0],   // call-and-response
-  [0, 1, 2, 2, 1, 0, 1, 2],   // rising arc
-  [1, 2, 0, 2, 1, 0, 2, 1],   // syncopated
-];
 // Stable per-game seed. window.GF_GAME_KEY is NOT set by the factory today, so
 // relying on it alone collapses every game to one shared key. Derive instead
 // from values that are always present AND differ per game (title + path), with
@@ -1209,14 +1182,10 @@ function _musKick(t) { _musTone(130, t, 0.16, 'sine', 0.42, { glideTo: 48, attac
 function _musSchedule() {
   var p = _mus.preset, c = _mus.ctx; if (!p || !c) return;
   var root = _mus.root || (p.roots ? p.roots[0] : p.root) || 220.00;
-  var spb = 60 / (_mus.bpm || p.bpm), stepDur = spb / 4;   // 16 sixteenth-steps per bar
+  var spb = 60 / p.bpm, stepDur = spb / 4;          // 16 sixteenth-steps per bar
   while (_mus.next < c.currentTime + 0.25) {
     var t = _mus.next, step = _mus.step % 16;
-    // Build this bar's triad from the per-game progression (stacked thirds
-    // in-scale), so games on the same preset play DIFFERENT chord changes.
-    var prog = _mus.prog || [0, 5, 3, 4];
-    var cr = prog[_mus.bar % prog.length];
-    var chord = [cr, cr + 2, cr + 4], sc = p.scale, L = sc.length;
+    var chord = p.chords[_mus.bar % p.chords.length], sc = p.scale, L = sc.length;
     var deg2semi = function (deg) { return sc[((deg % L) + L) % L] + 12 * Math.floor(deg / L); };
     if (step === 0) {                                // bar: pad chord + bass + kick
       for (var ci = 0; ci < chord.length; ci++) _musTone(_musFreq(root, deg2semi(chord[ci])), t, spb * 4 * 0.96, p.wave, 0.085, { attack: 0.10, release: 0.5, filter: 1500 });
@@ -1232,7 +1201,7 @@ function _musSchedule() {
       // Change 4: walk the chord up then back down (contour) instead of always
       // rising, so the melody is less mechanical and more song-like.
       var idx = Math.floor(step / arpEvery);
-      var contour = _mus.contour || [0, 1, 2, 1, 0, 2, 1, 0];
+      var contour = [0, 1, 2, 1, 0, 2, 1, 0];
       var deg = chord[contour[idx % contour.length] % chord.length] + ((idx % 8) >= 4 ? 7 : 0);
       _musTone(_musFreq(root, deg2semi(deg) + 12), t, stepDur * arpEvery * 0.85, p.wave, 0.05, { attack: 0.008, release: 0.06, filter: 2800 });
     }
@@ -1253,15 +1222,10 @@ function startMusic(opts) {
   // alone correlate), and keep everything UNSIGNED so the index is never
   // negative (a negative index would read chords[undefined] and break the loop).
   _mus.root = roots[((seed >>> 5) & 0xffff) % roots.length];
-  // Per-game progression, lead contour, and tempo from independent seed slices,
-  // so two games on one preset are different SONGS, not the same song transposed.
-  _mus.prog = MUSIC_PROGS[((seed >>> 9) & 0xffff) % MUSIC_PROGS.length];
-  _mus.contour = MUSIC_CONTOURS[((seed >>> 23) & 0xffff) % MUSIC_CONTOURS.length];
-  _mus.bpm = p.bpm * (0.92 + (((seed >>> 13) & 0xff) / 255) * 0.16);   // +/-8% tempo
-  _mus.startBar = ((seed >>> 17) & 0xffff) % _mus.prog.length;
+  _mus.startBar = ((seed >>> 17) & 0xffff) % p.chords.length;
   // Test-only hook (guarded; games never set the flag): expose the resolved
-  // key/progression so a headless harness can prove two games differ.
-  try { if (window.__GF_MUSIC_DEBUG) window.__gfMusicResolved = { preset: opts.preset || 'cozy', seed: seed, root: _mus.root, startBar: _mus.startBar, prog: _mus.prog, contour: _mus.contour, bpm: Math.round(_mus.bpm) }; } catch (e) {}
+  // key so a headless harness can prove two games differ.
+  try { if (window.__GF_MUSIC_DEBUG) window.__gfMusicResolved = { preset: opts.preset || 'cozy', seed: seed, root: _mus.root, startBar: _mus.startBar }; } catch (e) {}
   if (_mus.started) return; _mus.started = true;
   var begin = function () {
     if (_mus.on) return;
