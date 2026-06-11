@@ -20,7 +20,11 @@
 //   - poll GET: 2 reads per poll. cache-control max-age=8 is BROWSER cache
 //     only (CF Pages does not edge-cache Function responses on the header
 //     alone), and 10s polls outlive it - so budget every poll as 2 KV reads:
-//     a 10-min session = ~120 reads against the 100k/day read budget. Fine.
+//     a 10-min session = ~120 reads against the 100k/day read budget.
+//     Ceiling math (Codex 2026-06-11): ~6 SUSTAINED concurrent pilot-game
+//     viewers all day = ~100k reads/day. Current traffic is 2-3 orders of
+//     magnitude below; revisit polling (or move to a DO) before widening
+//     the allowlist if concurrency ever approaches that.
 //   - non-allowlisted GETs cost zero KV ops (404 before any read)
 
 export const SOCIAL_SLUGS = new Set([
@@ -31,11 +35,12 @@ export const SOCIAL_SLUGS = new Set([
   'asteroid_farm',
 ]);
 
-// A uid counts as "playing now" if its last heartbeat flush is within this
-// window. Flushes land every ~120s, so 300s tolerates one missed flush
-// without flickering the count; cost is a player ghosting for up to 5 min
-// after leaving (pagehide beacons refresh the entry one last time).
-export const PRESENCE_WINDOW_MS = 5 * 60 * 1000;
+// A uid counts as "playing" if its last heartbeat flush is within this
+// window. Flushes land every ~120s while the player is active, so 180s
+// covers one cadence + 60s of jitter; a leaver ghosts for at most 3 min
+// (pagehide beacons refresh the entry one last time). Codex review
+// 2026-06-11: was 300s, tightened so the count reads closer to "now".
+export const PRESENCE_WINDOW_MS = 180 * 1000;
 
 // KV TTL on the per-slug presence map - abandoned games' keys evaporate.
 export const PRESENCE_KEY_TTL_S = 900;
@@ -51,11 +56,15 @@ export const EMOTE_FRESH_MS = 45 * 1000; // GET returns only this window
 export function presenceKey(slug) { return `social_p:${slug}`; }
 export function emoteKey(slug)    { return `social_e:${slug}`; }
 
-// sha256(uid) -> first 12 hex chars. Same shape as _lib/uid.js emailToUid
+// sha256(input) -> first 12 hex chars. Same shape as _lib/uid.js emailToUid
 // but kept separate: this is an ANONYMIZER for transient presence entries,
-// not a stable account id - never join the two.
-export async function hashUid(uid) {
-  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(uid)));
+// not a stable account id - never join the two. Callers salt the input
+// (touchPresence prefixes the slug) so the same uid hashes DIFFERENTLY per
+// game - presence entries are not linkable across games even from a raw KV
+// dump. Full HMAC-with-secret hardening is a precondition for widening the
+// allowlist (Backlog note), not needed at 5 pilot slugs.
+export async function hashUid(input) {
+  const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(input)));
   return Array.from(new Uint8Array(h)).slice(0, 6).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -69,9 +78,10 @@ export function countPresence(map, now) {
 }
 
 // Refresh this uid's liveness in the per-slug presence map.
-// Read-modify-write; a lost update between two simultaneous flushes only
-// delays one player's refresh by a flush period, which the 300s window
-// absorbs - acceptable for an anonymous counter, so no locking.
+// Read-modify-write; a lost update between two simultaneous flushes can
+// drop one player from the count for up to ~60s (their entry sits a full
+// 120s cadence behind a 180s window) until the next flush re-adds them -
+// acceptable for an anonymous n>=2 counter, so no locking.
 export async function touchPresence(env, slug, uid) {
   const key = presenceKey(slug);
   const now = Date.now();
@@ -81,6 +91,6 @@ export async function touchPresence(env, slug, uid) {
   for (const k of Object.keys(map)) {
     if (now - map[k] <= PRESENCE_WINDOW_MS) pruned[k] = map[k];
   }
-  pruned[await hashUid(uid)] = now;
+  pruned[await hashUid(slug + '|' + uid)] = now;
   await env.VOTES.put(key, JSON.stringify(pruned), { expirationTtl: PRESENCE_KEY_TTL_S });
 }

@@ -2,7 +2,7 @@
 //
 //   GET  /api/social?slug=<slug>
 //        -> 200 { n, e: [{ i, t, n }] }   allowlisted slug
-//           n = players seen by heartbeat in the last 5 min (anonymous count)
+//           n = players seen by heartbeat in the last 3 min (anonymous count)
 //           e = emotes from the last 45s: i = index 0-5, t = ms timestamp,
 //               n = SERVER-generated nonce (client dedupe across polls)
 //        -> 404                            slug not in the pilot allowlist
@@ -64,6 +64,19 @@ export async function onRequestGet({ request, env }) {
 }
 
 export async function onRequestPost({ request, env }) {
+  // Same-origin guard (Codex 2026-06-11): browsers always attach Origin to
+  // cross-origin POSTs, so a mismatch = some other site trying to splash
+  // emotes onto everyone's screen. Reject it. (Headerless script traffic
+  // still passes - that path is covered by the rate limits below.)
+  const origin = request.headers.get('Origin');
+  if (origin) {
+    let oHost = null;
+    try { oHost = new URL(origin).host; } catch (e) { oHost = null; }
+    if (oHost !== new URL(request.url).host) {
+      return new Response('forbidden', { status: 403 });
+    }
+  }
+
   let body;
   try { body = await request.json(); }
   catch { return new Response('bad json', { status: 400 }); }
