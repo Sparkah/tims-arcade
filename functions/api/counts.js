@@ -13,6 +13,11 @@
 // Two fixes, same as least-attention.js / admin/stats.js:
 //   1. 60s edge cache via _lib/edgecache.js — cuts KV read + list cost ~95%+.
 //   2. Promise.all over each list page — cold-miss latency 13.5s → <1s.
+//
+// Staleness contract: consumers that let the user VOTE (app.js index, play.html)
+// carry the voteOverride/votedThisSession shields so a fresh vote is never
+// repainted over within the TTL. Read-only consumers (lab.html) accept ≤60s
+// staleness by design — verified the full consumer list 2026-06-11.
 
 import { edgeCached } from '../_lib/edgecache.js';
 
