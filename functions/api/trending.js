@@ -17,20 +17,17 @@
 // max-age header alone never edge-caches a function response (see
 // functions/_lib/social.js), so every call paid the full KV walk — measured
 // 13.5s live, landing trending data 13s+ late on the home page's second
-// paint. Fixed the same way as counts.js: caches.default + Promise.all.
+// paint. Fixed the same way as counts.js: _lib/edgecache.js + Promise.all.
+
+import { edgeCached } from '../_lib/edgecache.js';
 
 const CACHE_TTL_SECONDS = 120;
 
-export async function onRequestGet({ env }) {
-  const cache = caches.default;
-  const cacheKey = new Request('https://cache.tims-arcade/api-trending', { method: 'GET' });
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const r = new Response(cached.body, cached);
-    r.headers.set('x-cache', 'HIT');
-    return r;
-  }
+export function onRequestGet({ env }) {
+  return edgeCached('/api-trending', {}, () => buildTrending(env));
+}
 
+async function buildTrending(env) {
   const today = new Date().toISOString().slice(0, 10);
   const todayStart = Date.parse(today + 'T00:00:00Z');
   const games = {};
@@ -77,16 +74,13 @@ export async function onRequestGet({ env }) {
     g.score = (g.seconds || 0) + (g.comments || 0) * 60;
   }
 
-  const fresh = new Response(
+  return new Response(
     JSON.stringify({ date: today, games }),
     {
       headers: {
         'content-type': 'application/json',
         'cache-control': `public, max-age=30, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=60`,
-        'x-cache': 'MISS',
       },
     }
   );
-  try { await cache.put(cacheKey, fresh.clone()); } catch (e) { /* cache is best-effort */ }
-  return fresh;
 }

@@ -4,6 +4,9 @@ let hiddenSlugs = new Set();   // admin-hidden slugs (low-quality, curated out o
 let counts = {};  // from /api/counts (cumulative all-time)
 let todayScores = {}; // from /api/trending — { slug: {seconds, comments, score} }
 let myVotes = JSON.parse(localStorage.getItem('myVotes') || '{}');
+// Slugs voted on THIS page load — the late /api/counts paint must not clobber
+// the optimistic/server-corrected numbers for them (counts is 60s edge-cached).
+let votedSlugsThisSession = new Set();
 let me = null;    // { signed_in, email, uid, exp_ts } from /api/me
 let metaState = null;           // { tokens, lifetime, streak, ... } from /api/me/meta
 let todaysFeaturedSlug = null;  // slug of today's Featured Challenge (banner only — corner badge TBD)
@@ -171,7 +174,7 @@ async function init() {
   // SECOND PAINT — vote counts + featured game. We wait for BOTH so the
   // second render is the final state; a third render would just churn DOM.
   Promise.all([countsP, trendingP]).then(([c, t]) => {
-    counts = c || {};
+    counts = mergeFreshVoteState(c || {});
     todayScores = (t && t.games) || {};
     render();
   });
@@ -1233,7 +1236,37 @@ function logVariantClick(slug, variant) {
 }
 
 // ── Voting ────────────────────────────────────────────────────────────────
+
+// /api/counts is 60s edge-cached, so a fetch landing after (or a reload
+// shortly after) a vote can repaint pre-vote numbers over the optimistic bump
+// (scorecard P2, review-20260611-194919). Two shields:
+//   1. slugs voted THIS page load keep their in-memory numbers;
+//   2. a vote's authoritative server response is stashed in sessionStorage for
+//      90s (> the 60s TTL) and overlaid on the next load's counts fetch.
+const VOTE_OVERRIDE_TTL_MS = 90 * 1000;
+
+function mergeFreshVoteState(fresh) {
+  for (const slug of votedSlugsThisSession) {
+    if (counts[slug]) fresh[slug] = Object.assign({}, fresh[slug], counts[slug]);
+  }
+  try {
+    const stale = [];
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const k = sessionStorage.key(i);
+      if (!k || k.indexOf('voteOverride:') !== 0) continue;
+      const v = JSON.parse(sessionStorage.getItem(k) || 'null');
+      if (!v || Date.now() - v.ts > VOTE_OVERRIDE_TTL_MS) { stale.push(k); continue; }
+      const slug = k.slice('voteOverride:'.length);
+      if (votedSlugsThisSession.has(slug)) continue;  // in-memory shield already applied
+      fresh[slug] = Object.assign({}, fresh[slug], { likes: v.likes, dislikes: v.dislikes });
+    }
+    stale.forEach(k => sessionStorage.removeItem(k));
+  } catch (e) { /* private mode / quota — bounded staleness is acceptable */ }
+  return fresh;
+}
+
 async function vote(slug, action, cardEl) {
+  votedSlugsThisSession.add(slug);
   const prev = myVotes[slug] || null;
   const next = prev === action ? null : action;
 
@@ -1267,6 +1300,11 @@ async function vote(slug, action, cardEl) {
     if (r.ok) {
       const updated = await r.json();
       counts[slug] = { likes: updated.likes, dislikes: updated.dislikes };
+      // Survive a reload inside the counts edge-cache TTL (see mergeFreshVoteState).
+      try {
+        sessionStorage.setItem('voteOverride:' + slug,
+          JSON.stringify({ likes: updated.likes, dislikes: updated.dislikes, ts: Date.now() }));
+      } catch (e) { /* best-effort */ }
       // Server may correct our optimistic state (e.g. desync). Trust it.
       if (updated.myVote !== undefined) {
         if (updated.myVote === 'like' || updated.myVote === 'dislike') myVotes[slug] = updated.myVote;

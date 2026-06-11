@@ -11,23 +11,18 @@
 // 3.1-13.5s on EVERY call, gating play-page topbar interactivity and burning
 // ~300 KV reads + 4 list ops per visit (the free tier caps LIST at 1k/day).
 // Two fixes, same as least-attention.js / admin/stats.js:
-//   1. caches.default 60s edge cache — cuts KV read + list cost ~95%+.
-//      (The max-age header alone is inert: CF Pages does not edge-cache
-//      function responses from headers — see functions/_lib/social.js.)
+//   1. 60s edge cache via _lib/edgecache.js — cuts KV read + list cost ~95%+.
 //   2. Promise.all over each list page — cold-miss latency 13.5s → <1s.
+
+import { edgeCached } from '../_lib/edgecache.js';
 
 const CACHE_TTL_SECONDS = 60;
 
-export async function onRequestGet({ env }) {
-  const cache = caches.default;
-  const cacheKey = new Request('https://cache.tims-arcade/api-counts', { method: 'GET' });
-  const cached = await cache.match(cacheKey);
-  if (cached) {
-    const r = new Response(cached.body, cached);
-    r.headers.set('x-cache', 'HIT');
-    return r;
-  }
+export function onRequestGet({ env }) {
+  return edgeCached('/api-counts', {}, () => buildCounts(env));
+}
 
+async function buildCounts(env) {
   const out = {};
   const ensure = (slug) => out[slug] ||
     (out[slug] = { likes: 0, dislikes: 0, plays: 0, seconds: 0, comments: 0 });
@@ -70,13 +65,10 @@ export async function onRequestGet({ env }) {
     })(),
   ]);
 
-  const fresh = new Response(JSON.stringify(out), {
+  return new Response(JSON.stringify(out), {
     headers: {
       'content-type': 'application/json',
       'cache-control': `public, max-age=15, s-maxage=${CACHE_TTL_SECONDS}`,
-      'x-cache': 'MISS',
     },
   });
-  try { await cache.put(cacheKey, fresh.clone()); } catch (e) { /* cache is best-effort */ }
-  return fresh;
 }
