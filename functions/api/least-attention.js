@@ -33,14 +33,22 @@
 //
 // Cost: one games.json fetch + the same votes:/plays:/comment: KV walk
 // counts.js does, behind a 5-minute edge cache (Cache API, same pattern as
-// admin/stats.js). Pass ?nocache=1 to force a recompute.
+// admin/stats.js). ?nocache=1 forces a recompute but only with a valid
+// ADMIN_TOKEN (?token= or x-admin-token header) - public callers always get
+// the cached path.
 
 const NEW_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit')) || 12));
-  const noCache = url.searchParams.get('nocache') === '1';
+  // ?nocache=1 forces a full recompute (the expensive KV walk), so it is
+  // admin-token-gated - otherwise any visitor could spam the uncached path.
+  // A wrong/missing token silently falls back to the cached response; the
+  // recompute also refreshes the shared cache entry for everyone.
+  const noCache = url.searchParams.get('nocache') === '1'
+    && !!env.ADMIN_TOKEN
+    && (url.searchParams.get('token') || request.headers.get('x-admin-token') || '') === env.ADMIN_TOKEN;
 
   const cache = caches.default;
   const cacheKey = new Request(`https://cache.tims-arcade/least-attention?limit=${limit}`, { method: 'GET' });
