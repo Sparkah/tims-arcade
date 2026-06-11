@@ -35,7 +35,14 @@ function pct(part, whole) {
   return whole > 0 ? +(part / whole * 100).toFixed(1) : null;
 }
 
-export async function onRequestGet({ request, env }) {
+export async function onRequestGet(ctx) {
+  // Admin read side may 500 (unlike the always-200 collector) but must do so
+  // gracefully as JSON, never as an unhandled worker exception.
+  try { return await handleGet(ctx); }
+  catch (e) { return jsonError('internal_error', 500); }
+}
+
+async function handleGet({ request, env }) {
   const url = new URL(request.url);
   const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
   const expected = env.ADMIN_TOKEN;
@@ -76,9 +83,20 @@ export async function onRequestGet({ request, env }) {
     pages++;
   }
 
+  // Subrequest budget (Workers free plan ~50/request): the list pages above
+  // already spent `pages`, and each value read below is one more subrequest.
+  // Cap reads so list+gets can never breach the cap and hard-500 the endpoint
+  // as data accumulates. Slicing keeps lexicographic key order (slug, then
+  // date) - a capped read therefore biases toward earlier dates/slugs; the
+  // `truncated` flag tells the panel the picture is partial (narrow by slug
+  // or date range to see the rest).
+  const GET_BUDGET = Math.max(0, 45 - pages);
+  const overBudget = hits.length > GET_BUDGET;
+  const readHits = overBudget ? hits.slice(0, GET_BUDGET) : hits;
+
   // slug -> event -> [t, t, ...] (one entry per sid-day)
   const bySlug = new Map();
-  for (const h of hits) {
+  for (const h of readHits) {
     let v = null;
     try { v = await env.VOTES.get(h.key, 'json'); } catch { v = null; }
     if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
@@ -123,7 +141,8 @@ export async function onRequestGet({ request, env }) {
   return new Response(JSON.stringify({
     from, to, slugs,
     totalSidDays: hits.length,
-    truncated: !complete, // hit the 25-page key-list bound
+    readSidDays: readHits.length,
+    truncated: !complete || overBudget, // key-list bound hit OR read budget capped
     caveat: 'Gallery-only funnel (platform builds never beacon). Directional at low traffic; counts are unique sids per day summed over the range.',
     generatedAt: new Date().toISOString(),
   }), { headers: { 'content-type': 'application/json' } });
