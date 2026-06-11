@@ -686,7 +686,11 @@
     }
   </style>
 
-  <script src="/posthog-init"></script>
+  <!-- defer: /posthog-init is served by a Pages FUNCTION; a sync tag parser-blocks
+       the whole page on a cold/slow function response (8-14s stalls measured,
+       2026-06-11 perf diagnosis). Every posthog call site is an
+       `if (window.posthog)` guard at event time, so nothing needs it synchronously. -->
+  <script src="/posthog-init" defer></script>
   <script src="/identity.js?v=55021ea3"></script>
   <script>
     const params = new URLSearchParams(location.search);
@@ -697,9 +701,23 @@
     try { myVotes = JSON.parse(myVotesRaw); } catch (e) {}
 
     let games = [];
+    // games.json with a timeout + content-type guard. During deploy windows the
+    // functions layer serves index.html as 200 text/html for unanswered paths
+    // (SPA fallback, no 404.html) — .json() on that HTML throws and used to
+    // blank the page forever. A hung edge fetch (no timeout) blanked it too.
+    async function fetchGames(timeoutMs) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const r = await fetch('/games.json', { cache: 'no-store', signal: ctrl.signal });
+        const ct = r.headers.get('content-type') || '';
+        if (!r.ok || !ct.includes('json')) throw new Error('bad games.json response: ' + r.status + ' ' + ct);
+        return await r.json();
+      } finally { clearTimeout(t); }
+    }
     async function init() {
       if (!slug) { showError('No game specified.'); return; }
-      games = await (await fetch('/games.json', { cache: 'no-store' })).json();
+      games = await fetchGames(6000);
       const game = games.find(g => g.slug === slug);
       if (!game) { showError('Game not found.'); return; }
       // Unpublished (published:false) games were pulled from the gallery (e.g. a
@@ -736,8 +754,13 @@
         iframe.src = game.sandboxUrl;
         iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-pointer-lock allow-fullscreen');
       } else {
-        iframe.src = `/games/${slug}/index.html`;
+        // Folder URL, not index.html — Pages canonicalizes /index.html with a
+        // 308 redirect, and that extra hop sat on the critical path for 13.8s+
+        // in live captures (2026-06-11 perf diagnosis).
+        iframe.src = `/games/${slug}/`;
       }
+      // Clear any retry-path error UI before mounting the game frame.
+      wrap.innerHTML = '';
       wrap.appendChild(iframe);
 
       // Fire-and-forget play counter ping (one per page load)
@@ -869,7 +892,7 @@
         const picks = candidates.slice(0, 3);
         const row = document.getElementById('more-row');
         row.innerHTML = picks.map(g => `
-          <a class="tile" href="/play.html?slug=${encodeURIComponent(g.slug)}">
+          <a class="tile" href="/play?slug=${encodeURIComponent(g.slug)}">
             <div class="thumb" style="background-image: url('/thumbs/${g.slug}.png')"></div>
             <div class="meta"><div class="name"></div><div class="hook"></div></div>
           </a>
@@ -1106,16 +1129,17 @@
         })();
       })();
 
-      // load current vote counts
+      // Vote counts load in the BACKGROUND. This used to be `await`ed before
+      // any topbar handler attached, so like/dislike/comments/share were dead
+      // for as long as /api/counts took — measured 3.1-13.4s per load
+      // (2026-06-11 perf diagnosis). Handlers attach immediately now; the
+      // numbers fill in when counts lands (same pattern app.js already uses).
       let counts = { likes: 0, dislikes: 0 };
-      try {
-        const r = await fetch('/api/counts', { cache: 'no-store' });
-        if (r.ok) {
-          const all = await r.json();
-          counts = all[slug] || counts;
-        }
-      } catch (e) {}
       paintCounts(counts);
+      fetch('/api/counts', { cache: 'no-store' })
+        .then(r => (r.ok && (r.headers.get('content-type') || '').includes('json')) ? r.json() : null)
+        .then(all => { if (all) { counts = all[slug] || counts; paintCounts(counts); } })
+        .catch(() => {});
 
       document.getElementById('like').addEventListener('click', () => onVote('like'));
       document.getElementById('dislike').addEventListener('click', () => onVote('dislike'));
@@ -1656,7 +1680,24 @@
       });
     })();
 
-    init();
+    // Guarded boot: an init() rejection used to leave the page silently blank
+    // forever (no showError, no retry — the exact "reload 3x in Brave" symptom,
+    // 2026-06-11 perf diagnosis). One automatic retry covers transient deploy
+    // windows / edge stalls; a second failure shows a recoverable error UI.
+    // If the game iframe is already mounted, a late non-critical step failed —
+    // leave the game alone.
+    function bootWithRetry(attempt) {
+      init().catch(() => {
+        if (document.querySelector('#frame-wrap iframe')) return;
+        if (attempt < 2) {
+          showError('Loading hiccup — retrying…');
+          setTimeout(() => bootWithRetry(attempt + 1), 1500);
+        } else {
+          showError('Could not load the game. <a href="javascript:location.reload()" style="color:#4dd0e1">Tap to retry</a>');
+        }
+      });
+    }
+    bootWithRetry(1);
   </script>
 
   <!-- Suggest-a-game modal — opens from the topbar 💡 button. POSTs /api/suggest.

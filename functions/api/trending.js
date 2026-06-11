@@ -13,49 +13,61 @@
 //   daily:<slug>:<YYYY-MM-DD> → seconds (heartbeat.js writes this)
 //   comment:<slug>:<id>       → {vote, comment, ts} (feedback.js)
 //
-// Cache: 30s edge cache. Comments + seconds don't move fast.
+// Perf (2026-06-11 diagnosis): the per-key gets used to be serial and the
+// max-age header alone never edge-caches a function response (see
+// functions/_lib/social.js), so every call paid the full KV walk — measured
+// 13.5s live, landing trending data 13s+ late on the home page's second
+// paint. Fixed the same way as counts.js: caches.default + Promise.all.
+
+const CACHE_TTL_SECONDS = 120;
 
 export async function onRequestGet({ env }) {
+  const cache = caches.default;
+  const cacheKey = new Request('https://cache.tims-arcade/api-trending', { method: 'GET' });
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    const r = new Response(cached.body, cached);
+    r.headers.set('x-cache', 'HIT');
+    return r;
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const todayStart = Date.parse(today + 'T00:00:00Z');
   const games = {};
+  const ensure = (slug) => games[slug] || (games[slug] = { seconds: 0, comments: 0, score: 0 });
 
-  // Pass 1: today's seconds per slug (one list call, one get per slug)
+  // Pass 1: today's seconds per slug — gets parallelized per list page.
   let cursor;
   do {
     const list = await env.VOTES.list({ prefix: 'daily:', cursor, limit: 1000 });
-    for (const k of list.keys) {
+    await Promise.all(list.keys.map(async (k) => {
       // key: daily:<slug>:<YYYY-MM-DD>
       const rest = k.name.slice('daily:'.length);
       const lastColon = rest.lastIndexOf(':');
-      if (lastColon < 1) continue;
-      const date = rest.slice(lastColon + 1);
-      if (date !== today) continue;
+      if (lastColon < 1) return;
+      if (rest.slice(lastColon + 1) !== today) return;
       const slug = rest.slice(0, lastColon);
       const seconds = parseInt(await env.VOTES.get(k.name)) || 0;
-      if (!games[slug]) games[slug] = { seconds: 0, comments: 0, score: 0 };
-      games[slug].seconds = seconds;
-    }
+      ensure(slug).seconds = seconds;
+    }));
     cursor = list.list_complete ? null : list.cursor;
   } while (cursor);
 
   // Pass 2: today's comments per slug. Comment ids are base36-encoded
   // Date.now() prefixes — but we still need to fetch each value to read
-  // its `ts` reliably. Comment volume is low (~1-10 per game per day) so
-  // the read cost is bounded.
+  // its `ts` reliably. Volume is low (~1-10 per game per day), and the
+  // gets run in parallel per page.
   cursor = undefined;
   do {
     const list = await env.VOTES.list({ prefix: 'comment:', cursor, limit: 1000 });
-    for (const k of list.keys) {
+    await Promise.all(list.keys.map(async (k) => {
       const v = await env.VOTES.get(k.name, 'json');
-      if (!v || !v.ts || v.ts < todayStart) continue;
+      if (!v || !v.ts || v.ts < todayStart) return;
       const rest = k.name.slice('comment:'.length);
       const sep = rest.indexOf(':');
-      if (sep < 1) continue;
-      const slug = rest.slice(0, sep);
-      if (!games[slug]) games[slug] = { seconds: 0, comments: 0, score: 0 };
-      games[slug].comments = (games[slug].comments || 0) + 1;
-    }
+      if (sep < 1) return;
+      ensure(rest.slice(0, sep)).comments += 1;
+    }));
     cursor = list.list_complete ? null : list.cursor;
   } while (cursor);
 
@@ -65,13 +77,16 @@ export async function onRequestGet({ env }) {
     g.score = (g.seconds || 0) + (g.comments || 0) * 60;
   }
 
-  return new Response(
+  const fresh = new Response(
     JSON.stringify({ date: today, games }),
     {
       headers: {
         'content-type': 'application/json',
-        'cache-control': 'public, max-age=30, stale-while-revalidate=60',
+        'cache-control': `public, max-age=30, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=60`,
+        'x-cache': 'MISS',
       },
     }
   );
+  try { await cache.put(cacheKey, fresh.clone()); } catch (e) { /* cache is best-effort */ }
+  return fresh;
 }
