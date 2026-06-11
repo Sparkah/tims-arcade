@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-10T21:12:52.281516+00:00",
+  "generated": "2026-06-11T12:02:21.653216+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -66,9 +66,9 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "submittedOn": "2026-05-20",
+          "submittedOn": "2026-06-09",
           "rejectedOn": "2026-06-06",
-          "status": "rejected"
+          "status": "submitted"
         },
         "crazygames": {
           "submittedOn": "2026-05-26",
@@ -714,15 +714,16 @@ export default {
     "crash_buggy": {
       "gameDir": "Games/152_crash_buggy",
       "engagement": {
-        "plays7d": 8,
+        "plays7d": 23,
         "likes": 2,
         "dislikes": 0,
-        "seconds": 930,
+        "seconds": 1210,
         "genre": "other"
       },
       "platforms": {
         "yandex": {
-          "status": "built"
+          "submittedOn": "2026-06-11",
+          "status": "submitted"
         },
         "crazygames": {
           "status": "not_started"
@@ -736,7 +737,6 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "yandex",
         "crazygames",
         "gamedistribution",
         "gamepush"
@@ -789,17 +789,6 @@ export default {
       }
     },
     {
-      "slug": "deck_of_dread",
-      "folder": "126_deck_of_dread",
-      "engagement": {
-        "plays7d": 3,
-        "likes": 2,
-        "dislikes": 0,
-        "seconds": 210,
-        "genre": "other"
-      }
-    },
-    {
       "slug": "tight_spot",
       "folder": "109_tight_spot",
       "engagement": {
@@ -822,6 +811,17 @@ export default {
       }
     },
     {
+      "slug": "cedar_hollow",
+      "folder": "167_cedar_hollow",
+      "engagement": {
+        "plays7d": 4,
+        "likes": 1,
+        "dislikes": 1,
+        "seconds": 175,
+        "genre": "other"
+      }
+    },
+    {
       "slug": "hue_sort",
       "folder": "93_hue_sort",
       "engagement": {
@@ -837,9 +837,9 @@ export default {
     "yandex": {
       "live": 4,
       "approved": 0,
-      "submitted": 20,
-      "rejected": 1,
-      "built": 2
+      "submitted": 22,
+      "rejected": 0,
+      "built": 1
     },
     "crazygames": {
       "live": 0,
