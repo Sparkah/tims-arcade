@@ -67,7 +67,12 @@ export async function onRequest({ params, env, request }) {
 
   const img   = `${site}/thumbs/${slug}.png`;
   const url   = `${site}/p/${slug}`;
-  const playUrl = `/play.html?slug=${encodeURIComponent(slug)}`;
+  // Forward the ?band=<code> share param (Bandlings view-only concert links,
+  // 2026-06-11) so /p/bandlings?band=X carries through to the play surface.
+  // Strictly sanitized (band codes are [0-9a-zA-Z-]); canonical/og:url stay
+  // param-free so shared links don't fragment SEO.
+  const bandCode = String(new URL(request.url).searchParams.get('band') || '').replace(/[^0-9a-zA-Z-]/g, '').slice(0, 80);
+  const playUrl = `/play.html?slug=${encodeURIComponent(slug)}${bandCode ? `&band=${bandCode}` : ''}`;
 
   const genre = (game.genre || '').trim();
   const genreLabel = genre ? genre.charAt(0).toUpperCase() + genre.slice(1) : '';

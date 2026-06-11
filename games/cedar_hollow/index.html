@@ -1968,6 +1968,99 @@ GF.init({
       { name: 'stats', go: function() { tourTo('forest'); modal = 'stats'; } },
       { name: 'gameover', go: function() { tourTo('trail'); gs = 'GAMEOVER'; } },
     ]);
+
+    // -- WS-E economy sim hook (econ_sim_check.js gate). Pure headless model
+    // over the SAME BAL constants the game ships - declared ONLY under the sim
+    // flag, never in normal play. Models the core coin economy: gather wood+ore
+    // at the goal tier, sell surplus at trader prices, smith all 5 tool kinds,
+    // buy whetstones. Hunts/meals are EXCLUDED (conservative: their coins/XP
+    // land on top of what this model earns). ---------------------------------
+    if (window.__gfSimMode || window._silent) (function() {
+      function lvlFromXp(xp) { // pure twin of lvlOf() (which reads live st)
+        var l = 1; while (l < BAL.LEVEL_CAP && xp >= cumXp(l + 1)) l++; return l;
+      }
+      function recipe(kind, ti) {
+        var tt = BAL.toolTiers[ti];
+        var coins = tt.coins + (kind === 'spear' ? BAL.spearExtraCoins[ti] : 0);
+        return { wood: tt.wood, ore: tt.ore, coins: coins, smithLvl: tt.smithLvl, xp: tt.xp,
+                 scalar: coins + tt.wood * BAL.skills.woodcut.tiers[ti].sell
+                               + tt.ore * BAL.skills.mine.tiers[ti].sell };
+      }
+      function crafts(s) {
+        var out = [];
+        BAL.toolKinds.forEach(function(k) {
+          var ti = s.tools[k];
+          if (ti >= BAL.toolTiers.length) return;
+          var r = recipe(k, ti);
+          if (lvlFromXp(s.xpS) < r.smithLvl) return;
+          out.push({ id: k + (ti + 1), kind: k, ti: ti, r: r });
+        });
+        return out;
+      }
+      function gather(s, sk, dt) {
+        var ts = BAL.skills[sk].tiers, lv = lvlFromXp(sk === 'woodcut' ? s.xpW : s.xpM);
+        var ti = 0, i;
+        for (i = 0; i < ts.length; i++) if (ts[i].lvl <= lv) ti = i;
+        // goal-directed: if the cheapest pending craft still needs THIS skill's
+        // tier resource and that tier is unlocked, gather it instead of best-XP
+        var pend = crafts(s).sort(function(a, b) { return a.r.scalar - b.r.scalar; })[0];
+        if (pend) {
+          var bank = (sk === 'woodcut' ? s.w : s.o)[pend.ti] || 0;
+          var need = sk === 'woodcut' ? pend.r.wood : pend.r.ore;
+          if (bank < need && ts[pend.ti].lvl <= lv) ti = pend.ti;
+        }
+        var tool = sk === 'woodcut' ? s.tools.axe : s.tools.pick;
+        var per = ts[ti].t * Math.pow(BAL.TOOL_SPEED, tool) /
+                  (1 + BAL.upgrades.whetstone.speedPer * s.whet);
+        var n = dt / per, arr = sk === 'woodcut' ? s.w : s.o;
+        arr[ti] += n;
+        if (sk === 'woodcut') s.xpW += n * ts[ti].xp; else s.xpM += n * ts[ti].xp;
+        // sell every unit pending recipes do not reserve (trader is lossless,
+        // so a greedy player liquidates surplus to fund coin sinks)
+        var cs = crafts(s), j;
+        for (j = 0; j < ts.length; j++) {
+          var keep = 0;
+          cs.forEach(function(c) {
+            if (c.ti === j) keep = Math.max(keep, sk === 'woodcut' ? c.r.wood : c.r.ore);
+          });
+          if (arr[j] > keep) { s.coins += (arr[j] - keep) * ts[j].sell; arr[j] = keep; }
+        }
+      }
+      window.__gfEcon = {
+        genre: 'idle',
+        params: { LEVEL_XP_BASE: BAL.LEVEL_XP_BASE, LEVEL_XP_GROWTH: BAL.LEVEL_XP_GROWTH,
+                  TOOL_SPEED: BAL.TOOL_SPEED, toolTiers: BAL.toolTiers,
+                  whetstoneCosts: BAL.upgrades.whetstone.costs,
+                  note: 'hunt/meal economy excluded (conservative coin model)' },
+        initialState: function() {
+          return { xpW: 0, xpM: 0, xpS: 0, coins: 0, whet: 0,
+                   w: [0, 0, 0, 0, 0], o: [0, 0, 0, 0, 0],
+                   tools: { axe: 0, pick: 0, rod: 0, basket: 0, spear: 0 } };
+        },
+        actions: function(s) {
+          var out = crafts(s).map(function(c) {
+            return { id: c.id, cost: c.r.scalar,
+                     ready: s.w[c.ti] >= c.r.wood && s.o[c.ti] >= c.r.ore && s.coins >= c.r.coins };
+          });
+          var uc = BAL.upgrades.whetstone.costs;
+          if (s.whet < uc.length)
+            out.push({ id: 'whet' + (s.whet + 1), cost: uc[s.whet], ready: s.coins >= uc[s.whet] });
+          return out;
+        },
+        step: function(s, a) {
+          if (a.id === 'wait') { gather(s, 'woodcut', a.dt / 2); gather(s, 'mine', a.dt / 2); return s; }
+          if (a.id.indexOf('whet') === 0) { s.coins -= BAL.upgrades.whetstone.costs[s.whet]; s.whet++; return s; }
+          var c = crafts(s).filter(function(x) { return x.id === a.id; })[0];
+          if (c) { s.w[c.ti] -= c.r.wood; s.o[c.ti] -= c.r.ore; s.coins -= c.r.coins;
+                   s.tools[c.kind]++; s.xpS += c.r.xp; }
+          return s;
+        },
+        metrics: function(s) {
+          var bought = s.tools.axe + s.tools.pick + s.tools.rod + s.tools.basket + s.tools.spear + s.whet;
+          return { currency: s.coins, progress: s.xpW + s.xpM + s.xpS + bought * 100 };
+        },
+      };
+    })();
   },
   onUpdate: update,
   onDraw: draw,
