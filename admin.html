@@ -292,6 +292,8 @@ async function load() {
     loadHidden().catch(e => console.error('hidden:', e));
     loadRetention().catch(e => console.error('retention:', e));
     { const rb = document.getElementById('refresh-retention'); if (rb) rb.onclick = () => loadRetention(); }
+    loadFunnel().catch(e => console.error('funnel:', e));
+    { const fb = document.getElementById('refresh-funnel'); if (fb) fb.onclick = () => loadFunnel(); }
     loadLeastAttention().catch(e => console.error('least-attention:', e));
     { const lb = document.getElementById('refresh-least'); if (lb) lb.onclick = () => loadLeastAttention({ force: true }); }
   } catch (e) {
@@ -329,6 +331,82 @@ async function loadRetention() {
   } catch (e) {
     el.innerHTML = `<div class="err">Retention: ${e.message}</div>`;
   }
+}
+
+// First-60s funnel (WS-J) - per-game boot -> first_input -> alive_60/120/300
+// conversion plus custom marks, from /api/admin/funnel (gallery-only data;
+// platform builds never beacon). Mirrors the Retention panel pattern: cached
+// payload + a game selector that re-renders client-side.
+let funnelData = null;
+async function loadFunnel() {
+  const el = document.getElementById('funnel-panel');
+  if (!el) return;
+  el.innerHTML = '<div style="opacity:0.5;font-style:italic;padding:12px 0;">Loading funnel...</div>';
+  try {
+    const r = await fetch('/api/admin/funnel?token=' + encodeURIComponent(token), { cache: 'no-store' });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); el.innerHTML = `<div class="err">Funnel: ${e.error || r.status}</div>`; return; }
+    funnelData = await r.json();
+    const sel = document.getElementById('funnel-slug');
+    const slugs = Object.keys(funnelData.slugs || {})
+      .sort((a, b) => (funnelData.slugs[b].sidDays || 0) - (funnelData.slugs[a].sidDays || 0));
+    if (!slugs.length) {
+      if (sel) sel.innerHTML = '';
+      el.innerHTML = '<div style="opacity:0.5;font-style:italic">No funnel data yet - accumulates as gallery visitors boot games (GF.funnel in gf-lib, gallery-only transport). Live since this deploy.</div>';
+      return;
+    }
+    if (sel) {
+      const cur = sel.value;
+      sel.innerHTML = slugs.map(s =>
+        `<option value="${s}">${escapeHtml(adminTitleBySlug[s] || s)} (${funnelData.slugs[s].sidDays})</option>`).join('');
+      sel.value = (cur && slugs.includes(cur)) ? cur : slugs[0];
+      sel.onchange = renderFunnel;
+    }
+    renderFunnel();
+  } catch (e) {
+    el.innerHTML = `<div class="err">Funnel: ${e.message}</div>`;
+  }
+}
+function renderFunnel() {
+  const el = document.getElementById('funnel-panel');
+  const sel = document.getElementById('funnel-slug');
+  if (!el || !funnelData) return;
+  const slug = sel ? sel.value : '';
+  const d = (slug && funnelData.slugs) ? funnelData.slugs[slug] : null;
+  if (!d) { el.innerHTML = '<div style="opacity:0.5;font-style:italic">Pick a game.</div>'; return; }
+  const STD_LABEL = { boot: 'boot', first_input: 'first input', alive_60: 'alive 1 min', alive_120: 'alive 2 min', alive_300: 'alive 5 min' };
+  const fmtT = (ms) => ms == null ? '' : ms < 1000 ? `${ms}ms` : ms < 60000 ? `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s` : `${Math.round(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+  const row = (name, count, pctBoot, pctPrev, medT, isMark) => {
+    const w = pctBoot == null ? 0 : Math.max(2, Math.min(100, pctBoot));
+    const color = isMark ? 'var(--accent-2, #e8a33d)' : 'var(--accent, #7cf)';
+    return `<div style="display:flex;align-items:center;gap:10px;margin:4px 0;font-family:var(--font-mono,monospace);font-size:12px">
+      <div style="width:120px;text-align:right;color:var(--ink-soft,#aab);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(name)}</div>
+      <div style="flex:1;background:var(--rule-soft,rgba(255,255,255,0.06));border-radius:3px;height:18px;position:relative;overflow:hidden">
+        <div style="width:${w}%;height:100%;background:${color};opacity:0.55;border-radius:3px"></div>
+        <div style="position:absolute;inset:0;display:flex;align-items:center;padding-left:8px;gap:12px;white-space:nowrap">
+          <b>${count}</b>
+          <span style="opacity:0.75">${pctBoot == null ? '' : pctBoot + '% of boot'}</span>
+          <span style="opacity:0.5">${pctPrev == null ? '' : pctPrev + '% of prev'}</span>
+          <span style="opacity:0.5">${medT == null ? '' : 'median ' + fmtT(medT)}</span>
+        </div>
+      </div>
+    </div>`;
+  };
+  // Biggest early drop-off = the standard step with the lowest step-to-step
+  // conversion (what an iteration pass should target first).
+  let worst = null;
+  for (const s of d.steps) {
+    if (s.name === 'boot' || s.pctOfPrev == null) continue;
+    if (!worst || s.pctOfPrev < worst.pctOfPrev) worst = s;
+  }
+  el.innerHTML =
+    `<div style="opacity:0.55;font-size:11px;margin-bottom:8px">${funnelData.from} to ${funnelData.to} - counts are unique visitors/day summed over the range - gallery sessions only${funnelData.truncated ? ' - TRUNCATED (key bound hit)' : ''}</div>` +
+    d.steps.map(s => row(STD_LABEL[s.name] || s.name, s.count, s.pctOfBoot, s.name === 'boot' ? null : s.pctOfPrev, s.medianT, false)).join('') +
+    (worst ? `<div style="font-size:11px;margin:6px 0 2px;color:var(--accent,#7cf)">biggest early drop-off: ${escapeHtml(STD_LABEL[worst.name] || worst.name)} (${worst.pctOfPrev}% of previous step)</div>` : '') +
+    (d.marks && d.marks.length
+      ? `<div style="opacity:0.55;font-size:11px;margin:12px 0 4px">custom marks (sorted by median time; standard set: tutorial_done / first_death / first_upgrade)</div>` +
+        d.marks.map(m => row(m.name, m.count, m.pctOfBoot, null, m.medianT, true)).join('')
+      : `<div style="opacity:0.4;font-size:11px;margin-top:10px">no custom marks yet - games wire GF.funnel.mark('tutorial_done' / 'first_death' / 'first_upgrade')</div>`) +
+    `<div style="opacity:0.4;font-size:11px;margin-top:8px">${funnelData.caveat || ''}</div>`;
 }
 
 // Titles for panels that load outside render(d)'s scope (least-attention).
@@ -891,6 +969,17 @@ function render(d) {
     </h2>
     <div id="retention-panel" style="margin-bottom:32px;">
       <div style="opacity:0.5;font-style:italic;padding:12px 0;">Loading…</div>
+    </div>
+
+    <h2 style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+      <span>First-60s funnel <span style="opacity:0.5;font-weight:400;font-size:14px;">(boot to first input to alive 1/2/5 min - gallery sessions only)</span></span>
+      <span style="display:flex;align-items:center;gap:8px;">
+        <select id="funnel-slug" style="font-family:var(--font-mono);font-size:11px;padding:6px 8px;border:1px solid var(--rule);background:var(--bg-card);color:var(--ink);border-radius:4px;max-width:260px;"></select>
+        <button id="refresh-funnel" style="font-family:var(--font-mono);font-size:11px;padding:6px 12px;border:1px solid var(--rule);background:transparent;color:var(--ink-soft);cursor:pointer;border-radius:4px;letter-spacing:0.06em;text-transform:uppercase;">Refresh</button>
+      </span>
+    </h2>
+    <div id="funnel-panel" style="margin-bottom:32px;">
+      <div style="opacity:0.5;font-style:italic;padding:12px 0;">Loading...</div>
     </div>
 
     <h2 style="display:flex;align-items:center;justify-content:space-between;">
