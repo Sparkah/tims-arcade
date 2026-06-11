@@ -25,6 +25,7 @@ import { creditTokens } from '../_lib/meta.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { recordActiveDay } from '../_lib/cohort.js';
 import { checkRate } from '../_lib/rateLimit.js';
+import { SOCIAL_SLUGS, touchPresence } from '../_lib/social.js';
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -70,6 +71,14 @@ export async function onRequestPost({ request, env }) {
     // write-gates to ~1 KV write/uid/day (no-ops once today is already recorded),
     // and ANY visible-time heartbeat counts the return so short sessions aren't missed.
     await recordActiveDay(env, uid, dateUtc);
+
+    // Social presence pilot (allowlisted slugs only): refresh this uid's
+    // "playing now" liveness off the SAME flush - no extra client traffic.
+    // Cost: +1 read +1 write per flush on pilot games. The uid is hashed
+    // before storage and the key carries a short TTL (see _lib/social.js).
+    if (SOCIAL_SLUGS.has(slug)) {
+      try { await touchPresence(env, slug, uid); } catch (e) { /* never block the heartbeat */ }
+    }
   }
 
   return new Response(null, { status: 204 });

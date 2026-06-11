@@ -311,6 +311,88 @@
       .more-rail .close { top: 8px; right: 8px; width: 26px; height: 26px; font-size: 14px; }
     }
 
+    /* ── Social presence + emotes overlay (pilot, allowlisted games only).
+       Every node here is built by JS ONLY after GET /api/social answers 200,
+       so non-pilot games and any endpoint outage render none of this.
+       Vetted-emote reactions float up the lower-left third of the screen
+       (pointer-events none, never intercepts gameplay input). ── */
+    .social-floats {
+      position: fixed; top: 44px; left: 0; right: 0; bottom: 0;
+      overflow: hidden;
+      pointer-events: none;
+      z-index: 6;
+    }
+    .social-float {
+      position: absolute; bottom: -44px;
+      font-size: 28px; line-height: 1;
+      will-change: transform, opacity;
+      animation: socialFloatUp 3.2s ease-out forwards;
+    }
+    @keyframes socialFloatUp {
+      0%   { transform: translate(0, 0) scale(0.7); opacity: 0; }
+      12%  { transform: translate(calc(var(--dx, 0px) * 0.2), -8vh) scale(1.15); opacity: 1; }
+      100% { transform: translate(var(--dx, 0px), -62vh) scale(1); opacity: 0; }
+    }
+    @keyframes socialFadeOnly {
+      0%   { opacity: 0; }
+      20%  { opacity: 1; }
+      100% { opacity: 0; }
+    }
+    .social-pill {
+      position: fixed; top: 52px; left: 10px; z-index: 7;
+      display: none; align-items: center; gap: 6px;
+      background: var(--bg-card);
+      border: 1px solid var(--rule);
+      color: var(--ink-soft);
+      border-radius: 999px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+    }
+    .social-pill.on { display: inline-flex; }
+    .social-pill .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--accent);
+    }
+    .social-launcher {
+      position: fixed; left: 10px; bottom: 14px; z-index: 7;
+      width: 38px; height: 38px; border-radius: 50%;
+      background: var(--bg-card);
+      border: 1px solid var(--rule);
+      font-size: 17px; line-height: 1;
+      cursor: pointer;
+      opacity: 0.85;
+      padding: 0;
+      transition: transform 0.15s ease, opacity 0.15s ease;
+    }
+    .social-launcher:hover { opacity: 1; transform: scale(1.06); }
+    .social-tray {
+      position: fixed; left: 10px; bottom: 58px; z-index: 7;
+      display: none; flex-direction: column; gap: 4px;
+      background: var(--bg-card);
+      border: 1px solid var(--rule);
+      border-radius: 999px;
+      padding: 6px 4px;
+      box-shadow: 0 8px 24px -12px rgba(14,14,18,0.35);
+    }
+    .social-tray.open { display: flex; }
+    .social-tray button {
+      width: 34px; height: 34px;
+      border: none; background: transparent;
+      font-size: 19px; line-height: 1;
+      cursor: pointer; border-radius: 50%;
+      padding: 0;
+      transition: transform 0.12s ease, background 0.12s ease;
+    }
+    .social-tray button:hover { background: var(--rule-soft, rgba(14,14,18,0.05)); transform: scale(1.15); }
+    @media (prefers-reduced-motion: reduce) {
+      /* No motion: park the emote IN view (the resting bottom:-44px is
+         offscreen by design for the travel animation) and just fade. */
+      .social-float { animation: socialFadeOnly 1.6s ease-out forwards; bottom: 18vh; }
+    }
+
   </style>
 </head>
 <body>
@@ -846,6 +928,181 @@
         _frame.addEventListener('load', bindIframeDismiss);
         bindIframeDismiss(); // also bind immediately if iframe is already loaded
       }
+
+      // ── Social presence + emotes (pilot, opt-in allowlist) ────────────
+      // Probes GET /api/social once; the server 404s for games not in the
+      // pilot (allowlist lives in functions/_lib/social.js - no client
+      // copy), and on ANY failure this renders nothing: the overlay must
+      // never degrade the play page. Zero UGC by construction - emotes go
+      // over the wire as an integer index into this fixed vetted set, the
+      // count is anonymous, and nothing persists beyond short server TTLs.
+      // No free text, no names, no uploads - not even UI affordances.
+      (function setupSocial() {
+        const EMOTES = ['🔥', '❤️', '😂', '👏', '😮', '🎉'];
+        const POLL_MS = 10000;     // response is browser-cached 8s; 10s polls stay fresh
+        const FLOAT_MS = 3400;     // slightly past the 3.2s CSS animation
+        const MAX_FLOATS = 12;     // concurrent float-node cap
+        let pollTimer = null;
+        let failStreak = 0;
+        let lastSend = 0;
+        let booted = false;        // first paint marks history seen, no replay
+        let dead = false;          // set by teardown(); nothing may resurrect after
+        const seen = new Set();    // server-issued nonces already rendered
+        let layer, pill, pillNum, launcher, tray;
+
+        function buildUi() {
+          layer = document.createElement('div');
+          layer.className = 'social-floats';
+          layer.setAttribute('aria-hidden', 'true');
+
+          pill = document.createElement('div');
+          pill.className = 'social-pill';
+          const dot = document.createElement('span');
+          dot.className = 'dot';
+          pillNum = document.createElement('span');
+          pill.appendChild(dot);
+          pill.appendChild(pillNum);
+
+          launcher = document.createElement('button');
+          launcher.className = 'social-launcher';
+          launcher.type = 'button';
+          launcher.textContent = '✨';
+          launcher.title = 'Send a reaction';
+          launcher.setAttribute('aria-label', 'Send a reaction');
+
+          tray = document.createElement('div');
+          tray.className = 'social-tray';
+          EMOTES.forEach((glyph, i) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = glyph;
+            b.setAttribute('aria-label', 'React ' + glyph);
+            b.addEventListener('click', () => sendEmote(i));
+            tray.appendChild(b);
+          });
+
+          launcher.addEventListener('click', (e) => {
+            e.stopPropagation();
+            tray.classList.toggle('open');
+          });
+          document.addEventListener('click', (e) => {
+            if (!tray.classList.contains('open')) return;
+            if (e.target.closest('.social-tray, .social-launcher')) return;
+            tray.classList.remove('open');
+          });
+
+          document.body.appendChild(layer);
+          document.body.appendChild(pill);
+          document.body.appendChild(tray);
+          document.body.appendChild(launcher);
+        }
+
+        function teardown() {
+          dead = true;             // visibilitychange must not restart polling
+          stopPolling();
+          [layer, pill, tray, launcher].forEach(el => {
+            if (el && el.parentNode) el.parentNode.removeChild(el);
+          });
+        }
+
+        function floatEmote(i) {
+          if (!layer || layer.childElementCount >= MAX_FLOATS) return;
+          const node = document.createElement('span');
+          node.className = 'social-float';
+          node.textContent = EMOTES[i] || EMOTES[0];
+          node.style.left = (5 + Math.random() * 30).toFixed(1) + '%';
+          node.style.setProperty('--dx', (Math.random() * 60 - 30).toFixed(0) + 'px');
+          layer.appendChild(node);
+          setTimeout(() => { if (node.parentNode) node.parentNode.removeChild(node); }, FLOAT_MS);
+        }
+
+        function paint(payload) {
+          const n = payload ? (payload.n | 0) : 0;
+          if (n >= 2) {
+            pillNum.textContent = n + ' playing now';
+            pill.classList.add('on');
+          } else {
+            pill.classList.remove('on');
+          }
+          const list = (payload && Array.isArray(payload.e)) ? payload.e : [];
+          for (const it of list) {
+            if (!it || typeof it.n !== 'string' || seen.has(it.n)) continue;
+            seen.add(it.n);
+            if (booted) floatEmote(it.i | 0);
+          }
+          // Bound the dedupe set - entries age out of the server window in
+          // 45s anyway, this just caps a very long session's memory.
+          if (seen.size > 400) {
+            const keep = Array.from(seen).slice(-200);
+            seen.clear();
+            keep.forEach(x => seen.add(x));
+          }
+          booted = true;
+        }
+
+        async function poll() {
+          if (dead) return;
+          try {
+            const r = await fetch('/api/social?slug=' + encodeURIComponent(slug));
+            if (!r.ok) throw new Error('http ' + r.status);
+            if (dead) return;      // teardown raced the fetch
+            paint(await r.json());
+            failStreak = 0;
+          } catch (e) {
+            failStreak += 1;
+            if (failStreak >= 3) teardown();   // degrade to nothing, stay gone
+          }
+        }
+
+        async function sendEmote(i) {
+          const now = Date.now();
+          if (now - lastSend < 600) return;    // local politeness cooldown
+          lastSend = now;
+          floatEmote(i);                       // optimistic - own reaction is instant
+          if (window.posthog) posthog.capture('social_emote_sent', { slug, emote: i });
+          try {
+            const r = await fetch('/api/social', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ slug, emote: i }),
+            });
+            if (r.ok) {
+              const out = await r.json();
+              if (out && out.n) seen.add(out.n);
+            }
+          } catch (e) { /* already floated locally - a server miss is invisible */ }
+        }
+
+        function startPolling() {
+          if (dead) return;
+          if (!pollTimer) pollTimer = setInterval(poll, POLL_MS);
+        }
+        function stopPolling() {
+          if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        }
+
+        (async function probe() {
+          try {
+            const r = await fetch('/api/social?slug=' + encodeURIComponent(slug));
+            if (!r.ok) return;                 // not in the pilot (or down): no overlay
+            const payload = await r.json();
+            buildUi();
+            paint(payload);
+            startPolling();
+            // Register presence fast: the first heartbeat flush normally
+            // lands at ~2 min, far too slow for "playing now". One early
+            // flush of real measured time (~10s in) costs 2-3 extra KV
+            // writes per session, on pilot games only.
+            setTimeout(() => { try { flush(false); } catch (e) {} }, 12000);
+            document.addEventListener('visibilitychange', () => {
+              if (dead) return;    // torn down - stay gone
+              if (document.visibilityState === 'visible') { poll(); startPolling(); }
+              else stopPolling();
+            });
+            if (window.posthog) posthog.capture('social_overlay_shown', { slug, players: payload.n | 0 });
+          } catch (e) { /* endpoint unreachable: no overlay at all */ }
+        })();
+      })();
 
       // load current vote counts
       let counts = { likes: 0, dislikes: 0 };
