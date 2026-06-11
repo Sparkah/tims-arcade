@@ -59,6 +59,9 @@ var STRINGS = {
     evHowto: 'Earn tokens this festival from deliveries and big merges, then claim the track. Tiers reset when a new festival begins.',
     evFestCharm: 'Festival favour', evRewardGold: 'gold', evExclusive: 'EVENT ONLY',
     patronHere: 'PATRON!', patronLeft: 'left the bazaar', patronServed: 'Patrons served', patronFav: 'Lv',
+    distTab: 'BAZAAR', renown: 'Renown', distBuild: 'Build & upgrade districts - your bazaar grows forever',
+    distUnlock: 'Renown {n} to unlock', distLvl: 'Lv', distBuy: 'BUILD', distOwned: 'OWNED',
+    distNext: 'Next district at Renown', distLocked: 'LOCKED',
   },
   ru: {
     title: 'Звериный Базар',
@@ -88,6 +91,9 @@ var STRINGS = {
     evHowto: 'Получай жетоны на фестивале за сдачи и крупные слияния, затем забирай награды. Ступени сбрасываются с новым фестивалем.',
     evFestCharm: 'Дар фестиваля', evRewardGold: 'золота', evExclusive: 'ТОЛЬКО НА ФЕСТ',
     patronHere: 'ГОСТЬ!', patronLeft: 'покинул базар', patronServed: 'Гостей обслужено', patronFav: 'ур',
+    distTab: 'БАЗАР', renown: 'Слава', distBuild: 'Строй и улучшай кварталы - твой базар растёт вечно',
+    distUnlock: 'Слава {n} для открытия', distLvl: 'ур', distBuy: 'СТРОИТЬ', distOwned: 'ЕСТЬ',
+    distNext: 'Новый квартал при Славе', distLocked: 'ЗАКРЫТО',
   },
 };
 
@@ -170,6 +176,7 @@ var charmUpRects = [];      // [{id,x,y,w,h,afford}] - charm upgrade buttons
 var equipSlotRects = [];    // [{slot,x,y,w,h}] - equip slots (tap a filled slot = unequip)
 var questClaimRects = [];   // [{i,x,y,w,h,can}] - daily-quest claim buttons
 var festClaimRects = [];    // [{i,x,y,w,h,can}] - festival reward-track claim buttons
+var distBuyRects = [];      // [{id,x,y,w,h,can}] - Bazaar district build/upgrade buttons
 var vaultScroll = null;     // GF.makeScroll controller for the vault body (long tabs scroll)
 var paused = false;                       // Vault overlay open mid-run (freezes the game so you never have to lose to reach the meta)
 var shopBtns = [];          // {kind, x,y,w,h, cost, enabled}
@@ -198,6 +205,108 @@ var META_UP_KEYS = ['slots', 'sell', 'luck', 'idle', 'vault'];
 var BANK_RATE = 0.25;        // base fraction of a run's score banked as gold at game-over
 var IDLE_CAP_H = 8;          // overnight idle income caps at 8h elapsed
 var IDLE_PER_LVL_PER_H = 6;  // gold/hour generated per bazaar level
+
+// ── META PASS - BAZAAR DISTRICTS + RENOWN (the never-capping owned-build meta) ─
+// Every OWNED, persistent progression in this game CAPS - the codex finishes in a
+// few runs (11/11), the playtime Charms top out (8/8 by 200 min), and all five
+// permanent upgrades hit max=5. After ~a week a returning player has nothing NEW
+// to BUILD, which is exactly the D7 -> D30 cliff. DISTRICTS fix that: the bazaar
+// becomes a set of named quarters the player UNLOCKS then LEVELS *forever* with
+// vault gold (a geometric, uncapped sink that finally gives banked gold a long
+// horizon purpose), each level granting a permanent passive folded into the
+// existing perm-perk + idle math. The pull is OWNERSHIP ("my bazaar grows every
+// session"), not a one-off reward - the #1 D30 driver. RENOWN is a never-capping
+// lifetime rank (deliveries + crowns*10 + sum of district levels) mapped to an
+// open-ended TITLE ladder; it gates which districts unlock, so the build reveals
+// itself across many sessions instead of all at once. Banks NOTHING per frame -
+// persists on buy and at game-over only. ADDITIVE: districts read-augment the
+// perm*() functions; bazaarLevel stays for backward-compatible idle.
+var DISTRICT_DEFS = [
+  // id, stat folded into the perm math, per-level magnitude, renown to UNLOCK,
+  // gold cost of level 1 (scales geometrically), colour, EN/RU name + one-line blurb.
+  { id: 'nest',   stat: 'start', per: 1,    unlock: 0,   base: 90,   step: 1.55, col: '#7ed957', en: 'Nest Row',      ru: 'Гнездовой ряд',  enD: '+1 start critter / level',     ruD: '+1 стартовый зверь / ур.' },
+  { id: 'trade',  stat: 'sell',  per: 0.05, unlock: 8,   base: 130,  step: 1.6,  col: '#ffd700', en: 'Trade Lane',    ru: 'Торговый ряд',   enD: '+5% sell value / level',       ruD: '+5% к продаже / ур.' },
+  { id: 'coin',   stat: 'merge', per: 2,    unlock: 25,  base: 180,  step: 1.62, col: '#e8985e', en: 'Coin Quarter',  ru: 'Монетный двор',  enD: '+2 gold / merge / level',      ruD: '+2 золота за слияние / ур.' },
+  { id: 'wild',   stat: 'wild',  per: 0.015,unlock: 55,  base: 240,  step: 1.65, col: '#c77dff', en: 'Wild Gardens',  ru: 'Дикие сады',     enD: '+1.5% wild luck / level',      ruD: '+1.5% шанс дикой / ур.' },
+  { id: 'vault',  stat: 'idle',  per: 0.10, unlock: 110, base: 320,  step: 1.68, col: '#6aa9e0', en: 'Vault Keep',    ru: 'Хранилище',      enD: '+10% idle income / level',     ruD: '+10% ночной доход / ур.' },
+  { id: 'plaza',  stat: 'bank',  per: 0.03, unlock: 200, base: 460,  step: 1.7,  col: '#ff9f43', en: 'Grand Plaza',   ru: 'Большая площадь',enD: '+3% run gold banked / level',  ruD: '+3% доли казны / ур.' },
+];
+var DISTRICT_BY_ID = {};
+for (var _di = 0; _di < DISTRICT_DEFS.length; _di++) DISTRICT_BY_ID[DISTRICT_DEFS[_di].id] = DISTRICT_DEFS[_di];
+// open-ended title ladder - the player's lifetime identity. The last entry repeats
+// with an ascending numeral so RENOWN literally never runs out of a new title.
+var RENOWN_TITLES = [
+  { at: 0,    en: 'Stallhand',    ru: 'Подмастерье' },
+  { at: 8,    en: 'Peddler',      ru: 'Лоточник' },
+  { at: 25,   en: 'Trader',       ru: 'Торговец' },
+  { at: 55,   en: 'Merchant',     ru: 'Купец' },
+  { at: 110,  en: 'Magnate',      ru: 'Магнат' },
+  { at: 200,  en: 'Baron',        ru: 'Барон' },
+  { at: 340,  en: 'Bazaar Lord',  ru: 'Владыка базара' },
+  { at: 540,  en: 'Grandmaster',  ru: 'Гранд-мастер' },
+];
+function districtName(d) { return (GF.lang === 'ru' ? d.ru : d.en) || d.en; }
+function districtDesc(d) { return (GF.lang === 'ru' ? d.ruD : d.enD) || d.enD; }
+// current OWNED level of a district (0 = not yet unlocked/bought)
+function districtLvl(id) { return (meta && meta.districts && meta.districts[id]) ? meta.districts[id] : 0; }
+// summed magnitude across all districts feeding a given perm stat (per * level)
+function districtVal(stat) {
+  if (!meta || !meta.districts) return 0;
+  var v = 0;
+  for (var i = 0; i < DISTRICT_DEFS.length; i++) {
+    var d = DISTRICT_DEFS[i]; if (d.stat !== stat) continue;
+    v += d.per * districtLvl(d.id);
+  }
+  return v;
+}
+// lifetime RENOWN - never caps. Deliveries + ascension Crowns + every district level.
+function renown() {
+  if (!meta) return 0;
+  var r = (meta.totalDeliveries || 0) + (meta.lifeCrowns || 0) * 10;
+  if (meta.districts) for (var id in meta.districts) if (meta.districts.hasOwnProperty(id)) r += meta.districts[id] * 4;
+  return r;
+}
+// the player's current title (open-ended: past the last fixed rank it appends a numeral)
+function renownTitle() {
+  var r = renown(), best = RENOWN_TITLES[0], ru = (GF.lang === 'ru');
+  for (var i = 0; i < RENOWN_TITLES.length; i++) if (r >= RENOWN_TITLES[i].at) best = RENOWN_TITLES[i];
+  var name = ru ? best.ru : best.en;
+  if (best === RENOWN_TITLES[RENOWN_TITLES.length - 1]) {
+    // beyond the top fixed rank, every +260 renown is a new numbered tier (never runs out)
+    var extra = Math.floor((r - best.at) / 260);
+    if (extra > 0) name += ' ' + toRoman(extra + 1);
+  }
+  return name;
+}
+function toRoman(n) {
+  var map = [[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']], s = '';
+  for (var i = 0; i < map.length; i++) while (n >= map[i][0]) { s += map[i][1]; n -= map[i][0]; }
+  return s || 'I';
+}
+// is a district unlocked yet (renown gate met)? - locked ones show "Renown N to unlock"
+function districtUnlocked(d) { return renown() >= d.unlock; }
+// gold cost of a district's NEXT level (geometric - an UNCAPPED sink, no max)
+function districtUpCost(id) {
+  var d = DISTRICT_BY_ID[id]; if (!d) return Infinity;
+  var lvl = districtLvl(id);
+  return Math.round(d.base * Math.pow(d.step, lvl));
+}
+function buyDistrict(id) {
+  var d = DISTRICT_BY_ID[id]; if (!d || !meta) return false;
+  if (!districtUnlocked(d)) return false;
+  var cost = districtUpCost(id);
+  if (meta.bank < cost) return false;
+  meta.bank -= cost;
+  if (!meta.districts) meta.districts = {};
+  meta.districts[id] = districtLvl(id) + 1;
+  saveMeta(); GF.sfx('coin');
+  return true;
+}
+// the next still-locked district (the visible "build unlocks at Renown N" goal), or null
+function nextLockedDistrict() {
+  for (var i = 0; i < DISTRICT_DEFS.length; i++) if (!districtUnlocked(DISTRICT_DEFS[i])) return DISTRICT_DEFS[i];
+  return null;
+}
 
 // ── DEPTH PASS - BAZAAR-KING ASCENSION (in-run prestige / mastery loop) ─────
 // The species ladder dead-ended at tier 10 (Bazaar King): once fused, every
@@ -678,6 +787,7 @@ var festCharmFlash = 0;       // flourish timer when the exclusive charm is clai
 
 var meta = null;             // loaded in onReady
 var lastProfit = 0;          // gold banked from the most recent run (session-end hook)
+var lastRenownGain = 0;      // RENOWN earned in the most recent run (session-end build hook)
 var lastRunCollected = 0;    // NEW codex species discovered in the most recent run
 var idleClaim = 0;           // gold awarded by the most recent idle-claim (for menu panel)
 var dailyClaim = 0;          // login-bonus gold just awarded (for menu panel)
@@ -712,6 +822,8 @@ function defaultMeta() {
     // FESTIVAL - the rotating 3-day limited-time event (FOMO return hook)
     festPeriod: -1,          // period id the active festival track belongs to
     fest: null,              // { tokens, claimed[5] } - the current track (reset on rotate)
+    // META - BAZAAR DISTRICTS (the never-capping owned-build meta; renown derived)
+    districts: {},           // districtId -> owned level (0/absent = not bought)
   };
 }
 function loadMeta() {
@@ -740,6 +852,13 @@ function loadMeta() {
         if (s.fest && typeof s.fest === 'object') {
           var fcl = Array.isArray(s.fest.claimed) ? s.fest.claimed : [];
           m.fest = { tokens: Math.max(0, +s.fest.tokens || 0), claimed: [0,1,2,3,4].map(function (k) { return !!fcl[k]; }) };
+        }
+        if (s.districts && typeof s.districts === 'object') {
+          for (var did in s.districts) {
+            if (s.districts.hasOwnProperty(did) && DISTRICT_BY_ID[did]) {
+              m.districts[did] = Math.max(0, Math.floor(+s.districts[did] || 0));
+            }
+          }
         }
         if (s.charms && typeof s.charms === 'object') {
           for (var cid in s.charms) {
@@ -780,13 +899,14 @@ function buyMetaUpgrade(key) {
   saveMeta(); GF.sfx('coin');
   return true;
 }
-// permanent perks applied to the CURRENT run, derived from owned upgrade levels
-function permStartCritters() { return 2 + (meta ? meta.up.slots : 0) + charmVal('start'); }   // base 2 + slot upgrades + Charms
-function permSellMult()      { return 1 + (meta ? meta.up.sell : 0) * 0.12 + charmVal('sell'); } // +12%/lvl + Charm sell bonus
-function permWildChance()    { return wildcardChance + (meta ? meta.up.luck : 0) * 0.02 + charmVal('wild'); }
-function permMergeGold()     { return charmVal('merge'); }                                     // flat coins granted per merge (Charms)
-function permBankRate()      { return BANK_RATE + (meta ? (meta.up.vault || 0) : 0) * 0.05; }   // banked cut of run score (guard partial save: matches permIdleMul)
-function permIdleMul()       { return 1 + (meta ? (meta.up.idle || 0) : 0) * 0.25 + charmVal('idle'); }
+// permanent perks applied to the CURRENT run, derived from owned upgrade levels +
+// equipped Charms + owned Bazaar DISTRICT levels (districtVal, the never-capping meta).
+function permStartCritters() { return 2 + (meta ? meta.up.slots : 0) + charmVal('start') + districtVal('start'); } // base 2 + slot upgrades + Charms + Nest Row
+function permSellMult()      { return 1 + (meta ? meta.up.sell : 0) * 0.12 + charmVal('sell') + districtVal('sell'); } // +12%/lvl + Charm + Trade Lane sell bonus
+function permWildChance()    { return wildcardChance + (meta ? meta.up.luck : 0) * 0.02 + charmVal('wild') + districtVal('wild'); }
+function permMergeGold()     { return charmVal('merge') + districtVal('merge'); }              // flat coins per merge (Charms + Coin Quarter)
+function permBankRate()      { return BANK_RATE + (meta ? (meta.up.vault || 0) : 0) * 0.05 + districtVal('bank'); }  // banked cut of run score (+ Grand Plaza)
+function permIdleMul()       { return 1 + (meta ? (meta.up.idle || 0) : 0) * 0.25 + charmVal('idle') + districtVal('idle'); } // + Vault Keep idle bonus
 // codex (owned collection) - record a tier as forever-discovered
 function recordCodex(tier) {
   if (!meta || tier < 0) return;
@@ -1182,7 +1302,9 @@ function gameOver() {
     try { localStorage.setItem('beast_bazaar_best', best); } catch (e) {}
   }
   gs = 'GAMEOVER'; GF.sfx('lose');
+  var renBefore = renown();    // snapshot to show RENOWN gained this run on game-over
   bankRun();   // bank a cut of the run as permanent gold + grow the bazaar (the meta payoff)
+  lastRenownGain = Math.max(0, renown() - renBefore);
   GF.gameEnded();
   GF.saveRun();
   if (newBest && best > 0) GF.happytime();
@@ -1312,6 +1434,8 @@ function onDown(x, y) {
       for (var qi = 0; qi < questClaimRects.length; qi++) { if (hit(questClaimRects[qi])) { if (questClaimRects[qi].can && claimQuest(questClaimRects[qi].i) && GF.happytime) GF.happytime(); return; } }
     } else if (vaultTab === 'event') {
       for (var fi = 0; fi < festClaimRects.length; fi++) { if (hit(festClaimRects[fi])) { if (festClaimRects[fi].can) claimFestTier(festClaimRects[fi].i); return; } }
+    } else if (vaultTab === 'dist') {
+      for (var dbi = 0; dbi < distBuyRects.length; dbi++) { if (hit(distBuyRects[dbi])) { if (distBuyRects[dbi].can && buyDistrict(distBuyRects[dbi].id) && GF.happytime) GF.happytime(); return; } }
     } else {
       for (var mi = 0; mi < metaUpRects.length; mi++) {
         var rr = metaUpRects[mi];
@@ -2259,22 +2383,23 @@ function drawPauseOverlay(ctx) {
   var maxW = Math.min(W - 24 * S, 440 * S);
   // tab row (4 tabs) - a "!" badge on QUESTS / EVENT when a reward is claimable
   vaultTabRects = [];
-  var tabH = GF.clamp(34 * S, 28, 42), tabGap = 5 * S, NTABS = 4, tabW = (maxW - tabGap * (NTABS - 1)) / NTABS;
-  var tabX = GF.cx - maxW / 2, tabY = ty + 12 * S;
   var claimable = claimableQuests();
   var tabs = [
-    { id: 'up', label: ru ? 'УЛУЧШ.' : 'UPGRADES' },
+    { id: 'up', label: ru ? 'УЛУЧШ.' : 'UPGRADE' },
+    { id: 'dist', label: GF.t('distTab') },
     { id: 'charms', label: ru ? 'ТАЛИСМ.' : 'CHARMS' },
     { id: 'quests', label: ru ? 'ЗАДАНИЯ' : 'QUESTS', badge: claimable },
     { id: 'event', label: GF.t('evTab'), badge: festClaimable() },
   ];
+  var tabH = GF.clamp(34 * S, 28, 42), tabGap = 4 * S, NTABS = tabs.length, tabW = (maxW - tabGap * (NTABS - 1)) / NTABS;
+  var tabX = GF.cx - maxW / 2, tabY = ty + 12 * S;
   for (var t = 0; t < tabs.length; t++) {
     var on = (vaultTab === tabs[t].id), bx = tabX + t * (tabW + tabGap);
-    GF.rr(ctx, bx, tabY, tabW, tabH, 9 * S);
+    GF.rr(ctx, bx, tabY, tabW, tabH, 8 * S);
     ctx.fillStyle = on ? 'rgba(255,209,102,0.22)' : 'rgba(255,255,255,0.05)'; ctx.fill();
     ctx.strokeStyle = on ? '#ffd166' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
     ctx.fillStyle = on ? '#ffd700' : '#9a8c7a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = 'bold ' + GF.clamp(10.5 * S, 8, 14) + 'px sans-serif';
+    ctx.font = 'bold ' + GF.clamp(9 * S, 7, 12.5) + 'px sans-serif';
     ctx.fillText(tabs[t].label, bx + tabW / 2, tabY + tabH / 2);
     if (tabs[t].badge) {
       var br = GF.clamp(8 * S, 7, 11);
@@ -2302,6 +2427,7 @@ function drawPauseOverlay(ctx) {
   var pb = (vaultTab === 'charms') ? drawCharmPanel(ctx, panelTopY, maxW)
         : (vaultTab === 'quests') ? drawQuestPanel(ctx, panelTopY, maxW)
         : (vaultTab === 'event')  ? drawEventPanel(ctx, panelTopY, maxW)
+        : (vaultTab === 'dist')   ? drawDistrictPanel(ctx, panelTopY, maxW)
         : drawMetaPanel(ctx, panelTopY, maxW);
   ctx.restore();
   vaultScroll.setContentHeight(pb - panelTopY);   // natural panel height
@@ -2406,6 +2532,92 @@ function drawCharmPanel(ctx, topY, maxW) {
       ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = '#8a7d6d';
       ctx.font = GF.clamp(8.5 * S, 7.5, 11) + 'px sans-serif';
       ctx.fillText((ru ? 'играй ' : 'play ') + def.min + (ru ? 'м' : 'm'), icx, byy + tileH * 0.58);
+    }
+  }
+  ctx.textBaseline = 'alphabetic';
+  return topY + panelH;
+}
+
+// Vector district icon - a little stall/building keyed to its colour (no fonts/emoji).
+function drawDistrictIcon(ctx, def, x, y, r) {
+  ctx.save();
+  ctx.fillStyle = def.col; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = Math.max(1, r * 0.12);
+  // awning roof (triangle) + stall body (rounded rect)
+  ctx.beginPath();
+  ctx.moveTo(x - r, y - r * 0.2); ctx.lineTo(x, y - r); ctx.lineTo(x + r, y - r * 0.2); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  GF.rr(ctx, x - r * 0.78, y - r * 0.1, r * 1.56, r * 1.1, r * 0.18);
+  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.stroke();
+  // scalloped awning edge
+  ctx.fillStyle = def.col;
+  for (var i = 0; i < 4; i++) { ctx.beginPath(); ctx.arc(x - r * 0.6 + i * r * 0.4, y - r * 0.1, r * 0.16, 0, Math.PI); ctx.fill(); }
+  ctx.restore();
+}
+
+// BAZAAR tab - the never-capping owned-build meta. A RENOWN header (title + score
+// + next-unlock hint), then one row per district: icon, name + per-level effect,
+// current level, and a BUILD/upgrade button (cost in vault gold) or a renown lock.
+function drawDistrictPanel(ctx, topY, maxW) {
+  var S = GF.S, ru = (GF.lang === 'ru'), x = GF.cx - maxW / 2, pad = 12 * S;
+  distBuyRects = [];
+  var headH = 52 * S;
+  var rowH = GF.clamp(56 * S, 50, 66), rowGap = 7 * S;
+  var n = DISTRICT_DEFS.length;
+  var panelH = pad + headH + (rowH * n + rowGap * (n - 1)) + pad;
+  GF.rr(ctx, x, topY, maxW, panelH, 14 * S); ctx.fillStyle = 'rgba(40,25,16,0.94)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,209,102,0.28)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+  var cy = topY + pad;
+  // header: vault gold (left) + RENOWN title & score (right)
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif'; ctx.fillStyle = '#ffd700';
+  ctx.fillText(fmtGold(meta ? meta.bank : 0) + ' ' + GF.t('goldUnit'), x + pad, cy);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffd166'; ctx.font = 'bold ' + GF.clamp(13 * S, 10.5, 17) + 'px sans-serif';
+  ctx.fillText(renownTitle(), x + maxW - pad, cy);
+  ctx.fillStyle = '#caa86a'; ctx.font = GF.clamp(10.5 * S, 9, 14) + 'px sans-serif';
+  ctx.fillText(GF.t('renown') + ' ' + renown(), x + maxW - pad, cy + 17 * S);
+  cy += 24 * S;
+  // build prompt + next-unlock hint (the session-end "build unlocks at Renown N" goal)
+  ctx.textAlign = 'left'; ctx.fillStyle = '#9a8c7a'; ctx.font = GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+  ctx.fillText(GF.t('distBuild'), x + pad, cy);
+  cy += headH - 24 * S + 4 * S;
+  // district rows
+  for (var i = 0; i < n; i++) {
+    var d = DISTRICT_DEFS[i], lvl = districtLvl(d.id), unlocked = districtUnlocked(d);
+    var ry = cy + i * (rowH + rowGap);
+    GF.rr(ctx, x + pad, ry, maxW - pad * 2, rowH, 10 * S);
+    ctx.fillStyle = unlocked ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.025)'; ctx.fill();
+    ctx.strokeStyle = (lvl > 0) ? 'rgba(255,209,102,0.3)' : 'rgba(255,255,255,0.1)'; ctx.lineWidth = 1.3 * S; ctx.stroke();
+    var ir = GF.clamp(15 * S, 12, 20), ix = x + pad + 14 * S + ir, iy = ry + rowH / 2;
+    if (unlocked) drawDistrictIcon(ctx, d, ix, iy, ir);
+    else { ctx.save(); ctx.globalAlpha = 0.4; drawDistrictIcon(ctx, d, ix, iy, ir); ctx.restore(); }
+    var tx = ix + ir + 12 * S;
+    // name + level
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillStyle = unlocked ? '#fff' : '#8a7d6c'; ctx.font = 'bold ' + GF.clamp(12.5 * S, 10.5, 16) + 'px sans-serif';
+    var nm = districtName(d) + (lvl > 0 ? '  ' + GF.t('distLvl') + ' ' + lvl : '');
+    ctx.fillText(nm, tx, ry + 8 * S);
+    // per-level effect blurb
+    ctx.fillStyle = unlocked ? '#caa86a' : '#6f6457'; ctx.font = GF.clamp(9.5 * S, 8, 12.5) + 'px sans-serif';
+    ctx.fillText(districtDesc(d), tx, ry + 8 * S + 16 * S);
+    // build/upgrade button (right) OR renown-lock label
+    var btnW = GF.clamp(86 * S, 70, 104), btnH = GF.clamp(34 * S, 30, 42);
+    var bx = x + maxW - pad - 10 * S - btnW, by = ry + (rowH - btnH) / 2;
+    if (!unlocked) {
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#c77dff'; ctx.font = 'bold ' + GF.clamp(9.5 * S, 8, 12.5) + 'px sans-serif';
+      var lockTxt = GF.t('distUnlock').replace('{n}', d.unlock);
+      ctx.fillText(lockTxt, x + maxW - pad - 12 * S, ry + rowH / 2);
+      distBuyRects.push({ id: d.id, x: bx, y: by, w: btnW, h: btnH, can: false });
+    } else {
+      var cost = districtUpCost(d.id), afford = !!(meta && meta.bank >= cost);
+      GF.rr(ctx, bx, by, btnW, btnH, btnH / 2);
+      ctx.fillStyle = afford ? 'rgba(255,215,0,0.18)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+      ctx.strokeStyle = afford ? '#ffd700' : 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = afford ? '#ffd700' : '#9a8c7a'; ctx.font = 'bold ' + GF.clamp(10 * S, 8.5, 13) + 'px sans-serif';
+      ctx.fillText((lvl > 0 ? '' : GF.t('distBuy') + ' ') + fmtGold(cost) + GF.t('goldUnit'), bx + btnW / 2, by + btnH / 2);
+      distBuyRects.push({ id: d.id, x: bx, y: by, w: btnW, h: btnH, can: afford });
     }
   }
   ctx.textBaseline = 'alphabetic';
@@ -2573,8 +2785,11 @@ function drawMetaPanel(ctx, topY, maxW) {
   ctx.textAlign = 'left'; ctx.textBaseline = 'top';
   ctx.font = 'bold ' + GF.clamp(21 * S, 16, 27) + 'px sans-serif'; ctx.fillStyle = '#ffd700';
   ctx.fillText(fmtGold(meta ? meta.bank : 0) + ' ' + GF.t('goldUnit'), x + pad, cy);
-  ctx.font = GF.clamp(10.5 * S, 9, 14) + 'px sans-serif'; ctx.fillStyle = '#caa86a'; ctx.textAlign = 'right';
-  ctx.fillText(GF.t('bankLbl'), x + maxW - pad, cy + 6 * S);
+  // RENOWN title + score (the owned lifetime identity - never caps)
+  ctx.textAlign = 'right'; ctx.fillStyle = '#ffd166'; ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif';
+  ctx.fillText(renownTitle(), x + maxW - pad, cy);
+  ctx.fillStyle = '#caa86a'; ctx.font = GF.clamp(9.5 * S, 8, 12.5) + 'px sans-serif';
+  ctx.fillText(GF.t('renown') + ' ' + renown(), x + maxW - pad, cy + 15 * S);
   cy += 24 * S;
   // return-to-play payoff banner (idle income + daily streak) - why come back
   if (hasBanner) {
@@ -2771,6 +2986,22 @@ function drawGameOver(ctx) {
     ctx.fillText('★ ' + GF.t('patronServed') + ': ' + patronsServed + '   ' + GF.t('patronFav') + ' ' + bestPatronFavor, GF.cx, sy0 + 36 * S);
     sy0 += 20 * S;
   }
+  // RENOWN gained this run + the next-district build hint (the session-end "come
+  // back to build" hook). One compact line; the next-locked-district nudge only
+  // appears when there's one still ahead.
+  if (lastRenownGain > 0 || nextLockedDistrict()) {
+    ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#ffd166'; ctx.textAlign = 'center';
+    var rtxt = '+' + lastRenownGain + ' ' + GF.t('renown') + '  ·  ' + renownTitle();
+    ctx.fillText(rtxt, GF.cx, sy0 + 36 * S);
+    sy0 += 18 * S;
+    var nd = nextLockedDistrict();
+    if (nd) {
+      ctx.fillStyle = '#caa86a'; ctx.font = GF.clamp(10.5 * S, 8.5, 14) + 'px sans-serif';
+      ctx.fillText(GF.t('distNext') + ' ' + nd.unlock + ' (' + districtName(nd) + ')', GF.cx, sy0 + 34 * S);
+      sy0 += 16 * S;
+    }
+  }
   // score
   ctx.fillStyle = '#fff'; ctx.font = GF.clamp(18 * S, 13, 26) + 'px sans-serif';
   ctx.fillText(GF.t('score') + ': ' + score, GF.cx, sy0 + 50 * S);
@@ -2923,6 +3154,8 @@ window._bbInfo = function () {
     // M3 Collection state - tabs, charms, equip slots (drive equip/upgrade in tests)
     vaultTab: vaultTab, tabRects: vaultTabRects, charmTiles: charmTileRects, charmUps: charmUpRects, equipSlots: equipSlotRects,
     equipped: meta ? meta.equipped.slice() : [], charms: meta ? meta.charms : {},
+    // META - Bazaar Districts + Renown (drive build/upgrade in tests)
+    distBuys: distBuyRects, renown: renown(), districts: meta ? (meta.districts || {}) : {},
     totalPlayMin: Math.floor(totalPlayMin()), nextCharm: (function () { var n = nextCharm(); return n ? { id: n.id, min: n.min } : null; }()),
     quests: (meta && meta.quests) ? meta.quests.map(function (q) { return { kind: q.kind, goal: q.goal, prog: q.prog, done: q.done, claimed: q.claimed, reward: q.reward }; }) : [],
     questClaims: questClaimRects, claimableQuests: claimableQuests(),
@@ -2956,6 +3189,14 @@ window._bbFillBoard = function () {
 window._bbWinQuest = function (i) {
   var q = meta && meta.quests && meta.quests[i]; if (!q) return;
   q.prog = q.goal; q.done = true; q.claimed = false; saveMeta();
+};
+// Test seam: grant vault gold + lifetime deliveries so a harness can reach a target
+// RENOWN and afford a district BUILD without grinding real runs. No console output.
+window._bbGrantMeta = function (gold, deliveries) {
+  if (!meta) return;
+  meta.bank += Math.max(0, +gold || 0);
+  meta.totalDeliveries += Math.max(0, Math.floor(+deliveries || 0));
+  recomputeBazaarLevel(); saveMeta();
 };
 // Test seam: force cumulative playtime (minutes) so the Charm ladder can be exercised
 // without real wall-clock waiting. Grants any newly-eligible charms. No console output.
@@ -3011,6 +3252,8 @@ function reachState() {
       for (var qi = 0; qi < questClaimRects.length; qi++) _riContent(items, 'quest_' + qi, questClaimRects[qi]);
     } else if (vaultTab === 'event') {
       for (var fi = 0; fi < festClaimRects.length; fi++) _riContent(items, 'fest_' + fi, festClaimRects[fi]);
+    } else if (vaultTab === 'dist') {
+      for (var dbi = 0; dbi < distBuyRects.length; dbi++) _riContent(items, 'dist_' + distBuyRects[dbi].id, distBuyRects[dbi]);
     } else {
       for (var mi = 0; mi < metaUpRects.length; mi++) _riContent(items, 'up_' + metaUpRects[mi].key, metaUpRects[mi]);
     }
@@ -3034,6 +3277,7 @@ function reachState() {
 var REACH_TOUR = [
   { name: 'play',         go: function () { paused = false; if (GF.tutorial) GF.tutorial.active = false; if (gs !== 'PLAYING') startGame(); } },
   { name: 'vault_up',     go: function () { if (gs !== 'PLAYING') startGame(); paused = true; vaultTab = 'up'; if (vaultScroll) vaultScroll.scrollTo(0); } },
+  { name: 'vault_dist',   go: function () { if (gs !== 'PLAYING') startGame(); paused = true; vaultTab = 'dist'; if (vaultScroll) vaultScroll.scrollTo(0); } },
   { name: 'vault_charms', go: function () { if (gs !== 'PLAYING') startGame(); paused = true; vaultTab = 'charms'; if (vaultScroll) vaultScroll.scrollTo(0); } },
   { name: 'vault_quests', go: function () { if (gs !== 'PLAYING') startGame(); paused = true; vaultTab = 'quests'; if (vaultScroll) vaultScroll.scrollTo(0); } },
   { name: 'vault_event',  go: function () { if (gs !== 'PLAYING') startGame(); paused = true; vaultTab = 'event'; if (vaultScroll) vaultScroll.scrollTo(0); } },
@@ -3123,6 +3367,9 @@ GF.exposeState(function () {
     lifeCrowns: meta ? (meta.lifeCrowns || 0) : 0, bestCrowns: meta ? (meta.bestCrowns || 0) : 0,
     festTokens: (meta && meta.fest) ? meta.fest.tokens : 0,
     festClaimable: festClaimable(), festTheme: festTheme().id, festHoursLeft: Math.round(festHoursLeft()),
+    renown: renown(), renownTitle: renownTitle(),
+    districtLevels: (function () { var o = {}; for (var i = 0; i < DISTRICT_DEFS.length; i++) o[DISTRICT_DEFS[i].id] = districtLvl(DISTRICT_DEFS[i].id); return o; }()),
+    nextLockedDistrict: (function () { var d = nextLockedDistrict(); return d ? d.id : ''; }()),
     paused: paused, vaultTab: vaultTab,
     // tunables (DESIGN.md §Tunables)
     boardCols: boardCols, boardRows: boardRows, genCharge: genCharge, genRechargeMs: genRechargeMs,

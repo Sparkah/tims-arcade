@@ -50,6 +50,13 @@ var STRINGS = {
     up_brush: 'Brush Width', up_speed: 'Move Speed', up_time: 'Extra Time',
     up_brush_d: 'Sweep a wider area', up_speed_d: 'Glide faster', up_time_d: 'Start each room with more seconds',
     lvl: 'Lv', next_up: 'Next upgrade', have: 'have', resume: 'CONTINUE',
+    // M2 — daily / streak / idle / quests
+    welcome_back: 'WELCOME BACK', day_streak: 'DAY STREAK', daily_bonus: 'Daily bonus',
+    idle_earned: 'Crew swept while away', collect: 'COLLECT', day: 'Day',
+    quests: 'DAILY TASKS', q_all: 'All tasks', q_alldone: 'ALL TASKS!',
+    q_rooms: 'Clean {n} rooms', q_dirt: 'Sweep {n} dirt', q_combo: 'Hit a x{n} combo',
+    q_coins: 'Earn {n} coins', q_perfect: 'Clear a room fast', q_done: 'DONE',
+    streak_hint: 'Come back tomorrow for', tasks_left: 'tasks left today',
   },
   ru: {
     title: 'Уборщик Квартир', sub: 'Убери каждую комнату до заката!',
@@ -63,6 +70,13 @@ var STRINGS = {
     up_brush: 'Ширина щётки', up_speed: 'Скорость', up_time: 'Доп. время',
     up_brush_d: 'Убирай шире за раз', up_speed_d: 'Двигайся быстрее', up_time_d: 'Больше секунд в каждой комнате',
     lvl: 'Ур', next_up: 'Следующее улучшение', have: 'есть', resume: 'ПРОДОЛЖИТЬ',
+    // M2 — daily / streak / idle / quests
+    welcome_back: 'С ВОЗВРАЩЕНИЕМ', day_streak: 'ДНЕЙ ПОДРЯД', daily_bonus: 'Ежедневный бонус',
+    idle_earned: 'Бригада убирала', collect: 'ЗАБРАТЬ', day: 'День',
+    quests: 'ЗАДАНИЯ ДНЯ', q_all: 'Все задания', q_alldone: 'ВСЕ ЗАДАНИЯ!',
+    q_rooms: 'Убери {n} комнат', q_dirt: 'Собери {n} грязи', q_combo: 'Комбо x{n}',
+    q_coins: 'Заработай {n} монет', q_perfect: 'Убери комнату быстро', q_done: 'ГОТОВО',
+    streak_hint: 'Завтра получишь', tasks_left: 'заданий осталось',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -114,6 +128,7 @@ var particles = [], floats = [], buttons = [];
 var combo = 0, comboT = 0;
 var revealT = 0; // 0..1 reveal animation when room complete
 var coinsRun = 0; // coins banked THIS room (shown on clear/gameover)
+var runDirtSwept = 0; // M2: dirt swept this room (telemetry for quest feel; bookkeeping)
 
 // ── PERSISTENT META (M1 core meta loop, 2026-06-07) ──────────────────────────
 // Owned across sessions: coins + 3 deep upgrade tracks (the Tool Shed). The
@@ -159,8 +174,160 @@ function buyUpgrade(key){
   saveMeta();
   return true;
 }
-function saveMeta(){ if (GF&&GF.saveRun) GF.saveRun(); }
+function saveMeta(){ lastSeen = Date.now(); if (GF&&GF.saveRun) GF.saveRun(); }
 var GF = window.GF || {};
+
+// ── M2: REASON TO RETURN (daily reward + streak + idle accrual + quests) ─────
+// 2026-06-11. Gives tomorrow a concrete payout so the habit forms across real
+// days (not just within a session). All folded into the same apt_meta_v1 save.
+var DAY_MS = 86400000;
+// Idle: crew keeps sweeping while away. Rate scales with furthest room (meta
+// progress feeds idle income — ties M1<->M2). Capped so the cap IS the return
+// trigger (uncapped idle kills the return — Retention spec).
+var IDLE_CAP_H = 10;
+function idleRatePerHour(){ return 18 + Math.max(0, resumeRoom) * 6; } // coins/hr
+// 7-day login streak: day N reward escalates, plateaus at day 7.
+var LOGIN_REWARDS = [30, 45, 65, 90, 120, 160, 220]; // day 1..7+
+function loginRewardFor(streakDay){ return LOGIN_REWARDS[clamp(streakDay-1,0,LOGIN_REWARDS.length-1)]; }
+
+var lastDay = 0;        // day-index (floor(now/DAY_MS)) of last login reward claimed
+var streak = 0;         // consecutive-day login streak
+var lastSeen = 0;       // epoch ms of last save (for idle accrual)
+var questDay = 0;       // day-index the current quest set was generated for
+var quests = [];        // [{id,type,target,prog,done,claimed,reward}]
+// pending payouts surfaced on the DAILY overlay (computed on first menu open):
+var pending = { idle:0, idleHrs:0, login:0, streakDay:0, isNewDay:false, shown:false };
+
+// Quest templates — seeded per day, one is tuned EASY (momentum transfer).
+var QUEST_POOL = [
+  { type:'rooms',  target:3,   reward:60,  nameKey:'q_rooms'  },
+  { type:'rooms',  target:1,   reward:25,  nameKey:'q_rooms'  },   // easy momentum
+  { type:'dirt',   target:200, reward:55,  nameKey:'q_dirt'   },
+  { type:'dirt',   target:120, reward:35,  nameKey:'q_dirt'   },
+  { type:'combo',  target:6,   reward:50,  nameKey:'q_combo'  },
+  { type:'combo',  target:4,   reward:30,  nameKey:'q_combo'  },
+  { type:'coins',  target:120, reward:45,  nameKey:'q_coins'  },
+  { type:'perfect',target:1,   reward:70,  nameKey:'q_perfect'},   // clear a room with time>15s left
+];
+var ALL_QUESTS_BONUS = 80; // completing all 3 in a day
+function dayIndex(ms){ return Math.floor((ms||Date.now()) / DAY_MS); }
+function genQuests(di){
+  // deterministic per day so a refresh keeps the same set; pick 3 distinct types,
+  // guarantee at least one EASY (low target) for momentum transfer.
+  var rng = mulberry(di*2654435761 ^ 0x9e3779b9);
+  var pool = QUEST_POOL.slice();
+  var chosen = [], types = {};
+  // first pick: force an easy one (target<=1 rooms / <=4 combo / <=120 dirt)
+  var easy = pool.filter(function(q){ return (q.type==='rooms'&&q.target<=1)||(q.type==='combo'&&q.target<=4)||(q.type==='dirt'&&q.target<=120); });
+  var e = easy[Math.floor(rng()*easy.length)];
+  chosen.push(e); types[e.type]=1;
+  var guard=0;
+  while (chosen.length < 3 && guard++ < 50) {
+    var q = pool[Math.floor(rng()*pool.length)];
+    if (types[q.type]) continue;
+    types[q.type]=1; chosen.push(q);
+  }
+  return chosen.map(function(q,i){
+    return { id:di+'_'+i, type:q.type, target:q.target, reward:q.reward,
+             nameKey:q.nameKey, prog:0, done:false, claimed:false };
+  });
+}
+function ensureQuests(){
+  var di = dayIndex();
+  if (questDay !== di || !quests || quests.length === 0) {
+    questDay = di; quests = genQuests(di);
+    saveMeta();
+  }
+}
+function questsAllDone(){ for (var i=0;i<quests.length;i++) if (!quests[i].done) return false; return quests.length>0; }
+function allQuestsRewardClaimed(){ // the +ALL bonus is auto-banked; flag stored on quests[0]
+  return quests.length>0 && quests[0]._allClaimed;
+}
+// progress a quest type during play; banks reward immediately on completion + toast
+function questProgress(type, amount){
+  ensureQuests();
+  var changed=false, justDone=null;
+  for (var i=0;i<quests.length;i++){
+    var q=quests[i];
+    if (q.type!==type || q.done) continue;
+    q.prog = Math.min(q.target, q.prog + amount);
+    if (q.prog >= q.target) { q.done=true; coins+=q.reward; justDone=q; changed=true; }
+    else changed=true;
+  }
+  if (justDone){
+    spawnFloat(cx, cy - 60*S, '✓ +'+justDone.reward, '#2ecc71');
+    if (GF.sfx) GF.sfx('unlock');
+    // all-three bonus
+    if (questsAllDone() && !allQuestsRewardClaimed()){
+      coins += ALL_QUESTS_BONUS; quests[0]._allClaimed = true;
+      spawnFloat(cx, cy - 36*S, t('q_alldone')+' +'+ALL_QUESTS_BONUS, '#FFD700');
+      if (GF.sfx) GF.sfx('win');
+    }
+  }
+  if (changed) saveMeta();
+}
+// For "reach a value" quests (combo peak): set progress to the max seen.
+function questSetMax(type, value){
+  ensureQuests();
+  var justDone=null;
+  for (var i=0;i<quests.length;i++){
+    var q=quests[i];
+    if (q.type!==type || q.done) continue;
+    if (value > q.prog) q.prog = Math.min(q.target, value);
+    if (q.prog >= q.target){ q.done=true; coins+=q.reward; justDone=q; }
+  }
+  if (justDone){
+    spawnFloat(cx, cy - 60*S, '✓ +'+justDone.reward, '#2ecc71');
+    if (GF.sfx) GF.sfx('unlock');
+    if (questsAllDone() && !allQuestsRewardClaimed()){
+      coins += ALL_QUESTS_BONUS; quests[0]._allClaimed = true;
+      spawnFloat(cx, cy - 36*S, t('q_alldone')+' +'+ALL_QUESTS_BONUS, '#FFD700');
+      if (GF.sfx) GF.sfx('win');
+    }
+    saveMeta();
+  }
+}
+// Quest label with {n} substitution (target injected).
+function questLabel(q){ return t(q.nameKey).replace('{n}', q.target); }
+// Compute idle + login when the player opens the game (called once on boot,
+// AFTER persist load). Fills `pending`; the DAILY overlay then offers CLAIM.
+function computeReturnRewards(){
+  var now = Date.now();
+  var di = dayIndex(now);
+  // ── idle accrual since lastSeen, capped ──
+  if (lastSeen > 0) {
+    var hrs = Math.min(IDLE_CAP_H, (now - lastSeen) / 3600000);
+    if (hrs > 0.05) {
+      pending.idle = Math.floor(hrs * idleRatePerHour());
+      pending.idleHrs = hrs;
+    }
+  }
+  // ── daily login + streak ──
+  if (lastDay === 0 && lastSeen === 0) {
+    // FIRST-EVER visit: no "welcome back" — they've not been anywhere. Start the
+    // streak at day 1 and silently bank the day-1 bonus; drop them on the MENU.
+    streak = 1; coins += loginRewardFor(1); lastDay = di; pending.streakDay = 1;
+    saveMeta();
+  } else if (di > lastDay) {
+    streak = (di === lastDay + 1) ? streak + 1 : 1; // consecutive → grow, gap → reset
+    pending.login = loginRewardFor(streak); pending.streakDay = streak; pending.isNewDay = true;
+  } else {
+    pending.streakDay = streak; // already claimed today
+  }
+  // overlay is needed only when a returning player has something to collect
+  pending.shown = !(pending.idle > 0 || pending.login > 0);
+  ensureQuests();
+}
+function claimReturnRewards(){
+  if (pending.idle > 0) coins += pending.idle;
+  if (pending.login > 0) { coins += pending.login; lastDay = dayIndex(); }
+  lastSeen = Date.now();
+  pending.idle = 0; pending.login = 0; pending.shown = true;
+  if (GF.sfx) GF.sfx('reward');
+  saveMeta();
+}
+window._claimDaily = function(){ claimReturnRewards(); };
+window._setReturnState = function(idle, login, sd){ pending.idle=idle||0; pending.login=login||0; pending.streakDay=sd||1; pending.idleHrs=2; pending.shown=false; gs='DAILY'; };
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var keys = {};
@@ -221,7 +388,7 @@ function startRoom(n) {
   room = n;
   palette = ROOMS[(n - 1) % ROOMS.length];
   particles = []; floats = []; buttons = [];
-  combo = 0; comboT = 0; revealT = 0; coinsRun = 0;
+  combo = 0; comboT = 0; revealT = 0; coinsRun = 0; runDirtSwept = 0;
   timeLeft = Math.max(28, 75 - (n - 1) * 5) + bonusTime();
 
   var rng = mulberry(n * 9301 + 49297);
@@ -377,6 +544,9 @@ function update(dt) {
       spawnParticles(d.x, d.y, palette.accent, 4 + Math.ceil(d.r));
       if (GF.sfxRL) GF.sfxRL(prevCombo > 4 ? 'combo' : 'sweep', 55);
       if (combo > 1) spawnFloat(d.x, d.y - 12*S, 'x'+combo+' +'+pts, '#FFD700');
+      runDirtSwept++;                          // M2 quest: total dirt swept this run
+      questProgress('dirt', 1);
+      questSetMax('combo', combo);             // combo quest = peak combo reached
       dirt.splice(i, 1);
     } else {
       d.wobble += dt * 1.6;
@@ -390,6 +560,10 @@ function update(dt) {
     coinsRun = 8 + room * 2 + Math.round(timeLeft * 0.6);
     coins += coinsRun;
     resumeRoom = Math.max(resumeRoom, room);
+    // ── M2 quest hooks on a full room clear ──
+    questProgress('rooms', 1);
+    questProgress('coins', coinsRun);
+    if (timeLeft > 15) questProgress('perfect', 1); // "clear a room fast" (>15s left)
     saveMeta();
     spawnFloat(cx, cy - 30*S, t('bonus')+' +'+bonus, '#2ecc71');
     spawnParticles(player.x, player.y, '#FFD700', 22);
@@ -720,6 +894,94 @@ function hitMute(px, py) {
 }
 
 // ── TOOL SHED — persistent upgrade screen (the owned meta) ───────────────────
+// ── M2: streak pip row (7 days) ──────────────────────────────────────────────
+function drawStreakPips(x, y, activeDays, r){
+  var n = 7, gap = r*2.9, totalW = (n-1)*gap;
+  var startX = x - totalW/2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (var i=0;i<n;i++){
+    var px = startX + i*gap, on = i < activeDays;
+    ctx.beginPath(); ctx.arc(px, y, r, 0, Math.PI*2);
+    if (on){
+      var g = ctx.createRadialGradient(px-r*0.3, y-r*0.3, 0, px, y, r);
+      g.addColorStop(0,'#ffe27a'); g.addColorStop(1,'#e0a417'); ctx.fillStyle=g; ctx.fill();
+      ctx.strokeStyle='#a87908'; ctx.lineWidth=Math.max(1,r*0.12); ctx.stroke();
+    } else {
+      ctx.fillStyle='rgba(255,255,255,0.10)'; ctx.fill();
+      ctx.strokeStyle='rgba(255,255,255,0.18)'; ctx.lineWidth=1; ctx.stroke();
+    }
+    ctx.fillStyle = on ? '#3a2a00' : '#667';
+    ctx.font = 'bold '+(r*0.95)+'px sans-serif';
+    ctx.fillText(''+(i+1), px, y + r*0.06);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── M2: WELCOME-BACK / DAILY overlay (login reward + streak + idle claim) ─────
+function drawDaily() {
+  buttons = [];
+  ctx.fillStyle = 'rgba(8,12,28,0.92)'; ctx.fillRect(0, 0, W, H);
+  var wide = W / H > 1.15;
+
+  var titleFs = clamp(34*S, 22, 50);
+  ctx.font = 'bold '+titleFs+'px sans-serif'; ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(46,204,113,0.5)'; ctx.shadowBlur = 24*S;
+  var topY = clamp(70*S, 48, 120);
+  ctx.fillText(t('welcome_back'), cx, topY);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+
+  var y = topY + clamp(40*S, 28, 60);
+
+  // ── streak block ──
+  ctx.font = 'bold '+clamp(15*S,11,19)+'px sans-serif'; ctx.fillStyle = '#9ab';
+  ctx.fillText(pending.streakDay + ' ' + t('day_streak'), cx, y);
+  y += clamp(28*S, 20, 40);
+  drawStreakPips(cx, y, pending.streakDay, clamp(13*S, 10, 18));
+  y += clamp(44*S, 32, 62);
+
+  // ── reward rows (login bonus + idle) drawn as pills ──
+  var rowFs = clamp(15*S, 12, 19);
+  function rewardRow(labelTxt, amount, sub){
+    var cardW = Math.min(W - 48*S, 420*S), cardX = cx - cardW/2, cardH = clamp(50*S, 40, 64);
+    rr(ctx, cardX, y, cardW, cardH, 12*S);
+    ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(255,226,122,0.35)'; ctx.lineWidth = 1.5*S; ctx.stroke();
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold '+rowFs+'px sans-serif'; ctx.fillStyle = '#dfe7ff';
+    ctx.fillText(labelTxt, cardX + 16*S, y + cardH*0.5 + (sub?-rowFs*0.45:0));
+    if (sub){
+      ctx.font = clamp(11.5*S,9,15)+'px sans-serif'; ctx.fillStyle = '#8aa';
+      ctx.fillText(sub, cardX + 16*S, y + cardH*0.5 + rowFs*0.7);
+    }
+    // amount pill on right
+    drawCoinPill(cardX + cardW - clamp(54*S,42,72), y + cardH/2, amount, clamp(15*S,12,19));
+    ctx.textBaseline = 'alphabetic';
+    y += cardH + 12*S;
+  }
+  if (pending.login > 0) rewardRow(t('daily_bonus'), pending.login, t('day')+' '+pending.streakDay);
+  if (pending.idle > 0)  rewardRow(t('idle_earned'), pending.idle, '~'+Math.round(pending.idleHrs)+'h');
+
+  // ── COLLECT button ──
+  var btnW = clamp((wide?300:260)*S, 170, 380), btnH = clamp((wide?60:54)*S, 42, 76);
+  var btnY = Math.min(H - btnH - clamp(30*S,20,50), Math.max(y + 10*S, H*0.62));
+  var _t = performance.now()/1000, _k = Math.sin(_t*2.2), _p = 1 + 0.045*_k;
+  var _w = btnW*_p, _h = btnH*_p, _x = cx - _w/2, _y = btnY + btnH/2 - _h/2;
+  var grad = ctx.createLinearGradient(_x, _y, _x, _y+_h);
+  grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#1e8449');
+  ctx.save();
+  ctx.shadowColor = 'rgba(46,224,122,'+(0.4+0.28*_k).toFixed(3)+')'; ctx.shadowBlur = (20+10*_k)*S;
+  rr(ctx, _x, _y, _w, _h, _h/2); ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+  ctx.font = 'bold '+clamp((wide?22:18)*S,14,28)+'px sans-serif'; ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(t('collect'), cx, btnY + btnH/2);
+  ctx.textBaseline = 'alphabetic';
+  buttons.push({ x:cx-btnW/2, y:btnY, w:btnW, h:btnH, fn:function(){ claimReturnRewards(); gs = 'MENU'; } });
+
+  drawMuteBtn();
+}
+
 function drawShed() {
   buttons = [];
   ctx.fillStyle = 'rgba(8,12,28,0.94)'; ctx.fillRect(0, 0, W, H);
@@ -835,26 +1097,30 @@ function drawOverlay(title, sub, btnText, btnFn, sub2, opts) {
   var wide    = W / H > 1.15;
   var btnW    = clamp((wide?320:240)*S, 160, 400), btnH = clamp((wide?64:52)*S, 40, 82);
   var btnX    = cx - btnW/2;
-  // text block bottom: title at cy-50*S, sub at cy-16*S (+subFs), sub2 at cy+2*S (+subFs)
-  var textBlockBottom = cy - 16*S + subFs + (sub2 ? subFs + 18*S : 0);
-  var wideFloor       = H * 0.58;
+  // The MENU stacks a lot below PLAY (BEST + Tool Shed + upgrade hint + daily-quests
+  // panel). On a wide/short viewport that runs off the bottom (Step 3b: 1280x720
+  // clipped the panel), so lift the whole overlay up when the quest panel is shown.
+  // (The gallery preview recorder reaches gameplay via the __gfBot 'start' seam, so
+  // moving PLAY off 800x600-centre no longer breaks the preview.)
+  var ay = cy - ((opts.quests && wide) ? 132*S : 0);
+  var textBlockBottom = ay - 16*S + subFs + (sub2 ? subFs + 18*S : 0);
   var btnY = wide
-    ? Math.max(textBlockBottom + btnH / 2 + 16, wideFloor)
+    ? Math.max(textBlockBottom + btnH / 2 + 16, (opts.quests ? H * 0.20 : H * 0.58))
     : cy + 20*S;
 
   ctx.shadowColor = 'rgba(46,204,113,0.45)'; ctx.shadowBlur = 30*S;
   ctx.font = 'bold '+titleFs+'px sans-serif';
   ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  ctx.fillText(title, cx, cy - 50*S);
+  ctx.fillText(title, cx, ay - 50*S);
   ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
 
   if (sub) {
     ctx.font = subFs+'px sans-serif'; ctx.fillStyle = '#9ab';
-    ctx.fillText(sub, cx, cy - 16*S);
+    ctx.fillText(sub, cx, ay - 16*S);
   }
   if (sub2) {
     ctx.font = subFs+'px sans-serif'; ctx.fillStyle = '#bcd';
-    ctx.fillText(sub2, cx, cy + 2*S);
+    ctx.fillText(sub2, cx, ay + 2*S);
   }
 
   // animated PLAY button (only for the start-game call; also applies to retry/next but fine)
@@ -910,6 +1176,52 @@ function drawOverlay(title, sub, btnText, btnFn, sub2, opts) {
       ctx.fillStyle = coins >= hint.cost ? '#2ecc71' : '#c9a227';
       ctx.font = 'bold '+clamp(12.5*S,10,16)+'px sans-serif';
       ctx.fillText(hint.cost+'  ('+t('have')+' '+coins+')', cx, hy + 18*S);
+      infoY = hy + 18*S;
+    } else { infoY = sY + sH; }
+  }
+
+  // ── M2: compact daily-quests panel on the MENU (reason-to-return surfaced) ──
+  if (opts.quests && quests && quests.length) {
+    var qTop = infoY + clamp(26*S, 18, 40);
+    var qGap = 6*S, qRowH = clamp(26*S, 21, 34);
+    var doneN = 0; for (var qi=0; qi<quests.length; qi++) if (quests[qi].done) doneN++;
+    // header
+    ctx.textAlign = 'center'; ctx.font = 'bold '+clamp(13*S,11,17)+'px sans-serif';
+    ctx.fillStyle = '#9ed0f5';
+    ctx.fillText(t('quests')+'  '+doneN+'/'+quests.length, cx, qTop);
+    var qy = qTop + clamp(14*S, 10, 20);
+    var qCardW = Math.min(W - 44*S, 380*S), qCardX = cx - qCardW/2;
+    for (var qi=0; qi<quests.length; qi++) {
+      var q = quests[qi];
+      rr(ctx, qCardX, qy, qCardW, qRowH, 7*S);
+      ctx.fillStyle = q.done ? 'rgba(46,204,113,0.14)' : 'rgba(255,255,255,0.045)'; ctx.fill();
+      // progress fill (under text)
+      if (!q.done && q.target>0) {
+        ctx.save(); rr(ctx, qCardX, qy, qCardW*Math.min(1,q.prog/q.target), qRowH, 7*S);
+        ctx.fillStyle = 'rgba(93,173,226,0.13)'; ctx.fill(); ctx.restore();
+      }
+      // label (clip so it never runs under the reward); cap to compressed row height
+      var qFs = Math.min(clamp(11.5*S, 9.5, 15), qRowH*0.62);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(qCardX+9*S, qy, qCardW-70*S, qRowH); ctx.clip();
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.font = (q.done?'bold ':'')+qFs+'px sans-serif';
+      ctx.fillStyle = q.done ? '#7fe0a8' : '#cdd6e6';
+      ctx.fillText((q.done?'✓ ':'')+questLabel(q), qCardX+10*S, qy+qRowH/2);
+      ctx.restore();
+      // right side: reward or DONE
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold '+qFs+'px sans-serif';
+      if (q.done){ ctx.fillStyle = '#6c8'; ctx.fillText(t('q_done'), qCardX+qCardW-10*S, qy+qRowH/2); }
+      else { ctx.fillStyle = '#ffd35a'; ctx.fillText('+'+q.reward+(q.target>1?'  '+q.prog+'/'+q.target:''), qCardX+qCardW-10*S, qy+qRowH/2); }
+      ctx.textBaseline = 'alphabetic';
+      qy += qRowH + qGap;
+    }
+    // streak teaser: come back tomorrow for +N
+    if (streak > 0) {
+      ctx.textAlign = 'center'; ctx.font = clamp(11*S,9,14)+'px sans-serif'; ctx.fillStyle = '#778';
+      var nextR = loginRewardFor(streak+1);
+      ctx.fillText(t('streak_hint')+' +'+nextR+' ('+t('day')+' '+(streak+1)+')', cx, qy + 10*S);
     }
   }
 
@@ -965,13 +1277,18 @@ function frame(ts) {
     drawShed();
   }
 
+  if (gs === 'DAILY') {
+    ctx.fillStyle = '#0c0c1a'; ctx.fillRect(0,0,W,H);
+    drawDaily();
+  }
+
   if (gs === 'MENU') {
     ctx.fillStyle = '#0c0c1a'; ctx.fillRect(0,0,W,H);
     var menuBtnTxt = resumeRoom > 0 ? t('resume') : t('play');
     var menuSub2 = resumeRoom > 0 ? (t('room')+' '+resumeRoom+' • '+t('best')+' '+best) : null;
     drawOverlay(t('title'), t('sub'), menuBtnTxt,
       function() { if (GF.sfx) GF.sfx('tap'); score=0; startRoom(resumeRoom > 0 ? resumeRoom : 1); },
-      menuSub2, { meta:true });
+      menuSub2, { meta:true, quests:true });
   }
   if (gs === 'LEVELEND' && revealT >= 1) {
     drawOverlay(t('complete')+' (' + t(palette.nameKey) + ')', t('score')+': '+score, t('next'),
@@ -1005,21 +1322,34 @@ function boot() {
   // ── Persistent meta: load owned coins + upgrades + best + furthest room ──
   if (GF.persist) {
     GF.persist('apt_meta_v1',
-      function () { return { coins:coins, upg:upg, best:best, resumeRoom:resumeRoom }; },
+      function () { return { coins:coins, upg:upg, best:best, resumeRoom:resumeRoom,
+        lastDay:lastDay, streak:streak, lastSeen:lastSeen, questDay:questDay, quests:quests }; },
       function (s) {
         if (!s) return;
         coins = s.coins || 0;
         if (s.upg) { upg.brush = s.upg.brush||0; upg.speed = s.upg.speed||0; upg.time = s.upg.time||0; }
         best = Math.max(best, s.best||0);
         resumeRoom = s.resumeRoom || 0;
+        // ── M2 restore ──
+        lastDay = s.lastDay || 0;
+        streak = s.streak || 0;
+        lastSeen = s.lastSeen || 0;
+        questDay = s.questDay || 0;
+        quests = Array.isArray(s.quests) ? s.quests : [];
       });
   }
 
+  // ── M2: compute return rewards (idle + daily login/streak) on open ──
+  computeReturnRewards();
+
   // ── State seam for the post-build-tester gate ──
   if (GF.exposeState) GF.exposeState(function () {
+    var qDone=0; for (var i=0;i<quests.length;i++) if (quests[i].done) qDone++;
     return { gs:gs, score:score, best:best, room:room, coins:coins,
              upgBrush:upg.brush, upgSpeed:upg.speed, upgTime:upg.time,
-             dirtLeft:dirt.length, timeLeft:Math.ceil(timeLeft) };
+             dirtLeft:dirt.length, timeLeft:Math.ceil(timeLeft),
+             streak:streak, questsDone:qDone, questsTotal:quests.length,
+             pendingIdle:pending.idle, pendingLogin:pending.login };
   });
 
   // ── Bot contract for the progression probe ──
@@ -1030,6 +1360,7 @@ function boot() {
         for (var i=0;i<UPGRADES.length;i++){ var c=upgCost(UPGRADES[i].key); if (c!=null && coins>=c) acts.push('buy_'+UPGRADES[i].key); }
         return acts;
       }
+      if (gs === 'DAILY') { return ['claimDaily']; }
       if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'LEVELEND') {
         var acts = ['start'];
         // affordable upgrades become bot actions so the probe exercises the meta
@@ -1044,8 +1375,10 @@ function boot() {
     },
     function (a) {
       if (a === 'exitShed') { gs = shedReturn || 'MENU'; return; }
+      if (a === 'claimDaily') { claimReturnRewards(); gs = 'MENU'; return; }
       if (a === 'start') {
         if (gs==='SHED') gs = shedReturn || 'MENU';
+        if (gs==='DAILY') { claimReturnRewards(); gs='MENU'; }
         if (gs==='MENU') { score=0; startRoom(resumeRoom>0?resumeRoom:1); }
         else if (gs==='LEVELEND') startRoom(room+1);
         else if (gs==='GAMEOVER') { score=0; startRoom(room); }
@@ -1068,10 +1401,18 @@ function boot() {
 
   gs = 'MENU';
 
+  // ── M2: show the WELCOME-BACK / daily-claim screen first if there's a
+  //    login bonus or idle pile waiting (gallery + platform-with-menu only). ──
+  var hasReturnReward = (pending.idle > 0 || pending.login > 0);
+
   // ── PLATFORM AUTOSTART (CLAUDE.md #9): drop straight into gameplay on
-  //    Yandex/CrazyGames; the gallery (no flag) keeps its menu. ──
+  //    Yandex/CrazyGames; the gallery (no flag) keeps its menu. We still BANK
+  //    any daily/idle reward silently so it's never lost — just skip the screen. ──
   if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') {
+    if (hasReturnReward) claimReturnRewards();   // silent bank, no overlay
     score = 0; startRoom(resumeRoom > 0 ? resumeRoom : 1);
+  } else if (hasReturnReward && !window._silent) {
+    gs = 'DAILY';   // gallery: greet returning player with their payout
   }
 
   lastTs = performance.now();
