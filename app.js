@@ -163,6 +163,11 @@ async function init() {
 
   render();
 
+  // Hidden Gems shelf - the least-attention tail surfaced as a discovery
+  // section below the grid. The fetch is deferred until the visitor scrolls
+  // near the footer, so the homepage critical path never pays for it.
+  setupGemsLazyLoad();
+
   // SECOND PAINT — vote counts + featured game. We wait for BOTH so the
   // second render is the final state; a third render would just churn DOM.
   Promise.all([countsP, trendingP]).then(([c, t]) => {
@@ -612,6 +617,7 @@ function render() {
     empty.classList.remove('hidden');
     empty.innerHTML = emptyMessage();
     renderPagination(0);
+    renderGems();
     return;
   }
   empty.classList.add('hidden');
@@ -633,6 +639,7 @@ function render() {
   const rest = pageList.slice(CHUNK_SIZE);
   paintChunks(rest, () => hydrateLazyVideos(), gen);
   renderPagination(totalPages);
+  renderGems();
 }
 
 function paintChunks(rest, done, gen) {
@@ -850,6 +857,73 @@ function renderFeatured() {
   return game.slug;
 }
 
+// ── Hidden Gems shelf ─────────────────────────────────────────────────────
+// "Least attention" surfaced with player-positive framing: the games at the
+// bottom of the attention ranking (/api/least-attention: plays + votes*3 +
+// comments*5, ascending, 48h grace for new games) get a shelf of their own
+// below the grid so they can earn the impressions the Top feed never gives
+// them. Lazy: the fetch fires only when the visitor nears the footer.
+const GEMS_LIMIT = 12;
+let gemsGames = null;      // game objects resolved from /api/least-attention
+let gemsRequested = false; // fetch-once guard
+
+function setupGemsLazyLoad() {
+  // The #gems section itself is display:none until data lands, so it can't
+  // be observed directly - watch the (always-rendered) footer instead.
+  const sentinel = document.querySelector('footer');
+  if (!document.getElementById('gems') || !sentinel) return;
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      if (!entries.some(e => e.isIntersecting)) return;
+      io.disconnect();
+      loadGems();
+    }, { rootMargin: '600px 0px' });
+    io.observe(sentinel);
+  } else {
+    schedule(loadGems);
+  }
+}
+
+async function loadGems() {
+  if (gemsRequested) return;
+  gemsRequested = true;
+  let data = null;
+  try {
+    const r = await fetch(`/api/least-attention?limit=${GEMS_LIMIT * 2}`, { cache: 'no-store' });
+    data = r.ok ? await r.json() : null;
+  } catch (e) { /* shelf is best-effort - never break the page */ }
+  if (!data || !Array.isArray(data.games)) return;
+  // Resolve slugs against the already-filtered catalogue (hidden/unpublished
+  // games can't resurface here even if the API view is briefly stale). Fetch
+  // 2x the shelf size so dropped slugs still leave a full shelf.
+  const bySlug = new Map(games.map(g => [g.slug, g]));
+  gemsGames = data.games
+    .map(row => bySlug.get(row.slug))
+    .filter(Boolean)
+    .slice(0, GEMS_LIMIT);
+  renderGems();
+}
+
+function renderGems() {
+  const section = document.getElementById('gems');
+  const gemsGrid = document.getElementById('gems-grid');
+  if (!section || !gemsGrid) return;
+  // Same exposure rule as the featured hero: the shelf belongs to the default
+  // landing view only - a filtered/searching player is already exploring.
+  const onDefaultView = activeTab === 'top' && activeGenre === 'all' && !searchTerm;
+  if (!onDefaultView || !gemsGames || gemsGames.length < 3) {
+    section.classList.add('hidden');
+    return;
+  }
+  if (!gemsGrid.childElementCount) {
+    for (const g of gemsGames) {
+      gemsGrid.appendChild(card(g, { eager: false, noVideo: true, from: 'gems_shelf' }));
+    }
+    if (window.posthog) posthog.capture('gems_shelf_viewed', { count: gemsGames.length });
+  }
+  section.classList.remove('hidden');
+}
+
 function emptyMessage() {
   if (activeTab === 'liked')    return '<h2>No liked games yet.</h2><p>Tap 👍 on something you enjoyed.</p>';
   if (activeTab === 'myplayed') return '<h2>No play history yet.</h2><p>Open any game and it\'ll show up here. Up to your last 50 plays are remembered locally on this device.</p>';
@@ -927,8 +1001,10 @@ function card(g, opts) {
   // Eager (above-the-fold) cards get the inline autoplay video right away.
   // Lazy cards get a slot div the IntersectionObserver upgrades to a real
   // <video> when the card scrolls into view — keeps initial bandwidth small.
+  // opts.noVideo skips previews entirely (gems shelf: static thumbs only,
+  // its cards live outside #grid so the observer never hydrates them).
   let mediaInner = '';
-  if (g.hasPreview) {
+  if (g.hasPreview && !opts.noVideo) {
     if (opts.eager) {
       mediaInner = `<video class="card-video" src="/previews/${g.slug}.webm" poster="${thumb}"
                           autoplay loop muted playsinline preload="metadata" aria-hidden="true"></video>`;
@@ -984,7 +1060,7 @@ function card(g, opts) {
       window.open(primaryExtUrl, '_blank', 'noopener');
       return;
     }
-    if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'thumbnail' });
+    if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: opts.from || 'thumbnail' });
     location.href = playUrl;
   }
   el.querySelector('.card-thumb').addEventListener('click', (e) => {
