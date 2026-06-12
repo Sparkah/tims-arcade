@@ -16,11 +16,13 @@
 // visitor after a quiet night gets last-known numbers instantly with no
 // switcheroo; the rebuild lands for the next request.
 //
-// Staleness contract: typical max ≈ SNAPSHOT_FRESH + edge TTL (~6 min) plus
-// however long the site sat with zero traffic (stale data ages while nobody
-// looks — acceptable: nobody saw it drift). app.js vote shields cover a voter
-// reloading inside the window (VOTE_OVERRIDE_TTL_MS > this endpoint's worst
-// typical staleness); spectators tolerate minutes-old like counts. Featured
+// Staleness contract: served data is never older than STALE_SERVE_MAX +
+// edge TTL = 360 + 60 = 420s — exactly app.js's VOTE_OVERRIDE_TTL_MS, so a
+// voter reloading inside the staleness window is always covered by the vote
+// shields. A snapshot that idle-aged beyond the window (quiet night, zero
+// traffic) is rebuilt INLINE — that one visitor pays the walk (~1s, still
+// inside the client's 1.5s boot race) and gets exact numbers, never a
+// pre-vote repaint. Spectators tolerate minutes-old like counts. Featured
 // is date-scoped: a snapshot written on a previous UTC day serves
 // featured:null and the client falls back to fetching /api/featured async.
 // This endpoint only READS `featured:<date>` — the pick + its 2× reward
@@ -37,6 +39,9 @@ import { buildTrendingData } from './trending.js';
 
 const EDGE_TTL_SECONDS = 60;
 const SNAPSHOT_FRESH_SECONDS = 300;
+// Serve-stale ceiling: STALE_SERVE_MAX + EDGE_TTL must equal app.js's
+// VOTE_OVERRIDE_TTL_MS (420s) — change them together.
+const STALE_SERVE_MAX_SECONDS = 360;
 const SNAPSHOT_KEY = 'snapshot:boot';
 
 export function onRequestGet(context) {
@@ -50,17 +55,22 @@ async function buildBoot(context) {
 
   if (snap && snap.ts) {
     const ageSeconds = (Date.now() - snap.ts) / 1000;
-    if (ageSeconds >= SNAPSHOT_FRESH_SECONDS) {
-      // Serve stale NOW, rebuild for the next request. waitUntil keeps the
-      // walk alive after the response; if it's unavailable (old runtime,
-      // tests) fall back to a fire-and-forget promise.
+    if (ageSeconds < SNAPSHOT_FRESH_SECONDS) {
+      return bootResponse(await withFeatured(env, snap));
+    }
+    if (ageSeconds < STALE_SERVE_MAX_SECONDS) {
+      // Inside the client's vote-shield window: serve stale NOW, rebuild for
+      // the next request. waitUntil keeps the walk alive after the response;
+      // if it's unavailable (old runtime, tests) the promise still runs.
       const refresh = rebuildSnapshot(env).catch(() => { /* next visitor retries */ });
       try { context.waitUntil(refresh); } catch (e) { /* already fired */ }
+      return bootResponse(await withFeatured(env, snap));
     }
-    return bootResponse(await withFeatured(env, snap));
+    // Idle-aged past the shield window — fall through to an inline rebuild
+    // so a voter returning after a quiet gap never sees pre-vote numbers.
   }
 
-  // No snapshot yet (first request after this endpoint ships) — build inline.
+  // No snapshot yet, or snapshot too old to serve — build inline.
   const fresh = await rebuildSnapshot(env);
   return bootResponse(await withFeatured(env, fresh));
 }
