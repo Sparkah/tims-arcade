@@ -84,7 +84,10 @@ log "polling $SITE/$URLPATH for marker /$MARKER/ (deploy-landed signal)"
 deadline=$(( $(date +%s) + TIMEOUT_MIN*60 ))
 retriggered=0
 while :; do
-  if curl -sL --max-time 15 "$SITE/$URLPATH?cb=$RANDOM$(date +%s)" | grep -qE "$MARKER"; then
+  # Capture then grep: pipefail + grep -q can SIGPIPE curl after an early match,
+  # which makes a found marker report as stale on large HTML pages.
+  body="$(curl -sL --max-time 15 "$SITE/$URLPATH?cb=$RANDOM$(date +%s)" || true)"
+  if grep -qE "$MARKER" <<<"$body"; then
     log "✅ DEPLOY LANDED — live $URLPATH contains /$MARKER/."; exit 0
   fi
   now=$(date +%s)
