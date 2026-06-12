@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Bandlings</title>
+  <link rel="icon" href="data:,">
   <script src="/sdk.js"></script>
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
@@ -76,6 +77,8 @@ var STRINGS = {
     new_special: 'A special voice joins the band!',
     legend_hint: 'Legendary eggs hide special voices',
     star_one: 'first Encore star',
+    sell: 'SELL', donate: 'STAR EGG', sold: 'Sold', donated: 'Star Egg fed',
+    star_ready: 'Star Egg ready!', retire_hint: 'Sell or feed a creature to keep going',
   },
   ru: {
     title: 'Бэндлинги',
@@ -131,6 +134,8 @@ var STRINGS = {
     new_special: 'Особый голос в бэнде!',
     legend_hint: 'В легендарных яйцах - особые голоса',
     star_one: 'первая звезда биса',
+    sell: 'ПРОДАТЬ', donate: 'В ЯЙЦО', sold: 'Продано', donated: 'Яйцо растёт',
+    star_ready: 'Звёздное яйцо готово!', retire_hint: 'Продай монстра или отдай в яйцо',
   },
 };
 
@@ -184,6 +189,9 @@ var ENCORE_PAYOUT = 300;
 var EGG_HATCH_MS = 3000;
 var UNLOCK_MERGES_S1 = 4, UNLOCK_TIER_S2 = 4, UNLOCK_TIER_S3 = 5;
 var UNLOCK_MERGES_S4 = 12, UNLOCK_MERGES_S5 = 24, UNLOCK_STARS_S6 = 1;
+var STAR_EGG_GOAL = 160;
+var DONATE_POINTS = [0, 8, 18, 42, 90, 180];
+var SELL_REFUND = [0, 5, 12, 28, 65, 140];
 // 7 regular species (milestone unlocks) + 3 SPECIAL species (legendary eggs
 // only). Specials are ORIGINAL absurd characters inspired by brain-rot meme
 // ARCHETYPES - no real meme names, designs, or sampled audio (Yandex 5.6 + IP
@@ -215,13 +223,14 @@ var noise = 0, eggsBought = 0, setEarned = 0;
 var uidSeq = 1;
 // meta v2: disc[] replaces the v1 32-bit `discovered` bitmask (10 species x 5
 // tiers = 50 bits would overflow JS bitwise ops); stars/disc are length-10.
-var meta = { seed: 0, unlocked: 1, disc: [0,0,0,0,0,0,0,0,0,0], stars: [0,0,0,0,0,0,0,0,0,0], best: 0, totalMerges: 0, maxTier: 1, lastClaimDay: 0, carry: 0, pity: 0, previewSeen: 0 };
+var meta = { seed: 0, unlocked: 1, disc: [0,0,0,0,0,0,0,0,0,0], stars: [0,0,0,0,0,0,0,0,0,0], best: 0, totalMerges: 0, maxTier: 1, lastClaimDay: 0, carry: 0, pity: 0, previewSeen: 0, starDust: 0, starEggBank: 0 };
 var sel = -1, drag = null, pressStart = null;   // cell addressing: 0..19 stage, 100..103 bench
 var toasts = [];
 var barAcc = 0, lastPayout = 0, payoutFlash = 0;
 var carryDoubled = false, pendingCarry = 0;
 var bookScroll = null;
 var firstSetStarted = false;
+var lastFullHintAt = 0;
 var preview = null, pvBoard = [];        // first-visit concert preview state
 var eggTimerAcc = 0, eggBank = 0;        // playtime free-egg generator
 var exporting = false;                   // wav export in flight
@@ -620,6 +629,93 @@ function isDiscovered(sp, tier) { return !!((meta.disc[sp] | 0) & (1 << (tier - 
 function unlockedCount() { var n = 0; for (var s = 0; s < SPECIES.length; s++) if (meta.unlocked & (1 << s)) n++; return n; }
 function newestSpecies() { for (var s = REG_SPECIES - 1; s >= 0; s--) if (meta.unlocked & (1 << s)) return s; return 0; }
 function starsTotal() { var n = 0; for (var i = 0; i < meta.stars.length; i++) n += meta.stars[i] | 0; return n; }
+function starGoal() { return STAR_EGG_GOAL; }
+function starMeterText() {
+  var bank = meta.starEggBank | 0;
+  return (bank > 0 ? 'x' + bank + ' +' : '') + fmt(meta.starDust | 0) + '/' + fmt(starGoal());
+}
+function selectedCreature() {
+  var m = sel >= 0 ? getCell(sel) : null;
+  return m && !m.egg ? m : null;
+}
+function selectedActionMode() {
+  return gs === 'PLAYING' && !preview && !viewOnly && !GF.tutorial.active && !hubOpen && !bookOpen && !!selectedCreature();
+}
+function monsterDonateValue(m) {
+  if (!m) return 0;
+  var v = DONATE_POINTS[Math.max(1, Math.min(5, m.tier | 0))] || DONATE_POINTS[1];
+  if (SPECIES[m.sp] && SPECIES[m.sp].special) v = Math.round(v * 1.25);
+  return v;
+}
+function monsterSellValue(m) {
+  if (!m) return 0;
+  var v = SELL_REFUND[Math.max(1, Math.min(5, m.tier | 0))] || SELL_REFUND[1];
+  if (SPECIES[m.sp] && SPECIES[m.sp].special) v = Math.round(v * 1.35);
+  return v;
+}
+function canRetireAny() {
+  for (var i = 0; i < board.length; i++) if (board[i] && !board[i].egg) return true;
+  for (var b = 0; b < BENCH_SLOTS; b++) if (bench[b] && !bench[b].egg) return true;
+  return false;
+}
+function firstRetireIdx() {
+  for (var i = 0; i < board.length; i++) if (board[i] && !board[i].egg) return i;
+  for (var b = 0; b < BENCH_SLOTS; b++) if (bench[b] && !bench[b].egg) return 100 + b;
+  return -1;
+}
+function placeStarEgg() {
+  var idx = firstFreeCell();
+  if (idx < 0) return false;
+  var m = gachaSpawn(3, idx);
+  if (m) {
+    var c = cellCenter(idx);
+    toast(t('star_ready'));
+    GF.spawnParticles(c.x, c.y, '#ffd34d', 22);
+    GF.sfx('reward');
+    return true;
+  }
+  return false;
+}
+function tryPlaceBankedStarEggs() {
+  var placed = false;
+  while ((meta.starEggBank | 0) > 0 && freeCells() > 0) {
+    meta.starEggBank--;
+    if (placeStarEgg()) placed = true;
+    else { meta.starEggBank++; break; }
+  }
+  if (placed) save();
+}
+function grantStarEgg() {
+  if (!placeStarEgg()) meta.starEggBank = (meta.starEggBank | 0) + 1;
+}
+function sellSelected() {
+  var m = selectedCreature(); if (!m) return false;
+  var idx = sel, c = cellCenter(idx), refund = monsterSellValue(m);
+  setCell(idx, null); sel = -1;
+  noise += refund;
+  GF.spawnFloat(c.x, c.y, '+' + fmt(refund), '#ffd34d');
+  toast(t('sold') + ' +' + fmt(refund));
+  GF.spawnParticles(c.x, c.y, '#ffd34d', 10);
+  GF.sfx('coin');
+  save();
+  return true;
+}
+function donateSelected() {
+  var m = selectedCreature(); if (!m) return false;
+  var idx = sel, c = cellCenter(idx), pts = monsterDonateValue(m);
+  setCell(idx, null); sel = -1;
+  meta.starDust = (meta.starDust | 0) + pts;
+  while ((meta.starDust | 0) >= starGoal()) {
+    meta.starDust -= starGoal();
+    grantStarEgg();
+  }
+  toast(t('donated') + ' +' + fmt(pts));
+  GF.spawnParticles(c.x, c.y, '#ffd34d', 14);
+  GF.setShake(0.18);
+  GF.sfx('evolve');
+  save();
+  return true;
+}
 function checkUnlocks() {
   var before = meta.unlocked;
   if (meta.totalMerges >= UNLOCK_MERGES_S1) meta.unlocked |= 2;
@@ -783,7 +879,14 @@ function barPayout() {
 function checkGameOver() {
   if (gs !== 'PLAYING' || preview) return;
   // a free bench slot = options remain (bench a stage monster to free a cell)
-  if (freeCells() === 0 && benchFree() === 0 && !canMerge()) gameOver();
+  if (freeCells() === 0 && benchFree() === 0 && !canMerge()) {
+    if (canRetireAny()) {
+      var now = Date.now();
+      if (now - lastFullHintAt > 3500) { toast(t('retire_hint')); lastFullHintAt = now; }
+      return;
+    }
+    gameOver();
+  }
 }
 function gameOver() {
   if (gs === 'GAMEOVER') return;
@@ -806,6 +909,7 @@ function startSet(auto) {
   noise = Math.max(CFG.tuning.egg_base || 25, meta.carry);
   pendingCarry = 0;
   sel = -1; drag = null;
+  lastFullHintAt = 0;
   gs = 'PLAYING'; hubOpen = false; bookOpen = false;
   firstSetStarted = true;
   GF.gameStarted();
@@ -1130,6 +1234,7 @@ function update(dt) {
     // onto the stage; if the stage is full it banks (capped) and auto-claims
     // the moment a cell frees up - the "stay for one more egg" loop.
     if (!GF.tutorial.active) {
+      if ((meta.starEggBank | 0) > 0 && freeCells() > 0) tryPlaceBankedStarEggs();
       var spanS = Math.max(30, (CFG.timer && CFG.timer.egg_minutes != null ? CFG.timer.egg_minutes : 5) * 60);
       var cap = Math.max(0, Math.round(CFG.timer && CFG.timer.egg_cap != null ? CFG.timer.egg_cap : 2));
       eggTimerAcc += dt;
@@ -1675,6 +1780,19 @@ function drawHUD(c) {
     drawEggShape(c, GF.cx - chW / 2 + 10 * GF.S, chY + chH / 2, chH * 0.78, newestSpecies(), bobT * 0.5);
     c.fillStyle = eggBank > 0 ? '#ffd34d' : '#8d86b8'; c.textAlign = 'left'; c.textBaseline = 'middle';
     c.fillText(chipTxt, GF.cx - chW / 2 + 19 * GF.S, chY + chH / 2 + 1);
+    var starDust = meta.starDust | 0, starBank = meta.starEggBank | 0;
+    if (starDust > 0 || starBank > 0) {
+      var sTxt = starMeterText();
+      var sY = chY + chH + 4 * GF.S;
+      if (sY + chH < L.gridY - 2 * GF.S) {
+        var sW = c.measureText(sTxt).width + 28 * GF.S;
+        c.fillStyle = 'rgba(20,14,38,0.78)';
+        GF.rr(c, GF.cx - sW / 2, sY, sW, chH, chH / 2); c.fill();
+        drawStarIcon(c, GF.cx - sW / 2 + 11 * GF.S, sY + chH / 2, chH * 0.28, '#ffd34d', true);
+        c.fillStyle = starBank > 0 ? '#ffd34d' : '#8d86b8'; c.textAlign = 'left'; c.textBaseline = 'middle';
+        c.fillText(sTxt, GF.cx - sW / 2 + 21 * GF.S, sY + chH / 2 + 1);
+      }
+    }
     c.restore();
   }
   c.textBaseline = 'alphabetic';
@@ -1739,6 +1857,16 @@ function drawBigBtn(c, r, label, opts) {
   return r;
 }
 function drawBottomBar(c) {
+  var sm = selectedActionMode() ? selectedCreature() : null;
+  if (sm) {
+    drawBigBtn(c, eggBtn, t('sell'), { primary: true, sub: '+' + fmt(monsterSellValue(sm)), icon: true });
+    drawNoteIcon(c, eggBtn.x + 18 * GF.S, eggBtn.y + eggBtn.h / 2, eggBtn.h * 0.36, '#17351f');
+    var ready = ((meta.starDust | 0) + monsterDonateValue(sm)) >= starGoal();
+    drawBigBtn(c, dailyBtn, t('donate'), { glow: ready, sub: starMeterText(), icon: true });
+    drawStarIcon(c, dailyBtn.x + 18 * GF.S, dailyBtn.y + dailyBtn.h / 2, dailyBtn.h * 0.18, ready ? '#3a2a00' : '#ffd34d', true);
+    drawBigBtn(c, bookBtn, t('close'), {});
+    return;
+  }
   var canAfford = noise >= eggPrice() && freeCells() > 0;
   drawBigBtn(c, eggBtn, t('egg'), { primary: canAfford, disabled: !canAfford, sub: fmt(eggPrice()), icon: true });
   drawEggShape(c, eggBtn.x + 18 * GF.S, eggBtn.y + eggBtn.h / 2, eggBtn.h * 0.5, newestSpecies(), bobT);
@@ -2045,9 +2173,15 @@ function onDown(x, y) {
   } else {
     if (inRect(x, y, hubBtn)) { hubOpen = true; GF.sfx('click'); save(); return; }
     if (inRect(x, y, helpBtn)) { GF.tutorial.reopen(); GF.sfx('click'); return; }
-    if (inRect(x, y, eggBtn)) { buyEgg(); return; }
-    if (inRect(x, y, dailyBtn)) { claimDaily(); return; }
-    if (inRect(x, y, bookBtn)) { openBook(); GF.sfx('click'); return; }
+    if (selectedActionMode()) {
+      if (inRect(x, y, eggBtn)) { sellSelected(); return; }
+      if (inRect(x, y, dailyBtn)) { donateSelected(); return; }
+      if (inRect(x, y, bookBtn)) { sel = -1; GF.sfx('click'); return; }
+    } else {
+      if (inRect(x, y, eggBtn)) { buyEgg(); return; }
+      if (inRect(x, y, dailyBtn)) { claimDaily(); return; }
+      if (inRect(x, y, bookBtn)) { openBook(); GF.sfx('click'); return; }
+    }
   }
   var idx = cellAtAny(x, y);
   if (idx < 0) {
@@ -2154,7 +2288,7 @@ function restoreBench(arr) {
 }
 function getState() {
   return {
-    v: 2,
+    v: 3,
     gs: gs, noise: noise, eggsBought: eggsBought, setEarned: setEarned,
     uidSeq: uidSeq, board: serializeCells(board), bench: serializeCells(bench), meta: meta,
     pendingCarry: pendingCarry, carryDoubled: carryDoubled,
@@ -2179,6 +2313,8 @@ function applyState(s) {
   delete meta.discovered;
   meta.pity = meta.pity | 0;
   meta.previewSeen = meta.previewSeen | 0;
+  meta.starDust = Math.max(0, meta.starDust | 0);
+  meta.starEggBank = Math.max(0, meta.starEggBank | 0);
   if (!meta.seed) meta.seed = (Math.random() * 0xffffffff) >>> 0;
   noise = s.noise || 0; eggsBought = s.eggsBought || 0; setEarned = s.setEarned || 0;
   uidSeq = s.uidSeq || 1;
@@ -2231,7 +2367,8 @@ GF.init({
     // CSP-BLOCKED and sprays console violations in front of moderators even
     // though the .catch path keeps gameplay on defaults. Re-enable for Yandex
     // in the first post-approval update once External hosts is approved.
-    if (!window.__GF_AUTOSTART) {
+    var localHost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/.test(location.hostname);
+    if (!window.__GF_AUTOSTART && !localHost) {
     GF.remoteConfig('bandlings', CFG, {
       clamps: {
         'tuning.egg_base': [10, 100],
@@ -2283,7 +2420,8 @@ GF.exposeState(function () {
     benched: bench.filter(function (m) { return !!m; }).length,
     merges: meta.totalMerges, maxTier: meta.maxTier,
     unlocked: unlockedCount(), discovered: bookSub(),
-    pity: meta.pity, eggBank: eggBank,
+    pity: meta.pity, eggBank: eggBank, starDust: meta.starDust | 0, starEggBank: meta.starEggBank | 0,
+    selected: sel, selectedRetire: !!selectedCreature(),
     hub: hubOpen, book: bookOpen, preview: !!preview, viewOnly: viewOnly,
     score: setEarned, level: meta.maxTier,
   };
@@ -2298,6 +2436,7 @@ GF.exposeBot(
     if (noise >= eggPrice() && freeCells() > 0) a.push('egg');
     for (var i = 0; i < board.length; i++) if (board[i] && board[i].egg && !(board[i].crackT > 0)) { a.push('hatch'); break; }
     if (pairIdxs()) a.push('merge');
+    if (canRetireAny()) a.push('sell', 'donate');
     if (dailyReady() && freeCells() > 0) a.push('claim');
     return a;
   },
@@ -2309,6 +2448,8 @@ GF.exposeBot(
     if (action === 'egg') { buyEgg(); return; }
     if (action === 'hatch') { for (var i = 0; i < board.length; i++) if (board[i] && board[i].egg) { board[i].rar = 0; board[i].crackT = 0; finishHatch(i); return; } }
     if (action === 'merge') { var p = pairIdxs(); if (p) tryMerge(p[0], p[1]); return; }
+    if (action === 'sell') { if (!selectedCreature()) sel = firstRetireIdx(); sellSelected(); return; }
+    if (action === 'donate') { if (!selectedCreature()) sel = firstRetireIdx(); donateSelected(); return; }
     if (action === 'claim') { claimDaily(); return; }
   }
 );
@@ -2324,13 +2465,14 @@ function reachState() {
     var screen = hubOpen ? 'hub' : (gs === 'GAMEOVER' ? 'gameover' : 'menu');
     return { screen: screen, items: goButtons.map(function (b, i) { return { id: screen + '_btn' + i, x: b.r.x, y: b.r.y, w: b.r.w, h: b.r.h }; }) };
   }
+  var actionMode = selectedActionMode();
   var playItems = [
     { id: 'hub', x: hubBtn.x, y: hubBtn.y, w: hubBtn.w, h: hubBtn.h },
     { id: 'help', x: helpBtn.x, y: helpBtn.y, w: helpBtn.w, h: helpBtn.h },
     { id: 'mute', x: muteBtn.x, y: muteBtn.y, w: muteBtn.w, h: muteBtn.h },
-    { id: 'egg', x: eggBtn.x, y: eggBtn.y, w: eggBtn.w, h: eggBtn.h },
-    { id: 'daily', x: dailyBtn.x, y: dailyBtn.y, w: dailyBtn.w, h: dailyBtn.h },
-    { id: 'book', x: bookBtn.x, y: bookBtn.y, w: bookBtn.w, h: bookBtn.h },
+    { id: actionMode ? 'sell' : 'egg', x: eggBtn.x, y: eggBtn.y, w: eggBtn.w, h: eggBtn.h },
+    { id: actionMode ? 'star_egg' : 'daily', x: dailyBtn.x, y: dailyBtn.y, w: dailyBtn.w, h: dailyBtn.h },
+    { id: actionMode ? 'close_selected' : 'book', x: bookBtn.x, y: bookBtn.y, w: bookBtn.w, h: bookBtn.h },
   ];
   for (var bi = 0; bi < benchRects.length; bi++) {
     playItems.push({ id: 'bench_' + bi, x: benchRects[bi].x, y: benchRects[bi].y, w: benchRects[bi].w, h: benchRects[bi].h });
@@ -2350,6 +2492,7 @@ window._setupForScreenshot = function (level) {
   try { localStorage.setItem('bandlings_seen_tutorial', '1'); } catch (e) {}
   GF.tutorial.active = false;
   killPreview();
+  toasts = [];
   if (!meta.seed) { meta.seed = 1337421; }
   deriveSong();
   meta.unlocked = 0x7f | 0x80;   // all 7 regulars + Gnarp (special) unlocked
@@ -2376,6 +2519,7 @@ window._setupForScreenshot = function (level) {
   bench[0] = b0; bench[2] = b1;
   noise = 1240; setEarned = 3160; eggsBought = 9;
   eggTimerAcc = 96; eggBank = 0;
+  meta.starDust = 72; meta.starEggBank = 0; sel = -1;
   meta.best = Math.max(meta.best, 5210);
   hubOpen = false; bookOpen = false;
   gs = 'PLAYING';
@@ -2388,6 +2532,19 @@ window._bandCode = function () { return bandCode(); };
 window._parseBandCode = function (s) { return parseBandCode(s); };
 window._exportSong = function () { return exportSong(); };
 window._killPreview = function () { killPreview(); };
+window._bandlingsRetire = function (action, idx) {
+  if (typeof idx === 'number') sel = idx;
+  else if (!selectedCreature()) sel = firstRetireIdx();
+  if (action === 'sell') sellSelected();
+  else if (action === 'donate') donateSelected();
+  return {
+    noise: noise,
+    starDust: meta.starDust | 0,
+    starEggBank: meta.starEggBank | 0,
+    board: board.map(function (m) { return m ? { sp: m.sp, tier: m.tier, egg: !!m.egg, rar: m.rar | 0 } : null; }),
+    bench: bench.map(function (m) { return m ? { sp: m.sp, tier: m.tier } : null; }),
+  };
+};
 // locale-overflow audit hooks
 window._setState = function (s) {
   if (s === 'MENU') { gs = 'MENU'; hubOpen = false; bookOpen = false; }
@@ -2416,6 +2573,16 @@ window.__bandProbe = function () {
     bpm: band.bpm, root: Math.round(band.root * 100) / 100,
     prog: band.prog, eq: band.eqLevel.map(function (v) { return Math.round(v * 100) / 100; }),
   };
+};
+window.render_game_to_text = function () {
+  var s = window.__gfState ? window.__gfState() : {};
+  s.actions = window.__gfBot ? window.__gfBot.actions() : [];
+  return JSON.stringify(s);
+};
+window.advanceTime = function (ms) {
+  var steps = Math.max(1, Math.round((ms || 16) / (1000 / 60)));
+  if (window.__gfStep) window.__gfStep(steps, 1 / 60);
+  return Promise.resolve();
 };
 
 })();

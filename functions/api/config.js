@@ -1,6 +1,6 @@
 // Public remote-config READ endpoint for live games (gf-lib GF.remoteConfig).
 //
-//   GET /api/config?slug=<slug>  -> 200 (stored config JSON) | 404 {error}
+//   GET /api/config?slug=<slug>  -> 200 (stored config JSON) | 204 (no config)
 //
 // Storage: KV key `config:<slug>` in the VOTES namespace, written ONLY by the
 // token-gated /api/admin/config endpoint (which validates: pure DATA - finite
@@ -37,11 +37,12 @@ export async function onRequestGet({ request, env }) {
   let txt = null;
   try { txt = await env.VOTES.get('config:' + slug); } catch (e) { txt = null; }
   if (!txt) {
-    // 404 is the NORMAL state for most games (no config stored = defaults
-    // apply client-side). Cache it too so un-configured games stay cheap.
-    return new Response(JSON.stringify({ error: 'no_config' }), {
-      status: 404,
-      headers: { ...hdrs, 'cache-control': 'public, max-age=60' },
+    // No config is the NORMAL state for most games: defaults apply client-side.
+    // Return 204 instead of 404 so browsers do not log a console error during
+    // otherwise-clean gameplay sessions.
+    return new Response(null, {
+      status: 204,
+      headers: { ...CORS, 'cache-control': 'public, max-age=60' },
     });
   }
   return new Response(txt, {
