@@ -28,6 +28,18 @@ export function onRequestGet({ env }) {
 }
 
 async function buildCounts(env) {
+  const out = await buildCountsData(env);
+  return new Response(JSON.stringify(out), {
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': `public, max-age=15, s-maxage=${CACHE_TTL_SECONDS}`,
+    },
+  });
+}
+
+// Data-only builder, shared with /api/boot (the homepage's single
+// first-paint request bundling counts + trending + featured).
+export async function buildCountsData(env) {
   const out = {};
   const ensure = (slug) => out[slug] ||
     (out[slug] = { likes: 0, dislikes: 0, plays: 0, seconds: 0, comments: 0 });
@@ -70,10 +82,5 @@ async function buildCounts(env) {
     })(),
   ]);
 
-  return new Response(JSON.stringify(out), {
-    headers: {
-      'content-type': 'application/json',
-      'cache-control': `public, max-age=15, s-maxage=${CACHE_TTL_SECONDS}`,
-    },
-  });
+  return out;
 }

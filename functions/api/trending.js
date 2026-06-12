@@ -28,6 +28,21 @@ export function onRequestGet({ env }) {
 }
 
 async function buildTrending(env) {
+  const data = await buildTrendingData(env);
+  return new Response(
+    JSON.stringify(data),
+    {
+      headers: {
+        'content-type': 'application/json',
+        'cache-control': `public, max-age=30, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=60`,
+      },
+    }
+  );
+}
+
+// Data-only builder, shared with /api/boot (the homepage's single
+// first-paint request bundling counts + trending + featured).
+export async function buildTrendingData(env) {
   const today = new Date().toISOString().slice(0, 10);
   const todayStart = Date.parse(today + 'T00:00:00Z');
   const games = {};
@@ -74,13 +89,5 @@ async function buildTrending(env) {
     g.score = (g.seconds || 0) + (g.comments || 0) * 60;
   }
 
-  return new Response(
-    JSON.stringify({ date: today, games }),
-    {
-      headers: {
-        'content-type': 'application/json',
-        'cache-control': `public, max-age=30, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=60`,
-      },
-    }
-  );
+  return { date: today, games };
 }

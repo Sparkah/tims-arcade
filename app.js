@@ -89,34 +89,30 @@ const pagination = document.getElementById('pagination');
 init();
 
 async function init() {
-  // Fire all four network calls in parallel so first paint can happen
-  // as soon as games.json lands instead of waiting for the sum of four
-  // sequential round-trips. On a 400 ms RTT this drops time-to-first-card
-  // from ~1.6 s of pure blocking to ~400 ms.
+  // Two-request first paint: games.json (the catalogue) + /api/boot (counts +
+  // trending + featured in ONE response, KV-snapshot backed + edge-cached).
+  // First paint WAITS for boot — bounded by BOOT_WAIT_MS — so the hero is the
+  // real trending game, cards carry real like/comment numbers, and the Top
+  // sort is final from frame one. The old flow painted with zeros and
+  // re-sorted when counts/trending landed seconds later — the visible
+  // hero-swap + grid shuffle Tim flagged 2026-06-12.
   //
-  // Critical: games.json. The grid needs the catalogue to render at all.
-  // Secondary: counts (vote/play numbers + Top-tab sort) and trending
-  // (featured-game pick). The grid does its first paint with empty
-  // numbers, then a second render swaps in real counts + the correct
-  // featured game once both land. Cards' thumbs are HTTP-cached after
-  // first paint, so the second render is visually subtle, not a refetch.
-  // Independent: /api/me drives the sign-in pill — repaints when ready.
+  // Degradation ladder: boot slow → paint without it, apply when it lands
+  // (one refinement render, the pre-2026-06-12 behavior). Boot failed →
+  // fall back to the individual counts/trending/featured endpoints.
+  // Independent either way: /api/me + /api/me/meta (auth/meta pills),
+  // /api/hidden (curation filter, fail-closed via localStorage).
+  const BOOT_WAIT_MS = 1500;
   const gamesP    = fetch('/games.json', { cache: 'no-store' })
                       .then(r => r.ok ? r.json() : [])
                       .catch(() => []);
-  const countsP   = fetch('/api/counts', { cache: 'no-store' })
-                      .then(r => r.ok ? r.json() : {})
-                      .catch(() => ({}));
-  const trendingP = fetch('/api/trending', { cache: 'no-store' })
-                      .then(r => r.ok ? r.json() : { games: {} })
-                      .catch(() => ({ games: {} }));
+  const bootP     = fetch('/api/boot', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : null)
+                      .catch(() => null);
   const meP       = fetch('/api/me', { cache: 'no-store', credentials: 'same-origin' })
                       .then(r => r.ok ? r.json() : null)
                       .catch(() => null);
   const metaP     = fetch('/api/me/meta', { cache: 'no-store', credentials: 'same-origin' })
-                      .then(r => r.ok ? r.json() : null)
-                      .catch(() => null);
-  const featuredP = fetch('/api/featured', { cache: 'no-store' })
                       .then(r => r.ok ? r.json() : null)
                       .catch(() => null);
   // Admin-hidden (low-quality) slugs curated out of the public grid. Fetched in
@@ -164,6 +160,15 @@ async function init() {
     }
   } catch (e) { /* malformed URL — ignore */ }
 
+  // Boot gate — wait (bounded) for the combined payload so the FIRST paint
+  // is the correct one. Race resolves: object = boot landed, null = boot
+  // FAILED fast, undefined = still in flight at the deadline.
+  const boot = await Promise.race([
+    bootP,
+    new Promise(res => setTimeout(() => res(undefined), BOOT_WAIT_MS)),
+  ]);
+  if (boot) applyBoot(boot);
+
   render();
 
   // Hidden Gems shelf - the least-attention tail surfaced as a discovery
@@ -171,13 +176,23 @@ async function init() {
   // near the footer, so the homepage critical path never pays for it.
   setupGemsLazyLoad();
 
-  // SECOND PAINT — vote counts + featured game. We wait for BOTH so the
-  // second render is the final state; a third render would just churn DOM.
-  Promise.all([countsP, trendingP]).then(([c, t]) => {
-    counts = mergeFreshVoteState(c || {});
-    todayScores = (t && t.games) || {};
-    render();
-  });
+  if (boot) {
+    // Painted correct already. Featured pick can be absent early in the UTC
+    // day (nothing cached yet) — resolve it async; it only swaps badge text.
+    if (!boot.featured) fetchFeaturedAsync();
+  } else if (boot === null) {
+    legacyRefine();
+  } else {
+    bootP.then(b => {
+      if (b) {
+        applyBoot(b);
+        render();
+        if (!b.featured) fetchFeaturedAsync();
+      } else {
+        legacyRefine();
+      }
+    });
+  }
 
   // Auth pill — independent of the grid, paints whenever /api/me resolves.
   meP.then(m => {
@@ -196,15 +211,51 @@ async function init() {
     showMetaWelcomePops(m);
   });
 
-  // Featured Challenge — /api/featured returns today's 2× tokens slug. We
-  // store it so renderFeatured() can swap the hero badge from generic
-  // "🔥 Trending" to "⭐ FEATURED TODAY · 2× TOKENS" when the slugs match.
-  featuredP.then(f => {
-    if (!f || !f.slug) return;
-    if (hiddenSlugs.has(f.slug)) return;   // hidden wins over featured — never badge a hidden game
-    todaysFeaturedSlug = f.slug;
+}
+
+// Fold a /api/boot payload into render state. Counts go through the same
+// vote shields as the old /api/counts fetch — the snapshot can be minutes
+// old, and a fresh vote must never be repainted over.
+function applyBoot(b) {
+  counts = mergeFreshVoteState((b && b.counts) || {});
+  todayScores = (b && b.trending && b.trending.games) || {};
+  const f = b && b.featured;
+  if (f && !hiddenSlugs.has(f)) todaysFeaturedSlug = f;  // hidden wins over featured
+}
+
+// Featured Challenge — /api/featured returns today's 2× tokens slug (and
+// CREATES the day's pick when none exists yet). renderFeatured() swaps the
+// hero badge from generic "🔥 Trending" to "⭐ FEATURED TODAY · 2× TOKENS"
+// when the slugs match. Called only when boot didn't already carry the pick.
+function fetchFeaturedAsync() {
+  fetch('/api/featured', { cache: 'no-store' })
+    .then(r => r.ok ? r.json() : null)
+    .catch(() => null)
+    .then(f => {
+      if (!f || !f.slug) return;
+      if (hiddenSlugs.has(f.slug)) return;   // hidden wins over featured — never badge a hidden game
+      if (todaysFeaturedSlug === f.slug) return;
+      todaysFeaturedSlug = f.slug;
+      render();
+    });
+}
+
+// Pre-boot fallback: /api/boot unavailable (failed request, old function
+// cache mid-deploy) — fetch counts + trending individually and refine in a
+// second render, exactly the pre-2026-06-12 flow.
+function legacyRefine() {
+  const countsP   = fetch('/api/counts', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : {})
+                      .catch(() => ({}));
+  const trendingP = fetch('/api/trending', { cache: 'no-store' })
+                      .then(r => r.ok ? r.json() : { games: {} })
+                      .catch(() => ({ games: {} }));
+  Promise.all([countsP, trendingP]).then(([c, t]) => {
+    counts = mergeFreshVoteState(c || {});
+    todayScores = (t && t.games) || {};
     render();
   });
+  fetchFeaturedAsync();
 }
 
 
@@ -1237,13 +1288,15 @@ function logVariantClick(slug, variant) {
 
 // ── Voting ────────────────────────────────────────────────────────────────
 
-// /api/counts is 60s edge-cached, so a fetch landing after (or a reload
-// shortly after) a vote can repaint pre-vote numbers over the optimistic bump
+// Counts arriving from /api/boot (KV snapshot ≤ ~5min + 60s edge) or
+// /api/counts (60s edge) can predate a vote just cast, so a reload shortly
+// after voting could repaint pre-vote numbers over the optimistic bump
 // (scorecard P2, review-20260611-194919). Two shields:
 //   1. slugs voted THIS page load keep their in-memory numbers;
-//   2. a vote's authoritative server response is stashed in sessionStorage for
-//      90s (> the 60s TTL) and overlaid on the next load's counts fetch.
-const VOTE_OVERRIDE_TTL_MS = 90 * 1000;
+//   2. a vote's authoritative server response is stashed in sessionStorage
+//      for 7 min (> snapshot 300s + edge 60s) and overlaid on the next
+//      load's counts/boot payload.
+const VOTE_OVERRIDE_TTL_MS = 420 * 1000;
 
 function mergeFreshVoteState(fresh) {
   for (const slug of votedSlugsThisSession) {
