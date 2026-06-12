@@ -239,7 +239,8 @@ jq --argjson meta "$META_JSON" '
     flagship: (.flagship // false),
     hosting: .hosting,
     sandboxUrl: .sandboxUrl,
-    author: .author
+    author: .author,
+    builtWith: .builtWith
   })
 ' "$SRC" > "$OUT_MANIFEST"
 

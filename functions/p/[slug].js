@@ -211,6 +211,7 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
     lang === 'ru' ? 'Играй в браузере, без установки' : 'Play in-browser, no install',
   ].filter(Boolean).join(' · ')}</p>` : ''}
   <a class="btn" href="${playUrl}">${lang === 'ru' ? '▶ Играть' : '▶ Play now'}</a>
+  ${game.builtWith && game.builtWith.url ? `<p class="alt"><a href="${escapeHtml(game.builtWith.url)}" style="color:#8a8aa0">${escapeHtml((lang === 'ru' && game.builtWith.label_ru) || game.builtWith.label || 'Built with our engine')} →</a></p>` : ''}
   <small><a href="/" style="color:#8a8aa0">${lang === 'ru' ? '← все игры' : '← browse all games'}</a></small>
   ${related.length ? `<nav class="related" aria-label="${lang === 'ru' ? 'Похожие игры' : 'Related games'}">
     <h2>${lang === 'ru' ? 'Похожие игры' : 'More games'}</h2>

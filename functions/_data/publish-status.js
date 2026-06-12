@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-11T12:02:21.653216+00:00",
+  "generated": "2026-06-12T11:26:42.468586+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -741,6 +741,31 @@ export default {
         "gamedistribution",
         "gamepush"
       ]
+    },
+    "bandlings": {
+      "gameDir": "Games/173_bandlings",
+      "engagement": null,
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
     }
   },
   "untracked": [
@@ -839,7 +864,7 @@ export default {
       "approved": 0,
       "submitted": 22,
       "rejected": 0,
-      "built": 1
+      "built": 2
     },
     "crazygames": {
       "live": 0,
