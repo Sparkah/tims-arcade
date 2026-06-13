@@ -35,6 +35,11 @@ var STRINGS = {
     goalLine: 'Goal: merge up to finished dishes & serve orders',
     chainsLbl: 'Cuisines', topDish: 'Best dish',
     howto: 'HOW TO PLAY',
+    bookShort: 'BOOK', stationShort: 'station', mastered: 'mastered',
+    metaEmpty: 'Serve orders to stamp your restaurant book',
+    metaUnlock: 'STATION UPGRADED!',
+    metaNextShift: 'Next shift',
+    metaReturn: 'Restaurant book kept. Upgrade stations by serving recipes.',
     tut_goal: 'Goal: Merge two identical ingredients to build them into finished dishes, then serve the dish each customer order asks for to earn coins.',
     tut_controls: 'Controls: Tap a crate to drop an ingredient. Drag an item onto a matching one to merge — or tap it, then tap where to send it. Serve a finished dish onto a matching order.',
     tut_win: 'Win: Endless — chase your best coin score. Every few orders unlocks a NEW cuisine: pizza, burgers, sushi, desserts, drinks.',
@@ -54,6 +59,11 @@ var STRINGS = {
     goalLine: 'Цель: собирай блюда и подавай заказы',
     chainsLbl: 'Кухни', topDish: 'Лучшее блюдо',
     howto: 'КАК ИГРАТЬ',
+    bookShort: 'КНИГА', stationShort: 'станция', mastered: 'готово',
+    metaEmpty: 'Подавай заказы и заполняй книгу ресторана',
+    metaUnlock: 'СТАНЦИЯ УЛУЧШЕНА!',
+    metaNextShift: 'Следующая смена',
+    metaReturn: 'Книга ресторана сохранена. Улучшай станции рецептами.',
     tut_goal: 'Цель: Сливай два одинаковых продукта, чтобы собрать готовые блюда, затем подавай блюдо по каждому заказу клиента и получай монеты.',
     tut_controls: 'Управление: Жми ящик, чтобы выпал продукт. Тащи продукт на такой же, чтобы слить — или нажми на него, затем на нужную клетку. Подай готовое блюдо на подходящий заказ.',
     tut_win: 'Победа: Бесконечно — бей рекорд монет. Каждые несколько заказов открывают НОВУЮ кухню: пицца, бургеры, суши, десерты, напитки.',
@@ -105,6 +115,8 @@ var JAM_GRACE_MS    = 700;   // ms board may stay full before GAMEOVER (jam)
 var GOLDEN_CHANCE   = 0.05;  // chance a dispensed ingredient is a golden wildcard
 var MAX_TIER        = 5;     // tiers per chain (0..5)
 var MAX_CRATES      = 2;     // crate generators cap
+var RECIPE_STAMP_GOAL = 3;   // stamps to complete a recipe-page entry
+var STATION_THRESHOLDS = [2, 5, 9]; // served recipes per cuisine for station Lv1/2/3
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';             // MENU | PLAYING | GAMEOVER
@@ -125,6 +137,10 @@ var crateReady = [];         // per-crate: true once recharged
 var orders = [];             // {chain, tier, id, _cx, _cy}
 var orderSeq = 1;
 var firstMergeDone = false;  // progressive disclosure: orders appear after 1st merge
+
+// Persistent owned meta: the player's restaurant book + cuisine stations.
+var dinerMeta = { recipes: {}, chainServes: {}, totalServed: 0 };
+var metaToast = null, metaToastTimer = 0;
 
 // selection / drag
 var sel = -1;                // selected source cell index (tap-tap), -1 = none
@@ -173,6 +189,124 @@ function shade(hex, f) {
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 function itemColor(chain, tier) { return shade(chainDef(chain).col, TIER_LIGHT[GF.clamp(tier, 0, MAX_TIER)] || 1); }
+
+// ── RESTAURANT BOOK META ─────────────────────────────────────────────────
+function blankDinerMeta() {
+  var m = { recipes: {}, chainServes: {}, totalServed: 0 };
+  for (var i = 0; i < CHAINS.length; i++) m.chainServes[CHAINS[i].id] = 0;
+  return m;
+}
+function normalizeDinerMeta(m) {
+  var out = blankDinerMeta();
+  if (!m || typeof m !== 'object') return out;
+  if (m.recipes && typeof m.recipes === 'object') {
+    for (var k in m.recipes) if (Object.prototype.hasOwnProperty.call(m.recipes, k)) {
+      out.recipes[k] = GF.clamp(parseInt(m.recipes[k], 10) || 0, 0, RECIPE_STAMP_GOAL);
+    }
+  }
+  if (m.chainServes && typeof m.chainServes === 'object') {
+    for (var c = 0; c < CHAINS.length; c++) {
+      var id = CHAINS[c].id;
+      out.chainServes[id] = Math.max(0, parseInt(m.chainServes[id], 10) || 0);
+    }
+  }
+  out.totalServed = Math.max(0, parseInt(m.totalServed, 10) || 0);
+  return out;
+}
+function exportDinerMeta() { return normalizeDinerMeta(dinerMeta); }
+function applyDinerMeta(m) { dinerMeta = normalizeDinerMeta(m); }
+function recipeKey(chain, tier) { return chain + ':' + GF.clamp(tier, 2, MAX_TIER); }
+function recipeStampCount(chain, tier) { return (dinerMeta.recipes[recipeKey(chain, tier)] || 0); }
+function stationServeCount(chain) { return (dinerMeta.chainServes[chain] || 0); }
+function stationLevelFor(chain) {
+  var n = stationServeCount(chain), lvl = 0;
+  for (var i = 0; i < STATION_THRESHOLDS.length; i++) if (n >= STATION_THRESHOLDS[i]) lvl = i + 1;
+  return lvl;
+}
+function stationNextNeed(chain) {
+  var lvl = stationLevelFor(chain);
+  if (lvl >= STATION_THRESHOLDS.length) return null;
+  return STATION_THRESHOLDS[lvl];
+}
+function totalRecipeSlots() { return NUM_CHAINS * Math.max(1, MAX_TIER - 1); }
+function uniqueRecipeCount() {
+  var n = 0;
+  for (var c = 0; c < CHAINS.length; c++) for (var t = 2; t <= MAX_TIER; t++) if (recipeStampCount(CHAINS[c].id, t) > 0) n++;
+  return n;
+}
+function totalRecipeStamps() {
+  var n = 0;
+  for (var c = 0; c < CHAINS.length; c++) for (var t = 2; t <= MAX_TIER; t++) n += recipeStampCount(CHAINS[c].id, t);
+  return n;
+}
+function nextStationTarget() {
+  var arr = activeChains(), bestTarget = null;
+  for (var i = 0; i < arr.length; i++) {
+    var chain = arr[i].id, need = stationNextNeed(chain);
+    if (need == null) continue;
+    var have = stationServeCount(chain);
+    var remain = Math.max(0, need - have);
+    if (!bestTarget || remain < bestTarget.remain || (remain === bestTarget.remain && have > bestTarget.have)) {
+      bestTarget = { chain: chain, have: have, need: need, remain: remain, level: stationLevelFor(chain) };
+    }
+  }
+  return bestTarget;
+}
+function compactMetaLine() {
+  if (dinerMeta.totalServed <= 0) return GF.t('metaEmpty');
+  var n = nextStationTarget();
+  if (!n) return GF.t('bookShort') + ' ' + uniqueRecipeCount() + '/' + totalRecipeSlots() + ' - ' + GF.t('mastered');
+  return GF.t('bookShort') + ' ' + uniqueRecipeCount() + '/' + totalRecipeSlots() + ' - ' +
+    itemName(n.chain, MAX_TIER) + ' ' + GF.t('stationShort') + ' ' + n.have + '/' + n.need;
+}
+function stationBonusMult(chain) { return 1 + stationLevelFor(chain) * 0.08; }
+function stationCrateTier(chain) {
+  var lvl = stationLevelFor(chain);
+  return (lvl >= 3 && Math.random() < 0.25) ? 1 : 0;
+}
+function seedStationPrep() {
+  for (var c = 0; c < CHAINS.length; c++) {
+    var id = CHAINS[c].id, lvl = stationLevelFor(id);
+    if (lvl <= 0) continue;
+    var count = lvl >= 2 ? 2 : 1;
+    for (var k = 0; k < count; k++) {
+      var idx = randFree();
+      if (idx >= 0) placeItem(idx, id, 1, false, false);
+    }
+  }
+}
+function stationAutoMerge(chain) {
+  if (gs !== 'PLAYING' || GF.tutorial.active || stationLevelFor(chain) < 2) return false;
+  var seen = {};
+  for (var i = 0; i < board.length; i++) {
+    var c = board[i];
+    if (!c || c.golden || c.chain !== chain || c.tier >= MAX_TIER) continue;
+    var k = c.chain + ':' + c.tier;
+    if (seen[k] != null) {
+      doMerge(i, seen[k]);
+      if (board[seen[k]]) GF.spawnFloat(board[seen[k]].sx, board[seen[k]].sy - L.cell * 0.3, GF.t('stationShort'), '#7ed957');
+      return true;
+    }
+    seen[k] = i;
+  }
+  return false;
+}
+function awardDinerMeta(order) {
+  if (!order) return null;
+  dinerMeta = normalizeDinerMeta(dinerMeta);
+  var beforeLevel = stationLevelFor(order.chain);
+  var key = recipeKey(order.chain, order.tier);
+  dinerMeta.recipes[key] = Math.min(RECIPE_STAMP_GOAL, (dinerMeta.recipes[key] || 0) + 1);
+  dinerMeta.chainServes[order.chain] = stationServeCount(order.chain) + 1;
+  dinerMeta.totalServed++;
+  var afterLevel = stationLevelFor(order.chain);
+  if (afterLevel > beforeLevel) {
+    metaToast = { chain: order.chain, level: afterLevel };
+    metaToastTimer = 2.4;
+    return { upgraded: true, chain: order.chain, level: afterLevel };
+  }
+  return { upgraded: false, chain: order.chain, level: afterLevel };
+}
 
 // Two same chain+tier items anywhere mergeable, or a golden present with any item.
 function hasMergePair() {
@@ -231,9 +365,11 @@ function dispenseFromCrate(ci) {
   crateReady[ci] = false; crateCharge[ci] = 0;
   var golden = (Math.random() < GOLDEN_CHANCE) && firstMergeDone;
   if (golden) goldenSeen = true;
-  placeItem(idx, randActiveChain().id, 0, golden, true);
+  var pickChain = randActiveChain().id;
+  var pickTier = golden ? 0 : stationCrateTier(pickChain);
+  placeItem(idx, pickChain, pickTier, golden, true);
   GF.sfx('spawn');
-  GF.spawnParticles(board[idx].sx, board[idx].sy, golden ? '#ffd700' : itemColor(board[idx].chain, 0), 8);
+  GF.spawnParticles(board[idx].sx, board[idx].sy, golden ? '#ffd700' : itemColor(board[idx].chain, board[idx].tier), 8);
   GF.saveRun();
   return true;
 }
@@ -315,13 +451,18 @@ function serveTo(srcIdx, order) {
   comboTimer = COMBO_WINDOW * 1000;
   if (combo > bestCombo) bestCombo = combo;
   var mult = combo >= 2 ? combo : 1;
-  var gain = Math.round(COINS_PER_TIER * order.tier * mult);
+  var gain = Math.round(COINS_PER_TIER * order.tier * mult * stationBonusMult(order.chain));
   coins += gain; score += gain;
   ordersServed++;
+  var metaAward = awardDinerMeta(order);
   GF.sfx('coin');
   GF.spawnParticles(order._cx || (L.boardX + L.boardW / 2), order._cy || L.railY, '#ffd700', 14);
   GF.spawnFloat(order._cx || (L.boardX + L.boardW / 2), (order._cy || L.railY) + 4, '+' + gain, '#ffd700');
   if (combo >= 2) GF.spawnFloat(order._cx || (L.boardX + L.boardW / 2), (order._cy || L.railY) - 18, GF.t('combo') + ' x' + combo, '#ffd166');
+  if (metaAward && metaAward.upgraded) {
+    GF.sfx('unlock');
+    GF.spawnFloat(order._cx || GF.cx, (order._cy || L.railY) - 32 * GF.S, GF.t('metaUnlock'), '#7ed957');
+  }
   GF.setShake(0.35);
   if (GF.tutorial.active && GF.tutorial.step === 2) GF.tutorial.next();  // a real serve completes step 3
   // replace this order
@@ -330,6 +471,7 @@ function serveTo(srcIdx, order) {
   refillOrders();
   // combo cascade: a high combo fires a brief auto-merge on the board (juice + relief)
   if (combo >= 3) triggerCascade();
+  stationAutoMerge(order.chain);
   checkLevelUp();
   GF.saveRun();
   checkGameOver();
@@ -390,6 +532,7 @@ function startGame() {
   // a third ingredient of the same chain so the player can reach the tier-2 demo order
   var cc = randFree(); if (cc >= 0) placeItem(cc, seedChain, 0, false, false);
   var dd = randFree(); if (dd >= 0) placeItem(dd, seedChain, 1, false, false);   // a pre-merged tier-1 to pair toward tier-2
+  seedStationPrep();
   gs = 'PLAYING';
   startTutorial();
   GF.gameStarted();
@@ -565,6 +708,7 @@ function onUp(x, y) {
 function update(dt) {
   if (newChainFlash > 0) newChainFlash = Math.max(0, newChainFlash - dt);
   if (levelFlash > 0) levelFlash = Math.max(0, levelFlash - dt);
+  if (metaToastTimer > 0) metaToastTimer = Math.max(0, metaToastTimer - dt);
   if (cascadeTimer > 0) cascadeTimer = Math.max(0, cascadeTimer - dt);
   if (gs !== 'PLAYING') { GF.tutorial.update(dt); return; }
   GF.tutorial.update(dt);
@@ -601,11 +745,15 @@ function layout() {
   var topH = GF.clamp(46 * S, 38, 60);          // coins / score / level row
   var railH = GF.clamp(72 * S, 58, 96);          // order tickets
   var meterH = GF.clamp(16 * S, 12, 22);         // jam meter
+  var bookH = GF.clamp(24 * S, 20, 32);          // restaurant book strip
   var crateH = GF.clamp(96 * S, 78, 130);        // crate bar
   L.railY = topH;
   L.railH = railH;
   L.meterY = topH + railH + 2 * S;
-  var availTop = topH + railH + meterH + pad;
+  L.meterH = meterH;
+  L.bookY = L.meterY + meterH + 5 * S;
+  L.bookH = bookH;
+  var availTop = topH + railH + meterH + bookH + pad + 5 * S;
   var availBot = H - crateH - pad;
   var availH = availBot - availTop;
   var maxBoardW = colW - pad * 2;
@@ -634,6 +782,7 @@ function draw(ctx) {
   if (gs === 'PLAYING' || gs === 'GAMEOVER') {
     drawOrderRail(ctx);
     drawJamMeter(ctx);
+    drawBookStrip(ctx);
     drawBoard(ctx);
     drawCrateBar(ctx);
     drawTopHUD(ctx);
@@ -641,6 +790,7 @@ function draw(ctx) {
     drawDrag(ctx);
     if (levelFlash > 0) drawLevelUp(ctx);
     if (newChainFlash > 0) drawNewChain(ctx);
+    if (metaToastTimer > 0) drawMetaToast(ctx);
     if (gs === 'PLAYING') GF.tutorial.draw(ctx);
   }
   if (gs === 'MENU') drawMenu(ctx);
@@ -751,6 +901,37 @@ function drawJamMeter(ctx) {
   ctx.fillText(GF.t('free') + ': ' + fc, x + w, y - 1 * S);
   ctx.textAlign = 'left'; ctx.fillStyle = '#9a8c7a';
   ctx.fillText(GF.t('chainsLbl') + ' ' + chainsUnlocked + '/' + NUM_CHAINS, x, y - 1 * S);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawBookIcon(ctx, x, y, s) {
+  ctx.save();
+  ctx.fillStyle = '#f4d28a';
+  GF.rr(ctx, x - s * 0.48, y - s * 0.36, s * 0.9, s * 0.72, s * 0.08); ctx.fill();
+  ctx.fillStyle = '#8a4f2a';
+  GF.rr(ctx, x - s * 0.42, y - s * 0.3, s * 0.18, s * 0.6, s * 0.04); ctx.fill();
+  ctx.strokeStyle = 'rgba(42,24,16,0.45)'; ctx.lineWidth = Math.max(1, s * 0.07);
+  ctx.beginPath(); ctx.moveTo(x - s * 0.1, y - s * 0.18); ctx.lineTo(x + s * 0.28, y - s * 0.18);
+  ctx.moveTo(x - s * 0.1, y + s * 0.02); ctx.lineTo(x + s * 0.22, y + s * 0.02);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBookStrip(ctx) {
+  var S = GF.S;
+  var x = L.boardX, y = L.bookY, w = L.boardW, h = L.bookH || GF.clamp(24 * S, 20, 32);
+  GF.rr(ctx, x, y, w, h, h / 2);
+  ctx.fillStyle = 'rgba(255,248,232,0.09)'; ctx.fill();
+  ctx.lineWidth = Math.max(1, 1.4 * S); ctx.strokeStyle = 'rgba(244,210,138,0.36)'; ctx.stroke();
+  drawBookIcon(ctx, x + h * 0.55, y + h / 2, h * 0.72);
+  var text = compactMetaLine();
+  var fs = GF.clamp(10.5 * S, 8.5, 14);
+  var maxW = w - h * 1.25 - 10 * S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  while (fs > 8 && ctx.measureText(text).width > maxW) { fs -= 0.5; ctx.font = 'bold ' + fs + 'px sans-serif'; }
+  ctx.fillStyle = dinerMeta.totalServed > 0 ? '#f4d28a' : '#cdb';
+  ctx.fillText(text, x + h * 1.08, y + h / 2);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -963,6 +1144,26 @@ function drawNewChain(ctx) {
   ctx.restore();
 }
 
+function drawMetaToast(ctx) {
+  if (!metaToast) return;
+  var S = GF.S, a = Math.min(1, metaToastTimer / 0.45, (2.4 - metaToastTimer) / 0.25);
+  var w = Math.min(L.boardW, GF.clamp(300 * S, 210, 360));
+  var h = GF.clamp(54 * S, 44, 66);
+  var x = GF.cx - w / 2, y = Math.max(70 * S, L.boardY - h - 10 * S);
+  ctx.save();
+  ctx.globalAlpha = GF.clamp(a, 0, 1);
+  GF.rr(ctx, x, y, w, h, 12 * S); ctx.fillStyle = 'rgba(24,42,22,0.92)'; ctx.fill();
+  ctx.lineWidth = 2 * S; ctx.strokeStyle = '#7ed957'; ctx.stroke();
+  drawBookIcon(ctx, x + h * 0.52, y + h / 2, h * 0.58);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#7ed957'; ctx.font = 'bold ' + GF.clamp(13 * S, 10, 18) + 'px sans-serif';
+  ctx.fillText(GF.t('metaUnlock'), x + h * 0.96, y + h * 0.38);
+  ctx.fillStyle = '#fff'; ctx.font = GF.clamp(11 * S, 9, 15) + 'px sans-serif';
+  ctx.fillText(itemName(metaToast.chain, MAX_TIER) + ' ' + GF.t('stationShort') + ' ' + GF.t('level') + ' ' + metaToast.level, x + h * 0.96, y + h * 0.68);
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
 // ── OVERLAYS ───────────────────────────────────────────────────────────────
 function wrapLines(ctx, text, maxW) {
   var words = String(text).split(/\s+/), lines = [], cur = '';
@@ -973,6 +1174,18 @@ function wrapLines(ctx, text, maxW) {
   }
   if (cur) lines.push(cur);
   return lines;
+}
+function drawFitCenter(ctx, text, x, y, maxW, fs, minFs, weight, color) {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var size = fs;
+  ctx.font = (weight ? weight + ' ' : '') + size + 'px sans-serif';
+  while (size > minFs && ctx.measureText(text).width > maxW) {
+    size -= 0.5;
+    ctx.font = (weight ? weight + ' ' : '') + size + 'px sans-serif';
+  }
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  ctx.textBaseline = 'alphabetic';
 }
 function drawTutorialBlock(ctx, topY, maxW) {
   var S = GF.S;
@@ -1006,12 +1219,13 @@ function drawMenu(ctx) {
   ctx.fillText(GF.t('sub'), GF.cx, titleY + 26 * S);
   ctx.font = GF.clamp(11 * S, 9, 14.5) + 'px sans-serif'; ctx.fillStyle = '#caa86a';
   ctx.fillText(GF.t('goalLine'), GF.cx, titleY + 46 * S);
+  drawFitCenter(ctx, compactMetaLine(), GF.cx, titleY + 64 * S, Math.min(W - 34 * S, 430 * S), GF.clamp(11 * S, 9, 15), 8.5, 'bold', '#f4d28a');
   // tutorial block (how to play) under the title, above PLAY
   var maxW = Math.min(W - 36 * S, 420 * S);
-  var blockH = drawTutorialBlock(ctx, titleY + 64 * S, maxW);
+  var blockH = drawTutorialBlock(ctx, titleY + 84 * S, maxW);
   // PLAY button
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
-  var btnY = Math.min(titleY + 64 * S + blockH + 22 * S, H - btnH - 18 * S);
+  var btnY = Math.min(titleY + 84 * S + blockH + 22 * S, H - btnH - 18 * S);
   drawPlayButton(ctx, btnW, btnH, btnY, GF.t('play'));
   if (best > 0) {
     ctx.fillStyle = '#8a7'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px sans-serif'; ctx.textAlign = 'center';
@@ -1040,6 +1254,8 @@ function drawGameOver(ctx) {
   ctx.fillText(GF.t('score') + ': ' + score, GF.cx, sy0 + 46 * S);
   ctx.fillStyle = '#8a7'; ctx.font = GF.clamp(13 * S, 10, 18) + 'px sans-serif';
   ctx.fillText(GF.t('best') + ': ' + best + '    ' + GF.t('chainsLbl') + ': ' + chainsUnlocked + '/' + NUM_CHAINS, GF.cx, sy0 + 70 * S);
+  drawFitCenter(ctx, GF.t('metaReturn'), GF.cx, sy0 + 96 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12 * S, 9.5, 16), 8.5, '', '#f4d28a');
+  drawFitCenter(ctx, GF.t('metaNextShift') + ': ' + compactMetaLine(), GF.cx, sy0 + 116 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12.5 * S, 10, 17), 8.5, 'bold', '#7ed957');
   // buttons: rewarded continue (one per run) above PLAY AGAIN
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
   var retryY = H - btnH - 20 * S;
@@ -1049,9 +1265,7 @@ function drawGameOver(ctx) {
     var cg = ctx.createLinearGradient(cbx, contY, cbx, contY + btnH);
     cg.addColorStop(0, '#5ad15a'); cg.addColorStop(1, '#2ea043');
     GF.rr(ctx, cbx, contY, btnW, btnH, btnH / 2); ctx.fillStyle = cg; ctx.fill();
-    ctx.fillStyle = '#08240f'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = 'bold ' + GF.clamp(14 * S, 11, 19) + 'px sans-serif';
-    ctx.fillText('▶ ' + GF.t('adContinue'), GF.cx, contY + btnH / 2);
+    drawFitCenter(ctx, '▶ ' + GF.t('adContinue'), GF.cx, contY + btnH / 2, btnW - 22 * S, GF.clamp(14 * S, 11, 19), 8, 'bold', '#08240f');
     ctx.textBaseline = 'alphabetic';
     continueBtnRect = { x: cbx, y: contY, w: btnW, h: btnH };
   }
@@ -1213,6 +1427,7 @@ window._mdInfo = function () {
     centers: board.map(function (c, i) { var p = cellCenter(i); return { x: p.x, y: p.y }; }),
     playBtn: playBtnRect, coins: coins, score: score, level: level, chainsUnlocked: chainsUnlocked,
     freeCells: freeCells(), crateReady: crateReady.slice(), continueBtn: continueBtnRect,
+    dinerMeta: exportDinerMeta(), metaLine: compactMetaLine(),
   };
 };
 // Test seam: fill every empty cell to force JAM deterministically.
@@ -1243,12 +1458,20 @@ GF.init({
   sprites: SPRITE_NAMES,
   saveKey: 'merge_diner',
   onReady: function () {
+    var visualTest = false;
+    try {
+      if (window.__forceLang) {
+        GF.lang = String(window.__forceLang).toLowerCase().indexOf('ru') === 0 ? 'ru' : 'en';
+        visualTest = /[?&]test=1\b/.test(location.search);
+      }
+      if (visualTest) localStorage.removeItem('merge_diner_run_v1');
+    } catch (e) {}
     try { best = parseInt(localStorage.getItem('merge_diner_best') || '0') || 0; } catch (e) {}
     (function(){ var go=function(){ GF.music('audio/bg_track.mp3', 0.55); ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){ document.removeEventListener(ev, go, true); }); }; ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){ document.addEventListener(ev, go, true); }); })(); /* bespoke synth_track music */   // procedural bg bed (starts on first gesture)
     // Yandex 1.9 — persist run across reload
     GF.persist('merge_diner_run_v1',
       function () {
-        if (gs !== 'PLAYING') return { gs: gs };
+        if (gs !== 'PLAYING') return { gs: gs, meta: exportDinerMeta() };
         return {
           gs: gs, score: score, coins: coins, merges: merges, ordersServed: ordersServed,
           level: level, chainsUnlocked: chainsUnlocked, topTier: topTier, goldenSeen: goldenSeen,
@@ -1256,9 +1479,11 @@ GF.init({
           board: board.map(function (c) { return c ? { c: c.chain, t: c.tier, g: c.golden ? 1 : 0 } : 0; }),
           orders: orders.map(function (o) { return { c: o.chain, t: o.tier, id: o.id }; }),
           firstMergeDone: firstMergeDone, orderSeq: orderSeq,
+          meta: exportDinerMeta(),
         };
       },
       function (s) {
+        if (s && s.meta) applyDinerMeta(s.meta);
         if (!s || s.gs !== 'PLAYING') return;
         score = s.score || 0; coins = s.coins || 0; merges = s.merges || 0; ordersServed = s.ordersServed || 0;
         level = s.level || 1; chainsUnlocked = s.chainsUnlocked || 1; topTier = s.topTier || 0; goldenSeen = !!s.goldenSeen;
@@ -1294,11 +1519,14 @@ GF.exposeState(function () {
     merges: merges, combo: combo, bestCombo: bestCombo, topTier: topTier,
     freeCells: freeCells(), goldenSeen: goldenSeen, crates: crates,
     hasMergePair: hasMergePair(), hasDeliverableOrder: hasDeliverableOrder(), orders: orders.length,
+    dinerMeta: exportDinerMeta(), uniqueRecipes: uniqueRecipeCount(), recipeStamps: totalRecipeStamps(),
+    nextStation: nextStationTarget(),
     // tunables (DESIGN.md §Tunables)
     GRID_W: GRID_W, GRID_H: GRID_H, CRATE_COOLDOWN: CRATE_COOLDOWN, ORDER_SLOTS: ORDER_SLOTS,
     COMBO_WINDOW: COMBO_WINDOW, COINS_PER_TIER: COINS_PER_TIER, LEVELUP_ORDERS: LEVELUP_ORDERS,
     NUM_CHAINS: NUM_CHAINS, JAM_GRACE_MS: JAM_GRACE_MS, GOLDEN_CHANCE: GOLDEN_CHANCE,
-    MAX_TIER: MAX_TIER, MAX_CRATES: MAX_CRATES,
+    MAX_TIER: MAX_TIER, MAX_CRATES: MAX_CRATES, RECIPE_STAMP_GOAL: RECIPE_STAMP_GOAL,
+    STATION_THRESHOLDS: STATION_THRESHOLDS.slice(),
   };
 });
 

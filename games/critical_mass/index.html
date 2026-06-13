@@ -90,6 +90,10 @@ var VENT_POWER_BASE      = 4;
 var VENT_POWER_PER_EXTRA = 3;
 var COOLANT_DUMP         = 16;
 var SHIFT_COOL           = 22;
+var POST_VENT_SPAWN_COOLDOWN_MS = 700;
+var INPUT_DEBOUNCE_MS    = 140;
+var SAME_TILE_DEBOUNCE_MS = 520;
+var SPAWN_AVOID_RADIUS   = 1;
 
 var COLS = 6, ROWS = 9;
 var SCRIPTED_SHIFTS = 6;
@@ -124,6 +128,7 @@ var bestShift = 0;
 var heat = 0;
 var spawnTimer = 0;
 var spawnInterval = SPAWN_BASE_MS;
+var spawnCooldown = 0;
 var colorCount = 3;        // active number of fuel colours (rises with shifts)
 var seenTut = false;
 var helpOpen = false;
@@ -140,6 +145,9 @@ var newTypeBanner = null, newTypeT = 0;  // "new cell type" toast
 
 // drag/swap tracking
 var dragCell = null;        // {r,c,x,y} where a press began
+var lastTapCell = null;     // recent tap coordinate, used to reject spam repeats
+var lastTapAt = 0;
+var lastVentCell = null;    // successful vent origin, used for fair respawns
 
 // layout (rebuilt on resize)
 var L = {};
@@ -221,6 +229,8 @@ function heatRate() {
 // ── SPAWNING ───────────────────────────────────────────────────────────────
 function rngColor() { return (Math.random() * colorCount) | 0; }
 function rodTime() { return Math.max(6, 12 - shift); }
+function nowMs() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
+function sameCell(a, b) { return !!a && !!b && a.r === b.r && a.c === b.c; }
 
 function makeCell() {
   var roll = Math.random();
@@ -237,12 +247,36 @@ function makeCell() {
   return { t: T_FUEL, c: rngColor() };
 }
 
+function landingRowForColumn(c) {
+  for (var r = ROWS - 1; r >= 0; r--) if (!grid[r][c]) return r;
+  return -1;
+}
+
+function fairDistance(r, c) {
+  if (!lastVentCell) return 99;
+  return Math.abs(r - lastVentCell.r) + Math.abs(c - lastVentCell.c);
+}
+
+function fairSpawnChoices(choices) {
+  if (!lastVentCell || choices.length <= 1) return choices;
+  var away = choices.filter(function (ch) {
+    return ch.c !== lastVentCell.c && fairDistance(ch.r, ch.c) > SPAWN_AVOID_RADIUS;
+  });
+  if (away.length) return away;
+  var notSameColumn = choices.filter(function (ch) { return ch.c !== lastVentCell.c; });
+  return notSameColumn.length ? notSameColumn : choices;
+}
+
 // drop one cell into a random non-full column; full board -> overflow heat
 function spawnCell() {
-  var cols = [];
-  for (var c = 0; c < COLS; c++) { if (!grid[0][c]) cols.push(c); }
-  if (!cols.length) { heat = Math.min(HEAT_MAX, heat + 6); heatPulse = 1; GF.setShake(0.4); return; }
-  var c2 = cols[(Math.random() * cols.length) | 0];
+  var choices = [];
+  for (var c = 0; c < COLS; c++) {
+    var lr = landingRowForColumn(c);
+    if (lr >= 0) choices.push({ c: c, r: lr });
+  }
+  if (!choices.length) { heat = Math.min(HEAT_MAX, heat + 6); heatPulse = 1; GF.setShake(0.4); return; }
+  var pool = fairSpawnChoices(choices);
+  var c2 = pool[(Math.random() * pool.length) | 0].c;
   for (var r = ROWS - 1; r >= 0; r--) { if (!grid[r][c2]) { grid[r][c2] = makeCell(); break; } }
   if (heat > HEAT_MAX * 0.6) heatPulse = Math.max(heatPulse, 0.5);
 }
@@ -258,13 +292,36 @@ function seedBoard(rowsFilled) {
 // guarantee a couple of vent-able clusters so the player is never stuck
 function ensureSolvable() {
   if (listClusters().length >= 2) return;
-  for (var k = 0; k < 2; k++) {
-    var rr = ROWS - 1 - k;
-    var col = rngColor();
-    for (var c = 0; c < 3; c++) {
-      if (cellAt(rr, c) && (cellAt(rr, c).t === T_INERT || cellAt(rr, c).t === T_ROD)) continue;
-      grid[rr][c] = { t: T_FUEL, c: col };
+  var used = {};
+  for (var k = listClusters().length; k < 2; k++) placeSolvableCluster(used);
+}
+
+function placeSolvableCluster(used) {
+  var candidates = [];
+  var minR = Math.max(0, ROWS - 4);
+  for (var rr = ROWS - 1; rr >= minR; rr--) {
+    for (var start = 0; start <= COLS - MIN_CLUSTER; start++) {
+      var ok = true, dist = 99;
+      for (var c = start; c < start + MIN_CLUSTER; c++) {
+        var cell = cellAt(rr, c);
+        var id = rr * COLS + c;
+        if (used[id] || (cell && (cell.t === T_INERT || cell.t === T_ROD))) { ok = false; break; }
+        dist = Math.min(dist, fairDistance(rr, c));
+      }
+      if (ok) candidates.push({ r: rr, c: start, dist: dist });
     }
+  }
+  candidates.sort(function (a, b) {
+    if (b.dist !== a.dist) return b.dist - a.dist;
+    return b.r - a.r;
+  });
+  var pick = candidates[0] || { r: ROWS - 1, c: 0 };
+  var col = rngColor();
+  for (var cc = pick.c; cc < pick.c + MIN_CLUSTER; cc++) {
+    var id2 = pick.r * COLS + cc;
+    used[id2] = true;
+    if (cellAt(pick.r, cc) && (cellAt(pick.r, cc).t === T_INERT || cellAt(pick.r, cc).t === T_ROD)) continue;
+    grid[pick.r][cc] = { t: T_FUEL, c: col };
   }
 }
 
@@ -276,6 +333,9 @@ function ventClusterAt(r, c) {
   if (!cell || cell.t === T_INERT || cell.t === T_ROD) { GF.sfx('error'); return false; }
   var cl = clusterAt(r, c);
   if (cl.length < MIN_CLUSTER) { GF.sfx('error'); return false; }
+  lastVentCell = { r: r, c: c };
+  spawnCooldown = POST_VENT_SPAWN_COOLDOWN_MS;
+  spawnTimer = 0;
   doVent(cl);
   return true;
 }
@@ -390,9 +450,10 @@ function announceNewType(sh) {
 // ── LIFECYCLE ──────────────────────────────────────────────────────────────
 function startGame() {
   shift = 1; power = 0; score = 0; heat = 0;
-  quota = QUOTA_BASE; spawnInterval = SPAWN_BASE_MS; spawnTimer = 0;
+  quota = QUOTA_BASE; spawnInterval = SPAWN_BASE_MS; spawnTimer = 0; spawnCooldown = 0;
   colorCount = 3;
   newTypeBanner = null; newTypeT = 0; shiftClearT = 0; ventFlash = 0; heatPulse = 0;
+  lastTapCell = null; lastTapAt = 0; lastVentCell = null;
   helpOpen = false;
   seedBoard(4);
   gs = 'PLAYING';
@@ -497,8 +558,12 @@ function update(dt) {
   }
   if (changed) applyGravity();
 
-  spawnTimer += dt * 1000;
-  if (spawnTimer >= spawnInterval) { spawnTimer = 0; spawnCell(); applyGravity(); ensureSolvable(); }
+  if (spawnCooldown > 0) {
+    spawnCooldown = Math.max(0, spawnCooldown - dt * 1000);
+  } else {
+    spawnTimer += dt * 1000;
+    if (spawnTimer >= spawnInterval) { spawnTimer = 0; spawnCell(); applyGravity(); ensureSolvable(); }
+  }
 
   if (heat >= HEAT_MAX) { heat = HEAT_MAX; gameOver(); return; }
 }
@@ -845,6 +910,17 @@ function evtPos(e) {
 }
 function hitCirc(b, x, y) { var dx = x - b.x, dy = y - b.y; return dx * dx + dy * dy <= (b.r + 6 * GF.S) * (b.r + 6 * GF.S); }
 function inRect(r, x, y) { return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
+function acceptTapCell(cellPos) {
+  var t = nowMs();
+  var since = lastTapAt ? t - lastTapAt : 9999;
+  if (since < INPUT_DEBOUNCE_MS || (sameCell(lastTapCell, cellPos) && since < SAME_TILE_DEBOUNCE_MS)) {
+    GF.sfx('error');
+    return false;
+  }
+  lastTapCell = { r: cellPos.r, c: cellPos.c };
+  lastTapAt = t;
+  return true;
+}
 
 function onDown(x, y) {
   if (helpOpen) { if (helpCloseRect && inRect(helpCloseRect, x, y)) { helpOpen = false; GF.sfx('click'); } return; }
@@ -890,7 +966,7 @@ function onUp(x, y) {
     var moved = Math.abs(x - dragCell.x) > L.cell * 0.55 || Math.abs(y - dragCell.y) > L.cell * 0.55;
     if (!moved) {
       var cellPos = pxToCell(x, y);
-      if (cellPos) ventClusterAt(cellPos.r, cellPos.c);
+      if (cellPos && acceptTapCell(cellPos)) ventClusterAt(cellPos.r, cellPos.c);
     }
   }
   dragCell = null;
@@ -967,12 +1043,16 @@ GF.init({
         heat: Math.round(heat * 10) / 10, heatRate: Math.round(heatRate() * 100) / 100,
         cells: countCells(), clusters: listClusters().length,
         colorCount: colorCount, spawnInterval: Math.round(spawnInterval),
+        spawnCooldown: Math.round(spawnCooldown), lastVentCell: lastVentCell,
         coachOn: coachOn, coachStep: coachStep, seenTut: seenTut, helpOpen: helpOpen,
         HEAT_MAX: HEAT_MAX, QUOTA_BASE: QUOTA_BASE, QUOTA_STEP: QUOTA_STEP,
         MIN_CLUSTER: MIN_CLUSTER, SPAWN_BASE_MS: SPAWN_BASE_MS, SPAWN_MIN_MS: SPAWN_MIN_MS,
         HEAT_PER_CELL: HEAT_PER_CELL, VOLATILE_HEAT_MULT: VOLATILE_HEAT_MULT,
         VENT_POWER_BASE: VENT_POWER_BASE, VENT_POWER_PER_EXTRA: VENT_POWER_PER_EXTRA,
         COOLANT_DUMP: COOLANT_DUMP, SHIFT_COOL: SHIFT_COOL,
+        POST_VENT_SPAWN_COOLDOWN_MS: POST_VENT_SPAWN_COOLDOWN_MS,
+        INPUT_DEBOUNCE_MS: INPUT_DEBOUNCE_MS, SAME_TILE_DEBOUNCE_MS: SAME_TILE_DEBOUNCE_MS,
+        SPAWN_AVOID_RADIUS: SPAWN_AVOID_RADIUS,
         COLS: COLS, ROWS: ROWS, SCRIPTED_SHIFTS: SCRIPTED_SHIFTS,
       };
     });
