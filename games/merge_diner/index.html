@@ -40,10 +40,22 @@ var STRINGS = {
     metaUnlock: 'STATION UPGRADED!',
     metaNextShift: 'Next shift',
     metaReturn: 'Restaurant book kept. Upgrade stations by serving recipes.',
+    dailyShift: 'SHIFT',
+    dailyStreak: 'streak',
+    dailyReady: 'Morning prep ready',
+    dailyRestocked: 'restocked',
+    dailyPrep: 'prep',
+    dailyGoal: 'Goal',
+    dailyServe: 'Serve',
+    dailyMerge: 'Merge',
+    dailyAny: 'Serve any order',
+    dailyCombo: 'Feast combo',
+    dailyDone: 'All shift goals done',
+    dailyReward: 'book stamp + prep',
     tut_goal: 'Goal: Merge two identical ingredients to build them into finished dishes, then serve the dish each customer order asks for to earn coins.',
-    tut_controls: 'Controls: Tap a crate to drop an ingredient. Drag an item onto a matching one to merge — or tap it, then tap where to send it. Serve a finished dish onto a matching order.',
-    tut_win: 'Win: Endless — chase your best coin score. Every few orders unlocks a NEW cuisine: pizza, burgers, sushi, desserts, drinks.',
-    tut_lose: 'Lose: JAM — the counter fills up completely and stays full, with no room left to drop or merge.',
+    tut_controls: 'Controls: Tap a crate to drop an ingredient. Drag an item onto a matching one to merge - or tap it, then tap where to send it. Serve a finished dish onto a matching order.',
+    tut_win: 'Win: Endless - chase your best coin score. Every few orders unlocks a NEW cuisine: pizza, burgers, sushi, desserts, drinks.',
+    tut_lose: 'Lose: JAM - the counter fills up completely and stays full, with no room left to drop or merge.',
     tut_tip: 'Tip: Serve orders back-to-back for a Feast Combo (bigger coins) and to free up counter space before it jams.',
   },
   ru: {
@@ -64,10 +76,22 @@ var STRINGS = {
     metaUnlock: 'СТАНЦИЯ УЛУЧШЕНА!',
     metaNextShift: 'Следующая смена',
     metaReturn: 'Книга ресторана сохранена. Улучшай станции рецептами.',
+    dailyShift: 'СМЕНА',
+    dailyStreak: 'серия',
+    dailyReady: 'Утренняя заготовка готова',
+    dailyRestocked: 'подготовлено',
+    dailyPrep: 'заготовка',
+    dailyGoal: 'Цель',
+    dailyServe: 'Подай',
+    dailyMerge: 'Слей',
+    dailyAny: 'Подай любой заказ',
+    dailyCombo: 'Комбо Пир',
+    dailyDone: 'Все цели смены готовы',
+    dailyReward: 'штамп книги + заготовка',
     tut_goal: 'Цель: Сливай два одинаковых продукта, чтобы собрать готовые блюда, затем подавай блюдо по каждому заказу клиента и получай монеты.',
-    tut_controls: 'Управление: Жми ящик, чтобы выпал продукт. Тащи продукт на такой же, чтобы слить — или нажми на него, затем на нужную клетку. Подай готовое блюдо на подходящий заказ.',
-    tut_win: 'Победа: Бесконечно — бей рекорд монет. Каждые несколько заказов открывают НОВУЮ кухню: пицца, бургеры, суши, десерты, напитки.',
-    tut_lose: 'Поражение: ЗАТОР — прилавок полностью забит и остаётся забитым, класть и сливать негде.',
+    tut_controls: 'Управление: Жми ящик, чтобы выпал продукт. Тащи продукт на такой же, чтобы слить - или нажми на него, затем на нужную клетку. Подай готовое блюдо на подходящий заказ.',
+    tut_win: 'Победа: Бесконечно - бей рекорд монет. Каждые несколько заказов открывают НОВУЮ кухню: пицца, бургеры, суши, десерты, напитки.',
+    tut_lose: 'Поражение: ЗАТОР - прилавок полностью забит и остаётся забитым, класть и сливать негде.',
     tut_tip: 'Совет: Подавай заказы подряд ради Комбо Пира (больше монет) и чтобы освободить место на прилавке до затора.',
   },
 };
@@ -117,6 +141,9 @@ var MAX_TIER        = 5;     // tiers per chain (0..5)
 var MAX_CRATES      = 2;     // crate generators cap
 var RECIPE_STAMP_GOAL = 3;   // stamps to complete a recipe-page entry
 var STATION_THRESHOLDS = [2, 5, 9]; // served recipes per cuisine for station Lv1/2/3
+var PREP_CAP_HOURS = 10;     // overnight prep caps at a daily-return window
+var PREP_ITEM_MINUTES = 90;   // one stocked prep item per capped 90 minutes away
+var PREP_QUEUE_CAP = 8;       // visible next-shift stockpile cap
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';             // MENU | PLAYING | GAMEOVER
@@ -141,6 +168,7 @@ var firstMergeDone = false;  // progressive disclosure: orders appear after 1st 
 // Persistent owned meta: the player's restaurant book + cuisine stations.
 var dinerMeta = { recipes: {}, chainServes: {}, totalServed: 0 };
 var metaToast = null, metaToastTimer = 0;
+var dailyToast = null, dailyToastTimer = 0;
 
 // selection / drag
 var sel = -1;                // selected source cell index (tap-tap), -1 = none
@@ -191,10 +219,72 @@ function shade(hex, f) {
 function itemColor(chain, tier) { return shade(chainDef(chain).col, TIER_LIGHT[GF.clamp(tier, 0, MAX_TIER)] || 1); }
 
 // ── RESTAURANT BOOK META ─────────────────────────────────────────────────
+function dayIndexFromMs(ms) { return Math.floor(Math.max(0, ms || 0) / 86400000); }
+function dayKeyFromIndex(idx) { try { return new Date(idx * 86400000).toISOString().slice(0, 10); } catch (e) { return ''; } }
+function todayIndex() { return dayIndexFromMs(Date.now()); }
+function blankDailyMeta() {
+  return {
+    date: '', dayIndex: -1, streak: 0, lastSeenAt: 0,
+    prepTickets: 0, pendingPrep: [], goals: [],
+    summaryKind: '', summaryItems: 0, summaryHours: 0, summaryReward: 0,
+    summarySeen: true,
+  };
+}
 function blankDinerMeta() {
-  var m = { recipes: {}, chainServes: {}, totalServed: 0 };
+  var m = { recipes: {}, chainServes: {}, totalServed: 0, daily: blankDailyMeta() };
   for (var i = 0; i < CHAINS.length; i++) m.chainServes[CHAINS[i].id] = 0;
   return m;
+}
+function normalizePrepItem(it) {
+  if (!it || typeof it !== 'object') return null;
+  var c = chainDef(it.c || it.chain || CHAINS[0].id).id;
+  var t = GF.clamp(parseInt(it.t != null ? it.t : it.tier, 10) || 0, 0, 2);
+  return { c: c, t: t };
+}
+function normalizeDailyGoal(g) {
+  if (!g || typeof g !== 'object') return null;
+  var type = String(g.type || '');
+  if (type !== 'serve_chain' && type !== 'merge_tier' && type !== 'serve_any' && type !== 'combo') return null;
+  var need = GF.clamp(parseInt(g.need, 10) || 1, 1, 12);
+  var chain = chainDef(g.chain || CHAINS[0].id).id;
+  var tier = GF.clamp(parseInt(g.tier, 10) || 2, 2, MAX_TIER);
+  return {
+    id: String(g.id || type + ':' + chain + ':' + tier),
+    type: type,
+    chain: chain,
+    tier: tier,
+    need: need,
+    progress: GF.clamp(parseInt(g.progress, 10) || 0, 0, need),
+    rewarded: !!g.rewarded,
+  };
+}
+function normalizeDailyMeta(m) {
+  var out = blankDailyMeta();
+  if (!m || typeof m !== 'object') return out;
+  out.date = String(m.date || '');
+  out.dayIndex = parseInt(m.dayIndex, 10);
+  if (!isFinite(out.dayIndex)) out.dayIndex = -1;
+  out.streak = Math.max(0, parseInt(m.streak, 10) || 0);
+  out.lastSeenAt = Math.max(0, parseInt(m.lastSeenAt, 10) || 0);
+  out.prepTickets = GF.clamp(parseInt(m.prepTickets, 10) || 0, 0, PREP_QUEUE_CAP);
+  if (Array.isArray(m.pendingPrep)) {
+    for (var i = 0; i < m.pendingPrep.length && out.pendingPrep.length < PREP_QUEUE_CAP; i++) {
+      var it = normalizePrepItem(m.pendingPrep[i]);
+      if (it) out.pendingPrep.push(it);
+    }
+  }
+  if (Array.isArray(m.goals)) {
+    for (var j = 0; j < m.goals.length && out.goals.length < 3; j++) {
+      var g = normalizeDailyGoal(m.goals[j]);
+      if (g) out.goals.push(g);
+    }
+  }
+  out.summaryKind = String(m.summaryKind || '');
+  out.summaryItems = Math.max(0, parseInt(m.summaryItems, 10) || 0);
+  out.summaryHours = Math.max(0, parseFloat(m.summaryHours) || 0);
+  out.summaryReward = Math.max(0, parseInt(m.summaryReward, 10) || 0);
+  out.summarySeen = m.summarySeen !== false;
+  return out;
 }
 function normalizeDinerMeta(m) {
   var out = blankDinerMeta();
@@ -211,6 +301,7 @@ function normalizeDinerMeta(m) {
     }
   }
   out.totalServed = Math.max(0, parseInt(m.totalServed, 10) || 0);
+  out.daily = normalizeDailyMeta(m.daily);
   return out;
 }
 function exportDinerMeta() { return normalizeDinerMeta(dinerMeta); }
@@ -239,6 +330,13 @@ function totalRecipeStamps() {
   for (var c = 0; c < CHAINS.length; c++) for (var t = 2; t <= MAX_TIER; t++) n += recipeStampCount(CHAINS[c].id, t);
   return n;
 }
+function addBookStamp(chain, tier, amount) {
+  dinerMeta = normalizeDinerMeta(dinerMeta);
+  var key = recipeKey(chain, tier);
+  var before = dinerMeta.recipes[key] || 0;
+  dinerMeta.recipes[key] = Math.min(RECIPE_STAMP_GOAL, before + Math.max(1, amount || 1));
+  return dinerMeta.recipes[key] > before;
+}
 function nextStationTarget() {
   var arr = activeChains(), bestTarget = null;
   for (var i = 0; i < arr.length; i++) {
@@ -258,6 +356,188 @@ function compactMetaLine() {
   if (!n) return GF.t('bookShort') + ' ' + uniqueRecipeCount() + '/' + totalRecipeSlots() + ' - ' + GF.t('mastered');
   return GF.t('bookShort') + ' ' + uniqueRecipeCount() + '/' + totalRecipeSlots() + ' - ' +
     itemName(n.chain, MAX_TIER) + ' ' + GF.t('stationShort') + ' ' + n.have + '/' + n.need;
+}
+function dailyReachableChains() {
+  var count = 1;
+  for (var i = 0; i < CHAINS.length; i++) if (stationServeCount(CHAINS[i].id) > 0) count = i + 1;
+  count = GF.clamp(Math.max(count, chainsUnlocked || 1), 1, NUM_CHAINS);
+  return CHAINS.slice(0, count);
+}
+function dailyChainAt(dayIdx, offset) {
+  var arr = dailyReachableChains();
+  return arr[Math.abs((dayIdx || 0) + offset) % arr.length].id;
+}
+function makeDailyGoals(dayIdx) {
+  var c0 = dailyChainAt(dayIdx, 0);
+  var c1 = dailyChainAt(dayIdx, 1);
+  return [
+    { id: dayKeyFromIndex(dayIdx) + ':serve', type: 'serve_chain', chain: c0, tier: 2, need: 2, progress: 1, rewarded: false },
+    { id: dayKeyFromIndex(dayIdx) + ':merge', type: 'merge_tier', chain: c1, tier: 2 + (Math.abs(dayIdx) % 2), need: 2, progress: 1, rewarded: false },
+    { id: dayKeyFromIndex(dayIdx) + ':orders', type: 'serve_any', chain: c0, tier: 2, need: 4, progress: 2, rewarded: false },
+  ];
+}
+function totalStationLevels() {
+  var n = 0;
+  for (var i = 0; i < CHAINS.length; i++) n += stationLevelFor(CHAINS[i].id);
+  return n;
+}
+function prepItemFor(dayIdx, offset) {
+  var target = nextStationTarget();
+  var chain = target && offset % 2 === 0 ? target.chain : dailyChainAt(dayIdx, offset);
+  var lvl = stationLevelFor(chain);
+  var tier = lvl >= 2 ? 2 : (lvl >= 1 ? 1 : 0);
+  return { c: chain, t: tier };
+}
+function collectOvernightPrep(d, now) {
+  if (!d.lastSeenAt || d.lastSeenAt >= now) return { hours: 0, items: 0, stamps: 0 };
+  var hours = Math.min(PREP_CAP_HOURS, Math.max(0, (now - d.lastSeenAt) / 3600000));
+  if (hours < 0.25) return { hours: hours, items: 0, stamps: 0 };
+  var room = PREP_QUEUE_CAP - d.pendingPrep.length;
+  var stationBoost = Math.min(3, Math.floor(totalStationLevels() / 2));
+  var items = GF.clamp(Math.floor((hours * 60) / PREP_ITEM_MINUTES) + stationBoost, 0, room);
+  var stamps = 0;
+  for (var i = 0; i < items; i++) d.pendingPrep.push(prepItemFor(d.dayIndex >= 0 ? d.dayIndex : todayIndex(), i));
+  if (items >= 2) {
+    var stampBudget = Math.min(2, Math.floor(items / 3) + 1);
+    for (var s = 0; s < stampBudget; s++) {
+      var it = prepItemFor(d.dayIndex >= 0 ? d.dayIndex : todayIndex(), s);
+      if (addBookStamp(it.c, Math.max(2, it.t + 1), 1)) stamps++;
+    }
+  }
+  return { hours: hours, items: items, stamps: stamps };
+}
+function syncDailyMeta(reason) {
+  dinerMeta = normalizeDinerMeta(dinerMeta);
+  var d = dinerMeta.daily;
+  var now = Date.now();
+  var today = todayIndex();
+  var canCollect = reason === 'boot' || reason === 'start';
+  var overnight = canCollect ? collectOvernightPrep(d, now) : { hours: 0, items: 0, stamps: 0 };
+  var newDay = d.dayIndex !== today;
+  if (newDay) {
+    var streak = (d.dayIndex === today - 1) ? d.streak + 1 : 1;
+    d.date = dayKeyFromIndex(today);
+    d.dayIndex = today;
+    d.streak = streak;
+    d.goals = makeDailyGoals(today);
+    var loginPrep = GF.clamp(1 + Math.floor(Math.min(streak, 7) / 2), 1, 4);
+    d.prepTickets = GF.clamp(d.prepTickets + loginPrep, 0, PREP_QUEUE_CAP);
+    addBookStamp(dailyChainAt(today, 0), 2, 1);
+    d.summaryKind = 'newDay';
+    d.summaryItems = overnight.items;
+    d.summaryHours = Math.round(overnight.hours * 10) / 10;
+    d.summaryReward = loginPrep;
+    d.summarySeen = false;
+  } else if (overnight.items > 0) {
+    d.summaryKind = reason === 'boot' ? 'return' : 'prep';
+    d.summaryItems = overnight.items;
+    d.summaryHours = Math.round(overnight.hours * 10) / 10;
+    d.summaryReward = 0;
+    d.summarySeen = false;
+  }
+  d.lastSeenAt = now;
+  dinerMeta.daily = normalizeDailyMeta(d);
+  if (!dinerMeta.daily.summarySeen) {
+    dailyToast = {
+      items: dinerMeta.daily.summaryItems,
+      hours: dinerMeta.daily.summaryHours,
+      reward: dinerMeta.daily.summaryReward,
+      streak: dinerMeta.daily.streak,
+    };
+    dailyToastTimer = 5.5;
+  }
+}
+function touchDailySeen() {
+  if (!dinerMeta.daily) dinerMeta.daily = blankDailyMeta();
+  dinerMeta.daily.lastSeenAt = Date.now();
+}
+function saveProgressEvent() {
+  touchDailySeen();
+  GF.saveRun();
+}
+function activeDailyGoal() {
+  dinerMeta = normalizeDinerMeta(dinerMeta);
+  var gsDaily = dinerMeta.daily.goals || [];
+  for (var i = 0; i < gsDaily.length; i++) if (!gsDaily[i].rewarded) return gsDaily[i];
+  return null;
+}
+function dailyGoalText(g) {
+  if (!g) return GF.t('dailyDone');
+  var prog = GF.clamp(g.progress || 0, 0, g.need || 1) + '/' + (g.need || 1);
+  if (g.type === 'serve_chain') return GF.t('dailyServe') + ' ' + itemName(g.chain, MAX_TIER) + ' ' + prog;
+  if (g.type === 'merge_tier') return GF.t('dailyMerge') + ' ' + itemName(g.chain, g.tier) + ' ' + prog;
+  if (g.type === 'combo') return GF.t('dailyCombo') + ' ' + prog;
+  return GF.t('dailyAny') + ' ' + prog;
+}
+function dailyCompactLine() {
+  dinerMeta = normalizeDinerMeta(dinerMeta);
+  var d = dinerMeta.daily;
+  var g = activeDailyGoal();
+  return GF.t('dailyShift') + ' ' + Math.max(1, d.streak || 1) + ' ' + GF.t('dailyStreak') + ' - ' + dailyGoalText(g);
+}
+function rewardDailyGoal(g) {
+  if (!g || g.rewarded) return;
+  g.rewarded = true;
+  dinerMeta.daily.prepTickets = GF.clamp((dinerMeta.daily.prepTickets || 0) + 1, 0, PREP_QUEUE_CAP);
+  addBookStamp(g.chain, g.tier || 2, 1);
+  dailyToast = { goal: true, streak: dinerMeta.daily.streak, reward: 1, items: dinerMeta.daily.pendingPrep.length, hours: 0 };
+  dailyToastTimer = 3.8;
+  if (gs === 'PLAYING') {
+    GF.sfx('reward');
+    GF.spawnFloat(GF.cx, L.bookY || GF.cy, GF.t('dailyReward'), '#7ed957');
+  }
+}
+function trackDaily(kind, data, amount) {
+  syncDailyMeta('event');
+  var changed = false;
+  var goals = dinerMeta.daily.goals || [];
+  for (var i = 0; i < goals.length; i++) {
+    var g = goals[i];
+    if (g.rewarded) continue;
+    var hit = false;
+    if (g.type === 'serve_chain' && kind === 'serve' && data && data.chain === g.chain) hit = true;
+    else if (g.type === 'merge_tier' && kind === 'merge' && data && data.chain === g.chain && data.tier >= g.tier) hit = true;
+    else if (g.type === 'serve_any' && kind === 'serve') hit = true;
+    else if (g.type === 'combo' && kind === 'combo') hit = true;
+    if (!hit) continue;
+    g.progress = GF.clamp((g.progress || 0) + (amount || 1), 0, g.need);
+    changed = true;
+    if (g.progress >= g.need) rewardDailyGoal(g);
+  }
+  if (changed) saveProgressEvent();
+}
+function seedDailyShiftPrep() {
+  dinerMeta = normalizeDinerMeta(dinerMeta);
+  var d = dinerMeta.daily;
+  var placed = 0;
+  while (placed < 6 && d.pendingPrep.length && freeCells() > 0) {
+    var it = normalizePrepItem(d.pendingPrep.shift());
+    if (!it) continue;
+    var idx = randFree();
+    if (idx < 0) break;
+    placeItem(idx, it.c, it.t, false, false);
+    placed++;
+  }
+  while (placed < 6 && d.prepTickets > 0 && freeCells() > 0) {
+    var pi = prepItemFor(d.dayIndex >= 0 ? d.dayIndex : todayIndex(), placed);
+    var pidx = randFree();
+    if (pidx < 0) break;
+    placeItem(pidx, pi.c, pi.t, false, false);
+    d.prepTickets--;
+    placed++;
+  }
+  if (placed > 0) {
+    if (d.summarySeen === false || d.summaryItems > 0 || d.summaryReward > 0) {
+      dailyToast = { items: placed, hours: d.summaryHours || 0, reward: d.summaryReward || 0, streak: d.streak || 1 };
+      dailyToastTimer = 5.5;
+      d.summarySeen = true;
+    }
+    if (placed >= 2) firstMergeDone = true;
+    refillOrders();
+    GF.sfx('unlock');
+  }
+  dinerMeta.daily = normalizeDailyMeta(d);
+  return placed;
 }
 function stationBonusMult(chain) { return 1 + stationLevelFor(chain) * 0.08; }
 function stationCrateTier(chain) {
@@ -423,6 +703,7 @@ function doMerge(srcIdx, dst) {
   board[dst] = { chain: baseChain, tier: resultTier, golden: false, sx: p2.x, sy: p2.y, pop: 1 };
   if (resultTier > topTier) topTier = resultTier;
   merges++;
+  trackDaily('merge', { chain: baseChain, tier: resultTier }, 1);
   GF.sfx('merge');
   // combo timer extends on merges too (keeps a serve-merge-serve flow rewarding)
   // first merge → unlock orders (progressive disclosure)
@@ -455,6 +736,8 @@ function serveTo(srcIdx, order) {
   coins += gain; score += gain;
   ordersServed++;
   var metaAward = awardDinerMeta(order);
+  trackDaily('serve', { chain: order.chain, tier: order.tier }, 1);
+  if (combo >= 2) trackDaily('combo', { combo: combo }, 1);
   GF.sfx('coin');
   GF.spawnParticles(order._cx || (L.boardX + L.boardW / 2), order._cy || L.railY, '#ffd700', 14);
   GF.spawnFloat(order._cx || (L.boardX + L.boardW / 2), (order._cy || L.railY) + 4, '+' + gain, '#ffd700');
@@ -516,6 +799,7 @@ function checkLevelUp() {
 
 // ── GAME LIFECYCLE ───────────────────────────────────────────────────────
 function startGame() {
+  syncDailyMeta('start');
   score = 0; coins = 0; merges = 0; ordersServed = 0;
   combo = 0; bestCombo = 0; comboTimer = 0;
   level = 1; chainsUnlocked = 1; topTier = 0; goldenSeen = false; jamTimer = 0;
@@ -533,10 +817,11 @@ function startGame() {
   var cc = randFree(); if (cc >= 0) placeItem(cc, seedChain, 0, false, false);
   var dd = randFree(); if (dd >= 0) placeItem(dd, seedChain, 1, false, false);   // a pre-merged tier-1 to pair toward tier-2
   seedStationPrep();
+  seedDailyShiftPrep();
   gs = 'PLAYING';
   startTutorial();
   GF.gameStarted();
-  GF.saveRun();
+  saveProgressEvent();
 }
 
 function gameOver() {
@@ -564,11 +849,11 @@ function startTutorial() {
     { text: ru ? 'Нажми ЯЩИК, чтобы выпал продукт' : 'Tap the CRATE to drop an ingredient',
       target: function () { return crateTarget(); }, advance: 'manual',
       onAdvance: function () { try { ensureMergePair(); } catch (e) {} } },
-    { text: ru ? 'Перетащи продукт на такой же — получится блюдо покрупнее!' : 'Drag an ingredient onto a matching one to MERGE!',
+    { text: ru ? 'Перетащи продукт на такой же - получится блюдо покрупнее!' : 'Drag an ingredient onto a matching one to MERGE!',
       target: function () { return mergeFromTarget(); }, target2: function () { return mergeToTarget(); }, gesture: 'drag', advance: 'manual' },
-    { text: ru ? 'Перетащи блюдо на ЗАКАЗ сверху — подай за монеты!' : 'Drag the dish onto the glowing ORDER to serve it!',
+    { text: ru ? 'Перетащи блюдо на ЗАКАЗ сверху - подай за монеты!' : 'Drag the dish onto the glowing ORDER to serve it!',
       target: function () { return serveFromTarget(); }, target2: function () { return orderTarget(); }, gesture: 'drag', advance: 'manual' },
-    { text: ru ? 'Снова нажми ЯЩИК — продолжай готовить!' : 'Tap the CRATE again — keep cooking!',
+    { text: ru ? 'Снова нажми ЯЩИК - продолжай готовить!' : 'Tap the CRATE again - keep cooking!',
       target: function () { return crateTarget(); }, advance: 'manual' },
   ];
   GF.tutorial.start(steps, { storageKey: 'merge_diner_seen_tutorial', force: !seen ? true : false });
@@ -709,6 +994,7 @@ function update(dt) {
   if (newChainFlash > 0) newChainFlash = Math.max(0, newChainFlash - dt);
   if (levelFlash > 0) levelFlash = Math.max(0, levelFlash - dt);
   if (metaToastTimer > 0) metaToastTimer = Math.max(0, metaToastTimer - dt);
+  if (dailyToastTimer > 0) dailyToastTimer = Math.max(0, dailyToastTimer - dt);
   if (cascadeTimer > 0) cascadeTimer = Math.max(0, cascadeTimer - dt);
   if (gs !== 'PLAYING') { GF.tutorial.update(dt); return; }
   GF.tutorial.update(dt);
@@ -745,7 +1031,7 @@ function layout() {
   var topH = GF.clamp(46 * S, 38, 60);          // coins / score / level row
   var railH = GF.clamp(72 * S, 58, 96);          // order tickets
   var meterH = GF.clamp(16 * S, 12, 22);         // jam meter
-  var bookH = GF.clamp(24 * S, 20, 32);          // restaurant book strip
+  var bookH = GF.clamp(40 * S, 34, 50);          // restaurant book + daily shift strip
   var crateH = GF.clamp(96 * S, 78, 130);        // crate bar
   L.railY = topH;
   L.railH = railH;
@@ -791,10 +1077,12 @@ function draw(ctx) {
     if (levelFlash > 0) drawLevelUp(ctx);
     if (newChainFlash > 0) drawNewChain(ctx);
     if (metaToastTimer > 0) drawMetaToast(ctx);
+    if (dailyToastTimer > 0) drawDailyToast(ctx);
     if (gs === 'PLAYING') GF.tutorial.draw(ctx);
   }
   if (gs === 'MENU') drawMenu(ctx);
   if (gs === 'GAMEOVER') drawGameOver(ctx);
+  if ((gs === 'MENU' || gs === 'GAMEOVER') && dailyToastTimer > 0) drawDailyToast(ctx);
 }
 
 // Vector coin (gold disc + ring) — never an emoji (tofu-box bug in game font).
@@ -917,6 +1205,23 @@ function drawBookIcon(ctx, x, y, s) {
   ctx.restore();
 }
 
+function drawPrepIcon(ctx, x, y, s) {
+  ctx.save();
+  ctx.strokeStyle = '#7ed957';
+  ctx.lineWidth = Math.max(1.5, s * 0.08);
+  ctx.fillStyle = 'rgba(126,217,87,0.16)';
+  GF.rr(ctx, x - s * 0.48, y - s * 0.22, s * 0.96, s * 0.44, s * 0.1); ctx.fill(); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x - s * 0.3, y - s * 0.22);
+  ctx.quadraticCurveTo(x - s * 0.18, y - s * 0.52, x, y - s * 0.22);
+  ctx.quadraticCurveTo(x + s * 0.18, y - s * 0.52, x + s * 0.3, y - s * 0.22);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x + s * 0.28, y + s * 0.03, s * 0.14, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffd166'; ctx.fill();
+  ctx.restore();
+}
+
 function drawBookStrip(ctx) {
   var S = GF.S;
   var x = L.boardX, y = L.bookY, w = L.boardW, h = L.bookH || GF.clamp(24 * S, 20, 32);
@@ -925,13 +1230,19 @@ function drawBookStrip(ctx) {
   ctx.lineWidth = Math.max(1, 1.4 * S); ctx.strokeStyle = 'rgba(244,210,138,0.36)'; ctx.stroke();
   drawBookIcon(ctx, x + h * 0.55, y + h / 2, h * 0.72);
   var text = compactMetaLine();
+  var daily = dailyCompactLine();
   var fs = GF.clamp(10.5 * S, 8.5, 14);
   var maxW = w - h * 1.25 - 10 * S;
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.font = 'bold ' + fs + 'px sans-serif';
   while (fs > 8 && ctx.measureText(text).width > maxW) { fs -= 0.5; ctx.font = 'bold ' + fs + 'px sans-serif'; }
   ctx.fillStyle = dinerMeta.totalServed > 0 ? '#f4d28a' : '#cdb';
-  ctx.fillText(text, x + h * 1.08, y + h / 2);
+  ctx.fillText(text, x + h * 1.08, y + h * 0.36);
+  var fs2 = GF.clamp(9.5 * S, 8, 12.5);
+  ctx.font = 'bold ' + fs2 + 'px sans-serif';
+  while (fs2 > 7.5 && ctx.measureText(daily).width > maxW) { fs2 -= 0.5; ctx.font = 'bold ' + fs2 + 'px sans-serif'; }
+  ctx.fillStyle = '#7ed957';
+  ctx.fillText(daily, x + h * 1.08, y + h * 0.68);
   ctx.textBaseline = 'alphabetic';
 }
 
@@ -1164,6 +1475,44 @@ function drawMetaToast(ctx) {
   ctx.textBaseline = 'alphabetic';
 }
 
+function drawDailyToast(ctx) {
+  if (!dailyToast) return;
+  var S = GF.S, a = Math.min(1, dailyToastTimer / 0.4, (5.5 - dailyToastTimer) / 0.35);
+  var w = Math.min(L.boardW || GF.W - 30 * S, GF.clamp(340 * S, 235, 410));
+  var h = GF.clamp(62 * S, 50, 76);
+  var x = GF.cx - w / 2;
+  var y = (gs === 'MENU') ? (GF.H - h - GF.clamp(92 * S, 70, 118)) : Math.max(58 * S, (L.bookY || 110 * S) - h - 8 * S);
+  ctx.save();
+  ctx.globalAlpha = GF.clamp(a, 0, 1);
+  GF.rr(ctx, x, y, w, h, 14 * S); ctx.fillStyle = 'rgba(18,38,24,0.95)'; ctx.fill();
+  ctx.lineWidth = 2 * S; ctx.strokeStyle = '#7ed957'; ctx.stroke();
+  drawPrepIcon(ctx, x + h * 0.52, y + h / 2, h * 0.62);
+  var title = dailyToast.goal ? GF.t('dailyReward') : GF.t('dailyReady');
+  var parts = [];
+  if (dailyToast.items) parts.push(dailyToast.items + ' ' + GF.t('dailyRestocked'));
+  if (dailyToast.reward) parts.push('+' + dailyToast.reward + ' ' + GF.t('dailyPrep'));
+  parts.push(Math.max(1, dailyToast.streak || 1) + ' ' + GF.t('dailyStreak'));
+  var sub = parts.join('  ');
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  var textX = x + h * 0.96;
+  var maxTextW = x + w - textX - 10 * S;
+  var titleFs = GF.clamp(13 * S, 10, 18);
+  ctx.fillStyle = '#7ed957'; ctx.font = 'bold ' + titleFs + 'px sans-serif';
+  while (titleFs > 8.5 && ctx.measureText(title).width > maxTextW) { titleFs -= 0.5; ctx.font = 'bold ' + titleFs + 'px sans-serif'; }
+  ctx.fillText(title, x + h * 0.96, y + h * 0.34);
+  var subFs = GF.clamp(10.5 * S, 8.5, 14);
+  ctx.fillStyle = '#fff'; ctx.font = subFs + 'px sans-serif';
+  while (subFs > 7.5 && ctx.measureText(sub).width > maxTextW) { subFs -= 0.5; ctx.font = subFs + 'px sans-serif'; }
+  ctx.fillText(sub, x + h * 0.96, y + h * 0.62);
+  var goal = GF.t('dailyGoal') + ': ' + dailyGoalText(activeDailyGoal());
+  var goalFs = GF.clamp(9.5 * S, 8, 13);
+  ctx.fillStyle = '#f4d28a'; ctx.font = 'bold ' + goalFs + 'px sans-serif';
+  while (goalFs > 7 && ctx.measureText(goal).width > maxTextW) { goalFs -= 0.5; ctx.font = 'bold ' + goalFs + 'px sans-serif'; }
+  ctx.fillText(goal, x + h * 0.96, y + h * 0.82);
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
 // ── OVERLAYS ───────────────────────────────────────────────────────────────
 function wrapLines(ctx, text, maxW) {
   var words = String(text).split(/\s+/), lines = [], cur = '';
@@ -1220,12 +1569,13 @@ function drawMenu(ctx) {
   ctx.font = GF.clamp(11 * S, 9, 14.5) + 'px sans-serif'; ctx.fillStyle = '#caa86a';
   ctx.fillText(GF.t('goalLine'), GF.cx, titleY + 46 * S);
   drawFitCenter(ctx, compactMetaLine(), GF.cx, titleY + 64 * S, Math.min(W - 34 * S, 430 * S), GF.clamp(11 * S, 9, 15), 8.5, 'bold', '#f4d28a');
+  drawFitCenter(ctx, dailyCompactLine(), GF.cx, titleY + 80 * S, Math.min(W - 34 * S, 430 * S), GF.clamp(10.5 * S, 8.5, 14), 8, 'bold', '#7ed957');
   // tutorial block (how to play) under the title, above PLAY
   var maxW = Math.min(W - 36 * S, 420 * S);
-  var blockH = drawTutorialBlock(ctx, titleY + 84 * S, maxW);
+  var blockH = drawTutorialBlock(ctx, titleY + 102 * S, maxW);
   // PLAY button
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
-  var btnY = Math.min(titleY + 84 * S + blockH + 22 * S, H - btnH - 18 * S);
+  var btnY = Math.min(titleY + 102 * S + blockH + 22 * S, H - btnH - 18 * S);
   drawPlayButton(ctx, btnW, btnH, btnY, GF.t('play'));
   if (best > 0) {
     ctx.fillStyle = '#8a7'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px sans-serif'; ctx.textAlign = 'center';
@@ -1256,6 +1606,7 @@ function drawGameOver(ctx) {
   ctx.fillText(GF.t('best') + ': ' + best + '    ' + GF.t('chainsLbl') + ': ' + chainsUnlocked + '/' + NUM_CHAINS, GF.cx, sy0 + 70 * S);
   drawFitCenter(ctx, GF.t('metaReturn'), GF.cx, sy0 + 96 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12 * S, 9.5, 16), 8.5, '', '#f4d28a');
   drawFitCenter(ctx, GF.t('metaNextShift') + ': ' + compactMetaLine(), GF.cx, sy0 + 116 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12.5 * S, 10, 17), 8.5, 'bold', '#7ed957');
+  drawFitCenter(ctx, dailyCompactLine(), GF.cx, sy0 + 136 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(11.5 * S, 9, 15), 8, 'bold', '#ffd166');
   // buttons: rewarded continue (one per run) above PLAY AGAIN
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
   var retryY = H - btnH - 20 * S;
@@ -1427,8 +1778,12 @@ window._mdInfo = function () {
     centers: board.map(function (c, i) { var p = cellCenter(i); return { x: p.x, y: p.y }; }),
     playBtn: playBtnRect, coins: coins, score: score, level: level, chainsUnlocked: chainsUnlocked,
     freeCells: freeCells(), crateReady: crateReady.slice(), continueBtn: continueBtnRect,
-    dinerMeta: exportDinerMeta(), metaLine: compactMetaLine(),
+    dinerMeta: exportDinerMeta(), metaLine: compactMetaLine(), dailyLine: dailyCompactLine(),
   };
+};
+window.__gfPlayRect = function () {
+  if (!playBtnRect) return null;
+  return { x: playBtnRect.x, y: playBtnRect.y, w: playBtnRect.w, h: playBtnRect.h, cx: playBtnRect.x + playBtnRect.w / 2, cy: playBtnRect.y + playBtnRect.h / 2 };
 };
 // Test seam: fill every empty cell to force JAM deterministically.
 window._mdFillBoard = function () {
@@ -1448,6 +1803,68 @@ window._jumpLevel = function (n) {
   var variant = (n === 2) ? 2 : (1 + (_ssAlt % 2));
   _ssAlt++;
   window._setupForScreenshot(variant);
+};
+window.__gfStep = function (n, dt) {
+  n = n | 0;
+  dt = (typeof dt === 'number' && dt > 0) ? dt : (1 / 60);
+  var i = 0;
+  for (; i < n; i++) {
+    try { update(dt); } catch (e) { return i; }
+  }
+  return i;
+};
+function botServeAction() {
+  for (var o = 0; o < orders.length; o++) {
+    var ord = orders[o];
+    for (var i = 0; i < board.length; i++) {
+      var c = board[i];
+      if (c && (c.golden || (c.chain === ord.chain && c.tier === ord.tier))) return 'serve:' + i + ':' + o;
+    }
+  }
+  return null;
+}
+function botMergeAction() {
+  var seen = {};
+  for (var i = 0; i < board.length; i++) {
+    var c = board[i];
+    if (!c) continue;
+    if (c.golden) {
+      for (var g = 0; g < board.length; g++) if (g !== i && board[g] && board[g].tier < MAX_TIER) return 'merge:' + i + ':' + g;
+    }
+    if (c.tier >= MAX_TIER) continue;
+    var k = c.chain + ':' + c.tier;
+    if (seen[k] != null) return 'merge:' + i + ':' + seen[k];
+    seen[k] = i;
+  }
+  return null;
+}
+window.__gfBot = {
+  actions: function () {
+    if (gs === 'MENU' || gs === 'GAMEOVER') return ['start'];
+    if (gs !== 'PLAYING') return [];
+    if (GF.tutorial.active) return ['skipTutorial'];
+    var acts = [];
+    var s = botServeAction(); if (s) acts.push(s);
+    var m = botMergeAction(); if (m) acts.push(m);
+    for (var k = 0; k < crates; k++) if (crateReady[k] && freeCells() > 0) acts.push('crate:' + k);
+    if (!acts.length) acts.push('wait');
+    return acts;
+  },
+  act: function (a) {
+    a = String(a || '');
+    if (a === 'start') { startGame(); GF.tutorial.active = false; return true; }
+    if (a === 'skipTutorial') { GF.tutorial.active = false; return true; }
+    if (a.indexOf('crate:') === 0) return dispenseFromCrate(parseInt(a.split(':')[1], 10) || 0);
+    if (a.indexOf('serve:') === 0) {
+      var sp = a.split(':'), si = parseInt(sp[1], 10), oi = parseInt(sp[2], 10);
+      return !!(orders[oi] && tryActOn(si, 'order', orders[oi]));
+    }
+    if (a.indexOf('merge:') === 0) {
+      var mp = a.split(':'), from = parseInt(mp[1], 10), to = parseInt(mp[2], 10);
+      return tryActOn(from, 'cell', to);
+    }
+    return false;
+  },
 };
 
 // ── BOOT ─────────────────────────────────────────────────────────────────
@@ -1497,6 +1914,8 @@ GF.init({
         gs = 'PLAYING';
       }
     );
+    syncDailyMeta('boot');
+    GF.saveRun();
     // AUTOSTART (rule #9): platform builds drop straight into gameplay (no menu).
     if (window.__GF_AUTOSTART && !window._silent) {
       try { localStorage.setItem('merge_diner_seen_tutorial', '1'); } catch (e) {}
@@ -1511,6 +1930,9 @@ GF.init({
   onDraw: draw,
 });
 
+window.addEventListener('pagehide', saveProgressEvent);
+document.addEventListener('visibilitychange', function () { if (document.hidden) saveProgressEvent(); });
+
 // ── EXPOSE STATE (post-build-tester cross-checks vs DESIGN.md) ────────────
 GF.exposeState(function () {
   return {
@@ -1521,6 +1943,10 @@ GF.exposeState(function () {
     hasMergePair: hasMergePair(), hasDeliverableOrder: hasDeliverableOrder(), orders: orders.length,
     dinerMeta: exportDinerMeta(), uniqueRecipes: uniqueRecipeCount(), recipeStamps: totalRecipeStamps(),
     nextStation: nextStationTarget(),
+    dailyStreak: (dinerMeta.daily && dinerMeta.daily.streak) || 0,
+    dailyPrepTickets: (dinerMeta.daily && dinerMeta.daily.prepTickets) || 0,
+    dailyPendingPrep: (dinerMeta.daily && dinerMeta.daily.pendingPrep && dinerMeta.daily.pendingPrep.length) || 0,
+    dailyGoalProgress: (activeDailyGoal() && activeDailyGoal().progress) || 0,
     // tunables (DESIGN.md §Tunables)
     GRID_W: GRID_W, GRID_H: GRID_H, CRATE_COOLDOWN: CRATE_COOLDOWN, ORDER_SLOTS: ORDER_SLOTS,
     COMBO_WINDOW: COMBO_WINDOW, COINS_PER_TIER: COINS_PER_TIER, LEVELUP_ORDERS: LEVELUP_ORDERS,
