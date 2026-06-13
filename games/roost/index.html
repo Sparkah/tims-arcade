@@ -1,0 +1,1555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Roost</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #06060f; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── ROOST — night-cave bat collector where your catches ARE the music ─────
+// Tap fluttering bats to net them; each species adds its own call to one shared
+// WebAudio tempo grid so the cave's soundscape grows as the collection does.
+// Tap empty sky to send an echo pulse that lures nearby bats + reveals rares.
+// Retention: species dex (rarity + pity), nightly daily bonus, overnight idle.
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — both languages, all UI through GF.t) ──
+var STRINGS = {
+  en: {
+    title: 'Roost',
+    sub:   'Tap bats. Hear your cave sing.',
+    play: 'ENTER THE CAVE', retry: 'NEXT NIGHT',
+    score: 'Caught', best: 'Best night',
+    echoes: 'Echoes',
+    night: 'Night', target: 'Target',
+    nightdone: 'Night over',
+    caught_n: 'Caught', banked: 'Echoes banked',
+    dex: 'Bat Dex', shop: 'Roost', daily: 'Daily Lure', back: 'Back',
+    tut_tap: 'Tap a bat to net it',
+    tut_pulse: 'Tap the empty sky to send an echo and lure bats',
+    tut_goal: 'Fill the night meter before dawn',
+    welcome_back: 'Welcome back',
+    roosted_while: 'roosted while you were away',
+    claim: 'Collect', collect_lure: 'Free lures', come_back: 'Come back tomorrow',
+    common: 'Common', uncommon: 'Uncommon', rare: 'Rare', epic: 'Epic', mythic: 'Mythic',
+    locked: 'Not seen yet', seen: 'seen',
+    net: 'Net reach', lure: 'Echo power', slots: 'Roost slots', singers: 'Singers',
+    buy: 'Tune', maxed: 'Max', need: 'Need', lvl: 'Lv',
+    pity: 'Rare in', new_species: 'New species!', dawn: 'Dawn breaks',
+    tip_dex: 'Each species sings its own note. More singers, richer song.',
+    lure_ready: 'Lures ready', lure_used: 'Lures',
+    streak: 'Night streak',
+  },
+  ru: {
+    title: 'Логово',
+    sub:   'Лови летучих мышей. Слушай, как поёт пещера.',
+    play: 'В ПЕЩЕРУ', retry: 'НОВАЯ НОЧЬ',
+    score: 'Поймано', best: 'Рекорд ночи',
+    echoes: 'Эхо',
+    night: 'Ночь', target: 'Цель',
+    nightdone: 'Ночь окончена',
+    caught_n: 'Поймано', banked: 'Эхо собрано',
+    dex: 'Атлас', shop: 'Логово', daily: 'Дар ночи', back: 'Назад',
+    tut_tap: 'Коснись мыши, чтобы поймать',
+    tut_pulse: 'Коснись неба, чтобы послать эхо и приманить',
+    tut_goal: 'Заполни шкалу ночи до рассвета',
+    welcome_back: 'С возвращением',
+    roosted_while: 'прилетели, пока тебя не было',
+    claim: 'Забрать', collect_lure: 'Приманки', come_back: 'Загляни завтра',
+    common: 'Обычный', uncommon: 'Необычный', rare: 'Редкий', epic: 'Эпический', mythic: 'Мифический',
+    locked: 'Не встречен', seen: 'встречен',
+    net: 'Радиус', lure: 'Сила эха', slots: 'Места', singers: 'Певцы',
+    buy: 'Настроить', maxed: 'Макс', need: 'Нужно', lvl: 'Ур',
+    pity: 'Редкий через', new_species: 'Новый вид!', dawn: 'Рассвет',
+    tip_dex: 'Каждый вид поёт свою ноту. Больше певцов - богаче песня.',
+    lure_ready: 'Приманки готовы', lure_used: 'Приманки',
+    streak: 'Серия ночей',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+// ── REMOTE CONFIG (live-ops DATA only — gf-lib REMOTE CONFIG contract) ──────
+var CFG = {
+  tuning: { lure_cost_mult: 1, idle_rate_mult: 1, target_mult: 1 },
+  events: { double_echoes: false },
+  daily:  { lures: 5 },
+  motd:   { en: '', ru: '' },
+  version: 0,
+};
+
+// ── DETERMINISTIC RNG (mulberry32) ──────────────────────────────────────────
+function mulberry(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    var t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── SPECIES TABLE — timbre family + rarity + lane + palette ─────────────────
+// rarity: 0 common .. 4 mythic. lane decides the instrument register/role on
+// the shared tempo grid. weight = base spawn weight (rares are rarer).
+var RAR = ['common', 'uncommon', 'rare', 'epic', 'mythic'];
+var RAR_COL = ['#9fb4c8', '#7fe0a3', '#6db8ff', '#c89bff', '#ffd76b'];
+var SPECIES = [
+  { id: 'dusk',   name_en: 'Duskwing',   name_ru: 'Сумрачник', rar: 0, lane: 1, weight: 40, col: '#8a93b8', wing: '#6b73a0', size: 1.00, speed: 1.00 },
+  { id: 'pip',    name_en: 'Pipistrel',  name_ru: 'Пипис',     rar: 0, lane: 2, weight: 34, col: '#7fb0c8', wing: '#5d8aa6', size: 0.86, speed: 1.22 },
+  { id: 'amber',  name_en: 'Amberfur',   name_ru: 'Янтарник',  rar: 1, lane: 3, weight: 18, col: '#d8a866', wing: '#b3823f', size: 1.06, speed: 0.94 },
+  { id: 'frost',  name_en: 'Frostnose',  name_ru: 'Морозец',   rar: 1, lane: 2, weight: 14, col: '#9fd8e6', wing: '#73b3c6', size: 0.92, speed: 1.30 },
+  { id: 'ember',  name_en: 'Emberwing',  name_ru: 'Уголёк',    rar: 2, lane: 4, weight: 7,  col: '#ff8a5c', wing: '#d8633a', size: 1.14, speed: 1.06 },
+  { id: 'shade',  name_en: 'Shadeveil',  name_ru: 'Тенник',    rar: 2, lane: 5, weight: 6,  col: '#9b7fd8', wing: '#7558b3', size: 1.10, speed: 0.86, cloak: true },
+  { id: 'gilded', name_en: 'Gildbat',    name_ru: 'Златокрыл', rar: 3, lane: 4, weight: 3,  col: '#ffd76b', wing: '#d8af3f', size: 1.22, speed: 1.14, cloak: true },
+  { id: 'lumen',  name_en: 'Lumenmoth',  name_ru: 'Люмен',     rar: 4, lane: 6, weight: 1,  col: '#bfe9ff', wing: '#86c6ff', size: 1.30, speed: 1.00, cloak: true, glow: true },
+];
+function speciesName(s) { return GF.lang === 'ru' ? s.name_ru : s.name_en; }
+function speciesById(id) { for (var i = 0; i < SPECIES.length; i++) if (SPECIES[i].id === id) return SPECIES[i]; return SPECIES[0]; }
+
+// ── PERSISTENT META (saved) ─────────────────────────────────────────────────
+var meta = {
+  seed: 0,
+  echoes: 0,
+  bestNight: 0,
+  nightNo: 1,
+  dex: {},            // id -> count seen/caught
+  pityCount: 0,       // catches since last rare+
+  net: 0, lure: 0, slots: 0,   // upgrade levels
+  lures: 0,           // banked free lure pulses (from daily + welcome-back)
+  lastDaily: 0,       // ms timestamp of last daily claim
+  lastSeen: 0,        // ms timestamp of last session end (for idle accrual)
+  streak: 0,          // consecutive-day streak
+  lastDay: 0,         // day-index of last play
+};
+var SAVE_KEY = 'roost';
+
+// ── UPGRADE CURVES ──────────────────────────────────────────────────────────
+var UP_MAX = 6;
+function upCost(base, lvl) { return Math.round(base * Math.pow(1.7, lvl)); }
+function netCost()  { return upCost(40,  meta.net); }
+function lureCost() { return Math.round(upCost(55, meta.lure) * (CFG.tuning.lure_cost_mult || 1)); }
+function slotCost() { return upCost(70,  meta.slots); }
+function netRadius()  { return 38 + meta.net * 9; }        // catch tap radius (design px)
+function lureRadius() { return 120 + meta.lure * 34; }     // echo pulse lure radius
+function lurePower()  { return 0.9 + meta.lure * 0.35; }   // pull strength
+function roostSlots() { return 4 + meta.slots; }           // simultaneous singers
+
+// ── GAME STATE ───────────────────────────────────────────────────────────────
+var gs = 'MENU';          // MENU | PLAYING | NIGHTDONE | DEX | SHOP
+var prevScreen = 'MENU';
+var bats = [];            // active flying bats
+var pulses = [];          // echo ripples
+var caught = 0;           // bats caught THIS night
+var nightTarget = 12;
+var nightT = 0, nightLen = 90;   // seconds
+var dawn = 0;             // 0..1 sky brightening near end
+var spawnAcc = 0;
+var rng = Math.random;
+var newSpeciesFlash = 0, newSpeciesName = '';
+var welcomeBack = null;   // {n, list:[{id,n}]} overlay payload
+var dexScroll = null;
+var bgStars = [];
+
+// ── ROOST CHOIR — the caught bats sing on a shared tempo grid ───────────────
+// Architecture mirrors bandlings: one scheduler, lookahead, per-bat pattern
+// from (seed ^ uid). The gf-lib procedural bed (GF.startMusic 'calm') is the
+// harmonic floor; this layer adds the species CALLS quantized to the SAME beat
+// so catches sound musical. Uses gf-lib's shared AudioContext via window.GF.
+var choir = {
+  roster: [],           // [{sp, uid, pat}] up to roostSlots(); the singers
+  next: 0, step: 0, bar: 0, timer: null, on: false, started: false, extPaused: false,
+  bpm: 84, root: 196, scale: [0, 2, 4, 5, 7, 9, 11], prog: [0, 5, 3, 4], contour: [0, 1, 2, 1, 0, 2, 1, 0],
+  flash: [],            // {uid, t} visual ping when a singer fires
+};
+var CHOIR_ROOTS = [196.00, 174.61, 220.00, 164.81, 246.94, 233.08];
+var CHOIR_PROGS = [[0,5,3,4],[0,3,4,0],[5,3,0,4],[0,4,5,3],[0,5,1,4]];
+var CHOIR_CONTOURS = [[0,1,2,1,0,2,1,0],[0,2,1,2,0,1,2,1],[2,1,0,1,2,1,0,1],[0,0,2,2,1,1,2,0]];
+// per-lane register shift (semitones) and pattern density mask (16 steps)
+var LANE_MASKS = [
+  null,
+  [1,0,0,0, 0,0,1,0, 1,0,0,0, 0,0,1,0],   // lane1 click/perc
+  [0,0,1,0, 0,0,0,0, 0,0,1,0, 0,0,0,1],   // lane2 chirp
+  [1,0,0,0, 1,0,1,0, 0,0,1,0, 0,0,1,0],   // lane3 warble/arp
+  [0,0,0,0, 1,0,0,0, 0,0,0,0, 1,0,0,0],   // lane4 cry/lead
+  [1,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0],   // lane5 drone/pad (bar-long)
+  [1,0,0,0, 0,0,0,0, 1,0,0,0, 0,0,0,0],   // lane6 mythic shimmer
+];
+function deriveChoir() {
+  var s = meta.seed >>> 0;
+  choir.root = CHOIR_ROOTS[(s >>> 3) % CHOIR_ROOTS.length];
+  choir.prog = CHOIR_PROGS[(s >>> 9) % CHOIR_PROGS.length];
+  choir.contour = CHOIR_CONTOURS[(s >>> 17) % CHOIR_CONTOURS.length];
+  choir.bpm = 80 + ((s >>> 13) % 16);
+}
+function choirDeg2semi(deg) { var sc = choir.scale, L = sc.length; return sc[((deg % L) + L) % L] + 12 * Math.floor(deg / L); }
+function choirFreq(deg, shift) { return choir.root * Math.pow(2, (choirDeg2semi(deg) + (shift || 0)) / 12); }
+function choirChord(bar) { var r = choir.prog[((bar % choir.prog.length) + choir.prog.length) % choir.prog.length]; return [r, r + 2, r + 4]; }
+function choirStepDur() { return (60 / choir.bpm) / 4; }
+
+// derive a per-bat playing pattern from its uid (so each individual differs)
+function batPattern(sp, uid) {
+  var r = mulberry((meta.seed ^ Math.imul(uid, 2654435761) ^ (sp.lane << 8)) >>> 0);
+  return { off: Math.floor(r() * 4), accent: r(), tone: 0.9 + r() * 0.25, contourPick: Math.floor(r() * CHOIR_CONTOURS.length) };
+}
+
+function rebuildRoster() {
+  // The most-recently-caught DISTINCT singers fill the roost, capped at slots.
+  // Prefer one representative per OWNED species, rarest first for richer top end.
+  var owned = [];
+  for (var i = 0; i < SPECIES.length; i++) { var sp = SPECIES[i]; if (meta.dex[sp.id]) owned.push(sp); }
+  owned.sort(function (a, b) { return b.rar - a.rar; });
+  var n = Math.min(roostSlots(), owned.length);
+  choir.roster = [];
+  for (var j = 0; j < n; j++) {
+    var sp2 = owned[j];
+    choir.roster.push({ sp: sp2, uid: 1000 + j * 7 + sp2.lane, pat: batPattern(sp2, 1000 + j * 7 + sp2.lane) });
+  }
+}
+
+// synth voice per lane (all WebAudio, zero samples). The call layer owns its
+// own AudioContext (like bandlings' band.ctx) so it never depends on gf-lib
+// internals; it is created + resumed on the first user gesture (autoplay).
+function choirCtx() {
+  if (choir.ctx) { try { if (choir.ctx.state === 'suspended' && !choir.extPaused) choir.ctx.resume(); } catch (e) {} return choir.ctx; }
+  try { var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return null; choir.ctx = new AC(); if (choir.ctx.state === 'suspended' && !choir.extPaused) choir.ctx.resume(); } catch (e) { choir.ctx = null; }
+  return choir.ctx;
+}
+function voiceTone(freq, when, dur, wave, peak, o) {
+  o = o || {}; var c = choir.ctx; if (!c || !choir.master) return;
+  try {
+    var osc = c.createOscillator(), g = c.createGain();
+    osc.type = wave; osc.frequency.setValueAtTime(Math.max(20, freq), when);
+    if (o.glideTo) osc.frequency.exponentialRampToValueAtTime(Math.max(20, o.glideTo), when + dur);
+    var a = o.attack != null ? o.attack : 0.012, rl = o.release != null ? o.release : 0.1;
+    g.gain.setValueAtTime(0.0001, when);
+    g.gain.exponentialRampToValueAtTime(Math.max(0.0002, peak), when + a);
+    g.gain.setValueAtTime(Math.max(0.0002, peak), when + Math.max(a + 0.01, dur - rl));
+    g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+    if (o.bp) { var bf = c.createBiquadFilter(); bf.type = 'bandpass'; bf.frequency.value = o.bp; bf.Q.value = o.bpq || 5; osc.connect(bf); bf.connect(g); }
+    else if (o.lp) { var lf = c.createBiquadFilter(); lf.type = 'lowpass'; lf.frequency.value = o.lp; osc.connect(lf); lf.connect(g); }
+    else osc.connect(g);
+    g.connect(choir.master);
+    osc.start(when); osc.stop(when + dur + 0.05);
+  } catch (e) {}
+}
+function voiceNoise(when, dur, peak, hp) {
+  var c = choir.ctx; if (!c || !choir.master) return;
+  try {
+    var n = Math.max(1, Math.floor(c.sampleRate * dur)), buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+    var src = c.createBufferSource(); src.buffer = buf;
+    var f = c.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = hp || 5200;
+    var g = c.createGain(); g.gain.setValueAtTime(peak, when); g.gain.exponentialRampToValueAtTime(0.0001, when + dur);
+    src.connect(f); f.connect(g); g.connect(choir.master); src.start(when); src.stop(when + dur + 0.02);
+  } catch (e) {}
+}
+// play one singer's contribution at step within the bar
+function playSinger(singer, when, step, chord) {
+  var sp = singer.sp, lane = sp.lane, pat = singer.pat, mask = LANE_MASKS[lane];
+  var sd = choirStepDur();
+  if (lane === 1) {            // click/percussion blip — bandpass tick
+    if (mask[step]) { voiceNoise(when, 0.05, 0.05 * pat.tone, 4200 + sp.size * 600); choir.flash.push({ uid: singer.uid, t: 0 }); }
+  } else if (lane === 2) {     // chirp — short high bandpass tone
+    if (mask[step]) { var d2 = chord[step % chord.length]; voiceTone(choirFreq(d2, 12), when, 0.09, 'sine', 0.06 * pat.tone, { glideTo: choirFreq(d2 + 2, 12), bp: 2200 }); choir.flash.push({ uid: singer.uid, t: 0 }); }
+  } else if (lane === 3) {     // warble/arp — triangle line
+    if (mask[step]) { var cc = CHOIR_CONTOURS[pat.contourPick]; var deg = chord[cc[(step >> 1) % cc.length] % chord.length]; voiceTone(choirFreq(deg, 0), when, sd * 1.6, 'triangle', 0.055 * pat.tone, { lp: 2600 }); choir.flash.push({ uid: singer.uid, t: 0 }); }
+  } else if (lane === 4) {     // cry/lead — sawtooth, filtered, a held call
+    if (mask[step]) { var deg4 = chord[0] + (pat.accent > 0.5 ? 7 : 0); voiceTone(choirFreq(deg4, 12), when, sd * 3.4, 'sawtooth', 0.05 * pat.tone, { lp: 1800, attack: 0.04, release: 0.4, glideTo: choirFreq(deg4 + 2, 12) }); choir.flash.push({ uid: singer.uid, t: 0 }); }
+  } else if (lane === 5) {     // drone/pad — sustained sine bed, once per bar
+    if (step === 0) { for (var k = 0; k < chord.length; k++) voiceTone(choirFreq(chord[k], -12), when, choirStepDur() * 16 * 0.96, 'sine', 0.04 * pat.tone, { lp: 1100, attack: 0.2, release: 0.6 }); choir.flash.push({ uid: singer.uid, t: 0 }); }
+  } else if (lane === 6) {     // mythic shimmer — bell-ish high partials
+    if (step === 0 || step === 8) { var deg6 = chord[(step >> 3) % chord.length]; voiceTone(choirFreq(deg6, 24), when, sd * 6, 'sine', 0.045, { attack: 0.01, release: 1.0 }); voiceTone(choirFreq(deg6 + 4, 24), when, sd * 6, 'sine', 0.025, { attack: 0.01, release: 1.0 }); choir.flash.push({ uid: singer.uid, t: 0 }); }
+  }
+}
+function choirSchedule() {
+  var c = choir.ctx; if (!c) return;
+  while (choir.next < c.currentTime + 0.2) {
+    var when = choir.next, step = choir.step % 16, chord = choirChord(choir.bar);
+    for (var i = 0; i < choir.roster.length; i++) playSinger(choir.roster[i], when, step, chord);
+    choir.next += choirStepDur(); choir.step++;
+    if (choir.step % 16 === 0) choir.bar++;
+  }
+}
+function startChoir() {
+  if (choir.started) return;
+  var c = choirCtx(); if (!c) return;
+  choir.started = true; choir.ctx = c;
+  choir.master = c.createGain();
+  choir.master.gain.value = GF.muted ? 0.0001 : 0.9;
+  choir.master.connect(c.destination);
+  choir.next = c.currentTime + 0.14; choir.step = 0; choir.bar = 0; choir.on = true;
+  choir.timer = setInterval(function () { try { if (choir.on) choirSchedule(); } catch (e) {} }, 30);
+  // suspend the call layer on tab-hide (Yandex 1.3 / hard rule #8). Respect the
+  // external-pause flag so an ad/platform pause keeps it suspended on return.
+  document.addEventListener('visibilitychange', function () {
+    if (!choir.ctx) return;
+    try {
+      if (document.hidden) choir.ctx.suspend();
+      else if (choir.on && !choir.extPaused) { choir.ctx.resume(); choir.next = choir.ctx.currentTime + 0.1; }
+    } catch (e) {}
+  });
+}
+// Yandex 4.7 / 1.3 — suspend the custom choir layer over an ad or platform
+// pause, mirroring GF.pauseAudio/resumeAudio (the gf-lib bed handles itself).
+function pauseChoir() {
+  if (choir.extPaused) return; choir.extPaused = true;
+  try { if (choir.ctx && choir.ctx.state === 'running') choir.ctx.suspend(); } catch (e) {}
+}
+function resumeChoir() {
+  if (!choir.extPaused) return; choir.extPaused = false;
+  try { if (choir.ctx && choir.on && choir.ctx.state === 'suspended') { choir.ctx.resume(); choir.next = choir.ctx.currentTime + 0.1; } } catch (e) {}
+}
+function setChoirMuted(m) {
+  if (choir.master && choir.ctx) { try { choir.master.gain.setTargetAtTime(m ? 0.0001 : 0.9, choir.ctx.currentTime, 0.05); } catch (e) {} }
+}
+
+// ── DEX / RARITY ROLL — weighted draw with pity ─────────────────────────────
+function rollSpecies(underPulse) {
+  // pity: after PITY_AT catches with no rare+, force a rare+ pick.
+  var PITY_AT = 14;
+  var forceRare = meta.pityCount >= PITY_AT;
+  // cloaked rares only surface under an echo pulse; if forced and not under
+  // pulse, still allow (the dawn always reveals).
+  var pool = [], total = 0;
+  for (var i = 0; i < SPECIES.length; i++) {
+    var s = SPECIES[i];
+    if (s.cloak && !underPulse && !forceRare) continue;   // hidden until lured
+    var w = s.weight;
+    if (forceRare && s.rar < 2) w = 0;                     // pity: rare+ only
+    if (underPulse && s.rar >= 2) w *= 2.2;                // pulses bias rare
+    if (w <= 0) continue;
+    pool.push({ s: s, w: w }); total += w;
+  }
+  if (!pool.length) return SPECIES[0];
+  var r = rng() * total, acc = 0;
+  for (var j = 0; j < pool.length; j++) { acc += pool[j].w; if (r <= acc) return pool[j].s; }
+  return pool[pool.length - 1].s;
+}
+
+// ── BAT SPAWN ────────────────────────────────────────────────────────────────
+var _uid = 1;
+function spawnBat(underPulse) {
+  var sp = rollSpecies(!!underPulse);
+  var fromLeft = rng() < 0.5;
+  var y0 = GF.H * (0.16 + rng() * 0.5);
+  var b = {
+    uid: _uid++, sp: sp,
+    x: fromLeft ? -40 * GF.S : GF.W + 40 * GF.S,
+    y: y0,
+    dir: fromLeft ? 1 : -1,
+    baseSpeed: (44 + rng() * 26) * sp.speed,
+    amp: (24 + rng() * 40) * GF.S,
+    freq: 0.7 + rng() * 1.1,
+    ph: rng() * Math.PI * 2,
+    flap: rng() * Math.PI * 2,
+    t: 0,
+    caught: false, fade: 1,
+    lureVx: 0, lureVy: 0,
+    cloakAlpha: sp.cloak ? 0.18 : 1,    // dim until pulse reveals
+    seenT: 0,
+  };
+  bats.push(b);
+}
+
+// ── ECHO PULSE — lure + reveal ───────────────────────────────────────────────
+function sendPulse(x, y, free) {
+  pulses.push({ x: x, y: y, r: 6 * GF.S, max: lureRadius() * GF.S, t: 0, life: 1 });
+  GF.sfx('spawn');
+  // reveal + pull nearby cloaked bats; also chance to draw a fresh rare in
+  for (var i = 0; i < bats.length; i++) {
+    var b = bats[i]; if (b.caught) continue;
+    var d = GF.dist(b.x, b.y, x, y);
+    if (d < lureRadius() * GF.S * 1.2) {
+      b.cloakAlpha = 1;
+      var pull = lurePower() * (1 - d / (lureRadius() * GF.S * 1.4));
+      if (pull > 0) {
+        var dx = x - b.x, dy = y - b.y, dl = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        b.lureVx += (dx / dl) * pull * 30; b.lureVy += (dy / dl) * pull * 30;
+      }
+    }
+  }
+  // a pulse can summon a cloaked arrival biased to rares
+  if (bats.length < 26 && rng() < 0.55) spawnBat(true);
+}
+
+// ── CATCH ────────────────────────────────────────────────────────────────────
+function catchBat(b) {
+  if (b.caught) return;
+  b.caught = true; b.fade = 1;
+  var sp = b.sp;
+  caught++;
+  var gain = 1 + sp.rar * 2;
+  if (CFG.events.double_echoes) gain *= 2;
+  meta.echoes += gain;
+
+  // pity bookkeeping
+  if (sp.rar >= 2) meta.pityCount = 0; else meta.pityCount++;
+
+  // dex
+  var hadBefore = !!meta.dex[sp.id];
+  meta.dex[sp.id] = (meta.dex[sp.id] || 0) + 1;
+  if (!hadBefore) {
+    newSpeciesFlash = 2.4; newSpeciesName = speciesName(sp);
+    GF.sfx('unlock');
+    rebuildRoster();   // a new species can immediately join the song
+    GF.juice.flash(RAR_COL[sp.rar], 0.4);
+  } else {
+    GF.sfx(sp.rar >= 2 ? 'reward' : 'pickup');
+  }
+
+  // juice: catch burst + float + the species' OWN call as the catch stinger
+  GF.juice.particles.burst(b.x, b.y, { color: sp.col, count: 10 + sp.rar * 4, speed: 3 + sp.rar });
+  GF.juice.floatText('+' + gain, b.x, b.y - 10 * GF.S, { color: RAR_COL[sp.rar] });
+  GF.juice.punch(0.5 + sp.rar * 0.15);
+  playCatchCall(sp);
+
+  GF.funnel.mark('first_upgrade');  // reuse: first catch funnel signal
+  GF.saveRun();
+}
+// the caught species' signature note, fired immediately (off-grid, but in-key)
+function playCatchCall(sp) {
+  var c = choirCtx(); if (!c || GF.muted) return;
+  try {
+    if (!choir.master) { startChoir(); }
+    var when = c.currentTime + 0.005;
+    var deg = [0, 2, 4][sp.lane % 3];
+    if (sp.lane <= 2) voiceTone(choirFreq(deg, 12), when, 0.16, 'sine', 0.12, { glideTo: choirFreq(deg + 4, 12), bp: 1800 });
+    else if (sp.lane <= 4) voiceTone(choirFreq(deg, 7), when, 0.22, 'triangle', 0.11, { glideTo: choirFreq(deg + 5, 7), lp: 2600 });
+    else { voiceTone(choirFreq(deg, 12), when, 0.5, 'sine', 0.1, { attack: 0.01, release: 0.4 }); voiceTone(choirFreq(deg + 4, 19), when, 0.5, 'sine', 0.05, { attack: 0.01, release: 0.4 }); }
+  } catch (e) {}
+}
+
+// ── NIGHT LIFECYCLE ──────────────────────────────────────────────────────────
+function startNight() {
+  caught = 0; nightT = 0; dawn = 0; spawnAcc = 0;
+  bats = []; pulses = [];
+  nightTarget = Math.round((10 + meta.nightNo * 2) * (CFG.tuning.target_mult || 1));
+  nightTarget = GF.clamp(nightTarget, 8, 40);
+  rng = mulberry((meta.seed ^ (meta.nightNo * 0x9E3779B1)) >>> 0);
+  gs = 'PLAYING';
+  rebuildRoster();
+  startChoir();
+  // seed a few bats so the cave isn't empty on entry
+  for (var i = 0; i < 5; i++) spawnBat(false);
+  GF.gameStarted();
+  GF.saveRun();
+}
+function endNight() {
+  meta.nightNo++;
+  if (caught > meta.bestNight) meta.bestNight = caught;
+  gs = 'NIGHTDONE';
+  // a night can end while the first-run tutorial is still mid-step (e.g. the
+  // night timer runs out before the player finishes it) — dismiss it so its
+  // overlay doesn't linger on the dawn screen and swallow RETRY taps.
+  if (GF.tutorial.active) { GF.tutorial.active = false; try { localStorage.setItem('roost_tutorial_v1', '1'); } catch (e) {} }
+  GF.gameEnded();
+  if (caught >= nightTarget && caught > 0) GF.happytime();
+  GF.saveRun();
+}
+
+// Leave the current night and return to the menu (Yandex 1.15 back-to-menu).
+// Non-punishing: bank best/dex, then go home. Dismiss any active tutorial.
+function leaveToMenu() {
+  if (gs === 'PLAYING') {
+    if (caught > meta.bestNight) meta.bestNight = caught;
+    GF.gameEnded();
+  }
+  if (GF.tutorial.active) { GF.tutorial.active = false; try { localStorage.setItem('roost_tutorial_v1', '1'); } catch (e) {} }
+  welcomeBack = null;
+  gs = 'MENU';
+  GF.saveRun();
+}
+
+// ── DAILY + IDLE (retention) ─────────────────────────────────────────────────
+function dayIndex(ms) { return Math.floor(ms / 86400000); }
+function canClaimDaily() {
+  var now = monotonicNow();
+  return dayIndex(now) > dayIndex(meta.lastDaily || 0);
+}
+// monotonic clock guard: never let a backwards system clock unlock daily early.
+var _bootNow = Date.now();
+var _bootPerf = (typeof performance !== 'undefined' ? performance.now() : 0);
+function monotonicNow() {
+  // wall clock, but floored so it can only move forward within a session
+  var w = Date.now();
+  var elapsed = (typeof performance !== 'undefined' ? performance.now() : 0) - _bootPerf;
+  var floor = _bootNow + elapsed - 1500;   // small slack
+  return Math.max(w, floor);
+}
+function claimDaily() {
+  if (!canClaimDaily()) return;
+  var now = monotonicNow();
+  // streak
+  if (dayIndex(now) === dayIndex(meta.lastDaily || 0) + 1) meta.streak++; else meta.streak = 1;
+  meta.lastDaily = now;
+  var n = (CFG.daily.lures || 5) + Math.min(5, meta.streak - 1);
+  meta.lures += n;
+  meta.echoes += 6 + meta.streak * 2;
+  GF.sfx('reward');
+  GF.juice.flash('#ffd76b', 0.5);
+  GF.saveRun();
+}
+// overnight idle: the roost passively attracts bats while away (capped).
+function computeIdle() {
+  if (!meta.lastSeen) return null;
+  var now = monotonicNow();
+  var awayMs = now - meta.lastSeen;
+  if (awayMs < 5 * 60000) return null;                  // need 5+ min away
+  var hours = Math.min(8, awayMs / 3600000);            // cap at 8h
+  var rate = (1.6 + meta.slots * 0.5) * (CFG.tuning.idle_rate_mult || 1);  // bats/hour-ish
+  var n = Math.floor(hours * rate);
+  if (n <= 0) return null;
+  n = Math.min(n, 18);
+  // award: each idle arrival is a weighted common/uncommon roll (no pity, no rares)
+  var list = {}, banked = 0;
+  var ir = mulberry((meta.seed ^ Math.floor(now / 60000)) >>> 0);
+  for (var i = 0; i < n; i++) {
+    var pool = [], total = 0;
+    for (var k = 0; k < SPECIES.length; k++) { var s = SPECIES[k]; if (s.rar > 1) continue; pool.push({ s: s, w: s.weight }); total += s.weight; }
+    var rr2 = ir() * total, acc = 0, pick = pool[0].s;
+    for (var j = 0; j < pool.length; j++) { acc += pool[j].w; if (rr2 <= acc) { pick = pool[j].s; break; } }
+    list[pick.id] = (list[pick.id] || 0) + 1;
+    meta.dex[pick.id] = (meta.dex[pick.id] || 0) + 1;
+    banked += 1 + pick.rar;
+  }
+  meta.echoes += banked;
+  rebuildRoster();
+  var arr = [];
+  for (var id in list) arr.push({ id: id, n: list[id] });
+  return { n: n, banked: banked, list: arr };
+}
+
+// Screenshot/QA fast-forward hook. n=99 -> terminal (NIGHTDONE) so the gflib
+// adapter's forceGameOver + state-cycle + retry-tap tests can run. n=1 (default)
+// -> drop into a fresh night with a busy sky so screenshots show real gameplay.
+window._jumpLevel = function(n) {
+  if (n === 99) { if (gs !== 'PLAYING') startNight(); caught = Math.max(caught, nightTarget); endNight(); return; }
+  _setupForScreenshot();
+};
+// Lands the game in a photogenic PLAYING frame: suppress the tutorial, start a
+// night, seed a varied swarm (incl. a couple rares/cloaked revealed) + a couple
+// echo ripples, and give the player some echoes so the HUD reads richly.
+function _setupForScreenshot() {
+  try { localStorage.setItem('roost_tutorial_v1', '1'); } catch (e) {}
+  GF.tutorial.active = false;
+  welcomeBack = null;
+  // pre-populate the dex so the roost choir has SINGERS in the shot (the choir
+  // is the game's differentiator — a screenshot with "Singers: 0" undersells it).
+  ['dusk', 'pip', 'amber', 'frost', 'ember', 'shade'].forEach(function (id) { meta.dex[id] = (meta.dex[id] || 0) + 3; });
+  meta.slots = Math.max(meta.slots, 2);
+  rebuildRoster();
+  if (gs !== 'PLAYING') startNight();
+  GF.tutorial.active = false;
+  bats = [];
+  meta.echoes = Math.max(meta.echoes, 48);
+  // a spread of species across the sky (force-reveal cloaked ones for the shot)
+  for (var i = 0; i < 11; i++) {
+    spawnBat(i % 3 === 0);   // every 3rd under-pulse (biased to rares)
+    var b = bats[bats.length - 1];
+    if (b) { b.x = GF.W * (0.12 + (i / 11) * 0.76); b.y = GF.H * (0.16 + ((i * 37) % 100) / 100 * 0.5); b.cloakAlpha = 1; b.t = (i % 7) * 0.4; }
+  }
+  pulses.push({ x: GF.W * 0.32, y: GF.H * 0.45, r: 60 * GF.S, max: lureRadius() * GF.S, t: 0, life: 0.8 });
+  caught = Math.max(caught, 5);
+}
+window._setupForScreenshot = _setupForScreenshot;
+
+// ── BACKGROUND (cave + stars + moon glow) ────────────────────────────────────
+function initStars() {
+  bgStars = [];
+  var sr = mulberry(0xC0FFEE ^ (meta.seed >>> 0));
+  for (var i = 0; i < 70; i++) bgStars.push({ x: sr(), y: sr() * 0.6, r: sr() * 1.4 + 0.3, tw: sr() * Math.PI * 2 });
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────────
+function update(dt) {
+  if (GF.tutorial.active) { GF.tutorial.update(dt); }
+
+  if (newSpeciesFlash > 0) newSpeciesFlash -= dt;
+  // advance choir flashes
+  for (var f = choir.flash.length - 1; f >= 0; f--) { choir.flash[f].t += dt; if (choir.flash[f].t > 0.4) choir.flash.splice(f, 1); }
+
+  if (gs !== 'PLAYING') return;
+  if (GF.tutorial.active) return;   // freeze the night during the tutorial steps
+
+  nightT += dt;
+  var remain = nightLen - nightT;
+  if (remain < 14) dawn = GF.clamp((14 - remain) / 14, 0, 1);
+  if (nightT >= nightLen) { endNight(); return; }
+
+  // spawn cadence ramps a little with night number
+  spawnAcc += dt;
+  var interval = GF.clamp(1.05 - meta.nightNo * 0.015, 0.5, 1.1);
+  if (spawnAcc >= interval && bats.length < 24) { spawnAcc = 0; spawnBat(false); }
+
+  // update bats
+  for (var i = bats.length - 1; i >= 0; i--) {
+    var b = bats[i];
+    if (b.caught) { b.fade -= dt * 2.4; if (b.fade <= 0) bats.splice(i, 1); continue; }
+    b.t += dt; b.flap += dt * (9 + b.baseSpeed * 0.05);
+    // base drift + sine bob
+    var vx = b.dir * b.baseSpeed * GF.S * dt;
+    var vy = Math.cos(b.t * b.freq + b.ph) * b.amp * b.freq * dt;
+    // lure velocity decays
+    b.x += vx + b.lureVx * GF.S * dt;
+    b.y += vy + b.lureVy * GF.S * dt;
+    b.lureVx *= 0.9; b.lureVy *= 0.9;
+    // reveal cloaked gradually if near a recent pulse handled there; otherwise re-dim slowly
+    if (b.sp.cloak && b.cloakAlpha > 0.18) b.cloakAlpha = Math.max(0.18, b.cloakAlpha - dt * 0.25);
+    // keep within vertical band
+    if (b.y < GF.H * 0.10) b.y = GF.H * 0.10; if (b.y > GF.H * 0.74) b.y = GF.H * 0.74;
+    // offscreen cull
+    if ((b.dir > 0 && b.x > GF.W + 60 * GF.S) || (b.dir < 0 && b.x < -60 * GF.S)) bats.splice(i, 1);
+  }
+
+  // update pulses
+  for (var p = pulses.length - 1; p >= 0; p--) {
+    var pl = pulses[p]; pl.t += dt; pl.r += (pl.max - pl.r) * Math.min(1, dt * 4); pl.life -= dt * 0.9;
+    if (pl.life <= 0) pulses.splice(p, 1);
+  }
+}
+
+// ── INPUT (own pointer handling — tap-to-catch + tap-sky-to-pulse) ──────────
+// resize() pins canvas backing px == CSS px (scale 1), so client coords map
+// straight to canvas coords. Still recompute scale per click to be safe (1.15).
+function clientToCanvas(clientX, clientY) {
+  var r = GF.canvas.getBoundingClientRect();
+  var sx = GF.canvas.width / Math.max(1, r.width), sy = GF.canvas.height / Math.max(1, r.height);
+  return { x: (clientX - r.left) * sx, y: (clientY - r.top) * sy };
+}
+function onPress(cx0, cy0) {
+  // tutorial gets first dibs
+  if (GF.tutorial.active) { if (GF.tutorial.handleClick(cx0, cy0)) { return; } }
+
+  // top-bar buttons (mute / dex / shop) while PLAYING; menu buttons elsewhere
+  if (gs === 'PLAYING') {
+    if (hitTopBar(cx0, cy0)) return;
+    // try to catch the nearest bat within net radius
+    var best = -1, bestD = netRadius() * GF.S;
+    for (var i = 0; i < bats.length; i++) {
+      var b = bats[i]; if (b.caught) continue;
+      if (b.sp.cloak && b.cloakAlpha < 0.5) continue;   // can't grab a fully-cloaked bat
+      var d = GF.dist(b.x, b.y, cx0, cy0);
+      var rad = netRadius() * GF.S + b.sp.size * 14 * GF.S;
+      if (d < rad && d < bestD + b.sp.size * 14 * GF.S) { best = i; bestD = d; }
+    }
+    if (best >= 0) { catchBat(bats[best]); }
+    else {
+      // empty sky -> echo pulse (consumes a banked free lure if you have one,
+      // else it's a normal free echo; lures just make pulses STRONGER/rarer)
+      var free = false;
+      if (meta.lures > 0) { meta.lures--; free = true; }
+      sendPulse(cx0, cy0, free);
+      if (free) { meta.echoes += 0; GF.saveRun(); }
+    }
+    return;
+  }
+}
+
+// ── HUD top-bar buttons ──────────────────────────────────────────────────────
+var topBtns = [];   // populated each draw while PLAYING
+function hitTopBar(x, y) {
+  for (var i = 0; i < topBtns.length; i++) {
+    var b = topBtns[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return true; }
+  }
+  return false;
+}
+
+// ── DRAW ──────────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  drawSky(ctx);
+
+  if (gs === 'PLAYING') {
+    drawPulses(ctx);
+    drawBats(ctx);
+    drawCaveForeground(ctx);
+    drawHUD(ctx);
+    if (newSpeciesFlash > 0) drawNewSpecies(ctx);
+  } else {
+    drawCaveForeground(ctx);
+  }
+
+  if (gs === 'MENU')     drawMenu(ctx);
+  if (gs === 'NIGHTDONE') drawNightDone(ctx);
+  if (gs === 'DEX')      drawDex(ctx);
+  if (gs === 'SHOP')     drawShop(ctx);
+
+  if (welcomeBack) drawWelcomeBack(ctx);
+
+  // tutorial overlay only over live gameplay (never over a menu/terminal screen)
+  if (GF.tutorial.active && gs === 'PLAYING' && !welcomeBack) GF.tutorial.draw(ctx);
+}
+
+function drawSky(ctx) {
+  var W = GF.W, H = GF.H;
+  // night gradient, brightening toward dawn
+  var topC = mixHex('#0a0a1e', '#23314e', dawn * 0.7);
+  var midC = mixHex('#10122a', '#3a3357', dawn * 0.6);
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, topC); g.addColorStop(0.55, midC); g.addColorStop(1, mixHex('#070611', '#1a1626', dawn * 0.5));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // moon glow upper-right
+  var mx = W * 0.78, my = H * 0.16, mr = 46 * GF.S;
+  var mg = ctx.createRadialGradient(mx, my, 0, mx, my, mr * 4);
+  mg.addColorStop(0, 'rgba(220,228,255,' + (0.5 - dawn * 0.3).toFixed(2) + ')');
+  mg.addColorStop(0.18, 'rgba(200,210,245,0.16)');
+  mg.addColorStop(1, 'rgba(200,210,245,0)');
+  ctx.fillStyle = mg; ctx.beginPath(); ctx.arc(mx, my, mr * 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(235,240,255,' + (0.85 - dawn * 0.5).toFixed(2) + ')';
+  ctx.beginPath(); ctx.arc(mx, my, mr, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = mixHex('#10122a', '#3a3357', dawn * 0.6);
+  ctx.beginPath(); ctx.arc(mx + mr * 0.5, my - mr * 0.25, mr * 0.92, 0, Math.PI * 2); ctx.fill();
+  // stars (fade at dawn)
+  var sa = (1 - dawn) * 0.9;
+  for (var i = 0; i < bgStars.length; i++) {
+    var st = bgStars[i];
+    var tw = 0.5 + 0.5 * Math.sin(performance.now() / 700 + st.tw);
+    ctx.globalAlpha = sa * (0.4 + tw * 0.6);
+    ctx.fillStyle = '#dfe7ff';
+    ctx.beginPath(); ctx.arc(st.x * W, st.y * H, st.r * GF.S, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCaveForeground(ctx) {
+  var W = GF.W, H = GF.H;
+  // jagged cave rim along the bottom (silhouette) + a couple of foreground stalactites at top
+  ctx.fillStyle = '#05050d';
+  // bottom ridge
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  ctx.lineTo(0, H * 0.86);
+  var pts = 7, sr = mulberry(0xBA7 ^ (meta.seed >>> 0));
+  for (var i = 0; i <= pts; i++) {
+    var x = (i / pts) * W;
+    var y = H * (0.80 + sr() * 0.10);
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(W, H * 0.86); ctx.lineTo(W, H); ctx.closePath(); ctx.fill();
+  // top stalactites
+  ctx.beginPath();
+  ctx.moveTo(0, 0); ctx.lineTo(W, 0); ctx.lineTo(W, H * 0.03);
+  var st = 5, sr2 = mulberry(0x5AC ^ (meta.seed >>> 0));
+  for (var k = st; k >= 0; k--) {
+    var sx = (k / st) * W;
+    ctx.lineTo(sx + 0.0001, H * (0.02 + sr2() * 0.07));
+    ctx.lineTo(sx - (W / st) * 0.5, H * 0.02);
+  }
+  ctx.lineTo(0, H * 0.03); ctx.closePath(); ctx.fillStyle = '#06060f'; ctx.fill();
+}
+
+// vector bat — body + two flapping wings + ears. cell-centered.
+function drawBat(ctx, b) {
+  var sp = b.sp, s = GF.S * sp.size;
+  var flap = Math.sin(b.flap);
+  var wingY = -Math.abs(flap) * 5 * s;
+  var spread = (0.55 + 0.45 * (1 - Math.abs(flap))) ;
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.scale(b.dir, 1);
+  var alpha = b.fade * (b.sp.cloak ? b.cloakAlpha : 1);
+  ctx.globalAlpha = alpha;
+  // glow for glowing/rare species
+  if (sp.glow || sp.rar >= 2) {
+    ctx.save();
+    ctx.shadowColor = sp.col; ctx.shadowBlur = (sp.glow ? 22 : 10) * s;
+  }
+  // wings (two membranes)
+  ctx.fillStyle = sp.wing;
+  for (var side = -1; side <= 1; side += 2) {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(side * 16 * s * spread, wingY - 6 * s, side * 26 * s * spread, wingY + 3 * s);
+    ctx.quadraticCurveTo(side * 20 * s * spread, wingY + 9 * s, side * 12 * s * spread, 4 * s);
+    ctx.quadraticCurveTo(side * 18 * s * spread, wingY + 7 * s, side * 8 * s * spread, 9 * s);
+    ctx.quadraticCurveTo(side * 4 * s, 5 * s, 0, 2 * s);
+    ctx.closePath(); ctx.fill();
+  }
+  // body
+  ctx.fillStyle = sp.col;
+  ctx.beginPath(); ctx.ellipse(0, 1 * s, 6 * s, 8 * s, 0, 0, Math.PI * 2); ctx.fill();
+  // head + ears
+  ctx.beginPath(); ctx.arc(0, -6 * s, 5 * s, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(-3.6 * s, -9 * s); ctx.lineTo(-5 * s, -14 * s); ctx.lineTo(-1.6 * s, -10 * s); ctx.closePath();
+  ctx.moveTo(3.6 * s, -9 * s); ctx.lineTo(5 * s, -14 * s); ctx.lineTo(1.6 * s, -10 * s); ctx.closePath();
+  ctx.fill();
+  if (sp.glow || sp.rar >= 2) ctx.restore();
+  // eyes
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = sp.glow ? '#ffffff' : '#10101c';
+  ctx.beginPath(); ctx.arc(-2 * s, -6 * s, 1.3 * s, 0, Math.PI * 2); ctx.arc(2 * s, -6 * s, 1.3 * s, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawBats(ctx) {
+  // singer ping ring: if a roster member's lane matches a recent flash, ring it.
+  for (var i = 0; i < bats.length; i++) drawBat(ctx, bats[i]);
+}
+
+function drawPulses(ctx) {
+  for (var i = 0; i < pulses.length; i++) {
+    var p = pulses[i];
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, p.life) * 0.55;
+    ctx.strokeStyle = '#7fd8ff'; ctx.lineWidth = 2.5 * GF.S;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.globalAlpha = Math.max(0, p.life) * 0.22;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r * 0.6, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// ── HUD (night meter + echoes + singers + buttons) ──────────────────────────
+function drawHUD(ctx) {
+  var W = GF.W, S = GF.S;
+  topBtns = [];
+  var fs = GF.clamp(15 * S, 12, 20);
+  // top-right chip radius + a center-y that ALWAYS clears the top edge (so the
+  // chips stay fully on-screen even in short-landscape where S is tiny).
+  var r = GF.clamp(15 * S, 13, 20);
+  var tcy = topBarY(r);
+  // top-left: echoes
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+  drawEchoIcon(ctx, 16 * S, tcy, 7 * S);
+  ctx.fillStyle = '#dfe7ff';
+  ctx.fillText(meta.echoes + '', 28 * S, tcy);
+
+  // top-right buttons: mute, dex, roost — drawn as round chips
+  var gap = 10 * S, bx = W - 16 * S - r;
+  // mute
+  pushTopChip(ctx, bx, tcy, r, function () { drawMuteIcon(ctx, bx, tcy, r * 0.7, GF.muted); }, function () {
+    var m = GF.toggleMute(); setChoirMuted(m); GF.setMusicMuted(m);
+  });
+  bx -= (r * 2 + gap);
+  // dex
+  pushTopChip(ctx, bx, tcy, r, function () { drawDexIcon(ctx, bx, tcy, r * 0.78); }, function () { prevScreen = 'PLAYING'; gs = 'DEX'; dexScroll = null; });
+  bx -= (r * 2 + gap);
+  // roost / shop
+  pushTopChip(ctx, bx, tcy, r, function () { drawRoostIcon(ctx, bx, tcy, r * 0.8); }, function () { prevScreen = 'PLAYING'; gs = 'SHOP'; });
+  bx -= (r * 2 + gap);
+  // home / back-to-menu (Yandex 1.15 — every in-run screen needs a way home).
+  // The night is non-punishing, so leaving early just ends it and banks what
+  // was caught into best/dex.
+  pushTopChip(ctx, bx, tcy, r, function () { drawHomeIcon(ctx, bx, tcy, r * 0.74); }, function () { leaveToMenu(); });
+
+  // night meter (center top): progress toward target
+  var mw = GF.clamp(150 * S, 110, 230), mh = 12 * S, mx = (W - mw) / 2, my = 17 * S;
+  ctx.fillStyle = 'rgba(255,255,255,0.10)';
+  rrFill(ctx, mx, my, mw, mh, mh / 2);
+  var frac = GF.clamp(caught / nightTarget, 0, 1);
+  var grad = ctx.createLinearGradient(mx, 0, mx + mw, 0);
+  grad.addColorStop(0, '#6db8ff'); grad.addColorStop(1, '#9bffd0');
+  ctx.fillStyle = grad; rrFill(ctx, mx, my, mw * frac, mh, mh / 2);
+  ctx.fillStyle = '#cfe3ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(caught + ' / ' + nightTarget, mx + mw / 2, my + mh / 2 + 0.5);
+  // night number + time-left bar under it
+  ctx.fillStyle = '#9fb0d0'; ctx.font = GF.clamp(10 * S, 8, 13) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('night') + ' ' + meta.nightNo, mx + mw / 2, my + mh + 11 * S);
+  // thin time bar
+  var tw = mw * GF.clamp(1 - nightT / nightLen, 0, 1);
+  ctx.fillStyle = dawn > 0 ? '#ffd76b' : 'rgba(160,180,220,0.5)';
+  rrFill(ctx, mx, my + mh + 18 * S, tw, 3 * S, 1.5 * S);
+
+  // bottom: lures left + singers count
+  var by = GF.H - 18 * S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#9fd8e6';
+  if (meta.lures > 0) ctx.fillText(GF.t('lure_used') + ': ' + meta.lures, 16 * S, by);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#bfa8ff';
+  ctx.fillText(GF.t('singers') + ': ' + choir.roster.length, GF.W - 16 * S, by);
+}
+// top-bar center-y that always keeps a chip of radius r fully on-screen, even
+// when S is tiny (short-landscape). Reachability gate: pinned items must sit
+// within [0, screenH]; this guarantees the chip top edge >= 0.
+function topBarY(r) { return Math.max(24 * GF.S, r + 4); }
+function pushTopChip(ctx, cx0, cy0, r, drawFn, fn) {
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,24,40,0.7)'; ctx.beginPath(); ctx.arc(cx0, cy0, r, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(140,160,210,0.3)'; ctx.lineWidth = 1.2 * GF.S; ctx.stroke();
+  ctx.restore();
+  drawFn();
+  topBtns.push({ x: cx0 - r, y: cy0 - r, w: r * 2, h: r * 2, fn: fn });
+}
+
+function drawNewSpecies(ctx) {
+  var a = GF.clamp(newSpeciesFlash / 2.4, 0, 1);
+  var W = GF.W, S = GF.S;
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, a * 2);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffd76b'; ctx.font = 'bold ' + GF.clamp(22 * S, 16, 30) + 'px Inter, system-ui, sans-serif';
+  ctx.shadowColor = 'rgba(255,215,107,0.7)'; ctx.shadowBlur = 18 * S;
+  ctx.fillText(GF.t('new_species'), W / 2, GF.H * 0.30);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#fff'; ctx.font = GF.clamp(16 * S, 13, 22) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(newSpeciesName, W / 2, GF.H * 0.30 + 26 * S);
+  ctx.restore();
+}
+
+// ── MENU ────────────────────────────────────────────────────────────────────
+var menuBtns = [];
+function drawMenu(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  menuBtns = [];
+  // dim panel
+  ctx.fillStyle = 'rgba(6,6,16,0.74)'; ctx.fillRect(0, 0, W, H);
+  // a few decorative bats drifting on the menu
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.shadowColor = 'rgba(125,216,255,0.45)'; ctx.shadowBlur = 26 * S;
+  ctx.fillStyle = '#eaf2ff'; ctx.font = 'bold ' + GF.clamp(46 * S, 28, 62) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('title'), W / 2, H * 0.27);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#9fb0d0'; ctx.font = GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('sub'), W / 2, H * 0.27 + 30 * S);
+  // motd
+  var motd = (CFG.motd && CFG.motd[GF.lang]) ? CFG.motd[GF.lang] : '';
+  if (motd) { ctx.fillStyle = '#7fd8ff'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif'; ctx.fillText(motd, W / 2, H * 0.27 + 50 * S); }
+
+  // ── Layout (PLAY in the CENTER band, secondary buttons BELOW it). This order
+  // matters: the QA tap-sweep scans top->center->bottom and stops on the first
+  // state change, so PLAY must be the first hit (else a tap lands on Dex/Shop).
+  var bw = GF.clamp(258 * S, 180, 360), bh = GF.clamp(58 * S, 46, 78);
+  var bx = W / 2 - bw / 2;
+
+  // PLAY (primary, centered)
+  var pY = H * 0.50 - bh / 2;
+  var _t = performance.now() / 1000, _k = Math.sin(_t * 2.2), _p = 1 + 0.05 * _k;
+  var _w = bw * _p, _h = bh * _p, _x = W / 2 - _w / 2, _y = pY + bh / 2 - _h / 2;
+  var grad = ctx.createLinearGradient(_x, _y, _x, _y + _h);
+  grad.addColorStop(0, '#2ee0a0'); grad.addColorStop(1, '#1f9bd8');
+  ctx.save(); ctx.shadowColor = 'rgba(46,224,160,' + (0.4 + 0.28 * _k).toFixed(3) + ')'; ctx.shadowBlur = (22 + 10 * _k) * S;
+  rrFill(ctx, _x, _y, _w, _h, _h / 2); ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#06121a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(19 * S, 15, 26) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('play'), W / 2, pY + bh / 2);
+  ctx.textBaseline = 'alphabetic';
+  menuBtns.push({ x: bx, y: pY, w: bw, h: bh, fn: function () { beginRun(); } });
+
+  // daily lure button (glows if claimable) — below PLAY
+  var dy = pY + bh + 18 * S;
+  var dh = GF.clamp(44 * S, 36, 56);
+  var canDaily = canClaimDaily();
+  menuWide(ctx, bx, dy, bw, dh, (canDaily ? GF.t('daily') : GF.t('come_back')), canDaily ? '#ffd76b' : '#3a4258', canDaily, function () {
+    if (canClaimDaily()) { claimDaily(); }
+  });
+  if (canDaily) drawCheck(ctx, bx + bw - 26 * S, dy + dh / 2, 7 * S, '#ffd76b');
+
+  // dex + roost row — below daily
+  var sw = GF.clamp(124 * S, 96, 168), sh = GF.clamp(46 * S, 38, 60), sgap = 10 * S;
+  var rowY = dy + dh + 12 * S;
+  menuChip(ctx, W / 2 - sw - sgap / 2, rowY, sw, sh, GF.t('dex'), '#6db8ff', function () { prevScreen = 'MENU'; gs = 'DEX'; dexScroll = null; });
+  menuChip(ctx, W / 2 + sgap / 2, rowY, sw, sh, GF.t('shop'), '#bfa8ff', function () { prevScreen = 'MENU'; gs = 'SHOP'; });
+
+  // best night + streak footer
+  ctx.fillStyle = '#5f6f92'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  var foot = GF.t('best') + ': ' + meta.bestNight;
+  if (meta.streak > 0) foot += '    ' + GF.t('streak') + ': ' + meta.streak;
+  ctx.fillText(foot, W / 2, H * 0.92);
+
+  // mute chip top-right on menu too
+  topBtns = [];
+  var r = GF.clamp(15 * S, 13, 20), tcy = topBarY(r);
+  pushTopChip(ctx, W - 16 * S - r, tcy, r, function () { drawMuteIcon(ctx, W - 16 * S - r, tcy, r * 0.7, GF.muted); }, function () { var m = GF.toggleMute(); setChoirMuted(m); GF.setMusicMuted(m); });
+}
+function menuWide(ctx, x, y, w, h, label, col, glow, fn) {
+  ctx.save();
+  if (glow) { ctx.shadowColor = col + 'aa'; ctx.shadowBlur = 16 * GF.S; }
+  ctx.fillStyle = glow ? 'rgba(40,40,30,0.6)' : 'rgba(24,28,44,0.6)';
+  rrFill(ctx, x, y, w, h, h / 2);
+  ctx.strokeStyle = col; ctx.lineWidth = 1.6 * GF.S; rrStroke(ctx, x, y, w, h, h / 2);
+  ctx.restore();
+  ctx.fillStyle = glow ? col : '#cdd8ee'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+  menuBtns.push({ x: x, y: y, w: w, h: h, fn: fn });
+}
+function menuChip(ctx, x, y, w, h, label, col, fn) {
+  ctx.fillStyle = 'rgba(24,28,44,0.7)'; rrFill(ctx, x, y, w, h, 12 * GF.S);
+  ctx.strokeStyle = col; ctx.lineWidth = 1.4 * GF.S; rrStroke(ctx, x, y, w, h, 12 * GF.S);
+  ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 18) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+  menuBtns.push({ x: x, y: y, w: w, h: h, fn: fn });
+}
+
+// ── NIGHT DONE ────────────────────────────────────────────────────────────────
+function drawNightDone(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  menuBtns = [];
+  ctx.fillStyle = 'rgba(6,6,16,0.80)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd76b'; ctx.shadowColor = 'rgba(255,215,107,0.5)'; ctx.shadowBlur = 22 * S;
+  ctx.font = 'bold ' + GF.clamp(30 * S, 20, 42) + 'px Inter, system-ui, sans-serif';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillText(GF.t('dawn'), W / 2, H * 0.30);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#cdd8ee'; ctx.font = GF.clamp(17 * S, 13, 23) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('caught_n') + ': ' + caught, W / 2, H * 0.40);
+  var bankLabel = GF.t('echoes') + ': ' + meta.echoes;
+  ctx.fillStyle = '#9fd8e6'; ctx.font = GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(bankLabel, W / 2, H * 0.40 + 26 * S);
+  if (caught > 0 && caught >= nightTarget) {
+    ctx.textAlign = 'center';
+    var tlabel = GF.t('target');
+    ctx.fillStyle = '#9bffd0'; ctx.font = GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+    var tw2 = ctx.measureText(tlabel).width;
+    ctx.fillText(tlabel, W / 2, H * 0.40 + 50 * S);
+    drawStar(ctx, W / 2 - tw2 / 2 - 14 * S, H * 0.40 + 45 * S, 6 * S, '#ffd76b');
+    drawCheck(ctx, W / 2 + tw2 / 2 + 12 * S, H * 0.40 + 45 * S, 6 * S, '#9bffd0');
+  }
+
+  // RETRY (primary) centered FIRST so the tap-sweep hits it before secondaries.
+  var bw = GF.clamp(258 * S, 180, 360), bh = GF.clamp(56 * S, 44, 74), bx = W / 2 - bw / 2;
+  var pY = H * 0.54 - bh / 2;
+  var _t = performance.now() / 1000, _k = Math.sin(_t * 2.2);
+  ctx.save(); ctx.shadowColor = 'rgba(46,224,160,' + (0.4 + 0.28 * _k).toFixed(3) + ')'; ctx.shadowBlur = (20 + 8 * _k) * S;
+  var grad = ctx.createLinearGradient(bx, pY, bx, pY + bh); grad.addColorStop(0, '#2ee0a0'); grad.addColorStop(1, '#1f9bd8');
+  rrFill(ctx, bx, pY, bw, bh, bh / 2); ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#06121a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(19 * S, 15, 26) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('retry'), W / 2, pY + bh / 2);
+  ctx.textBaseline = 'alphabetic';
+  menuBtns.push({ x: bx, y: pY, w: bw, h: bh, fn: function () { startNight(); } });
+
+  // dex + roost row — below RETRY
+  var sw = GF.clamp(124 * S, 96, 168), sh = GF.clamp(46 * S, 38, 60), sgap = 10 * S, rowY = pY + bh + 16 * S;
+  menuChip(ctx, W / 2 - sw - sgap / 2, rowY, sw, sh, GF.t('dex'), '#6db8ff', function () { prevScreen = 'NIGHTDONE'; gs = 'DEX'; dexScroll = null; });
+  menuChip(ctx, W / 2 + sgap / 2, rowY, sw, sh, GF.t('shop'), '#bfa8ff', function () { prevScreen = 'NIGHTDONE'; gs = 'SHOP'; });
+}
+
+// ── DEX (species album) ─────────────────────────────────────────────────────
+function drawDex(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  menuBtns = [];
+  ctx.fillStyle = 'rgba(6,6,16,0.94)'; ctx.fillRect(0, 0, W, H);
+  // header
+  ctx.fillStyle = '#eaf2ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(24 * S, 18, 32) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('dex'), W / 2, 44 * S);
+  // collected count
+  var have = 0; for (var i = 0; i < SPECIES.length; i++) if (meta.dex[SPECIES[i].id]) have++;
+  ctx.fillStyle = '#9fb0d0'; ctx.font = GF.clamp(13 * S, 11, 17) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(have + ' / ' + SPECIES.length + '   ·   ' + GF.t('pity') + ': ' + Math.max(0, 14 - meta.pityCount), W / 2, 64 * S);
+
+  // scrollable grid
+  var topY = 80 * S, botY = H - 70 * S;
+  if (!dexScroll) { dexScroll = GF.makeScroll('dex', { x: 0, y: topY, w: W, h: botY - topY }); }
+  dexScroll.setViewport({ x: 0, y: topY, w: W, h: botY - topY });
+  var cardW = GF.clamp(W * 0.86, 200, 460), cardH = GF.clamp(72 * S, 58, 92), pad = 10 * S, cx0 = (W - cardW) / 2;
+  var contentH = SPECIES.length * (cardH + pad) + pad;
+  dexScroll.setContentHeight(contentH);
+  dexScroll.update();
+  // begin() clips to the viewport AND translates the origin to (vp.y - offset),
+  // so inside begin/end we draw cards at CONTENT-space y (top of content = 0).
+  var off = dexScroll.offset;
+  dexScroll.begin(ctx);
+  for (var k = 0; k < SPECIES.length; k++) {
+    var sp = SPECIES[k];
+    var cyC = pad + k * (cardH + pad);              // content-space y
+    if (cyC + cardH < off - 10 || cyC > off + (botY - topY) + 10) continue;   // cull off-view
+    var seen = !!meta.dex[sp.id];
+    drawDexCard(ctx, cx0, cyC, cardW, cardH, sp, seen);
+  }
+  dexScroll.end(ctx);
+  dexScroll.draw(ctx);   // scrollbar + fade hints
+
+  // tip
+  ctx.fillStyle = '#5f6f92'; ctx.textAlign = 'center'; ctx.font = GF.clamp(11 * S, 9, 14) + 'px Inter, system-ui, sans-serif';
+  wrapText(ctx, GF.t('tip_dex'), W / 2, botY + 16 * S, W * 0.9, 14 * S);
+
+  // back button
+  drawBackBtn(ctx);
+}
+function drawDexCard(ctx, x, y, w, h, sp, seen) {
+  ctx.save();
+  ctx.fillStyle = seen ? 'rgba(26,30,48,0.92)' : 'rgba(16,18,28,0.85)';
+  rrFill(ctx, x, y, w, h, 12 * GF.S);
+  ctx.strokeStyle = seen ? RAR_COL[sp.rar] : 'rgba(80,90,120,0.4)'; ctx.lineWidth = 1.6 * GF.S; rrStroke(ctx, x, y, w, h, 12 * GF.S);
+  ctx.restore();
+  // portrait box
+  var pbS = h - 16 * GF.S, pbx = x + 12 * GF.S, pby = y + 8 * GF.S;
+  ctx.fillStyle = 'rgba(8,10,18,0.7)'; rrFill(ctx, pbx, pby, pbS, pbS, 8 * GF.S);
+  if (seen) {
+    // draw the species as a static portrait
+    var fake = { x: pbx + pbS / 2, y: pby + pbS / 2 + 2 * GF.S, dir: 1, sp: sp, flap: 0.2, fade: 1, cloakAlpha: 1 };
+    var savedS = GF.S;
+    drawBatPortrait(ctx, fake, pbS / (44 * GF.S));
+  } else {
+    ctx.fillStyle = '#3a4258'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + (pbS * 0.5) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText('?', pbx + pbS / 2, pby + pbS / 2 + 1);
+  }
+  // text
+  var tx = pbx + pbS + 12 * GF.S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  if (seen) {
+    ctx.fillStyle = '#eaf2ff'; ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(speciesName(sp), tx, y + 26 * GF.S);
+    ctx.fillStyle = RAR_COL[sp.rar]; ctx.font = GF.clamp(11 * GF.S, 9, 14) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t(RAR[sp.rar]), tx, y + 44 * GF.S);
+    ctx.fillStyle = '#7f8eb0';
+    ctx.fillText(GF.t('seen') + ': ' + meta.dex[sp.id], tx, y + 60 * GF.S);
+  } else {
+    ctx.fillStyle = '#5a647e'; ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 18) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('locked'), tx, y + 32 * GF.S);
+    ctx.fillStyle = RAR_COL[sp.rar]; ctx.globalAlpha = 0.55; ctx.font = GF.clamp(11 * GF.S, 9, 14) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t(RAR[sp.rar]), tx, y + 50 * GF.S); ctx.globalAlpha = 1;
+  }
+  // lane note hint dots (which "instrument" it sings)
+  var dotX = x + w - 14 * GF.S;
+  for (var d = 0; d < sp.lane; d++) {
+    ctx.globalAlpha = seen ? 0.9 : 0.3;
+    ctx.fillStyle = seen ? RAR_COL[sp.rar] : '#5a647e';
+    ctx.beginPath(); ctx.arc(dotX - d * 7 * GF.S, y + h - 12 * GF.S, 2.4 * GF.S, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+// portrait variant (no dir flip jitter, fixed pose)
+function drawBatPortrait(ctx, b, scale) {
+  var sp = b.sp, s = GF.S * sp.size * (scale || 1) * 0.8;
+  ctx.save(); ctx.translate(b.x, b.y);
+  if (sp.glow || sp.rar >= 2) { ctx.shadowColor = sp.col; ctx.shadowBlur = 10 * s; }
+  ctx.fillStyle = sp.wing;
+  for (var side = -1; side <= 1; side += 2) {
+    ctx.beginPath(); ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(side * 16 * s, -8 * s, side * 26 * s, 1 * s);
+    ctx.quadraticCurveTo(side * 20 * s, 7 * s, side * 12 * s, 4 * s);
+    ctx.quadraticCurveTo(side * 16 * s, 6 * s, side * 8 * s, 9 * s);
+    ctx.quadraticCurveTo(side * 4 * s, 5 * s, 0, 2 * s); ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = sp.col;
+  ctx.beginPath(); ctx.ellipse(0, 1 * s, 6 * s, 8 * s, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(0, -6 * s, 5 * s, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(-3.6 * s, -9 * s); ctx.lineTo(-5 * s, -14 * s); ctx.lineTo(-1.6 * s, -10 * s); ctx.closePath();
+  ctx.moveTo(3.6 * s, -9 * s); ctx.lineTo(5 * s, -14 * s); ctx.lineTo(1.6 * s, -10 * s); ctx.closePath(); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = sp.glow ? '#ffffff' : '#10101c';
+  ctx.beginPath(); ctx.arc(-2 * s, -6 * s, 1.3 * s, 0, Math.PI * 2); ctx.arc(2 * s, -6 * s, 1.3 * s, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+// ── SHOP (roost upgrades) ────────────────────────────────────────────────────
+function drawShop(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  menuBtns = [];
+  ctx.fillStyle = 'rgba(6,6,16,0.94)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#eaf2ff'; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(24 * S, 18, 32) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('shop'), W / 2, 44 * S);
+  // echoes balance
+  drawEchoIcon(ctx, W / 2 - 36 * S, 60 * S, 7 * S);
+  ctx.fillStyle = '#9fd8e6'; ctx.textAlign = 'left'; ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(meta.echoes + ' ' + GF.t('echoes'), W / 2 - 24 * S, 64 * S);
+
+  var cardW = GF.clamp(W * 0.88, 220, 480), cx0 = (W - cardW) / 2, cardH = GF.clamp(70 * S, 56, 90), gap = 12 * S, y0 = 90 * S;
+  var items = [
+    { label: GF.t('net'), desc: GF.t('lvl') + ' ' + meta.net, lvl: meta.net, cost: netCost(), col: '#6db8ff', fn: function () { tryBuy(netCost(), function () { meta.net++; }); } },
+    { label: GF.t('lure'), desc: GF.t('lvl') + ' ' + meta.lure, lvl: meta.lure, cost: lureCost(), col: '#9fd8e6', fn: function () { tryBuy(lureCost(), function () { meta.lure++; }); } },
+    { label: GF.t('slots'), desc: GF.t('singers') + ': ' + roostSlots(), lvl: meta.slots, cost: slotCost(), col: '#bfa8ff', fn: function () { tryBuy(slotCost(), function () { meta.slots++; rebuildRoster(); }); } },
+  ];
+  for (var i = 0; i < items.length; i++) {
+    drawShopCard(ctx, cx0, y0 + i * (cardH + gap), cardW, cardH, items[i]);
+  }
+  // tip
+  ctx.fillStyle = '#5f6f92'; ctx.textAlign = 'center'; ctx.font = GF.clamp(11 * S, 9, 14) + 'px Inter, system-ui, sans-serif';
+  wrapText(ctx, GF.t('tip_dex'), W / 2, y0 + items.length * (cardH + gap) + 14 * S, W * 0.9, 14 * S);
+
+  drawBackBtn(ctx);
+}
+function drawShopCard(ctx, x, y, w, h, it) {
+  var maxed = it.lvl >= UP_MAX;
+  var afford = meta.echoes >= it.cost;
+  ctx.fillStyle = 'rgba(24,28,44,0.92)'; rrFill(ctx, x, y, w, h, 12 * GF.S);
+  ctx.strokeStyle = it.col; ctx.lineWidth = 1.6 * GF.S; rrStroke(ctx, x, y, w, h, 12 * GF.S);
+  // label + desc
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#eaf2ff'; ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 21) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(it.label, x + 16 * GF.S, y + 28 * GF.S);
+  ctx.fillStyle = '#8b9bbd'; ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(it.desc, x + 16 * GF.S, y + 48 * GF.S);
+  // level pips
+  for (var p = 0; p < UP_MAX; p++) {
+    ctx.fillStyle = p < it.lvl ? it.col : 'rgba(255,255,255,0.12)';
+    ctx.beginPath(); ctx.arc(x + 16 * GF.S + p * 11 * GF.S, y + h - 14 * GF.S, 3 * GF.S, 0, Math.PI * 2); ctx.fill();
+  }
+  // buy button
+  var bw = GF.clamp(96 * GF.S, 78, 128), bh = GF.clamp(40 * GF.S, 34, 52), bx = x + w - bw - 12 * GF.S, by = y + (h - bh) / 2;
+  if (maxed) {
+    ctx.fillStyle = 'rgba(60,66,86,0.6)'; rrFill(ctx, bx, by, bw, bh, bh / 2);
+    ctx.fillStyle = '#7f8eb0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(13 * GF.S, 11, 17) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('maxed'), bx + bw / 2, by + bh / 2);
+    ctx.textBaseline = 'alphabetic';
+  } else {
+    ctx.save();
+    if (afford) { var g = ctx.createLinearGradient(bx, by, bx, by + bh); g.addColorStop(0, it.col); g.addColorStop(1, shade(it.col, -0.25)); ctx.fillStyle = g; }
+    else ctx.fillStyle = 'rgba(50,56,76,0.7)';
+    rrFill(ctx, bx, by, bw, bh, bh / 2); ctx.fill ? null : null;
+    ctx.restore();
+    ctx.fillStyle = afford ? '#06121a' : '#9aa6c2'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(13 * GF.S, 11, 17) + 'px Inter, system-ui, sans-serif';
+    drawEchoIcon(ctx, bx + bw / 2 - 22 * GF.S, by + bh / 2, 5 * GF.S, afford ? '#06121a' : '#9aa6c2');
+    ctx.fillText(it.cost + '', bx + bw / 2 + 6 * GF.S, by + bh / 2);
+    ctx.textBaseline = 'alphabetic';
+    menuBtns.push({ x: bx, y: by, w: bw, h: bh, fn: it.fn });
+  }
+}
+function tryBuy(cost, apply) {
+  if (meta.echoes >= cost) { meta.echoes -= cost; apply(); GF.sfx('coin'); GF.juice.punch(0.4); GF.saveRun(); }
+  else { GF.sfx('error'); }
+}
+
+// ── BACK button (shared by DEX + SHOP) ──────────────────────────────────────
+function drawBackBtn(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var bw = GF.clamp(180 * S, 130, 240), bh = GF.clamp(48 * S, 40, 62), bx = W / 2 - bw / 2, by = H - bh - 16 * S;
+  ctx.fillStyle = 'rgba(30,34,52,0.92)'; rrFill(ctx, bx, by, bw, bh, bh / 2);
+  ctx.strokeStyle = 'rgba(150,168,220,0.5)'; ctx.lineWidth = 1.4 * S; rrStroke(ctx, bx, by, bw, bh, bh / 2);
+  ctx.fillStyle = '#cdd8ee'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(16 * S, 13, 21) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText('‹ ' + GF.t('back'), W / 2, by + bh / 2);
+  ctx.textBaseline = 'alphabetic';
+  menuBtns.push({ x: bx, y: by, w: bw, h: bh, fn: function () { gs = (prevScreen === 'PLAYING') ? 'PLAYING' : prevScreen; } });
+}
+
+// ── WELCOME BACK (idle accrual reveal) ──────────────────────────────────────
+function drawWelcomeBack(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  menuBtns = [];
+  ctx.fillStyle = 'rgba(6,6,16,0.88)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#9bffd0'; ctx.shadowColor = 'rgba(155,255,208,0.5)'; ctx.shadowBlur = 20 * S;
+  ctx.font = 'bold ' + GF.clamp(24 * S, 18, 32) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('welcome_back'), W / 2, H * 0.26);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#cdd8ee'; ctx.font = GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(welcomeBack.n + ' ' + (GF.lang === 'ru' ? '' : '') + GF.t('roosted_while'), W / 2, H * 0.26 + 30 * S);
+  // show a small grid of arrivals
+  var y = H * 0.40;
+  for (var i = 0; i < welcomeBack.list.length && i < 5; i++) {
+    var it = welcomeBack.list[i], sp = speciesById(it.id);
+    var rowY = y + i * 40 * S;
+    var fake = { x: W / 2 - 70 * S, y: rowY, dir: 1, sp: sp, flap: 0.2, fade: 1, cloakAlpha: 1 };
+    drawBatPortrait(ctx, fake, 0.7);
+    ctx.fillStyle = '#eaf2ff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.font = GF.clamp(14 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(speciesName(sp) + '  x' + it.n, W / 2 - 50 * S, rowY);
+  }
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#9fd8e6'; ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText('+' + welcomeBack.banked + ' ' + GF.t('echoes'), W / 2, y + Math.min(5, welcomeBack.list.length) * 40 * S + 16 * S);
+
+  // claim button
+  var bw = GF.clamp(220 * S, 160, 300), bh = GF.clamp(54 * S, 44, 70), bx = W / 2 - bw / 2, by = H * 0.78;
+  var _t = performance.now() / 1000, _k = Math.sin(_t * 2.2);
+  ctx.save(); ctx.shadowColor = 'rgba(46,224,160,' + (0.4 + 0.28 * _k).toFixed(3) + ')'; ctx.shadowBlur = (18 + 8 * _k) * S;
+  var grad = ctx.createLinearGradient(bx, by, bx, by + bh); grad.addColorStop(0, '#2ee0a0'); grad.addColorStop(1, '#1f9bd8');
+  rrFill(ctx, bx, by, bw, bh, bh / 2); ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#06121a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(18 * S, 14, 24) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('claim'), W / 2, by + bh / 2);
+  ctx.textBaseline = 'alphabetic';
+  menuBtns.push({ x: bx, y: by, w: bw, h: bh, fn: function () { welcomeBack = null; GF.sfx('reward'); } });
+}
+
+// ── small icon + helpers ─────────────────────────────────────────────────────
+function drawEchoIcon(ctx, x, y, r, col) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.strokeStyle = col || '#9fd8e6'; ctx.lineWidth = Math.max(1, r * 0.32);
+  for (var i = 1; i <= 3; i++) { ctx.globalAlpha = 1 - i * 0.22; ctx.beginPath(); ctx.arc(0, 0, r * 0.4 * i, -0.6, 0.6); ctx.stroke(); ctx.beginPath(); ctx.arc(0, 0, r * 0.4 * i, Math.PI - 0.6, Math.PI + 0.6); ctx.stroke(); }
+  ctx.globalAlpha = 1; ctx.fillStyle = col || '#9fd8e6'; ctx.beginPath(); ctx.arc(0, 0, r * 0.28, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+function drawDexIcon(ctx, x, y, r) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.strokeStyle = '#cdd8ee'; ctx.lineWidth = 1.6 * GF.S; ctx.fillStyle = 'rgba(205,216,238,0.15)';
+  rrFill(ctx, -r, -r * 0.8, r * 2, r * 1.6, 2 * GF.S); rrStroke(ctx, -r, -r * 0.8, r * 2, r * 1.6, 2 * GF.S);
+  ctx.beginPath(); ctx.moveTo(0, -r * 0.8); ctx.lineTo(0, r * 0.8); ctx.stroke();
+  ctx.restore();
+}
+function drawRoostIcon(ctx, x, y, r) {
+  ctx.save(); ctx.translate(x, y);
+  // a little bat glyph
+  var fake = { x: 0, y: 1 * GF.S, dir: 1, sp: SPECIES[0], flap: 0.3, fade: 1, cloakAlpha: 1 };
+  ctx.scale(r / (10 * GF.S), r / (10 * GF.S));
+  drawBatPortrait(ctx, fake, 0.85);
+  ctx.restore();
+}
+function drawHomeIcon(ctx, x, y, r) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.strokeStyle = '#cdd8ee'; ctx.fillStyle = 'rgba(205,216,238,0.12)'; ctx.lineWidth = 1.6 * GF.S; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-r, 0); ctx.lineTo(0, -r * 0.95); ctx.lineTo(r, 0);          // roof
+  ctx.lineTo(r * 0.72, 0); ctx.lineTo(r * 0.72, r * 0.8);                 // right wall
+  ctx.lineTo(-r * 0.72, r * 0.8); ctx.lineTo(-r * 0.72, 0); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  // door
+  ctx.beginPath(); ctx.rect(-r * 0.22, r * 0.18, r * 0.44, r * 0.62); ctx.stroke();
+  ctx.restore();
+}
+function drawCheck(ctx, x, y, r, col) {
+  ctx.save(); ctx.translate(x, y); ctx.strokeStyle = col || '#9bffd0'; ctx.lineWidth = Math.max(1.4, r * 0.42); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath(); ctx.moveTo(-r * 0.7, 0); ctx.lineTo(-r * 0.18, r * 0.6); ctx.lineTo(r * 0.75, -r * 0.6); ctx.stroke(); ctx.restore();
+}
+function drawStar(ctx, x, y, r, col) {
+  ctx.save(); ctx.translate(x, y); ctx.fillStyle = col || '#ffd76b'; ctx.beginPath();
+  for (var i = 0; i < 10; i++) { var ang = -Math.PI / 2 + i * Math.PI / 5, rad = (i % 2 === 0) ? r : r * 0.45; ctx[i === 0 ? 'moveTo' : 'lineTo'](Math.cos(ang) * rad, Math.sin(ang) * rad); }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+function rrFill(ctx, x, y, w, h, r) { if (!(w > 0)) return; r = Math.min(r, w / 2, h / 2); ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); ctx.fill(); }
+function rrStroke(ctx, x, y, w, h, r) { if (!(w > 0)) return; r = Math.min(r, w / 2, h / 2); ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); ctx.stroke(); }
+function wrapText(ctx, text, x, y, maxW, lh) {
+  var words = String(text).split(/\s+/), line = '', lines = [];
+  for (var i = 0; i < words.length; i++) { var probe = line ? line + ' ' + words[i] : words[i]; if (ctx.measureText(probe).width > maxW && line) { lines.push(line); line = words[i]; } else line = probe; }
+  if (line) lines.push(line);
+  for (var j = 0; j < lines.length; j++) ctx.fillText(lines[j], x, y + j * lh);
+}
+function mixHex(a, b, t) {
+  t = GF.clamp(t, 0, 1);
+  var ca = hx(a), cb = hx(b);
+  return 'rgb(' + Math.round(ca[0] + (cb[0] - ca[0]) * t) + ',' + Math.round(ca[1] + (cb[1] - ca[1]) * t) + ',' + Math.round(ca[2] + (cb[2] - ca[2]) * t) + ')';
+}
+function shade(hex, amt) { var c = hx(hex); var f = amt < 0 ? 0 : 255, p = Math.abs(amt); return 'rgb(' + Math.round(c[0] + (f - c[0]) * p) + ',' + Math.round(c[1] + (f - c[1]) * p) + ',' + Math.round(c[2] + (f - c[2]) * p) + ')'; }
+function hx(h) { h = h.replace('#', ''); if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2]; return [parseInt(h.substr(0, 2), 16), parseInt(h.substr(2, 2), 16), parseInt(h.substr(4, 2), 16)]; }
+
+// ── PROVIDE the mute icon (gf-lib has drawMuteIcon) ──────────────────────────
+function drawMuteIcon(ctx, x, y, r, muted) { GF.drawMuteIcon(ctx, x, y, r, muted); }
+
+// ── menu/overlay click wiring (single pointer entry) ────────────────────────
+function handleOverlayClick(x, y) {
+  // overlay buttons live in menuBtns; check them on any non-playing screen
+  for (var i = menuBtns.length - 1; i >= 0; i--) {
+    var b = menuBtns[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); return true; }
+  }
+  return false;
+}
+
+// ── BEGIN a run (from menu PLAY) — runs the tutorial first time ─────────────
+function beginRun() {
+  startNight();
+  GF.tutorial.start([
+    { text: GF.t('tut_tap'), target: function () { var b = nearestBat(); return b ? { x: b.x, y: b.y, r: 34 * GF.S } : { x: GF.W / 2, y: GF.H * 0.4, r: 34 * GF.S }; }, advance: 'click_target', gesture: 'tap' },
+    { text: GF.t('tut_pulse'), target: { x: GF.W * 0.30, y: GF.H * 0.55, r: 30 * GF.S }, advance: 'click_any', gesture: 'tap' },
+    { text: GF.t('tut_goal'), target: { x: GF.W / 2, y: 23 * GF.S, r: 30 * GF.S }, advance: 'auto', after: 2600 },
+  ], { storageKey: 'roost_tutorial_v1' });
+}
+function nearestBat() {
+  var best = null, bd = 1e9;
+  for (var i = 0; i < bats.length; i++) { var b = bats[i]; if (b.caught) continue; var d = GF.dist(b.x, b.y, GF.W / 2, GF.H * 0.42); if (d < bd) { bd = d; best = b; } }
+  return best;
+}
+
+// ── BOOT ──────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 432,
+  designH: 936,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: SAVE_KEY,
+  onReady: function() {
+    // seed (stable per install)
+    try {
+      var rawSeed = localStorage.getItem('roost_seed');
+      if (rawSeed) meta.seed = parseInt(rawSeed, 10) >>> 0;
+      else { meta.seed = (Math.floor(Math.random() * 4294967296)) >>> 0; localStorage.setItem('roost_seed', meta.seed + ''); }
+    } catch (e) { meta.seed = (Date.now() >>> 0); }
+
+    // persist FULL meta (Yandex 1.9 — survive reload). Getter/applier ferry the
+    // whole meta object so dex, echoes, upgrades, dailies all survive a refresh.
+    GF.persist('roost_meta_v1',
+      function () { return meta; },
+      function (s) { if (s && typeof s === 'object') { for (var k in s) if (Object.prototype.hasOwnProperty.call(meta, k)) meta[k] = s[k]; } }
+    );
+    // mid-run flag is NOT persisted as PLAYING (safe entry): always boot to MENU
+    gs = 'MENU';
+
+    // CIS languages -> Russian (gf-lib only maps ru*; be/kk/uk/uz/ky/tg players
+    // should get the RU build on Yandex). Read the Yandex env lang if present.
+    try {
+      var yl = (window.ysdk && window.ysdk.environment && window.ysdk.environment.i18n && window.ysdk.environment.i18n.lang) || '';
+      yl = String(yl).toLowerCase();
+      if (/^(ru|be|kk|uk|uz|ky|tg|tt|az|hy)/.test(yl)) GF.lang = 'ru';
+    } catch (e) {}
+
+    deriveChoir();
+    initStars();
+    rebuildRoster();
+
+    // OVERNIGHT IDLE accrual — compute BEFORE updating lastSeen
+    var idle = computeIdle();
+    if (idle) welcomeBack = idle;
+    meta.lastSeen = monotonicNow();
+    GF.saveRun();
+
+    // ── MUSIC (hard rule #8): procedural bed via gf-lib; the species CALLS are
+    // a second WebAudio layer (startChoir) locked to the same beat feel. 'calm'
+    // preset fits the nocturnal cave; per-game seed gives it a unique tune.
+    GF.bgMusic({ file: 'audio/bg_track.mp3', preset: 'calm', muted: GF.muted });
+    // start the call layer on first gesture (its own AudioContext, like bandlings)
+    var armChoir = function () { startChoir(); ['pointerdown', 'touchstart', 'keydown'].forEach(function (ev) { window.removeEventListener(ev, armChoir, true); }); };
+    ['pointerdown', 'touchstart', 'keydown'].forEach(function (ev) { window.addEventListener(ev, armChoir, true); });
+
+    // Yandex 4.7 / 1.3 — when the platform pauses (ad open, focus loss), gf-lib
+    // suspends its own audio; mirror that into the custom choir layer too. ysdk
+    // fires game_api_pause/resume; wrap GF.pauseAudio/resumeAudio so any future
+    // ad path also brackets the choir.
+    try {
+      if (window.ysdk && window.ysdk.on) {
+        window.ysdk.on('game_api_pause', pauseChoir);
+        window.ysdk.on('game_api_resume', resumeChoir);
+      }
+    } catch (e) {}
+    var _origPause = GF.pauseAudio, _origResume = GF.resumeAudio;
+    GF.pauseAudio = function () { try { _origPause && _origPause(); } catch (e) {} pauseChoir(); };
+    GF.resumeAudio = function () { try { _origResume && _origResume(); } catch (e) {} resumeChoir(); };
+
+    // Idle-accrual correctness: stamp lastSeen when the page is hidden/closing,
+    // not only at boot, so a long session before leaving cannot over-award the
+    // overnight "bats roosted while away" bonus next time.
+    var stampSeen = function () { try { meta.lastSeen = monotonicNow(); GF.saveRun(); } catch (e) {} };
+    document.addEventListener('visibilitychange', function () { if (document.hidden) stampSeen(); });
+    window.addEventListener('pagehide', stampSeen);
+
+    // REMOTE CONFIG (live-ops DATA channel; never blocks boot, offline=defaults)
+    GF.remoteConfig('roost', CFG, {
+      clamps: { 'tuning.lure_cost_mult': [0.5, 2], 'tuning.idle_rate_mult': [0.25, 3], 'tuning.target_mult': [0.6, 1.6] },
+      onUpdate: function (c) { CFG = c; },
+    }).then(function (c) { CFG = c; });
+
+    // expose state for QA gates
+    // Report a harness-canonical state name: our terminal screen is NIGHTDONE,
+    // but the QA adapter's menu-button/terminal set is {MENU,PLAYING,GAMEOVER}.
+    // Map NIGHTDONE -> GAMEOVER for the gate so retry/cycle tests recognise it.
+    GF.exposeState(function () { return { gs: (gs === 'NIGHTDONE' ? 'GAMEOVER' : gs), caught: caught, echoes: meta.echoes, dex: Object.keys(meta.dex).length, night: meta.nightNo, singers: choir.roster.length }; });
+    // Reachability gate: report the live button rects of the CURRENT screen. The
+    // overlay screens populate menuBtns/topBtns every frame; DEX scrolls so its
+    // cards are reported in content space against the dex scroll region.
+    GF.exposeReach && GF.exposeReach(function () {
+      var items = [], i;
+      for (i = 0; i < menuBtns.length; i++) { var b = menuBtns[i]; items.push({ id: 'b' + i, x: b.x, y: b.y, w: b.w, h: b.h, pinned: (gs === 'DEX' || gs === 'SHOP') }); }
+      for (i = 0; i < topBtns.length; i++) { var tb = topBtns[i]; items.push({ id: 't' + i, x: tb.x, y: tb.y, w: tb.w, h: tb.h, pinned: true }); }
+      var payload = { screen: gs, items: items };
+      if (gs === 'DEX' && dexScroll) {
+        // dex cards are display-only (no hit-rects) but still must be reachable;
+        // report them as scrollable content items so the gate proves you can
+        // scroll the whole album into view.
+        var topY = 80 * GF.S, botY = GF.H - 70 * GF.S, cardH = GF.clamp(72 * GF.S, 58, 92), pad = 10 * GF.S, cw = GF.clamp(GF.W * 0.86, 200, 460), cx0 = (GF.W - cw) / 2;
+        var cards = [];
+        for (i = 0; i < SPECIES.length; i++) cards.push({ id: 'dex' + i, x: cx0, y: pad + i * (cardH + pad), w: cw, h: cardH });
+        // back button is pinned (drawn outside the scroll region)
+        payload = { screen: 'DEX', items: cards.concat(items.filter(function (it) { return it.pinned; })), scrollId: 'dex', viewportH: botY - topY, screenH: GF.H };
+      }
+      return payload;
+    });
+    GF.exposeTour && GF.exposeTour([
+      { name: 'MENU', go: function () { welcomeBack = null; gs = 'MENU'; } },
+      { name: 'PLAYING', go: function () { if (gs !== 'PLAYING') startNight(); GF.tutorial.active = false; } },
+      { name: 'NIGHTDONE', go: function () { if (gs !== 'PLAYING') startNight(); caught = Math.max(caught, nightTarget); endNight(); } },
+      { name: 'DEX', go: function () { prevScreen = 'MENU'; gs = 'DEX'; dexScroll = null; } },
+      { name: 'SHOP', go: function () { prevScreen = 'MENU'; gs = 'SHOP'; } },
+    ]);
+    GF.exposeBot && GF.exposeBot(function () { return gs === 'PLAYING' ? ['catch', 'pulse'] : ['start']; }, function (a) {
+      if (a === 'start' && gs !== 'PLAYING') startNight();
+      else if (a === 'catch') { var b = nearestBat(); if (b) catchBat(b); }
+      else if (a === 'pulse') sendPulse(GF.W * (0.3 + Math.random() * 0.4), GF.H * (0.3 + Math.random() * 0.3), false);
+    });
+
+    // Test-only probes (guarded; never used in production).
+    window.__roostBtns = function () { return menuBtns.map(function (b) { return { x: b.x, y: b.y, w: b.w, h: b.h }; }); };
+    // returns the nearest catchable bat's CSS coords so a headless harness can tap real targets.
+    window.__roostProbe = function () {
+      if (gs !== 'PLAYING') return null;
+      var b = null, bd = 1e9;
+      for (var i = 0; i < bats.length; i++) { var k = bats[i]; if (k.caught) continue; if (k.sp.cloak && k.cloakAlpha < 0.5) continue; var d = k.y; if (d < bd) { bd = d; b = k; } }
+      if (!b) return null;
+      var r = GF.canvas.getBoundingClientRect();
+      var sx = r.width / GF.canvas.width, sy = r.height / GF.canvas.height;
+      return { x: r.left + b.x * sx, y: r.top + b.y * sy };
+    };
+
+    // ── PLATFORM AUTOSTART (hard rule #9): drop straight into a night on
+    // Yandex/CG/GD/GP; suppress the tutorial so the player lands IN gameplay.
+    if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') {
+      try { localStorage.setItem('roost_tutorial_v1', '1'); } catch (e) {}
+      welcomeBack = null;           // don't gate autostart behind the idle modal
+      startNight();
+    }
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── POINTER (single source) — route to overlay buttons or gameplay ──────────
+// We bind our OWN pointerdown so tap-to-catch works (gf-lib's button system
+// only covers declarative overlay buttons; the night needs raw taps).
+function pointerDown(clientX, clientY) {
+  var pc = clientToCanvas(clientX, clientY);
+  // tutorial first (it draws over everything) — but ONLY during PLAYING, so a
+  // stray active flag can never swallow overlay-screen button taps.
+  if (GF.tutorial.active && gs === 'PLAYING') { if (GF.tutorial.handleClick(pc.x, pc.y)) return; }
+  // welcome-back modal swallows clicks via its claim button
+  if (welcomeBack) { if (handleOverlayClick(pc.x, pc.y)) return; return; }
+  // overlay screens
+  if (gs === 'MENU' || gs === 'NIGHTDONE' || gs === 'DEX' || gs === 'SHOP') {
+    // top chips (mute) also live in topBtns on MENU
+    if ((gs === 'MENU') && hitTopBar(pc.x, pc.y)) return;
+    if (handleOverlayClick(pc.x, pc.y)) return;
+    return;
+  }
+  // gameplay
+  onPress(pc.x, pc.y);
+}
+// scroll drag for the dex
+var _dragId = null, _dragMoved = false, _dragStartY = 0;
+GF.canvas.addEventListener('pointerdown', function (e) {
+  if (gs === 'DEX' && dexScroll) { _dragId = e.pointerId; _dragMoved = false; _dragStartY = e.clientY; dexScroll.dragStart(e.clientY); }
+  pointerDown(e.clientX, e.clientY);
+}, { passive: true });
+GF.canvas.addEventListener('pointermove', function (e) {
+  if (_dragId === e.pointerId && gs === 'DEX' && dexScroll) { if (Math.abs(e.clientY - _dragStartY) > 4) _dragMoved = true; dexScroll.dragMove(e.clientY); }
+}, { passive: true });
+GF.canvas.addEventListener('pointerup', function (e) {
+  if (_dragId === e.pointerId && gs === 'DEX' && dexScroll) { dexScroll.dragEnd(); }
+  _dragId = null;
+}, { passive: true });
+GF.canvas.addEventListener('pointercancel', function (e) { _dragId = null; if (gs === 'DEX' && dexScroll) dexScroll.dragEnd(); }, { passive: true });
+
+// keyboard: space/enter starts from menu, Escape backs out (NOT on CG — but CG
+// reserves Escape; gf-lib platform check keeps it gallery/Yandex safe to use P).
+window.addEventListener('keydown', function (e) {
+  if ((e.code === 'Space' || e.code === 'Enter')) {
+    if (gs === 'MENU') { beginRun(); }
+    else if (gs === 'NIGHTDONE') { startNight(); }
+  }
+});
+
+// ── YANDEX MUST-HAVES (kept): UI text via GF.t, run persists (GF.persist +
+// GF.saveRun on every transition), fullscreen-exit resize handled in gf-lib,
+// no ads auto-fired (this build ships no ad calls; rewarded path can be added
+// later via GF.ads.rewarded from a user click). ───────────────────────────────
+
+})();
+</script>
+</body>
+</html>
