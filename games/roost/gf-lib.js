@@ -1139,8 +1139,10 @@ var MUSIC_PRESETS = {
   synth:  { bpm: 122, roots: [220.00, 196.00, 246.94, 261.63], scale: [0,2,3,5,7,8,10], chords: [[0,2,4],[5,0,2],[3,5,0],[6,1,3]], wave: 'sawtooth', bassWave: 'square',   drums: true,  gain: 0.12, arpDiv: 4 },
   // bright chiptune (root C) — fast casual/score
   arcade: { bpm: 132, roots: [261.63, 220.00, 246.94, 293.66], scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[3,5,0],[4,6,1],[0,2,4]], wave: 'square',   bassWave: 'triangle', drums: true,  gain: 0.11, arpDiv: 4 },
-  // slow ambient major (root F) — calm/zen
-  calm:   { bpm: 68,  roots: [174.61, 164.81, 196.00, 220.00], scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[4,6,1],[5,0,2],[3,5,0]], wave: 'sine',     bassWave: 'sine',     drums: false, gain: 0.15, arpDiv: 2 },
+  // slow ambient major (root F) — calm/zen. Bed gain reduced 0.15 -> 0.085 so a
+  // game's own foreground voice layer (e.g. roost's species choir) clearly leads
+  // over the harmonic floor (player comment 2026-06-13: "melody a bit quieter").
+  calm:   { bpm: 68,  roots: [174.61, 164.81, 196.00, 220.00], scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[4,6,1],[5,0,2],[3,5,0]], wave: 'sine',     bassWave: 'sine',     drums: false, gain: 0.085, arpDiv: 2 },
   // upbeat lo-fi for idle/tycoon (D major, bouncy bass groove, no drums)
   idle:   { bpm: 96,  roots: [220.00, 246.94, 261.63, 293.66], scale: [0,2,4,5,7,9,11], chords: [[0,2,4],[4,6,1],[5,0,2],[2,4,6]], wave: 'triangle', bassWave: 'triangle', drums: false, gain: 0.15, arpDiv: 3 },
   // tense pulse for horror/survival (E minor, driven, heavy bass)
