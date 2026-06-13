@@ -10,6 +10,7 @@
 #     --title "Clean Sweep Donut" \
 #     --hook  "Roll a sprinkled donut through dirty rooms..." \
 #     [--unpublished]   # default: published=true
+#     [--allow-dup]     # override the mechanic-dedup block (intentional clone/replace)
 #
 # Behaviour:
 #   - If a game with the same slug already exists, the entry is REPLACED
@@ -19,7 +20,7 @@
 
 set -euo pipefail
 
-SLUG="" GAME_DIR="" TITLE="" TITLE_RU="" HOOK="" HOOK_RU="" GENRE="other" PUBLISHED="true"
+SLUG="" GAME_DIR="" TITLE="" TITLE_RU="" HOOK="" HOOK_RU="" GENRE="other" PUBLISHED="true" ALLOW_DUP="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --hook-ru)     HOOK_RU="$2"; shift 2 ;;
     --genre)       GENRE="$2"; shift 2 ;;
     --unpublished) PUBLISHED="false"; shift ;;
+    --allow-dup)   ALLOW_DUP="true"; shift ;;
     -h|--help)
       sed -n '2,21p' "$0"; exit 0 ;;
     *)
@@ -63,6 +65,33 @@ if [[ ! -f "$SRC" ]]; then
 fi
 
 ADDED_DATE="$(date +%Y-%m-%d)"
+
+# ── Mechanic-dedup gate (2026-06-13 incident) ─────────────────────────────────
+# The announce ledger dedupes by SLUG, so two DIFFERENT-slug games with the SAME
+# mechanic both get announced (gem_cases + critter_crates, bolt_out + bolt_rescue).
+# Catch a NEW slug that clones an existing PUBLISHED mechanic HERE, the chokepoint
+# where a game first enters the catalog. Only checks NEW slugs (re-appending an
+# existing slug is an update -> skip). Non-fatal if the checker is missing.
+DEDUPE="$GALLERY/../Shared/skills/game-factory/tools/dedupe_check.py"
+IS_NEW_SLUG=$(jq --arg s "$SLUG" 'any(.[]; .slug == $s) | not' "$SRC")
+if [[ "$ALLOW_DUP" != "true" && "$IS_NEW_SLUG" == "true" && -f "$DEDUPE" ]] && command -v python3 >/dev/null; then
+  set +e
+  DEDUPE_OUT=$(python3 "$DEDUPE" --slug "$SLUG" --title "$TITLE" --hook "$HOOK" --genre "$GENRE" 2>/dev/null)
+  DEDUPE_RC=$?
+  set -e
+  if [[ $DEDUPE_RC -eq 2 ]]; then
+    echo "$DEDUPE_OUT"
+    echo ""
+    echo "❌ BLOCKED: \"$TITLE\" ($SLUG) duplicates a PUBLISHED game's mechanic (above)."
+    echo "   We already have it on the gallery and likely already announced it; a second"
+    echo "   clone double-announces the same game to subscribers (2026-06-13 incident)."
+    echo "   Intentional replacement/iteration? re-run with --allow-dup to override."
+    exit 3
+  elif [[ $DEDUPE_RC -eq 1 ]]; then
+    echo "$DEDUPE_OUT"
+    echo "⚠ WARNING: possible mechanic overlap (above) — eyeball it; proceeding."
+  fi
+fi
 
 NEW_ENTRY=$(jq -n \
   --arg slug      "$SLUG" \
