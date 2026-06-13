@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Crash Descent 2D</title>
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #101318;
+      color: #f6f2e8;
+      touch-action: none;
+      overscroll-behavior: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100dvw;
+      height: 100dvh;
+      touch-action: none;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" tabindex="0" aria-label="Crash Descent 2D game canvas"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const TAU = Math.PI * 2;
+  let W = 1;
+  let H = 1;
+  let dpr = 1;
+  let lastTs = 0;
+  let state = null;
+  let buttons = [];
+  let controls = { throttle: false, brake: false, tiltBack: false, tiltForward: false };
+  let pointerControls = new Map();
+  let toast = '';
+  let toastT = 0;
+  let audioCtx = null;
+  let masterGain = null;
+  let musicTimer = 0;
+  let muted = false;
+
+  function rand(seed) {
+    let t = seed >>> 0;
+    return () => {
+      t += 0x6D2B79F5;
+      let x = Math.imul(t ^ (t >>> 15), 1 | t);
+      x ^= x + Math.imul(x ^ (x >>> 7), 61 | x);
+      return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function resetGame(keepMeta) {
+    const meta = keepMeta && state ? state.meta : { coins: 0, engine: 1, suspension: 1, armor: 1 };
+    state = {
+      mode: 'menu',
+      level: keepMeta && state ? state.level : 1,
+      meta,
+      car: null,
+      terrain: [],
+      trackLen: 0,
+      cameraX: 0,
+      score: 0,
+      runCoins: 0,
+      bestX: 0,
+      flips: 0,
+      flipSpin: 0,
+      sparks: [],
+      dust: [],
+      finishBonus: 0
+    };
+    buildTrack();
+    placeCar();
+  }
+
+  function buildTrack() {
+    const level = state.level;
+    const rnd = rand(5000 + level * 997);
+    const len = 2500 + level * 360;
+    state.trackLen = len;
+    state.terrain = [];
+    let y = 220;
+    for (let x = -240; x <= len + 420; x += 90) {
+      const ramp = rnd() < 0.2 ? -50 - rnd() * 55 : 0;
+      const dip = rnd() < 0.18 ? 40 + rnd() * 50 : 0;
+      y += 18 + rnd() * 34 + ramp + dip;
+      y = Math.max(155, Math.min(520, y));
+      state.terrain.push({ x, y });
+    }
+    state.terrain.push({ x: len + 560, y: y + 70 });
+  }
+
+  function placeCar() {
+    const ground = terrainAt(0);
+    state.car = {
+      x: 0,
+      y: ground.y - 28,
+      vx: 38,
+      vy: 0,
+      angle: ground.a,
+      av: 0,
+      integrity: 100 + state.meta.armor * 16,
+      maxIntegrity: 100 + state.meta.armor * 16,
+      onGround: true,
+      landedRecently: 0,
+      dead: false
+    };
+  }
+
+  function resize() {
+    dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    W = Math.max(320, window.innerWidth);
+    H = Math.max(360, window.innerHeight);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    render();
+  }
+
+  function addToast(text) {
+    toast = text;
+    toastT = 1.35;
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      const Audio = window.AudioContext || window.webkitAudioContext;
+      if (!Audio) return;
+      audioCtx = new Audio();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = muted ? 0 : 0.16;
+      masterGain.connect(audioCtx.destination);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function tone(freq, dur, type, vol, slide) {
+    if (!audioCtx || muted || !masterGain) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), now + dur);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(vol || 0.14, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + dur + 0.03);
+  }
+
+  function sfx(name) {
+    ensureAudio();
+    if (!audioCtx || muted) return;
+    if (name === 'engine') tone(105 + Math.random() * 22, 0.12, 'sawtooth', 0.09, 35);
+    else if (name === 'control') tone(240, 0.06, 'triangle', 0.09, 30);
+    else if (name === 'upgrade') { tone(360, 0.1, 'triangle', 0.13, 120); setTimeout(() => tone(620, 0.12, 'sine', 0.1, 110), 60); }
+    else if (name === 'flip') { tone(520, 0.09, 'triangle', 0.14, 220); setTimeout(() => tone(860, 0.13, 'sine', 0.1, 120), 70); }
+    else if (name === 'finish') { tone(540, 0.12, 'triangle', 0.14, 140); setTimeout(() => tone(800, 0.18, 'sine', 0.11, 100), 80); }
+    else if (name === 'crash') tone(125, 0.34, 'sawtooth', 0.16, -70);
+    else if (name === 'deny') tone(145, 0.11, 'square', 0.09, -35);
+    else tone(300, 0.07, 'triangle', 0.11, 40);
+  }
+
+  function updateMusic(dt) {
+    if (!audioCtx || muted) return;
+    musicTimer -= dt;
+    if (musicTimer <= 0) {
+      const driving = state && state.mode === 'play';
+      musicTimer = driving && controls.throttle ? 0.22 : driving ? 0.42 : 0.8;
+      tone(driving ? 82 + Math.min(80, Math.max(0, state.car.vx) * 0.12) : 74, 0.07, 'sine', 0.032, 0);
+      if (driving && controls.throttle) tone(164, 0.045, 'triangle', 0.024, 18);
+    }
+  }
+
+  function toggleMute() {
+    ensureAudio();
+    muted = !muted;
+    if (masterGain && audioCtx) {
+      masterGain.gain.setTargetAtTime(muted ? 0 : 0.16, audioCtx.currentTime, 0.02);
+    }
+    addToast(muted ? 'MUTED' : 'SOUND ON');
+    if (!muted) sfx('tap');
+  }
+
+  function terrainAt(x) {
+    const pts = state.terrain;
+    let i = 0;
+    while (i < pts.length - 2 && pts[i + 1].x < x) i++;
+    const a = pts[i];
+    const b = pts[i + 1];
+    const t = Math.max(0, Math.min(1, (x - a.x) / (b.x - a.x)));
+    const smooth = t * t * (3 - 2 * t);
+    const y = a.y + (b.y - a.y) * smooth;
+    const slope = Math.atan2(b.y - a.y, b.x - a.x);
+    return { y, a: slope };
+  }
+
+  function startRun() {
+    if (state.mode === 'menu' || state.mode === 'garage') {
+      buildTrack();
+      placeCar();
+      state.mode = 'play';
+      state.score = 0;
+      state.runCoins = 0;
+      state.bestX = 0;
+      state.flips = 0;
+      state.flipSpin = 0;
+      addToast('HIT THE DESCENT');
+      sfx('engine');
+    } else if (state.mode === 'crashed' || state.mode === 'finish') {
+      state.mode = 'garage';
+      addToast('UPGRADE OR RUN');
+      sfx('tap');
+    }
+  }
+
+  function upgrade(which) {
+    if (state.mode !== 'garage' && state.mode !== 'menu') return;
+    const current = state.meta[which];
+    const cost = 75 + current * current * 45;
+    if (state.meta.coins < cost) {
+      addToast('NEED COINS');
+      sfx('deny');
+      return;
+    }
+    state.meta.coins -= cost;
+    state.meta[which]++;
+    addToast(`${which.toUpperCase()} +1`);
+    placeCar();
+    sfx('upgrade');
+  }
+
+  function updateCar(dt) {
+    if (state.mode !== 'play') return;
+    const car = state.car;
+    const ground = terrainAt(car.x);
+    const engine = 210 + state.meta.engine * 36;
+    const brake = 165 + state.meta.engine * 12;
+    const suspension = 1 + state.meta.suspension * 0.17;
+    if (controls.throttle) car.vx += engine * dt;
+    if (controls.brake) car.vx -= brake * dt;
+    if (!car.onGround) {
+      if (controls.tiltBack) car.av -= 3.2 * dt;
+      if (controls.tiltForward) car.av += 3.2 * dt;
+    } else {
+      if (controls.tiltBack) car.angle -= 1.1 * dt;
+      if (controls.tiltForward) car.angle += 1.1 * dt;
+    }
+    car.vx = Math.max(-90, Math.min(560 + state.meta.engine * 28, car.vx));
+    car.vy += 620 * dt;
+    car.x += car.vx * dt;
+    car.y += car.vy * dt;
+    car.angle += car.av * dt;
+    car.av *= Math.pow(0.2, dt);
+    const wheelY = car.y + 23;
+    if (wheelY >= ground.y) {
+      const wasAir = !car.onGround;
+      const impact = Math.max(0, car.vy - 250);
+      car.onGround = true;
+      car.y = ground.y - 23;
+      if (wasAir) {
+        const angleDiff = Math.abs(normalizeAngle(car.angle - ground.a));
+        const damage = Math.max(0, impact / (8 * suspension) + Math.max(0, angleDiff - 0.85) * 24);
+        if (damage > 4) hitCar(damage, car.x, car.y);
+        car.landedRecently = 0.24;
+        if (Math.abs(state.flipSpin) > TAU * 0.82) {
+          const gained = 25 + Math.floor(Math.abs(state.flipSpin) / TAU) * 20;
+          state.runCoins += gained;
+          state.flips++;
+          addToast(`FLIP +${gained}`);
+          sfx('flip');
+        }
+        state.flipSpin = 0;
+      }
+      car.vy = 0;
+      const target = ground.a;
+      car.angle += normalizeAngle(target - car.angle) * Math.min(1, dt * 5.5 * suspension);
+      car.vx += Math.sin(ground.a) * 230 * dt;
+      car.vx *= Math.pow(0.94, dt * 8);
+      if (Math.abs(normalizeAngle(car.angle - ground.a)) > 1.65 && Math.abs(car.vx) > 60) {
+        hitCar(12 * dt, car.x, car.y);
+      }
+      if (Math.random() < 7 * dt) state.dust.push({ x: car.x - 34, y: ground.y - 5, t: 0, life: 0.55, r: 6 + Math.random() * 10 });
+    } else {
+      car.onGround = false;
+      state.flipSpin += car.av * dt;
+    }
+    car.landedRecently = Math.max(0, car.landedRecently - dt);
+    state.bestX = Math.max(state.bestX, car.x);
+    state.score = Math.max(state.score, Math.floor(state.bestX) + state.flips * 250);
+    state.runCoins = Math.max(state.runCoins, Math.floor(state.bestX / 95) + state.flips * 30);
+    state.cameraX += (car.x - state.cameraX - W * 0.32) * Math.min(1, dt * 4);
+    if (car.integrity <= 0 || car.y > 900) {
+      state.meta.coins += state.runCoins;
+      state.mode = 'crashed';
+      addToast(`CRASH +${state.runCoins} COINS`);
+      sfx('crash');
+    } else if (car.x >= state.trackLen) {
+      state.finishBonus = 180 + state.level * 45 + Math.floor(car.integrity);
+      state.meta.coins += state.runCoins + state.finishBonus;
+      state.level++;
+      state.mode = 'finish';
+      addToast(`FINISH +${state.finishBonus}`);
+      sfx('finish');
+    }
+  }
+
+  function hitCar(amount, x, y) {
+    const car = state.car;
+    car.integrity = Math.max(0, car.integrity - amount);
+    car.vx *= 0.83;
+    car.av += (Math.random() - 0.5) * 1.7;
+    for (let i = 0; i < 8; i++) {
+      state.sparks.push({
+        x, y,
+        vx: (Math.random() - 0.5) * 180,
+        vy: -60 - Math.random() * 100,
+        t: 0,
+        life: 0.35 + Math.random() * 0.35,
+        r: 2 + Math.random() * 3,
+        color: i % 2 ? '#ffdf70' : '#ff745f'
+      });
+    }
+  }
+
+  function normalizeAngle(a) {
+    while (a > Math.PI) a -= TAU;
+    while (a < -Math.PI) a += TAU;
+    return a;
+  }
+
+  function update(dt) {
+    if (!state) return;
+    toastT = Math.max(0, toastT - dt);
+    updateMusic(dt);
+    updateCar(dt);
+    for (let i = state.sparks.length - 1; i >= 0; i--) {
+      const p = state.sparks[i];
+      p.t += dt;
+      p.vy += 420 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.t >= p.life) state.sparks.splice(i, 1);
+    }
+    for (let i = state.dust.length - 1; i >= 0; i--) {
+      const p = state.dust[i];
+      p.t += dt;
+      p.x -= 45 * dt;
+      p.y -= 18 * dt;
+      if (p.t >= p.life) state.dust.splice(i, 1);
+    }
+  }
+
+  function roundedRect(x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  function fillRound(x, y, w, h, r, fill, stroke) {
+    roundedRect(x, y, w, h, r);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  function layout() {
+    buttons = [];
+    const y = H - 64;
+    buttons.push({ id: 'tiltBack', label: 'TILT <', x: 18, y, w: 86, h: 46, hold: 'tiltBack' });
+    buttons.push({ id: 'brake', label: 'BRAKE', x: 112, y, w: 82, h: 46, hold: 'brake' });
+    buttons.push({ id: 'tiltForward', label: 'TILT >', x: W - 196, y, w: 86, h: 46, hold: 'tiltForward' });
+    buttons.push({ id: 'throttle', label: 'GAS', x: W - 102, y, w: 84, h: 46, hold: 'throttle', primary: true });
+    buttons.push({ id: 'sound', label: muted ? 'SOUND' : 'MUTE', x: W - 92, y: H - 116, w: 74, h: 34 });
+    const compact = W < 720;
+    const topY = compact ? 104 : 74;
+    buttons.push({ id: 'main', label: state.mode === 'play' ? 'RUNNING' : state.mode === 'garage' ? 'RUN' : state.mode === 'menu' ? 'START' : 'GARAGE', x: 18, y: topY, w: compact ? 88 : 98, h: 38, primary: true });
+    if (compact) {
+      buttons.push({ id: 'restart', label: 'RESET', x: Math.max(116, W - 178), y: topY, w: 76, h: 38 });
+      buttons.push({ id: 'fullscreen', label: 'FULL', x: Math.max(200, W - 94), y: topY, w: 76, h: 38 });
+      const uy = topY + 44;
+      const uw = Math.min(104, (W - 52) / 3);
+      buttons.push({ id: 'engine', label: `ENG ${upgradeCost('engine')}`, x: 18, y: uy, w: uw, h: 36 });
+      buttons.push({ id: 'suspension', label: `SUS ${upgradeCost('suspension')}`, x: 26 + uw, y: uy, w: uw, h: 36 });
+      buttons.push({ id: 'armor', label: `ARM ${upgradeCost('armor')}`, x: 34 + uw * 2, y: uy, w: uw, h: 36 });
+    } else {
+      buttons.push({ id: 'engine', label: `ENGINE ${upgradeCost('engine')}`, x: 124, y: topY, w: 116, h: 38 });
+      buttons.push({ id: 'suspension', label: `SUSP ${upgradeCost('suspension')}`, x: 248, y: topY, w: 108, h: 38 });
+      buttons.push({ id: 'armor', label: `ARMOR ${upgradeCost('armor')}`, x: 364, y: topY, w: 108, h: 38 });
+      buttons.push({ id: 'restart', label: 'RESET', x: W - 188, y: topY, w: 80, h: 38 });
+      buttons.push({ id: 'fullscreen', label: 'FULL', x: W - 100, y: topY, w: 82, h: 38 });
+    }
+  }
+
+  function upgradeCost(which) {
+    const current = state.meta[which];
+    return 75 + current * current * 45;
+  }
+
+  function drawBackground() {
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, '#263a4d');
+    sky.addColorStop(0.62, '#587070');
+    sky.addColorStop(1, '#2b261f');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,0.16)';
+    ctx.beginPath();
+    ctx.arc(W * 0.78, 82, 34, 0, TAU);
+    ctx.fill();
+    for (let i = 0; i < 5; i++) {
+      const px = (i * 260 - state.cameraX * 0.16) % (W + 280) - 80;
+      ctx.fillStyle = 'rgba(42,54,65,0.38)';
+      ctx.beginPath();
+      ctx.moveTo(px, H * 0.55);
+      ctx.lineTo(px + 120, H * 0.22 + i * 9);
+      ctx.lineTo(px + 260, H * 0.55);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function screenX(worldX) {
+    return worldX - state.cameraX;
+  }
+
+  function drawTerrain() {
+    const pts = state.terrain;
+    ctx.beginPath();
+    ctx.moveTo(screenX(pts[0].x), pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(screenX(pts[i].x), pts[i].y);
+    ctx.lineTo(screenX(pts[pts.length - 1].x), H + 160);
+    ctx.lineTo(screenX(pts[0].x), H + 160);
+    ctx.closePath();
+    const ground = ctx.createLinearGradient(0, 180, 0, H);
+    ground.addColorStop(0, '#8a6b3f');
+    ground.addColorStop(1, '#33251a');
+    ctx.fillStyle = ground;
+    ctx.fill();
+    ctx.strokeStyle = '#d2a968';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(screenX(pts[0].x), pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(screenX(pts[i].x), pts[i].y);
+    ctx.stroke();
+    const finishX = screenX(state.trackLen);
+    ctx.fillStyle = '#f6f2e8';
+    ctx.fillRect(finishX, terrainAt(state.trackLen).y - 100, 6, 100);
+    for (let i = 0; i < 5; i++) {
+      ctx.fillStyle = i % 2 ? '#101318' : '#f6f2e8';
+      ctx.fillRect(finishX + 6, terrainAt(state.trackLen).y - 100 + i * 14, 34, 14);
+    }
+  }
+
+  function drawCar() {
+    const car = state.car;
+    const x = screenX(car.x);
+    const y = car.y;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(car.angle);
+    ctx.fillStyle = '#111820';
+    ctx.beginPath();
+    ctx.arc(-27, 22, 14, 0, TAU);
+    ctx.arc(29, 22, 14, 0, TAU);
+    ctx.fill();
+    ctx.strokeStyle = '#d0d8dd';
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(-27, 22, 9, 0, TAU);
+    ctx.arc(29, 22, 9, 0, TAU);
+    ctx.stroke();
+    fillRound(-44, -18, 88, 34, 8, '#ff775f', '#862f26');
+    fillRound(-16, -39, 42, 25, 7, '#ffd86e', '#8a6b2b');
+    ctx.fillStyle = '#38495c';
+    ctx.fillRect(-6, -33, 20, 13);
+    ctx.restore();
+  }
+
+  function drawButton(rect) {
+    const active = rect.hold && controls[rect.hold];
+    fillRound(rect.x, rect.y, rect.w, rect.h, 8, active ? '#ffd86e' : rect.primary ? '#ff775f' : '#24313d', active ? '#fff3b0' : rect.primary ? '#ffb39f' : '#4b5c69');
+    ctx.fillStyle = active ? '#19140a' : '#f6f2e8';
+    ctx.font = rect.h < 38 ? '800 12px system-ui, sans-serif' : '800 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rect.label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  }
+
+  function render() {
+    if (!state) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawBackground();
+    layout();
+    drawTerrain();
+    for (const p of state.dust) {
+      ctx.globalAlpha = Math.max(0, 1 - p.t / p.life) * 0.5;
+      ctx.fillStyle = '#d9b784';
+      ctx.beginPath();
+      ctx.arc(screenX(p.x), p.y, p.r * (1 + p.t), 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    drawCar();
+    for (const p of state.sparks) {
+      ctx.globalAlpha = Math.max(0, 1 - p.t / p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(screenX(p.x), p.y, p.r, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    const compactHud = W < 620;
+    ctx.fillStyle = '#f6f2e8';
+    ctx.font = compactHud ? '900 20px system-ui, sans-serif' : '900 24px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Crash Descent 2D', 18, 14);
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillStyle = '#d8e0dc';
+    ctx.fillText(`Level ${state.level}   Coins ${state.meta.coins + state.runCoins}   Score ${state.score}`, 20, 46);
+
+    ctx.textAlign = 'right';
+    const hpPct = state.car.integrity / state.car.maxIntegrity;
+    ctx.fillStyle = hpPct < 0.35 ? '#ff745f' : '#ffd86e';
+    ctx.fillText(`Integrity ${Math.max(0, Math.floor(state.car.integrity))}/${state.car.maxIntegrity}`, W - 18, compactHud ? 20 : 18);
+    ctx.fillStyle = '#d8e0dc';
+    ctx.fillText(`Distance ${Math.max(0, Math.floor(state.bestX))}/${state.trackLen}`, W - 18, compactHud ? 46 : 42);
+    const barW = Math.min(310, W - 36);
+    const barY = compactHud ? 74 : 18;
+    fillRound(W / 2 - barW / 2, barY, barW, 10, 5, 'rgba(16,19,24,0.5)', null);
+    fillRound(W / 2 - barW / 2, barY, barW * Math.min(1, state.bestX / state.trackLen), 10, 5, '#67d8a5', null);
+
+    buttons.forEach(drawButton);
+
+    if (state.mode === 'menu' || state.mode === 'garage' || state.mode === 'crashed' || state.mode === 'finish') {
+      drawOverlay();
+    }
+    if (toastT > 0) {
+      ctx.globalAlpha = Math.min(1, toastT * 2);
+      const ty = compactHud ? 188 : 120;
+      fillRound(W / 2 - 145, ty, 290, 34, 10, 'rgba(246,242,232,0.94)', null);
+      ctx.fillStyle = '#101318';
+      ctx.font = '900 14px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(toast, W / 2, ty + 17);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawOverlay() {
+    ctx.fillStyle = 'rgba(8,10,14,0.62)';
+    ctx.fillRect(0, 0, W, H);
+    const w = Math.min(450, W - 36);
+    const h = state.mode === 'garage' ? 260 : 230;
+    const x = (W - w) / 2;
+    const y = Math.max(104, (H - h) / 2);
+    fillRound(x, y, w, h, 10, '#f6f2e8', '#ffffff');
+    ctx.fillStyle = '#101318';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = '900 24px system-ui, sans-serif';
+    const title = state.mode === 'finish' ? 'Finish reached' : state.mode === 'crashed' ? 'Buggy wrecked' : state.mode === 'garage' ? 'Garage' : 'Downhill toy crash';
+    ctx.fillText(title, x + w / 2, y + 22);
+    ctx.font = '500 15px system-ui, sans-serif';
+    let lines;
+    if (state.mode === 'finish') {
+      lines = [`Finish bonus ${state.finishBonus}.`, 'Bank coins, upgrade, and try the next descent.'];
+    } else if (state.mode === 'crashed') {
+      lines = [`Distance ${Math.floor(state.bestX)}. Coins earned ${state.runCoins}.`, 'Upgrade suspension or armor before retrying.'];
+    } else if (state.mode === 'garage') {
+      lines = [`Coins ${state.meta.coins}. Engine ${state.meta.engine}, suspension ${state.meta.suspension}, armor ${state.meta.armor}.`, 'Gas over ramps, tilt in air, land wheels-first.', 'Reach the flag before integrity hits zero.'];
+    } else {
+      lines = ['Gas, brake, and tilt through a rough downhill track.', 'Earn coins from distance and flips, then upgrade the car.', 'No brands, no 3D: pure crash-readable toy physics.'];
+    }
+    lines.forEach((line, i) => ctx.fillText(line, x + w / 2, y + 74 + i * 24));
+    fillRound(x + w / 2 - 82, y + h - 62, 164, 42, 8, '#ff775f', '#a33d2f');
+    ctx.fillStyle = '#fff8ed';
+    ctx.font = '900 15px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    const label = state.mode === 'finish' || state.mode === 'crashed' ? 'GARAGE' : 'START RUN';
+    ctx.fillText(label, x + w / 2, y + h - 41);
+  }
+
+  function hit(rect, x, y) {
+    return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+  }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement && canvas.requestFullscreen) {
+      canvas.requestFullscreen().catch(() => {});
+    } else if (document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
+  function pressButton(id, down) {
+    const rect = buttons.find((b) => b.id === id);
+    if (!rect) return;
+    if (rect.hold) {
+      controls[rect.hold] = down;
+      if (down) sfx(rect.hold === 'throttle' ? 'engine' : 'control');
+      return;
+    }
+    if (!down) return;
+    if (id === 'main') startRun();
+    if (id === 'engine') upgrade('engine');
+    if (id === 'suspension') upgrade('suspension');
+    if (id === 'armor') upgrade('armor');
+    if (id === 'restart') {
+      resetGame(false);
+      sfx('tap');
+    }
+    if (id === 'fullscreen') toggleFullscreen();
+    if (id === 'sound') toggleMute();
+  }
+
+  function pointerPos(ev) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (ev.clientX - r.left) * (W / r.width), y: (ev.clientY - r.top) * (H / r.height) };
+  }
+
+  function onPointerDown(ev) {
+    ev.preventDefault();
+    canvas.focus();
+    ensureAudio();
+    const p = pointerPos(ev);
+    for (const button of buttons) {
+      if (hit(button, p.x, p.y)) {
+        pointerControls.set(ev.pointerId, button.id);
+        pressButton(button.id, true);
+        return;
+      }
+    }
+    if (state.mode !== 'play') startRun();
+  }
+
+  function onPointerUp(ev) {
+    ev.preventDefault();
+    const id = pointerControls.get(ev.pointerId);
+    if (id) {
+      pressButton(id, false);
+      pointerControls.delete(ev.pointerId);
+    }
+  }
+
+  function onKey(ev, down) {
+    if (down) ensureAudio();
+    if (ev.code === 'ArrowRight' || ev.code === 'KeyD') controls.throttle = down;
+    if (ev.code === 'ArrowLeft' || ev.code === 'KeyS') controls.brake = down;
+    if (ev.code === 'KeyA') controls.tiltBack = down;
+    if (ev.code === 'ArrowUp' || ev.code === 'KeyW') controls.tiltForward = down;
+    if (!down) return;
+    if (ev.code === 'Enter' || ev.code === 'Space') {
+      ev.preventDefault();
+      startRun();
+    } else if (ev.code === 'KeyU') {
+      ev.preventDefault();
+      toggleMute();
+    } else if (ev.code === 'KeyR') {
+      ev.preventDefault();
+      resetGame(false);
+      sfx('tap');
+    } else if (ev.code === 'KeyF') {
+      ev.preventDefault();
+      toggleFullscreen();
+    }
+  }
+
+  function loop(ts) {
+    const dt = Math.min(0.05, Math.max(0, (ts - lastTs) / 1000 || 0));
+    lastTs = ts;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  window.render_game_to_text = () => JSON.stringify({
+    title: 'Crash Descent 2D',
+    coordinates: 'canvas pixels, origin top-left, x right, y down; world x follows terrain distance',
+    mode: state.mode,
+    level: state.level,
+    coins: state.meta.coins,
+    runCoins: state.runCoins,
+    score: state.score,
+    car: {
+      x: Math.round(state.car.x),
+      y: Math.round(state.car.y),
+      vx: Math.round(state.car.vx),
+      vy: Math.round(state.car.vy),
+      angle: Number(state.car.angle.toFixed(2)),
+      integrity: Math.round(state.car.integrity),
+      onGround: state.car.onGround
+    },
+    upgrades: state.meta,
+    distance: { best: Math.round(state.bestX), finish: state.trackLen },
+    controls,
+    toast: toastT > 0 ? toast : ''
+  });
+
+  window.advanceTime = (ms) => {
+    const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+    for (let i = 0; i < steps; i++) update(1 / 60);
+    render();
+  };
+
+  resetGame(false);
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+  canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
+  canvas.addEventListener('pointerup', onPointerUp, { passive: false });
+  canvas.addEventListener('pointercancel', onPointerUp, { passive: false });
+  window.addEventListener('keydown', (ev) => onKey(ev, true));
+  window.addEventListener('keyup', (ev) => onKey(ev, false));
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

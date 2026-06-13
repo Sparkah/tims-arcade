@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Screw Shelf Jam</title>
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #13171f;
+      color: #f7f2e8;
+      touch-action: none;
+      overscroll-behavior: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100dvw;
+      height: 100dvh;
+      touch-action: none;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" tabindex="0" aria-label="Screw Shelf Jam game canvas"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const TAU = Math.PI * 2;
+  const SCREW_COLORS = [
+    { name: 'red', fill: '#ef5550', edge: '#8f2727' },
+    { name: 'blue', fill: '#4da3ff', edge: '#1f5f9e' },
+    { name: 'green', fill: '#50d06b', edge: '#207b36' },
+    { name: 'yellow', fill: '#f2c84c', edge: '#9b7720' },
+    { name: 'purple', fill: '#a774ff', edge: '#6440ad' },
+    { name: 'teal', fill: '#38d6c7', edge: '#197b73' }
+  ];
+
+  let W = 1;
+  let H = 1;
+  let dpr = 1;
+  let lastTs = 0;
+  let buttons = [];
+  let stackRects = [];
+  let rodRects = [];
+  let bufferRects = [];
+  let toast = '';
+  let toastT = 0;
+  let state = null;
+  let audioCtx = null;
+  let masterGain = null;
+  let musicTimer = 0;
+  let muted = false;
+
+  function rand(seed) {
+    let t = seed >>> 0;
+    return () => {
+      t += 0x6D2B79F5;
+      let x = Math.imul(t ^ (t >>> 15), 1 | t);
+      x ^= x + Math.imul(x ^ (x >>> 7), 61 | x);
+      return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function shuffle(arr, rnd) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      const tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+    }
+    return arr;
+  }
+
+  function createLevel(level) {
+    const colorCount = Math.min(3 + Math.floor((level - 1) / 2), 6);
+    const stackCount = colorCount + 3;
+    const screws = [];
+    for (let color = 0; color < colorCount; color++) {
+      for (let i = 0; i < 4; i++) screws.push({ color, face: (i + color + level) % 3 });
+    }
+    const rnd = rand(9127 + level * 883);
+    shuffle(screws, rnd);
+    const stacks = Array.from({ length: stackCount }, () => []);
+    let si = 0;
+    for (const screw of screws) {
+      stacks[si].push(screw);
+      si = (si + 1 + Math.floor(rnd() * 2)) % stackCount;
+    }
+    for (let pass = 0; pass < 2; pass++) {
+      for (const stack of stacks) {
+        if (stack.length > 5) stacks[(stacks.indexOf(stack) + 1) % stackCount].push(stack.shift());
+      }
+    }
+    return {
+      mode: 'menu',
+      level,
+      score: Math.max(0, (state && state.score) || 0),
+      moves: 0,
+      bestMoves: 999,
+      colors: colorCount,
+      stacks,
+      rods: Array.from({ length: colorCount }, () => ({ color: -1, screws: [] })),
+      buffer: [],
+      bufferCap: 5,
+      flash: [],
+      particles: [],
+      lastMove: null,
+      wonLevel: false
+    };
+  }
+
+  function resetGame() {
+    state = createLevel(1);
+  }
+
+  function resize() {
+    dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    W = Math.max(320, window.innerWidth);
+    H = Math.max(360, window.innerHeight);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    render();
+  }
+
+  function addToast(text) {
+    toast = text;
+    toastT = 1.35;
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      const Audio = window.AudioContext || window.webkitAudioContext;
+      if (!Audio) return;
+      audioCtx = new Audio();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = muted ? 0 : 0.16;
+      masterGain.connect(audioCtx.destination);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function tone(freq, dur, type, vol, slide) {
+    if (!audioCtx || muted || !masterGain) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), now + dur);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(vol || 0.18, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + dur + 0.03);
+  }
+
+  function sfx(name) {
+    ensureAudio();
+    if (!audioCtx || muted) return;
+    if (name === 'place') tone(420 + Math.random() * 90, 0.08, 'triangle', 0.16, 90);
+    else if (name === 'lock') { tone(520, 0.10, 'triangle', 0.18, 180); tone(780, 0.14, 'sine', 0.12, 120); }
+    else if (name === 'buffer') tone(210, 0.12, 'sawtooth', 0.12, -70);
+    else if (name === 'deny') tone(145, 0.11, 'square', 0.09, -35);
+    else if (name === 'win') { tone(620, 0.13, 'triangle', 0.16, 120); setTimeout(() => tone(860, 0.18, 'sine', 0.12, 120), 70); }
+    else if (name === 'lose') tone(170, 0.32, 'sawtooth', 0.16, -90);
+    else tone(330, 0.07, 'triangle', 0.12, 40);
+  }
+
+  function updateMusic(dt) {
+    if (!audioCtx || muted) return;
+    musicTimer -= dt;
+    if (musicTimer <= 0) {
+      musicTimer = state && state.mode === 'play' ? 0.52 : 0.9;
+      tone(state && state.mode === 'play' ? 118 : 92, 0.08, 'sine', 0.035, 0);
+      if (state && state.mode === 'play') tone(236, 0.045, 'triangle', 0.026, 20);
+    }
+  }
+
+  function toggleMute() {
+    ensureAudio();
+    muted = !muted;
+    if (masterGain && audioCtx) {
+      masterGain.gain.setTargetAtTime(muted ? 0 : 0.16, audioCtx.currentTime, 0.02);
+    }
+    addToast(muted ? 'MUTED' : 'SOUND ON');
+    if (!muted) sfx('tap');
+  }
+
+  function screwColor(color) {
+    return SCREW_COLORS[color % SCREW_COLORS.length];
+  }
+
+  function canFitRod(rod, screw) {
+    return rod.screws.length < 4 && (rod.color === -1 || rod.color === screw.color);
+  }
+
+  function findRodFor(screw) {
+    let empty = -1;
+    for (let i = 0; i < state.rods.length; i++) {
+      const rod = state.rods[i];
+      if (rod.color === screw.color && canFitRod(rod, screw)) return i;
+      if (rod.color === -1 && empty < 0) empty = i;
+    }
+    return empty;
+  }
+
+  function placeOnRod(screw, rodIndex) {
+    const rod = state.rods[rodIndex];
+    if (rod.color === -1) rod.color = screw.color;
+    rod.screws.push(screw);
+    burst(rodRects[rodIndex], screw.color, rod.screws.length >= 4 ? 24 : 10);
+    if (rod.screws.length >= 4) {
+      addToast(`${screwColor(screw.color).name.toUpperCase()} ROD LOCKED`);
+      state.score += 80 + state.level * 8;
+      sfx('lock');
+    } else {
+      state.score += 12;
+      sfx('place');
+    }
+  }
+
+  function moveScrewFromStack(index) {
+    if (state.mode !== 'play') return;
+    const stack = state.stacks[index];
+    if (!stack || stack.length === 0) return;
+    const screw = stack[stack.length - 1];
+    const rodIndex = findRodFor(screw);
+    state.lastMove = {
+      type: 'stack',
+      index,
+      screw: { color: screw.color, face: screw.face },
+      rods: state.rods.map((r) => ({ color: r.color, n: r.screws.length })),
+      buffer: state.buffer.map((s) => ({ color: s.color, face: s.face }))
+    };
+    stack.pop();
+    state.moves++;
+    if (rodIndex >= 0) {
+      placeOnRod(screw, rodIndex);
+    } else if (state.buffer.length < state.bufferCap) {
+      state.buffer.push(screw);
+      const rect = bufferRects[state.buffer.length - 1];
+      if (rect) burst(rect, screw.color, 8);
+      addToast('BUFFERED');
+      sfx('buffer');
+    } else {
+      state.mode = 'lose';
+      addToast('TRAY JAMMED');
+      sfx('lose');
+    }
+    checkWin();
+  }
+
+  function moveScrewFromBuffer(index) {
+    if (state.mode !== 'play') return;
+    const screw = state.buffer[index];
+    if (!screw) return;
+    const rodIndex = findRodFor(screw);
+    if (rodIndex < 0) {
+      addToast('NO ROD YET');
+      sfx('deny');
+      return;
+    }
+    state.lastMove = null;
+    state.buffer.splice(index, 1);
+    state.moves++;
+    placeOnRod(screw, rodIndex);
+    checkWin();
+  }
+
+  function checkWin() {
+    const shelvesEmpty = state.stacks.every((s) => s.length === 0);
+    const bufferEmpty = state.buffer.length === 0;
+    const rodsFull = state.rods.every((r) => r.screws.length === 4);
+    if (shelvesEmpty && bufferEmpty && rodsFull) {
+      state.mode = 'win';
+      state.wonLevel = true;
+      const bonus = Math.max(40, 260 - state.moves * 5) + state.level * 30;
+      state.score += bonus;
+      addToast(`LEVEL CLEAR +${bonus}`);
+      sfx('win');
+    }
+  }
+
+  function undo() {
+    if (!state.lastMove || state.mode !== 'play') return;
+    const snap = state.lastMove;
+    state.stacks[snap.index].push({ color: snap.screw.color, face: snap.screw.face });
+    state.rods.forEach((rod, i) => {
+      const spec = snap.rods[i];
+      rod.color = spec.color;
+      while (rod.screws.length > spec.n) rod.screws.pop();
+    });
+    state.buffer = snap.buffer.map((s) => ({ color: s.color, face: s.face }));
+    state.moves = Math.max(0, state.moves - 1);
+    state.lastMove = null;
+    addToast('UNDO');
+    sfx('tap');
+  }
+
+  function startOrContinue() {
+    if (state.mode === 'menu') {
+      state.mode = 'play';
+      addToast('CLEAR THE SHELF');
+      sfx('tap');
+    } else if (state.mode === 'win') {
+      const nextScore = state.score;
+      state = createLevel(state.level + 1);
+      state.score = nextScore;
+      state.mode = 'play';
+      addToast('NEXT SHELF');
+      sfx('tap');
+    } else if (state.mode === 'lose') {
+      const level = state.level;
+      const score = Math.max(0, state.score - 60);
+      state = createLevel(level);
+      state.score = score;
+      state.mode = 'play';
+      addToast('TRY AGAIN');
+      sfx('tap');
+    }
+  }
+
+  function burst(rect, color, count) {
+    if (!rect) return;
+    const col = screwColor(color);
+    for (let i = 0; i < count; i++) {
+      state.particles.push({
+        x: rect.x + rect.w * 0.5,
+        y: rect.y + rect.h * 0.45,
+        vx: (Math.random() - 0.5) * 190,
+        vy: -50 - Math.random() * 120,
+        life: 0.4 + Math.random() * 0.45,
+        t: 0,
+        r: 2 + Math.random() * 3,
+        color: i % 3 === 0 ? '#ffffff' : col.fill
+      });
+    }
+  }
+
+  function update(dt) {
+    if (!state) return;
+    toastT = Math.max(0, toastT - dt);
+    updateMusic(dt);
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.t += dt;
+      p.vy += 380 * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      if (p.t >= p.life) state.particles.splice(i, 1);
+    }
+  }
+
+  function roundedRect(x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  function fillRound(x, y, w, h, r, fill, stroke) {
+    roundedRect(x, y, w, h, r);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  function drawButton(rect) {
+    fillRound(rect.x, rect.y, rect.w, rect.h, 8, rect.primary ? '#f2c84c' : '#273446', rect.primary ? '#fff1a3' : '#4c5a70');
+    ctx.fillStyle = rect.primary ? '#20180a' : '#f7f2e8';
+    ctx.font = rect.w < 76 ? '700 12px system-ui, sans-serif' : '700 14px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rect.label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  }
+
+  function drawScrew(x, y, size, screw, alpha = 1) {
+    const col = screwColor(screw.color);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(x, y);
+    ctx.rotate((screw.face - 1) * 0.2);
+    fillRound(-size * 0.42, -size * 0.42, size * 0.84, size * 0.84, size * 0.18, col.fill, col.edge);
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillRect(-size * 0.27, -size * 0.08, size * 0.54, size * 0.16);
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.fillRect(-size * 0.08, -size * 0.27, size * 0.16, size * 0.54);
+    ctx.strokeStyle = '#f7f2e8';
+    ctx.globalAlpha = alpha * 0.45;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-size * 0.18, -size * 0.18, size * 0.36, size * 0.36);
+    ctx.restore();
+  }
+
+  function drawBackground() {
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, '#182231');
+    grad.addColorStop(0.55, '#262231');
+    grad.addColorStop(1, '#17151e');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,0.035)';
+    for (let x = -40; x < W + 40; x += 56) {
+      ctx.fillRect(x, 0, 18, H);
+    }
+  }
+
+  function layout() {
+    buttons = [];
+    stackRects = [];
+    rodRects = [];
+    bufferRects = [];
+    const top = 78;
+    const margin = 18;
+    const boardW = Math.min(720, W - margin * 2);
+    const left = (W - boardW) / 2;
+    const stackCount = state.stacks.length;
+    const gap = 8;
+    const stackW = Math.max(34, Math.min(70, (boardW - gap * (stackCount - 1)) / stackCount));
+    const stackH = Math.min(250, Math.max(165, H * 0.34));
+    for (let i = 0; i < stackCount; i++) {
+      stackRects.push({ x: left + i * (stackW + gap), y: top + 36, w: stackW, h: stackH });
+    }
+    const rodY = top + stackH + 112;
+    const rodGap = 12;
+    const rodW = Math.min(86, Math.max(52, (boardW * 0.66 - rodGap * (state.rods.length - 1)) / state.rods.length));
+    const rodsLeft = left;
+    for (let i = 0; i < state.rods.length; i++) {
+      rodRects.push({ x: rodsLeft + i * (rodW + rodGap), y: rodY, w: rodW, h: Math.min(118, H - rodY - 76) });
+    }
+    const trayW = Math.min(230, boardW * 0.32);
+    const trayX = left + boardW - trayW;
+    const slotW = Math.min(38, (trayW - 18) / state.bufferCap);
+    for (let i = 0; i < state.bufferCap; i++) {
+      bufferRects.push({ x: trayX + 9 + i * slotW, y: rodY + 32, w: slotW - 4, h: 44 });
+    }
+    const by = H - 56;
+    const compact = W < 390;
+    const mainW = compact ? 92 : 110;
+    const restartW = compact ? 98 : 110;
+    const fullW = compact ? 64 : 82;
+    const btnGap = compact ? 6 : 12;
+    buttons.push({ id: 'main', label: state.mode === 'menu' ? 'START' : state.mode === 'win' ? 'NEXT' : state.mode === 'lose' ? 'RETRY' : 'UNDO', x: left, y: by, w: mainW, h: 40, primary: true });
+    buttons.push({ id: 'restart', label: 'RESTART', x: left + mainW + btnGap, y: by, w: restartW, h: 40 });
+    buttons.push({ id: 'fullscreen', label: 'FULL', x: left + mainW + restartW + btnGap * 2, y: by, w: fullW, h: 40 });
+    buttons.push({ id: 'sound', label: muted ? 'SOUND' : 'MUTE', x: W - (compact ? 84 : 104), y: H - 104, w: compact ? 66 : 82, h: 34 });
+  }
+
+  function render() {
+    if (!state) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawBackground();
+    layout();
+
+    ctx.fillStyle = '#f7f2e8';
+    ctx.font = '800 24px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Screw Shelf Jam', 18, 14);
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillStyle = '#bac6d8';
+    ctx.fillText(`Level ${state.level}   Moves ${state.moves}   Score ${state.score}`, 20, 46);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = state.buffer.length >= state.bufferCap ? '#ff776d' : '#f2c84c';
+    ctx.fillText(`Tray ${state.buffer.length}/${state.bufferCap}`, W - 18, 18);
+    if (W >= 620) {
+      ctx.fillStyle = '#bac6d8';
+      ctx.fillText('Tap top screws. Buffer only when no rod fits.', W - 18, 42);
+    }
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '700 13px system-ui, sans-serif';
+    stackRects.forEach((rect, i) => {
+      fillRound(rect.x, rect.y, rect.w, rect.h, 10, '#222b37', '#465268');
+      ctx.fillStyle = '#171b23';
+      ctx.fillRect(rect.x + 8, rect.y + 10, rect.w - 16, rect.h - 20);
+      const stack = state.stacks[i];
+      const slot = Math.min(42, (rect.h - 24) / 5);
+      for (let j = 0; j < stack.length; j++) {
+        const sy = rect.y + rect.h - 18 - j * slot;
+        const alpha = j === stack.length - 1 ? 1 : 0.64;
+        drawScrew(rect.x + rect.w / 2, sy, Math.min(rect.w - 14, slot * 0.82), stack[j], alpha);
+      }
+      if (!stack.length) {
+        ctx.fillStyle = '#566174';
+        ctx.fillText('clear', rect.x + rect.w / 2, rect.y + rect.h / 2);
+      }
+    });
+
+    ctx.font = '800 14px system-ui, sans-serif';
+    ctx.fillStyle = '#f7f2e8';
+    ctx.textAlign = 'left';
+    ctx.fillText('Sorting rods', rodRects[0].x, rodRects[0].y - 22);
+    rodRects.forEach((rect, i) => {
+      const rod = state.rods[i];
+      const color = rod.color >= 0 ? screwColor(rod.color) : null;
+      fillRound(rect.x, rect.y, rect.w, rect.h, 10, '#1b222d', color ? color.edge : '#404a5d');
+      ctx.strokeStyle = color ? color.fill : '#586478';
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(rect.x + rect.w / 2, rect.y + 15);
+      ctx.lineTo(rect.x + rect.w / 2, rect.y + rect.h - 16);
+      ctx.stroke();
+      for (let j = 0; j < rod.screws.length; j++) {
+        drawScrew(rect.x + rect.w / 2, rect.y + rect.h - 22 - j * 24, 28, rod.screws[j]);
+      }
+      if (rod.screws.length >= 4) {
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.fillRect(rect.x + 10, rect.y + 8, rect.w - 20, 5);
+      }
+    });
+
+    const tray = bufferRects[0] || { x: W - 200, y: H - 160 };
+    ctx.fillStyle = '#f7f2e8';
+    ctx.font = '800 14px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Jam tray', tray.x, tray.y - 18);
+    bufferRects.forEach((rect, i) => {
+      fillRound(rect.x, rect.y, rect.w, rect.h, 8, '#151a22', '#3b4657');
+      if (state.buffer[i]) drawScrew(rect.x + rect.w / 2, rect.y + rect.h / 2, 28, state.buffer[i]);
+    });
+
+    for (const p of state.particles) {
+      ctx.globalAlpha = Math.max(0, 1 - p.t / p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    buttons.forEach(drawButton);
+
+    if (state.mode === 'menu' || state.mode === 'win' || state.mode === 'lose') {
+      drawOverlay();
+    }
+    if (toastT > 0) {
+      ctx.globalAlpha = Math.min(1, toastT * 2);
+      fillRound(W / 2 - 135, 72, 270, 34, 10, 'rgba(247,242,232,0.94)', null);
+      ctx.fillStyle = '#151923';
+      ctx.font = '800 14px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(toast, W / 2, 89);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawOverlay() {
+    ctx.fillStyle = 'rgba(9,12,18,0.68)';
+    ctx.fillRect(0, 0, W, H);
+    const w = Math.min(420, W - 36);
+    const h = 230;
+    const x = (W - w) / 2;
+    const y = Math.max(88, (H - h) / 2);
+    fillRound(x, y, w, h, 10, '#f7f2e8', '#ffffff');
+    ctx.fillStyle = '#151923';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = '900 24px system-ui, sans-serif';
+    const title = state.mode === 'menu' ? 'Sort the shelf' : state.mode === 'win' ? 'Shelf cleared' : 'Tray jammed';
+    ctx.fillText(title, x + w / 2, y + 24);
+    ctx.font = '500 15px system-ui, sans-serif';
+    const lines = state.mode === 'menu'
+      ? ['Tap exposed screws. Matching rods take them automatically.', 'If no rod fits, the screw drops into the tray.', 'Five tray mistakes and the shelf jams.']
+      : state.mode === 'win'
+        ? [`Level ${state.level} cleared in ${state.moves} moves.`, 'Next shelf adds denser colors and tighter choices.']
+        : ['The buffer tray filled before rods cleared.', 'Retry the same shelf and protect tray space.'];
+    lines.forEach((line, i) => ctx.fillText(line, x + w / 2, y + 78 + i * 24));
+    const label = state.mode === 'menu' ? 'START' : state.mode === 'win' ? 'NEXT LEVEL' : 'RETRY';
+    fillRound(x + w / 2 - 78, y + h - 62, 156, 42, 8, '#f2c84c', '#b28724');
+    ctx.fillStyle = '#151923';
+    ctx.font = '900 15px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + w / 2, y + h - 41);
+  }
+
+  function hit(rect, x, y) {
+    return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+  }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement && canvas.requestFullscreen) {
+      canvas.requestFullscreen().catch(() => {});
+    } else if (document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
+  function onPointer(ev) {
+    ev.preventDefault();
+    canvas.focus();
+    ensureAudio();
+    const r = canvas.getBoundingClientRect();
+    const x = (ev.clientX - r.left) * (W / r.width);
+    const y = (ev.clientY - r.top) * (H / r.height);
+
+    for (const button of buttons) {
+      if (button.id === 'sound' && hit(button, x, y)) {
+        toggleMute();
+        return;
+      }
+    }
+
+    if (state.mode !== 'play') {
+      startOrContinue();
+      return;
+    }
+    for (const button of buttons) {
+      if (hit(button, x, y)) {
+        if (button.id === 'main') undo();
+        if (button.id === 'restart') {
+          const level = state.level;
+          const score = state.score;
+          state = createLevel(level);
+          state.score = score;
+          state.mode = 'play';
+          sfx('tap');
+        }
+        if (button.id === 'fullscreen') toggleFullscreen();
+        return;
+      }
+    }
+    for (let i = 0; i < bufferRects.length; i++) {
+      if (hit(bufferRects[i], x, y)) {
+        moveScrewFromBuffer(i);
+        return;
+      }
+    }
+    for (let i = 0; i < stackRects.length; i++) {
+      if (hit(stackRects[i], x, y)) {
+        moveScrewFromStack(i);
+        return;
+      }
+    }
+  }
+
+  function onKey(ev) {
+    ensureAudio();
+    if (ev.code === 'Enter' || ev.code === 'Space') {
+      ev.preventDefault();
+      startOrContinue();
+    } else if (ev.code === 'KeyU') {
+      ev.preventDefault();
+      toggleMute();
+    } else if (ev.code === 'KeyR') {
+      ev.preventDefault();
+      const level = state.level;
+      state = createLevel(level);
+      state.mode = 'play';
+      sfx('tap');
+    } else if (ev.code === 'KeyF') {
+      ev.preventDefault();
+      toggleFullscreen();
+    } else if (ev.code === 'KeyZ') {
+      ev.preventDefault();
+      undo();
+    }
+  }
+
+  function loop(ts) {
+    const dt = Math.min(0.05, Math.max(0, (ts - lastTs) / 1000 || 0));
+    lastTs = ts;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  window.render_game_to_text = () => JSON.stringify({
+    title: 'Screw Shelf Jam',
+    coordinates: 'canvas pixels, origin top-left, x right, y down',
+    mode: state.mode,
+    level: state.level,
+    moves: state.moves,
+    score: state.score,
+    tray: { count: state.buffer.length, capacity: state.bufferCap, colors: state.buffer.map((s) => screwColor(s.color).name) },
+    stacks: state.stacks.map((stack, i) => ({ i, height: stack.length, top: stack.length ? screwColor(stack[stack.length - 1].color).name : null })),
+    rods: state.rods.map((rod, i) => ({ i, color: rod.color >= 0 ? screwColor(rod.color).name : null, count: rod.screws.length })),
+    toast: toastT > 0 ? toast : ''
+  });
+
+  window.advanceTime = (ms) => {
+    const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+    for (let i = 0; i < steps; i++) update(1 / 60);
+    render();
+  };
+
+  resetGame();
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+  canvas.addEventListener('pointerdown', onPointer, { passive: false });
+  window.addEventListener('keydown', onKey);
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
