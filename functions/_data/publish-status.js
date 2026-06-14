@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-13T16:31:04.726677+00:00",
+  "generated": "2026-06-14T13:21:04.836567+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -853,6 +853,31 @@ export default {
         "gamedistribution",
         "gamepush"
       ]
+    },
+    "gulp_rush": {
+      "gameDir": "Games/187_gulp_rush",
+      "engagement": null,
+      "platforms": {
+        "yandex": {
+          "status": "not_started"
+        },
+        "crazygames": {
+          "status": "built"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
     }
   },
   "untracked": [
@@ -936,7 +961,7 @@ export default {
       "approved": 0,
       "submitted": 0,
       "rejected": 3,
-      "built": 4
+      "built": 5
     },
     "gamedistribution": {
       "live": 0,
