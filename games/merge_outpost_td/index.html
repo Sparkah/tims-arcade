@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Merge Outpost TD</title>
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #10161c;
+      color: #edf4f1;
+      touch-action: none;
+      overscroll-behavior: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100dvw;
+      height: 100dvh;
+      touch-action: none;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" tabindex="0" aria-label="Merge Outpost TD game canvas"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const TAU = Math.PI * 2;
+  const LANES = 3;
+  const COLS = 5;
+  const UNIT_COLORS = ['#60d394', '#4ea5ff', '#ffcb57', '#f87979', '#bb88ff', '#55d6c2'];
+  let W = 1;
+  let H = 1;
+  let dpr = 1;
+  let lastTs = 0;
+  let state = null;
+  let buttons = [];
+  let slotRects = [];
+  let benchRects = [];
+  let toast = '';
+  let toastT = 0;
+  let audioCtx = null;
+  let masterGain = null;
+  let musicTimer = 0;
+  let muted = false;
+
+  function resetGame() {
+    state = {
+      mode: 'menu',
+      wave: 1,
+      scrap: 95,
+      score: 0,
+      baseHp: 16,
+      baseMax: 16,
+      buyCost: 28,
+      grid: Array.from({ length: LANES }, () => Array.from({ length: COLS }, () => null)),
+      bench: [{ level: 1 }, { level: 1 }],
+      selected: null,
+      enemies: [],
+      shots: [],
+      sparks: [],
+      spawnTimer: 0,
+      spawned: 0,
+      waveSize: 0,
+      waveActive: false,
+      beacon: 20,
+      kills: 0,
+      merges: 0,
+      dangerLane: 0
+    };
+  }
+
+  function resize() {
+    dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    W = Math.max(320, window.innerWidth);
+    H = Math.max(360, window.innerHeight);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    render();
+  }
+
+  function addToast(text) {
+    toast = text;
+    toastT = 1.35;
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      const Audio = window.AudioContext || window.webkitAudioContext;
+      if (!Audio) return;
+      audioCtx = new Audio();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = muted ? 0 : 0.15;
+      masterGain.connect(audioCtx.destination);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function tone(freq, dur, type, vol, slide) {
+    if (!audioCtx || muted || !masterGain) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(40, freq + slide), now + dur);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(vol || 0.15, now + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + dur + 0.03);
+  }
+
+  function sfx(name) {
+    ensureAudio();
+    if (!audioCtx || muted) return;
+    if (name === 'buy') tone(330, 0.08, 'triangle', 0.14, 80);
+    else if (name === 'merge') { tone(440, 0.1, 'triangle', 0.14, 160); setTimeout(() => tone(660, 0.13, 'sine', 0.1, 120), 55); }
+    else if (name === 'wave') tone(170, 0.18, 'sawtooth', 0.12, 80);
+    else if (name === 'shot') tone(520 + Math.random() * 120, 0.045, 'square', 0.045, -80);
+    else if (name === 'beacon') { tone(260, 0.18, 'sawtooth', 0.13, 260); setTimeout(() => tone(740, 0.12, 'triangle', 0.11, 140), 80); }
+    else if (name === 'clear') { tone(520, 0.13, 'triangle', 0.13, 120); setTimeout(() => tone(780, 0.16, 'sine', 0.1, 120), 70); }
+    else if (name === 'lose') tone(150, 0.34, 'sawtooth', 0.16, -80);
+    else if (name === 'deny') tone(130, 0.12, 'square', 0.09, -30);
+    else tone(300, 0.07, 'triangle', 0.11, 40);
+  }
+
+  function updateMusic(dt) {
+    if (!audioCtx || muted) return;
+    musicTimer -= dt;
+    if (musicTimer <= 0) {
+      musicTimer = state && state.mode === 'combat' ? 0.42 : 0.74;
+      tone(state && state.mode === 'combat' ? 104 : 86, 0.075, 'sine', 0.032, 0);
+      if (state && state.mode !== 'menu') tone(208, 0.045, 'triangle', 0.024, 16);
+    }
+  }
+
+  function toggleMute() {
+    ensureAudio();
+    muted = !muted;
+    if (masterGain && audioCtx) {
+      masterGain.gain.setTargetAtTime(muted ? 0 : 0.15, audioCtx.currentTime, 0.02);
+    }
+    addToast(muted ? 'MUTED' : 'SOUND ON');
+    if (!muted) sfx('tap');
+  }
+
+  function unitStats(level) {
+    return {
+      damage: 8 + level * 7 + Math.floor(level * level * 1.4),
+      fire: Math.max(0.28, 0.82 - level * 0.055),
+      range: 330 + level * 12
+    };
+  }
+
+  function enemyStats(wave) {
+    return {
+      hp: 38 + wave * 15 + Math.floor(wave * wave * 1.7),
+      speed: 28 + Math.min(34, wave * 2.2),
+      reward: 7 + Math.floor(wave * 1.5)
+    };
+  }
+
+  function buyUnit() {
+    if (state.mode !== 'build' && state.mode !== 'menu') return;
+    if (state.mode === 'menu') state.mode = 'build';
+    if (state.bench.length >= 7) {
+      addToast('BENCH FULL');
+      sfx('deny');
+      return;
+    }
+    if (state.scrap < state.buyCost) {
+      addToast('NEED SCRAP');
+      sfx('deny');
+      return;
+    }
+    state.scrap -= state.buyCost;
+    state.bench.push({ level: 1 });
+    state.buyCost = Math.min(160, Math.ceil(state.buyCost * 1.08 + 2));
+    addToast('RECRUITED');
+    sfx('buy');
+  }
+
+  function autoMerge() {
+    if (state.mode !== 'build') return;
+    for (let level = 1; level <= 8; level++) {
+      const found = [];
+      for (let i = 0; i < state.bench.length; i++) {
+        if (state.bench[i].level === level) found.push(i);
+      }
+      if (found.length >= 2) {
+        state.bench.splice(found[1], 1);
+        state.bench.splice(found[0], 1);
+        state.bench.push({ level: level + 1 });
+        state.merges++;
+        state.beacon = Math.min(100, state.beacon + 22 + level * 3);
+        state.score += 50 + level * 20;
+        burst(W * 0.5, H * 0.72, UNIT_COLORS[(level + 1) % UNIT_COLORS.length], 26);
+        addToast(`MERGED LEVEL ${level + 1}`);
+        sfx('merge');
+        return;
+      }
+    }
+    addToast('NO PAIR');
+    sfx('deny');
+  }
+
+  function startWave() {
+    if (state.mode === 'menu') state.mode = 'build';
+    if (state.mode !== 'build') return;
+    const hasUnit = state.grid.some((lane) => lane.some(Boolean));
+    if (!hasUnit && state.bench.length) {
+      addToast('PLACE A UNIT');
+      sfx('deny');
+      return;
+    }
+    state.mode = 'combat';
+    state.waveActive = true;
+    state.spawned = 0;
+    state.waveSize = 5 + Math.floor(state.wave * 1.7);
+    state.spawnTimer = 0.15;
+    addToast(`WAVE ${state.wave}`);
+    sfx('wave');
+  }
+
+  function useBeacon() {
+    if (state.beacon < 100 || state.mode !== 'combat') {
+      addToast(state.mode === 'combat' ? 'BEACON CHARGING' : 'SAVE IT FOR COMBAT');
+      sfx('deny');
+      return;
+    }
+    const counts = [0, 0, 0];
+    state.enemies.forEach((e) => counts[e.lane]++);
+    let lane = 0;
+    if (counts[1] > counts[lane]) lane = 1;
+    if (counts[2] > counts[lane]) lane = 2;
+    state.dangerLane = lane;
+    state.beacon = 0;
+    state.enemies.forEach((e) => {
+      if (e.lane === lane) e.hp -= 145 + state.wave * 12;
+    });
+    burst(W * 0.63, laneY(lane), '#fff6a8', 48);
+    addToast('BEACON BLAST');
+    sfx('beacon');
+  }
+
+  function laneY(lane) {
+    const board = boardRect();
+    return board.y + board.h * (lane + 0.5) / LANES;
+  }
+
+  function boardRect() {
+    const top = 88;
+    const bottomPanel = W < 700 ? 205 : 150;
+    const h = Math.max(210, H - top - bottomPanel);
+    return { x: 18, y: top, w: W - 36, h };
+  }
+
+  function placeOrSelectBench(index) {
+    if (state.mode !== 'build') return;
+    if (!state.bench[index]) return;
+    state.selected = { from: 'bench', index };
+    sfx('tap');
+  }
+
+  function clickSlot(lane, col) {
+    if (state.mode !== 'build') return;
+    const cell = state.grid[lane][col];
+    if (state.selected) {
+      if (state.selected.from === 'bench') {
+        const unit = state.bench[state.selected.index];
+        if (!unit) {
+          state.selected = null;
+          return;
+        }
+        if (cell) {
+          state.grid[lane][col] = unit;
+          state.bench[state.selected.index] = cell;
+        } else {
+          state.grid[lane][col] = unit;
+          state.bench.splice(state.selected.index, 1);
+        }
+        state.selected = null;
+        addToast('PLACED');
+        sfx('buy');
+      } else {
+        const a = state.grid[state.selected.lane][state.selected.col];
+        state.grid[state.selected.lane][state.selected.col] = cell;
+        state.grid[lane][col] = a;
+        state.selected = null;
+        sfx('tap');
+      }
+    } else if (cell) {
+      state.selected = { from: 'grid', lane, col };
+      sfx('tap');
+    }
+  }
+
+  function spawnEnemy() {
+    const st = enemyStats(state.wave);
+    const lane = (state.spawned + Math.floor(Math.random() * LANES)) % LANES;
+    const y = laneY(lane);
+    state.enemies.push({
+      lane,
+      x: W + 26,
+      y,
+      hp: st.hp,
+      maxHp: st.hp,
+      speed: st.speed * (0.85 + Math.random() * 0.28),
+      reward: st.reward,
+      kind: Math.random() < 0.18 + state.wave * 0.01 ? 'brute' : 'runner'
+    });
+    const e = state.enemies[state.enemies.length - 1];
+    if (e.kind === 'brute') {
+      e.hp *= 1.55;
+      e.maxHp *= 1.55;
+      e.speed *= 0.72;
+      e.reward += 5;
+    }
+    state.spawned++;
+  }
+
+  function updateCombat(dt) {
+    if (state.mode !== 'combat') return;
+    state.spawnTimer -= dt;
+    if (state.spawned < state.waveSize && state.spawnTimer <= 0) {
+      spawnEnemy();
+      state.spawnTimer = Math.max(0.38, 1.15 - state.wave * 0.035);
+    }
+    const board = boardRect();
+    for (const enemy of state.enemies) {
+      enemy.x -= enemy.speed * dt;
+      enemy.y = laneY(enemy.lane) + Math.sin((enemy.x + enemy.hp) * 0.02) * 2;
+    }
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+      const enemy = state.enemies[i];
+      if (enemy.hp <= 0) {
+        state.scrap += enemy.reward;
+        state.score += 25 + enemy.reward * 2;
+        state.kills++;
+        state.beacon = Math.min(100, state.beacon + 4);
+        burst(enemy.x, enemy.y, enemy.kind === 'brute' ? '#ffcb57' : '#60d394', 14);
+        sfx('shot');
+        state.enemies.splice(i, 1);
+      } else if (enemy.x < board.x + 22) {
+        state.baseHp -= enemy.kind === 'brute' ? 2 : 1;
+        burst(board.x + 24, enemy.y, '#ff6b67', 20);
+        sfx('deny');
+        state.enemies.splice(i, 1);
+      }
+    }
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const unit = state.grid[lane][col];
+        if (!unit) continue;
+        unit.cool = Math.max(0, (unit.cool || 0) - dt);
+        if (unit.cool > 0) continue;
+        const rect = slotRects[lane] && slotRects[lane][col];
+        if (!rect) continue;
+        const st = unitStats(unit.level);
+        const ux = rect.x + rect.w / 2;
+        const target = state.enemies
+          .filter((e) => e.lane === lane && e.x > ux && e.x - ux < st.range)
+          .sort((a, b) => a.x - b.x)[0];
+        if (!target) continue;
+        unit.cool = st.fire;
+        target.hp -= st.damage;
+        state.shots.push({ x1: ux, y1: rect.y + rect.h / 2, x2: target.x, y2: target.y, t: 0, life: 0.11, level: unit.level });
+        if (Math.random() < 0.45) sfx('shot');
+      }
+    }
+    for (let i = state.shots.length - 1; i >= 0; i--) {
+      state.shots[i].t += dt;
+      if (state.shots[i].t >= state.shots[i].life) state.shots.splice(i, 1);
+    }
+    if (state.baseHp <= 0) {
+      state.mode = 'lose';
+      state.waveActive = false;
+      addToast('OUTPOST BREACHED');
+      sfx('lose');
+    } else if (state.spawned >= state.waveSize && state.enemies.length === 0) {
+      state.mode = 'build';
+      state.waveActive = false;
+      const bonus = 38 + state.wave * 9;
+      state.scrap += bonus;
+      state.score += 120 + state.wave * 30;
+      state.baseHp = Math.min(state.baseMax, state.baseHp + 2);
+      state.wave++;
+      addToast(`WAVE CLEAR +${bonus}`);
+      sfx('clear');
+    }
+  }
+
+  function burst(x, y, color, count) {
+    for (let i = 0; i < count; i++) {
+      state.sparks.push({
+        x, y,
+        vx: (Math.random() - 0.5) * 230,
+        vy: (Math.random() - 0.5) * 180,
+        r: 2 + Math.random() * 3,
+        t: 0,
+        life: 0.35 + Math.random() * 0.45,
+        color
+      });
+    }
+  }
+
+  function update(dt) {
+    if (!state) return;
+    toastT = Math.max(0, toastT - dt);
+    updateMusic(dt);
+    updateCombat(dt);
+    for (let i = state.sparks.length - 1; i >= 0; i--) {
+      const p = state.sparks[i];
+      p.t += dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= Math.pow(0.08, dt);
+      p.vy *= Math.pow(0.08, dt);
+      if (p.t >= p.life) state.sparks.splice(i, 1);
+    }
+  }
+
+  function roundedRect(x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  function fillRound(x, y, w, h, r, fill, stroke) {
+    roundedRect(x, y, w, h, r);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
+  function layout() {
+    buttons = [];
+    slotRects = [];
+    benchRects = [];
+    const board = boardRect();
+    const cellW = board.w / (COLS + 1.25);
+    const cellH = board.h / LANES;
+    for (let lane = 0; lane < LANES; lane++) {
+      slotRects[lane] = [];
+      for (let col = 0; col < COLS; col++) {
+        slotRects[lane][col] = {
+          x: board.x + 54 + col * cellW,
+          y: board.y + lane * cellH + 12,
+          w: Math.min(76, cellW - 10),
+          h: Math.min(64, cellH - 20)
+        };
+      }
+    }
+    const compact = W < 700;
+    const by = compact ? H - 150 : H - 126;
+    const bx = 18;
+    const specs = [
+      ['buy', `BUY ${state.buyCost}`, true],
+      ['merge', 'MERGE', false],
+      ['wave', state.mode === 'combat' ? 'FIGHTING' : 'WAVE', true],
+      ['beacon', `BEACON ${Math.floor(state.beacon)}%`, state.beacon >= 100],
+      ['restart', 'RESTART', false],
+      ['fullscreen', 'FULL', false]
+    ];
+    if (compact) {
+      const widths = [86, 84, 84, 112, 86, 70];
+      for (let i = 0; i < specs.length; i++) {
+        const row = Math.floor(i / 3);
+        const col = i % 3;
+        const x = bx + col * ((W - 36) / 3);
+        const w = Math.min(widths[i], (W - 52) / 3);
+        buttons.push({ id: specs[i][0], label: specs[i][1], x, y: by + row * 44, w, h: 40, primary: specs[i][2] });
+      }
+    } else {
+      let x = bx;
+      for (const spec of specs) {
+        const w = spec[0] === 'beacon' ? 126 : 92;
+        buttons.push({ id: spec[0], label: spec[1], x, y: by, w, h: 40, primary: spec[2] });
+        x += w + 8;
+      }
+    }
+    buttons.push({ id: 'sound', label: muted ? 'SOUND' : 'MUTE', x: W - 92, y: 54, w: 74, h: 30 });
+    const benchY = compact ? H - 54 : H - 68;
+    const slot = compact ? 40 : 48;
+    for (let i = 0; i < 7; i++) {
+      benchRects.push({ x: 20 + i * (slot + (compact ? 5 : 8)), y: benchY, w: slot, h: compact ? 40 : 48 });
+    }
+  }
+
+  function drawBackground() {
+    const grad = ctx.createLinearGradient(0, 0, W, H);
+    grad.addColorStop(0, '#172531');
+    grad.addColorStop(0.55, '#15231b');
+    grad.addColorStop(1, '#0e1218');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(255,255,255,0.035)';
+    ctx.lineWidth = 1;
+    for (let x = 0; x < W; x += 42) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x + H * 0.25, H);
+      ctx.stroke();
+    }
+  }
+
+  function drawUnit(unit, x, y, size, selected) {
+    if (!unit) return;
+    const color = UNIT_COLORS[(unit.level - 1) % UNIT_COLORS.length];
+    ctx.save();
+    ctx.translate(x, y);
+    if (selected) {
+      ctx.strokeStyle = '#fff7b5';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.62, 0, TAU);
+      ctx.stroke();
+    }
+    fillRound(-size * 0.38, -size * 0.34, size * 0.76, size * 0.68, size * 0.16, color, '#10161c');
+    ctx.fillStyle = '#10161c';
+    ctx.fillRect(-size * 0.12, -size * 0.58, size * 0.24, size * 0.3);
+    ctx.fillStyle = '#edf4f1';
+    ctx.font = '900 14px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(unit.level), 0, 1);
+    ctx.restore();
+  }
+
+  function drawEnemy(enemy) {
+    const hpPct = Math.max(0, enemy.hp / enemy.maxHp);
+    ctx.save();
+    ctx.translate(enemy.x, enemy.y);
+    ctx.fillStyle = enemy.kind === 'brute' ? '#d98045' : '#8dd061';
+    ctx.beginPath();
+    ctx.arc(0, 0, enemy.kind === 'brute' ? 19 : 15, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = '#162019';
+    ctx.fillRect(-7, -5, 5, 5);
+    ctx.fillRect(3, -5, 5, 5);
+    ctx.fillStyle = '#ff6b67';
+    ctx.fillRect(-18, 22, 36, 5);
+    ctx.fillStyle = '#80f0a0';
+    ctx.fillRect(-18, 22, 36 * hpPct, 5);
+    ctx.restore();
+  }
+
+  function drawButton(rect) {
+    const disabled = rect.id === 'wave' && state.mode === 'combat';
+    fillRound(rect.x, rect.y, rect.w, rect.h, 8, disabled ? '#25313b' : rect.primary ? '#67e08c' : '#25313b', rect.primary ? '#c3ffd3' : '#4b5b69');
+    ctx.fillStyle = rect.primary && !disabled ? '#102016' : '#edf4f1';
+    ctx.font = rect.h < 34 ? '800 12px system-ui, sans-serif' : '800 13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(rect.label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  }
+
+  function render() {
+    if (!state) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    drawBackground();
+    layout();
+    const board = boardRect();
+
+    ctx.fillStyle = '#edf4f1';
+    ctx.font = '900 24px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Merge Outpost TD', 18, 14);
+    ctx.font = '600 13px system-ui, sans-serif';
+    ctx.fillStyle = '#b7c8c1';
+    ctx.fillText(`Wave ${state.wave}   Scrap ${state.scrap}   Score ${state.score}`, 20, 46);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = state.baseHp <= 5 ? '#ff776d' : '#67e08c';
+    ctx.fillText(`Outpost ${state.baseHp}/${state.baseMax}`, W - 18, 18);
+    ctx.fillStyle = '#ffdf70';
+    ctx.fillText(`Beacon ${Math.floor(state.beacon)}%`, W - 18, 42);
+
+    fillRound(board.x, board.y, board.w, board.h, 10, 'rgba(15,22,26,0.72)', '#31424c');
+    for (let lane = 0; lane < LANES; lane++) {
+      const y = board.y + board.h * lane / LANES;
+      ctx.fillStyle = lane % 2 ? 'rgba(255,255,255,0.035)' : 'rgba(255,255,255,0.07)';
+      ctx.fillRect(board.x, y, board.w, board.h / LANES);
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.beginPath();
+      ctx.moveTo(board.x, y);
+      ctx.lineTo(board.x + board.w, y);
+      ctx.stroke();
+      ctx.fillStyle = '#263844';
+      ctx.fillRect(board.x + 18, y + 10, 26, board.h / LANES - 20);
+    }
+    ctx.fillStyle = '#ff776d';
+    ctx.fillRect(board.x + 18, board.y + 10, 8, board.h - 20);
+
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const rect = slotRects[lane][col];
+        const selected = state.selected && state.selected.from === 'grid' && state.selected.lane === lane && state.selected.col === col;
+        fillRound(rect.x, rect.y, rect.w, rect.h, 8, selected ? '#40546a' : '#1a252d', '#40505e');
+        drawUnit(state.grid[lane][col], rect.x + rect.w / 2, rect.y + rect.h / 2, Math.min(rect.w, rect.h) * 0.78, selected);
+      }
+    }
+    state.enemies.forEach(drawEnemy);
+    for (const shot of state.shots) {
+      ctx.globalAlpha = Math.max(0, 1 - shot.t / shot.life);
+      ctx.strokeStyle = UNIT_COLORS[(shot.level - 1) % UNIT_COLORS.length];
+      ctx.lineWidth = 3 + shot.level * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(shot.x1, shot.y1);
+      ctx.lineTo(shot.x2, shot.y2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    for (const p of state.sparks) {
+      ctx.globalAlpha = Math.max(0, 1 - p.t / p.life);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    buttons.forEach(drawButton);
+    ctx.fillStyle = '#b7c8c1';
+    ctx.font = '800 13px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Bench', 20, benchRects[0].y - 16);
+    benchRects.forEach((rect, i) => {
+      const selected = state.selected && state.selected.from === 'bench' && state.selected.index === i;
+      fillRound(rect.x, rect.y, rect.w, rect.h, 8, selected ? '#40546a' : '#1a252d', '#40505e');
+      drawUnit(state.bench[i], rect.x + rect.w / 2, rect.y + rect.h / 2, 40, selected);
+    });
+
+    if (state.mode === 'menu' || state.mode === 'lose') drawOverlay();
+    if (toastT > 0) {
+      ctx.globalAlpha = Math.min(1, toastT * 2);
+      fillRound(W / 2 - 145, 70, 290, 34, 10, 'rgba(237,244,241,0.94)', null);
+      ctx.fillStyle = '#10161c';
+      ctx.font = '900 14px system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(toast, W / 2, 87);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawOverlay() {
+    ctx.fillStyle = 'rgba(8,12,16,0.72)';
+    ctx.fillRect(0, 0, W, H);
+    const w = Math.min(440, W - 36);
+    const h = state.mode === 'lose' ? 210 : 250;
+    const x = (W - w) / 2;
+    const y = Math.max(84, (H - h) / 2);
+    fillRound(x, y, w, h, 10, '#edf4f1', '#ffffff');
+    ctx.fillStyle = '#10161c';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.font = '900 24px system-ui, sans-serif';
+    ctx.fillText(state.mode === 'lose' ? 'Outpost breached' : 'Build the outpost', x + w / 2, y + 24);
+    ctx.font = '500 15px system-ui, sans-serif';
+    const lines = state.mode === 'lose'
+      ? [`You reached wave ${state.wave}.`, 'Restart with a cleaner merge order.']
+      : ['Buy level-1 defenders, merge pairs, place them into lanes.', 'Start waves when the grid is ready.', 'Merges charge the beacon for one emergency lane blast.'];
+    lines.forEach((line, i) => ctx.fillText(line, x + w / 2, y + 78 + i * 24));
+    fillRound(x + w / 2 - 82, y + h - 62, 164, 42, 8, '#67e08c', '#2c9f50');
+    ctx.fillStyle = '#102016';
+    ctx.font = '900 15px system-ui, sans-serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(state.mode === 'lose' ? 'RESTART' : 'START BUILD', x + w / 2, y + h - 41);
+  }
+
+  function hit(rect, x, y) {
+    return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+  }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement && canvas.requestFullscreen) {
+      canvas.requestFullscreen().catch(() => {});
+    } else if (document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
+  function onPointer(ev) {
+    ev.preventDefault();
+    canvas.focus();
+    ensureAudio();
+    const r = canvas.getBoundingClientRect();
+    const x = (ev.clientX - r.left) * (W / r.width);
+    const y = (ev.clientY - r.top) * (H / r.height);
+    for (const button of buttons) {
+      if (button.id === 'sound' && hit(button, x, y)) {
+        toggleMute();
+        return;
+      }
+    }
+    if (state.mode === 'menu') {
+      state.mode = 'build';
+      addToast('PLACE DEFENDERS');
+      sfx('tap');
+      return;
+    }
+    if (state.mode === 'lose') {
+      resetGame();
+      state.mode = 'build';
+      sfx('tap');
+      return;
+    }
+    for (const button of buttons) {
+      if (!hit(button, x, y)) continue;
+      if (button.id === 'buy') buyUnit();
+      if (button.id === 'merge') autoMerge();
+      if (button.id === 'wave') startWave();
+      if (button.id === 'beacon') useBeacon();
+      if (button.id === 'sound') toggleMute();
+      if (button.id === 'restart') {
+        resetGame();
+        state.mode = 'build';
+        sfx('tap');
+      }
+      if (button.id === 'fullscreen') toggleFullscreen();
+      return;
+    }
+    for (let i = 0; i < benchRects.length; i++) {
+      if (hit(benchRects[i], x, y)) {
+        placeOrSelectBench(i);
+        return;
+      }
+    }
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        if (hit(slotRects[lane][col], x, y)) {
+          clickSlot(lane, col);
+          return;
+        }
+      }
+    }
+  }
+
+  function onKey(ev) {
+    ensureAudio();
+    if (ev.code === 'Enter') {
+      ev.preventDefault();
+      if (state.mode === 'menu') {
+        state.mode = 'build';
+        sfx('tap');
+      }
+      else if (state.mode === 'lose') {
+        resetGame();
+        state.mode = 'build';
+        sfx('tap');
+      }
+    } else if (ev.code === 'KeyU') {
+      ev.preventDefault();
+      toggleMute();
+    } else if (ev.code === 'KeyB') {
+      ev.preventDefault();
+      buyUnit();
+    } else if (ev.code === 'KeyM') {
+      ev.preventDefault();
+      autoMerge();
+    } else if (ev.code === 'KeyW') {
+      ev.preventDefault();
+      startWave();
+    } else if (ev.code === 'Space') {
+      ev.preventDefault();
+      useBeacon();
+    } else if (ev.code === 'KeyR') {
+      ev.preventDefault();
+      resetGame();
+      state.mode = 'build';
+    } else if (ev.code === 'KeyF') {
+      ev.preventDefault();
+      toggleFullscreen();
+    }
+  }
+
+  function loop(ts) {
+    const dt = Math.min(0.05, Math.max(0, (ts - lastTs) / 1000 || 0));
+    lastTs = ts;
+    update(dt);
+    render();
+    requestAnimationFrame(loop);
+  }
+
+  window.render_game_to_text = () => JSON.stringify({
+    title: 'Merge Outpost TD',
+    coordinates: 'canvas pixels, origin top-left, x right, y down',
+    mode: state.mode,
+    wave: state.wave,
+    scrap: state.scrap,
+    score: state.score,
+    baseHp: state.baseHp,
+    beacon: Math.floor(state.beacon),
+    bench: state.bench.map((u, i) => ({ i, level: u.level })),
+    grid: state.grid.map((lane, laneIndex) => lane.map((u, col) => u ? { lane: laneIndex, col, level: u.level } : null).filter(Boolean)),
+    enemies: state.enemies.map((e) => ({ lane: e.lane, x: Math.round(e.x), hp: Math.round(e.hp), kind: e.kind })),
+    selected: state.selected,
+    toast: toastT > 0 ? toast : ''
+  });
+
+  window.advanceTime = (ms) => {
+    const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+    for (let i = 0; i < steps; i++) update(1 / 60);
+    render();
+  };
+
+  resetGame();
+  window.addEventListener('resize', resize);
+  window.addEventListener('orientationchange', resize);
+  canvas.addEventListener('pointerdown', onPointer, { passive: false });
+  window.addEventListener('keydown', onKey);
+  resize();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
