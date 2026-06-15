@@ -7,7 +7,7 @@
 // Tim 2026-06-15.
 
 import { readSession } from '../_session.js';
-import { json, jsonError } from '../../_lib/response.js';
+import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 import { checkRate } from '../../_lib/rateLimit.js';
 import { filterText } from '../../_lib/chatmod.js';
 import { grantFreePrompt, spendPrompts, creditPrompts } from '../../_lib/meta.js';
@@ -19,6 +19,9 @@ const DAILY_GEN_CAP = 20;           // successful generations / uid / day
 const HOURLY_ATTEMPTS = 60;         // total submit attempts / IP / hour (anti-hammer)
 
 export async function onRequestPost({ request, env }) {
+  // CSRF defense-in-depth (on top of the SameSite=Lax session cookie): this is
+  // the highest-value mutating endpoint -- it spends a prompt and queues a build.
+  if (!sameOriginOk(request)) return jsonError('forbidden', 403);
   const session = await readSession(request, env);
   if (!session || !session.uid) return jsonError('sign_in_required', 401);
 
@@ -37,7 +40,7 @@ export async function onRequestPost({ request, env }) {
 
   // Sanitize + block links/contacts/profanity (kid-safe gallery; the prompt is
   // fed to a generator). filterText caps length too.
-  const filtered = filterText(rawPrompt, MAX_PROMPT);
+  const filtered = filterText(rawPrompt, MAX_PROMPT, { phone: false });   // allow big numbers in game ideas
   if (!filtered.ok) return jsonError('prompt_' + (filtered.reason || 'blocked'), 400);
   const prompt = filtered.text;
 

@@ -21,18 +21,17 @@
 // this allows for shared connections (NAT) while blocking obvious bots.
 
 import { parseCookie } from '../_lib/cookie.js';
-import { creditTokens, accruePlay } from '../_lib/meta.js';
+import { creditTokens, accruePlay, SECONDS_PER_PROMPT, PROMPT_BANK_CAP } from '../_lib/meta.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { recordActiveDay } from '../_lib/cohort.js';
 import { checkRate } from '../_lib/rateLimit.js';
 import { SOCIAL_SLUGS, touchPresence } from '../_lib/social.js';
 import { readSession } from './_session.js';
 
-// Vibe-coder economy (Tim 2026-06-15): 30 min of ACTIVE play = 1 game-generation
-// prompt; stop banking past PROMPT_BANK_CAP so the accrual write is skipped once
-// a signed-in player is comfortably ahead.
-const SECONDS_PER_PROMPT = 1800;
-const PROMPT_BANK_CAP = 5;
+// Vibe-coder economy tunables live in _lib/meta.js (single source of truth).
+// With PROMPT_BANK_CAP=1, accruePlay skips its KV write for any signed-in player
+// who already holds a prompt -- so the only per-heartbeat meta writes come from
+// players actively grinding toward their next one with an empty balance.
 
 export async function onRequestPost({ request, env }) {
   let body;

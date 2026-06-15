@@ -6,9 +6,7 @@
 
 import { readSession } from '../_session.js';
 import { json } from '../../_lib/response.js';
-import { readMeta, grantFreePrompt } from '../../_lib/meta.js';
-
-const SECONDS_PER_PROMPT = 1800;   // keep in sync with heartbeat.js
+import { readMeta, grantFreePrompt, SECONDS_PER_PROMPT } from '../../_lib/meta.js';
 
 export async function onRequestGet({ request, env }) {
   const session = await readSession(request, env);

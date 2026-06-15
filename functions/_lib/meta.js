@@ -10,6 +10,16 @@
 // keys (`meta:<uid>:tokens` as an integer-only counter) and recompose on
 // read.
 
+// Vibe-coder economy tunables (single source of truth -- imported by heartbeat.js
+// and gen/quota.js so they can't drift). Tim 2026-06-15.
+//   SECONDS_PER_PROMPT: 30 min of ACTIVE play earns 1 generation prompt.
+//   PROMPT_BANK_CAP:    accrual stops (and, crucially, the per-flush KV write is
+//                       SKIPPED) once a player holds this many prompts -- so the
+//                       only signed-in players writing meta per heartbeat are
+//                       those actively grinding with an empty balance.
+export const SECONDS_PER_PROMPT = 1800;
+export const PROMPT_BANK_CAP = 1;
+
 export function emptyMeta() {
   return {
     tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [],
@@ -100,7 +110,7 @@ export async function spendPrompts(env, uid, n = 1) {
 // the bank is full (prompts >= cap) so it costs only a read in the common case —
 // this is the heartbeat write-budget guard. Returns the post-state for callers
 // that want to surface progress.
-export async function accruePlay(env, uid, seconds, { secondsPerPrompt = 1800, cap = 5, now = Date.now() } = {}) {
+export async function accruePlay(env, uid, seconds, { secondsPerPrompt = SECONDS_PER_PROMPT, cap = PROMPT_BANK_CAP, now = Date.now() } = {}) {
   if (!uid || !seconds || seconds <= 0) return null;
   const m = await readMeta(env, uid);
   if ((m.prompts || 0) >= cap) return { prompts: m.prompts, playProgress: m.playProgress || 0, capped: true };

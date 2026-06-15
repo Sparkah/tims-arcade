@@ -79,6 +79,7 @@
     if (!m || !m.id || seen[m.id]) return;
     seen[m.id] = true;
     if (String(m.id) > lastId) lastId = String(m.id);
+    var ph = list.querySelector('.chat-empty'); if (ph) ph.remove();
     var row = document.createElement('div');
     row.className = 'chat-msg';
     row.innerHTML =

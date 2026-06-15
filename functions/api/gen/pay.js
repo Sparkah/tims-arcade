@@ -6,7 +6,7 @@
 // the metric can't be inflated cross-site (Codex review 2026-06-15).
 
 import { readSession } from '../_session.js';
-import { json, jsonError } from '../../_lib/response.js';
+import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 import { checkRate } from '../../_lib/rateLimit.js';
 
 export async function onRequestPost({ request, env }) {
@@ -25,15 +25,6 @@ export async function onRequestPost({ request, env }) {
   const next = cur + 1;
   await env.VOTES.put('genpay:clicks', String(next));
   return nostore(json({ ok: true, clicks: next }));
-}
-
-function sameOriginOk(request) {
-  const origin = request.headers.get('Origin');
-  if (!origin) return true;
-  try {
-    const o = new URL(origin), u = new URL(request.url);
-    return o.host === u.host || o.hostname === 'localhost' || o.hostname === '127.0.0.1';
-  } catch { return false; }
 }
 
 function nostore(r) { r.headers.set('cache-control', 'no-store'); return r; }

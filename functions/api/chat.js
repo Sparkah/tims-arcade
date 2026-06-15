@@ -19,7 +19,7 @@
 // Concurrency: the tail key is a non-atomic read-modify-write, so two posts within
 // ~50ms can drop one. Rare at gallery volume; D1 would make it atomic.
 
-import { json } from '../_lib/response.js';
+import { json, sameOriginOk } from '../_lib/response.js';
 import { checkRate } from '../_lib/rateLimit.js';
 import { cleanName, filterText } from '../_lib/chatmod.js';
 
@@ -94,18 +94,6 @@ async function appendRoomTail(env, message) {
     .slice(-MAX_MESSAGES + 1);
   rows.push(message);
   await env.VOTES.put(tailKey(), JSON.stringify(rows), { expirationTtl: RETENTION_SECONDS });
-}
-
-// Allow the request when there is no Origin header (same-origin navigations often
-// omit it) or the Origin's host matches the request host (or localhost for dev).
-// Blocks cross-site POSTs, which always carry a foreign Origin.
-function sameOriginOk(request) {
-  const origin = request.headers.get('Origin');
-  if (!origin) return true;
-  try {
-    const o = new URL(origin), u = new URL(request.url);
-    return o.host === u.host || o.hostname === 'localhost' || o.hostname === '127.0.0.1';
-  } catch { return false; }
 }
 
 function nostore(r) { r.headers.set('cache-control', 'no-store'); return r; }

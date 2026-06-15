@@ -19,3 +19,17 @@ export function json(body, status = 200) {
     headers: { 'content-type': 'application/json' },
   });
 }
+
+// Same-origin guard for POST endpoints (chat, gen/pay). Allows the request when
+// there is no Origin header (same-origin navigations often omit it) or the
+// Origin's host matches the request host (or localhost for dev). Blocks
+// cross-site POSTs, which always carry a foreign Origin. Shared so the two
+// callers can't drift (Codex review 2026-06-15).
+export function sameOriginOk(request) {
+  const origin = request.headers.get('Origin');
+  if (!origin) return true;
+  try {
+    const o = new URL(origin), u = new URL(request.url);
+    return o.host === u.host || o.hostname === 'localhost' || o.hostname === '127.0.0.1';
+  } catch { return false; }
+}

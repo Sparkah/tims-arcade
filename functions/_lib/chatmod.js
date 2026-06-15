@@ -39,7 +39,10 @@ export function fold(text) {
 // run of 7+ digits (phone numbers).
 const TLD = 'com|net|org|ru|io|gg|xyz|app|co|me|tv|info|biz|online|site|link|club|dev|gl|ly|cc|to|win|live|store|shop|fun|space|press|us|uk|de|fr|it|es|pl|in|cn|jp|kr';
 
-export function containsContact(text) {
+// `phone` defaults true (chat blocks phone numbers). Callers that validate game
+// prompts pass { phone:false } so legit number-heavy ideas ("score up to 9999999")
+// aren't mis-flagged as contact info (Codex/scorecard 2026-06-15).
+export function containsContact(text, { phone = true } = {}) {
   const raw = String(text || '').toLowerCase();
   // schemes / known contact platforms / @handles
   if (/https?:|hxxp|www\.|t\.me|discord|telegram|whatsapp|\bvk\b|@[a-z0-9_]{2,}/i.test(raw)) return true;
@@ -49,23 +52,24 @@ export function containsContact(text) {
   if (new RegExp('\\b[a-z0-9-]{2,}\\s*(?:\\(dot\\)|\\[dot\\]|\\bdot\\b)\\s*(' + TLD + ')\\b', 'i').test(raw)) return true;
   // email
   if (/\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/i.test(raw)) return true;
-  // phone-ish: 7+ digits total
-  return raw.replace(/\D/g, '').length >= 7;
+  // phone-ish: 7+ digits total (chat only)
+  if (phone && raw.replace(/\D/g, '').length >= 7) return true;
+  return false;
 }
 
 export function containsBlocked(text) {
-  const s = fold(text);
-  const raw = String(text || '')
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/\p{M}/gu, '')
-    .replace(/[^a-zа-я0-9]+/g, '');
-  const patterns = [
-    /fuck|shit|bitch|cunt|dick|cock|pussy|porn|sex|nude|naked|anal|hentai|onlyfans|blowjob|rape|suicide|killurself|killyourself/,
-    /nigg|fagg|retard/,
-    /ху[йяеюи]|пизд|еба|еби|ебу|ёба|ёби|бля|сука|секс|порно|член|минет|анал|сиськ|голая|голый/,
-  ];
-  return patterns.some(re => re.test(s) || re.test(raw));
+  const lower = String(text || '').toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '');
+  // Leet-normalize but KEEP word separators, so we match WHOLE words and don't
+  // trip on innocent substrings (analysis, cockpit, grape, Essex) -- the
+  // Scunthorpe problem the old substring filter had (Codex review 2026-06-15).
+  const norm = lower
+    .replace(/0/g, 'o').replace(/[1!|]/g, 'i').replace(/3/g, 'e')
+    .replace(/4/g, 'a').replace(/[5$]/g, 's').replace(/7/g, 't').replace(/@/g, 'a');
+  const EN = /\b(fuck\w*|shit\w*|bitch\w*|cunt\w*|dick|dicks|cock|cocks|pussy|porn\w*|sex(?:y|ual|ist)?|nude|nudes|naked|anal|hentai|onlyfans|blowjob|rape|raping|rapist|nigg(?:er|a|ers|as)|fag|fags|faggot\w*|retard\w*|slut\w*|whore\w*|cum|jerkoff|wank\w*|suicide|kill(?:urself|yourself))\b/;
+  if (EN.test(norm)) return true;
+  // Russian/Cyrillic stems (don't collide with common game vocabulary).
+  if (/ху[йяеюи]|пизд|еб[ауеёи]|ёб[ауеи]|бля|сука|сучка|пид[оа]р|залуп|минет|порно|\bчлен|голая|голый|сиськ/.test(lower)) return true;
+  return false;
 }
 
 function blockedName(name) {
@@ -83,13 +87,13 @@ export function cleanName(name, maxName = DEFAULT_MAX_NAME) {
 
 // Validate + sanitize a message. Returns { ok, text } on success or
 // { ok:false, reason } where reason in empty|contact|blocked.
-export function filterText(text, maxText = DEFAULT_MAX_TEXT) {
+export function filterText(text, maxText = DEFAULT_MAX_TEXT, { phone = true } = {}) {
   text = String(text || '').normalize('NFKC');
   text = text.replace(/[\x00-\x1f\x7f<>]/g, ' ');
   text = text.replace(/\s+/g, ' ').trim();
   if (!text) return { ok: false, reason: 'empty' };
   if (text.length > maxText) text = text.slice(0, maxText).trim();
-  if (containsContact(text)) return { ok: false, reason: 'contact' };
+  if (containsContact(text, { phone })) return { ok: false, reason: 'contact' };
   if (containsBlocked(text)) return { ok: false, reason: 'blocked' };
   return { ok: true, text };
 }
