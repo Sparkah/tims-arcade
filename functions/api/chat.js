@@ -104,7 +104,7 @@ async function readRoom(env, limit, since) {
   return rows
     .filter(Boolean)
     .filter(m => m.id && (m.text || m.game) && (!since || String(m.id) > since))
-    .filter(m => !m.ts || m.ts >= minTs)
+    .filter(m => Number.isFinite(m.ts) && m.ts >= minTs)
     .sort((a, b) => String(a.id).localeCompare(String(b.id)))
     .slice(-limit)
     .map(publicView);
@@ -116,7 +116,7 @@ async function appendRoomTail(env, message) {
   const minTs = Date.now() - RETENTION_SECONDS * 1000;
   rows = rows
     .filter(Boolean)
-    .filter(m => m.id && (m.text || m.game) && (!m.ts || m.ts >= minTs))
+    .filter(m => m.id && (m.text || m.game) && (Number.isFinite(m.ts) && m.ts >= minTs))
     .slice(-MAX_MESSAGES + 1);
   rows.push(message);
   await env.VOTES.put(tailKey(), JSON.stringify(rows), { expirationTtl: RETENTION_SECONDS });

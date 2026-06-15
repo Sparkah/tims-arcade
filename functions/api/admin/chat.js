@@ -10,7 +10,7 @@
 // Auth is HEADER-ONLY (no ?token= -> no querystring leak to logs/history) and POST
 // is same-origin only (Codex review 2026-06-15). Reads/deletes PRUNE rows older
 // than RETENTION and never extend a non-edit's TTL, so poster IPs can't be kept
-// alive past the 2h window by repeated moderation.
+// alive past the 24h window by repeated moderation.
 
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 
@@ -22,7 +22,7 @@ async function readPruned(env) {
   let rows = [];
   try { rows = (await env.VOTES.get(TAIL, 'json')) || []; } catch { rows = []; }
   const minTs = Date.now() - RETENTION * 1000;
-  return rows.filter(m => m && m.id && (!m.ts || m.ts >= minTs));
+  return rows.filter(m => m && m.id && Number.isFinite(m.ts) && m.ts >= minTs);
 }
 
 export async function onRequestGet({ request, env }) {
