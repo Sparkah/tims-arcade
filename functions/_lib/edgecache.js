@@ -33,6 +33,12 @@ export async function edgeCached(cachePath, { bypass = false } = {}, build) {
 
   const fresh = await build();
   fresh.headers.set('x-cache', 'MISS');
-  try { await cache.put(cacheKey, fresh.clone()); } catch (e) { /* cache is best-effort */ }
+  // Only cache successful responses — never negative-cache an error/empty body.
+  // A builder that THROWS (e.g. KV list() over the daily cap) already propagates
+  // uncached; this also guards a builder that returns a non-200 Response from
+  // being stored and replayed for the whole TTL (Codex review 2026-06-15).
+  if (fresh.status === 200) {
+    try { await cache.put(cacheKey, fresh.clone()); } catch (e) { /* cache is best-effort */ }
+  }
   return fresh;
 }

@@ -9,11 +9,16 @@
 // alongside the text — see feedback.js storage shape). Nothing more is
 // surfaced here than what the writer voluntarily typed.
 //
-// Caching: 30s edge cache + 60s stale-while-revalidate. Comments don't
-// move fast and the read path hits KV once per cache miss.
+// Caching: a Cache-Control header ALONE does not edge-cache a Pages Function
+// response (see _lib/edgecache.js + counts.js) — so this endpoint previously
+// ran a full `comment:<slug>:*` KV list scan on EVERY game-open, i.e. one list
+// op per view. That is a top consumer of the 1k/day free KV list cap. Wrap it
+// in the caches.default put/match dance, keyed per (slug, limit), 60s TTL
+// (matches the prior stale-while-revalidate intent).
 
 import { json } from '../_lib/response.js';
 import { isValidSlug } from '../_lib/validate.js';
+import { edgeCached } from '../_lib/edgecache.js';
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
@@ -26,6 +31,12 @@ export async function onRequestGet({ request, env }) {
     return json({ error: 'bad_slug' }, 400);
   }
 
+  // encodeURIComponent the slug into the synthetic cache key so the key can't be
+  // split/collided even if SLUG_RE ever widens; `limit` is already a clamped int.
+  return edgeCached(`/api-comments/${encodeURIComponent(slug)}?l=${limit}`, {}, () => buildComments(env, slug, limit));
+}
+
+async function buildComments(env, slug, limit) {
   const prefix = `comment:${slug}:`;
   let cursor;
   const names = [];
@@ -67,7 +78,7 @@ export async function onRequestGet({ request, env }) {
       status: 200,
       headers: {
         'content-type': 'application/json',
-        'cache-control': 'public, max-age=30, stale-while-revalidate=60',
+        'cache-control': 'public, max-age=30, s-maxage=60, stale-while-revalidate=60',
       },
     }
   );

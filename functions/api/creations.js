@@ -2,12 +2,24 @@
 // creators chose to publish (published + ready/live). Returns cover + author
 // display name + basic stats. Edge-cached 30s. Tim 2026-06-15.
 //
-// NOTE: walks upload:* records; fine at gallery volume + the 30s edge cache. If
+// NOTE: walks upload:* records; fine at gallery volume + the edge cache. If
 // creations grow large, add a snapshot index (see boot.js's pattern).
+//
+// CACHING: a Cache-Control header alone does NOT edge-cache a Pages Function
+// (see _lib/edgecache.js) — so this used to run a full `upload:*` KV list scan
+// on EVERY request, one list op per call against the 1k/day free cap. Wrap the
+// scan in the caches.default put/match dance (30s TTL).
 
 import { json } from '../_lib/response.js';
+import { edgeCached } from '../_lib/edgecache.js';
 
-export async function onRequestGet({ env }) {
+export function onRequestGet({ env }) {
+  // Fixed cache key — this endpoint takes no query params. If a filter/sort/page
+  // param is ever added, fold it into the key or all callers share one entry.
+  return edgeCached('/api-creations', {}, () => buildCreations(env));
+}
+
+async function buildCreations(env) {
   const out = [];
   let cursor;
   do {
@@ -38,6 +50,6 @@ export async function onRequestGet({ env }) {
 
   out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
   const res = json({ ok: true, creations: out.slice(0, 60) });
-  res.headers.set('cache-control', 'public, max-age=30');
+  res.headers.set('cache-control', 'public, max-age=30, s-maxage=30');
   return res;
 }
