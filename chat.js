@@ -12,7 +12,7 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var panel    = $('chat-panel');
-  var toggle   = $('meta-pill-chat');
+  var toggle   = $('meta-pill-chat') || $('chat-toggle');   // gallery pill OR in-game side tab
   var closeBtn = $('chat-close');
   var list     = $('chat-messages');
   var statusEl = $('chat-status');
@@ -113,7 +113,9 @@
 
   // ---- open / close (drawer; reuses .lb-panel .visible) ----
   function openChat() {
-    var lb = $('lb-panel'); if (lb) lb.classList.remove('visible');   // don't stack with the leaderboard
+    // Don't stack with the other right-side drawers (gallery leaderboard / in-game comments).
+    var lb = $('lb-panel'); if (lb) lb.classList.remove('visible');
+    var cm = $('comments-panel'); if (cm) cm.classList.remove('visible');
     panel.classList.add('visible'); panel.setAttribute('aria-hidden', 'false');
     open = true; prefillName(); startPolling();
     if (window.innerWidth > 720) setTimeout(function () { textInp.focus(); }, 60);
