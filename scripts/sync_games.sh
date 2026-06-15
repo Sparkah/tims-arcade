@@ -232,7 +232,7 @@ jq --argjson meta "$META_JSON" '
     addedDate,
     published: (.published != false),   # != false, NOT // true: jq // treats false as empty, so // true would coerce an explicit published:false back to true (unpublish never worked before this)
     num: ((.gameDir | capture("/(?<n>[0-9]+)[_-]")? | .n) // ""),
-    thumbCount: ($meta[.slug].thumbCount // 1),
+    thumbCount: ($meta[.slug].thumbCount // .thumbCount // 1),
     hasPreview: ($meta[.slug].hasPreview // false),
     platforms: .platforms,
     external: (.external // false),
