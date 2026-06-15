@@ -26,8 +26,9 @@ export async function onRequestGet({ request, env }) {
     for (const k of page.keys) {
       const jobRec = await env.VOTES.get(k.name, 'json');
       if (!jobRec) continue;
+      const readyPending = jobRec.status === 'pending' && (!jobRec.retryAfter || jobRec.retryAfter <= now);
       const stuck = jobRec.status === 'building' && (now - (jobRec.updatedTs || 0)) > STUCK_MS;
-      if (jobRec.status === 'pending' || stuck) {
+      if (readyPending || stuck) {
         jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts });
       }
     }

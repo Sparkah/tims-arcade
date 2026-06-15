@@ -15,6 +15,8 @@ const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
 const JOB_TTL = 60 * 60 * 24 * 7;
 const MAX_HTML = 600 * 1024;          // 600 KB cap for a single-file game
+const QUEUE_MAX_MS = 5 * 24 * 60 * 60 * 1000;   // keep retrying for up to 5 days (Tim 2026-06-15)
+const MAX_ATTEMPTS = 30;                         // safety cap so a truly-unbuildable prompt can't loop forever
 
 export async function onRequestPost({ request, env }) {
   // Header-only token: keeps the secret out of URLs / access logs.
@@ -38,6 +40,36 @@ export async function onRequestPost({ request, env }) {
     jobRec.updatedTs = Date.now();
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
     return json({ ok: true, status: 'building' });
+  }
+
+  // Transient failure (relay timeout / claude error / bad output): DON'T fail the
+  // job -- re-queue it so it retries when the machine is less loaded (Tim 2026-06-15:
+  // "should just queue for up to 5 days and fail only if the laptop is offline that
+  // long"). Only hard-fail (+refund) once the job is older than QUEUE_MAX_MS or has
+  // exhausted MAX_ATTEMPTS. Backoff spaces retries so we don't hammer under load.
+  if (status === 'requeue') {
+    if (terminal) return json({ ok: true, status: jobRec.status, noop: true });
+    const now = Date.now();
+    const ageMs = now - (jobRec.ts || now);
+    const attempts = (jobRec.attempts || 0) + 1;
+    if (ageMs > QUEUE_MAX_MS || attempts > MAX_ATTEMPTS) {
+      jobRec.status = 'failed';
+      jobRec.error = ageMs > QUEUE_MAX_MS ? 'expired_after_5d' : 'max_attempts';
+      jobRec.attempts = attempts;
+      jobRec.updatedTs = now;
+      await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+      try { await creditPrompts(env, jobRec.uid, 1); } catch (e) { /* best effort */ }
+      try { await emailUser(env, jobRec, null); } catch (e) { /* best effort */ }
+      return json({ ok: true, status: 'failed', reason: jobRec.error });
+    }
+    jobRec.status = 'pending';
+    jobRec.attempts = attempts;
+    jobRec.retryAfter = now + Math.min(attempts * 120, 1800) * 1000;   // 2min..30min backoff
+    jobRec.updatedTs = now;
+    // Expire ~5 days after the ORIGINAL submit, not after the last retry.
+    const remainingTtl = Math.max(3600, Math.floor((QUEUE_MAX_MS - ageMs) / 1000));
+    await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: remainingTtl });
+    return json({ ok: true, status: 'pending', attempts, retryAfter: jobRec.retryAfter });
   }
 
   if (status === 'failed') {
