@@ -40,6 +40,8 @@
   var pollTimer = null;
   var SECONDS_PER_PROMPT = 1800;
   var myName = '';
+  var lastBuild = null, buildTicker = null;
+  var BUILD_ETA_MIN = 12;   // measured: a sonnet game gen runs ~11-12 min under load
 
   function show(el, on) { if (el) el.hidden = !on; }
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
@@ -136,8 +138,12 @@
     stopPolling();
     pollOnce(id);
     pollTimer = setInterval(function () { pollOnce(id); }, POLL_MS);
+    buildTicker = setInterval(renderBuildStatus, 1000);   // live elapsed between polls
   }
-  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (buildTicker) { clearInterval(buildTicker); buildTicker = null; }
+  }
 
   function pollOnce(id) {
     fetch('/api/gen/status?id=' + encodeURIComponent(id), { cache: 'no-store' })
@@ -146,8 +152,42 @@
         if (!s) return;
         if (s.status === 'ready' && s.playUrl) { stopPolling(); clearJob(); onReady(s); }
         else if (s.status === 'failed') { stopPolling(); clearJob(); onFailed(s); }
+        else { lastBuild = { s: s, recvAt: Date.now() }; renderBuildStatus(); }   // pending/building -> live status
       })
       .catch(function () {});
+  }
+
+  // Live, reload-visible build progress: elapsed, ~ETA, attempt count, retry reason
+  // (Tim 2026-06-15: "not just hanging there building"). Re-rendered every second
+  // off the last poll + a skew-corrected local clock.
+  function friendlyErr(e) {
+    e = String(e || '');
+    if (/timeout/i.test(e)) return 'the studio was busy and it timed out';
+    if (/smoke/i.test(e)) return 'a glitch in the generated game';
+    if (/html|empty|large/i.test(e)) return 'the output was not a clean game';
+    return 'a temporary hiccup';
+  }
+  function renderBuildStatus() {
+    if (!lastBuild) return;
+    var phaseEl = $('build-phase'), detailEl = $('build-detail');
+    if (!phaseEl || !detailEl) return;
+    var s = lastBuild.s;
+    var serverNow = (s.now || Date.now()) + (Date.now() - lastBuild.recvAt);
+    if (s.status === 'pending') {
+      if ((s.attempts || 0) > 0) {
+        phaseEl.textContent = 'Restarting your build (attempt ' + ((s.attempts || 0) + 1) + ')';
+        detailEl.textContent = (s.error ? 'Last attempt hit ' + friendlyErr(s.error) + '. ' : '') + 'It is queued and will restart automatically.';
+      } else {
+        phaseEl.textContent = 'In the queue';
+        detailEl.textContent = 'Your game starts building when the studio is online. Builds take about ' + BUILD_ETA_MIN + ' minutes.';
+      }
+    } else if (s.status === 'building') {
+      var elapsedMin = Math.max(0, Math.floor((serverNow - (s.updatedAt || serverNow)) / 60000));
+      var remain = Math.max(1, BUILD_ETA_MIN - elapsedMin);
+      phaseEl.textContent = 'Building your game now';
+      detailEl.textContent = elapsedMin + ' min elapsed, about ' + remain + ' min to go (these take ~' + BUILD_ETA_MIN + ' min)'
+        + ((s.attempts || 0) > 0 ? ' - attempt ' + ((s.attempts || 0) + 1) + ' after a restart.' : '.');
+    }
   }
 
   function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch (e) {} }
