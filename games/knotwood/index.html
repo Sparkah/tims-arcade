@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Knotwood</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1c130c; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — both languages) ────────────────────
+var STRINGS = {
+  en: {
+    title: 'Knotwood', sub: 'Fit the blocks. Clear the lines.',
+    play: 'PLAY', retry: 'PLAY AGAIN',
+    score: 'SCORE', best: 'BEST', gameover: 'NO MOVES LEFT',
+    combo: 'COMBO', daily: 'DAILY CHALLENGE', daily_done: 'DAILY DONE',
+    grains: 'WOOD GRAINS', howto: 'HOW TO PLAY', resume: 'RESUME', menu: 'MENU',
+    next_grain: 'NEXT', all_grains: 'ALL GRAINS UNLOCKED', locked: 'LOCKED',
+    newbest: 'NEW BEST!',
+    tut_goal: 'Goal: fill a full row or column to clear it and score.',
+    tut_controls: 'Controls: drag a wooden piece from the tray onto the board.',
+    tut_win: 'Endless: chase your best score and unlock new wood grains.',
+    tut_lose: 'You lose when no piece in the tray can fit anywhere.',
+    tut_tip: 'Tip: clear lines on back-to-back turns to build a combo multiplier.',
+    coach_drag: 'Drag this piece onto the glowing row',
+    unlocked_grain: 'GRAIN UNLOCKED',
+  },
+  ru: {
+    title: 'Knotwood', sub: 'Складывай блоки. Очищай линии.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    score: 'ОЧКИ', best: 'РЕКОРД', gameover: 'НЕТ ХОДОВ',
+    combo: 'СЕРИЯ', daily: 'ВЫЗОВ ДНЯ', daily_done: 'ВЫЗОВ ПРОЙДЕН',
+    grains: 'ТЕКСТУРЫ', howto: 'КАК ИГРАТЬ', resume: 'ПРОДОЛЖИТЬ', menu: 'МЕНЮ',
+    next_grain: 'ДАЛЕЕ', all_grains: 'ВСЕ ТЕКСТУРЫ ОТКРЫТЫ', locked: 'ЗАКРЫТО',
+    newbest: 'НОВЫЙ РЕКОРД!',
+    tut_goal: 'Цель: заполни ряд или столбец целиком, чтобы очистить его.',
+    tut_controls: 'Управление: перетащи деревянную фигуру из лотка на доску.',
+    tut_win: 'Бесконечно: бей рекорд и открывай новые текстуры дерева.',
+    tut_lose: 'Проигрыш, когда ни одна фигура не помещается на доску.',
+    tut_tip: 'Совет: очищай линии ход за ходом, чтобы растить множитель серии.',
+    coach_drag: 'Перетащи эту фигуру на светящийся ряд',
+    unlocked_grain: 'ТЕКСТУРА ОТКРЫТА',
+  },
+};
+
+// Remote-config DEFAULTS (live-ops tuning hole; offline = these exact values).
+var CFG = {
+  tuning: { difficulty_at: 600, combo_max: 5 },
+  events: { double_score: false },
+  daily:  { seed: 0 },
+  motd:   { en: '', ru: '' },
+  version: 0,
+};
+
+// ── TUNABLES ─────────────────────────────────────────────────────────────
+var GRID = 8, TRAY = 3;
+var PLACE_PT = 1, LINE_PT = 10;
+var COMBO_STEP = 0.5, COMBO_MAX = 5;
+var DIFFICULTY_AT = 600;
+var SKIN_THRESHOLDS = [0, 1500, 4000, 9000, 18000, 32000];
+
+// ── WOOD GRAINS (block skins, unlocked by best score) ────────────────────
+var GRAINS = [
+  { name: 'Pine',   base: '#c9923f', light: '#e6b865', dark: '#9c6a26', knot: '#7a4f1c' },
+  { name: 'Oak',    base: '#b97a35', light: '#d99d57', dark: '#8a531f', knot: '#693d14' },
+  { name: 'Walnut', base: '#7a4a2b', light: '#9c6740', dark: '#56321b', knot: '#3c2112' },
+  { name: 'Birch',  base: '#e0c79a', light: '#f3e0bb', dark: '#bba273', knot: '#8f7a4f' },
+  { name: 'Cherry', base: '#a83f33', light: '#c8604f', dark: '#7c2a22', knot: '#561b16' },
+  { name: 'Ebony',  base: '#3a3330', light: '#5a4f49', dark: '#231f1d', knot: '#100d0c' },
+];
+var GRAIN_RU = ['Сосна', 'Дуб', 'Орех', 'Берёза', 'Вишня', 'Эбен'];
+
+// ── PIECE SHAPES (polyominoes; cells = [row,col] offsets) ────────────────
+function mk(cells, hard) {
+  var maxR = 0, maxC = 0;
+  for (var i = 0; i < cells.length; i++) { if (cells[i][0] > maxR) maxR = cells[i][0]; if (cells[i][1] > maxC) maxC = cells[i][1]; }
+  return { cells: cells, w: maxC + 1, h: maxR + 1, hard: !!hard };
+}
+var SHAPES = [
+  mk([[0,0]]),                                       // 0 mono
+  mk([[0,0],[0,1]]), mk([[0,0],[1,0]]),              // 1,2 dominoes
+  mk([[0,0],[0,1],[0,2]]), mk([[0,0],[1,0],[2,0]]),  // 3,4 tri lines
+  mk([[0,0],[1,0],[1,1]]), mk([[0,1],[1,0],[1,1]]),  // 5,6 tri corners
+  mk([[0,0],[0,1],[1,0]]), mk([[0,0],[0,1],[1,1]]),  // 7,8
+  mk([[0,0],[0,1],[1,0],[1,1]]),                     // 9 square 2x2
+  mk([[0,0],[0,1],[0,2],[0,3]]), mk([[0,0],[1,0],[2,0],[3,0]]), // 10,11 tetro I
+  mk([[0,0],[1,0],[2,0],[2,1]]), mk([[0,1],[1,1],[2,0],[2,1]]), // 12,13 tetro L/J
+  mk([[0,0],[0,1],[0,2],[1,1]]),                     // 14 tetro T
+  mk([[0,1],[0,2],[1,0],[1,1]], true), mk([[0,0],[0,1],[1,1],[1,2]], true), // 15,16 S/Z (hard)
+  mk([[0,1],[1,0],[1,1],[1,2],[2,1]], true),         // 17 plus pentomino (hard)
+  mk([[0,0],[0,1],[0,2],[0,3],[0,4]], true), mk([[0,0],[1,0],[2,0],[3,0],[4,0]], true), // 18,19 line 5 (hard)
+  mk([[0,0],[0,1],[0,2],[1,0],[2,0]], true), mk([[0,0],[0,1],[0,2],[1,2],[2,2]], true), // 20,21 big L (hard)
+];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'PLAYING';                 // PLAYING | GAMEOVER | HUB | GRAINS | HELP
+var board = new Array(GRID * GRID).fill(0);   // 0 empty, else grainIdx+1
+var tray = [null, null, null];      // each: { shape, grain } or null
+var score = 0, best = 0, comboMult = 1, linesCleared = 0, placements = 0;
+var grainsUnlocked = 1, currentGrain = 0;
+var dailyMode = false, dailyDoneDate = '';
+var rngState = 0, useSeeded = false;
+var prevGs = 'PLAYING';
+var drag = null;                    // { slot, shape, grain, px, py, valid, ar, ac }
+var toast = null;                   // { text, life }
+
+// layout (px), computed in layout()
+var bx = 0, by = 0, bsize = 0, cell = 40, trayY = 0, trayH = 0, slotW = 0;
+
+// ── SEEDED RNG (daily mode) ──────────────────────────────────────────────
+function mulberry32() {
+  rngState |= 0; rngState = (rngState + 0x6D2B79F5) | 0;
+  var t = Math.imul(rngState ^ (rngState >>> 15), 1 | rngState);
+  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+function rnd() { return useSeeded ? mulberry32() : Math.random(); }
+function todayStr() { var d = new Date(); return d.getUTCFullYear() + '-' + (d.getUTCMonth() + 1) + '-' + d.getUTCDate(); }
+function dailySeed() { var s = todayStr(), h = 2166136261, i; for (i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) || 1; }
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+function layout() {
+  var W = GF.W, H = GF.H, portrait = H >= W;
+  var topPad = Math.round(H * (portrait ? 0.14 : 0.12));
+  bsize = portrait ? Math.min(W * 0.95, H * 0.56) : Math.min(H * 0.72, W * 0.5);
+  bsize = Math.floor(bsize / GRID) * GRID;
+  cell = bsize / GRID;
+  bx = Math.round((W - bsize) / 2);
+  by = topPad;
+  trayY = by + bsize + Math.round(H * 0.03);
+  trayH = Math.min(H - trayY - (portrait ? 64 : 16), cell * 2.4);
+  slotW = bsize / TRAY;
+}
+
+// ── GAME LIFECYCLE ─────────────────────────────────────────────────────────
+function startGame(daily) {
+  dailyMode = !!daily;
+  useSeeded = dailyMode;
+  if (useSeeded) rngState = dailySeed();
+  board = new Array(GRID * GRID).fill(0);
+  tray = [null, null, null];
+  score = 0; comboMult = 1; linesCleared = 0; placements = 0;
+  refillTray();
+  gs = 'PLAYING';
+  drag = null;
+  GF.gameStarted();
+  GF.saveRun();
+}
+function gameOver() {
+  var newBest = score > best;
+  if (newBest) { best = score; try { localStorage.setItem('knotwood_best', best); } catch (e) {} unlockGrainsForBest(); }
+  if (dailyMode) { dailyDoneDate = todayStr(); try { localStorage.setItem('knotwood_daily', dailyDoneDate); } catch (e) {} }
+  gs = 'GAMEOVER';
+  GF.funnel.mark('first_death');
+  GF.sfx('lose');
+  GF.gameEnded();
+  if (newBest && best > 0) GF.happytime();
+  GF.saveRun();
+}
+
+// ── TRAY / PIECE BAG ───────────────────────────────────────────────────────
+function pickShape() {
+  var hardW = score >= DIFFICULTY_AT ? 1 : 0.08, total = 0, weights = [], i;
+  for (i = 0; i < SHAPES.length; i++) { var w = SHAPES[i].hard ? hardW : 1; weights.push(w); total += w; }
+  var r = rnd() * total;
+  for (i = 0; i < SHAPES.length; i++) { r -= weights[i]; if (r <= 0) return SHAPES[i]; }
+  return SHAPES[0];
+}
+function refillTray() { for (var i = 0; i < TRAY; i++) tray[i] = { shape: pickShape(), grain: currentGrain }; }
+
+// ── PLACEMENT / CLEARS ─────────────────────────────────────────────────────
+function canPlace(shape, r0, c0) {
+  for (var i = 0; i < shape.cells.length; i++) {
+    var r = r0 + shape.cells[i][0], c = c0 + shape.cells[i][1];
+    if (r < 0 || r >= GRID || c < 0 || c >= GRID) return false;
+    if (board[r * GRID + c]) return false;
+  }
+  return true;
+}
+function anyPieceFits() {
+  for (var t = 0; t < TRAY; t++) {
+    if (!tray[t]) continue;
+    var sh = tray[t].shape;
+    for (var r = 0; r <= GRID - sh.h; r++)
+      for (var c = 0; c <= GRID - sh.w; c++)
+        if (canPlace(sh, r, c)) return true;
+  }
+  return false;
+}
+function placePiece(slot, r0, c0) {
+  var pc = tray[slot]; if (!pc || !canPlace(pc.shape, r0, c0)) return false;
+  var n = pc.shape.cells.length, i;
+  for (i = 0; i < n; i++) {
+    var r = r0 + pc.shape.cells[i][0], c = c0 + pc.shape.cells[i][1];
+    board[r * GRID + c] = pc.grain + 1;
+  }
+  tray[slot] = null;
+  placements++;
+  score += n * PLACE_PT;
+  GF.sfx('tap');
+  GF.juice.particles.burst(bx + (c0 + pc.shape.w / 2) * cell, by + (r0 + pc.shape.h / 2) * cell,
+    { count: 6, color: GRAINS[pc.grain].light, speed: 90, life: 0.35, size: 3 });
+
+  var cleared = clearLines();
+  if (cleared > 0) {
+    linesCleared += cleared;
+    comboMult = Math.min(comboMult + COMBO_STEP, COMBO_MAX);
+    var gain = Math.round(cleared * LINE_PT * comboMult) * (CFG.events.double_score ? 2 : 1);
+    score += gain;
+    GF.sfx(cleared >= 2 ? 'reward' : 'merge');
+    if (comboMult > 1.4) GF.sfx('coin');
+    GF.juice.floatText(GF.cx, by + bsize * 0.4, '+' + gain + (comboMult > 1 ? '  x' + comboMult.toFixed(1) : ''),
+      { color: '#ffe08a', size: 22 + cleared * 3, life: 1.0, rise: 60 });
+    if (cleared >= 2) GF.juice.shake(4 + cleared, 220);
+    if (cleared >= 3) GF.juice.flash('#fff3d6', 180, 0.4);
+  } else {
+    comboMult = 1;
+  }
+
+  var empty = true; for (var s = 0; s < TRAY; s++) if (tray[s]) empty = false;
+  if (empty) refillTray();
+
+  if (score > best) { best = score; try { localStorage.setItem('knotwood_best', best); } catch (e) {} unlockGrainsForBest(); }
+  GF.saveRun();
+  if (!anyPieceFits()) gameOver();
+  return true;
+}
+function clearLines() {
+  var fullRows = [], fullCols = [], r, c, i;
+  for (r = 0; r < GRID; r++) { var f = true; for (c = 0; c < GRID; c++) if (!board[r * GRID + c]) { f = false; break; } if (f) fullRows.push(r); }
+  for (c = 0; c < GRID; c++) { var fc = true; for (r = 0; r < GRID; r++) if (!board[r * GRID + c]) { fc = false; break; } if (fc) fullCols.push(c); }
+  var total = fullRows.length + fullCols.length;
+  if (!total) return 0;
+  for (i = 0; i < fullRows.length; i++) for (c = 0; c < GRID; c++) burstCell(fullRows[i], c);
+  for (i = 0; i < fullCols.length; i++) for (r = 0; r < GRID; r++) burstCell(r, fullCols[i]);
+  for (i = 0; i < fullRows.length; i++) for (c = 0; c < GRID; c++) board[fullRows[i] * GRID + c] = 0;
+  for (i = 0; i < fullCols.length; i++) for (r = 0; r < GRID; r++) board[r * GRID + fullCols[i]] = 0;
+  return total;
+}
+function burstCell(r, c) {
+  var g = board[r * GRID + c]; if (!g) return;
+  GF.juice.particles.burst(bx + (c + 0.5) * cell, by + (r + 0.5) * cell,
+    { count: 7, color: GRAINS[g - 1].light, colors: [GRAINS[g - 1].light, GRAINS[g - 1].base, GRAINS[g - 1].dark], speed: 150, life: 0.55, size: 4 });
+}
+function unlockGrainsForBest() {
+  var before = grainsUnlocked, n = 1, i;
+  for (i = 0; i < SKIN_THRESHOLDS.length; i++) if (best >= SKIN_THRESHOLDS[i]) n = i + 1;
+  if (n > grainsUnlocked) {
+    grainsUnlocked = n;
+    try { localStorage.setItem('knotwood_grains', grainsUnlocked); } catch (e) {}
+    if (before > 0) {
+      currentGrain = grainsUnlocked - 1;
+      try { localStorage.setItem('knotwood_grain_sel', currentGrain); } catch (e) {}
+      toast = { text: GF.t('unlocked_grain') + ': ' + grainName(currentGrain), life: 2.4 };
+      GF.sfx('unlock'); GF.funnel.mark('first_upgrade');
+      GF.juice.flash(GRAINS[currentGrain].light, 220, 0.35);
+    }
+  }
+}
+function grainName(i) { return GF.lang === 'ru' ? GRAIN_RU[i] : GRAINS[i].name; }
+
+// ── INPUT (Pointer Events; client coords map 1:1 to canvas px) ─────────────
+var cv = GF.canvas;
+function ptXY(e) { var r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+function onDown(e) {
+  var p = ptXY(e), x = p.x, y = p.y;
+  if (gs !== 'PLAYING') { hitButton(x, y); return; }
+  if (hitButton(x, y)) return;
+  for (var s = 0; s < TRAY; s++) {
+    if (!tray[s]) continue;
+    var sx = bx + s * slotW;
+    if (x >= sx && x < sx + slotW && y >= trayY && y < trayY + trayH) {
+      drag = { slot: s, shape: tray[s].shape, grain: tray[s].grain, px: x, py: y, valid: false, ar: -1, ac: -1 };
+      GF.sfx('pickup'); updateGhost(); return;
+    }
+  }
+}
+function onMove(e) { if (!drag) return; var p = ptXY(e); drag.px = p.x; drag.py = p.y; updateGhost(); }
+function onUp() {
+  if (!drag) return;
+  var d = drag; drag = null;
+  if (d.valid) { placePiece(d.slot, d.ar, d.ac); if (GF.tutorial && GF.tutorial.active) GF.tutorial.next(); }
+  else GF.sfx('error');
+}
+function updateGhost() {
+  if (!drag) return;
+  var sh = drag.shape;
+  var originX = drag.px - (sh.w * cell) / 2;
+  var originY = drag.py - (sh.h * cell) / 2 - cell * 0.9;
+  drag.ac = Math.round((originX - bx) / cell);
+  drag.ar = Math.round((originY - by) / cell);
+  drag.valid = canPlace(sh, drag.ar, drag.ac);
+}
+cv.addEventListener('pointerdown', function (e) { e.preventDefault(); onDown(e); });
+cv.addEventListener('pointermove', function (e) { onMove(e); });
+cv.addEventListener('pointerup',   function (e) { e.preventDefault(); onUp(); });
+cv.addEventListener('pointercancel', function () { drag = null; });
+
+// ── UI BUTTONS (rebuilt each frame in draw; hit-tested on pointer) ──────────
+var uiButtons = [];
+function btn(id, x, y, w, h, fn) { uiButtons.push({ id: id, x: x, y: y, w: w, h: h, fn: fn }); }
+function hitButton(x, y) {
+  for (var i = uiButtons.length - 1; i >= 0; i--) {
+    var b = uiButtons[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { GF.sfx('click'); b.fn(); return true; }
+  }
+  return false;
+}
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) { GF.juice.update(dt); if (GF.tutorial) GF.tutorial.update(dt); if (toast) { toast.life -= dt; if (toast.life <= 0) toast = null; } }
+
+// ── DRAW ───────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  layout();
+  uiButtons.length = 0;
+  drawBackground(ctx);
+  ctx.save();
+  ctx.translate(GF.juice.offsetX, GF.juice.offsetY);
+  drawBoard(ctx);
+  drawGhost(ctx);
+  drawTray(ctx);
+  GF.juice.particles.draw(ctx);
+  ctx.restore();
+  drawHUD(ctx);
+  GF.juice.texts.draw(ctx);
+  if (toast) drawToast(ctx);
+  if (gs === 'PLAYING' && GF.tutorial) GF.tutorial.draw(ctx);   // animated demo hand over live play
+  if (gs === 'HUB')      drawHub(ctx);
+  else if (gs === 'GRAINS') drawGrains(ctx);
+  else if (gs === 'HELP')   drawHelp(ctx);
+  else if (gs === 'GAMEOVER') drawGameOver(ctx);
+  GF.juice.drawFlash(ctx);
+}
+function drawBackground(ctx) {
+  var g = ctx.createLinearGradient(0, 0, 0, GF.H);
+  g.addColorStop(0, '#241810'); g.addColorStop(1, '#150d07');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, GF.W, GF.H);
+}
+function drawBoard(ctx) {
+  GF.rr(ctx, bx - 6, by - 6, bsize + 12, bsize + 12, 14);
+  ctx.fillStyle = '#0f0a06'; ctx.fill();
+  for (var r = 0; r < GRID; r++) for (var c = 0; c < GRID; c++) {
+    var x = bx + c * cell, y = by + r * cell, v = board[r * GRID + c];
+    if (v) drawBlock(ctx, x, y, cell, v - 1, 1);
+    else {
+      GF.rr(ctx, x + 2, y + 2, cell - 4, cell - 4, 5);
+      ctx.fillStyle = ((r + c) % 2 === 0) ? 'rgba(255,240,210,0.045)' : 'rgba(255,240,210,0.02)'; ctx.fill();
+    }
+  }
+}
+function drawBlock(ctx, x, y, sz, grainIdx, alpha) {
+  var G = GRAINS[grainIdx] || GRAINS[0];
+  ctx.globalAlpha = alpha;
+  var pad = Math.max(1.5, sz * 0.05);
+  var g = ctx.createLinearGradient(x, y, x, y + sz);
+  g.addColorStop(0, G.light); g.addColorStop(0.5, G.base); g.addColorStop(1, G.dark);
+  GF.rr(ctx, x + pad, y + pad, sz - pad * 2, sz - pad * 2, sz * 0.16);
+  ctx.fillStyle = g; ctx.fill();
+  ctx.globalAlpha = alpha * 0.5;
+  GF.rr(ctx, x + pad + 1, y + pad + 1, sz - pad * 2 - 2, (sz - pad * 2) * 0.32, sz * 0.12);
+  ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.fill();
+  ctx.globalAlpha = alpha * 0.4;
+  ctx.strokeStyle = G.dark; ctx.lineWidth = Math.max(1, sz * 0.03);
+  ctx.beginPath();
+  ctx.moveTo(x + pad + sz * 0.2, y + pad + 2); ctx.lineTo(x + pad + sz * 0.26, y + sz - pad - 2);
+  ctx.moveTo(x + pad + sz * 0.62, y + pad + 2); ctx.lineTo(x + pad + sz * 0.56, y + sz - pad - 2);
+  ctx.stroke();
+  ctx.globalAlpha = alpha * 0.55; ctx.fillStyle = G.knot;
+  ctx.beginPath(); ctx.ellipse(x + sz * 0.5, y + sz * 0.56, sz * 0.07, sz * 0.1, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+function drawGhost(ctx) {
+  if (!drag) return;
+  var sh = drag.shape, i;
+  if (drag.valid) {
+    for (i = 0; i < sh.cells.length; i++) {
+      var r = drag.ar + sh.cells[i][0], c = drag.ac + sh.cells[i][1];
+      drawBlock(ctx, bx + c * cell, by + r * cell, cell, drag.grain, 0.5);
+    }
+  }
+  var ox = drag.px - (sh.w * cell) / 2, oy = drag.py - (sh.h * cell) / 2 - cell * 0.9;
+  for (i = 0; i < sh.cells.length; i++)
+    drawBlock(ctx, ox + sh.cells[i][1] * cell, oy + sh.cells[i][0] * cell, cell, drag.grain, drag.valid ? 1 : 0.5);
+}
+function drawTray(ctx) {
+  for (var s = 0; s < TRAY; s++) {
+    var pc = tray[s]; if (!pc || (drag && drag.slot === s)) continue;
+    var sh = pc.shape, tc = cell * 0.62, pw = sh.w * tc, ph = sh.h * tc;
+    var ox = bx + s * slotW + (slotW - pw) / 2, oy = trayY + (trayH - ph) / 2;
+    for (var i = 0; i < sh.cells.length; i++)
+      drawBlock(ctx, ox + sh.cells[i][1] * tc, oy + sh.cells[i][0] * tc, tc, pc.grain, 1);
+  }
+}
+function nextGrainInfo() { for (var i = 1; i < SKIN_THRESHOLDS.length; i++) if (best < SKIN_THRESHOLDS[i]) return { idx: i, thr: SKIN_THRESHOLDS[i] }; return null; }
+function drawHUD(ctx) {
+  var W = GF.W, S = GF.S, fs = GF.clamp(15 * S, 12, 22);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = comboMult > 1 ? '#ffcf5c' : '#7c6a55';
+  ctx.fillText(GF.t('combo') + '  x' + comboMult.toFixed(1), 12 * S, 10 * S);
+  var bw = GF.clamp(120 * S, 80, 180), bh = 7 * S, byy = 10 * S + fs + 4 * S;
+  GF.rr(ctx, 12 * S, byy, bw, bh, bh / 2); ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
+  GF.rr(ctx, 12 * S, byy, bw * GF.clamp((comboMult - 1) / (COMBO_MAX - 1), 0, 1), bh, bh / 2); ctx.fillStyle = '#ff9f43'; ctx.fill();
+
+  ctx.textAlign = 'right'; ctx.font = 'bold ' + GF.clamp(22 * S, 16, 32) + 'px sans-serif';
+  ctx.fillStyle = '#f3e4c8'; ctx.fillText('' + score, W - 12 * S, 8 * S);
+  ctx.font = 'bold ' + fs + 'px sans-serif'; ctx.fillStyle = '#9a8770';
+  ctx.fillText(GF.t('best') + ' ' + best, W - 12 * S, 8 * S + GF.clamp(22 * S, 16, 32) + 2 * S);
+
+  var ng = nextGrainInfo();
+  ctx.textAlign = 'center'; ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px sans-serif'; ctx.fillStyle = '#c9b48f';
+  var goalY = byy + bh + 8 * S;
+  ctx.fillText(ng ? (GF.t('next_grain') + ': ' + grainName(ng.idx) + '  ' + best + '/' + ng.thr) : GF.t('all_grains'), GF.cx, goalY);
+
+  if (gs === 'PLAYING') {
+    var bs = GF.clamp(40 * S, 32, 52), gap = 12 * S, rowW = bs * 3 + gap * 2;
+    var x0 = GF.cx - rowW / 2, ctrlY = GF.H - bs - 10 * S;
+    iconBtn(ctx, x0, ctrlY, bs, 'pause', function () { prevGs = 'PLAYING'; gs = 'HUB'; });
+    iconBtn(ctx, x0 + bs + gap, ctrlY, bs, 'help', function () { prevGs = 'PLAYING'; gs = 'HELP'; });
+    iconBtn(ctx, x0 + 2 * (bs + gap), ctrlY, bs, GF.muted ? 'muted' : 'sound', function () { GF.toggleMute(); GF.setMusicMuted(GF.muted); });
+  }
+}
+function iconBtn(ctx, x, y, sz, kind, fn) {
+  GF.rr(ctx, x, y, sz, sz, 9); ctx.fillStyle = 'rgba(40,28,18,0.85)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,220,170,0.25)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#e7d3ad'; ctx.strokeStyle = '#e7d3ad'; ctx.lineWidth = Math.max(2, sz * 0.07);
+  var cx = x + sz / 2, cy = y + sz / 2, q = sz * 0.2;
+  if (kind === 'pause') { ctx.fillRect(cx - q, cy - q, q * 0.7, q * 2); ctx.fillRect(cx + q * 0.3, cy - q, q * 0.7, q * 2); }
+  else if (kind === 'help') { ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold ' + (sz * 0.55) + 'px sans-serif'; ctx.fillText('?', cx, cy + 1); }
+  else if (kind === 'sound') { ctx.beginPath(); ctx.moveTo(cx - q, cy - q * 0.5); ctx.lineTo(cx - q * 0.2, cy - q * 0.5); ctx.lineTo(cx + q * 0.4, cy - q); ctx.lineTo(cx + q * 0.4, cy + q); ctx.lineTo(cx - q * 0.2, cy + q * 0.5); ctx.lineTo(cx - q, cy + q * 0.5); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.arc(cx + q * 0.6, cy, q * 0.5, -0.7, 0.7); ctx.stroke(); }
+  else if (kind === 'muted') { ctx.beginPath(); ctx.moveTo(cx - q, cy - q * 0.5); ctx.lineTo(cx - q * 0.2, cy - q * 0.5); ctx.lineTo(cx + q * 0.4, cy - q); ctx.lineTo(cx + q * 0.4, cy + q); ctx.lineTo(cx - q * 0.2, cy + q * 0.5); ctx.lineTo(cx - q, cy + q * 0.5); ctx.closePath(); ctx.fill(); ctx.beginPath(); ctx.moveTo(cx + q * 0.55, cy - q * 0.5); ctx.lineTo(cx + q * 1.15, cy + q * 0.5); ctx.moveTo(cx + q * 1.15, cy - q * 0.5); ctx.lineTo(cx + q * 0.55, cy + q * 0.5); ctx.stroke(); }
+  btn('icon_' + kind, x, y, sz, sz, fn);
+}
+function drawToast(ctx) {
+  var a = Math.min(1, toast.life), S = GF.S;
+  ctx.globalAlpha = a;
+  var w = GF.clamp(300 * S, 200, 380), h = 46 * S, x = GF.cx - w / 2, y = GF.H * 0.2;
+  GF.rr(ctx, x, y, w, h, 12); ctx.fillStyle = 'rgba(30,20,12,0.95)'; ctx.fill();
+  ctx.strokeStyle = '#ffcf5c'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#ffe9b8'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(16 * S, 12, 22) + 'px sans-serif';
+  ctx.fillText(toast.text, GF.cx, y + h / 2);
+  ctx.globalAlpha = 1;
+}
+
+// ── OVERLAYS ─────────────────────────────────────────────────────────────
+function scrim(ctx, a) { ctx.fillStyle = 'rgba(10,6,3,' + (a || 0.8) + ')'; ctx.fillRect(0, 0, GF.W, GF.H); }
+function bigBtn(ctx, label, y, fn, glow, accent) {
+  var S = GF.S, w = GF.clamp(GF.W * 0.74, 220, 460), h = GF.clamp(56 * S, 44, 70), x = GF.cx - w / 2;
+  GF.rr(ctx, x, y, w, h, 14); ctx.fillStyle = accent || '#7a4a2b'; ctx.fill();
+  if (glow) { ctx.strokeStyle = '#ffcf5c'; ctx.lineWidth = 3; ctx.stroke(); }
+  ctx.fillStyle = '#fff4df'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(20 * S, 15, 28) + 'px sans-serif';
+  ctx.fillText(label, GF.cx, y + h / 2);
+  btn('big_' + label, x, y, w, h, fn);
+  return y + h + 14 * S;
+}
+function drawHub(ctx) {
+  scrim(ctx, 0.82);
+  var S = GF.S;
+  ctx.fillStyle = '#f3e4c8'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(30 * S, 22, 42) + 'px sans-serif';
+  ctx.fillText(GF.t('menu'), GF.cx, GF.H * 0.18);
+  var y = GF.H * 0.30, dailyGlow = dailyDoneDate !== todayStr();
+  y = bigBtn(ctx, GF.t('resume'), y, function () { gs = 'PLAYING'; }, false, '#3f7a4a');
+  y = bigBtn(ctx, dailyGlow ? GF.t('daily') : GF.t('daily_done'), y, function () { startGame(true); }, dailyGlow, '#7a5a2b');
+  y = bigBtn(ctx, GF.t('grains'), y, function () { gs = 'GRAINS'; }, false, '#5a4030');
+  y = bigBtn(ctx, GF.t('howto'), y, function () { prevGs = 'HUB'; gs = 'HELP'; }, false, '#5a4030');
+}
+function drawGrains(ctx) {
+  scrim(ctx, 0.9);
+  var S = GF.S;
+  ctx.fillStyle = '#f3e4c8'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(26 * S, 20, 38) + 'px sans-serif';
+  ctx.fillText(GF.t('grains'), GF.cx, GF.H * 0.12);
+  var cols = 3, sw = GF.clamp(GF.W * 0.22, 76, 140), gap = sw * 0.2;
+  var gridW = cols * sw + (cols - 1) * gap, x0 = GF.cx - gridW / 2, y0 = GF.H * 0.22;
+  for (var i = 0; i < GRAINS.length; i++) {
+    var cxr = i % cols, ry = Math.floor(i / cols);
+    var x = x0 + cxr * (sw + gap), y = y0 + ry * (sw + gap + 16 * S), unlocked = i < grainsUnlocked, s2 = sw / 2;
+    if (unlocked) { drawBlock(ctx, x, y, s2, i, 1); drawBlock(ctx, x + s2, y, s2, i, 1); drawBlock(ctx, x, y + s2, s2, i, 1); drawBlock(ctx, x + s2, y + s2, s2, i, 1); }
+    else { GF.rr(ctx, x + 2, y + 2, sw - 4, sw - 4, 10); ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill(); ctx.fillStyle = '#6b5b46'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = 'bold ' + (sw * 0.16) + 'px sans-serif'; ctx.fillText(GF.t('locked'), x + sw / 2, y + sw / 2); }
+    if (i === currentGrain) { ctx.strokeStyle = '#ffcf5c'; ctx.lineWidth = 3; GF.rr(ctx, x, y, sw, sw, 10); ctx.stroke(); }
+    ctx.fillStyle = unlocked ? '#d8c4a0' : '#6b5b46'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.font = 'bold ' + GF.clamp(12 * S, 9, 16) + 'px sans-serif';
+    ctx.fillText(unlocked ? grainName(i) : ('' + SKIN_THRESHOLDS[i]), x + sw / 2, y + sw + 3 * S);
+    if (unlocked) (function (idx, bxx, byy, bww) { btn('grain_' + idx, bxx, byy, bww, bww, function () { currentGrain = idx; try { localStorage.setItem('knotwood_grain_sel', idx); } catch (e) {} for (var s = 0; s < TRAY; s++) if (tray[s]) tray[s].grain = idx; }); })(i, x, y, sw);
+  }
+  bigBtn(ctx, GF.t('resume'), GF.H * 0.83, function () { gs = (prevGs === 'HUB') ? 'HUB' : (prevGs === 'GAMEOVER' ? 'GAMEOVER' : 'PLAYING'); }, false, '#3f7a4a');
+}
+function wrapText(ctx, text, x, y, maxW, lh) {
+  var words = String(text).split(' '), line = '', yy = y, n;
+  for (n = 0; n < words.length; n++) {
+    var test = line + words[n] + ' ';
+    if (ctx.measureText(test).width > maxW && n > 0) { ctx.fillText(line, x, yy); line = words[n] + ' '; yy += lh; }
+    else line = test;
+  }
+  ctx.fillText(line, x, yy); return yy + lh;
+}
+function drawHelp(ctx) {
+  scrim(ctx, 0.92);
+  var S = GF.S, W = GF.W;
+  ctx.fillStyle = '#f3e4c8'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(26 * S, 20, 38) + 'px sans-serif';
+  ctx.fillText(GF.t('howto'), GF.cx, GF.H * 0.12);
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  ctx.font = GF.clamp(15 * S, 12, 20) + 'px sans-serif'; ctx.fillStyle = '#d8c4a0'; ctx.textAlign = 'left';
+  var maxW = W * 0.82, x = GF.cx - maxW / 2, y = GF.H * 0.22, lh = GF.clamp(21 * S, 16, 28), i;
+  for (i = 0; i < lines.length; i++) y = wrapText(ctx, lines[i], x, y, maxW, lh) + lh * 0.4;
+  bigBtn(ctx, GF.t('resume'), Math.min(y + 8 * S, GF.H * 0.84), function () { gs = (prevGs === 'HUB') ? 'HUB' : 'PLAYING'; }, false, '#3f7a4a');
+}
+function drawGameOver(ctx) {
+  scrim(ctx, 0.82);
+  var S = GF.S;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#f3e4c8'; ctx.font = 'bold ' + GF.clamp(30 * S, 22, 42) + 'px sans-serif';
+  ctx.fillText(GF.t('gameover'), GF.cx, GF.H * 0.26);
+  ctx.fillStyle = '#ffcf5c'; ctx.font = 'bold ' + GF.clamp(40 * S, 28, 56) + 'px sans-serif';
+  ctx.fillText('' + score, GF.cx, GF.H * 0.38);
+  ctx.fillStyle = '#9a8770'; ctx.font = 'bold ' + GF.clamp(16 * S, 12, 22) + 'px sans-serif';
+  ctx.fillText(GF.t('best') + ': ' + best + (score >= best && score > 0 ? '   ' + GF.t('newbest') : ''), GF.cx, GF.H * 0.46);
+  var y = GF.H * 0.56;
+  y = bigBtn(ctx, GF.t('retry'), y, function () { startGame(dailyMode); }, true, '#3f7a4a');
+  y = bigBtn(ctx, GF.t('grains'), y, function () { prevGs = 'GAMEOVER'; gs = 'GRAINS'; }, false, '#5a4030');
+}
+
+// ── TUTORIAL (interactive coach over live play; action-gated) ──────────────
+function trayTarget(slot) {
+  var pc = tray[slot]; if (!pc) return { x: GF.cx, y: trayY, w: 10, h: 10 };
+  var sh = pc.shape, tc = cell * 0.62, pw = sh.w * tc, ph = sh.h * tc;
+  var ox = bx + slot * slotW + (slotW - pw) / 2, oy = trayY + (trayH - ph) / 2;
+  return { x: ox + pw / 2, y: oy + ph / 2, w: pw, h: ph };
+}
+function boardTarget(r, c) { return { x: bx + (c + 0.5) * cell, y: by + (r + 0.5) * cell, w: cell, h: cell }; }
+function startTutorial() {
+  var row = GRID - 1, c;
+  for (c = 0; c < GRID - 1; c++) board[row * GRID + c] = currentGrain + 1;  // near-complete bottom row
+  tray[0] = { shape: SHAPES[0], grain: currentGrain };                       // a single block to finish it
+  GF.tutorial.start([{
+    text: GF.t('coach_drag'),
+    target: function () { return trayTarget(0); },
+    target2: function () { return boardTarget(GRID - 1, GRID - 1); },
+    gesture: 'drag', advance: 'manual',
+  }], { storageKey: 'knotwood_seen_tutorial' });
+}
+
+// ── PERSISTENCE ────────────────────────────────────────────────────────────
+function serializeTray() { return tray.map(function (p) { return p ? { s: SHAPES.indexOf(p.shape), g: p.grain } : null; }); }
+function restoreTray(arr) { if (arr) tray = arr.map(function (o) { return o ? { shape: SHAPES[o.s] || SHAPES[0], grain: o.g || 0 } : null; }); }
+
+// ── BOOT ───────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 420, designH: 820,
+  strings: STRINGS, sprites: [], saveKey: 'knotwood',
+  onReady: function () {
+    try { best = parseInt(localStorage.getItem('knotwood_best') || '0') || 0; } catch (e) {}
+    try { grainsUnlocked = Math.max(1, parseInt(localStorage.getItem('knotwood_grains') || '1') || 1); } catch (e) {}
+    try { currentGrain = GF.clamp(parseInt(localStorage.getItem('knotwood_grain_sel') || '0') || 0, 0, grainsUnlocked - 1); } catch (e) {}
+    try { dailyDoneDate = localStorage.getItem('knotwood_daily') || ''; } catch (e) {}
+
+    var restored = GF.persist('knotwood_run_v1',
+      function () { return { gs: gs, board: board, tray: serializeTray(), score: score, combo: comboMult, lines: linesCleared, daily: dailyMode }; },
+      function (s) {
+        if (!s || !s.board || s.board.length !== GRID * GRID) return;
+        board = s.board.slice(); restoreTray(s.tray);
+        score = s.score || 0; comboMult = s.combo || 1; linesCleared = s.lines || 0;
+        dailyMode = !!s.daily; gs = (s.gs === 'GAMEOVER') ? 'GAMEOVER' : 'PLAYING';
+      }
+    );
+
+    GF.bgMusic({ file: 'audio/bg_track.mp3', preset: 'cozy', muted: GF.muted });
+
+    GF.remoteConfig('knotwood', CFG, {
+      clamps: { 'tuning.difficulty_at': [100, 5000], 'tuning.combo_max': [2, 10] },
+      onUpdate: function (c) { CFG = c; applyCfg(); },
+    }).then(function (c) { CFG = c; applyCfg(); });
+
+    var hasBlocks = false; for (var i = 0; i < board.length; i++) if (board[i]) { hasBlocks = true; break; }
+    if (!restored || (!hasBlocks && gs !== 'GAMEOVER')) {
+      startGame(false);
+      var seen = false; try { seen = !!localStorage.getItem('knotwood_seen_tutorial'); } catch (e) {}
+      if (!seen && !window._silent) startTutorial();
+    }
+    // Platform builds (rule #9) drop straight into gameplay. Knotwood has NO menu —
+    // it always boots to PLAYING — so this honors the build_platforms-injected flag
+    // as a safety no-op (the menu lives behind the in-game pause/hub button).
+    if (window.__GF_AUTOSTART && !window._silent && gs !== 'PLAYING') startGame(false);
+    GF.funnel.mark('tutorial_done');
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+function applyCfg() { try { DIFFICULTY_AT = CFG.tuning.difficulty_at; COMBO_MAX = CFG.tuning.combo_max; } catch (e) {} }
+
+// ── TEST / TOOLING HOOKS (safe to ship; Yandex/CG don't reject test hooks) ──
+window._jumpLevel = function () { window._setupForScreenshot(5); };
+window._setupForScreenshot = function () {
+  startGame(false);
+  var pat = ['11011010', '11011110', '00111010', '11010011', '01110100', '11011010', '00000000', '00000000'];
+  for (var r = 0; r < GRID; r++) for (var c = 0; c < GRID; c++)
+    if (pat[r] && pat[r][c] === '1') board[r * GRID + c] = 1 + ((r + c * 2) % GRAINS.length);
+  tray = [{ shape: SHAPES[9], grain: currentGrain }, { shape: SHAPES[14], grain: 2 }, { shape: SHAPES[3], grain: 4 }];
+  score = 3450; comboMult = 2.5; best = Math.max(best, 4200); gs = 'PLAYING';
+};
+window._setState = function (s) { gs = s; };
+window._getI18N = function () { return STRINGS; };
+window._getFontBody = function () { return 'sans-serif'; };
+window.__gfState = function () { var f = 0, i; for (i = 0; i < board.length; i++) if (board[i]) f++; return { gs: gs, score: score, best: best, combo: comboMult, lines: linesCleared, placements: placements, filled: f }; };
+window.__gfReach = function () { return uiButtons.map(function (b) { return { id: b.id, x: b.x, y: b.y, w: b.w, h: b.h }; }); };
+window.__gfLayout = function () { return { bx: bx, by: by, bsize: bsize, cell: cell, trayY: trayY, trayH: trayH, slotW: slotW, GRID: GRID }; };
+window.__gfBoardCenter = function (r, c) { return { x: bx + (c + 0.5) * cell, y: by + (r + 0.5) * cell }; };
+window.__gfTrayCenter = function (slot) { return { x: bx + slot * slotW + slotW / 2, y: trayY + trayH / 2 }; };
+if (GF.exposeState) GF.exposeState(window.__gfState);
+
+})();
+</script>
+</body>
+</html>
