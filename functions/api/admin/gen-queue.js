@@ -10,7 +10,7 @@ const STUCK_MS = 10 * 60 * 1000;   // a "building" job older than this is presum
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
+  const token = request.headers.get('x-admin-token') || '';   // header-only (no querystring leak)
   if (!env.ADMIN_TOKEN) return json({ error: 'admin_token_not_configured' }, 500);
   if (token !== env.ADMIN_TOKEN) return json({ error: 'forbidden' }, 403);
 

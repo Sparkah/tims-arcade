@@ -18,7 +18,7 @@ const MAX_HTML = 600 * 1024;          // 600 KB cap for a single-file game
 
 export async function onRequestPost({ request, env }) {
   // Header-only token: keeps the secret out of URLs / access logs.
-  const token = request.headers.get('x-admin-token') || new URL(request.url).searchParams.get('token') || '';
+  const token = request.headers.get('x-admin-token') || '';
   if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
   if (token !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
 

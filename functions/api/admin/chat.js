@@ -1,28 +1,40 @@
-// Chat moderation (token-gated, mirrors admin/stats.js auth). Tim 2026-06-15.
-//   GET  /api/admin/chat?token=         -> recent lounge messages WITH poster IPs
-//   POST /api/admin/chat?token= {action}:
+// Chat moderation (token-gated). Tim 2026-06-15.
+//   GET  /api/admin/chat   (header X-Admin-Token)     -> recent lounge messages WITH poster IPs
+//   POST /api/admin/chat   (header X-Admin-Token, same-origin) {action}:
 //      clear            -> wipe all messages
 //      delete  {id}     -> remove one message
 //      ban     {ip}     -> block an IP from posting (90-day TTL)
 //      unban   {ip}     -> lift a ban
 // UI: /chat-mod (chat-mod.html).
+//
+// Auth is HEADER-ONLY (no ?token= -> no querystring leak to logs/history) and POST
+// is same-origin only (Codex review 2026-06-15). Reads/deletes PRUNE rows older
+// than RETENTION and never extend a non-edit's TTL, so poster IPs can't be kept
+// alive past the 2h window by repeated moderation.
 
-import { json, jsonError } from '../../_lib/response.js';
+import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 
 const TAIL = 'chat:lounge:lounge:tail';
 const RETENTION = 2 * 60 * 60;
 const BAN_TTL = 60 * 60 * 24 * 90;
 
-export async function onRequestGet({ request, env }) {
-  const a = auth(request, env); if (a !== true) return a;
+async function readPruned(env) {
   let rows = [];
   try { rows = (await env.VOTES.get(TAIL, 'json')) || []; } catch { rows = []; }
-  rows.sort((x, y) => String(x.id).localeCompare(String(y.id)));
+  const minTs = Date.now() - RETENTION * 1000;
+  return rows.filter(m => m && m.id && (!m.ts || m.ts >= minTs));
+}
+
+export async function onRequestGet({ request, env }) {
+  const a = auth(request, env); if (a !== true) return a;
+  const rows = (await readPruned(env)).sort((x, y) => String(x.id).localeCompare(String(y.id)));
   return ns(json({ ok: true, messages: rows }));
 }
 
 export async function onRequestPost({ request, env }) {
   const a = auth(request, env); if (a !== true) return a;
+  if (!sameOriginOk(request)) return jsonError('forbidden', 403);
+
   let body;
   try { body = await request.json(); } catch { return jsonError('bad_json', 400); }
   const action = String(body.action || '');
@@ -33,12 +45,13 @@ export async function onRequestPost({ request, env }) {
   }
   if (action === 'delete') {
     const id = String(body.id || '');
-    let rows = [];
-    try { rows = (await env.VOTES.get(TAIL, 'json')) || []; } catch { rows = []; }
-    const before = rows.length;
-    rows = rows.filter(m => String(m.id) !== id);
-    await env.VOTES.put(TAIL, JSON.stringify(rows), { expirationTtl: RETENTION });
-    return ns(json({ ok: true, removed: before - rows.length }));
+    const rows = await readPruned(env);
+    const kept = rows.filter(m => String(m.id) !== id);
+    const removed = rows.length - kept.length;
+    if (removed === 0) return ns(json({ ok: true, removed: 0 }));   // no-op -> don't reset the TTL
+    if (kept.length === 0) await env.VOTES.delete(TAIL);
+    else await env.VOTES.put(TAIL, JSON.stringify(kept), { expirationTtl: RETENTION });
+    return ns(json({ ok: true, removed }));
   }
   if (action === 'ban' || action === 'unban') {
     const ip = String(body.ip || '').trim();
@@ -51,7 +64,7 @@ export async function onRequestPost({ request, env }) {
 }
 
 function auth(request, env) {
-  const tok = request.headers.get('x-admin-token') || new URL(request.url).searchParams.get('token') || '';
+  const tok = request.headers.get('x-admin-token') || '';   // header-only
   if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
   if (tok !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
   return true;

@@ -124,6 +124,10 @@
   }
   toggle.addEventListener('click', function () { open ? closeChat() : openChat(); });
   closeBtn.addEventListener('click', closeChat);
+  // Symmetric with the leaderboard: opening it (📊) closes the chat (app.js opens
+  // the leaderboard on the same button; we just stop our drawer + polling).
+  var boardBtn = $('meta-pill-board');
+  if (boardBtn) boardBtn.addEventListener('click', function () { if (open) closeChat(); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && open) closeChat(); });
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible' && open) poll(false); });
 
