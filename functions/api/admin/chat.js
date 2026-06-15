@@ -15,7 +15,7 @@
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 
 const TAIL = 'chat:lounge:lounge:tail';
-const RETENTION = 2 * 60 * 60;
+const RETENTION = 24 * 60 * 60;   // match chat.js: 24h rolling window (Tim 2026-06-15)
 const BAN_TTL = 60 * 60 * 24 * 90;
 
 async function readPruned(env) {

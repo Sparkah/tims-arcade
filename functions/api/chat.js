@@ -17,8 +17,8 @@ import { isValidSlug } from '../_lib/validate.js';
 
 const ROOM = 'lounge';
 const ID_RE = /^[0-9a-z]{8,24}$/;
-const RETENTION_SECONDS = 2 * 60 * 60;
-const MAX_MESSAGES = 60;
+const RETENTION_SECONDS = 24 * 60 * 60;   // keep 24h of history, then roll off older messages (Tim 2026-06-15)
+const MAX_MESSAGES = 150;                  // size bound so an active 24h lounge isn't count-truncated below the time window
 const MAX_TEXT = 200;
 const MAX_TITLE = 60;
 
