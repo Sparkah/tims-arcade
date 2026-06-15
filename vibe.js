@@ -41,7 +41,7 @@
   var SECONDS_PER_PROMPT = 1800;
   var myName = '';
   var lastBuild = null, buildTicker = null;
-  var BUILD_ETA_MIN = 12;   // measured: a sonnet game gen runs ~11-12 min under load
+  var BUILD_ETA_MIN = 22;   // Opus game gen under heavy concurrent-claude load (sonnet fallback is faster)
 
   function show(el, on) { if (el) el.hidden = !on; }
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
@@ -183,10 +183,13 @@
       }
     } else if (s.status === 'building') {
       var elapsedMin = Math.max(0, Math.floor((serverNow - (s.updatedAt || serverNow)) / 60000));
-      var remain = Math.max(1, BUILD_ETA_MIN - elapsedMin);
+      var tail = (s.attempts || 0) > 0 ? ' - attempt ' + ((s.attempts || 0) + 1) + ' after a restart.' : '.';
       phaseEl.textContent = 'Building your game now';
-      detailEl.textContent = elapsedMin + ' min elapsed, about ' + remain + ' min to go (these take ~' + BUILD_ETA_MIN + ' min)'
-        + ((s.attempts || 0) > 0 ? ' - attempt ' + ((s.attempts || 0) + 1) + ' after a restart.' : '.');
+      if (elapsedMin < BUILD_ETA_MIN) {
+        detailEl.textContent = elapsedMin + ' min elapsed, about ' + (BUILD_ETA_MIN - elapsedMin) + ' min to go (good games take ~' + BUILD_ETA_MIN + ' min)' + tail;
+      } else {
+        detailEl.textContent = elapsedMin + ' min elapsed - wrapping up, almost there' + tail;
+      }
     }
   }
 
