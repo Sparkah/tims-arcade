@@ -1,0 +1,243 @@
+// vibe.js -- the /create page logic. Lets a signed-in player describe a game and
+// have it built (async, by Tim's Mac relay) and played back in a sandboxed iframe.
+// Economy: 1 free prompt, then 1 per 30 min of active play, or a (placeholder) buy
+// button. Dependency-free. Tim 2026-06-15.
+(function () {
+  'use strict';
+
+  var POLL_MS = 4000;
+  var JOB_KEY = 'vibe_job';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var els = {
+    prompts: $('create-prompts'),
+    signin: $('create-signin'),
+    composer: $('create-composer'),
+    prompt: $('vibe-prompt'),
+    counter: $('vibe-counter'),
+    generate: $('vibe-generate'),
+    msg: $('vibe-msg'),
+    gate: $('create-gate'),
+    gateFill: $('create-gate-fill'),
+    gateText: $('create-gate-text'),
+    pay: $('vibe-pay'),
+    payNote: $('create-pay-note'),
+    status: $('create-status'),
+    building: $('create-building'),
+    ready: $('create-ready'),
+    readyTitle: $('create-ready-title'),
+    frameWrap: $('create-frame-wrap'),
+    again: $('vibe-again'),
+    open: $('vibe-open'),
+    failed: $('create-failed'),
+    retry: $('vibe-retry'),
+    mine: $('create-mine'),
+    list: $('create-list'),
+  };
+  if (!els.composer) return;
+
+  var pollTimer = null;
+  var SECONDS_PER_PROMPT = 1800;
+
+  function show(el, on) { if (el) el.hidden = !on; }
+  function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
+  function px(secs) { return Math.max(1, Math.ceil(secs / 60)); }
+  function capture(ev, props) { try { if (window.posthog) window.posthog.capture(ev, props || {}); } catch (e) {} }
+
+  var ERRORS = {
+    prompt_too_short: 'Add a few more words about your game.',
+    prompt_contact: 'Please describe a game -- no links or contacts.',
+    prompt_blocked: "Let's keep it friendly. Try another idea.",
+    no_prompts: 'You are out of prompts for now.',
+    daily_limit_reached: 'You have hit today\'s limit. Come back tomorrow.',
+    sign_in_required: 'Please sign in first.',
+    enqueue_failed: 'Something went wrong. Try again.',
+    bad_json: 'Something went wrong. Try again.',
+  };
+
+  // ---- quota / routing ----
+  function loadQuota() {
+    return fetch('/api/gen/quota', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(function (q) {
+        SECONDS_PER_PROMPT = q.secondsPerPrompt || 1800;
+        if (!q.signed_in) { show(els.signin, true); show(els.composer, false); show(els.mine, false); return q; }
+        show(els.signin, false);
+        show(els.composer, true);
+        renderQuota(q);
+        loadCreations();
+        return q;
+      })
+      .catch(function () { setMsg('Could not load your account. Refresh to retry.', 'err'); });
+  }
+
+  function renderQuota(q) {
+    var n = q.prompts || 0;
+    els.prompts.hidden = false;
+    els.prompts.textContent = n === 1 ? '1 prompt' : n + ' prompts';
+    if (n > 0) {
+      show(els.gate, false);
+      els.generate.disabled = false;
+    } else {
+      show(els.gate, true);
+      els.generate.disabled = true;
+      var done = (q.playProgress || 0);
+      var pct = Math.min(100, Math.round((done / SECONDS_PER_PROMPT) * 100));
+      els.gateFill.style.width = pct + '%';
+      var left = q.secondsToNext != null ? q.secondsToNext : SECONDS_PER_PROMPT;
+      els.gateText.textContent = 'Play ' + px(left) + ' more min of games to earn your next free game.';
+    }
+  }
+
+  // ---- generate ----
+  function generate() {
+    var prompt = (els.prompt.value || '').trim();
+    if (prompt.length < 3) { setMsg(ERRORS.prompt_too_short, 'warn'); return; }
+    els.generate.disabled = true;
+    setMsg('Sending your idea...', '');
+    capture('vibe_generate_submit', { len: prompt.length });
+    fetch('/api/gen/submit', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ prompt: prompt }),
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (res) {
+        if (res.ok && res.d && res.d.id) {
+          setMsg('', '');
+          beginJob(res.d.id);
+        } else {
+          var code = (res.d && res.d.error) || 'enqueue_failed';
+          setMsg(ERRORS[code] || 'Could not start the build.', 'err');
+          els.generate.disabled = false;
+          if (code === 'no_prompts') loadQuota();
+        }
+      })
+      .catch(function () { setMsg('Network error. Try again.', 'err'); els.generate.disabled = false; });
+  }
+
+  function beginJob(id) {
+    try { localStorage.setItem(JOB_KEY, JSON.stringify({ id: id, ts: Date.now() })); } catch (e) {}
+    show(els.composer, false);
+    show(els.status, true);
+    show(els.building, true);
+    show(els.ready, false);
+    show(els.failed, false);
+    startPolling(id);
+  }
+
+  // ---- status polling ----
+  function startPolling(id) {
+    stopPolling();
+    pollOnce(id);
+    pollTimer = setInterval(function () { pollOnce(id); }, POLL_MS);
+  }
+  function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+  function pollOnce(id) {
+    fetch('/api/gen/status?id=' + encodeURIComponent(id), { cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (s) {
+        if (!s) return;
+        if (s.status === 'ready' && s.playUrl) { stopPolling(); clearJob(); onReady(s); }
+        else if (s.status === 'failed') { stopPolling(); clearJob(); onFailed(s); }
+      })
+      .catch(function () {});
+  }
+
+  function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch (e) {} }
+
+  function onReady(s) {
+    show(els.building, false);
+    show(els.failed, false);
+    show(els.ready, true);
+    els.readyTitle.textContent = (s.title ? '"' + s.title + '" is ready!' : 'Your game is ready!');
+    els.open.href = s.playUrl;
+    els.frameWrap.innerHTML = '';
+    var iframe = document.createElement('iframe');
+    iframe.className = 'create-frame';
+    iframe.setAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-fullscreen');
+    iframe.setAttribute('allow', 'fullscreen; autoplay');
+    iframe.setAttribute('title', s.title || 'Your game');
+    iframe.src = s.playUrl;
+    els.frameWrap.appendChild(iframe);
+    capture('vibe_generate_ready', { slug: s.slug || '' });
+    loadCreations();
+  }
+
+  function onFailed() {
+    show(els.building, false);
+    show(els.ready, false);
+    show(els.failed, true);
+    capture('vibe_generate_failed', {});
+  }
+
+  // ---- creations list ----
+  function loadCreations() {
+    fetch('/api/me/games', { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        if (!d || !d.games) return;
+        var mine = d.games.filter(function (g) { return g.genre === 'vibe' || g.sandboxUrl; });
+        if (!mine.length) { show(els.mine, false); return; }
+        show(els.mine, true);
+        els.list.innerHTML = '';
+        mine.forEach(function (g) {
+          var a = document.createElement('a');
+          a.className = 'create-list-item';
+          a.href = g.sandboxUrl || '#';
+          a.target = '_blank';
+          a.rel = 'noopener';
+          a.innerHTML = '<span class="create-list-title"></span>';
+          a.querySelector('.create-list-title').textContent = g.title || g.slug || 'Untitled';
+          els.list.appendChild(a);
+        });
+      })
+      .catch(function () {});
+  }
+
+  // ---- pay (placeholder) ----
+  function pay() {
+    els.pay.disabled = true;
+    capture('vibe_pay_click', {});
+    fetch('/api/gen/pay', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' }, body: '{}' })
+      .then(function (r) { return r.json(); })
+      .then(function () { show(els.payNote, true); })
+      .catch(function () { show(els.payNote, true); })
+      .then(function () { setTimeout(function () { els.pay.disabled = false; }, 1500); });
+  }
+
+  // ---- wire up ----
+  els.prompt.addEventListener('input', function () {
+    els.counter.textContent = (els.prompt.value || '').length + ' / 500';
+    if (els.msg.textContent) setMsg('', '');
+  });
+  els.generate.addEventListener('click', generate);
+  els.pay.addEventListener('click', pay);
+  els.again.addEventListener('click', function () {
+    show(els.status, false); show(els.composer, true);
+    els.prompt.value = ''; els.counter.textContent = '0 / 500';
+    loadQuota();
+  });
+  els.retry.addEventListener('click', function () {
+    show(els.status, false); show(els.composer, true);
+    loadQuota();
+  });
+
+  // Resume an in-flight job from a previous visit.
+  function resume() {
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch (e) {}
+    if (saved && saved.id && (Date.now() - (saved.ts || 0) < 24 * 3600 * 1000)) {
+      show(els.composer, false);
+      show(els.status, true);
+      show(els.building, true);
+      startPolling(saved.id);
+    } else {
+      clearJob();
+    }
+  }
+
+  loadQuota().then(resume);
+})();

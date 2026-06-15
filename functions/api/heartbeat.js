@@ -21,11 +21,18 @@
 // this allows for shared connections (NAT) while blocking obvious bots.
 
 import { parseCookie } from '../_lib/cookie.js';
-import { creditTokens } from '../_lib/meta.js';
+import { creditTokens, accruePlay } from '../_lib/meta.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { recordActiveDay } from '../_lib/cohort.js';
 import { checkRate } from '../_lib/rateLimit.js';
 import { SOCIAL_SLUGS, touchPresence } from '../_lib/social.js';
+import { readSession } from './_session.js';
+
+// Vibe-coder economy (Tim 2026-06-15): 30 min of ACTIVE play = 1 game-generation
+// prompt; stop banking past PROMPT_BANK_CAP so the accrual write is skipped once
+// a signed-in player is comfortably ahead.
+const SECONDS_PER_PROMPT = 1800;
+const PROMPT_BANK_CAP = 5;
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -80,6 +87,16 @@ export async function onRequestPost({ request, env }) {
       try { await touchPresence(env, slug, uid); } catch (e) { /* never block the heartbeat */ }
     }
   }
+
+  // Vibe-coder economy: bank active play toward generation prompts on the SESSION
+  // uid (per-email), so clearing the anon cookie can't farm free prompts. Isolated
+  // + best-effort — a failure here must never break the heartbeat. Signed-in only.
+  try {
+    const session = await readSession(request, env);
+    if (session && session.uid) {
+      await accruePlay(env, session.uid, seconds, { secondsPerPrompt: SECONDS_PER_PROMPT, cap: PROMPT_BANK_CAP });
+    }
+  } catch (e) { /* never block the heartbeat */ }
 
   return new Response(null, { status: 204 });
 }
