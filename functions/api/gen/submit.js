@@ -10,7 +10,7 @@ import { readSession } from '../_session.js';
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 import { checkRate } from '../../_lib/rateLimit.js';
 import { filterText } from '../../_lib/chatmod.js';
-import { grantFreePrompt, spendPrompts, creditPrompts } from '../../_lib/meta.js';
+import { grantFreePrompt, spendPrompts, creditPrompts, readMeta } from '../../_lib/meta.js';
 
 const MIN_PROMPT = 3;
 const MAX_PROMPT = 500;
@@ -60,8 +60,10 @@ export async function onRequestPost({ request, env }) {
   // enumerated (Codex review 2026-06-15).
   const id = crypto.randomUUID().replace(/-/g, '');
   const ts = Date.now();
+  const meta = await readMeta(env, session.uid);
+  const displayName = meta.displayName || (session.email || '').split('@')[0] || 'player';
   const jobRec = {
-    id, uid: session.uid, email: session.email, prompt,
+    id, uid: session.uid, email: session.email, prompt, displayName,
     status: 'pending', slug: null, title: null, error: null,
     ts, updatedTs: ts,
   };

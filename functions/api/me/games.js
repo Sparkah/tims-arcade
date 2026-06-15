@@ -43,11 +43,15 @@ export async function onRequestGet({ request, env }) {
       env.VOTES.get(`votes:${slug}`, 'json'),
     ]);
     return {
+      id: row.id || '',
       slug,
       title: row.title || slug,
       hook: row.hook || '',
       genre: row.genre || '',
+      source: row.source || '',
       status: row.status || 'pending',
+      published: !!row.published,
+      hasCover: !!row.hasCover,
       ts: row.ts || 0,
       sandboxUrl: row.sandboxUrl || null,
       plays: parseInt(playsRaw) || 0,

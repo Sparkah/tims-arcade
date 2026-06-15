@@ -24,7 +24,7 @@ cd "$GALLERY"
 # Content-hashed assets (filenames at Gallery root, served from /<name>).
 # Anything referenced as `/posthog-init` (a CF Pages Function, not a static
 # file) is intentionally excluded.
-ASSETS="style.css app.js identity.js sdk.js modal.js chat.js vibe.js"
+ASSETS="style.css app.js identity.js sdk.js modal.js chat.js vibe.js creations.js"
 
 shopt -s nullglob
 changed=0

@@ -90,10 +90,20 @@ export async function onRequestPost({ request, env }) {
   // Vibe-coder economy: bank active play toward generation prompts on the SESSION
   // uid (per-email), so clearing the anon cookie can't farm free prompts. Isolated
   // + best-effort — a failure here must never break the heartbeat. Signed-in only.
+  // kind==='creation' (player-generated game, played in a sandboxed iframe where
+  // active-input can't be measured) counts toward plays/seconds METRICS only --
+  // it must NOT accrue prompts, or idling on a creation would farm the economy.
   try {
-    const session = await readSession(request, env);
-    if (session && session.uid) {
-      await accruePlay(env, session.uid, seconds, { secondsPerPrompt: SECONDS_PER_PROMPT, cap: PROMPT_BANK_CAP });
+    if (body.kind !== 'creation') {
+      const session = await readSession(request, env);
+      if (session && session.uid) {
+        // Server-side authority: never accrue prompts for a creation slug, even if
+        // the client omits kind (Codex review 2026-06-15). One read, signed-in only.
+        const isCreation = await env.VOTES.get(`creationslug:${slug}`);
+        if (!isCreation) {
+          await accruePlay(env, session.uid, seconds, { secondsPerPrompt: SECONDS_PER_PROMPT, cap: PROMPT_BANK_CAP });
+        }
+      }
     }
   } catch (e) { /* never block the heartbeat */ }
 

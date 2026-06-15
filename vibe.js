@@ -33,11 +33,13 @@
     retry: $('vibe-retry'),
     mine: $('create-mine'),
     list: $('create-list'),
+    creatorName: $('vibe-creator-name'),
   };
   if (!els.composer) return;
 
   var pollTimer = null;
   var SECONDS_PER_PROMPT = 1800;
+  var myName = '';
 
   function show(el, on) { if (el) el.hidden = !on; }
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
@@ -64,6 +66,8 @@
         if (!q.signed_in) { show(els.signin, true); show(els.composer, false); show(els.mine, false); return q; }
         show(els.signin, false);
         show(els.composer, true);
+        if (els.creatorName && !els.creatorName.value && q.displayName) els.creatorName.value = q.displayName;
+        myName = (els.creatorName && els.creatorName.value) || q.displayName || '';
         renderQuota(q);
         loadCreations();
         return q;
@@ -179,21 +183,60 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (d) {
         if (!d || !d.games) return;
-        var mine = d.games.filter(function (g) { return g.genre === 'vibe' || g.sandboxUrl; });
+        var mine = d.games.filter(function (g) { return g.source === 'vibe' || g.genre === 'vibe'; });
         if (!mine.length) { show(els.mine, false); return; }
         show(els.mine, true);
         els.list.innerHTML = '';
-        mine.forEach(function (g) {
-          var a = document.createElement('a');
-          a.className = 'create-list-item';
-          a.href = g.sandboxUrl || '#';
-          a.target = '_blank';
-          a.rel = 'noopener';
-          a.innerHTML = '<span class="create-list-title"></span>';
-          a.querySelector('.create-list-title').textContent = g.title || g.slug || 'Untitled';
-          els.list.appendChild(a);
-        });
+        mine.forEach(function (g) { els.list.appendChild(creationCard(g)); });
       })
+      .catch(function () {});
+  }
+
+  function creationCard(g) {
+    var min = Math.round((g.seconds || 0) / 60);
+    var card = document.createElement('div');
+    card.className = 'create-mine-card';
+    var cover = document.createElement('div');
+    cover.className = 'create-mine-cover';
+    if (g.hasCover && g.id) { var im = document.createElement('img'); im.alt = ''; im.loading = 'lazy'; im.src = '/api/creation-cover?id=' + g.id; cover.appendChild(im); }
+    var meta = document.createElement('div'); meta.className = 'create-mine-meta';
+    var t = document.createElement('div'); t.className = 'create-mine-title'; t.textContent = g.title || g.slug || 'Untitled';
+    var stats = document.createElement('div'); stats.className = 'create-mine-stats';
+    stats.textContent = (g.plays || 0) + ' plays · ' + min + ' min played · ' + (g.likes || 0) + ' likes';
+    var acts = document.createElement('div'); acts.className = 'create-mine-acts';
+    // Play (instrumented wrapper)
+    var play = document.createElement('a'); play.className = 'create-mini-btn'; play.textContent = 'Play'; play.target = '_blank'; play.rel = 'noopener';
+    play.href = '/cplay?id=' + encodeURIComponent(g.id) + '&slug=' + encodeURIComponent(g.slug || '') + '&title=' + encodeURIComponent(g.title || '') + '&by=' + encodeURIComponent(myName || '');
+    acts.appendChild(play);
+    // Publish / unpublish
+    var pub = document.createElement('button'); pub.type = 'button'; pub.className = 'create-mini-btn' + (g.published ? ' on' : '');
+    pub.textContent = g.published ? 'Published ✓' : 'Publish to gallery';
+    pub.addEventListener('click', function () { pub.disabled = true; creationAction(g.id, g.published ? 'unpublish' : 'publish', loadCreations); });
+    acts.appendChild(pub);
+    // Delete
+    var del = document.createElement('button'); del.type = 'button'; del.className = 'create-mini-btn danger'; del.textContent = 'Delete';
+    del.addEventListener('click', function () { if (confirm('Delete "' + (g.title || g.slug) + '"? This cannot be undone.')) { del.disabled = true; creationAction(g.id, 'delete', loadCreations); } });
+    acts.appendChild(del);
+    meta.appendChild(t); meta.appendChild(stats); meta.appendChild(acts);
+    card.appendChild(cover); card.appendChild(meta);
+    return card;
+  }
+
+  function creationAction(id, action, cb) {
+    if (!id) return;
+    fetch('/api/me/creations', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ id: id, action: action }) })
+      .then(function (r) { return r.json(); })
+      .then(function () { if (cb) cb(); })
+      .catch(function () {});
+  }
+
+  function saveCreatorName() {
+    var n = (els.creatorName.value || '').trim().slice(0, 24);
+    if (!n) return;
+    myName = n;
+    fetch('/api/me/name', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ name: n }) })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) { if (d && d.displayName) { els.creatorName.value = d.displayName; myName = d.displayName; } })
       .catch(function () {});
   }
 
@@ -215,6 +258,7 @@
   });
   els.generate.addEventListener('click', generate);
   els.pay.addEventListener('click', pay);
+  if (els.creatorName) els.creatorName.addEventListener('change', saveCreatorName);
   els.again.addEventListener('click', function () {
     show(els.status, false); show(els.composer, true);
     els.prompt.value = ''; els.counter.textContent = '0 / 500';

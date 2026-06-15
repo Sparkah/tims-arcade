@@ -27,6 +27,7 @@ export async function onRequestGet({ request, env }) {
     playProgress,
     secondsPerPrompt: SECONDS_PER_PROMPT,
     secondsToNext: prompts > 0 ? 0 : Math.max(0, SECONDS_PER_PROMPT - playProgress),
+    displayName: m.displayName || (session.email || '').split('@')[0] || 'player',
   }));
 }
 

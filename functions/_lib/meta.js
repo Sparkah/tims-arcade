@@ -28,7 +28,8 @@ export function emptyMeta() {
     //   freeGranted  — has the one-time free prompt been given (per email)
     //   playProgress — active seconds banked toward the next earned prompt
     //   lastPlayTs   — last heartbeat ts, for the wall-clock anti-farm cap
-    prompts: 0, freeGranted: false, playProgress: 0, lastPlayTs: 0,
+    //   displayName  — public creator name shown on published creations
+    prompts: 0, freeGranted: false, playProgress: 0, lastPlayTs: 0, displayName: null,
   };
 }
 

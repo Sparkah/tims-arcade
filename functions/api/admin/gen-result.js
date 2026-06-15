@@ -93,24 +93,38 @@ export async function onRequestPost({ request, env }) {
 
     await env.VOTES.put(`genblob:${id}`, html, { expirationTtl: BLOB_TTL });
 
+    // Cover screenshot (base64 PNG from the relay's quality-smoke). Stored as-is;
+    // /api/creation-cover decodes + serves it. Capped so a giant shot can't bust KV.
+    let hasCover = false;
+    const coverB64 = String(body.cover || '');
+    if (coverB64 && coverB64.length < 700 * 1024) {
+      try { await env.VOTES.put(`creationcover:${id}`, coverB64, { expirationTtl: BLOB_TTL }); hasCover = true; } catch (e) { /* best effort */ }
+    }
+    const quality = String(body.quality || 'unverified').slice(0, 16);
+
     jobRec.status = 'ready';
     jobRec.title = title;
     jobRec.slug = slug;
+    jobRec.quality = quality;
     jobRec.updatedTs = Date.now();
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
 
-    // Surface in the creator's "My games" via the existing upload: schema
-    // (status 'live' so it never enters the UGC moderation queue).
+    // Surface in the creator's "My games" via the existing upload: schema. Private
+    // by default (published:false) -- the creator opts in to the public gallery.
     const rec = {
       id, slug, title,
       hook: String(jobRec.prompt || '').slice(0, 200),
       genre: 'vibe',
-      author: (jobRec.email || '').split('@')[0] || 'player',
+      author: jobRec.displayName || (jobRec.email || '').split('@')[0] || 'player',
       contact: jobRec.email || '',
       uid: jobRec.uid, email: jobRec.email,
       status: 'live', sandboxUrl: `/g/${id}`, source: 'vibe', ts: jobRec.ts,
+      published: false, quality, hasCover,
     };
     try { await env.VOTES.put(`upload:${id}`, JSON.stringify(rec), { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
+    // Server-side "this slug is a creation" index so heartbeat can refuse to accrue
+    // prompts for creation plays even if the client omits kind (Codex review 2026-06-15).
+    try { await env.VOTES.put(`creationslug:${slug}`, id, { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
 
     try { await emailUser(env, jobRec, `/g/${id}`); } catch (e) { /* best effort */ }
     return json({ ok: true, status: 'ready', slug, playUrl: `/g/${id}` });

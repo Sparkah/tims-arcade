@@ -9,6 +9,8 @@
 //   * the session cookie is HttpOnly regardless.
 // Tim 2026-06-15.
 
+import { readSession } from '../api/_session.js';
+
 const ID_RE = /^[0-9a-z]{8,40}$/;
 
 const CSP = [
@@ -26,7 +28,7 @@ const CSP = [
   "frame-ancestors 'self'",
 ].join('; ');
 
-export async function onRequestGet({ env, params }) {
+export async function onRequestGet({ request, env, params }) {
   const id = String((params && params.id) || '').toLowerCase();
   if (!ID_RE.test(id)) return new Response('Not found', { status: 404 });
 
@@ -36,6 +38,14 @@ export async function onRequestGet({ env, params }) {
       status: 404,
       headers: { 'content-type': 'text/plain; charset=utf-8' },
     });
+  }
+
+  // Access control (Codex review 2026-06-15): a published creation is public; an
+  // unpublished/private one is owner-only. So unpublish actually revokes the link.
+  const rec = await env.VOTES.get(`upload:${id}`, 'json');
+  if (rec && !rec.published) {
+    const s = await readSession(request, env);
+    if (!s || s.uid !== rec.uid) return new Response('Not found', { status: 404 });
   }
 
   return new Response(html, {
