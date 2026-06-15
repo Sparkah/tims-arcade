@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-14T13:21:04.836567+00:00",
+  "generated": "2026-06-15T14:11:29.008763+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -100,7 +100,7 @@ export default {
         "crazygames": {
           "submittedOn": "2026-05-25",
           "rejectedOn": "2026-05-26",
-          "status": "rejected"
+          "status": "submitted"
         },
         "gamedistribution": {
           "status": "not_started"
@@ -273,13 +273,7 @@ export default {
     },
     "backrooms": {
       "gameDir": "Games/128_backrooms",
-      "engagement": {
-        "plays7d": 6,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 480,
-        "genre": "other"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-05",
@@ -304,13 +298,7 @@ export default {
     },
     "devourling": {
       "gameDir": "Games/119_devourling",
-      "engagement": {
-        "plays7d": 3,
-        "likes": 2,
-        "dislikes": 0,
-        "seconds": 160,
-        "genre": "other"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-03",
@@ -335,13 +323,7 @@ export default {
     },
     "beast_bazaar": {
       "gameDir": "Games/120_beast_bazaar",
-      "engagement": {
-        "plays7d": 5,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 430,
-        "genre": "merge"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-04",
@@ -495,13 +477,7 @@ export default {
     },
     "rage_room": {
       "gameDir": "Games/131_rage_room",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 195,
-        "genre": "action"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-04",
@@ -526,13 +502,7 @@ export default {
     },
     "relic_restore": {
       "gameDir": "Games/133_relic_restore",
-      "engagement": {
-        "plays7d": 1,
-        "likes": 0,
-        "dislikes": 1,
-        "seconds": 240,
-        "genre": "restoration"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-07",
@@ -632,13 +602,7 @@ export default {
     },
     "orb_legion": {
       "gameDir": "Games/135_orb_legion",
-      "engagement": {
-        "plays7d": 7,
-        "likes": 2,
-        "dislikes": 0,
-        "seconds": 415,
-        "genre": "puzzle"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-07",
@@ -713,13 +677,7 @@ export default {
     },
     "crash_buggy": {
       "gameDir": "Games/152_crash_buggy",
-      "engagement": {
-        "plays7d": 23,
-        "likes": 2,
-        "dislikes": 0,
-        "seconds": 1210,
-        "genre": "other"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "submittedOn": "2026-06-11",
@@ -751,7 +709,8 @@ export default {
           "status": "submitted"
         },
         "crazygames": {
-          "status": "not_started"
+          "submittedOn": "2026-06-15",
+          "status": "submitted"
         },
         "gamedistribution": {
           "status": "not_started"
@@ -762,20 +721,13 @@ export default {
       },
       "other": null,
       "readyPlatforms": [
-        "crazygames",
         "gamedistribution",
         "gamepush"
       ]
     },
     "merge_diner": {
       "gameDir": "Games/132_merge_diner",
-      "engagement": {
-        "plays7d": 3,
-        "likes": 2,
-        "dislikes": 0,
-        "seconds": 625,
-        "genre": "other"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "status": "built"
@@ -800,13 +752,7 @@ export default {
     },
     "claw_tycoon": {
       "gameDir": "Games/153_claw_tycoon",
-      "engagement": {
-        "plays7d": 1,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 215,
-        "genre": "tycoon"
-      },
+      "engagement": null,
       "platforms": {
         "yandex": {
           "status": "built"
@@ -862,7 +808,8 @@ export default {
           "status": "not_started"
         },
         "crazygames": {
-          "status": "built"
+          "submittedOn": "2026-06-15",
+          "status": "submitted"
         },
         "gamedistribution": {
           "status": "not_started"
@@ -874,80 +821,12 @@ export default {
       "other": null,
       "readyPlatforms": [
         "yandex",
-        "crazygames",
         "gamedistribution",
         "gamepush"
       ]
     }
   },
-  "untracked": [
-    {
-      "slug": "date_the_look",
-      "folder": "136_date_the_look",
-      "engagement": {
-        "plays7d": 3,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 285,
-        "genre": "simulation"
-      }
-    },
-    {
-      "slug": "war_table",
-      "folder": "154_war_table",
-      "engagement": {
-        "plays7d": 1,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 235,
-        "genre": "strategy"
-      }
-    },
-    {
-      "slug": "tight_spot",
-      "folder": "109_tight_spot",
-      "engagement": {
-        "plays7d": 5,
-        "likes": 1,
-        "dislikes": 1,
-        "seconds": 185,
-        "genre": "racing"
-      }
-    },
-    {
-      "slug": "starbound_hearts",
-      "folder": "137_starbound_hearts",
-      "engagement": {
-        "plays7d": 2,
-        "likes": 1,
-        "dislikes": 0,
-        "seconds": 185,
-        "genre": "simulation"
-      }
-    },
-    {
-      "slug": "cedar_hollow",
-      "folder": "167_cedar_hollow",
-      "engagement": {
-        "plays7d": 4,
-        "likes": 1,
-        "dislikes": 1,
-        "seconds": 175,
-        "genre": "other"
-      }
-    },
-    {
-      "slug": "hue_sort",
-      "folder": "93_hue_sort",
-      "engagement": {
-        "plays7d": 8,
-        "likes": 1,
-        "dislikes": 1,
-        "seconds": 160,
-        "genre": "sort"
-      }
-    }
-  ],
+  "untracked": [],
   "summary": {
     "yandex": {
       "live": 4,
@@ -959,9 +838,9 @@ export default {
     "crazygames": {
       "live": 0,
       "approved": 0,
-      "submitted": 0,
-      "rejected": 3,
-      "built": 5
+      "submitted": 3,
+      "rejected": 2,
+      "built": 4
     },
     "gamedistribution": {
       "live": 0,

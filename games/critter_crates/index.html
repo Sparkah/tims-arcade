@@ -41,7 +41,12 @@ var STRINGS = {
     common: 'Common', uncommon: 'Uncommon', rare: 'Rare', epic: 'Epic', legendary: 'Legendary',
     sold: 'Sold', need_dupes: 'Need 5 dupes to star', starred_done: 'Starred!',
     free_ready: 'Free crate ready!', free_wait: 'Free in', sec: 's',
-    tut_goal: 'Open crates to collect every cute critter and complete your album.',
+    daily: 'DAILY', daily_ready: 'Daily crate ready!', daily_done: 'Daily', next_in: 'Next in', hr: 'h',
+    daily_crate: 'Daily Crate', daily_sub: 'A guaranteed Rare+ critter, free every day.',
+    power: 'Power', cpower: 'Collection Power', cpower_sub: 'Bond your critters for +coins on every open',
+    bond: 'Bond', bond_up: 'Bond up!', maxbond: 'MAX BOND', bondlv: 'Bond Lv',
+    wb_title: 'Welcome back!', wb_power: 'Collection Power', wb_daily: 'Your daily crate is ready',
+    coin_bonus: 'coin bonus',
     tut_controls: 'Tap OPEN to open a crate. Tap ALBUM to sell duplicates for coins. Tap SHOP to pick a different crate.',
     tut_win: 'Endless - fill the album and level up to unlock new crate themes.',
     tut_lose: 'You never lose. Out of coins? Claim the free crate to keep going.',
@@ -69,7 +74,12 @@ var STRINGS = {
     common: 'Обычный', uncommon: 'Необычный', rare: 'Редкий', epic: 'Эпический', legendary: 'Легендарный',
     sold: 'Продано', need_dupes: 'Нужно 5 дублей', starred_done: 'Звезда!',
     free_ready: 'Бесплатный готов!', free_wait: 'Бесплатно через', sec: 'с',
-    tut_goal: 'Открывай сундуки, собирай милых зверьков и заверши альбом.',
+    daily: 'ДЕНЬ', daily_ready: 'Сундук дня готов!', daily_done: 'Сундук дня', next_in: 'Через', hr: 'ч',
+    daily_crate: 'Сундук дня', daily_sub: 'Гарантированно Редкий+ зверёк, бесплатно каждый день.',
+    power: 'Сила', cpower: 'Сила коллекции', cpower_sub: 'Развивай связь со зверьками: +монеты за каждое открытие',
+    bond: 'Связь', bond_up: 'Связь крепче!', maxbond: 'МАКС СВЯЗЬ', bondlv: 'Связь ур.',
+    wb_title: 'С возвращением!', wb_power: 'Сила коллекции', wb_daily: 'Сундук дня готов',
+    coin_bonus: 'бонус монет',
     tut_controls: 'Жми ОТКРЫТЬ чтобы открыть сундук. АЛЬБОМ - продать дубли за монеты. МАГАЗИН - выбрать другой сундук.',
     tut_win: 'Бесконечно - заполняй альбом и повышай уровень, открывая новые темы.',
     tut_lose: 'Вы не проигрываете. Нет монет? Возьмите бесплатный сундук.',
@@ -96,6 +106,11 @@ var REEL_TILE_W = 96, REEL_TILES = 44, REEL_SPIN_MS = 3200;
 var TICK_MIN_GAP_MS = 28, PITY_OPENS = 12;
 var CRATE_COST_BASE = 100, FREE_COOLDOWN_S = 90;
 var STAR_DUPES = 5, XP_PER_OPEN = 10;
+// ── M1 CORE META: Critter Bonds + Collection Power + Daily Crate ────────────
+var BOND_MAX = 5;            // a critter's bond caps at level 5
+var BOND_DUPES_PER_LV = 2;   // duplicates needed to raise a critter's bond one level
+var POWER_PER_BOND = 0.6;    // each total bond level adds +0.6% coins on every open
+var DAILY_CRATE_THEME = 'meadow'; // daily uses the active theme but is always grantable
 var SELL_BASE = { common:12, uncommon:40, rare:160, epic:600, legendary:2400 };
 var ODDS = { common:0.80, uncommon:0.16, rare:0.032, epic:0.0064, legendary:0.0026 };
 var RARITY_ORDER = ['common','uncommon','rare','epic','legendary'];
@@ -152,11 +167,15 @@ var xp = 0, playerLevel = 1;
 var activeTheme = 'meadow';
 var inv = {};            // critterId -> count
 var starred = {};        // critterId -> true
+var bonds = {};          // critterId -> bond level (1..BOND_MAX) — duplicates raise it; OWNED, persisted
 var openCount = 0;
 var opensSinceRare = 0;  // pity counter
 var dailyStreak = 0;
-var lastFreeTs = 0;      // ms timestamp of last free crate
-var lastDailyDay = 0;
+var lastFreeTs = 0;      // ms timestamp of last free crate (90s session-pacing source)
+var lastDailyDay = 0;    // calendar day the FREE/session crate last bumped the streak
+var lastDailyCrateDay = 0; // calendar day the DAILY (24h) crate was last claimed — the return hook
+var welcomeBack = null;  // transient welcome-back toast {power, dailyReady, t}
+var welcomeShown = false;// session flag so the toast fires once per load
 var tutorialDone = false;
 var coachStep = 0;       // 0..3 (3 = done)
 var coachActive = false;
@@ -184,6 +203,41 @@ function freeWaitSec(){ return Math.max(0, Math.ceil((FREE_COOLDOWN_S*1000-(Date
 function dayIndex(){ return Math.floor(Date.now()/86400000); }
 function canAfford(themeId){ return coins >= crateCost(themeId); }
 
+// ── M1: CRITTER BONDS (duplicates -> owned upgrades) ───────────────────────
+// A duplicate is no longer dead weight: BOND_DUPES_PER_LV extra copies raise a
+// critter's bond one level (cap BOND_MAX). Bond level is OWNED + persisted and
+// sums into Collection Power below. STAR/sell remain untouched (additive).
+function bondLevel(id){ return bonds[id]|0; }
+function bondProgress(id){ // {lv, into, need} for the album pip + ring
+  var lv = bondLevel(id), have = inv[id]||0;
+  var spent = lv*BOND_DUPES_PER_LV;            // dupes already consumed by past levels
+  var dupes = Math.max(0, have - 1);           // copies beyond the first are "dupes"
+  var into = Math.max(0, dupes - spent);       // progress toward the NEXT level
+  return { lv:lv, into:Math.min(into,BOND_DUPES_PER_LV), need:BOND_DUPES_PER_LV, maxed:lv>=BOND_MAX };
+}
+// Auto-raise bond whenever this critter has enough un-spent dupes. Returns the
+// number of levels gained this call (0 = none). Called on every acquisition.
+function bumpBond(id){
+  if(bondLevel(id) >= BOND_MAX) return 0;
+  var have=inv[id]||0, dupes=Math.max(0, have-1);
+  var target = Math.min(BOND_MAX, Math.floor(dupes / BOND_DUPES_PER_LV));
+  var gained = target - bondLevel(id);
+  if(gained>0) bonds[id]=target;
+  return gained>0? gained : 0;
+}
+function totalBondLevels(){ var n=0; for(var id in bonds){ if(bonds.hasOwnProperty(id)) n+=bonds[id]|0; } return n; }
+// Collection Power: the OWNED, growing reason to exist across sessions. Sum of
+// all bond levels -> a permanent +% coins on EVERY open. "My collection makes me
+// stronger." Returns the percent (e.g. 18 == +18%).
+function collectionPowerPct(){ return Math.round(totalBondLevels()*POWER_PER_BOND*10)/10; }
+function collectionPowerMult(){ return 1 + totalBondLevels()*POWER_PER_BOND/100; }
+
+// ── M1: DAILY CRATE (24h reset = the genuine return hook) ──────────────────
+// Distinct from the 90s FREE button (session pacing). Resets each CALENDAR day,
+// guaranteed Rare+, and is the thing WAITING when a player returns tomorrow.
+function dailyCrateReady(){ return dayIndex() !== lastDailyCrateDay; }
+function dailyHoursLeft(){ var ms=(lastDailyCrateDay+1)*86400000 - Date.now(); return Math.max(0, Math.ceil(ms/3600000)); }
+
 // ── WEIGHTED DRAW (compute winner FIRST, then animate) ─────────────────────
 var ODDS_TOTAL = (function(){ var t=0; RARITY_ORDER.forEach(function(n){ t+=ODDS[n]; }); return t; })(); // normalize so the stated tail prob is exact
 function drawRarity(forcePity){
@@ -200,10 +254,11 @@ function drawRarity(forcePity){
   }
   return picked;
 }
-function drawCritter(themeId, noPity){
+function drawCritter(themeId, noPity, forceRarePlus){
   // noPity: skip the pity floor (used for battle/bot draws so they neither
   // consume nor benefit from the player's main-loop pity counter).
-  var pity = !noPity && opensSinceRare >= (PITY_OPENS-1);
+  // forceRarePlus: the daily crate guarantees Rare-or-better regardless of pity.
+  var pity = forceRarePlus || (!noPity && opensSinceRare >= (PITY_OPENS-1));
   var rarity = drawRarity(pity);
   var arr = CAT_BY_THEME[themeId]||[];
   var pool = arr.filter(function(c){ return c.rarity===rarity; });
@@ -220,6 +275,7 @@ function startOpen(mode){
   if(mode===true) mode='free'; if(mode===false||mode==null) mode='paid';
   if(gs==='OPENING') return;
   var themeId = activeTheme;
+  var forceRarePlus = false;
   if(mode==='paid'){
     if(!canAfford(themeId)){ maybeBust(); return; }
     coins -= crateCost(themeId);
@@ -227,12 +283,19 @@ function startOpen(mode){
     lastFreeTs = Date.now();
     var d=dayIndex();
     if(d !== lastDailyDay){ dailyStreak = (lastDailyDay===0 || d===lastDailyDay+1)? dailyStreak+1 : 1; lastDailyDay=d; }
+  } else if(mode==='daily'){
+    // The 24h DAILY crate: guaranteed Rare+, advances the streak, sets the 24h
+    // gate. This is the return hook (kept separate from the 90s free cooldown).
+    var dd=dayIndex();
+    if(dd !== lastDailyCrateDay){ dailyStreak = (lastDailyCrateDay===0 || dd===lastDailyCrateDay+1)? dailyStreak+1 : 1; }
+    lastDailyCrateDay = dd; lastDailyDay = dd;
+    forceRarePlus = true;
   } // 'bonus' costs nothing and leaves cooldown/streak untouched
   GF.sfx('click');
-  var won = drawCritter(themeId);                 // 1) winner FIRST
+  var won = drawCritter(themeId, false, forceRarePlus);   // 1) winner FIRST (daily forces Rare+)
   if(RARITY_ORDER.indexOf(won.rarity) >= 2) opensSinceRare=0; else opensSinceRare++;
   openCount++;
-  var coinGain = Math.round((6 + Math.random()*10) * themeObj(themeId).costMul * (CFG.tuning.coin_mult||1));
+  var coinGain = Math.round((6 + Math.random()*10) * themeObj(themeId).costMul * (CFG.tuning.coin_mult||1) * collectionPowerMult());
   reel = buildReel(themeId, won, coinGain, mode!=='paid');   // 2) reel lands on it
   gs = 'OPENING';
   GF.gameStarted();
@@ -281,10 +344,11 @@ function finishOpen(){
   var won=reel.won, coinGain=reel.coinGain;
   var isNew = !inv[won.id];
   inv[won.id]=(inv[won.id]||0)+1;
+  var bondGain = bumpBond(won.id);   // a dupe now strengthens the bond instead of being dead weight
   coins += coinGain;
   xp += XP_PER_OPEN; var leveled=false;
   while(xp >= xpForLevel(playerLevel)){ xp -= xpForLevel(playerLevel); playerLevel++; leveled=true; }
-  reveal = { critter:won, isNew:isNew, coinGain:coinGain, leveled:leveled };
+  reveal = { critter:won, isNew:isNew, coinGain:coinGain, leveled:leveled, bondGain:bondGain, bondLv:bondLevel(won.id) };
   gs='REVEAL';
   var rcol=RARITY_GLOW[won.rarity], ri=RARITY_ORDER.indexOf(won.rarity);
   GF.juice.flash(rcol, 220+ri*90, 0.25+ri*0.12);
@@ -292,6 +356,7 @@ function finishOpen(){
   GF.juice.particles.burst(GF.cx, GF.cy-20*GF.S, { count:18+ri*16, colors:[rcol, RARITY_COL[won.rarity], '#fff'], speed:160+ri*70, gravity:300, life:0.7+ri*0.15, size:5+ri });
   if(ri>=2){ GF.sfx(ri>=3?'win':'reward'); GF.funnel.mark('first_upgrade'); } else GF.sfx('pickup');
   if(coinGain>0) GF.juice.floatText(GF.cx+70*GF.S, GF.cy+60*GF.S, '+'+coinGain, { color:'#ffd34d', size:18 });
+  if(bondGain>0){ setTimeout(function(){ if(!GF.muted) GF.sfx('evolve'); }, 200); GF.juice.particles.burst(GF.cx, GF.cy+10*GF.S, { count:18, colors:['#7cf0c4','#4ad3a0','#fff'], speed:150, gravity:200, life:0.7, size:4 }); }
   if(leveled) setTimeout(function(){ if(!GF.muted) GF.sfx('levelup'); }, 260);
   GF.gameEnded();
   saveAll();
@@ -393,6 +458,7 @@ function resolveBattle(){
   var pc=battle.results[0].critter;
   battle.isNew = !inv[pc.id];
   inv[pc.id]=(inv[pc.id]||0)+1;   // you ALWAYS keep your critter
+  bumpBond(pc.id);                // and it can strengthen the bond
   xp += XP_PER_OPEN; while(xp>=xpForLevel(playerLevel)){ xp-=xpForLevel(playerLevel); playerLevel++; }
   if(battle.playerWon){ coins+=battle.prize; GF.sfx('win'); GF.juice.flash('#ffd87a',300,0.4); GF.juice.particles.burst(GF.cx,GF.cy,{count:46,colors:['#ffd87a','#ffb43c','#fff'],speed:240,life:1,size:6}); GF.happytime(); }
   else GF.sfx('lose');   // no penalty on a loss - just no bonus
@@ -412,8 +478,9 @@ function coachText(){ return coachActive? GF.t('coach'+(coachStep+1)) : null; }
 // ── PERSISTENCE ─────────────────────────────────────────────────────────────
 function saveAll(){ GF.saveRun(); }
 function snapshot(){
-  return { v:1, coins:coins, xp:xp, lvl:playerLevel, theme:activeTheme, inv:inv, star:starred,
-    oc:openCount, osr:opensSinceRare, streak:dailyStreak, lastFree:lastFreeTs, lastDay:lastDailyDay, tut:tutorialDone };
+  return { v:2, coins:coins, xp:xp, lvl:playerLevel, theme:activeTheme, inv:inv, star:starred, bonds:bonds,
+    oc:openCount, osr:opensSinceRare, streak:dailyStreak, lastFree:lastFreeTs, lastDay:lastDailyDay,
+    lastDaily:lastDailyCrateDay, tut:tutorialDone };
 }
 function restore(s){
   if(!s) return;
@@ -422,10 +489,13 @@ function restore(s){
   activeTheme=s.theme||'meadow';
   inv=(s.inv&&typeof s.inv==='object')?s.inv:{};
   starred=(s.star&&typeof s.star==='object')?s.star:{};
+  bonds=(s.bonds&&typeof s.bonds==='object')?s.bonds:{};
   openCount=s.oc|0; opensSinceRare=s.osr|0;
   dailyStreak=s.streak|0; lastFreeTs=s.lastFree|0; lastDailyDay=s.lastDay|0;
+  lastDailyCrateDay=s.lastDaily|0;
   tutorialDone=!!s.tut;
   for(var id in inv){ if(inv.hasOwnProperty(id)){ inv[id]=Math.max(0, inv[id]|0); if(!inv[id]||!critterById(id)) delete inv[id]; } }
+  for(var bid in bonds){ if(bonds.hasOwnProperty(bid)){ bonds[bid]=clamp(bonds[bid]|0,0,BOND_MAX); if(!bonds[bid]||!critterById(bid)) delete bonds[bid]; } }
 }
 
 // ── LAYOUT (rects recomputed each frame) ────────────────────────────────────
@@ -473,10 +543,35 @@ function draw(ctx){
   if(gs==='BUST') drawBust(ctx);
 
   drawCoach(ctx);
+  if(welcomeBack) drawWelcomeBack(ctx);
 
   GF.juice.particles.draw(ctx);
   GF.juice.texts.draw(ctx);
   GF.juice.drawFlash(ctx);
+}
+// M1: the returning-player surface — fades in/out on boot when the player has
+// progress, naming what's grown (Collection Power) and what's WAITING (daily).
+function drawWelcomeBack(ctx){
+  var W=GF.W,H=GF.H,S=GF.S, wb=welcomeBack;
+  var fade = wb.t<0.3? wb.t/0.3 : (wb.t>3.8? Math.max(0,(4.4-wb.t)/0.6) : 1);
+  var w=clamp(300*S,230,360), lines=wb.dailyReady?3:2, h=clamp((68+lines*22)*S, 92, 168);
+  var x=W/2-w/2, y=H*0.30-h/2;
+  ctx.save(); ctx.globalAlpha=fade;
+  ctx.shadowColor='rgba(124,240,196,0.5)'; ctx.shadowBlur=18*S;
+  rr(ctx,x,y,w,h,16*S);
+  var g=ctx.createLinearGradient(0,y,0,y+h); g.addColorStop(0,'#1b2f44'); g.addColorStop(1,'#101a2a');
+  ctx.fillStyle=g; ctx.fill();
+  ctx.shadowBlur=0; ctx.lineWidth=1.5*S; ctx.strokeStyle='rgba(124,240,196,0.45)'; ctx.stroke();
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle='#fff'; ctx.font='bold '+clamp(20*S,16,26)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('wb_title'), W/2, y+clamp(34*S,26,42));
+  ctx.fillStyle='#cfffe9'; ctx.font='bold '+clamp(14*S,11,18)+'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('wb_power')+': +'+wb.power+'% '+GF.t('coin_bonus'), W/2, y+clamp(62*S,50,78));
+  if(wb.dailyReady){
+    ctx.fillStyle='#ffd76a'; ctx.font='bold '+clamp(14*S,11,18)+'px Inter, system-ui, sans-serif';
+    ctx.fillText('★ '+GF.t('wb_daily'), W/2, y+clamp(86*S,72,108));
+  }
+  ctx.restore();
 }
 
 function drawBokeh(ctx){
@@ -506,8 +601,39 @@ function drawRoom(ctx, busy){
       ctx.fillStyle='#9fb2c9'; ctx.font='bold '+clamp(12*S,10,15)+'px Inter, system-ui, sans-serif';
       ctx.fillText(GF.t('streak')+': '+dailyStreak, L.crate.cx, L.crate.cy + L.crate.r + 50*S);
     }
-  }
+    drawDailyCrate(ctx);
+  } else { L._dailyBtn=null; }
   drawBottomBar(ctx);
+}
+// M1: the DAILY (24h) crate — the genuine return hook. A glowing tappable pill
+// above the crate when ready (what a returning player SEES is waiting); a quiet
+// "Daily next in Nh" when on cooldown.
+function drawDailyCrate(ctx){
+  var S=GF.S, cx=L.crate.cx, y=L.crate.cy - L.crate.r - clamp(58*S,42,76);
+  if(dailyCrateReady()){
+    var w=clamp(208*S,160,260), h=clamp(40*S,32,52), x=cx-w/2;
+    var t=(typeof performance!=='undefined'?performance.now():Date.now())/1000;
+    var pulse=0.5+0.5*Math.sin(t*3);
+    L._dailyBtn={ x:x, y:y, w:w, h:h };
+    ctx.save();
+    ctx.shadowColor='rgba(255,196,80,'+(0.4+pulse*0.45)+')'; ctx.shadowBlur=(14+pulse*16)*S;
+    rr(ctx,x,y,w,h,h/2);
+    var g=ctx.createLinearGradient(x,y,x,y+h); g.addColorStop(0,'#ffd76a'); g.addColorStop(1,'#ff9f2e');
+    ctx.fillStyle=g; ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#5a3500'; drawGiftIcon(ctx, x+h*0.6, y+h/2, h*0.26);
+    ctx.fillStyle='#3a2200'; ctx.font='bold '+clamp(15*S,12,20)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText(GF.t('daily')+' • '+GF.t('free'), x+h*1.0, y+h/2+0.5);
+    ctx.restore();
+  } else {
+    L._dailyBtn=null;
+    ctx.save();
+    ctx.fillStyle='rgba(159,178,201,0.85)'; ctx.font='bold '+clamp(11*S,9,14)+'px Inter, system-ui, sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(GF.t('daily_done')+' • '+GF.t('next_in')+' '+dailyHoursLeft()+GF.t('hr'), cx, y+clamp(20*S,16,26));
+    ctx.restore();
+  }
 }
 
 function drawHUD(ctx){
@@ -528,8 +654,32 @@ function drawHUD(ctx){
   ctx.fillStyle='#dfe7ff'; ctx.font='bold '+clamp(10*S,8,13)+'px Inter, system-ui, sans-serif';
   ctx.textAlign='left'; ctx.textBaseline='middle';
   ctx.fillText(GF.t('lvl')+' '+playerLevel, xb.x+xb.w+8*S, xb.y+xb.h/2);
+  drawPowerChip(ctx);
   GF.drawMuteIcon(ctx, L.mute.x, L.mute.y, L.mute.r, GF.muted);
   drawHelpIcon(ctx, L.help.x, L.help.y, L.help.r);
+}
+// M1: the OWNED, growing stat — "my collection makes me stronger". Always
+// visible in the HUD so the meta is legible outside the album.
+function drawPowerChip(ctx){
+  var S=GF.S, pct=collectionPowerPct();
+  var w=clamp(112*S,84,150), h=clamp(30*S,24,40), x=L.coin.x, y=L.xpbar.y+L.xpbar.h+8*S;
+  L.power={ x:x, y:y, w:w, h:h };
+  ctx.save();
+  rr(ctx,x,y,w,h,h/2);
+  ctx.fillStyle= pct>0? 'rgba(18,40,32,0.78)':'rgba(8,10,22,0.6)'; ctx.fill();
+  if(pct>0){ ctx.lineWidth=1.5*S; ctx.strokeStyle='rgba(124,240,196,0.55)'; ctx.stroke(); }
+  // little bonded-heart mark
+  var hx=x+h*0.55, hy=y+h/2, hr=h*0.2;
+  ctx.fillStyle= pct>0? '#7cf0c4':'#5b6578';
+  ctx.beginPath();
+  ctx.moveTo(hx,hy+hr*0.9);
+  ctx.bezierCurveTo(hx-hr*1.4,hy-hr*0.4, hx-hr*0.5,hy-hr*1.3, hx,hy-hr*0.4);
+  ctx.bezierCurveTo(hx+hr*0.5,hy-hr*1.3, hx+hr*1.4,hy-hr*0.4, hx,hy+hr*0.9);
+  ctx.fill();
+  ctx.fillStyle= pct>0? '#cfffe9':'#9fb2c9'; ctx.font='bold '+clamp(13*S,11,17)+'px Inter, system-ui, sans-serif';
+  ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.fillText(GF.t('power')+' +'+pct+'%', x+h*0.95, y+h/2+0.5);
+  ctx.restore();
 }
 
 function drawCollectionBar(ctx, cx, y){
@@ -672,6 +822,12 @@ function drawReveal(ctx){
   }
   ctx.fillStyle='#ffd34d'; ctx.font='bold '+clamp(15*S,12,20)+'px Inter, system-ui, sans-serif';
   ctx.fillText('+'+reveal.coinGain+' '+GF.t('coinsfrom'), cx, cy+ch/2-40*S);
+  if(reveal.bondGain>0){
+    ctx.save(); ctx.shadowColor='#7cf0c4'; ctx.shadowBlur=10*S;
+    ctx.fillStyle='#7cf0c4'; ctx.font='bold '+clamp(14*S,11,18)+'px Inter, system-ui, sans-serif';
+    ctx.fillText((reveal.bondLv>=BOND_MAX?GF.t('maxbond'):GF.t('bond_up'))+' • '+GF.t('bondlv')+' '+reveal.bondLv, cx, cy+ch/2-18*S);
+    ctx.restore();
+  }
   var bw=clamp(180*S,140,240), bh=clamp(54*S,44,68);
   L._revealAdd={ x:cx-bw/2, y:cy+ch/2+18*S, w:bw, h:bh };
   drawBigButton(ctx, L._revealAdd, GF.t('add'), '#2ee07a','#23a657', true);
@@ -738,12 +894,22 @@ function drawAlbumCard(ctx, x, y, w, h, c){
     var g=ctx.createLinearGradient(0,y,0,y+h); g.addColorStop(0, shade(rcol,-0.45)); g.addColorStop(1, shade(rcol,-0.72));
     ctx.fillStyle=g; ctx.fill();
     ctx.lineWidth=2*S; ctx.strokeStyle=rcol; ctx.stroke();
-    drawCritterArt(ctx, x+w/2, y+h*0.42, w*0.62, c);
+    drawCritterArt(ctx, x+w/2, y+h*0.40, w*0.60, c);
     if(starred[c.id]) drawStarIcon(ctx, x+w-12*S, y+12*S, 7*S, '#ffd34d', true);
     if(have>1){
       ctx.fillStyle='rgba(8,10,22,0.85)'; rr(ctx, x+4*S, y+h-20*S, 30*S, 16*S, 8*S); ctx.fill();
       ctx.fillStyle='#fff'; ctx.font='bold '+clamp(10*S,8,13)+'px Inter, system-ui, sans-serif';
       ctx.textAlign='left'; ctx.textBaseline='middle'; ctx.fillText('x'+have, x+8*S, y+h-12*S);
+    }
+    // M1: bond pips — duplicates fill these; a maxed bond glows. Visible proof the
+    // collection is something you GROW, not just complete.
+    var bp=bondProgress(c.id), pr=clamp(3*S,2.2,4.2), gap=clamp(7*S,5,9);
+    var py=y+h-12*S, totalW=(BOND_MAX-1)*gap, px=x+w-8*S-totalW;
+    for(var bi=0;bi<BOND_MAX;bi++){
+      var on=bi<bp.lv;
+      ctx.beginPath(); ctx.arc(px+bi*gap, py, pr, 0, Math.PI*2);
+      ctx.fillStyle= on? (bp.maxed?'#7cf0c4':'#5fd3b0') : 'rgba(255,255,255,0.22)';
+      ctx.fill();
     }
   } else {
     ctx.fillStyle='rgba(20,24,40,0.9)'; ctx.fill();
@@ -1107,6 +1273,7 @@ function update(dt){
   GF.juice.update(dt);
   var gdt=dt*GF.juice.timeScale;
   if(coinHud.pop>0) coinHud.pop=Math.max(0,coinHud.pop-dt*30);
+  if(welcomeBack){ welcomeBack.t+=dt; if(welcomeBack.t>4.4) welcomeBack=null; }
   if(gs==='OPENING') updateOpen(gdt);
   if(gs==='BATTLE' && battle && battle.phase==='spin') updateBattleSpin(gdt);
 }
@@ -1149,6 +1316,7 @@ function onPress(x, y){
   if(gs==='SHOP'){ onPressShop(x,y); return; }
   if(gs==='BATTLE'){ onPressBattle(x,y); return; }
 
+  if(L._dailyBtn && hit(x,y,L._dailyBtn)){ if(dailyCrateReady()) startOpen('daily'); else GF.sfx('error'); return; }
   if(hit(x,y,L.open)){ startOpen(false); return; }
   if(hit(x,y,L.tabs.album)){ openAlbum(); return; }
   if(hit(x,y,L.tabs.shop)){ openShop(); return; }
@@ -1230,14 +1398,15 @@ GF.init({
       clamps: { 'tuning.price_mult':[0.5,2], 'tuning.coin_mult':[0.5,3] },
       onUpdate: function(c){ CFG=c; },
     }).then(function(c){ CFG=c; });
-    GF.exposeState(function(){ return { gs:gs, score:coins, coins:coins, level:playerLevel, xp:xp, owned:totalOwned(), opens:openCount, theme:activeTheme }; });
+    GF.exposeState(function(){ return { gs:gs, score:coins, coins:coins, level:playerLevel, xp:xp, owned:totalOwned(), opens:openCount, theme:activeTheme, power:collectionPowerPct(), bonds:totalBondLevels(), dailyReady:dailyCrateReady() }; });
     GF.exposeBot(function(){
       var acts=[];
-      if(gs==='PLAYING'){ acts.push('open'); if(freeReady()) acts.push('free'); if(dupesSellValue()>0) acts.push('sellall'); }
+      if(gs==='PLAYING'){ acts.push('open'); if(dailyCrateReady()) acts.push('daily'); if(freeReady()) acts.push('free'); if(dupesSellValue()>0) acts.push('sellall'); }
       if(gs==='REVEAL') acts.push('continue');
       return acts;
     }, function(a){
-      if(a==='open'){ if(canAfford(activeTheme)) startOpen(false); else if(freeReady()) startOpen(true); }
+      if(a==='open'){ if(canAfford(activeTheme)) startOpen(false); else if(dailyCrateReady()) startOpen('daily'); else if(freeReady()) startOpen(true); }
+      else if(a==='daily'){ if(dailyCrateReady()) startOpen('daily'); }
       else if(a==='free'){ if(freeReady()) startOpen(true); }
       else if(a==='sellall'){ openAlbum(); sellAllDupes(); closeOverlay(); }
       else if(a==='continue'){ dismissReveal(); }
@@ -1260,6 +1429,7 @@ GF.init({
       var it=[];
       if(gs==='PLAYING'){
         it.push({ id:'open', x:L.open.x, y:L.open.y, w:L.open.w, h:L.open.h });
+        if(L._dailyBtn) it.push({ id:'daily', x:L._dailyBtn.x, y:L._dailyBtn.y, w:L._dailyBtn.w, h:L._dailyBtn.h });
         ['album','shop','battle','free'].forEach(function(k){ var t=L.tabs[k]; it.push({ id:k, x:t.x, y:t.y, w:t.w, h:t.h }); });
       }
       return { screen:gs.toLowerCase(), items:it, viewportH:GF.H, screenH:GF.H };
@@ -1271,6 +1441,13 @@ GF.init({
       { name:'battle', go:function(){ battle=null; gs='BATTLE'; } },
     ]);
     startCoach();
+    // ── M1: WELCOME BACK — a returning player with progress sees their growing
+    // Collection Power + the daily crate that's waiting, the moment they boot. ──
+    if(!welcomeShown && totalOwned()>0){
+      welcomeShown=true;
+      welcomeBack={ power:collectionPowerPct(), dailyReady:dailyCrateReady(), t:0 };
+      if(dailyCrateReady()) setTimeout(function(){ if(!GF.muted) GF.sfx('reward'); }, 400);
+    }
     if(window.__GF_AUTOSTART && !window._silent){ gs='PLAYING'; }
   },
   onUpdate: function(dt){ update(dt); postUpdate(); },
@@ -1297,11 +1474,15 @@ window._getI18N = function(){ return STRINGS[GF.lang]||STRINGS.en; };
 window._getFontBody = function(){ return 'Inter, system-ui, sans-serif'; };
 window._jumpLevel = function(n){
   coins=5200; playerLevel=7; xp=20;
-  inv={}; starred={};
+  inv={}; starred={}; bonds={};
   var meadow=CAT_BY_THEME['meadow']||[]; for(var i=0;i<meadow.length;i++){ if(i<9) inv[meadow[i].id]=(i%3===0?3:1); }
   var reef=CAT_BY_THEME['reef']||[]; for(var j=0;j<reef.length;j++){ if(j<5) inv[reef[j].id]=(j===0?6:1); }
   if(meadow[0]){ inv[meadow[0].id]=6; }
-  activeTheme='meadow'; albumViewTheme='meadow'; tutorialDone=true; coachActive=false; gs='PLAYING';
+  // seed bonds so the meta (pips + Collection Power) is visible in screenshots
+  for(var b=0;b<meadow.length;b++){ if(inv[meadow[b].id]){ bumpBond(meadow[b].id); } }
+  if(meadow[1]){ bonds[meadow[1].id]=BOND_MAX; } if(meadow[3]){ bonds[meadow[3].id]=3; }
+  lastDailyCrateDay=dayIndex(); lastDailyDay=dayIndex(); dailyStreak=4;   // daily already claimed today
+  activeTheme='meadow'; albumViewTheme='meadow'; tutorialDone=true; coachActive=false; welcomeBack=null; welcomeShown=true; gs='PLAYING';
 };
 // Test-only verifier: confirm the reel's centered tile == the pre-computed won
 // critter once the spin has settled. Returns null when no reel is active.
@@ -1323,6 +1504,14 @@ window.__ccSetupBattle = function(){
   battleRivals=3; startBattle(3);   // FREE entry, 3 rivals
   // settle all reels + resolve
   if(battle){ battle.t=battle.dur; for(var i=0;i<60;i++){ updateBattleSpin(1/60); if(battle.phase==='result') break; } }
+};
+// Test-only: force the DAILY-READY + welcome-back surface a returning player sees.
+window._ccPreviewReturn = function(){
+  window._jumpLevel();
+  lastDailyCrateDay = dayIndex()-1;   // daily is now READY again (the return hook)
+  welcomeShown=false;
+  welcomeBack={ power:collectionPowerPct(), dailyReady:true, t:0.6 };
+  gs='PLAYING';
 };
 window._setupForScreenshot = function(level){
   window._jumpLevel();

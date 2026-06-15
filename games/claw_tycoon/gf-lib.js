@@ -854,7 +854,7 @@ function showAd(type) {
           window.gp.ads.showRewardedVideo()
             .then(function (success) { ok({ shown: true, rewarded: !!success }); })
             .catch(function () { ok({ shown: false, rewarded: false }); });
-          setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
           return;
         }
         // A rewarded request must NEVER fall through to a fullscreen ad (that
@@ -864,7 +864,7 @@ function showAd(type) {
           window.gp.ads.showFullscreen()
             .then(function () { ok({ shown: true, rewarded: false }); })
             .catch(function () { ok({ shown: false, rewarded: false }); });
-          setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
           return;
         }
       }
@@ -874,7 +874,7 @@ function showAd(type) {
           adFinished: function () { ok({ shown: true, rewarded: type === 'rewarded' }); },
           adError:    function () { ok({ shown: false, rewarded: false }); },
         });
-        setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+        setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
         return;
       }
       if (platform === 'yandex' && window.ysdk && window.ysdk.adv) {
@@ -895,7 +895,7 @@ function showAd(type) {
               onError:    function () { ok({ shown: false, rewarded: false }); },
             },
           });
-          setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
           return;
         }
         window.ysdk.adv.showFullscreenAdv({
@@ -908,12 +908,21 @@ function showAd(type) {
             onError: function () { ok({ shown: false, rewarded: false }); },
           },
         });
-        setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+        setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
         return;
       }
     } catch (e) {}
     ok({ shown: false, rewarded: false });  // local / unknown → resolve immediately
   });
+}
+function adWatchdogMs() {
+  var ms = 30000;
+  try {
+    if (typeof window.__GF_AD_WATCHDOG_MS === 'number' && window.__GF_AD_WATCHDOG_MS >= 300) {
+      ms = window.__GF_AD_WATCHDOG_MS;
+    }
+  } catch (e) {}
+  return ms;
 }
 // Convenience: rewarded ad with callbacks. Audio pause/resume + the no-fill
 // watchdog are handled inside showAd; onReward fires ONLY on a confirmed reward.

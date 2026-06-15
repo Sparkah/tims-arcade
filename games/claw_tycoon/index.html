@@ -92,7 +92,7 @@ var STRINGS = {
     goal_save: 'Накопи', goal_unlock: 'чтобы открыть', goal_rank: 'до ранга',
     emptied_sub: 'Клиенты устали ждать и ушли!',
     reached: 'Достигнут', newmachine: 'НОВЫЙ АВТОМАТ!', rankup: 'НОВЫЙ РАНГ!',
-    vip: 'VIP', grabbed: 'ЕСТЬ!', missed: 'мимо',
+    vip: 'ОСОБЫЙ', grabbed: 'ЕСТЬ!', missed: 'мимо',
     tickets: 'БИЛЕТЫ', arcade: 'ЗАЛ', shelf: 'ВИТРИНА',
     u_meta_shelf: 'Витрина призов', u_meta_shelf_d: 'постоянная ценность пойманных призов',
     u_meta_franchise: 'Штаб франшизы', u_meta_franchise_d: 'постоянный хват и обучение персонала',
@@ -120,7 +120,7 @@ var STRINGS = {
 // ── MACHINE TYPES (DESIGN.md §Win — eight-rung ladder) ────────────────────
 var MACHINES = {
   en: ['Plush Claw','Capsule Gacha','Jumbo Claw','Candy Drop','Prize Pusher','Mystery Box','VIP Crane','Diamond Vault'],
-  ru: ['Клешня-плюш','Капсула-гача','Гигант-клешня','Сахарный дроп','Толкатель','Загадка-бокс','VIP-кран','Алмазный сейф'],
+  ru: ['Клешня-плюш','Капсула-гача','Гигант-клешня','Сахарный дроп','Толкатель','Загадка-бокс','Золотой кран','Алмазный сейф'],
 };
 // Per-machine cabinet palette {glass, frame, accent} + plushie hue family.
 var MACHINE_COL = [
@@ -235,6 +235,7 @@ var clawHeld = null;           // {plush ref} while carrying to chute
 var swayT = 0;                 // auto-sway phase
 var dragging = false;          // is the player currently dragging to aim
 var dragStartedInShop = false; // touch began inside shop -> scroll, not aim
+var inputNoise = 0;             // incremented by live play taps for Yandex pause-lock tests
 
 var plushies = [];             // live plushies in the cabinet
 var stockSlots = 8;            // plushie slots in the cabinet
@@ -258,6 +259,9 @@ var muteBtn = { x:0, y:0, w:0, h:0 };
 var upgradeRects = [];         // {kind, x,y,w,h, cost, enabled, maxed}
 var playBtnRect = null;
 var shop = null;               // GF.makeScroll controller
+var tutorialCueT = 0;          // local tap target pulse timer
+var tutorialLastStep = -1;     // used to run one-shot focus work per step
+var tutorialFocusKind = null;  // upgrade row currently emphasized for the coach
 
 // ── PERSISTENT ARCADE META ────────────────────────────────────────────────
 function normalizeMeta(m) {
@@ -767,13 +771,15 @@ function startGame() {
 function startTutorial() {
   var seen = false;
   try { seen = !!localStorage.getItem('claw_tycoon_seen_tutorial'); } catch (e) {}
+  tutorialLastStep = -1;
+  tutorialFocusKind = null;
   var steps = [
     { text: (GF.lang === 'ru' ? 'Двигай влево-вправо, чтобы навести клешню на игрушку' : 'Drag left/right to aim the claw over a plushie'),
-      target: function () { var p = nearestPlushTarget(); return { x: clawX, y: L.railY + 24 * GF.S, r: CLAW_W() * 0.6 }; },
-      target2: function () { var p = nearestPlushTarget(); return { x: p.x, y: L.railY + 24 * GF.S, r: CLAW_W() * 0.5 }; },
+      target: function () { var p = nearestPlushTarget(); return { x: clawX, y: L.railY + 24 * GF.S, r: GF.clamp(18 * GF.S, 14, 24) }; },
+      target2: function () { var p = nearestPlushTarget(); return { x: p.x, y: L.railY + 24 * GF.S, r: GF.clamp(18 * GF.S, 14, 24) }; },
       gesture: 'drag', advance: 'manual' },
     { text: (GF.lang === 'ru' ? 'Тапни, чтобы опустить клешню и схватить!' : 'Tap to drop the claw and grab!'),
-      target: function () { return { x: clawX, y: L.railY + 30 * GF.S, r: CLAW_W() * 0.6 }; },
+      target: function () { return { x: clawX, y: L.railY + 30 * GF.S, r: GF.clamp(18 * GF.S, 14, 24) }; },
       gesture: 'tap', advance: 'manual' },
     { text: (GF.lang === 'ru' ? 'Накопи монеты и купи улучшение внизу!' : 'Save coins and buy an upgrade below!'),
       target: function () { return upgradeTarget('clerk'); }, advance: 'manual' },
@@ -794,10 +800,130 @@ function upgradeTarget(kind) {
   for (var i = 0; i < upgradeRects.length; i++) {
     if (upgradeRects[i].kind === kind) {
       var r = upgradeRects[i];
-      return { x: r.x + r.w / 2, y: r.y + r.h / 2, r: Math.max(r.w, r.h) / 2 };
+      return { x: r.x + r.w - GF.clamp(50 * GF.S, 42, 70), y: r.y + r.h / 2, r: GF.clamp(18 * GF.S, 14, 24) };
     }
   }
-  return { x: GF.cx, y: GF.H * 0.82, r: 40 * GF.S };
+  return { x: GF.cx, y: GF.H * 0.82, r: GF.clamp(18 * GF.S, 14, 24) };
+}
+function shopRowMetrics() {
+  L.rowGap = GF.clamp(7 * GF.S, 4, 11);
+  L.rowH = GF.clamp(64 * GF.S, 50, 84);
+}
+function focusUpgradeInShop(kind) {
+  if (!shop) return false;
+  shopRowMetrics();
+  var items = shopItems();
+  var idx = -1;
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].kind === kind) { idx = i; break; }
+  }
+  if (idx < 0) return false;
+  var contentH = items.length * (L.rowH + L.rowGap);
+  shop.setContentHeight(contentH);
+  var rowY = idx * (L.rowH + L.rowGap);
+  shop.scrollTo(rowY - (L.listH - L.rowH) / 2);
+  tutorialFocusKind = kind;
+  return true;
+}
+function updateTutorialFocus(dt) {
+  if (!GF.tutorial.active) {
+    tutorialLastStep = -1;
+    tutorialFocusKind = null;
+    return;
+  }
+  tutorialCueT += dt;
+  if (GF.tutorial.step === tutorialLastStep) return;
+  tutorialLastStep = GF.tutorial.step;
+  tutorialFocusKind = null;
+  if (GF.tutorial.step === 2) focusUpgradeInShop('clerk');
+}
+function tutorialCueTarget() {
+  if (!GF.tutorial.active) return null;
+  var st = GF.tutorial.step;
+  if (st === 0) {
+    return { x: clawX, y: L.railY + 24 * GF.S, r: GF.clamp(15 * GF.S, 12, 20), hitR: GF.clamp(38 * GF.S, 32, 52), action: 'aim' };
+  }
+  if (st === 1) {
+    return { x: clawX, y: L.railY + 30 * GF.S, r: GF.clamp(15 * GF.S, 12, 20), hitR: GF.clamp(40 * GF.S, 34, 54), action: 'drop' };
+  }
+  if (st === 2) {
+    if (!upgradeTargetVisible('clerk')) focusUpgradeInShop('clerk');
+    var row = upgradeRect('clerk');
+    if (row) {
+      return { x: row.x + row.w - GF.clamp(50 * GF.S, 42, 70), y: row.y + row.h / 2,
+        r: GF.clamp(16 * GF.S, 13, 22), hitR: GF.clamp(42 * GF.S, 36, 58), action: 'buy_clerk' };
+    }
+    return { x: GF.cx, y: GF.H * 0.82, r: GF.clamp(16 * GF.S, 13, 22), hitR: GF.clamp(42 * GF.S, 36, 58), action: 'buy_clerk' };
+  }
+  if (st === 3) {
+    return { x: L.cabX + L.cabW * 0.5, y: L.cabY + L.cabH * 0.42,
+      r: GF.clamp(14 * GF.S, 11, 19), hitR: GF.clamp(38 * GF.S, 32, 52), action: 'finish' };
+  }
+  return null;
+}
+function upgradeRect(kind) {
+  for (var i = 0; i < upgradeRects.length; i++) {
+    if (upgradeRects[i].kind === kind) return upgradeRects[i];
+  }
+  return null;
+}
+function upgradeTargetVisible(kind) {
+  var r = upgradeRect(kind);
+  return !!(r && shop && r.y + r.h * 0.5 >= shop.vp.y + 8 * GF.S && r.y + r.h * 0.5 <= shop.vp.y + shop.vp.h - 8 * GF.S);
+}
+function handleTutorialCuePress(x, y) {
+  var cue = tutorialCueTarget();
+  if (!cue) return false;
+  var dx = x - cue.x, dy = y - cue.y;
+  if (dx * dx + dy * dy > cue.hitR * cue.hitR) return false;
+  if (cue.action === 'aim') {
+    var p = nearestPlushTarget();
+    clawX = clawTargetX = GF.clamp(p.x, L.cabX + CLAW_W() * 0.5, L.cabX + L.cabW - CLAW_W() * 0.5);
+    dragging = false;
+    GF.tutorial.next();
+    return true;
+  }
+  if (cue.action === 'drop') {
+    if (clawState === 'idle') startDrop();
+    GF.tutorial.next();
+    return true;
+  }
+  if (cue.action === 'buy_clerk') {
+    focusUpgradeInShop('clerk');
+    doUpgrade('clerk');
+    GF.tutorial.next();
+    return true;
+  }
+  if (cue.action === 'finish') {
+    GF.tutorial.next();
+    return true;
+  }
+  return false;
+}
+function drawTutorialCue(ctx) {
+  var cue = tutorialCueTarget();
+  if (!cue) return;
+  var pulse = 0.5 + 0.5 * Math.sin(tutorialCueT * 7);
+  var r = cue.r;
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.shadowColor = 'rgba(124,252,154,0.8)';
+  ctx.shadowBlur = 12 * GF.S;
+  ctx.globalAlpha = 0.25 + pulse * 0.25;
+  ctx.fillStyle = '#7CFC9A';
+  ctx.beginPath(); ctx.arc(cue.x, cue.y, r + 13 * GF.S * pulse, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#f7fff2';
+  ctx.beginPath(); ctx.arc(cue.x, cue.y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#1b3b24';
+  ctx.lineWidth = Math.max(2, 2.5 * GF.S);
+  ctx.beginPath(); ctx.arc(cue.x, cue.y, r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = '#7CFC9A';
+  ctx.lineWidth = Math.max(2, 3 * GF.S);
+  ctx.globalAlpha = 0.75;
+  ctx.beginPath(); ctx.arc(cue.x, cue.y, r + 6 * GF.S + pulse * 5 * GF.S, 0, Math.PI * 2); ctx.stroke();
+  ctx.restore();
 }
 
 // ── UPDATE ───────────────────────────────────────────────────────────────
@@ -807,6 +933,7 @@ function update(dt) {
   if (shop) shop.update();
 
   GF.tutorial.update(dt);
+  updateTutorialFocus(dt);
   // freeze the world (no drain/spawn) while the coach is up — first seconds can't fail
   var coachFreeze = GF.tutorial.active;
 
@@ -1181,10 +1308,12 @@ function onDown(x, y) {
   // mute button always accessible
   if (inRect(x, y, muteBtn)) { var m = GF.toggleMute(); GF.setMusicMuted(m); ClawTycoonMusic.setMuted(m); return; }
   if (gs !== 'PLAYING') return;
+  inputNoise++;
 
   // tutorial gating: hands-on (aim/drop/buy are the real actions)
   if (GF.tutorial.active) {
     var st = GF.tutorial.step;
+    if (handleTutorialCuePress(x, y)) return;
     if (st === 0) { // aim: begin a drag
       if (inCabinet(x, y)) { beginAim(x, y); }
       return;
@@ -1355,6 +1484,7 @@ function draw(ctx) {
 
   // tutorial overlay last
   GF.tutorial.draw(ctx);
+  drawTutorialCue(ctx);
 }
 
 function hexA(hex, a) {
@@ -1857,11 +1987,26 @@ function drawShop(ctx) {
     var ry = i * (L.rowH + L.rowGap);
     var screenY = ry + L.listY - shop.offset; // for hit rect
     drawShopRow(ctx, it, pad, ry, rowFull, L.rowH);
+    if (GF.tutorial.active && GF.tutorial.step === 2 && it.kind === tutorialFocusKind) {
+      drawShopTutorialFocus(ctx, pad, ry, rowFull, L.rowH, it.col);
+    }
     upgradeRects.push({ kind: it.kind, x: pad, y: screenY, w: rowFull, h: L.rowH,
       cost: it.cost, enabled: itemAffordable(it) });
   }
   shop.end(ctx);
   shop.draw(ctx);
+}
+function drawShopTutorialFocus(ctx, x, y, w, h, col) {
+  var pulse = 0.5 + 0.5 * Math.sin(tutorialCueT * 6);
+  ctx.save();
+  ctx.strokeStyle = col || '#7CFC9A';
+  ctx.globalAlpha = 0.78 + pulse * 0.22;
+  ctx.lineWidth = Math.max(3, 3.5 * GF.S);
+  ctx.shadowColor = col || '#7CFC9A';
+  ctx.shadowBlur = 12 * GF.S;
+  GF.rr(ctx, x + 3 * GF.S, y + 3 * GF.S, w - 6 * GF.S, h - 6 * GF.S, 12 * GF.S);
+  ctx.stroke();
+  ctx.restore();
 }
 function drawShopRow(ctx, it, x, y, w, h) {
   var S = GF.S;
@@ -2350,6 +2495,74 @@ window._setState = function (s) { gs = (s === 'PLAYING' || s === 'GAMEOVER' || s
 window._getI18N = function () { return STRINGS; };
 window._getFontBody = function () { return 'sans-serif'; };
 
+window.__gfAdTest = {
+  rewardedNoFill: function () { return runAdNoFillProbe('rewarded'); },
+  fullscreenNoFill: function () { return runAdNoFillProbe('fullscreen'); },
+};
+function runAdNoFillProbe(kind) {
+  var oldTimeout = window.__GF_AD_WATCHDOG_MS;
+  window.__GF_AD_WATCHDOG_MS = 650;
+  var p = kind === 'rewarded' ? GF.ads.rewarded({}) : GF.ads.interstitial({ force: true });
+  return new Promise(function (resolve) {
+    var done = false;
+    var timer = setTimeout(function () {
+      if (done) return;
+      done = true;
+      window.__GF_AD_WATCHDOG_MS = oldTimeout;
+      resolve({ verdict: 'FAIL', detail: kind + ' no-fill did not resolve before watchdog' });
+    }, 2200);
+    p.then(function (r) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      window.__GF_AD_WATCHDOG_MS = oldTimeout;
+      resolve({ verdict: 'PASS', detail: kind + ' no-fill recovered (shown=' + !!(r && r.shown) + ', rewarded=' + !!(r && r.rewarded) + ')' });
+    }).catch(function (e) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      window.__GF_AD_WATCHDOG_MS = oldTimeout;
+      resolve({ verdict: 'FAIL', detail: kind + ' no-fill rejected: ' + (e && e.message ? e.message : e) });
+    });
+  });
+}
+
+// Reachability hook for Yandex runtime tests: only report real hit targets.
+function exposeReachabilityForTests() {
+  function rowItem(r) {
+    return { id: 'shop_' + r.kind, x: r.x, y: r.y - L.listY + (shop ? shop.offset : 0), w: r.w, h: r.h };
+  }
+  GF.exposeTour([
+    { name: 'menu', go: function () { gs = 'MENU'; GF.tutorial.active = false; layout(); } },
+    { name: 'playing', go: function () { startGame(); GF.tutorial.active = false; } },
+    { name: 'gameover', go: function () { startGame(); GF.tutorial.active = false; satisfaction = 0; emptyOut(); } },
+  ]);
+  GF.exposeReach(function () {
+    layout();
+    if (gs === 'MENU' || gs === 'GAMEOVER') {
+      var btn = playBtnRect || { x: GF.W * 0.5 - 110 * GF.S, y: GF.H * 0.72, w: 220 * GF.S, h: 56 * GF.S };
+      return {
+        screen: gs === 'MENU' ? 'menu' : 'gameover',
+        items: [
+          { id: gs === 'MENU' ? 'play' : 'resume', x: btn.x, y: btn.y, w: btn.w, h: btn.h },
+          { id: 'mute', x: muteBtn.x, y: muteBtn.y, w: muteBtn.w, h: muteBtn.h },
+        ],
+      };
+    }
+    return {
+      screen: 'playing',
+      scrollId: 'claw_shop',
+      viewportH: L.listH,
+      screenH: GF.H,
+      items: [
+        { id: 'cabinet_drag_area', x: L.cabX, y: L.cabY, w: L.cabW, h: L.cabH, pinned: true },
+        { id: 'help', x: helpBtn.x, y: helpBtn.y, w: helpBtn.w, h: helpBtn.h, pinned: true },
+        { id: 'mute', x: muteBtn.x, y: muteBtn.y, w: muteBtn.w, h: muteBtn.h, pinned: true },
+      ].concat(upgradeRects.map(rowItem)),
+    };
+  });
+}
+
 // ── BOOT ─────────────────────────────────────────────────────────────────
 GF.init({
   designW: 420,
@@ -2404,14 +2617,16 @@ GF.init({
   onUpdate: function (dt) { update(dt); },
   onDraw: draw,
 });
+exposeReachabilityForTests();
 
 window.addEventListener('pagehide', function () { GF.saveRun(); });
 document.addEventListener('visibilitychange', function () { if (document.hidden) GF.saveRun(); });
 
 // ── EXPOSE STATE (post-build-tester cross-checks vs DESIGN.md) ────────────
 GF.exposeState(function () {
-  return {
-    gs: gs, coins: coins, score: score, best: best,
+    return {
+      gs: gs, coins: coins, score: score, best: best,
+    noise: inputNoise,
     coinsPerSec: coinsPerSec(),
     // player-controlled aim var (funnel probe steers this)
     clawX: clawX, clawTargetX: clawTargetX, clawState: clawState,

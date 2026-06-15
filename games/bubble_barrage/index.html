@@ -88,6 +88,26 @@ var STRINGS = {
     tut_win: 'Win: Endless - clear waves and push your best wave higher.',
     tut_lose: 'Lose: Focus reaches 0 when bubbles leak or crowd the field.',
     tut_tip: 'Tip: Manual taps fill fever. Turrets cannot fill it for you.',
+    reactor: 'Reactor',
+    reactor_sub: 'Every pop feeds it. It powers every run, forever.',
+    essence: 'Essence',
+    upgrade: 'Charge Up',
+    next_tier: 'Next tier',
+    reactor_max: 'Reactor maxed',
+    reactor_buffs: 'Permanent boosts',
+    reactor_locked: 'Pop bubbles to bank Essence',
+    best_run: 'Best run',
+    rt_dormant: 'Dormant',
+    rt_spark: 'Spark',
+    rt_pulse: 'Pulse',
+    rt_surge: 'Surge',
+    rt_core: 'Core',
+    rt_nova: 'Nova',
+    buff_coin: 'coins',
+    buff_ess: 'essence',
+    buff_dmg: 'turret dmg',
+    buff_focus: 'start focus',
+    reactor_up: 'Reactor charged',
   },
   ru: {
     title: 'Пузырьковый Шквал',
@@ -156,6 +176,26 @@ var STRINGS = {
     tut_win: 'Победа: бесконечно - чистите волны и бейте рекорд волны.',
     tut_lose: 'Поражение: фокус падает до 0, когда пузырьки уходят или забивают поле.',
     tut_tip: 'Совет: ручные хлопки наполняют жар. Турели не делают это за вас.',
+    reactor: 'Реактор',
+    reactor_sub: 'Каждый хлопок питает его. Он усиливает все забеги, навсегда.',
+    essence: 'Эссенция',
+    upgrade: 'Зарядить',
+    next_tier: 'След. уровень',
+    reactor_max: 'Реактор макс',
+    reactor_buffs: 'Постоянные бонусы',
+    reactor_locked: 'Лопайте пузырьки ради Эссенции',
+    best_run: 'Лучший забег',
+    rt_dormant: 'Покой',
+    rt_spark: 'Искра',
+    rt_pulse: 'Пульс',
+    rt_surge: 'Разряд',
+    rt_core: 'Ядро',
+    rt_nova: 'Нова',
+    buff_coin: 'монеты',
+    buff_ess: 'эссенция',
+    buff_dmg: 'урон турелей',
+    buff_focus: 'старт фокус',
+    reactor_up: 'Реактор заряжен',
   },
 };
 
@@ -199,6 +239,22 @@ var TURRET_TYPES = [
   { id: 'tesla',  name: 'tesla_name',  desc: 'tesla_desc',  cost: 320, color: '#a879ff', rate: 0.56, power: 1, range: 215 },
 ];
 
+// ---- M1: The Reactor (persistent owned meta) ----------------------------
+// A core you build across EVERY session. Bubbles drop Essence; Essence charges
+// the Reactor through named tiers, each granting an always-on global buff and a
+// bigger, brighter core drawn in the playfield. Tier 0 is dormant (no buff).
+// Endless past the last named tier ("Nova II", "Nova III"...). The cost table is
+// cumulative-to-next; offlineEssence/buffs read off the current tier.
+var REACTOR_TIERS = [
+  { key: 'rt_dormant', cost: 0,    glow: '#5f7d86', coin: 0,    ess: 0,    dmg: 0,    focus: 0 },
+  { key: 'rt_spark',   cost: 60,   glow: '#62ffcf', coin: 0.08, ess: 0,    dmg: 0,    focus: 0 },
+  { key: 'rt_pulse',   cost: 160,  glow: '#5eb6ff', coin: 0.16, ess: 0.10, dmg: 0,    focus: 5 },
+  { key: 'rt_surge',   cost: 340,  glow: '#b8a0ff', coin: 0.24, ess: 0.20, dmg: 0.12, focus: 10 },
+  { key: 'rt_core',    cost: 640,  glow: '#ffd85a', coin: 0.34, ess: 0.32, dmg: 0.24, focus: 15 },
+  { key: 'rt_nova',    cost: 1100, glow: '#ff8ad0', coin: 0.46, ess: 0.46, dmg: 0.40, focus: 22 },
+];
+var REACTOR_NOVA_STEP = 700; // extra essence per endless tier past 'rt_nova'
+
 var bubbles = [];
 var rings = [];
 var beams = [];
@@ -209,6 +265,7 @@ var shopButtons = [];
 var playButtons = [];
 var offlineButtons = [];
 var gameoverButtons = [];
+var reactorPanelButtons = [];
 var helpLines = [];
 var bgBubbles = [];
 
@@ -247,10 +304,15 @@ var savePulse = 0;
 var rewardCooldown = 0;
 var dailySeed = 0;
 var rngState = 1;
+var essence = 0;          // M1: persistent meta-currency (lifetime bank, spent on Reactor)
+var reactorTier = 0;      // M1: current Reactor tier (index into REACTOR_TIERS, endless past last)
+var reactorOpen = false;  // M1: Reactor panel overlay open?
+var reactorPulse = 0;     // M1: render pulse when essence banked / tier charged
+var reactorReadyFlag = false; // M1: true while player can afford the next tier (drives a HUD ping)
 
 var L = {
   topH: 0, bottomH: 0, field: { x: 0, y: 0, w: 0, h: 0 },
-  mute: null, help: null, feverAd: null,
+  mute: null, help: null, feverAd: null, reactor: null, reactorBtn: null,
 };
 
 function initPools() {
@@ -327,6 +389,60 @@ function offlineRate() {
   }
   return base * OFFLINE_RATE_MULT;
 }
+// ---- M1: Reactor accessors -------------------------------------------------
+function reactorDef(tier) {
+  if (tier < REACTOR_TIERS.length) return REACTOR_TIERS[tier];
+  // endless Nova tiers: clone the last named tier, scale buffs up gently
+  var last = REACTOR_TIERS[REACTOR_TIERS.length - 1];
+  var over = tier - (REACTOR_TIERS.length - 1);
+  return {
+    key: 'rt_nova', nova: over, glow: last.glow,
+    coin: last.coin + over * 0.10,
+    ess: last.ess + over * 0.10,
+    dmg: last.dmg + over * 0.08,
+    focus: last.focus + over * 4,
+  };
+}
+function reactorCur() { return reactorDef(reactorTier); }
+function reactorNextCost() {
+  var n = reactorTier + 1;
+  if (n < REACTOR_TIERS.length) return REACTOR_TIERS[n].cost;
+  return REACTOR_TIERS[REACTOR_TIERS.length - 1].cost + (n - (REACTOR_TIERS.length - 1)) * REACTOR_NOVA_STEP;
+}
+function reactorName(tier) {
+  var d = reactorDef(tier);
+  var nm = t(d.key);
+  if (d.nova) nm += ' ' + (d.nova + 1);
+  return nm;
+}
+function coinMult() { return 1 + reactorCur().coin; }       // applied to pop coin gain
+function essMult() { return 1 + reactorCur().ess; }         // applied to essence drops
+function dmgBonus() { return reactorCur().dmg; }            // added fraction to turret damage
+function reactorFocusBonus() { return reactorCur().focus; } // added to start focus
+function startFocus() { return BASE_FOCUS + reactorFocusBonus(); }
+function canChargeReactor() { return essence >= reactorNextCost(); }
+function chargeReactor() {
+  var cost = reactorNextCost();
+  if (essence < cost) { GF.sfx('error'); return false; }
+  essence -= cost;
+  reactorTier += 1;
+  reactorPulse = 1.2;
+  var def = reactorCur();
+  showMsg('reactor_up');
+  GF.sfx('evolve');
+  GF.juice.flash(def.glow, 200, 0.2);
+  GF.juice.shake(8, 360);
+  if (L.reactor) {
+    GF.juice.floatText(L.reactor.x, L.reactor.y - 16 * GF.S, reactorName(reactorTier), { color: def.glow, size: 24, life: 1.3 });
+    GF.juice.particles.burst(L.reactor.x, L.reactor.y, { count: 34, colors: [def.glow, '#ffffff', '#d8ffff'], speed: 260, gravity: 120, size: 5, life: 0.6 });
+  }
+  saveNow();
+  return true;
+}
+function gainEssence(n) {
+  if (n <= 0) return;
+  essence += n;
+}
 function saveNow() {
   lastSeen = Date.now();
   GF.saveRun();
@@ -346,6 +462,8 @@ function stateForSave() {
     coins: coins,
     parts: parts,
     fever: fever,
+    essence: essence,
+    reactorTier: reactorTier,
     pendingOffline: pendingOffline,
     playSeconds: playSeconds,
     claimedParts: claimedParts,
@@ -368,6 +486,8 @@ function applySave(s) {
   coins = Math.max(0, s.coins || 0);
   parts = Math.max(0, s.parts || 0);
   fever = clamp(s.fever || 0, 0, FEVER_MAX);
+  essence = Math.max(0, s.essence || 0);
+  reactorTier = Math.max(0, Math.floor(s.reactorTier || 0));
   pendingOffline = Math.max(0, s.pendingOffline || 0);
   playSeconds = Math.max(0, s.playSeconds || 0);
   dailyDoneDay = s.dailyDoneDay || '';
@@ -409,6 +529,9 @@ function layout() {
   L.mute = { x: W - pad - 42 * S, y: pad, w: 38 * S, h: 38 * S };
   L.help = { x: W - pad - 84 * S, y: pad, w: 38 * S, h: 38 * S };
   L.feverAd = { x: W * 0.5 - clamp(128 * S, 100, 160), y: H - L.bottomH + 18 * S, w: clamp(256 * S, 200, 320), h: clamp(42 * S, 36, 48) };
+  // M1: the Reactor core sits at top-center of the field; tap it to open the panel
+  var rr = clamp(26 * S, 20, 34);
+  L.reactor = { x: W * 0.5, y: L.field.y + rr + 6 * S, r: rr };
   placeTurrets();
 }
 function placeTurrets() {
@@ -432,7 +555,7 @@ function resetWaveState(daily) {
     dailySeed = parseInt(ds, 10) || 20260612;
     rngState = dailySeed;
   }
-  focus = Math.min(BASE_FOCUS, Math.max(55, focus || BASE_FOCUS));
+  focus = Math.min(startFocus(), Math.max(55, focus || startFocus()));
   spawned = 0;
   spawnTimer = 0.1;
   combo = 0;
@@ -452,12 +575,12 @@ function resetWaveState(daily) {
   saveNow();
 }
 function retryWave() {
-  focus = BASE_FOCUS;
+  focus = startFocus();
   resetWaveState(false);
 }
 function startNextWave() {
   wave += 1;
-  focus = BASE_FOCUS;
+  focus = startFocus();
   resetWaveState(false);
 }
 function startDailyWave() {
@@ -466,7 +589,7 @@ function startDailyWave() {
     GF.sfx('error');
     return;
   }
-  focus = BASE_FOCUS;
+  focus = startFocus();
   resetWaveState(true);
 }
 function completeWave() {
@@ -646,9 +769,12 @@ function popBubble(b, source, chainDepth) {
   combo = comboT > 0 ? combo + 1 : 1;
   comboT = COMBO_WINDOW;
   var mult = 1 + Math.min(combo, 20) * 0.05;
-  var gain = Math.floor(b.value * mult * (frenzyT > 0 ? 1.25 : 1));
+  var gain = Math.floor(b.value * mult * (frenzyT > 0 ? 1.25 : 1) * coinMult());
   coins += gain;
   score += gain;
+  // M1: every pop feeds the persistent Reactor with Essence
+  var ess = (1 + (bt.id === 'golden' ? 2 : 0) + (bt.id === 'big' || bt.id === 'armored' ? 1 : 0)) * essMult();
+  gainEssence(ess);
   addRing(x, y, rr * 0.9, bt.rim);
   GF.juice.particles.burst(x, y, { count: 11 + Math.min(combo, 12), colors: [bt.rim, bt.col, '#ffffff'], speed: 230, gravity: 140, size: 4.2, life: 0.42 });
   GF.juice.particles.burst(x, y + rr * 0.25, { count: 7, colors: ['#b8fdff', bt.col], speed: 96, gravity: 360, size: 3.2, life: 0.65, angle: Math.PI / 2, spread: Math.PI * 0.85 });
@@ -704,7 +830,7 @@ function fireTurret(tu, dt) {
   tu.recoil = 1;
   tu.glow = 1;
   tu.turn = Math.atan2(target.y - tu.y, target.x - tu.x);
-  var dmg = type.power + tu.power * 0.65 + (tier >= 3 ? 0.5 : 0);
+  var dmg = (type.power + tu.power * 0.65 + (tier >= 3 ? 0.5 : 0)) * (1 + dmgBonus());
   if (tu.id === 'dart') {
     addBeam(tu.x, tu.y, target.x, target.y, type.color, 2 + tier);
     damageBubble(target, Math.max(1, Math.round(dmg)), 'dart', 0);
@@ -857,8 +983,9 @@ function update(dt) {
   layout();
   if (messageT > 0) messageT -= dt;
   if (rewardCooldown > 0) rewardCooldown -= dt;
+  if (reactorPulse > 0) reactorPulse = Math.max(0, reactorPulse - dt * 1.6);
   GF.tutorial.update(dt);
-  if (helpOpen) return;
+  if (helpOpen || reactorOpen) return;
 
   updateFx(gdt);
   if (gs !== 'PLAYING') return;
@@ -968,6 +1095,12 @@ function onPointerDown(e) {
     GF.sfx('click');
     return;
   }
+  if (reactorOpen) {
+    for (var ri = 0; ri < reactorPanelButtons.length; ri++) {
+      if (inRect(x, y, reactorPanelButtons[ri])) { reactorPanelButtons[ri].fn(); return; }
+    }
+    return; // modal: swallow taps outside its buttons
+  }
   if (L.mute && inRect(x, y, L.mute)) { GF.toggleMute(); GF.sfx('click'); return; }
   if (L.help && inRect(x, y, L.help)) { helpOpen = true; GF.sfx('click'); return; }
 
@@ -1002,6 +1135,11 @@ function onPointerDown(e) {
     savePulse = Math.max(savePulse, 8);
     return;
   }
+  // M1: tapping the Reactor core (when no bubble is there) opens its panel mid-run
+  if (L.reactor) {
+    var dxr = x - L.reactor.x, dyr = y - L.reactor.y, hit = L.reactor.r + 14 * GF.S;
+    if (dxr * dxr + dyr * dyr <= hit * hit) { reactorOpen = true; GF.sfx('click'); return; }
+  }
   if (GF.tutorial.active) GF.tutorial.handleClick(x, y);
 }
 GF.canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
@@ -1018,12 +1156,14 @@ function draw(ctx) {
   drawBeams(ctx);
   GF.juice.particles.draw(ctx);
   GF.juice.texts.draw(ctx);
+  if (gs === 'PLAYING') drawReactor(ctx);
   drawHUD(ctx);
   if (gs === 'SHOP') drawShop(ctx);
   if (gs === 'OFFLINE') drawOffline(ctx);
   if (gs === 'GAMEOVER') drawGameOver(ctx);
   if (messageT > 0) drawMessage(ctx);
   ctx.restore();
+  if (reactorOpen) drawReactorPanel(ctx);
   if (helpOpen) drawHelp(ctx);
   GF.tutorial.draw(ctx);
   GF.juice.drawFlash(ctx);
@@ -1275,7 +1415,7 @@ function drawShop(ctx) {
   var rows = portrait ? 4 : 2;
   var gap = portrait ? 9 * S : 14 * S;
   var cardW = (W - pad * 2 - gap * (cols - 1)) / cols;
-  var cardH = Math.min((H - top - 82 * S - gap * (rows - 1)) / rows, portrait ? 128 * S : 112 * S);
+  var cardH = Math.min((H - top - 148 * S - gap * (rows - 1)) / rows, portrait ? 124 * S : 112 * S);
   for (var i = 0; i < TURRET_TYPES.length; i++) {
     var c = i % cols, r = (i / cols) | 0;
     var x = pad + c * (cardW + gap), y = top + r * (cardH + gap);
@@ -1283,6 +1423,11 @@ function drawShop(ctx) {
   }
   var bw = Math.min(180 * S, W * 0.42), bh = clamp(44 * S, 38, 52);
   var by = H - bh - clamp(10 * S, 6, 14);
+  // M1: session-end Reactor hook sits just above the wave buttons (tap to open)
+  var hookY = by - 64 * S;
+  drawReactorHook(ctx, W / 2, hookY);
+  var reactorTab = { x: W / 2 - 90 * S, y: hookY - 6 * S, w: 180 * S, h: 58 * S, fn: function () { reactorOpen = true; GF.sfx('click'); } };
+  shopButtons.push(reactorTab);
   var dReady = dailyDoneDay !== todayStr();
   var dailyRect = { x: W / 2 - bw - 8 * S, y: by, w: bw, h: bh, fn: startDailyWave };
   var nextRect = { x: W / 2 + 8 * S, y: by, w: bw, h: bh, fn: startNextWave };
@@ -1364,6 +1509,139 @@ function drawOffline(ctx) {
   drawButton(ctx, doub, t('watch_2x'), '#ffd85a', '#2c2108');
   offlineButtons.push(collect, doub);
 }
+// ---- M1: Reactor core drawn in the playfield (always visible in PLAYING) ----
+function drawReactor(ctx) {
+  if (!L.reactor) return;
+  var S = GF.S, rc = L.reactor, def = reactorCur();
+  var pulse = 1 + reactorPulse * 0.18 + Math.sin(nowT * 2.2) * 0.04;
+  var R = rc.r * pulse;
+  var ready = canChargeReactor();
+  ctx.save();
+  // soft halo
+  var halo = ctx.createRadialGradient(rc.x, rc.y, R * 0.2, rc.x, rc.y, R * 2.1);
+  halo.addColorStop(0, shade(def.glow, 1) + '');
+  ctx.globalAlpha = 0.18 + reactorPulse * 0.2 + (ready ? 0.12 : 0);
+  ctx.fillStyle = def.glow;
+  ctx.beginPath(); ctx.arc(rc.x, rc.y, R * 2.0, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1;
+  // tier rings (count grows with tier; capped for sanity)
+  var rings = Math.min(6, reactorTier);
+  ctx.strokeStyle = def.glow; ctx.lineWidth = 2 * S;
+  for (var i = 0; i < rings; i++) {
+    ctx.globalAlpha = 0.5 - i * 0.05;
+    var rad = R + (i + 1) * 5 * S + Math.sin(nowT * 1.6 + i) * 1.5 * S;
+    ctx.beginPath(); ctx.arc(rc.x, rc.y, rad, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  // core body
+  var body = ctx.createRadialGradient(rc.x - R * 0.3, rc.y - R * 0.3, R * 0.1, rc.x, rc.y, R);
+  body.addColorStop(0, '#ffffff');
+  body.addColorStop(0.4, def.glow);
+  body.addColorStop(1, shade(def.glow, 0.55));
+  ctx.fillStyle = body;
+  ctx.beginPath(); ctx.arc(rc.x, rc.y, R, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = ready ? '#ffffff' : shade(def.glow, 0.8);
+  ctx.lineWidth = (ready ? 2.5 : 1.5) * S;
+  ctx.beginPath(); ctx.arc(rc.x, rc.y, R, 0, Math.PI * 2); ctx.stroke();
+  // tier label + essence + next-tier mini-bar
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#eaffff';
+  ctx.font = 'bold ' + clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.fillText(t('reactor') + ' · ' + reactorName(reactorTier), rc.x, rc.y + R + 6 * S);
+  ctx.fillStyle = '#ffe9a8';
+  ctx.font = 'bold ' + clamp(10 * S, 8, 13) + 'px sans-serif';
+  var cost = reactorNextCost();
+  ctx.fillText(nfmt(essence) + ' / ' + nfmt(cost) + ' ' + t('essence'), rc.x, rc.y + R + 20 * S);
+  var bw = clamp(96 * S, 70, 130), bx = rc.x - bw / 2, by = rc.y + R + 34 * S, bh = 5 * S;
+  ctx.fillStyle = 'rgba(255,255,255,0.16)';
+  GF.rr(ctx, bx, by, bw, bh, bh / 2); ctx.fill();
+  ctx.fillStyle = ready ? '#fff06f' : def.glow;
+  GF.rr(ctx, bx, by, bw * clamp(essence / Math.max(1, cost), 0, 1), bh, bh / 2); ctx.fill();
+  if (ready) {
+    ctx.fillStyle = '#fff06f';
+    ctx.font = 'bold ' + clamp(10 * S, 8, 13) + 'px sans-serif';
+    ctx.fillText('▲ ' + t('upgrade'), rc.x, by + bh + 3 * S);
+  }
+  ctx.restore();
+}
+// ---- M1: Reactor panel overlay (reachable mid-run by tapping the core) ------
+function drawReactorPanel(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S, def = reactorCur();
+  ctx.fillStyle = 'rgba(3,16,26,0.86)';
+  ctx.fillRect(0, 0, W, H);
+  var w = Math.min(W - 30 * S, 440 * S), h = Math.min(382 * S, H - 70 * S);
+  var x = W / 2 - w / 2, y = H / 2 - h / 2;
+  ctx.fillStyle = 'rgba(8,40,52,0.97)';
+  GF.rr(ctx, x, y, w, h, 14 * S); ctx.fill();
+  ctx.strokeStyle = def.glow; ctx.lineWidth = 2 * S; GF.rr(ctx, x, y, w, h, 14 * S); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold ' + clamp(26 * S, 20, 34) + 'px sans-serif';
+  ctx.fillText(t('reactor') + ' · ' + reactorName(reactorTier), W / 2, y + 18 * S);
+  ctx.font = clamp(12 * S, 10, 15) + 'px sans-serif';
+  ctx.fillStyle = '#bdefff';
+  fitText(ctx, t('reactor_sub'), x + 24 * S, y + 52 * S, w - 48 * S, 16 * S, 'center');
+  // big essence bank
+  ctx.fillStyle = '#ffd85a';
+  ctx.font = 'bold ' + clamp(30 * S, 24, 40) + 'px sans-serif';
+  ctx.fillText(nfmt(essence) + ' ' + t('essence'), W / 2, y + 86 * S);
+  // permanent buffs list
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#9fe9ff';
+  ctx.font = 'bold ' + clamp(13 * S, 11, 16) + 'px sans-serif';
+  ctx.fillText(t('reactor_buffs') + ':', x + 26 * S, y + 132 * S);
+  var lines = [];
+  if (def.coin > 0) lines.push('+' + Math.round(def.coin * 100) + '% ' + t('buff_coin'));
+  if (def.ess > 0) lines.push('+' + Math.round(def.ess * 100) + '% ' + t('buff_ess'));
+  if (def.dmg > 0) lines.push('+' + Math.round(def.dmg * 100) + '% ' + t('buff_dmg'));
+  if (def.focus > 0) lines.push('+' + def.focus + ' ' + t('buff_focus'));
+  if (!lines.length) lines.push(t('reactor_locked'));
+  ctx.fillStyle = '#eaffff';
+  ctx.font = clamp(13 * S, 11, 16) + 'px sans-serif';
+  for (var i = 0; i < lines.length; i++) ctx.fillText('•  ' + lines[i], x + 30 * S, y + 158 * S + i * 22 * S);
+  // next tier preview + charge button
+  var ndef = reactorDef(reactorTier + 1), cost = reactorNextCost();
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#cfe9ff';
+  ctx.font = 'bold ' + clamp(12 * S, 10, 15) + 'px sans-serif';
+  ctx.fillText(t('next_tier') + ': ' + reactorName(reactorTier + 1), W / 2, y + h - 96 * S);
+  var bw = Math.min(280 * S, w - 60 * S), bx = W / 2 - bw / 2, by = y + h - 74 * S, bh = clamp(46 * S, 40, 54);
+  var ready = canChargeReactor();
+  var chargeRect = { x: bx, y: by, w: bw, h: bh, fn: function () { if (canChargeReactor()) chargeReactor(); else GF.sfx('error'); } };
+  drawButton(ctx, chargeRect, t('upgrade') + '  ·  ' + nfmt(cost) + ' ' + t('essence'), ready ? def.glow : '#5d757f', ready ? '#06251f' : '#0a2630');
+  // close button
+  var closeRect = { x: x + w - clamp(40 * S, 32, 46), y: y + 12 * S, w: clamp(30 * S, 26, 36), h: clamp(30 * S, 26, 36), fn: function () { reactorOpen = false; GF.sfx('click'); } };
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  GF.rr(ctx, closeRect.x, closeRect.y, closeRect.w, closeRect.h, 8 * S); ctx.fill();
+  ctx.fillStyle = '#eaffff';
+  ctx.font = 'bold ' + clamp(18 * S, 14, 24) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('×', closeRect.x + closeRect.w / 2, closeRect.y + closeRect.h / 2 + 1);
+  ctx.restore();
+  reactorPanelButtons = [chargeRect, closeRect];
+}
+// ---- M1: session-end "next tier in N" hook on SHOP + GAMEOVER ---------------
+function drawReactorHook(ctx, cx, yTop) {
+  var S = GF.S, def = reactorCur(), cost = reactorNextCost();
+  var need = Math.max(0, cost - essence);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = def.glow;
+  ctx.font = 'bold ' + clamp(14 * S, 11, 18) + 'px sans-serif';
+  ctx.fillText(t('reactor') + ': ' + reactorName(reactorTier), cx, yTop);
+  ctx.fillStyle = '#cfeaff';
+  ctx.font = clamp(12 * S, 10, 15) + 'px sans-serif';
+  var msg = need > 0 ? (t('next_tier') + ': ' + reactorName(reactorTier + 1) + ' · ' + nfmt(need) + ' ' + t('essence'))
+                     : (t('upgrade') + ' ▲ ' + reactorName(reactorTier + 1));
+  ctx.fillText(msg, cx, yTop + 19 * S);
+  // mini progress bar
+  var bw = clamp(180 * S, 130, 230), bx = cx - bw / 2, by = yTop + 38 * S, bh = 6 * S;
+  ctx.fillStyle = 'rgba(255,255,255,0.16)';
+  GF.rr(ctx, bx, by, bw, bh, bh / 2); ctx.fill();
+  ctx.fillStyle = need > 0 ? def.glow : '#fff06f';
+  GF.rr(ctx, bx, by, bw * clamp(essence / Math.max(1, cost), 0, 1), bh, bh / 2); ctx.fill();
+}
 function drawGameOver(ctx) {
   gameoverButtons = [];
   var W = GF.W, H = GF.H, S = GF.S;
@@ -1376,8 +1654,10 @@ function drawGameOver(ctx) {
   ctx.font = clamp(15 * S, 12, 20) + 'px sans-serif';
   ctx.fillStyle = '#c9f8ff';
   ctx.fillText(t('keep_progress'), W / 2, H * 0.39);
-  ctx.fillText(t('score') + ': ' + nfmt(score) + '   ' + t('best') + ': ' + nfmt(best), W / 2, H * 0.44);
-  var br = { x: W / 2 - 98 * S, y: H * 0.53, w: 196 * S, h: 52 * S, fn: retryWave };
+  ctx.fillText(t('best_run') + ': ' + nfmt(score) + '   ' + t('best') + ': ' + nfmt(best), W / 2, H * 0.435);
+  // M1: the session-end hook - "next Reactor tier in N essence" plants the return reason
+  drawReactorHook(ctx, W / 2, H * 0.485);
+  var br = { x: W / 2 - 98 * S, y: H * 0.62, w: 196 * S, h: 52 * S, fn: retryWave };
   drawButton(ctx, br, t('retry'), '#66ffcf', '#06251f');
   gameoverButtons.push(br);
 }
@@ -1495,6 +1775,10 @@ function startTutorial() {
 function exposeReachability() {
   GF.exposeReach(function () {
     var items = [];
+    if (reactorOpen) {
+      for (var rp = 0; rp < reactorPanelButtons.length; rp++) items.push({ id: 'reactor_' + rp, x: reactorPanelButtons[rp].x, y: reactorPanelButtons[rp].y, w: reactorPanelButtons[rp].w, h: reactorPanelButtons[rp].h, pinned: true });
+      return { screen: 'REACTOR', viewportH: GF.H, screenH: GF.H, items: items };
+    }
     if (L.mute) items.push({ id: 'mute', x: L.mute.x, y: L.mute.y, w: L.mute.w, h: L.mute.h, pinned: true });
     if (L.help) items.push({ id: 'help', x: L.help.x, y: L.help.y, w: L.help.w, h: L.help.h, pinned: true });
     if (gs === 'PLAYING') {
@@ -1509,10 +1793,11 @@ function exposeReachability() {
     return { screen: gs, viewportH: GF.H, screenH: GF.H, items: items };
   });
   GF.exposeTour([
-    { name: 'play', go: function () { helpOpen = false; if (gs !== 'PLAYING') resetWaveState(false); } },
-    { name: 'shop', go: function () { helpOpen = false; gs = 'SHOP'; } },
-    { name: 'offline', go: function () { helpOpen = false; pendingOffline = Math.max(pendingOffline, 120); gs = 'OFFLINE'; } },
-    { name: 'gameover', go: function () { helpOpen = false; gs = 'GAMEOVER'; } },
+    { name: 'play', go: function () { helpOpen = false; reactorOpen = false; if (gs !== 'PLAYING') resetWaveState(false); } },
+    { name: 'shop', go: function () { helpOpen = false; reactorOpen = false; gs = 'SHOP'; } },
+    { name: 'reactor', go: function () { helpOpen = false; essence = Math.max(essence, 200); reactorOpen = true; } },
+    { name: 'offline', go: function () { helpOpen = false; reactorOpen = false; pendingOffline = Math.max(pendingOffline, 120); gs = 'OFFLINE'; } },
+    { name: 'gameover', go: function () { helpOpen = false; reactorOpen = false; gs = 'GAMEOVER'; } },
   ]);
 }
 function exposeStateAndBot() {
@@ -1530,12 +1815,17 @@ function exposeStateAndBot() {
       turrets: ownedTurretCount(),
       turretPower: totalTurretLevels(),
       pendingOffline: pendingOffline,
+      essence: Math.floor(essence),
+      reactorTier: reactorTier,
+      reactorNextCost: reactorNextCost(),
+      reactorOpen: reactorOpen,
     };
   });
   GF.exposeBot(function () {
     var actions = [];
-    if (gs === 'PLAYING') actions.push('tap');
-    if (gs === 'SHOP') actions.push('buy', 'next');
+    if (reactorOpen) { actions.push('reactorClose'); if (canChargeReactor()) actions.push('reactorCharge'); return actions; }
+    if (gs === 'PLAYING') { actions.push('tap'); if (canChargeReactor()) actions.push('reactor'); }
+    if (gs === 'SHOP') { actions.push('buy', 'next'); if (canChargeReactor()) actions.push('reactor'); }
     if (gs === 'GAMEOVER') actions.push('retry');
     if (gs === 'OFFLINE') actions.push('collect');
     return actions;
@@ -1551,6 +1841,9 @@ function exposeStateAndBot() {
     } else if (a === 'next' && gs === 'SHOP') startNextWave();
     else if (a === 'retry' && gs === 'GAMEOVER') retryWave();
     else if (a === 'collect' && gs === 'OFFLINE') claimOffline(1);
+    else if (a === 'reactor') reactorOpen = true;
+    else if (a === 'reactorCharge') chargeReactor();
+    else if (a === 'reactorClose') reactorOpen = false;
   });
 }
 
@@ -1579,6 +1872,8 @@ window._setupForScreenshot = function (level) {
   GF.tutorial.active = false;
   wave = Math.max(5, level || 5);
   coins = Math.max(coins, 900);
+  reactorTier = Math.max(reactorTier, 3);
+  essence = Math.max(essence, 220);
   for (var i = 0; i < turrets.length; i++) {
     turrets[i].owned = true;
     turrets[i].rate = Math.min(5, 1 + i + Math.floor(wave / 3));

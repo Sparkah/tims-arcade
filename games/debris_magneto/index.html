@@ -1,0 +1,1250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Debris Magneto</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #14110c; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (both languages required by Yandex 8.2.3) ───────────
+var STRINGS = {
+  en: {
+    title: 'Debris Magneto',
+    sub:   'Roll the magnet, sweep the scrap',
+    play: 'PLAY', retry: 'RETRY', again: 'PLAY AGAIN',
+    score: 'RECYCLED', best: 'BEST',
+    gameover: 'Arena Jammed',
+    win: 'Scrapyard Cleared!',
+    stage: 'STAGE', clean: 'CLEAN', dump: 'DUMP HERE', full: 'FULL - DUMP!',
+    cleared: 'Stage Cleared',
+    upgrades: 'UPGRADES', nextStage: 'NEXT STAGE', resume: 'RESUME',
+    upCap: 'Capacity', upPull: 'Magnet Pull', upRad: 'Magnet Radius',
+    tier: 'Tier', maxed: 'MAX',
+    paused: 'Paused', tonnage: 'Total recycled',
+    tut_goal: 'Roll your magnet ball to sweep up scrap and clean the arena, dumping at the recycler before you max out.',
+    tut_controls: 'Drag (or arrow keys) to roll the ball; roll onto the glowing recycler to dump your load.',
+    tut_win: 'Clean each arena to its target percent; clear all 8 arenas.',
+    tut_lose: 'If junk crates jam the arena before you hit the clean target, the stage fails.',
+    tut_tip: 'Small scrap snaps on instantly; big scrap needs several passes. Dump often so you never saturate.',
+    cDrag: 'Drag to roll the magnet', cSweep: 'Sweep scrap onto the ball', cDump: 'Roll onto the recycler to dump',
+    skip: 'skip',
+  },
+  ru: {
+    title: 'Магнит-Уборщик',
+    sub:   'Катай магнит, собирай лом',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', again: 'СНАЧАЛА',
+    score: 'ПЕРЕРАБОТАНО', best: 'РЕКОРД',
+    gameover: 'Арена забита',
+    win: 'Свалка очищена!',
+    stage: 'АРЕНА', clean: 'ЧИСТО', dump: 'СГРУЗИТЬ', full: 'ПОЛНО - СГРУЗИ!',
+    cleared: 'Арена пройдена',
+    upgrades: 'УЛУЧШЕНИЯ', nextStage: 'ДАЛЬШЕ', resume: 'ПРОДОЛЖИТЬ',
+    upCap: 'Ёмкость', upPull: 'Сила', upRad: 'Радиус',
+    tier: 'Ур.', maxed: 'МАКС',
+    paused: 'Пауза', tonnage: 'Всего переработано',
+    tut_goal: 'Катай магнитный шар, собирай лом и очищай арену, сгружая на переработчик, пока не переполнился.',
+    tut_controls: 'Веди палец (или стрелки), чтобы катить шар; заезжай на переработчик, чтобы сгрузить груз.',
+    tut_win: 'Очисти каждую арену до нужного процента; пройди все 8 арен.',
+    tut_lose: 'Если ящики мусора забьют арену до достижения цели очистки, арена провалена.',
+    tut_tip: 'Мелкий лом цепляется сразу; крупный нужно проехать несколько раз. Сгружай чаще, чтобы не переполниться.',
+    cDrag: 'Веди палец, чтобы катить', cSweep: 'Собирай лом на шар', cDump: 'Заезжай на переработчик',
+    skip: 'пропустить',
+  },
+};
+
+var SPRITE_NAMES = [];
+
+var CFG = {
+  tuning: { speed_mult: 1, price_mult: 1 },
+  events: { double_coins: false },
+  daily:  { seed: 0 },
+  motd:   { en: '', ru: '' },
+  version: 0,
+};
+
+// ── TUNABLES (read live; the econ/loop gates test these real numbers) ─────
+var BAL = {
+  BALL_RADIUS_BASE:   26,
+  BALL_ACCEL:         0.62,
+  BALL_FRICTION:      0.86,
+  MAGNET_RADIUS_BASE: 64,
+  MAGNET_PULL_BASE:   3,
+  CAPACITY_BASE:      8,
+  JAM_LIMIT:          14,
+  STAGE_COUNT:        8,
+  CLEAN_TARGET_BASE:  0.70,
+  COMBO_DECAY_SEC:    2.2,
+  CRATE_SPAWN_SEC:    2.4,        // a fresh junk crate drops in this often (jam pressure)
+  SCRAP_SMALL_R: 7, SCRAP_MED_R: 12, SCRAP_LARGE_R: 20,
+  CRATE_R: 16, RECYCLER_R: 40, TAR_R: 28,
+};
+// Upgrade cost ladders (score economy - the gate reads these live).
+// Geometric scaling keeps a sink in front of the player across the whole
+// 8-stage run (no dead zone where everything is already bought).
+var COSTS = {
+  cap:  [60, 130, 250, 440, 720, 1120, 1680, 2450],   // +4 capacity each (8 tiers)
+  pull: [80, 175, 330, 580, 980, 1560, 2400],         // -1 pass to snap (unlocks large at tier>=2), 7 tiers
+  rad:  [70, 150, 290, 500, 840, 1340, 2050],         // +14 magnet radius each, 7 tiers
+};
+
+// Stage tier palettes + name keys (names localised below).
+var STAGES = [
+  { bg:['#2b2218','#1a140d','#241a10'], grime:'#6b5836', accent:'#ffb347' },
+  { bg:['#33231a','#22120c','#2a160e'], grime:'#7a4a2a', accent:'#ff8a3d' },
+  { bg:['#1c2a1e','#0f1a12','#162417'], grime:'#3f6b46', accent:'#7CFC9A' },
+  { bg:['#2a2630','#16131c','#211d28'], grime:'#5a5070', accent:'#b39ddb' },
+  { bg:['#2e2410','#1c1608','#27200c'], grime:'#8a6e1f', accent:'#ffe14d' },
+  { bg:['#16242c','#0d161b','#132028'], grime:'#356073', accent:'#4dd0e1' },
+  { bg:['#2c1a1a','#180d0d','#241414'], grime:'#7a3636', accent:'#ff6b6b' },
+  { bg:['#222730','#13161c','#1c2027'], grime:'#56627a', accent:'#9fd8ff' },
+];
+var STAGE_NAMES = {
+  en: ['Scrapyard','Foundry Floor','Sludge Dock','Rail Depot','Reactor Bay','Harbor Wreck','Crusher Pit','Magnet Vault'],
+  ru: ['Свалка','Литейный цех','Шламовый док','Депо','Реакторный зал','Гавань','Дробилка','Хранилище'],
+};
+
+// ── GAME STATE ────────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | HUB | PAUSE | GAMEOVER | WON
+var score = 0, best = 0, runTonnage = 0;
+var stage = 1;                   // 1-based
+var capTier = 0, pullTier = 0, radTier = 0;
+
+// arena geometry
+var ARENA = { x:0, y:0, w:0, h:0, gx:0, gy:0 };
+var GRID = { cols:0, rows:0, cell:0, cells:null, dirty:0, total:0, _w:-1, _h:-1 };
+var ball = { x:0, y:0, vx:0, vy:0, r:26, load:0, accreted:[] };
+var recycler = { x:0, y:0, r:40 };
+var scraps = [];                 // {x,y,r,kind:'s'|'m'|'l'|'mine', passes, need, mass, val}
+var crates = [];                 // {x,y,r,settled}
+var tars = [];                   // {x,y,r}
+var jammed = 0;
+var cleanPct = 0;
+var combo = 1, comboT = 0, comboKills = 0;
+var stageTarget = 0.70;
+var saturated = false, satFlash = 0;
+var dumpHintT = 0;
+var _spawnAcc = 0;
+var _crateAcc = 0;               // continuous crate-spawn timer (jam pressure)
+var _pendingAd = false;
+
+// local rate-limited sfx (gf-lib has no sfxRL)
+var _sfxLast = {};
+function sfxRL(name, ms) {
+  var t = performance.now();
+  if (!_sfxLast[name] || t - _sfxLast[name] >= (ms || 100)) { _sfxLast[name] = t; GF.sfx(name); }
+}
+
+// derived stats from upgrade tiers
+function capacityMax()   { return BAL.CAPACITY_BASE + capTier * 4; }
+function magnetRadius()  { return BAL.MAGNET_RADIUS_BASE + radTier * 14; }
+function passesNeeded()  { return Math.max(1, BAL.MAGNET_PULL_BASE - pullTier); }
+function largeUnlocked() { return pullTier >= 2; }
+function ballBaseR()     { return BAL.BALL_RADIUS_BASE + capTier * 2; }
+function stageData()     { return STAGES[(stage - 1) % STAGES.length]; }
+
+// HUD button rects (set in drawHUD, hit-tested in onPress)
+var hudBtns = {};
+var hubBtns = {};
+
+// ── TUTORIAL coach (interactive, over live play) ──────────────────────────
+var coach = { active:false, step:0, t:0, done:false, _skip:null };
+function tutorialSeen() { try { return !!localStorage.getItem('debris_magneto_seen_tutorial'); } catch(e){ return false; } }
+function markTutorialSeen() { try { localStorage.setItem('debris_magneto_seen_tutorial','1'); } catch(e){} coach.active=false; coach.done=true; GF.funnel.mark('tutorial_done'); }
+
+// ─────────────────────────────────────────────────────────────────────────
+// LAYOUT — recompute arena + grid for the current viewport (portrait-first)
+// ─────────────────────────────────────────────────────────────────────────
+function layout() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var topPad = 78 * S;             // HUD band
+  var botPad = 28 * S;             // jam pips
+  var sidePad = 12 * S;
+  ARENA.x = sidePad; ARENA.y = topPad;
+  ARENA.w = W - sidePad * 2;
+  ARENA.h = H - topPad - botPad;
+  var target = 34 * S;
+  GRID.cols = Math.max(6, Math.round(ARENA.w / target));
+  GRID.rows = Math.max(8, Math.round(ARENA.h / target));
+  GRID.cell = Math.min(ARENA.w / GRID.cols, ARENA.h / GRID.rows);
+  var gw = GRID.cell * GRID.cols, gh = GRID.cell * GRID.rows;
+  ARENA.gx = ARENA.x + (ARENA.w - gw) / 2;
+  ARENA.gy = ARENA.y + (ARENA.h - gh) / 2;
+  ball.r = ballBaseR() * S;
+  recycler.r = BAL.RECYCLER_R * S;
+}
+function ensureLayout() {
+  if (GRID._w !== GF.W || GRID._h !== GF.H) {
+    GRID._w = GF.W; GRID._h = GF.H;
+    var hadCells = !!GRID.cells;
+    var oldCols = GRID.cols, oldRows = GRID.rows;
+    layout();
+    if (hadCells) reflowAfterResize(oldCols, oldRows);
+  }
+}
+// keep entities + grid inside a resized arena (grid dims may change)
+function reflowAfterResize(oldCols, oldRows) {
+  // grid dimensions can change on resize; rebuild cells preserving clean ratio
+  if (GRID.cols !== oldCols || GRID.rows !== oldRows || !GRID.cells || GRID.cells.length !== GRID.cols*GRID.rows) {
+    var prevDirty = GRID.dirty, prevTotal = GRID.total;
+    var frac = prevTotal > 0 ? prevDirty / prevTotal : 0.7;
+    GRID.cells = new Uint8Array(GRID.cols * GRID.rows);
+    GRID.dirty = 0;
+    for (var i = 0; i < GRID.cells.length; i++) { if (Math.random() < frac) { GRID.cells[i] = 1; GRID.dirty++; } else GRID.cells[i] = 2; }
+    GRID.total = prevTotal > 0 ? prevTotal : GRID.dirty;
+    if (GRID.dirty > GRID.total) GRID.total = GRID.dirty;
+  }
+  var minx = ARENA.gx + ball.r, maxx = ARENA.gx + GRID.cell*GRID.cols - ball.r;
+  var miny = ARENA.gy + ball.r, maxy = ARENA.gy + GRID.cell*GRID.rows - ball.r;
+  ball.x = GF.clamp(ball.x, minx, maxx); ball.y = GF.clamp(ball.y, miny, maxy);
+  recycler.x = GF.clamp(recycler.x, ARENA.gx + recycler.r, ARENA.gx + GRID.cell*GRID.cols - recycler.r);
+  recycler.y = GF.clamp(recycler.y, ARENA.gy + recycler.r, ARENA.gy + GRID.cell*GRID.rows - recycler.r);
+}
+
+// ── STAGE SETUP ───────────────────────────────────────────────────────────
+function randSpot(pad) {
+  pad = pad || 0;
+  return { x: ARENA.gx + pad + Math.random() * (GRID.cell * GRID.cols - pad * 2),
+           y: ARENA.gy + pad + Math.random() * (GRID.cell * GRID.rows - pad * 2) };
+}
+function spawnScrap() {
+  var p = randSpot(16 * GF.S), roll = Math.random();
+  var kind, r, need, mass, val;
+  if (largeUnlocked() && roll < 0.14 + stage * 0.01) { kind='l'; r=BAL.SCRAP_LARGE_R; need = passesNeeded() + 2; mass=4; val=14; }
+  else if (roll < 0.46) { kind='m'; r=BAL.SCRAP_MED_R; need = passesNeeded(); mass=2; val=5; }
+  else { kind='s'; r=BAL.SCRAP_SMALL_R; need=1; mass=1; val=2; }
+  scraps.push({ x:p.x, y:p.y, r:r*GF.S, kind:kind, passes:0, need:need, mass:mass, val:val, _last:0, wob:Math.random()*6.28 });
+}
+function spawnMine() { var p = randSpot(24 * GF.S); scraps.push({ x:p.x, y:p.y, r:BAL.SCRAP_MED_R*GF.S, kind:'mine', passes:0, need:1, mass:3, val:0, _last:0, wob:Math.random()*6.28 }); }
+function spawnCrate() { var p = randSpot(20 * GF.S); crates.push({ x:p.x, y:p.y, r:BAL.CRATE_R*GF.S, settled:false, _bonk:0 }); }
+function spawnTar() { var p = randSpot(30 * GF.S); tars.push({ x:p.x, y:p.y, r:BAL.TAR_R*GF.S }); }
+
+function startStage() {
+  layout();
+  GRID._w = GF.W; GRID._h = GF.H;
+  GRID.cells = new Uint8Array(GRID.cols * GRID.rows);
+  var dirtyFrac = Math.min(0.92, 0.62 + stage * 0.03);
+  GRID.dirty = 0;
+  for (var i = 0; i < GRID.cells.length; i++) { if (Math.random() < dirtyFrac) { GRID.cells[i] = 1; GRID.dirty++; } else GRID.cells[i] = 2; }
+  GRID.total = GRID.dirty;            // total dirty at start = denominator
+  recycler.x = ARENA.gx + GRID.cell * (GRID.cols - 1.4);
+  recycler.y = ARENA.gy + GRID.cell * 1.4;
+  recycler.r = BAL.RECYCLER_R * GF.S;
+  ball.x = ARENA.gx + GRID.cell * GRID.cols * 0.4;
+  ball.y = ARENA.gy + GRID.cell * GRID.rows * 0.62;
+  ball.vx = 0; ball.vy = 0; ball.load = 0; ball.accreted = [];
+  ball.r = ballBaseR() * GF.S;
+  scraps = []; crates = []; tars = [];
+  jammed = 0; cleanPct = 0; combo = 1; comboT = 0; comboKills = 0;
+  saturated = false; satFlash = 0; _spawnAcc = 0; _crateAcc = 0;
+  stageTarget = Math.min(0.92, BAL.CLEAN_TARGET_BASE + (stage - 1) * 0.04);
+  var n = 10 + stage * 3;
+  for (var s = 0; s < n; s++) spawnScrap();
+  // a few crates seed every stage (sparse on stage 1, denser later); they then
+  // keep dropping in over time (see update) so ignored clutter can jam the arena.
+  for (var c = 0; c < 2 + stage; c++) spawnCrate();
+  if (stage >= 3) { for (var t = 0; t < 2 + Math.floor(stage/2); t++) spawnTar(); }
+  if (stage >= 4) { for (var m = 0; m < stage - 3; m++) spawnMine(); }
+  gs = 'PLAYING';
+  GF.gameStarted();
+  saveRunState();
+}
+
+// ── GAME LIFECYCLE ──────────────────────────────────────────────────────
+function startGame() {
+  // Guard against a STALE gf-lib overlay button: gf-lib repopulates its private
+  // buttons[] only inside drawOverlay, so on our custom PLAYING/HUB/PAUSE screens
+  // the last PLAY/RETRY rect lingers and gf-lib's own click/touchstart listener
+  // could re-fire startGame at that location. Only act from the real overlay
+  // states; a stray call from any live screen is a no-op. (Codex review.)
+  if (gs !== 'MENU' && gs !== 'GAMEOVER' && gs !== 'WON') return;
+  if (gs === 'GAMEOVER') { startStage(); return; }               // retry same stage, keep upgrades
+  if (gs === 'WON') { stage = 1; capTier=0; pullTier=0; radTier=0; score=0; runTonnage=0; }
+  if (stage < 1) stage = 1;
+  startStage();
+  if (!tutorialSeen() && !coach.done) { coach.active = true; coach.step = 0; coach.t = 0; }
+}
+
+function failStage() {
+  if (gs !== 'PLAYING') return;
+  gs = 'GAMEOVER';
+  GF.sfx('lose');
+  GF.juice.shake(7); GF.juice.flash('#ff5b5b', 320, 0.4);
+  GF.funnel.mark('first_death');
+  GF.gameEnded();
+  _pendingAd = true;
+  saveRunState();
+}
+function clearStage() {
+  GF.sfx('win'); GF.juice.flash(stageData().accent, 280, 0.35);
+  if (score > best) { best = score; try { localStorage.setItem('debris_magneto_best', best); } catch(e){} }
+  GF.happytime();
+  gs = 'HUB';
+  GF.gameEnded();
+  _pendingAd = true;
+  saveRunState();
+}
+function nextStage() {
+  if (stage >= BAL.STAGE_COUNT) { winGame(); return; }
+  stage++;
+  startStage();
+}
+function winGame() {
+  gs = 'WON';
+  runTonnage = score;
+  if (score > best) { best = score; try { localStorage.setItem('debris_magneto_best', best); } catch(e){} }
+  GF.sfx('win'); GF.happytime();
+  GF.gameEnded();
+  saveRunState();
+}
+
+// ── DUMP ──────────────────────────────────────────────────────────────────
+function tryDump() {
+  if (ball.load <= 0) return;
+  var gained = 0;
+  for (var i = 0; i < ball.accreted.length; i++) gained += ball.accreted[i].val;
+  gained = Math.round(gained * combo);
+  if (gained <= 0) gained = ball.load;
+  score += gained;
+  GF.juice.floatText(recycler.x, recycler.y - recycler.r - 8 * GF.S, '+' + gained, { color: '#ffe14d', size: 22, rise: 40 });
+  GF.juice.particles.burst(recycler.x, recycler.y, { count: 22, colors: ['#ffe14d','#7CFC9A','#4dd0e1','#fff'], speed: 220, life: 0.7 });
+  GF.sfx('reward'); GF.juice.punch(recycler, 'r', 10 * GF.S, 260);
+  ball.load = 0; ball.accreted = []; saturated = false;
+  ball.r = ballBaseR() * GF.S;
+  saveRunState();
+}
+
+// ── UPDATE ────────────────────────────────────────────────────────────────
+function update(dt) {
+  GF.juice.update(dt);
+  ensureLayout();
+  if (gs !== 'PLAYING') { satFlash = Math.max(0, satFlash - dt); return; }
+
+  var S = GF.S;
+  var coaching = coach.active;
+
+  // steering input
+  var ax = 0, ay = 0;
+  if (GF.keys['ArrowLeft']  || GF.keys['KeyA']) ax -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) ax += 1;
+  if (GF.keys['ArrowUp']    || GF.keys['KeyW']) ay -= 1;
+  if (GF.keys['ArrowDown']  || GF.keys['KeyS']) ay += 1;
+  if (GF.touch.active) { ax += GF.touch.dx; ay += GF.touch.dy; }
+  var alen = Math.sqrt(ax*ax + ay*ay);
+  if (alen > 0.001) { ax /= alen; ay /= alen; }
+
+  // tar slows the ball
+  var onTar = false;
+  for (var ti = 0; ti < tars.length; ti++) { if (GF.dist(ball.x, ball.y, tars[ti].x, tars[ti].y) < tars[ti].r + ball.r * 0.5) { onTar = true; break; } }
+  var spm = (CFG.tuning.speed_mult || 1);
+  var accel = BAL.BALL_ACCEL * (onTar ? 0.4 : 1) * spm * S;
+  var fric = onTar ? 0.78 : BAL.BALL_FRICTION;
+  ball.vx = (ball.vx + ax * accel) * fric;
+  ball.vy = (ball.vy + ay * accel) * fric;
+  ball.x += ball.vx; ball.y += ball.vy;
+
+  // arena bounds
+  var minx = ARENA.gx + ball.r, maxx = ARENA.gx + GRID.cell*GRID.cols - ball.r;
+  var miny = ARENA.gy + ball.r, maxy = ARENA.gy + GRID.cell*GRID.rows - ball.r;
+  if (ball.x < minx) { ball.x = minx; ball.vx *= -0.4; }
+  if (ball.x > maxx) { ball.x = maxx; ball.vx *= -0.4; }
+  if (ball.y < miny) { ball.y = miny; ball.vy *= -0.4; }
+  if (ball.y > maxy) { ball.y = maxy; ball.vy *= -0.4; }
+
+  var speed = Math.sqrt(ball.vx*ball.vx + ball.vy*ball.vy);
+
+  // clean floor under footprint
+  cleanFloorUnder(ball.x, ball.y, ball.r);
+
+  // magnet pull + pickup
+  var mr = magnetRadius() * S;
+  saturated = ball.load >= capacityMax();
+  for (var i = scraps.length - 1; i >= 0; i--) {
+    var sc = scraps[i];
+    var d = GF.dist(ball.x, ball.y, sc.x, sc.y);
+    if (d < mr + sc.r && !saturated) {
+      var pull = (1 - d / (mr + sc.r));
+      var dx = ball.x - sc.x, dy = ball.y - sc.y;
+      var pn = Math.max(0.0001, Math.sqrt(dx*dx+dy*dy));
+      sc.x += (dx/pn) * pull * 3.4 * S;
+      sc.y += (dy/pn) * pull * 3.4 * S;
+      if (d < ball.r + sc.r * 0.6) {
+        var now = performance.now();
+        if (now - sc._last > 220) {
+          sc._last = now; sc.passes++;
+          if (sc.passes >= sc.need) collectScrap(sc, i);
+          else { sfxRL('click', 90); GF.juice.particles.burst(sc.x, sc.y, { count: 4, colors: [stageData().accent, '#fff'], speed: 120, life: 0.3, size: 2 }); }
+        }
+      }
+    }
+  }
+
+  // crates: pushed by the ball. A crate that hasn't been touched for a moment
+  // counts as "settled" clutter -> feeds the jam pressure (the lose condition).
+  for (var ci = 0; ci < crates.length; ci++) {
+    var cr = crates[ci];
+    var cd = GF.dist(ball.x, ball.y, cr.x, cr.y), minD = ball.r + cr.r;
+    if (cd < minD) {
+      var nx = (cr.x - ball.x), ny = (cr.y - ball.y), nn = Math.max(0.0001, Math.sqrt(nx*nx+ny*ny)), push = (minD - cd);
+      cr.x += (nx/nn) * push; cr.y += (ny/nn) * push;
+      ball.vx *= 0.86; ball.vy *= 0.86;
+      cr.settled = false; cr._stillT = 0;
+      if (!cr._bonk || performance.now()-cr._bonk>200){ cr._bonk=performance.now(); sfxRL('hit', 120); }
+    } else {
+      // settle after a short rest so shoving a crate aside briefly relieves jam
+      cr._stillT = (cr._stillT || 0) + dt;
+      if (cr._stillT > 0.8) cr.settled = true;
+    }
+    cr.x = GF.clamp(cr.x, ARENA.gx + cr.r, ARENA.gx + GRID.cell*GRID.cols - cr.r);
+    cr.y = GF.clamp(cr.y, ARENA.gy + cr.r, ARENA.gy + GRID.cell*GRID.rows - cr.r);
+  }
+  // crate-crate separation -> pile-ups
+  for (var a = 0; a < crates.length; a++) {
+    for (var b = a + 1; b < crates.length; b++) {
+      var A = crates[a], B = crates[b], dd = GF.dist(A.x, A.y, B.x, B.y), md = A.r + B.r;
+      if (dd < md && dd > 0.001) { var ox=(B.x-A.x)/dd, oy=(B.y-A.y)/dd, ov=(md-dd)/2; A.x-=ox*ov; A.y-=oy*ov; B.x+=ox*ov; B.y+=oy*ov; }
+    }
+  }
+  // continuous crate drop-in from stage 2 on: ignored clutter encroaches until
+  // it jams the arena. Spawning never stops below JAM_LIMIT, so a player who
+  // doesn't clear the floor reaches the lose condition organically (~40s on
+  // stage 1-2). Stage 1 stays crate-free as a gentle on-ramp.
+  if (!coaching) {
+    _crateAcc += dt;
+    var spawnEvery = Math.max(1.1, BAL.CRATE_SPAWN_SEC - stage * 0.15);
+    if (_crateAcc >= spawnEvery && crates.length < BAL.JAM_LIMIT + 4) { _crateAcc = 0; spawnCrate(); }
+  }
+  if (!coaching) recomputeJam();
+
+  // recycler dump on contact
+  var rd = GF.dist(ball.x, ball.y, recycler.x, recycler.y);
+  if (rd < recycler.r + ball.r * 0.4) {
+    dumpHintT = 0.6;
+    if (ball.load > 0) tryDump();
+    if (coach.active && coach.step === 2) markTutorialSeen();
+  } else { dumpHintT = Math.max(0, dumpHintT - dt); }
+
+  // combo decay
+  if (comboT > 0) { comboT -= dt; if (comboT <= 0) { combo = 1; comboKills = 0; } }
+
+  if (saturated) satFlash = 0.5; else satFlash = Math.max(0, satFlash - dt);
+
+  cleanPct = GRID.total > 0 ? (1 - GRID.dirty / GRID.total) : 1;
+
+  // respawn scrap so the arena stays sweepable (density pressure)
+  _spawnAcc += dt;
+  if (_spawnAcc > 1.1 && scraps.length < 8 + stage * 2 && cleanPct < stageTarget) { _spawnAcc = 0; spawnScrap(); }
+
+  // win / lose
+  if (!coaching) {
+    if (cleanPct >= stageTarget) { clearStage(); return; }
+    if (jammed >= BAL.JAM_LIMIT && cleanPct < stageTarget) { failStage(); return; }
+  }
+
+  // coach auto-advance: step0 (drag) once the ball moved
+  if (coach.active) { coach.t += dt; if (coach.step === 0 && speed > 1.1 * S) { coach.step = 1; coach.t = 0; } }
+}
+
+function cleanFloorUnder(x, y, r) {
+  var c0 = Math.floor((x - r - ARENA.gx) / GRID.cell), c1 = Math.floor((x + r - ARENA.gx) / GRID.cell);
+  var r0 = Math.floor((y - r - ARENA.gy) / GRID.cell), r1 = Math.floor((y + r - ARENA.gy) / GRID.cell);
+  for (var cy = r0; cy <= r1; cy++) {
+    for (var cx = c0; cx <= c1; cx++) {
+      if (cx < 0 || cy < 0 || cx >= GRID.cols || cy >= GRID.rows) continue;
+      var idx = cy * GRID.cols + cx;
+      if (GRID.cells[idx] === 1) {
+        var ccx = ARENA.gx + (cx + 0.5) * GRID.cell, ccy = ARENA.gy + (cy + 0.5) * GRID.cell;
+        if (GF.dist(x, y, ccx, ccy) < r + GRID.cell * 0.2) {
+          GRID.cells[idx] = 2; GRID.dirty--;
+          if (GRID.dirty % 6 === 0) sfxRL('coin', 70);
+        }
+      }
+    }
+  }
+}
+
+function collectScrap(sc, i) {
+  scraps.splice(i, 1);
+  ball.load += sc.mass;
+  if (sc.kind !== 'mine') {
+    var ang = Math.atan2(sc.y - ball.y, sc.x - ball.x);
+    ball.accreted.push({ val: sc.val, ang: ang, kind: sc.kind, r: sc.r * 0.7 });
+    comboKills++; comboT = BAL.COMBO_DECAY_SEC; combo = Math.min(5, 1 + Math.floor(comboKills / 4));
+    var col = sc.kind === 'l' ? '#ffd24d' : sc.kind === 'm' ? '#9fd8ff' : '#cfe8ff';
+    GF.juice.particles.burst(sc.x, sc.y, { count: sc.kind==='l'?14:8, colors: [col, '#fff', stageData().accent], speed: sc.kind==='l'?260:180, life: 0.5 });
+    GF.juice.floatText(sc.x, sc.y - sc.r, '+' + sc.val, { color: col, size: sc.kind==='l'?18:13, rise: 30 });
+    if (sc.kind === 'l') { GF.sfx('unlock'); GF.juice.shake(3); }
+    else if (sc.kind === 'm') GF.sfx('merge');
+    else sfxRL('spawn', 60);
+    if (coach.active && coach.step === 1) { coach.step = 2; coach.t = 0; }
+  } else {
+    ball.accreted.push({ val: 0, ang: Math.atan2(sc.y-ball.y, sc.x-ball.x), kind:'mine', r: sc.r*0.7 });
+    GF.sfx('hit'); GF.juice.shake(4); GF.juice.flash('#7a3cff', 180, 0.25);
+    GF.juice.floatText(sc.x, sc.y - sc.r, '0', { color: '#b38aff', size: 14, rise: 26 });
+  }
+  ball.r = (ballBaseR() + Math.min(10, ball.load * 0.5)) * GF.S;
+  if (ball.load >= capacityMax()) { GF.sfx('lose'); satFlash = 1; }
+  // No save here: persisted state (score/stage/tiers) only changes on DUMP,
+  // CLEAR, BUY and FAIL - which each call saveRunState(). A scrap pickup
+  // changes only the live in-memory load, so saving here would be a hot-path
+  // localStorage write during a dense sweep (Build Hygiene: persist on event).
+}
+
+function recomputeJam() {
+  // jam = settled crates the player isn't currently clearing. A crate becomes
+  // 'settled' after ~0.8s untouched (set in the crate loop); bodying it resets
+  // it. Continuous spawns push this toward JAM_LIMIT if the player ignores
+  // crates, so the lose condition is reachable from idle/random play; a player
+  // who shoves crates aside keeps jam low. Counting settled crates (not just
+  // pile-touching ones) makes the pressure legible via the jam pips.
+  var count = 0;
+  for (var i = 0; i < crates.length; i++) { if (crates[i].settled) count++; }
+  jammed = count;
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var W = GF.W, H = GF.H;
+  ensureLayout();
+  var sd = stageData();
+
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, sd.bg[0]); g.addColorStop(0.5, sd.bg[1]); g.addColorStop(1, sd.bg[2]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  if (gs === 'PLAYING' || gs === 'HUB' || gs === 'PAUSE' || gs === 'GAMEOVER') {
+    ctx.save();
+    ctx.translate(GF.juice.offsetX, GF.juice.offsetY);
+    drawArena(ctx);
+    drawRecycler(ctx);
+    drawTars(ctx);
+    drawScraps(ctx);
+    drawCrates(ctx);
+    drawBall(ctx);
+    GF.juice.particles.draw(ctx);
+    GF.juice.texts.draw(ctx);
+    ctx.restore();
+    drawHUD(ctx);
+    if (coach.active) drawCoach(ctx);
+  }
+
+  if (gs === 'MENU') {
+    drawMenuArt(ctx);
+    GF.drawOverlay({ title: GF.t('title'), sub: GF.t('sub'), btnText: GF.t('play'), btnFn: startGame,
+      bestText: best > 0 ? GF.t('best') + ': ' + best : null });
+  }
+  if (gs === 'HUB')      drawHub(ctx);
+  if (gs === 'PAUSE')    drawPause(ctx);
+  if (gs === 'GAMEOVER') GF.drawOverlay({ title: GF.t('gameover'), sub: GF.t('score') + ': ' + score, btnText: GF.t('retry'), btnFn: startGame, bestText: GF.t('best') + ': ' + best });
+  if (gs === 'WON')      GF.drawOverlay({ title: GF.t('win'), sub: GF.t('tonnage') + ': ' + runTonnage, btnText: GF.t('again'), btnFn: startGame, bestText: GF.t('best') + ': ' + best });
+
+  GF.juice.drawFlash(ctx);
+}
+
+function drawArena(ctx) {
+  var S = GF.S, sd = stageData();
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  GF.rr(ctx, ARENA.gx - 4*S, ARENA.gy - 4*S, GRID.cell*GRID.cols + 8*S, GRID.cell*GRID.rows + 8*S, 10*S); ctx.fill();
+  for (var cy = 0; cy < GRID.rows; cy++) {
+    for (var cx = 0; cx < GRID.cols; cx++) {
+      var idx = cy * GRID.cols + cx, x = ARENA.gx + cx * GRID.cell, y = ARENA.gy + cy * GRID.cell, v = GRID.cells[idx];
+      if (v === 1) {
+        ctx.fillStyle = sd.grime;
+        ctx.globalAlpha = 0.55 + ((cx*7+cy*13)%5)*0.06;
+        ctx.fillRect(x + 0.5*S, y + 0.5*S, GRID.cell - 1*S, GRID.cell - 1*S);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        ctx.beginPath(); ctx.arc(x + GRID.cell*0.32, y + GRID.cell*0.4, GRID.cell*0.1, 0, 6.28); ctx.fill();
+      } else {
+        ctx.fillStyle = ((cx+cy)%2===0) ? 'rgba(255,255,255,0.045)' : 'rgba(255,255,255,0.02)';
+        ctx.fillRect(x + 0.5*S, y + 0.5*S, GRID.cell - 1*S, GRID.cell - 1*S);
+      }
+    }
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 2*S;
+  GF.rr(ctx, ARENA.gx - 4*S, ARENA.gy - 4*S, GRID.cell*GRID.cols + 8*S, GRID.cell*GRID.rows + 8*S, 10*S); ctx.stroke();
+}
+
+function drawRecycler(ctx) {
+  var S = GF.S, x = recycler.x, y = recycler.y, r = recycler.r;
+  var pulse = 0.5 + 0.5 * Math.sin(performance.now()/300);
+  ctx.save();
+  ctx.shadowColor = '#ffe14d'; ctx.shadowBlur = (14 + pulse*10) * S;
+  ctx.fillStyle = 'rgba(40,34,8,0.9)';
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 6.28); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = '#ffe14d'; ctx.lineWidth = 3*S;
+  ctx.beginPath(); ctx.arc(x, y, r - 3*S, 0, 6.28); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,225,77,' + (0.5 + pulse*0.4) + ')'; ctx.lineWidth = 2.4*S;
+  for (var a = 0; a < 4; a++) {
+    var an = a * Math.PI/2 + performance.now()/900, ox = Math.cos(an), oy = Math.sin(an), rr1 = r*0.62, rr2 = r*0.34;
+    ctx.beginPath();
+    ctx.moveTo(x + ox*rr1 - oy*r*0.22, y + oy*rr1 + ox*r*0.22);
+    ctx.lineTo(x + ox*rr2, y + oy*rr2);
+    ctx.lineTo(x + ox*rr1 + oy*r*0.22, y + oy*rr1 - ox*r*0.22);
+    ctx.stroke();
+  }
+  ctx.restore();
+  if (dumpHintT > 0 || (gs==='PLAYING' && ball.load > 0 && GF.dist(ball.x,ball.y,x,y) < r*3)) {
+    var fs = GF.clamp(12*S, 10, 16);
+    ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+    ctx.fillStyle = '#ffe14d'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(GF.t('dump'), x, y - r - 4*S);
+    ctx.textBaseline = 'alphabetic';
+  }
+}
+
+function drawTars(ctx) {
+  for (var i = 0; i < tars.length; i++) {
+    var t = tars[i];
+    ctx.save();
+    ctx.fillStyle = 'rgba(12,10,18,0.82)';
+    ctx.beginPath(); ctx.ellipse(t.x, t.y, t.r, t.r*0.82, 0, 0, 6.28); ctx.fill();
+    ctx.fillStyle = 'rgba(70,40,90,0.5)';
+    ctx.beginPath(); ctx.ellipse(t.x - t.r*0.2, t.y - t.r*0.2, t.r*0.45, t.r*0.34, 0, 0, 6.28); ctx.fill();
+    ctx.fillStyle = 'rgba(160,120,200,0.35)';
+    ctx.beginPath(); ctx.ellipse(t.x - t.r*0.3, t.y - t.r*0.32, t.r*0.16, t.r*0.1, 0, 0, 6.28); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawScraps(ctx) {
+  var S = GF.S;
+  for (var i = 0; i < scraps.length; i++) {
+    var s = scraps[i];
+    s.wob += 0.04;
+    ctx.save();
+    ctx.translate(s.x, s.y);
+    if (s.kind === 'mine') {
+      var p = 0.5 + 0.5*Math.sin(performance.now()/180);
+      ctx.shadowColor = '#7a3cff'; ctx.shadowBlur = (6+p*6)*S;
+      ctx.fillStyle = '#3a1f66'; ctx.strokeStyle = '#b38aff'; ctx.lineWidth = 2*S;
+      ctx.beginPath();
+      for (var k = 0; k < 8; k++) { var an = k/8*6.28, rr = s.r * (k%2===0?1:0.6); ctx[k===0?'moveTo':'lineTo'](Math.cos(an)*rr, Math.sin(an)*rr); }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      ctx.shadowBlur = 0;
+    } else {
+      var col = s.kind === 'l' ? '#9aa4b0' : s.kind === 'm' ? '#aeb6c0' : '#c2c8d0';
+      var dark = s.kind === 'l' ? '#5a626c' : '#6e757e';
+      ctx.rotate(s.wob * 0.2);
+      ctx.fillStyle = col; ctx.strokeStyle = dark; ctx.lineWidth = 1.6*S;
+      var n = s.kind === 'l' ? 6 : s.kind === 'm' ? 5 : 4;
+      ctx.beginPath();
+      for (var j = 0; j < n; j++) { var a2 = j/n*6.28, rr2 = s.r * (0.78 + ((j*5)%3)*0.12); ctx[j===0?'moveTo':'lineTo'](Math.cos(a2)*rr2, Math.sin(a2)*rr2); }
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+      if (s.kind === 's') { ctx.fillStyle = dark; ctx.beginPath(); ctx.arc(0,0,s.r*0.28,0,6.28); ctx.fill(); }
+      if (s.need > 1 && s.passes > 0) {
+        ctx.strokeStyle = '#7CFC9A'; ctx.lineWidth = 2.4*S; ctx.globalAlpha = 0.9;
+        ctx.beginPath(); ctx.arc(0, 0, s.r + 4*S, -Math.PI/2, -Math.PI/2 + 6.28 * (s.passes/s.need)); ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
+  }
+}
+
+function drawCrates(ctx) {
+  var S = GF.S;
+  for (var i = 0; i < crates.length; i++) {
+    var c = crates[i];
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.fillStyle = '#6e4e2e'; ctx.strokeStyle = '#3c2a17'; ctx.lineWidth = 2.4*S;
+    GF.rr(ctx, -c.r, -c.r, c.r*2, c.r*2, 4*S); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,0.32)'; ctx.lineWidth = 1.6*S;
+    ctx.beginPath(); ctx.moveTo(-c.r, -c.r*0.2); ctx.lineTo(c.r, -c.r*0.2); ctx.moveTo(-c.r, c.r*0.4); ctx.lineTo(c.r, c.r*0.4); ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1.4*S;
+    ctx.beginPath(); ctx.moveTo(-c.r, -c.r); ctx.lineTo(c.r, c.r); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawBall(ctx) {
+  var S = GF.S, x = ball.x, y = ball.y, r = ball.r;
+  var mr = magnetRadius() * S;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(120,200,255,0.10)'; ctx.lineWidth = 1.4*S;
+  ctx.beginPath(); ctx.arc(x, y, mr, 0, 6.28); ctx.stroke();
+  ctx.restore();
+
+  ctx.save();
+  var grad = ctx.createLinearGradient(x - r, y - r, x + r, y + r);
+  grad.addColorStop(0, '#e63b4d'); grad.addColorStop(0.5, '#b0b6c0'); grad.addColorStop(1, '#3a6bd6');
+  ctx.fillStyle = grad;
+  ctx.shadowColor = 'rgba(0,0,0,0.4)'; ctx.shadowBlur = 8*S; ctx.shadowOffsetY = 3*S;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 6.28); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.beginPath(); ctx.ellipse(x - r*0.32, y - r*0.36, r*0.26, r*0.16, -0.6, 0, 6.28); ctx.fill();
+  for (var i = 0; i < ball.accreted.length; i++) {
+    var sh = ball.accreted[i], rr = r + sh.r * 0.5, sx = x + Math.cos(sh.ang) * rr, sy = y + Math.sin(sh.ang) * rr;
+    ctx.fillStyle = sh.kind === 'mine' ? '#7a3cff' : (sh.kind === 'l' ? '#9aa4b0' : '#b6bcc4');
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(sh.ang);
+    GF.rr(ctx, -sh.r*0.6, -sh.r*0.5, sh.r*1.2, sh.r, 2*S); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1.2*S;
+    GF.rr(ctx, -sh.r*0.6, -sh.r*0.5, sh.r*1.2, sh.r, 2*S); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+
+  // capacity ring
+  var frac = Math.min(1, ball.load / capacityMax()), ringR = r + 7*S;
+  ctx.save();
+  ctx.lineWidth = 4*S;
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.arc(x, y, ringR, 0, 6.28); ctx.stroke();
+  var ringCol = saturated ? '#ff4d4d' : frac > 0.75 ? '#ffb347' : '#7CFC9A';
+  if (saturated && Math.sin(performance.now()/120) < 0) ringCol = '#fff';
+  ctx.strokeStyle = ringCol;
+  ctx.beginPath(); ctx.arc(x, y, ringR, -Math.PI/2, -Math.PI/2 + 6.28 * frac); ctx.stroke();
+  ctx.restore();
+
+  if (saturated && gs === 'PLAYING') {
+    var fs = GF.clamp(12*S, 10, 16);
+    ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+    ctx.fillStyle = '#ff6b6b'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.fillText(GF.t('full'), x, y - ringR - 4*S);
+    ctx.textBaseline = 'alphabetic';
+  }
+}
+
+// ── HUD ─────────────────────────────────────────────────────────────────
+function drawHUD(ctx) {
+  var W = GF.W, S = GF.S, fs = GF.clamp(14*S, 11, 19);
+  ctx.textBaseline = 'top';
+
+  ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
+  var nm = (STAGE_NAMES[GF.lang] || STAGE_NAMES.en)[(stage-1)%STAGES.length] || '';
+  ctx.fillText(GF.t('stage') + ' ' + stage + ' - ' + nm, 12*S, 10*S);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ffe14d';
+  var btnZoneX = W - 12*S - (40*S * 3) - 16*S;
+  ctx.fillText(GF.t('score') + ': ' + score, btnZoneX, 10*S);
+  if (combo > 1) {
+    ctx.fillStyle = '#7CFC9A'; ctx.font = 'bold ' + (fs+2) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText('x' + combo, btnZoneX, 10*S + fs + 4*S);
+  }
+
+  // clean-% bar (top-center)
+  var barW = Math.min(W * 0.5, 320*S), barH = 12*S, bx = (W - barW) / 2, by = 36*S;
+  ctx.fillStyle = 'rgba(0,0,0,0.4)'; GF.rr(ctx, bx, by, barW, barH, barH/2); ctx.fill();
+  var pf = Math.min(1, stageTarget > 0 ? cleanPct / stageTarget : 0);
+  ctx.fillStyle = pf >= 1 ? '#7CFC9A' : stageData().accent;
+  GF.rr(ctx, bx, by, Math.max(barH, barW * pf), barH, barH/2); ctx.fill();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2*S;
+  ctx.beginPath(); ctx.moveTo(bx + barW, by - 2*S); ctx.lineTo(bx + barW, by + barH + 2*S); ctx.stroke();
+  ctx.font = 'bold ' + GF.clamp(11*S,9,14) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.fillText(GF.t('clean') + ' ' + Math.round(cleanPct*100) + '% / ' + Math.round(stageTarget*100) + '%', W/2, by - 2*S);
+  ctx.textBaseline = 'top';
+
+  // jam pips (bottom-left)
+  var pipR = 5*S, py = GF.H - 18*S, px0 = 12*S;
+  ctx.textBaseline = 'middle';
+  for (var i = 0; i < BAL.JAM_LIMIT; i++) {
+    ctx.fillStyle = i < jammed ? '#ff6b6b' : 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.arc(px0 + i * (pipR*2 + 2*S) + pipR, py, pipR, 0, 6.28); ctx.fill();
+  }
+
+  // HUD buttons: ? / mute / pause (top-right, big tappable)
+  var bw = 40*S, gap = 8*S, byb = 8*S;
+  var x3 = W - 12*S - bw, x2 = x3 - bw - gap, x1 = x2 - bw - gap;
+  hudBtns.help  = { x:x1, y:byb, w:bw, h:bw };
+  hudBtns.mute  = { x:x2, y:byb, w:bw, h:bw };
+  hudBtns.pause = { x:x3, y:byb, w:bw, h:bw };
+  drawHudButton(ctx, hudBtns.help,  'help');
+  drawHudButton(ctx, hudBtns.mute,  'mute');
+  drawHudButton(ctx, hudBtns.pause, 'pause');
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawHudButton(ctx, b, kind) {
+  var S = GF.S, cx = b.x + b.w/2, cy = b.y + b.h/2, r = b.w*0.5;
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,24,32,0.72)';
+  GF.rr(ctx, b.x, b.y, b.w, b.h, 9*S); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 1.4*S;
+  GF.rr(ctx, b.x, b.y, b.w, b.h, 9*S); ctx.stroke();
+  ctx.strokeStyle = '#cfe8ff'; ctx.fillStyle = '#cfe8ff'; ctx.lineWidth = 2.4*S; ctx.lineCap = 'round';
+  if (kind === 'help') {
+    ctx.font = 'bold ' + (b.w*0.5) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('?', cx, cy + 1*S);
+  } else if (kind === 'pause') {
+    var pw = r*0.28;
+    ctx.fillRect(cx - pw - 2*S, cy - r*0.4, pw, r*0.8);
+    ctx.fillRect(cx + 2*S, cy - r*0.4, pw, r*0.8);
+  } else if (kind === 'mute') {
+    ctx.beginPath();
+    ctx.moveTo(cx - r*0.5, cy - r*0.2); ctx.lineTo(cx - r*0.2, cy - r*0.2);
+    ctx.lineTo(cx + r*0.05, cy - r*0.45); ctx.lineTo(cx + r*0.05, cy + r*0.45);
+    ctx.lineTo(cx - r*0.2, cy + r*0.2); ctx.lineTo(cx - r*0.5, cy + r*0.2); ctx.closePath();
+    ctx.fill();
+    if (GF.muted) {
+      ctx.strokeStyle = '#ff6b6b';
+      ctx.beginPath(); ctx.moveTo(cx + r*0.18, cy - r*0.28); ctx.lineTo(cx + r*0.5, cy + r*0.28);
+      ctx.moveTo(cx + r*0.5, cy - r*0.28); ctx.lineTo(cx + r*0.18, cy + r*0.28); ctx.stroke();
+    } else {
+      ctx.beginPath(); ctx.arc(cx + r*0.18, cy, r*0.22, -0.8, 0.8); ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx + r*0.18, cy, r*0.4, -0.8, 0.8); ctx.stroke();
+    }
+  }
+  ctx.restore();
+}
+
+// ── MENU ART (a magnet ball crusted with scrap) ──────────────────────────
+function drawMenuArt(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S, x = W/2, y = H*0.34, r = Math.min(W, H) * 0.16;
+  ctx.save();
+  ctx.shadowColor = '#ffb347'; ctx.shadowBlur = 30*S;
+  var grad = ctx.createLinearGradient(x-r, y-r, x+r, y+r);
+  grad.addColorStop(0, '#e63b4d'); grad.addColorStop(0.5, '#b0b6c0'); grad.addColorStop(1, '#3a6bd6');
+  ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.28); ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.beginPath(); ctx.ellipse(x - r*0.32, y - r*0.36, r*0.26, r*0.16, -0.6, 0, 6.28); ctx.fill();
+  for (var i = 0; i < 14; i++) {
+    var an = i/14*6.28, rr = r + (8 + (i%3)*5)*S, sx = x + Math.cos(an)*rr, sy = y + Math.sin(an)*rr;
+    ctx.fillStyle = (i%3===0) ? '#9aa4b0' : '#b6bcc4';
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(an);
+    GF.rr(ctx, -6*S, -5*S, 12*S, 10*S, 2*S); ctx.fill(); ctx.restore();
+  }
+  ctx.restore();
+}
+
+// ── HUB (between-stage upgrade shop) ──────────────────────────────────────
+function drawHub(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,8,14,0.82)'; ctx.fillRect(0, 0, W, H);
+  var cx = W/2;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#7CFC9A'; ctx.font = 'bold ' + GF.clamp(24*S, 18, 34) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('cleared'), cx, H*0.10);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(15*S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('score') + ': ' + score, cx, H*0.10 + 32*S);
+  ctx.fillStyle = '#9ab'; ctx.font = 'bold ' + GF.clamp(13*S, 11, 17) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('upgrades'), cx, H*0.10 + 58*S);
+
+  var bw = Math.min(W*0.86, 420*S), bx = cx - bw/2, bh = 56*S, gap = 12*S, y0 = H*0.30;
+  hubBtns = {};
+  drawUpgradeButton(ctx, 'cap',  bx, y0,              bw, bh, GF.t('upCap'),  capTier,  COSTS.cap);
+  drawUpgradeButton(ctx, 'pull', bx, y0 + (bh+gap),   bw, bh, GF.t('upPull'), pullTier, COSTS.pull);
+  drawUpgradeButton(ctx, 'rad',  bx, y0 + (bh+gap)*2, bw, bh, GF.t('upRad'),  radTier,  COSTS.rad);
+
+  var ny = y0 + (bh+gap)*3 + 8*S, nbh = 58*S;
+  ctx.save();
+  ctx.shadowColor = stageData().accent; ctx.shadowBlur = 16*S;
+  ctx.fillStyle = stageData().accent;
+  GF.rr(ctx, bx, ny, bw, nbh, 12*S); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#14110c'; ctx.font = 'bold ' + GF.clamp(18*S, 14, 24) + 'px Inter, system-ui, sans-serif';
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'center';
+  ctx.fillText((stage >= BAL.STAGE_COUNT ? GF.t('again') : GF.t('nextStage') + ' >'), cx, ny + nbh/2);
+  ctx.textBaseline = 'alphabetic';
+  hubBtns.next = { x:bx, y:ny, w:bw, h:nbh };
+}
+function upgradeCost(ladder, tier) { return tier < ladder.length ? Math.round(ladder[tier] * (CFG.tuning.price_mult||1)) : -1; }
+function drawUpgradeButton(ctx, key, x, y, w, h, label, tier, ladder) {
+  var S = GF.S, cost = upgradeCost(ladder, tier), maxed = cost < 0, afford = !maxed && score >= cost;
+  ctx.save();
+  ctx.fillStyle = maxed ? 'rgba(40,46,56,0.7)' : afford ? 'rgba(30,52,40,0.92)' : 'rgba(40,30,30,0.8)';
+  GF.rr(ctx, x, y, w, h, 11*S); ctx.fill();
+  ctx.strokeStyle = maxed ? 'rgba(255,255,255,0.16)' : afford ? '#7CFC9A' : 'rgba(255,107,107,0.5)';
+  ctx.lineWidth = 2*S; GF.rr(ctx, x, y, w, h, 11*S); ctx.stroke();
+  ctx.restore();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(15*S, 12, 20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(label, x + 14*S, y + h*0.36);
+  ctx.fillStyle = '#9ab'; ctx.font = 'bold ' + GF.clamp(11*S, 9, 14) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('tier') + ' ' + tier, x + 14*S, y + h*0.7);
+  var dots = ladder.length + 1, dr = 4*S, dxs = x + w*0.58;
+  for (var i = 0; i < dots; i++) {
+    ctx.fillStyle = i <= tier ? '#7CFC9A' : 'rgba(255,255,255,0.2)';
+    ctx.beginPath(); ctx.arc(dxs + i*(dr*2+3*S), y + h*0.5, dr, 0, 6.28); ctx.fill();
+  }
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  if (maxed) { ctx.fillStyle = '#9ab'; ctx.fillText(GF.t('maxed'), x + w - 14*S, y + h/2); }
+  else {
+    ctx.fillStyle = afford ? '#ffe14d' : '#ff8a8a';
+    ctx.font = 'bold ' + GF.clamp(15*S, 12, 20) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText('> ' + cost, x + w - 14*S, y + h/2);
+  }
+  ctx.textBaseline = 'alphabetic';
+  hubBtns[key] = { x:x, y:y, w:w, h:h, ladder:ladder, tier:tier };
+}
+function buyUpgrade(key) {
+  var b = hubBtns[key];
+  if (!b) return;
+  var cost = upgradeCost(b.ladder, b.tier);
+  if (cost < 0 || score < cost) { GF.sfx('hit'); return; }
+  score -= cost;
+  if (key === 'cap') capTier++;
+  else if (key === 'pull') pullTier++;
+  else if (key === 'rad') radTier++;
+  GF.sfx('levelup'); GF.juice.flash('#7CFC9A', 180, 0.2);
+  GF.juice.particles.burst(b.x + b.w/2, b.y + b.h/2, { count: 16, colors: ['#7CFC9A','#ffe14d','#fff'], speed: 220, life: 0.6 });
+  GF.funnel.mark('first_upgrade');
+  saveRunState();
+}
+
+// ── PAUSE / HELP ──────────────────────────────────────────────────────────
+function drawPause(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,8,14,0.8)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(26*S, 20, 36) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('paused'), W/2, H*0.22);
+
+  // how-to-play reference text (wrapped)
+  var lines = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
+  var fs = GF.clamp(13*S, 11, 16);
+  ctx.font = fs + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#cfe0ee';
+  var maxW = Math.min(W*0.84, 440*S), tx = (W - maxW)/2, ty = H*0.30, lh = fs * 1.35;
+  for (var i = 0; i < lines.length; i++) ty = wrapText(ctx, lines[i], tx, ty, maxW, lh) + lh*0.5;
+
+  var bw = Math.min(W*0.7, 300*S), bx = W/2 - bw/2, bh = 56*S, byb = Math.min(H*0.82, ty + 12*S);
+  ctx.save(); ctx.shadowColor = '#7CFC9A'; ctx.shadowBlur = 14*S;
+  ctx.fillStyle = '#7CFC9A'; GF.rr(ctx, bx, byb, bw, bh, 12*S); ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#14110c'; ctx.font = 'bold ' + GF.clamp(17*S,14,22) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('> ' + GF.t('resume'), W/2, byb + bh/2);
+  hubBtns.resume = { x:bx, y:byb, w:bw, h:bh };
+  ctx.textBaseline = 'alphabetic';
+}
+function wrapText(ctx, text, x, y, maxW, lh) {
+  var words = String(text).split(/\s+/), cur = '', yy = y;
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { ctx.fillText(cur, x, yy); yy += lh; cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) { ctx.fillText(cur, x, yy); yy += lh; }
+  return yy;
+}
+
+// ── COACH (interactive tutorial over live play) ───────────────────────────
+function drawCoach(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fillRect(0, 0, W, H);
+  var msg = coach.step === 0 ? GF.t('cDrag') : coach.step === 1 ? GF.t('cSweep') : GF.t('cDump');
+  var tgx, tgy;
+  if (coach.step === 2) { tgx = recycler.x; tgy = recycler.y; } else { tgx = ball.x; tgy = ball.y; }
+  var pulse = 0.5 + 0.5*Math.sin(performance.now()/250);
+  ctx.save();
+  ctx.strokeStyle = coach.step===2 ? '#ffe14d' : '#7CFC9A'; ctx.lineWidth = 3*S; ctx.globalAlpha = 0.8;
+  ctx.beginPath(); ctx.arc(tgx, tgy, (coach.step===2?recycler.r:ball.r) + (10+pulse*8)*S, 0, 6.28); ctx.stroke();
+  ctx.restore();
+  if (coach.step < 2) {
+    var t = (performance.now()/900) % 1, dx = ball.x + Math.cos(t*6.28) * 46*S, dy = ball.y + Math.sin(t*6.28) * 46*S;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath(); ctx.arc(dx, dy, 7*S, 0, 6.28); ctx.fill();
+  }
+  var fs = GF.clamp(15*S, 12, 19);
+  ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+  var tw = ctx.measureText(msg).width, pad = 16*S, ph = 38*S, pw = tw + pad*2, px = W/2 - pw/2, py = H*0.14;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 9*S;
+  ctx.fillStyle = 'rgba(16,20,30,0.92)';
+  GF.rr(ctx, px, py, pw, ph, ph/2); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(msg, W/2, py + ph/2);
+  var sk = GF.t('skip') + ' x';
+  ctx.font = (fs-2) + 'px Inter, system-ui, sans-serif';
+  var skw = ctx.measureText(sk).width;
+  ctx.fillStyle = '#9cc';
+  ctx.fillText(sk, W/2, py + ph + 16*S);
+  coach._skip = { x: W/2 - skw/2 - 16*S, y: py + ph + 4*S, w: skw + 32*S, h: 28*S };
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── INPUT (pointer) — HUD buttons, overlays, coach, hub ───────────────────
+function onPress(cx, cy) {
+  if (coach.active) {
+    var sb = coach._skip;
+    if (sb && cx >= sb.x && cx <= sb.x + sb.w && cy >= sb.y && cy <= sb.y + sb.h) { markTutorialSeen(); return true; }
+  }
+  if (gs === 'PLAYING') {
+    if (hit(hudBtns.help, cx, cy))  { reopenHelp(); return true; }
+    if (hit(hudBtns.mute, cx, cy))  { GF.toggleMute(); GF.setMusicMuted(GF.muted); return true; }
+    if (hit(hudBtns.pause, cx, cy)) { enterPause(); return true; }
+    return false;
+  }
+  if (gs === 'PAUSE') {
+    if (hit(hubBtns.resume, cx, cy)) { resumePlay(); return true; }
+    return true;
+  }
+  if (gs === 'HUB') {
+    if (hit(hubBtns.cap, cx, cy))  { buyUpgrade('cap'); return true; }
+    if (hit(hubBtns.pull, cx, cy)) { buyUpgrade('pull'); return true; }
+    if (hit(hubBtns.rad, cx, cy))  { buyUpgrade('rad'); return true; }
+    if (hit(hubBtns.next, cx, cy)) {
+      // Fire the capped interstitial on THIS user click (Yandex 4.4), and only
+      // start the next stage once the ad CLOSES so gameplay never runs behind
+      // the ad (Codex review). If no ad is pending/available, onClose fires
+      // ~immediately and play continues seamlessly.
+      if (_pendingAd) {
+        _pendingAd = false;
+        GF.ads.interstitial({ onClose: function () { nextStage(); } });
+      } else {
+        nextStage();
+      }
+      return true;
+    }
+    return true;
+  }
+  return false;
+}
+function hit(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+// PAUSE / help: tell the platform gameplay paused (GameplayAPI stop), freeze the
+// world (update gates on gs!=='PLAYING'), and resume cleanly (Codex review).
+function enterPause() { gs = 'PAUSE'; GF.gameEnded(); }
+function resumePlay() { gs = 'PLAYING'; GF.gameStarted(); }
+function reopenHelp() {
+  // open the help reference panel (reuse the PAUSE screen, which shows the full
+  // how-to text) and re-arm the coach so the gestures are re-shown next play.
+  enterPause();
+  coach.done = false;
+}
+
+var _canvas = document.getElementById('c');
+function pointerXY(e) {
+  var r = _canvas.getBoundingClientRect();
+  var sx = _canvas.width / r.width, sy = _canvas.height / r.height;
+  return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+}
+_canvas.addEventListener('pointerdown', function(e) { var p = pointerXY(e); onPress(p.x, p.y); }, { passive: true });
+
+// ── SCREENSHOT / GATE HOOKS ───────────────────────────────────────────────
+window._jumpLevel = function(n) {
+  n = n || 1;
+  coach.done = true; coach.active = false;
+  try { localStorage.setItem('debris_magneto_seen_tutorial','1'); } catch(e){}
+  if (n >= 99) {
+    stage = 1; capTier=0; pullTier=0; radTier=0; score=0;
+    startStage();
+    jammed = BAL.JAM_LIMIT; cleanPct = 0; stageTarget = 0.7;
+    failStage();
+    return;
+  }
+  stage = GF.clamp(n, 1, BAL.STAGE_COUNT);
+  capTier = 1; pullTier = 2; radTier = 1; score = 240;
+  startStage();
+  ball.load = Math.floor(capacityMax() * 0.5);
+  for (var k = 0; k < ball.load; k++) ball.accreted.push({ val: 3, ang: k/ball.load*6.28, kind: k%3===0?'l':'s', r: 8*GF.S });
+  ball.r = (ballBaseR() + Math.min(10, ball.load*0.5)) * GF.S;
+  var cleaned = 0, want = Math.floor(GRID.total * 0.4);
+  for (var i = 0; i < GRID.cells.length && cleaned < want; i++) { if (GRID.cells[i] === 1) { GRID.cells[i] = 2; GRID.dirty--; cleaned++; } }
+  cleanPct = GRID.total > 0 ? (1 - GRID.dirty/GRID.total) : 0;
+  combo = 3; comboT = BAL.COMBO_DECAY_SEC;
+};
+window._setupForScreenshot = function(n) { window._jumpLevel(n || 4); };
+
+// ── Locale / state hooks for locale_overflow_check.js (safe to ship) ──
+window._setState = function(s) {
+  // force a screen for the overflow audit; build benign geometry where needed
+  if (s === 'PLAYING') { if (!GRID.cells) startStageSilent(); gs = 'PLAYING'; }
+  else if (s === 'HUB') { if (!GRID.cells) startStageSilent(); gs = 'HUB'; }
+  else if (s === 'PAUSE') { if (!GRID.cells) startStageSilent(); gs = 'PAUSE'; }
+  else if (s === 'GAMEOVER') { if (!GRID.cells) startStageSilent(); gs = 'GAMEOVER'; }
+  else if (s === 'WON') { gs = 'WON'; }
+  else gs = 'MENU';
+};
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'Inter, system-ui, sans-serif'; };
+
+// ── BOOT ──────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 540,
+  designH: 960,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'debris_magneto',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('debris_magneto_best') || '0') || 0; } catch (e) {}
+    layout();
+
+    // ── Yandex 1.9 — persist run state across reload ──
+    GF.persist('debris_magneto_run_v1',
+      function () {
+        return { gs: gs, score: score, stage: stage, capTier: capTier, pullTier: pullTier,
+                 radTier: radTier, runTonnage: runTonnage };
+      },
+      function (s) {
+        if (!s) return;
+        score = s.score || 0; stage = s.stage || 1; runTonnage = s.runTonnage || 0;
+        capTier = s.capTier || 0; pullTier = s.pullTier || 0; radTier = s.radTier || 0;
+        // Restore to a safe screen (hub) rather than resuming live physics mid-stage.
+        if (s.gs === 'PLAYING' || s.gs === 'PAUSE') gs = 'HUB';
+        else gs = (s.gs === 'WON') ? 'WON' : (s.gs === 'GAMEOVER' ? 'GAMEOVER' : 'MENU');
+        if (gs === 'HUB' || gs === 'GAMEOVER' || gs === 'WON') startStageSilent();
+      }
+    );
+    if (gs === 'PLAYING') gs = 'MENU';   // safe entry point
+
+    // ── MUSIC (HARD RULE 8) ──
+    GF.bgMusic({ file: 'audio/bg_track.mp3', preset: 'cozy', muted: GF.muted });
+
+    // ── REMOTE CONFIG (live-ops tuning) ──
+    GF.remoteConfig('debris_magneto', CFG, {
+      clamps: { 'tuning.speed_mult': [0.5, 2], 'tuning.price_mult': [0.5, 3] },
+      onUpdate: function (c) { CFG = c; },
+    }).then(function (c) { CFG = c; });
+
+    // ── exposeState for the post-build-tester / gates ──
+    GF.exposeState(function () {
+      return { gs: gs, score: score, best: best, stage: stage, level: stage,
+               cleanPct: Math.round(cleanPct*100), capacity: capacityMax(),
+               load: ball.load, jammed: jammed, combo: combo,
+               capTier: capTier, pullTier: pullTier, radTier: radTier };
+    });
+
+    // ── exposeReach: every interactive control on the current screen, in screen
+    //    px, no scroll regions (all content fits the viewport). Lets
+    //    reachability_check.js prove the UI is reachable inside Yandex chrome
+    //    (silences the presubmit reachability WARN). Buttons are live globals set
+    //    by the draw pass, so we report whichever screen is showing. (Codex review.)
+    GF.exposeReach(function () {
+      var items = [], S = GF.S, W = GF.W;
+      function add(id, b) { if (b && b.w) items.push({ id: id, x: b.x, y: b.y, w: b.w, h: b.h }); }
+      if (gs === 'PLAYING') {
+        // compute the HUD button rects directly (same formula as drawHUD) so
+        // reachability is valid even before a draw frame has populated hudBtns.
+        var bw = 40*S, gap = 8*S, byb = 8*S;
+        var x3 = W - 12*S - bw, x2 = x3 - bw - gap, x1 = x2 - bw - gap;
+        items.push({ id:'help',  x:x1, y:byb, w:bw, h:bw });
+        items.push({ id:'mute',  x:x2, y:byb, w:bw, h:bw });
+        items.push({ id:'pause', x:x3, y:byb, w:bw, h:bw });
+      } else if (gs === 'HUB') { add('up_cap', hubBtns.cap); add('up_pull', hubBtns.pull); add('up_rad', hubBtns.rad); add('next', hubBtns.next); }
+      else if (gs === 'PAUSE') { add('resume', hubBtns.resume); }
+      else { var pr = (window.__gfPlayRect && window.__gfPlayRect()); if (pr) items.push({ id: 'play', x: pr.x, y: pr.y, w: pr.w, h: pr.h }); }
+      return { screen: gs, viewportH: GF.H, screenH: GF.H, scrollMaxY: 0, items: items };
+    });
+    // Tour the reachability gate walks (it waits a draw frame per step so the
+    // HUB/PAUSE button rects repopulate). All screens fit the viewport - no
+    // scroll regions, so scrollMaxY is 0 everywhere. (Codex review.)
+    GF.exposeTour([
+      { name: 'menu',    go: function () { gs = 'MENU'; } },
+      { name: 'playing', go: function () { if (!GRID.cells) startStageSilent(); gs = 'PLAYING'; } },
+      { name: 'hub',     go: function () { if (!GRID.cells) startStageSilent(); gs = 'HUB'; } },
+      { name: 'pause',   go: function () { if (!GRID.cells) startStageSilent(); gs = 'PAUSE'; } },
+    ]);
+
+    // ── exposeBot: balance probe rolls toward nearest scrap / dumps / buys ──
+    GF.exposeBot(
+      function () {
+        if (gs === 'HUB') {
+          var acts = [];
+          if (upgradeCost(COSTS.cap, capTier) >= 0 && score >= upgradeCost(COSTS.cap, capTier)) acts.push('buy_cap');
+          if (upgradeCost(COSTS.pull, pullTier) >= 0 && score >= upgradeCost(COSTS.pull, pullTier)) acts.push('buy_pull');
+          if (upgradeCost(COSTS.rad, radTier) >= 0 && score >= upgradeCost(COSTS.rad, radTier)) acts.push('buy_rad');
+          acts.push('next'); return acts;
+        }
+        if (gs === 'PLAYING') { var a = ['roll_scrap']; if (ball.load > 0) a.push('roll_dump'); return a; }
+        if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WON') return ['start'];
+        return [];
+      },
+      function (action) {
+        if (action === 'start') { startGame(); return; }
+        if (action === 'next') { nextStage(); return; }
+        if (action === 'buy_cap') { buyUpgrade('cap'); return; }
+        if (action === 'buy_pull') { buyUpgrade('pull'); return; }
+        if (action === 'buy_rad') { buyUpgrade('rad'); return; }
+        if (action === 'roll_dump') {
+          var dx = recycler.x - ball.x, dy = recycler.y - ball.y, d = Math.max(0.001, Math.sqrt(dx*dx+dy*dy));
+          ball.vx += (dx/d) * BAL.BALL_ACCEL * 2 * GF.S; ball.vy += (dy/d) * BAL.BALL_ACCEL * 2 * GF.S;
+          ball.x += ball.vx; ball.y += ball.vy;
+          if (d < recycler.r + ball.r) tryDump();
+          return;
+        }
+        if (action === 'roll_scrap') {
+          var bestSc = null, bd = 1e9;
+          for (var i = 0; i < scraps.length; i++) { var dd = GF.dist(ball.x, ball.y, scraps[i].x, scraps[i].y); if (dd < bd) { bd = dd; bestSc = scraps[i]; } }
+          var tx = bestSc ? bestSc.x : recycler.x, ty = bestSc ? bestSc.y : recycler.y;
+          var ex = tx - ball.x, ey = ty - ball.y, e = Math.max(0.001, Math.sqrt(ex*ex+ey*ey));
+          ball.vx += (ex/e) * BAL.BALL_ACCEL * 2 * GF.S; ball.vy += (ey/e) * BAL.BALL_ACCEL * 2 * GF.S;
+        }
+      }
+    );
+
+    // ── econ sim hook (capacity/upgrade economy) ──
+    if (window.__gfSimMode || window._silent) window.__gfEcon = {
+      genre: 'idle',
+      params: { COSTS: COSTS, SCRAP_VAL: { s:2, m:5, l:14 } },
+      initialState: function () { return { coins: 0, cap: 0, pull: 0, rad: 0, stage: 1 }; },
+      actions: function (s) {
+        var a = [];
+        var cc = s.cap < COSTS.cap.length ? COSTS.cap[s.cap] : -1;
+        var pc = s.pull < COSTS.pull.length ? COSTS.pull[s.pull] : -1;
+        var rc = s.rad < COSTS.rad.length ? COSTS.rad[s.rad] : -1;
+        if (cc >= 0) a.push({ id:'cap'+s.cap, cost: cc, ready: s.coins >= cc });
+        if (pc >= 0) a.push({ id:'pull'+s.pull, cost: pc, ready: s.coins >= pc });
+        if (rc >= 0) a.push({ id:'rad'+s.rad, cost: rc, ready: s.coins >= rc });
+        return a;
+      },
+      step: function (s, act) {
+        if (act.id === 'wait') {
+          // income = clearing scrap during one stage of real sweeping. One stage
+          // is ~75s of real play; income scales modestly with the upgrades that
+          // make collection efficient (capacity = fewer dump trips, pull = bigger
+          // scrap reachable, radius = wider vacuum) so the long ladders pace out.
+          var perStage = 90 + s.cap * 16 + s.pull * 26 + s.rad * 12 + s.stage * 14;
+          s.coins += perStage * act.dt / 75;
+          return s;
+        }
+        if (act.id.indexOf('cap') === 0) { s.coins -= COSTS.cap[s.cap]; s.cap++; }
+        else if (act.id.indexOf('pull') === 0) { s.coins -= COSTS.pull[s.pull]; s.pull++; }
+        else if (act.id.indexOf('rad') === 0) { s.coins -= COSTS.rad[s.rad]; s.rad++; }
+        s.stage++;
+        return s;
+      },
+      metrics: function (s) { return { currency: s.coins, progress: s.stage * 100 + s.cap*20 + s.pull*20 + s.rad*20 }; },
+    };
+
+    // ── PLATFORM AUTOSTART (HARD RULE 9 — platform builds drop into gameplay) ──
+    if (window.__GF_AUTOSTART && !window._silent) startGame();
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// build a silent arena (no gs change) so draw() has geometry after a restore
+function startStageSilent() {
+  layout();
+  GRID._w = GF.W; GRID._h = GF.H;
+  GRID.cells = new Uint8Array(GRID.cols * GRID.rows);
+  GRID.dirty = 0;
+  for (var i = 0; i < GRID.cells.length; i++) { if (Math.random() < 0.5) { GRID.cells[i] = 1; GRID.dirty++; } else GRID.cells[i] = 2; }
+  GRID.total = GRID.cells.length;
+  recycler.x = ARENA.gx + GRID.cell * (GRID.cols - 1.4);
+  recycler.y = ARENA.gy + GRID.cell * 1.4; recycler.r = BAL.RECYCLER_R * GF.S;
+  ball.x = ARENA.gx + GRID.cell*GRID.cols*0.4; ball.y = ARENA.gy + GRID.cell*GRID.rows*0.6;
+  ball.r = ballBaseR()*GF.S; ball.load = 0; ball.accreted = [];
+  scraps = []; crates = []; tars = [];
+  stageTarget = Math.min(0.92, BAL.CLEAN_TARGET_BASE + (stage-1)*0.04);
+}
+
+// save helper (event-driven only; never per-frame)
+function saveRunState() { try { GF.saveRun(); } catch (e) {} }
+
+})();
+</script>
+</body>
+</html>
