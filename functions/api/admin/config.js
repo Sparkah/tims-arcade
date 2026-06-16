@@ -24,6 +24,8 @@
 // KV write budget: admin writes are manual and rare - negligible against the
 // free-tier 1000 writes/day.
 
+import { edgeCached } from '../../_lib/edgecache.js';
+
 const MAX_BYTES = 8192;
 
 function badKey(k) { return k === '__proto__' || k === 'constructor' || k === 'prototype'; }
@@ -79,20 +81,28 @@ function parseSlug(raw) {
   return /^[a-z0-9_-]{1,64}$/.test(slug) ? slug : null;
 }
 
+async function buildConfigSlugs(env) {
+  const slugs = [];
+  let cursor;
+  do {
+    const page = await env.VOTES.list({ prefix: 'config:', cursor });
+    for (const k of page.keys) slugs.push(k.name.slice('config:'.length));
+    cursor = page.list_complete ? null : page.cursor;
+  } while (cursor);
+  const r = json({ slugs: slugs.sort(), count: slugs.length });
+  r.headers.set('cache-control', 'public, max-age=0, s-maxage=300');  // json() sets no-store; override so the edge can cache
+  return r;
+}
+
 export async function onRequestGet({ request, env }) {
   const fail = authFail(request, env);
   if (fail) return fail;
   const url = new URL(request.url);
   const rawSlug = url.searchParams.get('slug');
   if (!rawSlug) {
-    const slugs = [];
-    let cursor;
-    do {
-      const page = await env.VOTES.list({ prefix: 'config:', cursor });
-      for (const k of page.keys) slugs.push(k.name.slice('config:'.length));
-      cursor = page.list_complete ? null : page.cursor;
-    } while (cursor);
-    return json({ slugs: slugs.sort(), count: slugs.length });
+    // Edge-cache the config:* slug listing (auth verified above). 5min. Free
+    // tier caps KV LIST at 1000/day. See Knowledge/Learnings/KV List Budget.
+    return edgeCached('/api-admin-config-slugs', {}, () => buildConfigSlugs(env));
   }
   const slug = parseSlug(rawSlug);
   if (!slug) return json({ error: 'invalid_slug' }, 400);

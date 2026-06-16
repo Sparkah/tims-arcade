@@ -13,14 +13,25 @@
 // pending/just-approved games legitimately show zeros.
 //
 // Read-only (no KV writes). { signed_in:false } when not logged in.
+//
+// CACHING: this walks the whole upload:* set (a KV LIST) and the dev's "my
+// games" page can poll it. Edge-cache per-uid (the caller's session, so each
+// dev only ever reads their own entry), 30s. The free tier caps LIST at
+// 1000/day. See Knowledge/Learnings/KV List Budget.
 
 import { readSession } from '../_session.js';
+import { edgeCached } from '../_lib/edgecache.js';
 
 export async function onRequestGet({ request, env }) {
   const session = await readSession(request, env);
-  const headers = { 'content-type': 'application/json', 'cache-control': 'no-store' };
-  if (!session) return new Response(JSON.stringify({ signed_in: false, games: [] }), { headers });
+  if (!session) {
+    return new Response(JSON.stringify({ signed_in: false, games: [] }),
+      { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+  }
+  return edgeCached(`/api-me-games/${session.uid}`, {}, () => buildMyGames(env, session));
+}
 
+async function buildMyGames(env, session) {
   const mine = [];
   let cursor;
   do {
@@ -62,5 +73,7 @@ export async function onRequestGet({ request, env }) {
   }));
 
   games.sort((a, b) => (b.ts || 0) - (a.ts || 0));
-  return new Response(JSON.stringify({ signed_in: true, email: session.email, count: games.length, games }), { headers });
+  return new Response(
+    JSON.stringify({ signed_in: true, email: session.email, count: games.length, games }),
+    { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=0, s-maxage=30' } });
 }

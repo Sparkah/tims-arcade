@@ -34,6 +34,7 @@ echo "✓ Installed Gallery pre-push hook -> $HOOKS_DIR/pre-push (from tracked s
 echo "  Stage -1:  Gallery push lock        (serialises concurrent pushes)"
 echo "  Stage 0:   cover-art gate           (BLOCKING)"
 echo "  Stage 0.5: thumb .webp gate         (BLOCKING)"
+echo "  Stage 0.8: KV list-op guard         (BLOCKING - new unguarded VOTES.list())"
 echo "  Stage 1:   mechanical Yandex gate   (BLOCKING)"
 echo "  Stage 2:   6-axis AI scorecard      (BLOCKING - avg >= ${REVIEW_THRESHOLD:-5.0})"
 echo "  Bypass: git push --no-verify        (use sparingly)"

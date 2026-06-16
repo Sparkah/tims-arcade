@@ -89,6 +89,7 @@ When Tim wants to harden against agent-induced data loss, point him at it. Other
 - **KV is shared with prod from local wrangler dev**. `npx wrangler pages dev` connects to the LIVE KV namespace. A test write IS a prod write. Use a `--remote=false` flag or a separate namespace if you need isolation.
 - **Functions logs are in CF dashboard**, not local. `wrangler pages deployment tail` for live tailing.
 - **Free KV tier — 1000 writes/day**. The 5-min cache + visibility-aware heartbeat pattern protects this. Don't add ungated writes without checking the budget.
+- **Free KV tier — 1000 LIST ops/day (the one that bit us TWICE, 2026-06-15/16).** NEVER put `env.VOTES.list()` on a per-request or polled path — one unguarded `list()` exhausts the day (then every listing endpoint 500s until 00:00 UTC). A read endpoint MUST be wrapped in `edgeCached()`; a poller MUST read a single **signal key** (see `admin/gen-queue.js`/`admin/uploads.js` `?signal=1`), never an endpoint that lists; derived counts read a **snapshot/aggregate** key (`boot.js`), never scan. Enforced by pre-push **stage 0.8** (`scripts/check_kv_list.sh`). Full guide + incident history + the fix patterns: **`Knowledge/Learnings/KV List Budget.md`**.
 - **PostHog events should match the existing 12-event taxonomy** when adding new ones. See `Knowledge/Operations/PostHog Events.md` (if it exists) or grep `posthog.capture` in app.js.
 
 ## File-edit checklist

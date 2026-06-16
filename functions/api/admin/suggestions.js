@@ -7,6 +7,12 @@
 //
 // Also used by the factory leader's portfolio_context step at 09:15 to
 // pull all open ('new') suggestions for today's idea-ranking.
+//
+// The GET does a suggestion:* KV LIST, so it is edge-cached (auth verified
+// first; key by params) — the free tier caps LIST at 1000/day and this is hit
+// by the dashboard + the 09:15 leader. See Knowledge/Learnings/KV List Budget.
+
+import { edgeCached } from '../../_lib/edgecache.js';
 
 const MAX_DAYS = 30;
 
@@ -18,6 +24,11 @@ export async function onRequestGet({ request, env }) {
 
   const days = Math.min(parseInt(url.searchParams.get('days') || '14') || 14, MAX_DAYS);
   const statusFilter = url.searchParams.get('status') || ''; // optional: new|built|dismissed
+  return edgeCached(`/api-admin-suggestions?d=${days}&s=${statusFilter}`, {},
+    () => buildSuggestions(env, days, statusFilter));
+}
+
+async function buildSuggestions(env, days, statusFilter) {
   const cutoff = Date.now() - days * 86400_000;
 
   const out = [];
@@ -46,7 +57,7 @@ export async function onRequestGet({ request, env }) {
     count: out.length,
     new_count: out.filter(s => s.status === 'new').length,
     suggestions: out,
-  }), { headers: { 'content-type': 'application/json' } });
+  }), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=0, s-maxage=300' } });
 }
 
 export async function onRequestPost({ request, env }) {

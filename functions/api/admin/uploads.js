@@ -17,6 +17,7 @@
 // Metadata only — the raw zip lives under uploadblob:<id> and is never returned.
 
 import { emailToUid } from '../../_lib/uid.js';
+import { edgeCached } from '../../_lib/edgecache.js';
 
 const STATUSES = ['pending', 'approved', 'rejected', 'live'];
 const RECORD_TTL = 60 * 60 * 24 * 45;
@@ -35,6 +36,14 @@ export async function onRequestGet({ request, env }) {
   }
 
   const statusFilter = url.searchParams.get('status') || '';
+  // Edge-cache the upload:* + uploadfail:* scan (auth verified above; key by
+  // status). 60s. The background worker polls the cheap ?signal=1 path above;
+  // this full scan is the dashboard view. Free tier caps KV LIST at 1000/day.
+  // See Knowledge/Learnings/KV List Budget.
+  return edgeCached(`/api-admin-uploads?s=${statusFilter}`, {}, () => buildUploads(env, statusFilter));
+}
+
+async function buildUploads(env, statusFilter) {
   const out = [];
   let cursor;
   do {
@@ -68,7 +77,9 @@ export async function onRequestGet({ request, env }) {
   } while (fcursor);
   failures.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 
-  return json({ generated_at: new Date().toISOString(), count: out.length, counts, uploads: out, failures });
+  const r = json({ generated_at: new Date().toISOString(), count: out.length, counts, uploads: out, failures });
+  r.headers.set('cache-control', 'public, max-age=0, s-maxage=60');   // edge-cache 5min->60s; auth gates access
+  return r;
 }
 
 export async function onRequestPost({ request, env }) {

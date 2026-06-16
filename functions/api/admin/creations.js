@@ -2,14 +2,23 @@
 //   GET  /api/admin/creations               -> all vibe creations (with email + flags)
 //   POST /api/admin/creations {id, action}:  delete | unpublish
 // UI: /chat-mod (shared moderation page).
+//
+// The GET walks upload:* (a KV LIST), so it is edge-cached (auth verified
+// first) — the free tier caps LIST at 1000/day. POST mutations are uncached.
+// See Knowledge/Learnings/KV List Budget.
 
 import { json, jsonError } from '../../_lib/response.js';
+import { edgeCached } from '../../_lib/edgecache.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const TTL = 60 * 60 * 24 * 30;
 
 export async function onRequestGet({ request, env }) {
   const a = auth(request, env); if (a !== true) return a;
+  return edgeCached('/api-admin-creations', {}, () => buildCreations(env));
+}
+
+async function buildCreations(env) {
   const out = [];
   let cursor;
   do {
@@ -24,7 +33,9 @@ export async function onRequestGet({ request, env }) {
     cursor = list.list_complete ? null : list.cursor;
   } while (cursor);
   out.sort((x, y) => (y.ts || 0) - (x.ts || 0));
-  return ns(json({ ok: true, creations: out }));
+  const r = json({ ok: true, creations: out });
+  r.headers.set('cache-control', 'public, max-age=0, s-maxage=300');  // edge-cache 5min; auth gates access
+  return r;
 }
 
 export async function onRequestPost({ request, env }) {

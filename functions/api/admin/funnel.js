@@ -20,6 +20,7 @@
 
 import { jsonError } from '../../_lib/response.js';
 import { isValidSlug } from '../../_lib/validate.js';
+import { edgeCached } from '../../_lib/edgecache.js';
 
 const STANDARD = ['boot', 'first_input', 'alive_60', 'alive_120', 'alive_300'];
 const DAY = 86400000;
@@ -64,6 +65,14 @@ async function handleGet({ request, env }) {
     from = dateUtc(Date.parse(to) - 31 * DAY);
   }
 
+  // Edge-cache the fnl:* scan (auth verified above; key by slug+range). 5min.
+  // The factory iteration loop hits this per game; the free tier caps KV LIST
+  // at 1000/day. See Knowledge/Learnings/KV List Budget.
+  return edgeCached(`/api-admin-funnel?s=${slugParam || ''}&f=${from}&t=${to}`, {},
+    () => buildFunnel(env, slugParam, from, to));
+}
+
+async function buildFunnel(env, slugParam, from, to) {
   // Collect fnl:<slug>:<date>:<sid> keys (key NAME carries slug+date, so the
   // range filter needs no value read; values are read only for in-range keys).
   const prefix = slugParam ? `fnl:${slugParam}:` : 'fnl:';
@@ -145,5 +154,5 @@ async function handleGet({ request, env }) {
     truncated: !complete || overBudget, // key-list bound hit OR read budget capped
     caveat: 'Gallery-only funnel (platform builds never beacon). Directional at low traffic; counts are unique sids per day summed over the range.',
     generatedAt: new Date().toISOString(),
-  }), { headers: { 'content-type': 'application/json' } });
+  }), { headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=0, s-maxage=300' } });
 }
