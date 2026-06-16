@@ -63,6 +63,9 @@ var STRINGS = {
     daily_streak: 'Streak', daily_login_d: 'daily tickets for keeping the arcade open',
     morning_shift: 'Morning visitors', morning_shift_d: 'offline visitors filled the arcade',
     visitors: 'visitors', cap_10h: '10h cap', claim: 'CLAIM',
+    dex: 'Dex', new_critter: 'NEW CRITTER', set_complete: 'SET COMPLETE!',
+    mystery_crate: 'Mystery Crate', mystery_crate_d: 'free critter for an ad',
+    watch_ad: 'WATCH AD', collection: 'COLLECTION', critters_left: 'critters left',
     daily_catch: 'Catch prizes', daily_catch_d: 'stock today shelf',
     daily_serve: 'Serve visitors', daily_serve_d: 'land grabs for the front line',
     daily_tickets_goal: 'Earn tickets', daily_tickets_d: 'feed saved arcade upgrades',
@@ -105,6 +108,9 @@ var STRINGS = {
     daily_streak: 'Серия', daily_login_d: 'ежедневные билеты за открытый зал',
     morning_shift: 'Утренние гости', morning_shift_d: 'зал работал, пока тебя не было',
     visitors: 'гостей', cap_10h: 'лимит 10ч', claim: 'ЗАБРАТЬ',
+    dex: 'Дек', new_critter: 'НОВЫЙ ЗВЕРЁК', set_complete: 'НАБОР СОБРАН!',
+    mystery_crate: 'Загадочный ящик', mystery_crate_d: 'зверёк за рекламу',
+    watch_ad: 'РЕКЛАМА', collection: 'КОЛЛЕКЦИЯ', critters_left: 'зверьков осталось',
     daily_catch: 'Лови призы', daily_catch_d: 'пополни витрину дня',
     daily_serve: 'Обслужи гостей', daily_serve_d: 'лови для первой очереди',
     daily_tickets_goal: 'Заработай билеты', daily_tickets_d: 'усиль сохранённый зал',
@@ -122,6 +128,48 @@ var MACHINES = {
   en: ['Plush Claw','Capsule Gacha','Jumbo Claw','Candy Drop','Prize Pusher','Mystery Box','VIP Crane','Diamond Vault'],
   ru: ['Клешня-плюш','Капсула-гача','Гигант-клешня','Сахарный дроп','Толкатель','Загадка-бокс','Золотой кран','Алмазный сейф'],
 };
+// ── PLUSHIE CRITTER COLLECTION (M3 depth) ─────────────────────────────────
+// A discoverable roster grown straight out of the catch loop: every machine
+// owns 4 named critter species (one per plushie tier). Catching a tier on a
+// machine for the FIRST time registers that species in the permanent Plushie-dex
+// and grants a STACKING permanent passive bonus (income / grip / tickets). 32
+// species total = a long collection chase, and completing all 4 of a machine's
+// species grants a one-time SET bonus. `bonus` keys: inc (% all income),
+// grip (+flat grip), tkt (% ticket gain). Drawn as a HUD strip so a returning
+// player SEES more critters filled than yesterday (apartment-cleaner test).
+var CRITTER_BONUS = { inc: 0.05, grip: 0.06, tkt: 0.05 };   // per discovered species
+var CRITTER_SET_BONUS_INC = 0.12;                            // per fully-collected machine set
+var CRITTER_NAMES = {
+  en: [
+    ['Pip','Mochi','Clover','Pearl'],            // Plush Claw
+    ['Bibo','Tama','Sprout','Opal'],             // Capsule Gacha
+    ['Bruno','Puffin','Maple','Topaz'],          // Jumbo Claw
+    ['Gumdrop','Twirl','Sorbet','Amber'],        // Candy Drop
+    ['Roly','Pusher Pal','Fern','Jade'],         // Prize Pusher
+    ['Whisk','Enigma','Moss','Onyx'],            // Mystery Box
+    ['Coin Cat','Gilda','Laurel','Sunstone'],    // VIP Crane
+    ['Glimmer','Prism','Frost','Diamondback'],   // Diamond Vault
+  ],
+  ru: [
+    ['Пип','Моти','Клевер','Жемчуг'],
+    ['Бибо','Тама','Росток','Опал'],
+    ['Бруно','Паффин','Клён','Топаз'],
+    ['Мармелад','Вихрь','Сорбет','Янтарь'],
+    ['Роли','Толкач','Папоротник','Нефрит'],
+    ['Виск','Загадка','Мох','Оникс'],
+    ['Монеткот','Гильда','Лавр','Солнцекамень'],
+    ['Блеск','Призма','Иней','Алмазик'],
+  ],
+};
+// species id = machineTier * 4 + plushTier  (0..31)
+function critterId(mt, pt) { return GF.clamp(mt, 0, MAX_MACHINE) * 4 + GF.clamp(pt, 0, 3); }
+function critterName(id) {
+  var arr = CRITTER_NAMES[GF.lang] || CRITTER_NAMES.en;
+  var mt = Math.floor(id / 4), pt = id % 4;
+  return (arr[mt] && arr[mt][pt]) || ('Critter ' + id);
+}
+function critterBonusKind(id) { var pt = id % 4; return pt === 1 ? 'grip' : (pt === 3 ? 'tkt' : 'inc'); }
+var TOTAL_CRITTERS = 32;
 // Per-machine cabinet palette {glass, frame, accent} + plushie hue family.
 var MACHINE_COL = [
   { g:'#ff7eb3', f:'#c23b78', a:'#ffd1e6', plush:['#ff9a8b','#ffd166','#8ad6cb','#c8a2ff'] }, // plush claw - candy pink
@@ -211,6 +259,7 @@ var CABINET_PRIZE_NEEDS = [0, 16, 48, 110, 210, 360];
 var DAY_MS = 86400000;
 var HOUR_MS = 3600000;
 var OFFLINE_CAP_HOURS = 10;
+var CRATE_COOLDOWN_MS = 180000;   // 3 min between Mystery Crate opens (anti-farm)
 var DAILY_TASK_DEFS = [
   { id:'catch', name:'daily_catch', desc:'daily_catch_d' },
   { id:'serve', name:'daily_serve', desc:'daily_serve_d' },
@@ -218,8 +267,10 @@ var DAILY_TASK_DEFS = [
   { id:'upgrade', name:'daily_upgrade_goal', desc:'daily_upgrade_d' },
 ];
 function freshMeta() {
-  return { version: 2, tickets: 0, totalPrizes: 0, rarePrizes: 0, shelfLevel: 0,
+  var crit = []; for (var ci = 0; ci < TOTAL_CRITTERS; ci++) crit.push(0);
+  return { version: 3, tickets: 0, totalPrizes: 0, rarePrizes: 0, shelfLevel: 0,
     franchiseLevel: 0, cabinets: 1, bestMachine: 0, collection: [0, 0, 0, 0],
+    critters: crit, cratePending: false, crateAt: 0,
     lastSeenAt: Date.now(), lastLoginDay: -1, streak: 0, loginPending: false, loginReward: 0,
     pendingVisitors: 0, pendingTickets: 0, pendingHours: 0,
     dailyDay: -1, dailyTasks: [] };
@@ -267,7 +318,7 @@ var tutorialFocusKind = null;  // upgrade row currently emphasized for the coach
 function normalizeMeta(m) {
   var out = freshMeta();
   if (!m || typeof m !== 'object') return out;
-  out.version = 2;
+  out.version = 3;
   out.tickets = Math.max(0, Number(m.tickets) || 0);
   out.totalPrizes = Math.max(0, Math.floor(Number(m.totalPrizes) || 0));
   out.rarePrizes = Math.max(0, Math.floor(Number(m.rarePrizes) || 0));
@@ -278,6 +329,11 @@ function normalizeMeta(m) {
   if (Array.isArray(m.collection)) {
     for (var i = 0; i < 4; i++) out.collection[i] = Math.max(0, Math.floor(Number(m.collection[i]) || 0));
   }
+  if (Array.isArray(m.critters)) {
+    for (var ci = 0; ci < TOTAL_CRITTERS; ci++) out.critters[ci] = Math.max(0, Math.floor(Number(m.critters[ci]) || 0));
+  }
+  out.cratePending = !!m.cratePending;
+  out.crateAt = Math.max(0, Number(m.crateAt) || 0);
   out.lastSeenAt = Math.max(0, Number(m.lastSeenAt) || Date.now());
   out.lastLoginDay = Math.floor(Number(m.lastLoginDay));
   if (!isFinite(out.lastLoginDay)) out.lastLoginDay = -1;
@@ -427,6 +483,68 @@ function claimIdleVisitors() {
   GF.spawnParticles(GF.cx, L.listY, '#7ee0a8', Math.min(26, 10 + visitors));
   GF.saveRun();
 }
+// ── REWARDED MYSTERY CRATE (M3 monetization — optional, never gates play) ──
+// Player-initiated rewarded video. Grants a GUARANTEED critter: a brand-new
+// species you can reach on an owned machine if any are still locked, else a
+// duplicate plus a ticket bonus. No SDK (gallery/local) → grant anyway so the
+// reward path is always testable & gallery players still get the bonus.
+var crateBusy = false;
+// Anti-farm gate: the crate is available only when not mid-open and the cooldown
+// since the last successful open has elapsed. Persisted via meta.crateAt so it
+// survives reloads (a reload can't reset the cooldown to farm the dex).
+function crateCooldownLeft() { return Math.max(0, (Number(meta.crateAt) || 0) + CRATE_COOLDOWN_MS - Date.now()); }
+function crateReady() { return !crateBusy && crateCooldownLeft() <= 0; }
+function reachableLockedCritters() {
+  var out = [];
+  var topMt = Math.min(MAX_MACHINE, Math.max(machineTier, meta.bestMachine));
+  for (var mt = 0; mt <= topMt; mt++) {
+    for (var pt = 0; pt < 4; pt++) {
+      var id = critterId(mt, pt);
+      if (!critterDiscovered(id)) out.push(id);
+    }
+  }
+  return out;
+}
+function grantMysteryCrate() {
+  var locked = reachableLockedCritters();
+  if (locked.length) {
+    var id = locked[Math.floor(Math.random() * locked.length)];
+    var mt = Math.floor(id / 4), pt = id % 4;
+    // route through registerCritter so discovery bonus + set check + toast fire
+    var savedClawX = clawX, savedClawY = clawY;
+    clawX = GF.cx; clawY = L.cabY + L.cabH * 0.4;
+    registerCritter(mt, pt);
+    clawX = savedClawX; clawY = savedClawY;
+  } else {
+    // dex full (or no reachable lock) → duplicate of a random owned + ticket bump
+    var ownedIds = [];
+    for (var i = 0; i < TOTAL_CRITTERS; i++) if (critterDiscovered(i)) ownedIds.push(i);
+    if (ownedIds.length) meta.critters[ownedIds[Math.floor(Math.random() * ownedIds.length)]]++;
+    var bonus = 20 + meta.cabinets * 6;
+    meta.tickets += bonus;
+    GF.sfx('reward');
+    GF.spawnFloat(GF.cx, L.cabY + 40 * GF.S, '+' + fmt(bonus) + ' ' + GF.t('tickets'), '#7ee0a8');
+  }
+  GF.spawnParticles(GF.cx, L.cabY + L.cabH * 0.4, '#a8e9ff', 26);
+  meta.crateAt = Date.now();   // arm the anti-farm cooldown on every grant
+  GF.saveRun();
+}
+function openMysteryCrate() {
+  if (!crateReady()) return;   // mid-open or still on cooldown → ignore the tap
+  crateBusy = true;
+  var granted = false;
+  var finish = function () { if (granted) return; granted = true; grantMysteryCrate(); };
+  if (GF.ads && GF.ads.rewarded) {
+    // Grant ONLY on a real reward, OR when no ad actually served (gallery/local/
+    // no-fill/adblock) so gallery players still get the bonus. A deliberate
+    // ad-SKIP (ad SHOWN but not completed) grants NOTHING — no farming a reward
+    // by opening then closing the video. (Codex review 2026-06-16.)
+    GF.ads.rewarded({ onReward: function () { finish(); } }).then(function (r) {
+      if (!granted && !(r && r.shown)) finish();   // no ad served → grant once
+      crateBusy = false;
+    });
+  } else { finish(); crateBusy = false; }   // no ads API at all → local bonus
+}
 function claimDailyLogin() {
   if (!meta.loginPending) return;
   var reward = Math.max(1, meta.loginReward || dailyLoginReward());
@@ -449,7 +567,59 @@ function claimDailyTask(idx) {
   GF.spawnParticles(GF.cx, L.listY, '#ffe27a', 16);
   GF.saveRun();
 }
-function franchiseMult() { return 1 + meta.shelfLevel * 0.08 + (meta.cabinets - 1) * 0.12; }
+// ── CRITTER COLLECTION BONUSES (M3) ───────────────────────────────────────
+// Discovered species grant stacking permanent bonuses. Cached & recomputed only
+// when the collection changes (never per-frame) so the hot economy path is cheap.
+var _critCache = { inc: 1, grip: 0, tkt: 1, owned: 0, dirty: true };
+function critterDiscovered(id) { return meta.critters && meta.critters[id] > 0; }
+function critterOwnedCount() {
+  if (!meta.critters) return 0;
+  var n = 0; for (var i = 0; i < TOTAL_CRITTERS; i++) if (meta.critters[i] > 0) n++;
+  return n;
+}
+function critterSetComplete(mt) {
+  for (var pt = 0; pt < 4; pt++) if (!critterDiscovered(critterId(mt, pt))) return false;
+  return true;
+}
+function recomputeCritterBonus() {
+  var inc = 0, grip = 0, tkt = 0, owned = 0;
+  for (var i = 0; i < TOTAL_CRITTERS; i++) {
+    if (!meta.critters || meta.critters[i] <= 0) continue;
+    owned++;
+    var k = critterBonusKind(i);
+    if (k === 'grip') grip += CRITTER_BONUS.grip;
+    else if (k === 'tkt') tkt += CRITTER_BONUS.tkt;
+    else inc += CRITTER_BONUS.inc;
+  }
+  // completed-set bonus (income) per machine whose 4 species are all owned
+  for (var mt = 0; mt <= MAX_MACHINE; mt++) if (critterSetComplete(mt)) inc += CRITTER_SET_BONUS_INC;
+  _critCache = { inc: 1 + inc, grip: grip, tkt: 1 + tkt, owned: owned, dirty: false };
+}
+function critterIncMult() { if (_critCache.dirty) recomputeCritterBonus(); return _critCache.inc; }
+function critterGripBonus() { if (_critCache.dirty) recomputeCritterBonus(); return _critCache.grip; }
+function critterTicketMult() { if (_critCache.dirty) recomputeCritterBonus(); return _critCache.tkt; }
+function markCrittersDirty() { _critCache.dirty = true; }
+// register a catch into the dex; returns true if it was a NEW species (discovery)
+function registerCritter(mt, pt) {
+  if (!meta.critters) { meta.critters = []; for (var z = 0; z < TOTAL_CRITTERS; z++) meta.critters.push(0); }
+  var id = critterId(mt, pt);
+  var isNew = meta.critters[id] === 0;
+  meta.critters[id]++;
+  if (isNew) {
+    markCrittersDirty();
+    var setNow = critterSetComplete(mt);
+    GF.sfx('unlock');
+    GF.spawnFloat(clawX, clawY - 70 * GF.S, GF.t('new_critter') + ': ' + critterName(id), '#a8e9ff');
+    GF.setShake(0.22);
+    if (setNow) {
+      GF.sfx('win');
+      GF.spawnFloat(GF.cx, L.cabY + 36 * GF.S, GF.t('set_complete') + ' +' + Math.round(CRITTER_SET_BONUS_INC * 100) + '%', '#ffe27a');
+      GF.spawnParticles(GF.cx, L.cabY + L.cabH * 0.4, '#ffe27a', 22);
+    }
+  }
+  return isNew;
+}
+function franchiseMult() { return (1 + meta.shelfLevel * 0.08 + (meta.cabinets - 1) * 0.12) * critterIncMult(); }
 function franchiseGripBonus() { return meta.franchiseLevel * 0.08; }
 function franchiseStaffBonus() { return 1 + meta.franchiseLevel * 0.05; }
 function stockCapacity() { return Math.min(16, Math.max(8, 6 + machineTier + meta.cabinets)); }
@@ -474,11 +644,13 @@ function recordPrizeMeta(p) {
   var tier = GF.clamp(p && typeof p.tier === 'number' ? p.tier : 0, 0, 3);
   var gain = 1 + tier + Math.floor(machineTier / 2);
   if (tier >= 2) gain += 1;
+  gain = Math.max(1, Math.round(gain * critterTicketMult()));   // M3: collection ticket bonus
   meta.tickets += gain;
   meta.totalPrizes++;
   meta.collection[tier] = (meta.collection[tier] || 0) + 1;
   if (tier >= 2) meta.rarePrizes++;
   meta.bestMachine = Math.max(meta.bestMachine, machineTier);
+  registerCritter(machineTier, tier);   // M3: discover/record the critter species
   addDailyProgress('catch', 1);
   addDailyProgress('tickets', gain);
   GF.spawnFloat(clawX, clawY - 52 * GF.S, '+' + gain + ' ' + GF.t('tickets'), '#ffe27a');
@@ -534,7 +706,7 @@ function machineValue(t) { return Math.pow(MACHINE_MULT, t); }      // raw mult 
 function shelfMult() { return Math.pow(1.4, shelfLvl); }            // Prize Shelf multiplier
 function clerkMult() { return 1 + clerks * 0.04; }                  // small global boost from staff
 function comboMult() { return Math.min(COMBO_MAX, 1 + combo * COMBO_STEP); }
-function grip() { return GRIP_BASE + gripLvl * 0.5 + franchiseGripBonus(); } // grab strength
+function grip() { return GRIP_BASE + gripLvl * 0.5 + franchiseGripBonus() + critterGripBonus(); } // grab strength
 function accuracy() { return Math.min(0.98, ACCURACY_BASE + accLvl * 0.045 + meta.franchiseLevel * 0.006); }
 function dropSpeed() { return DROP_SPEED_BASE + dropLvl * 90; }
 function restockTime() { return Math.max(0.9, RESTOCK_BASE - restockLvl * 0.55); }
@@ -635,7 +807,13 @@ function resolveGrab() {
     var gripFactor = GF.clamp(grip() / best.weight, 0.45, 1.2);
     // a well-centered grab on a plushie within grip is reliable; off-center / heavy is risky
     var pSucc = GF.clamp(accuracy() * centerFactor * gripFactor, 0.08, 0.98);
-    if (bestD <= PLUSH_R() * 0.55 && grip() >= best.weight * 0.85) success = true;
+    // Player feedback (2026-06-16): "sometimes says miss when it is not missed".
+    // The claw visibly clamps ON the plushie but the probability roll fails, which
+    // reads as a broken grab. Fix: when the claw is clearly ON a plushie (well
+    // inside its body) it ALWAYS sticks — what you see clamp is what you get. Only
+    // off-body / edge grabs stay a roll. Threshold widened from 0.55 to 0.92·PLUSH_R
+    // and the grip gate relaxed so a centered grab is deterministic regardless of grip.
+    if (bestD <= PLUSH_R() * 0.92) success = true;
     else if (Math.random() < pSucc) success = true;
     if (success) {
       best.popping = 1;
@@ -1387,6 +1565,7 @@ function inCabinet(x, y) { return x >= L.cabX && x <= L.cabX + L.cabW && y >= L.
 function inRect(x, y, r) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
 function doUpgrade(kind) {
   if (kind === 'idle_claim') claimIdleVisitors();
+  else if (kind === 'mystery_crate') openMysteryCrate();
   else if (kind === 'daily_login') claimDailyLogin();
   else if (kind && kind.indexOf('daily_task') === 0) claimDailyTask(parseInt(kind.replace('daily_task', ''), 10) || 0);
   else if (kind === 'meta_shelf') buyMetaShelf();
@@ -1686,6 +1865,7 @@ function drawCabinet(ctx) {
 
   // stock pips (bottom inside)
   drawPrizeShelf(ctx);
+  drawCritterDex(ctx);
   drawStockPips(ctx);
 
   // claw
@@ -1851,7 +2031,7 @@ function drawDailyBoard(ctx) {
 }
 function drawPrizeShelf(ctx) {
   var S = GF.S;
-  var w = Math.min(L.cabW * 0.58, GF.clamp(190 * S, 130, 230));
+  var w = Math.min(L.cabW * 0.40, GF.clamp(122 * S, 92, 150));
   var h = GF.clamp(25 * S, 20, 34);
   var x = L.cabX + 10 * S;
   var y = L.cabY + L.cabH - h - 20 * S;
@@ -1865,16 +2045,55 @@ function drawPrizeShelf(ctx) {
   ctx.font = 'bold ' + GF.clamp(9.5 * S, 8, 12) + 'px Inter, system-ui, sans-serif';
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillText(GF.t('shelf') + ' ' + GF.t('lvl') + ' ' + meta.shelfLevel, x + 8 * S, y + h / 2);
+  // total caught prizes (lifetime) as the shelf headline
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'right';
+  ctx.font = GF.clamp(9 * S, 7.5, 12) + 'px Inter, sans-serif';
+  ctx.fillText(fmt(meta.totalPrizes), x + w - 8 * S, y + h / 2);
+  ctx.restore();
+}
+// M3 — Plushie-dex strip: the returning-player-visible collection (apartment
+// test). Shows THIS machine's 4 critter species (owned = filled + glow, locked
+// = dim outline) and the lifetime owned/total count + a SET star when complete.
+function drawCritterDex(ctx) {
+  var S = GF.S;
+  var w = Math.min(L.cabW * 0.46, GF.clamp(150 * S, 116, 178));
+  var h = GF.clamp(25 * S, 20, 34);
+  var x = L.cabX + L.cabW - w - 10 * S;
+  var y = L.cabY + L.cabH - h - 20 * S;
+  ctx.save();
+  ctx.fillStyle = 'rgba(10,6,18,0.46)';
+  GF.rr(ctx, x, y, w, h, h * 0.35); ctx.fill();
+  ctx.strokeStyle = 'rgba(168,233,255,0.30)';
+  ctx.lineWidth = Math.max(1, 1.2 * S);
+  GF.rr(ctx, x, y, w, h, h * 0.35); ctx.stroke();
+  ctx.fillStyle = '#bfeeff';
+  ctx.font = 'bold ' + GF.clamp(9.5 * S, 8, 12) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('dex') + ' ' + critterOwnedCount() + '/' + TOTAL_CRITTERS, x + 8 * S, y + h / 2);
   var r = h * 0.22;
-  var startX = x + w - 78 * S;
+  var dotGap = GF.clamp(16 * S, 12, 19);
+  var startX = x + w - dotGap * 3.4 - 12 * S;
+  var pal = MACHINE_COL[Math.min(machineTier, MACHINE_COL.length - 1)].plush;
   for (var i = 0; i < 4; i++) {
-    var cx = startX + i * 21 * S;
-    ctx.fillStyle = MACHINE_COL[Math.min(machineTier, MACHINE_COL.length - 1)].plush[i];
-    ctx.beginPath(); ctx.arc(cx, y + h / 2, r, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold ' + GF.clamp(7.5 * S, 6, 10) + 'px Inter, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(Math.min(99, meta.collection[i] || 0), cx, y + h / 2 + 0.5 * S);
+    var cx = startX + i * dotGap;
+    var owned = critterDiscovered(critterId(machineTier, i));
+    if (owned) {
+      ctx.shadowColor = pal[i]; ctx.shadowBlur = 6 * S;
+      ctx.fillStyle = pal[i];
+      ctx.beginPath(); ctx.arc(cx, y + h / 2, r, 0, Math.PI * 2); ctx.fill();
+      ctx.shadowBlur = 0;
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.30)'; ctx.lineWidth = Math.max(1, 1.3 * S);
+      ctx.beginPath(); ctx.arc(cx, y + h / 2, r, 0, Math.PI * 2); ctx.stroke();
+      // tiny lock dot
+      ctx.fillStyle = 'rgba(255,255,255,0.22)';
+      ctx.beginPath(); ctx.arc(cx, y + h / 2, r * 0.32, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  // SET-complete star
+  if (critterSetComplete(machineTier)) {
+    drawStar(ctx, x + w - 8 * S, y + h / 2, r * 0.85, '#ffe27a');
   }
   ctx.restore();
 }
@@ -1940,6 +2159,13 @@ function shopItems() {
       desc: dailyTaskDesc(task), cost: task.reward, costType: 'tickets', lvl: null, col: task.claimed ? '#888' : '#ffe27a',
       claim: true, locked: task.progress < task.target, maxed: task.claimed, lockText: dailyProgressText(task) });
   }
+  // M3 rewarded Mystery Crate — optional, player-initiated, never gates play.
+  // On cooldown it shows a dimmed "ready in Ns" lock instead of a tappable pill.
+  var crateLeft = crateCooldownLeft();
+  items.push({ kind: 'mystery_crate', name: GF.t('mystery_crate'),
+    desc: GF.t('mystery_crate_d') + ' · ' + critterOwnedCount() + '/' + TOTAL_CRITTERS,
+    cost: 0, lvl: null, col: '#a8e9ff', ad: crateLeft <= 0, claim: true,
+    locked: crateLeft > 0, lockText: crateLeft > 0 ? (Math.ceil(crateLeft / 1000) + 's') : '' });
   items.push({ kind: 'meta_cabinet', name: GF.t('u_meta_cabinet'), desc: metaCabinetReady() ? GF.t('u_meta_cabinet_d') : (GF.t('next_cabinet') + ': ' + Math.max(0, nextCabinetNeed() - meta.totalPrizes) + ' ' + GF.t('more_catches')),
     cost: metaCabinetCost(), costType: 'tickets', lvl: meta.cabinets, col: '#ffe27a', own: true,
     locked: !metaCabinetReady(), maxed: meta.cabinets >= META_MAX_CABINETS });
@@ -1962,6 +2188,7 @@ function shopItems() {
   return items;
 }
 function itemAffordable(it) {
+  if (it.ad) return true;          // rewarded crate is always tappable (WATCH AD)
   if (it.claim) return !it.maxed && !it.locked;
   if (it.maxed || it.locked) return false;
   return it.costType === 'tickets' ? meta.tickets >= it.cost : coins >= it.cost;
@@ -2062,6 +2289,25 @@ function drawShopRow(ctx, it, x, y, w, h) {
     ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px Inter, sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(it.lockText || (Math.max(0, nextCabinetNeed() - meta.totalPrizes) + ' ' + GF.t('need_catches')), lockX + lockW / 2, lockY + lockH / 2);
+  } else if (it.ad) {
+    // rewarded crate pill — "WATCH AD" (EN) / "РЕКЛАМА" (RU), never a price
+    var adPillW = GF.clamp(112 * S, 88, 150), adPillH = h * 0.5;
+    var adPillX = x + w - adPillW - 10 * S, adPillY = y + (h - adPillH) / 2;
+    var ag = ctx.createLinearGradient(adPillX, adPillY, adPillX, adPillY + adPillH);
+    ag.addColorStop(0, '#79d2ff'); ag.addColorStop(1, '#3aa0e6');
+    ctx.fillStyle = ag;
+    GF.rr(ctx, adPillX, adPillY, adPillW, adPillH, adPillH / 2); ctx.fill();
+    // little play-triangle glyph (vector, never emoji)
+    ctx.fillStyle = '#0b2233';
+    ctx.beginPath();
+    ctx.moveTo(adPillX + 16 * S, adPillY + adPillH * 0.32);
+    ctx.lineTo(adPillX + 16 * S, adPillY + adPillH * 0.68);
+    ctx.lineTo(adPillX + 24 * S, adPillY + adPillH * 0.5);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#0b2233';
+    ctx.font = 'bold ' + GF.clamp(12 * S, 10, 15) + 'px Inter, sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(GF.t('watch_ad'), adPillX + 30 * S, adPillY + adPillH / 2 + 0.5 * S);
   } else {
     var pillW = it.claim ? GF.clamp(102 * S, 80, 138) : GF.clamp(82 * S, 60, 120), pillH = h * 0.5;
     var pillX = x + w - pillW - 10 * S, pillY = y + (h - pillH) / 2;
@@ -2357,9 +2603,16 @@ function drawGameOver(ctx) {
   ctx.fillStyle = '#ffe27a';
   ctx.font = 'bold ' + GF.clamp(14 * S, 11, 18) + 'px Inter, sans-serif';
   ctx.fillText(GF.t('saved_arcade') + ': ' + meta.cabinets + ' · ' + fmt(meta.tickets) + ' ' + GF.t('tickets'), W / 2, H * 0.545);
+  // M3 collection progress — a concrete return hook ("N critters left to collect")
+  ctx.fillStyle = '#a8e9ff';
+  ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px Inter, sans-serif';
+  var owned = critterOwnedCount();
+  var collTxt = GF.t('collection') + ': ' + owned + '/' + TOTAL_CRITTERS;
+  if (owned < TOTAL_CRITTERS) collTxt += '  ·  ' + (TOTAL_CRITTERS - owned) + ' ' + GF.t('critters_left');
+  ctx.fillText(collTxt, W / 2, H * 0.585);
   ctx.fillStyle = '#d9f6ff';
   ctx.font = GF.clamp(12 * S, 10, 16) + 'px Inter, sans-serif';
-  ctx.fillText(GF.t('session_hook') + ': ' + nextMetaHook(), W / 2, H * 0.585);
+  ctx.fillText(GF.t('session_hook') + ': ' + nextMetaHook(), W / 2, H * 0.62);
 
   // RESUME button (keeps everything)
   var btnW = GF.clamp(220 * S, 160, 300), btnH = GF.clamp(56 * S, 46, 72);
@@ -2588,6 +2841,7 @@ GF.init({
       },
       function (s) {
         meta = normalizeMeta(s && s.meta);
+        markCrittersDirty();   // recompute collection bonuses from the loaded dex
         if (s && typeof s.best === 'number') best = Math.max(best, s.best || 0);
         if (!s || (s.gs !== 'PLAYING' && s.gs !== 'GAMEOVER')) { gs = 'MENU'; return; }
         coins = s.coins || 0; score = s.score || 0;
@@ -2636,6 +2890,10 @@ GF.exposeState(function () {
     metaTickets: meta.tickets, metaTotalPrizes: meta.totalPrizes, metaCabinets: meta.cabinets,
     metaShelfLevel: meta.shelfLevel, metaFranchiseLevel: meta.franchiseLevel,
     metaCollection: meta.collection.slice(),
+    crittersOwned: critterOwnedCount(), crittersTotal: TOTAL_CRITTERS,
+    critterIncMult: critterIncMult(), critterGripBonus: critterGripBonus(),
+    critterTicketMult: critterTicketMult(),
+    crateReady: crateReady(), crateCooldownLeft: crateCooldownLeft(),
     dailyStreak: meta.streak, dailyDay: meta.dailyDay, dailyComplete: dailyCompleteCount(),
     dailyClaimable: dailyClaimableCount(), dailyLoginPending: meta.loginPending,
     pendingVisitors: meta.pendingVisitors, pendingTickets: meta.pendingTickets, pendingHours: meta.pendingHours,
@@ -2666,6 +2924,9 @@ GF.exposeBot(
     a.push('aim');
     if (meta.pendingTickets > 0) a.push('idle_claim');
     if (meta.loginPending) a.push('daily_login');
+    // NOTE: 'mystery_crate' is intentionally NOT a bot action — granting free
+    // crates would invalidate the progression/catch-difficulty measurement
+    // (Codex review 2026-06-16). The crate is a player-only, ad-gated bonus.
     for (var i = 0; i < meta.dailyTasks.length; i++) a.push('daily_task' + i);
     a.push('grip', 'acc', 'drop_up', 'clerk', 'shelf', 'restock', 'machine');
     a.push('meta_shelf', 'meta_franchise', 'meta_cabinet');

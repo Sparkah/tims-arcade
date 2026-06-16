@@ -78,6 +78,12 @@ function rosterById(id){ for(var i=0;i<ROSTER.length;i++) if(ROSTER[i].id===id) 
 function unitStats(id, stars){
   var b = rosterById(id); if(!b) return {atk:0,hp:0};
   var k = 1 + 0.12*(Math.max(1,stars)-1);
+  // M3 AWAKENING: each Awakened rank on this champion adds a flat % on top of
+  // stars. Owned per-champion (meta.owned[id].awk = 0..AWK_MAX). This is the
+  // per-champion grind the dupe-capped roster lacked — a reason to keep pouring
+  // Astral Shards into the units you actually field.
+  var awk = (meta.owned[id] && meta.owned[id].awk) ? meta.owned[id].awk : 0;
+  k *= (1 + AWK_PER*awk);
   return { atk: Math.round(b.atk*k), hp: Math.round(b.hp*k) };
 }
 
@@ -105,6 +111,11 @@ var STRINGS = {
     sigil:'Sigil', vault:'Vault', lvl:'Lv', maxlvl:'MAX', upgrade:'Upgrade', sigilatk:'team ATK', sigilheal:'orb heal', sigilhp:'team HP',
     sanctumnext:'Next upgrade', sanctumafford:'ready to upgrade', empowered:'EMPOWERED!', sigilup:'SIGIL UP!',
     forge:'Forge', collect:'COLLECT', forgefull:'FULL!', quests:'Daily Quests', questhint:'Complete the day’s goals for Essence and tickets. New quests every day.', questdone:'QUEST COMPLETE!',
+    // M3: ascension + awakening
+    ascend:'ASCEND', tier:'Tier', shards:'Astral Shards', shardsShort:'Shards',
+    ascendTitle:'ASCENSION', ascendBody:'Reset the gauntlet to a higher Tier. Enemies grow stronger, but you keep every champion, star and sigil, and gain a permanent +team power bonus forever.',
+    ascendReward:'You earn', ascendDbl:'WATCH AD: double Shards', ascendGo:'ASCEND NOW', ascendDone:'TIER UP!', tierbonus:'team power',
+    awaken:'Awaken', awakened:'AWAKENED', awakenHint:'Spend Astral Shards to awaken a champion past 5 stars. Each rank adds flat power. Earn Shards by ascending.', awmax:'MAX', needShards:'Need',
   },
   ru: {
     title:'Орб-Чемпионы', sub:'Собирай орбы, усиливай чемпионов, пройди арену',
@@ -128,6 +139,11 @@ var STRINGS = {
     sigil:'Печать', vault:'Оплот', lvl:'Ур', maxlvl:'МАКС', upgrade:'Улучшить', sigilatk:'атака отряда', sigilheal:'лечение', sigilhp:'здоровье отряда',
     sanctumnext:'След. улучшение', sanctumafford:'можно улучшить', empowered:'УСИЛЕНО!', sigilup:'ПЕЧАТЬ+!',
     forge:'Горнило', collect:'ЗАБРАТЬ', forgefull:'ПОЛНО!', quests:'Задания дня', questhint:'Выполняй цели дня ради Эссенции и билетов. Новые задания каждый день.', questdone:'ЗАДАНИЕ ВЫПОЛНЕНО!',
+    // M3: ascension + awakening
+    ascend:'ВОЗВЫШЕНИЕ', tier:'Ранг', shards:'Звёздные осколки', shardsShort:'Осколки',
+    ascendTitle:'ВОЗВЫШЕНИЕ', ascendBody:'Сбрось арену и начни на новом Ранге. Враги сильнее, но ты сохраняешь всех чемпионов, звёзды и печати, и навсегда получаешь прибавку к силе отряда.',
+    ascendReward:'Награда', ascendDbl:'ВИДЕО: вдвое осколков', ascendGo:'ВОЗВЫСИТЬСЯ', ascendDone:'НОВЫЙ РАНГ!', tierbonus:'сила отряда',
+    awaken:'Пробудить', awakened:'ПРОБУЖДЁН', awakenHint:'Трать Звёздные осколки, чтобы пробудить чемпиона выше 5 звёзд. Каждый ранг даёт прибавку к силе. Осколки даёт Возвышение.', awmax:'МАКС', needShards:'Нужно',
   },
 };
 
@@ -219,6 +235,13 @@ var meta = {
   //   sigils[6]    = Vault: +team max HP% (a global survivability sink)
   // This is the currency SINK + ownership pull the gacha-only economy lacked.
   sigils: [0,0,0,0,0,0,0],  // level per track (0 = not yet bought; cap SIGIL_MAX)
+  // ── M3 DEPTH + MONETIZATION (iter#3) ─────────────────────────────────────
+  // ASCENSION prestige tier + ASTRAL SHARDS currency (spent on champion Awakening).
+  // tier scales enemies AND grants a permanent global team bonus; shards buy the
+  // per-champion Awakened ranks stored on owned[id].awk. Both endless-ish chases
+  // that grow past the gauntlet's hard ceiling.
+  tier: 0,          // ascension tier (0 = base gauntlet). +1 each Ascend.
+  shards: 0,        // Astral Shards (prestige currency, earned by ascending)
 };
 var SAVE_KEY = 'orbchamp_v1';
 
@@ -248,6 +271,11 @@ function loadMeta() {
         // SANCTUM sigils: restore + clamp; tolerate old saves with no sigils key.
         meta.sigils = [0,0,0,0,0,0,0];
         if (Array.isArray(s.sigils)) for (var si=0; si<7; si++) meta.sigils[si] = GF.clamp(s.sigils[si]|0, 0, SIGIL_MAX);
+        // M3: ascension tier + Astral Shards (tolerate old saves with neither key).
+        // owned[id].awk (Awakened rank) rides along inside meta.owned above.
+        meta.tier = Math.max(0, s.tier|0);
+        meta.shards = Math.max(0, s.shards|0);
+        if (s.owned) for (var oid in meta.owned){ if (meta.owned[oid]) meta.owned[oid].awk = GF.clamp((meta.owned[oid].awk)|0, 0, AWK_MAX); }
       }
     }
   } catch (e) {}
@@ -391,6 +419,66 @@ function sigilAtkMult(el){
 function sigilHealMult(){ return 1 + SIGIL_DEFS[5].per*meta.sigils[5]; }   // heart sigil
 function sigilHpMult(){ return 1 + SIGIL_DEFS[6].per*meta.sigils[6]; }     // vault
 var sanctumPulse = null;   // {idx,t} celebratory pulse on an upgraded track
+
+// ===========================================================================
+//  M3 — DEPTH + MONETIZATION (iter#3): ASCENSION prestige + champion AWAKENING
+// ===========================================================================
+// The gauntlet ends at the last stage with a hard ceiling — champions cap at 5
+// stars, sigils at 10, no content past Eclipse Throne. M3 grows ONE coherent
+// prestige loop OUT of that wall, in the game's own verbs:
+//   (1) ASCEND — clearing the final stage lets you reset to a higher TIER. Enemies
+//       scale up; you keep EVERY champion/star/sigil and gain a permanent global
+//       ATK/HP bonus per tier + a payout of ASTRAL SHARDS (a new prestige currency).
+//   (2) AWAKEN — spend Astral Shards in the Sanctum to push an OWNED champion past
+//       5 stars into Awakened ranks (A1..A3), a big flat power bump folded into
+//       unitStats. The per-champion grind the dupe-capped roster never had.
+//   (3) RV MONETIZE — a player-initiated "WATCH AD" on the Ascension panel DOUBLES
+//       that ascension's Shard payout (once). Never gates play; pure bonus.
+// Returning player at full collection now SEES a Tier badge on the hub + Awakened
+// pips on champions, and DOES a brand-new awaken+ascend chase.
+var TIER_HP_K   = 0.55;   // +55% enemy HP per ascension tier
+var TIER_ATK_K  = 0.35;   // +35% enemy ATK per tier
+var TIER_BONUS  = 0.08;   // +8% team ATK & HP per tier you've ascended (permanent)
+var AWK_MAX     = 3;      // Awakened ranks per champion (A1..A3)
+var AWK_PER     = 0.18;   // +18% atk & hp per Awakened rank (flat, on top of stars)
+// Astral Shards earned for ascending FROM tier t (the tier you just cleared).
+function ascendShardReward(t){ return 6 + t*4; }
+// Shard cost to take a champion from Awakened rank L to L+1 (rises per rank).
+function awkCost(L){ return 4 + L*4; }            // A0->A1=4, A1->A2=8, A2->A3=12
+function champAwk(id){ return (meta.owned[id] && meta.owned[id].awk) ? meta.owned[id].awk : 0; }
+function awkMaxed(id){ return champAwk(id) >= AWK_MAX; }
+function canAwaken(id){ return meta.owned[id] && !awkMaxed(id) && meta.shards >= awkCost(champAwk(id)); }
+function anyAwakenable(){ for (var id in meta.owned){ if (canAwaken(id)) return true; } return false; }
+// permanent global multiplier from ascension tier (folds into newBattle like a sigil)
+function tierAtkMult(){ return 1 + TIER_BONUS*(meta.tier|0); }
+function tierHpMult(){  return 1 + TIER_BONUS*(meta.tier|0); }
+// enemy scale at the current tier (applied to every enemy's hp/atk in newBattle)
+function tierEnemyHpMult(){ return 1 + TIER_HP_K*(meta.tier|0); }
+function tierEnemyAtkMult(){ return 1 + TIER_ATK_K*(meta.tier|0); }
+// true once the whole gauntlet is cleared at the current tier -> Ascend is offered
+function gauntletCleared(){ return (meta.stageUnlocked|0) >= STAGES.length-1; }
+function doAscend(dbl){
+  if (!gauntletCleared()) { GF.sfx('error'); return 0; }
+  var base = ascendShardReward(meta.tier|0);
+  var amt = dbl ? base*2 : base;
+  meta.shards += amt;
+  meta.tier = (meta.tier|0) + 1;
+  meta.stageUnlocked = 0;          // re-run the gauntlet at the higher tier
+  saveMeta();
+  GF.sfx('levelup'); GF.happytime();
+  ascendFx = { amt:amt, tier:meta.tier, t:0 };
+  return amt;
+}
+function awakenChamp(id){
+  if (!canAwaken(id)) { GF.sfx('error'); return false; }
+  meta.shards -= awkCost(champAwk(id));
+  meta.owned[id].awk = champAwk(id) + 1;
+  saveMeta();
+  GF.sfx('levelup'); GF.happytime();
+  sanctumPulse = { idx:-2, t:0, awkId:id };   // idx -2 = an awaken pulse (vs sigil)
+  return true;
+}
+var ascendFx = null;     // {amt,tier,t} burst after an ascension
 
 // ===========================================================================
 //  M2 — REASON TO RETURN (iter#2): overnight idle accrual + daily quests
@@ -540,16 +628,22 @@ var TUT_EL = EL.FIRE;         // the colour the player will line up (starter has
 // ── BATTLE OBJECT ─────────────────────────────────────────────────────────
 function newBattle(stageIdx, dailyStage) {
   var st = dailyStage || STAGES[stageIdx];
-  // deep copy waves so hp resets per battle
-  var waves = st.waves.map(function(w){ return w.map(function(e){ return mkEnemy(e.el, e.hpMax, e.atk, e.turns, e.boss); }); });
+  // M3: ascension tier scales enemy HP/ATK (the daily trial stays at base tier so
+  // the streak stays fair). Tier 0 = x1, so this is a no-op until the player ascends.
+  var ehpK = dailyStage ? 1 : tierEnemyHpMult();
+  var eatkK = dailyStage ? 1 : tierEnemyAtkMult();
+  // deep copy waves so hp resets per battle (enemy stats scaled by tier)
+  var waves = st.waves.map(function(w){ return w.map(function(e){
+    return mkEnemy(e.el, Math.round(e.hpMax*ehpK), Math.round(e.atk*eatkK), e.turns, e.boss); }); });
   // team units with current stats + current hp. SANCTUM sigils fold in here:
   // the element ATK sigil multiplies each unit's atk; the Vault sigil multiplies
-  // every unit's HP. Both are permanent, owned bonuses (iter#1 core-meta loop).
-  var hpMul = sigilHpMult();
+  // every unit's HP. M3: the ascension TIER bonus multiplies both (permanent).
+  var hpMul = sigilHpMult() * tierHpMult();
+  var atkTierMul = tierAtkMult();
   var units = meta.team.slice(0,5).map(function(id){
     var s = unitStats(id, meta.owned[id]?meta.owned[id].stars:1);
     var el = rosterById(id).el;
-    var atk = Math.round(s.atk * sigilAtkMult(el));
+    var atk = Math.round(s.atk * sigilAtkMult(el) * atkTierMul);
     var hp = Math.round(s.hp * hpMul);
     return { id:id, el:el, atk:atk, hpMax:hp, hp:hp, art:rosterById(id).art, hitFlash:0, atkAnim:0 };
   });
@@ -1056,6 +1150,7 @@ function onDown(x,y) {
   if (gs === 'MENU') return menuClick(x,y);
   if (gs === 'STAGESEL') return stageSelClick(x,y);
   if (gs === 'SUMMON') return summonClick(x,y);
+  if (gs === 'ASCEND') return ascendClick(x,y);   // M3 prestige panel (no scroll list)
   if (gs === 'BATTLE') return battleDown(x,y);
 }
 function onMove(x,y) {
@@ -1229,6 +1324,7 @@ function draw() {
   else if (gs==='SUMMON') drawSummon();
   else if (gs==='SANCTUM') drawSanctum();
   else if (gs==='QUESTS') drawQuests();
+  else if (gs==='ASCEND') drawAscend();      // M3 prestige panel
   // global mute icon top-right
   drawMute();
   // overlays
@@ -1237,6 +1333,7 @@ function draw() {
   if (dailyToast>0) drawDailyToast();
   if (idleCollectFx) drawIdleCollectFx();   // M2: floating "+N Essence" after a forge collect
   if (questToast>0) drawQuestToast();        // M2: brief "quest complete" banner
+  if (ascendFx) drawAscendFx();              // M3: "+N Shards / TIER UP" burst
   // tutorial overlay last
   GF.tutorial.draw(ctx);
 }
@@ -1536,13 +1633,22 @@ function drawWinOverlay() {
   if (anySigilAffordable()) drawAffordBadge(L.winSanctum);
   L.winSummon = { x:bx, y:by0+(bh+gapb), w:bw, h:bh };
   drawBigBtn(L.winSummon, GF.t('summon'), '#a05cff','#7e3ce0');
+  // M3: on the final-stage clear the gauntlet is beaten at this tier — the bottom
+  // CTA becomes ASCEND (prestige) instead of HUB. Mid-gauntlet stays CONTINUE.
   L.winNext = { x:bx, y:by0+(bh+gapb)*2, w:bw, h:bh };
-  drawBigBtn(L.winNext, last?GF.t('hub'):GF.t('cont'), '#2ee07a','#23a657');
+  if (last) { drawBigBtn(L.winNext, GF.t('ascend'), '#ffd23a','#caa11a'); drawAffordBadge(L.winNext); }
+  else drawBigBtn(L.winNext, GF.t('cont'), '#2ee07a','#23a657');
 }
 function winClick(x,y) {
   if (hit(L.winSanctum,x,y)) { battle=null; sanctumReturn='STAGESEL'; gs='SANCTUM'; GF.sfx('tap'); return; }
   if (hit(L.winSummon,x,y)) { openSummon(); return; }
-  if (hit(L.winNext,x,y)) { gs='STAGESEL'; battle=null; GF.sfx('tap'); return; }
+  if (hit(L.winNext,x,y)) {
+    var wasLast = battle && battle.stageIdx===STAGES.length-1;
+    battle=null;
+    if (wasLast && gauntletCleared()) { ascendReturn='STAGESEL'; gs='ASCEND'; GF.sfx('reward'); }
+    else { gs='STAGESEL'; GF.sfx('tap'); }
+    return;
+  }
 }
 function drawLoseOverlay() {
   var S=GF.S, W=GF.W, H=GF.H, b=battle;
@@ -1597,7 +1703,21 @@ function drawTopBar() {
   // tickets
   drawTicketIcon(GF.W*0.42, 23*S, 9*S);
   ctx.fillStyle='#ffe6a0'; ctx.fillText(' '+meta.tickets, GF.W*0.42+14*S, 23*S);
+  // M3: Astral Shards (only once the player has ascended/earned any — avoids
+  // cluttering the bar for a fresh player who has no concept of shards yet)
+  if ((meta.shards|0)>0 || (meta.tier|0)>0){
+    var sx=GF.W*0.71;
+    drawShardIcon(sx, 23*S, 8*S);
+    ctx.textAlign='left'; ctx.fillStyle='#e6c0ff'; ctx.fillText(' '+(meta.shards|0), sx+12*S, 23*S);
+  }
   ctx.restore();
+}
+// M3: Astral Shard icon — a 4-point star (vector, no emoji)
+function drawShardIcon(x,y,r){
+  ctx.save(); ctx.translate(x,y); ctx.beginPath();
+  for (var i=0;i<8;i++){ var a=i/8*Math.PI*2-Math.PI/2; var rr=(i%2===0)?r:r*0.42; ctx.lineTo(Math.cos(a)*rr,Math.sin(a)*rr); }
+  ctx.closePath(); var g=ctx.createLinearGradient(-r,-r,r,r); g.addColorStop(0,'#e6b3ff'); g.addColorStop(1,'#a05cff');
+  ctx.fillStyle=g; ctx.fill(); ctx.lineWidth=1.2; ctx.strokeStyle='rgba(255,255,255,0.7)'; ctx.stroke(); ctx.restore();
 }
 function drawEssenceIcon(x,y,r){ ctx.save(); ctx.translate(x,y); ctx.beginPath(); for(var i=0;i<6;i++){var a=i/6*Math.PI*2-Math.PI/2; ctx.lineTo(Math.cos(a)*r,Math.sin(a)*r);} ctx.closePath(); var g=ctx.createLinearGradient(-r,-r,r,r); g.addColorStop(0,'#7cf0ff'); g.addColorStop(1,'#37a8ff'); ctx.fillStyle=g; ctx.fill(); ctx.lineWidth=1.5; ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.stroke(); ctx.restore(); }
 function drawTicketIcon(x,y,r){ ctx.save(); ctx.translate(x,y); GF.rr(ctx,-r*1.3,-r*0.8,r*2.6,r*1.6,r*0.4); ctx.fillStyle='#ffcf3a'; ctx.fill(); ctx.lineWidth=1.4; ctx.strokeStyle='#a07a10'; ctx.setLineDash([2,2]); ctx.beginPath(); ctx.moveTo(0,-r*0.8); ctx.lineTo(0,r*0.8); ctx.stroke(); ctx.restore(); }
@@ -1681,6 +1801,23 @@ function drawStageSel() {
   ctx.textAlign='center'; ctx.textBaseline='top';
   ctx.font='bold '+clampF(20*S,15,28)+'px Inter, system-ui'; ctx.fillStyle='#fff';
   ctx.fillText(GF.t('stagesel'), GF.cx, 50*S);
+  // M3: TIER badge — the world-visible mark of how far you've ascended. Renders
+  // beside the title only once tier>0, so a returning prestige player immediately
+  // SEES their tier (the apartment_cleaner "what changed" answer).
+  if ((meta.tier|0)>0){
+    var tw=ctx.measureText(GF.t('stagesel')).width;
+    var bx0=GF.cx+tw/2+14*S, by0=58*S;
+    var lbl=GF.t('tier')+' '+(meta.tier|0);
+    ctx.font='bold '+clampF(12*S,10,16)+'px Inter, system-ui';
+    var lw=ctx.measureText(lbl).width;
+    GF.rr(ctx,bx0-6*S,by0-11*S,lw+24*S,22*S,11*S);
+    ctx.fillStyle='rgba(160,92,255,0.28)'; ctx.fill();
+    ctx.lineWidth=1.5*S; ctx.strokeStyle='#a05cff'; ctx.stroke();
+    drawShardIcon(bx0+5*S, by0, 6*S);
+    ctx.textAlign='left'; ctx.fillStyle='#e6c0ff'; ctx.textBaseline='middle';
+    ctx.fillText(lbl, bx0+14*S, by0+0.5*S);
+    ctx.textAlign='center'; ctx.textBaseline='top';
+  }
   var cardX=W*0.07, cardW=W*0.86;
   var topY=80*S;
   // Daily Trial card — the procedural daily level + login-streak hook (always available)
@@ -1688,6 +1825,32 @@ function drawStageSel() {
   L.dailyStage={ x:cardX, y:topY, w:cardW, h:dtH };
   drawDailyTrialCard(L.dailyStage);
   topY += dtH + 9*S;
+  // M3: ASCEND banner — appears once the whole gauntlet is cleared at this tier.
+  // The persistent re-entry to the prestige panel (the win overlay is the other
+  // path). Pulsing star + "Tier N -> N+1" so the endgame chase is always one tap away.
+  if (gauntletCleared()){
+    var asH=44*S; L.ascBanner={x:cardX,y:topY,w:cardW,h:asH};
+    var r=L.ascBanner;
+    ctx.save();
+    GF.rr(ctx,r.x,r.y,r.w,r.h,12*S);
+    var ag=ctx.createLinearGradient(r.x,r.y,r.x+r.w,r.y);
+    var pul=0.5+0.5*Math.sin(Date.now()/420);
+    ag.addColorStop(0,'#3a1d5e'); ag.addColorStop(1,'#5a2da0');
+    ctx.fillStyle=ag; ctx.fill();
+    GF.rr(ctx,r.x,r.y,r.w,r.h,12*S); ctx.lineWidth=2*S; ctx.strokeStyle='rgba(230,179,255,'+(0.55+0.45*pul)+')'; ctx.stroke();
+    drawShardIcon(r.x+22*S, r.y+r.h*0.5, 12*S);
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.font='bold '+clampF(15*S,12,20)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+    ctx.fillText(GF.t('ascend'), r.x+44*S, r.y+r.h*0.36);
+    ctx.font=clampF(11*S,9,15)+'px Inter, system-ui'; ctx.fillStyle='#e6c0ff';
+    ctx.fillText(GF.t('tier')+' '+(meta.tier|0)+' -> '+((meta.tier|0)+1), r.x+44*S, r.y+r.h*0.68);
+    var ab=r.x+r.w-58*S;
+    ctx.fillStyle='#ffd23a'; GF.rr(ctx,ab-2*S,r.y+r.h*0.5-11*S,54*S,22*S,11*S); ctx.fill();
+    ctx.fillStyle='#3a1d5e'; ctx.textAlign='center'; ctx.font='bold '+clampF(11*S,9,14)+'px Inter, system-ui';
+    ctx.fillText(GF.t('ascend'), ab+25*S, r.y+r.h*0.5);
+    ctx.restore();
+    topY += asH + 9*S;
+  } else L.ascBanner=null;
   // free daily-gift pull (slim) if still available today
   var dailyAvail = meta.lastDaily !== dayNumber();
   if (dailyAvail){ var dbh=32*S; L.dailyBtn={x:cardX,y:topY,w:cardW,h:dbh}; drawBigBtn(L.dailyBtn, GF.t('daily')+' · '+GF.t('free')+' '+GF.t('summon'), '#ffb028','#e0830a'); topY += dbh+9*S; }
@@ -1860,6 +2023,7 @@ function drawQuestCard(r){
 }
 function stageSelClick(x,y) {
   if (L.dailyStage && hit(L.dailyStage,x,y)) { startDaily(); return; }
+  if (L.ascBanner && hit(L.ascBanner,x,y)) { openAscend(); return; }   // M3 prestige entry
   if (L.dailyBtn && hit(L.dailyBtn,x,y)) { claimDaily(); return; }
   if (L.forgeBtn && hit(L.forgeBtn,x,y)) { if (idleReady()) collectIdle(); else GF.sfx('tap'); return; }
   if (L.questBtn && hit(L.questBtn,x,y)) { openQuests(); return; }
@@ -2257,11 +2421,19 @@ function drawSanctum() {
   var top=124*S, bottom=H-78*S;
   var rowH=64*S, gap=8*S, W2=W-20*S, x0=10*S;
   var rows=SIGIL_DEFS.length;
-  var contentH = rows*(rowH+gap) - gap + 8*S;
+  // M3: AWAKENING section appended below the sigils — one row per OWNED champion.
+  // Section header + awaken rows add to the same scroll content (this IS the
+  // "permanent owned upgrades" screen, so champion awakening belongs here).
+  var awkIds = Object.keys(meta.owned);
+  awkIds.sort(function(a,b){ return (rosterById(b).rar-rosterById(a).rar) || ((meta.owned[b].awk||0)-(meta.owned[a].awk||0)); });
+  var hdrH = 34*S, awkRowH=64*S;
+  var sigBlockH = rows*(rowH+gap);
+  var contentH = sigBlockH + hdrH + awkIds.length*(awkRowH+gap) - gap + 8*S;
   sanctumScroll.setViewport({x:0, y:top, w:W, h:bottom-top});
   sanctumScroll.setContentHeight(contentH);
   sanctumScroll.update();
   L.sigilRows=[];
+  L.awkRows=[];
   sanctumScroll.begin(ctx);
   for (var i=0;i<rows;i++){
     var d=SIGIL_DEFS[i], lvl=meta.sigils[i], maxed=sigilMaxed(i);
@@ -2320,6 +2492,76 @@ function drawSanctum() {
     }
     ctx.restore();
   }
+  // ── M3 AWAKENING ROWS ──────────────────────────────────────────────────────
+  var ay = sigBlockH;
+  // section header
+  ctx.save(); ctx.textAlign='left'; ctx.textBaseline='middle';
+  ctx.font='bold '+clampF(14*S,11,18)+'px Inter, system-ui'; ctx.fillStyle='#e6c0ff';
+  drawShardIcon(x0+10*S, ay+hdrH*0.55, 8*S);
+  ctx.fillText('  '+GF.t('awaken').toUpperCase(), x0+22*S, ay+hdrH*0.55);
+  ctx.restore();
+  ay += hdrH;
+  for (var ai=0; ai<awkIds.length; ai++){
+    var cid=awkIds[ai], cu=rosterById(cid), crank=champAwk(cid), cmaxed=awkMaxed(cid), caff=canAwaken(cid);
+    var cy=ay+ai*(awkRowH+gap);
+    var crect={x:x0,y:cy,w:W2,h:awkRowH};
+    ctx.save();
+    GF.rr(ctx,x0,cy,W2,awkRowH,12*S); ctx.fillStyle='rgba(18,20,38,0.95)'; ctx.fill();
+    GF.rr(ctx,x0,cy,W2,awkRowH,12*S); ctx.lineWidth=2*S;
+    ctx.strokeStyle = cmaxed?'#ffd23a':(caff?'#c79bff':'#33384e'); ctx.stroke();
+    // portrait thumb
+    var pcS=awkRowH-14*S, pcx=x0+8*S, pcy=cy+7*S;
+    ctx.save(); GF.rr(ctx,pcx,pcy,pcS,pcS,8*S); ctx.clip();
+    var pim=IMG[cu.art]; if(pim) drawCover(pim,pcx,pcy,pcS,pcS); else {ctx.fillStyle=ORB_COLS[cu.el].a; ctx.fillRect(pcx,pcy,pcS,pcS);}
+    ctx.restore();
+    GF.rr(ctx,pcx,pcy,pcS,pcS,8*S); ctx.lineWidth=2*S; ctx.strokeStyle=rarColor(cu.rar); ctx.stroke();
+    // name + awakened rank pips
+    var tx=pcx+pcS+10*S;
+    ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    ctx.font='bold '+clampF(13.5*S,11,17)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+    ctx.fillText((GF.lang==='ru'?cu.ru:cu.en), tx, cy+awkRowH*0.38);
+    // awakened rank label + star pips
+    ctx.font=clampF(11.5*S,9,15)+'px Inter, system-ui'; ctx.fillStyle=crank>0?'#e6c0ff':'#8a90a6';
+    ctx.fillText(crank>0?(GF.t('awakened')+' A'+crank):'A0', tx, cy+awkRowH*0.62);
+    for (var pp=0; pp<AWK_MAX; pp++){
+      var pcx2=tx+72*S+pp*(12*S);
+      ctx.beginPath();
+      var sr2=5*S;
+      for (var si2=0; si2<8; si2++){ var aa=si2/8*Math.PI*2-Math.PI/2; var rr2=(si2%2===0)?sr2:sr2*0.42; var px2=pcx2+Math.cos(aa)*rr2, py2=cy+awkRowH*0.58+Math.sin(aa)*rr2; if(si2===0)ctx.moveTo(px2,py2);else ctx.lineTo(px2,py2); }
+      ctx.closePath(); ctx.fillStyle = pp<crank?'#e6b3ff':'#2a2e44'; ctx.fill();
+    }
+    // awaken button or MAX
+    var abw=92*S, abh=40*S, abx=x0+W2-abw-10*S, aby=cy+(awkRowH-abh)/2;
+    var abtn={x:abx,y:aby,w:abw,h:abh};
+    if (cmaxed){
+      ctx.fillStyle='#ffd23a'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.font='bold '+clampF(13*S,10,17)+'px Inter, system-ui';
+      ctx.fillText(GF.t('awmax'), abx+abw/2, aby+abh/2);
+      L.awkRows.push({rect:crect, id:cid, btn:null, maxed:true});
+    } else {
+      var aca=caff?'#a05cff':'#3a3a44', acb=caff?'#7e3ce0':'#26262e';
+      var ag=ctx.createLinearGradient(abx,aby,abx,aby+abh); ag.addColorStop(0,aca); ag.addColorStop(1,acb);
+      GF.rr(ctx,abx,aby,abw,abh,10*S); ctx.fillStyle=ag; ctx.fill();
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.font='bold '+clampF(12.5*S,10,16)+'px Inter, system-ui'; ctx.fillStyle=caff?'#fff':'#888';
+      ctx.fillText(GF.t('awaken'), abx+abw/2, aby+abh*0.33);
+      // cost: shard icon + amount
+      var acost=awkCost(crank), atxt=''+acost;
+      ctx.font='bold '+clampF(11*S,9,14)+'px Inter, system-ui';
+      var acw=ctx.measureText(atxt).width;
+      drawShardIcon(abx+abw/2 - acw/2 - 8*S, aby+abh*0.70, 5.5*S);
+      ctx.fillStyle=caff?'#e6c0ff':'#7a7a86'; ctx.textAlign='left';
+      ctx.fillText(atxt, abx+abw/2 - acw/2 + 2*S, aby+abh*0.70);
+      L.awkRows.push({rect:crect, id:cid, btn:abtn, maxed:false});
+    }
+    // awaken pulse ring
+    if (sanctumPulse && sanctumPulse.idx===-2 && sanctumPulse.awkId===cid && sanctumPulse.t<0.7){
+      var a3=1-sanctumPulse.t/0.7;
+      ctx.globalAlpha=a3*0.9; ctx.lineWidth=3*S; ctx.strokeStyle='#c79bff';
+      GF.rr(ctx,x0-2*S,cy-2*S,W2+4*S,awkRowH+4*S,13*S); ctx.stroke(); ctx.globalAlpha=1;
+    }
+    ctx.restore();
+  }
   sanctumScroll.end(ctx);
   sanctumScroll.draw(ctx);
   // back button (pinned)
@@ -2332,6 +2574,82 @@ function sanctumClick(x,y) {
   for (var i=0;i<L.sigilRows.length;i++){ var sr=L.sigilRows[i];
     if (sr.btn && hitScrolled(sr.btn,x,y,sanctumScroll)){ buySigil(sr.idx); return; }
   }
+  // M3: awaken a champion (spends Astral Shards)
+  if (L.awkRows) for (var j=0;j<L.awkRows.length;j++){ var ar=L.awkRows[j];
+    if (ar.btn && hitScrolled(ar.btn,x,y,sanctumScroll)){ awakenChamp(ar.id); return; }
+  }
+}
+
+// ── ASCENSION SCREEN (M3 prestige — reset the gauntlet to a higher tier) ──────
+var ascendReturn = 'STAGESEL';
+var ascendDoubled = false;   // did the player watch the RV to double this ascension's shards?
+function openAscend(){ ascendReturn=(gs==='BATTLE'?'STAGESEL':gs); ascendDoubled=false; gs='ASCEND'; GF.sfx('tap'); }
+function drawAscend(){
+  drawHubBg(); drawTopBar();
+  var S=GF.S, W=GF.W, H=GF.H;
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  // big star emblem
+  ctx.save(); var ex=GF.cx, ey=72*S; ctx.translate(ex,ey);
+  ctx.beginPath(); for (var i=0;i<8;i++){ var a=i/8*Math.PI*2-Math.PI/2; var rr=(i%2===0)?22*S:9*S; ctx.lineTo(Math.cos(a)*rr,Math.sin(a)*rr); } ctx.closePath();
+  var g=ctx.createLinearGradient(-22*S,-22*S,22*S,22*S); g.addColorStop(0,'#e6b3ff'); g.addColorStop(1,'#a05cff');
+  ctx.shadowColor='#a05cff'; ctx.shadowBlur=20*S; ctx.fillStyle=g; ctx.fill(); ctx.restore();
+  ctx.font='bold '+clampF(24*S,17,32)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  ctx.fillText(GF.t('ascendTitle'), GF.cx, 100*S);
+  // current -> next tier
+  ctx.font='bold '+clampF(15*S,12,20)+'px Inter, system-ui'; ctx.fillStyle='#e6c0ff';
+  ctx.fillText(GF.t('tier')+' '+(meta.tier|0)+'  ->  '+GF.t('tier')+' '+((meta.tier|0)+1), GF.cx, 134*S);
+  ctx.font=clampF(12*S,10,16)+'px Inter, system-ui'; ctx.fillStyle='#9ab';
+  wrapText(GF.t('ascendBody'), GF.cx, 162*S, W*0.86, clampF(16*S,13,20));
+  // permanent bonus line (next tier)
+  var nextBonus = Math.round(TIER_BONUS*((meta.tier|0)+1)*100);
+  ctx.font='bold '+clampF(13*S,11,17)+'px Inter, system-ui'; ctx.fillStyle='#9fe6c0';
+  ctx.fillText('+'+nextBonus+'% '+GF.t('tierbonus'), GF.cx, H*0.50);
+  // reward (shards), doubled if the ad was watched
+  var base=ascendShardReward(meta.tier|0), amt=ascendDoubled?base*2:base;
+  ctx.font='bold '+clampF(15*S,12,20)+'px Inter, system-ui'; ctx.fillStyle='#fff';
+  var rtxt=GF.t('ascendReward')+': ';
+  var rw=ctx.measureText(rtxt).width;
+  ctx.textAlign='left'; ctx.fillText(rtxt, GF.cx-rw/2-16*S, H*0.555);
+  drawShardIcon(GF.cx-rw/2+rw-8*S, H*0.555+8*S, 8*S);
+  ctx.fillStyle='#e6c0ff'; ctx.fillText('  '+amt+(ascendDoubled?' x2':''), GF.cx-rw/2+rw+4*S, H*0.555);
+  ctx.textAlign='center';
+  // buttons
+  var bw=Math.min(W*0.82,340*S), bh=50*S, bx=GF.cx-bw/2, gapb=12*S, by0=H*0.63;
+  if (!ascendDoubled){
+    L.ascDbl={x:bx,y:by0,w:bw,h:bh};
+    drawBigBtn(L.ascDbl, GF.t('ascendDbl'), '#ffb028','#e0830a');
+  } else L.ascDbl=null;
+  var goY = ascendDoubled ? by0 : by0+(bh+gapb);
+  L.ascGo={x:bx,y:goY,w:bw,h:bh};
+  drawBigBtn(L.ascGo, GF.t('ascendGo'), '#a05cff','#7e3ce0');
+  L.ascBack={x:bx,y:goY+(bh+gapb),w:bw,h:bh};
+  drawBigBtn(L.ascBack, GF.t('back'), '#555','#333');
+}
+function ascendClick(x,y){
+  if (L.ascDbl && hit(L.ascDbl,x,y)){
+    GF.showAd('rewarded').then(function(){ ascendDoubled=true; GF.sfx('reward'); });
+    return;
+  }
+  if (hit(L.ascGo,x,y)){
+    doAscend(ascendDoubled);
+    ascendDoubled=false;
+    gs='STAGESEL';
+    return;
+  }
+  if (hit(L.ascBack,x,y)){ gs=ascendReturn; GF.sfx('tap'); return; }
+}
+// M3: floating burst after an ascension ("+N Shards" / "TIER UP!")
+function drawAscendFx(){
+  var S=GF.S, H=GF.H, fx=ascendFx;
+  fx.t += 1/60;
+  if (fx.t>1.6){ ascendFx=null; return; }
+  var a=fx.t<1.2?1:(1-(fx.t-1.2)/0.4);
+  ctx.save(); ctx.globalAlpha=Math.max(0,a); ctx.textAlign='center';
+  ctx.font='bold '+clampF(30*S,20,44)+'px Inter, system-ui'; ctx.fillStyle='#ffd23a'; ctx.shadowColor='#a05cff'; ctx.shadowBlur=18*S;
+  ctx.fillText(GF.t('ascendDone'), GF.cx, H*0.40 - fx.t*20*S); ctx.shadowBlur=0;
+  ctx.font='bold '+clampF(18*S,13,24)+'px Inter, system-ui'; ctx.fillStyle='#e6c0ff';
+  ctx.fillText('+'+fx.amt+' '+GF.t('shardsShort')+'  ·  '+GF.t('tier')+' '+fx.tier, GF.cx, H*0.40+30*S - fx.t*20*S);
+  ctx.restore();
 }
 
 // ── DAILY QUESTS SCREEN (M2 reason-to-return, iter#2) ────────────────────────
@@ -2592,6 +2910,13 @@ function reachState(){
     // each track's upgrade button lives in CONTENT space (y from region top)
     for (var sg=0; sg<(L.sigilRows||[]).length; sg++){ var rw=L.sigilRows[sg];
       if (rw.btn) _push(items,_ri('sigil_'+rw.idx, rw.btn)); }
+    // M3 awaken buttons (also CONTENT space, below the sigils)
+    for (var aw=0; aw<(L.awkRows||[]).length; aw++){ var arw=L.awkRows[aw];
+      if (arw.btn) _push(items,_ri('awaken_'+arw.id, arw.btn)); }
+  } else if (gs==='ASCEND'){
+    // M3 prestige panel — all buttons pinned (no scroll region)
+    if (L.ascDbl) _push(items,_ri('ascend_double',L.ascDbl));
+    _push(items,_ri('ascend_go',L.ascGo)); _push(items,_ri('ascend_back',L.ascBack));
   } else if (gs==='QUESTS'){
     res.scrollId='quest_list';
     res.viewportH = questScroll ? questScroll.vp.h : H;
@@ -2618,6 +2943,7 @@ var REACH_TOUR = [
   { name:'summon',     go:function(){ summonReturn='MENU'; gs='SUMMON'; } },
   { name:'sanctum',    go:function(){ battle=null; sanctumReturn='MENU'; gs='SANCTUM'; if(sanctumScroll) sanctumScroll.scrollTo(0); } },
   { name:'quests',     go:function(){ battle=null; questsReturn='STAGESEL'; ensureQuests(); gs='QUESTS'; if(questScroll) questScroll.scrollTo(0); } },
+  { name:'ascend',     go:function(){ battle=null; ascendReturn='STAGESEL'; ascendDoubled=false; gs='ASCEND'; } },
   { name:'battle',     go:function(){ _ensureBattle(); if(GF.tutorial) GF.tutorial.active=false; tutorialActive=false; battle.phase='INPUT'; gs='BATTLE'; } },
   { name:'battle_win', go:function(){ _ensureBattle(); battle.phase='WIN'; battle._rewardEss=battle._rewardEss||60; gs='BATTLE'; } },
   { name:'battle_lose',go:function(){ _ensureBattle(); battle.phase='LOSE'; battle.reviveUsed=false; gs='BATTLE'; } },
@@ -2670,6 +2996,12 @@ GF.init({
         questsDone: (meta.quests||[]).filter(function(q){return q.claimed;}).length,
         questsReady: (meta.quests||[]).filter(function(q){return questReady(q);}).length,
         questsTotal: (meta.quests||[]).length,
+        // M3 depth+monetization (iter#3)
+        tier: meta.tier|0,                                            // ascension prestige tier
+        shards: meta.shards|0,                                        // Astral Shards (prestige currency)
+        gauntletCleared: gauntletCleared(),                           // final stage beaten -> Ascend offered
+        awakenTotal: Object.keys(meta.owned).reduce(function(a,id){ return a+(meta.owned[id].awk||0); },0), // total Awakened ranks owned
+        anyAwakenable: anyAwakenable(),                               // can afford an awaken right now
       };
     });
     // reachability gate: expose the per-screen hit-rects + a screen tour so
@@ -2733,10 +3065,13 @@ function botActions(){
     else if (battle.phase==='WAVECLEAR') a.push('advance_wave');
   } else {
     // between battles: collect the idle forge + claim ready quests (M2), then
-    // spend essence on the owned-meta sink, then fight again.
+    // spend essence on the owned-meta sink, then fight again. M3: when the
+    // gauntlet is cleared, ASCEND (prestige); spend shards on AWAKENING.
     if (idleReady()) a.push('collect_idle');
     if (anyQuestReady()) a.push('claim_quest');
     if (anySigilAffordable()) a.push('upgrade_sigil');
+    if (anyAwakenable()) a.push('awaken_champ');     // M3: spend Astral Shards
+    if (gauntletCleared()) a.push('ascend');         // M3: prestige to next tier
     a.push('start_battle');
   }
   return a;
@@ -2752,6 +3087,10 @@ function botAct(action){
     var best=-1, bc=Infinity; for (var i=0;i<SIGIL_DEFS.length;i++){ if (canUpgradeSigil(i)){ var c=sigilCost(i); if (c<bc){ bc=c; best=i; } } }
     if (best>=0) buySigil(best); return;
   }
+  if (action==='awaken_champ'){ // M3: awaken the first affordable owned champion
+    for (var id in meta.owned){ if (canAwaken(id)){ awakenChamp(id); return; } } return;
+  }
+  if (action==='ascend'){ doAscend(false); return; }   // M3: prestige to next tier (no RV in the bot)
   if (action==='start_battle'){ window._silent=true; startBattle(Math.min(meta.stageUnlocked,STAGES.length-1)); window._silent=false; if(GF.tutorial) GF.tutorial.active=false; tutorialActive=false; if(battle){ battle.phase='INPUT'; battle.moveTimer=0; } return; }
 }
 
@@ -2885,6 +3224,30 @@ window._orbChampScreenRect = function(id){
              visible: sy>=sc.vp.y-1 && (sy+r.h)<=sc.vp.y+sc.vp.h+1 }; } }
   return null;
 };
+// M3 verification seams (iter#3): drive + read ASCENSION (prestige tier) and
+// champion AWAKENING (Astral Shards). Mirrors the _orbSigil/_orbIdle pattern.
+//  _orbAscend('read')              -> {tier, shards, cleared, reward, atkMult, hpMult, enemyHpMult}
+//  _orbAscend('setCleared')        -> force meta.stageUnlocked to the last stage (gauntlet cleared)
+//  _orbAscend('go', dbl?)          -> doAscend(dbl); returns shards gained
+//  _orbAwaken('read')              -> {shards, champs:[{id,rank,cost,canAwaken}], anyAwakenable}
+//  _orbAwaken('grantShards', n)    -> add n Astral Shards (sim an ascension payout)
+//  _orbAwaken('go', id)            -> awakenChamp(id); returns success bool
+//  _orbAwaken('atk', id)          -> the unit's CURRENT computed atk (proves awk folds in)
+window._orbAscend = function(action, arg){
+  if (action==='setCleared'){ meta.stageUnlocked = STAGES.length-1; saveMeta(); return gauntletCleared(); }
+  if (action==='go'){ return doAscend(!!arg); }
+  return { tier:meta.tier|0, shards:meta.shards|0, cleared:gauntletCleared(),
+    reward:ascendShardReward(meta.tier|0), atkMult:tierAtkMult(), hpMult:tierHpMult(),
+    enemyHpMult:tierEnemyHpMult(), enemyAtkMult:tierEnemyAtkMult() };
+};
+window._orbAwaken = function(action, arg){
+  if (action==='grantShards'){ meta.shards += (arg|0); saveMeta(); return meta.shards; }
+  if (action==='go'){ return awakenChamp(arg); }
+  if (action==='atk'){ var s=unitStats(arg, meta.owned[arg]?meta.owned[arg].stars:1); return s.atk; }
+  return { shards:meta.shards|0, anyAwakenable:anyAwakenable(),
+    champs:Object.keys(meta.owned).map(function(id){ return { id:id, rank:champAwk(id), cost:awkMaxed(id)?null:awkCost(champAwk(id)), canAwaken:canAwaken(id) }; }) };
+};
+window._orbShow = function(s){ gs=s; };   // jump to a screen for the visual gate
 
 })();
 </script>

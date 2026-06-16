@@ -52,6 +52,14 @@ var STRINGS = {
     dailyCombo: 'Feast combo',
     dailyDone: 'All shift goals done',
     dailyReward: 'book stamp + prep',
+    renoNext: 'next reno',
+    renoMax: 'top kitchen!',
+    renovate: 'RENOVATE DINER',
+    renoTitle: 'DINER RENOVATED!',
+    renoSignature: 'Signature',
+    renoBonus: 'coins forever',
+    headStart: 'Head Start (+prep)',
+    headStartGot: 'Head Start stocked!',
     tut_goal: 'Goal: Merge two identical ingredients to build them into finished dishes, then serve the dish each customer order asks for to earn coins.',
     tut_controls: 'Controls: Tap a crate to drop an ingredient. Drag an item onto a matching one to merge - or tap it, then tap where to send it. Serve a finished dish onto a matching order.',
     tut_win: 'Win: Endless - chase your best coin score. Every few orders unlocks a NEW cuisine: pizza, burgers, sushi, desserts, drinks.',
@@ -88,6 +96,14 @@ var STRINGS = {
     dailyCombo: 'Комбо Пир',
     dailyDone: 'Все цели смены готовы',
     dailyReward: 'штамп книги + заготовка',
+    renoNext: 'до ремонта',
+    renoMax: 'высший класс!',
+    renovate: 'РЕМОНТ КАФЕ',
+    renoTitle: 'КАФЕ ОБНОВЛЕНО!',
+    renoSignature: 'Фирменное',
+    renoBonus: 'монет навсегда',
+    headStart: 'Фора (+заготовка)',
+    headStartGot: 'Фора готова!',
     tut_goal: 'Цель: Сливай два одинаковых продукта, чтобы собрать готовые блюда, затем подавай блюдо по каждому заказу клиента и получай монеты.',
     tut_controls: 'Управление: Жми ящик, чтобы выпал продукт. Тащи продукт на такой же, чтобы слить - или нажми на него, затем на нужную клетку. Подай готовое блюдо на подходящий заказ.',
     tut_win: 'Победа: Бесконечно - бей рекорд монет. Каждые несколько заказов открывают НОВУЮ кухню: пицца, бургеры, суши, десерты, напитки.',
@@ -144,6 +160,23 @@ var STATION_THRESHOLDS = [2, 5, 9]; // served recipes per cuisine for station Lv
 var PREP_CAP_HOURS = 10;     // overnight prep caps at a daily-return window
 var PREP_ITEM_MINUTES = 90;   // one stocked prep item per capped 90 minutes away
 var PREP_QUEUE_CAP = 8;       // visible next-shift stockpile cap
+// ── M3 PRESTIGE / RENOVATION (depth + ownership) ─────────────────────────
+// Once lifetime served orders cross a tier threshold the player can RENOVATE
+// the diner one rank up (★). Each renovation grants a PERMANENT global coin
+// multiplier AND reveals a named SPECIALTY DISH the player owns forever — a
+// menu plaque a returning player SEES grown out of the diner world (not a kit).
+var RENOVATE_THRESHOLDS = [25, 80, 180, 340]; // lifetime serves to renovate to rank 1/2/3/4
+var RENOVATE_MULT_STEP  = 0.15;               // +15% coins/score per renovation rank (stacks)
+var RENOVATE_RANK_NAMES = {
+  en: ['Roadside Diner', 'Bronze Kitchen', 'Silver Kitchen', 'Gold Kitchen', 'Platinum Kitchen'],
+  ru: ['Придорожное кафе', 'Бронзовая кухня', 'Серебряная кухня', 'Золотая кухня', 'Платиновая кухня'],
+};
+// Signature dish revealed at each renovation rank (rank 1..4 → index 0..3).
+var SPECIALTY_DISHES = {
+  en: ['House Pizza Supreme', 'Double Smash Burger', 'Dragon Roll Platter', 'Grand Celebration Cake'],
+  ru: ['Фирменная Пицца', 'Двойной Бургер', 'Сет «Дракон»', 'Праздничный Торт'],
+};
+var SPECIALTY_CHAINS = ['pizza', 'burger', 'sushi', 'dessert']; // which chain's tile represents each specialty
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';             // MENU | PLAYING | GAMEOVER
@@ -170,6 +203,10 @@ var dinerMeta = { recipes: {}, chainServes: {}, totalServed: 0 };
 var metaToast = null, metaToastTimer = 0;
 var dailyToast = null, dailyToastTimer = 0, dailyToastDuration = 0;
 var dailyToastRect = null;
+// M3 prestige: renovation celebration flash + game-over action button rects
+var renovateFlash = 0, renovateFlashRank = 0;
+var renovateBtnRect = null, headStartBtnRect = null;
+var pendingHeadStart = false;   // a watched-ad Head Start to apply on the next startGame()
 
 // selection / drag
 var sel = -1;                // selected source cell index (tap-tap), -1 = none
@@ -232,7 +269,7 @@ function blankDailyMeta() {
   };
 }
 function blankDinerMeta() {
-  var m = { recipes: {}, chainServes: {}, totalServed: 0, daily: blankDailyMeta() };
+  var m = { recipes: {}, chainServes: {}, totalServed: 0, prestige: 0, headStart: 0, daily: blankDailyMeta() };
   for (var i = 0; i < CHAINS.length; i++) m.chainServes[CHAINS[i].id] = 0;
   return m;
 }
@@ -302,6 +339,8 @@ function normalizeDinerMeta(m) {
     }
   }
   out.totalServed = Math.max(0, parseInt(m.totalServed, 10) || 0);
+  out.prestige = GF.clamp(parseInt(m.prestige, 10) || 0, 0, RENOVATE_THRESHOLDS.length);
+  out.headStart = Math.max(0, parseInt(m.headStart, 10) || 0);
   out.daily = normalizeDailyMeta(m.daily);
   return out;
 }
@@ -607,6 +646,84 @@ function awardDinerMeta(order) {
   return { upgraded: false, chain: order.chain, level: afterLevel };
 }
 
+// ── M3 PRESTIGE / RENOVATION ─────────────────────────────────────────────
+// Permanent diner rank earned from LIFETIME served orders. Each rank gives a
+// stacking coin/score multiplier and a named signature dish the player owns.
+function prestigeRank() { return (dinerMeta && GF.clamp(dinerMeta.prestige || 0, 0, RENOVATE_THRESHOLDS.length)) || 0; }
+function prestigeMult() { return 1 + prestigeRank() * RENOVATE_MULT_STEP; }
+function rankName(rank) {
+  var arr = (GF.lang === 'ru' ? RENOVATE_RANK_NAMES.ru : RENOVATE_RANK_NAMES.en) || RENOVATE_RANK_NAMES.en;
+  return arr[GF.clamp(rank || 0, 0, arr.length - 1)];
+}
+function specialtyName(rank) {
+  var arr = (GF.lang === 'ru' ? SPECIALTY_DISHES.ru : SPECIALTY_DISHES.en) || SPECIALTY_DISHES.en;
+  return arr[GF.clamp((rank || 1) - 1, 0, arr.length - 1)];
+}
+function specialtyChain(rank) { return SPECIALTY_CHAINS[GF.clamp((rank || 1) - 1, 0, SPECIALTY_CHAINS.length - 1)]; }
+function renovateNeed() {
+  var r = prestigeRank();
+  if (r >= RENOVATE_THRESHOLDS.length) return null;   // maxed
+  return RENOVATE_THRESHOLDS[r];
+}
+function canRenovate() {
+  var need = renovateNeed();
+  return need != null && (dinerMeta.totalServed || 0) >= need;
+}
+function doRenovate() {
+  if (!canRenovate()) return false;
+  dinerMeta = normalizeDinerMeta(dinerMeta);
+  dinerMeta.prestige = GF.clamp((dinerMeta.prestige || 0) + 1, 0, RENOVATE_THRESHOLDS.length);
+  var r = dinerMeta.prestige;
+  renovateFlash = 1.8; renovateFlashRank = r;
+  GF.sfx('unlock'); GF.sfx('levelup');
+  if (GF.happytime) GF.happytime();
+  GF.setShake(0.5);
+  GF.spawnFloat(GF.cx, GF.cy, specialtyName(r), '#ffd700');
+  saveProgressEvent();
+  GF.saveRun();
+  return true;
+}
+// Plaque text shown in HUD / menu / game-over: rank stars + next-renovation progress.
+function prestigeStars(rank) { var s = ''; for (var i = 0; i < (rank || 0); i++) s += '★'; return s; }
+function prestigeLine() {
+  var r = prestigeRank();
+  var name = rankName(r);
+  var need = renovateNeed();
+  if (need == null) return name + ' ' + prestigeStars(r) + ' - ' + GF.t('renoMax');
+  var have = GF.clamp(dinerMeta.totalServed || 0, 0, need);
+  return name + ' ' + (r > 0 ? prestigeStars(r) + ' ' : '') + GF.t('renoNext') + ' ' + have + '/' + need;
+}
+// Best-developed station's chain (highest station level, tiebreak by serves).
+function bestStationChain() {
+  var best = CHAINS[0].id, bestLvl = -1, bestN = -1;
+  for (var i = 0; i < CHAINS.length; i++) {
+    var id = CHAINS[i].id, lvl = stationLevelFor(id), n = stationServeCount(id);
+    if (lvl > bestLvl || (lvl === bestLvl && n > bestN)) { best = id; bestLvl = lvl; bestN = n; }
+  }
+  return best;
+}
+// Head Start (rewarded): drop a small prep crate of the player's best station's
+// ingredients onto the board at shift start. Named, optional, never gates play.
+function applyHeadStart() {
+  if (!pendingHeadStart) return 0;
+  pendingHeadStart = false;
+  var chain = bestStationChain();
+  var lvl = stationLevelFor(chain);
+  var tier = lvl >= 2 ? 1 : 0;          // a small leg-up, not a free win
+  var placed = 0;
+  for (var k = 0; k < 4 && freeCells() > 0; k++) {
+    var idx = randFree(); if (idx < 0) break;
+    placeItem(idx, chain, k < 2 ? tier + 1 : tier, false, false); // a pair one tier higher + a pair of raws
+    placed++;
+  }
+  if (placed > 0) {
+    firstMergeDone = true; refillOrders();
+    GF.sfx('reward');
+    GF.spawnFloat(GF.cx, GF.cy - L.cell, GF.t('headStartGot'), '#7ed957');
+  }
+  return placed;
+}
+
 // Two same chain+tier items anywhere mergeable, or a golden present with any item.
 function hasMergePair() {
   var seen = {}, golden = false, any = false;
@@ -751,7 +868,7 @@ function serveTo(srcIdx, order) {
   comboTimer = COMBO_WINDOW * 1000;
   if (combo > bestCombo) bestCombo = combo;
   var mult = combo >= 2 ? combo : 1;
-  var gain = Math.round(COINS_PER_TIER * order.tier * mult * stationBonusMult(order.chain));
+  var gain = Math.round(COINS_PER_TIER * order.tier * mult * stationBonusMult(order.chain) * prestigeMult());
   coins += gain; score += gain;
   ordersServed++;
   var metaAward = awardDinerMeta(order);
@@ -823,7 +940,7 @@ function startGame() {
   combo = 0; bestCombo = 0; comboTimer = 0;
   level = 1; chainsUnlocked = 1; topTier = 0; goldenSeen = false; jamTimer = 0;
   continueUsed = false;
-  newChainFlash = 0; levelFlash = 0; flashChainId = null; cascadeTimer = 0;
+  newChainFlash = 0; levelFlash = 0; flashChainId = null; cascadeTimer = 0; renovateFlash = 0;
   crates = 1; crateCharge = [0]; crateReady = [true];
   board = []; for (var i = 0; i < cellCount(); i++) board.push(null);
   orders = []; orderSeq = 1; firstMergeDone = false;
@@ -837,6 +954,7 @@ function startGame() {
   var dd = randFree(); if (dd >= 0) placeItem(dd, seedChain, 1, false, false);   // a pre-merged tier-1 to pair toward tier-2
   seedStationPrep();
   seedDailyShiftPrep();
+  applyHeadStart();
   gs = 'PLAYING';
   startTutorial();
   GF.gameStarted();
@@ -1028,6 +1146,7 @@ function onUp(x, y) {
 function update(dt) {
   if (newChainFlash > 0) newChainFlash = Math.max(0, newChainFlash - dt);
   if (levelFlash > 0) levelFlash = Math.max(0, levelFlash - dt);
+  if (renovateFlash > 0) renovateFlash = Math.max(0, renovateFlash - dt);
   if (metaToastTimer > 0) metaToastTimer = Math.max(0, metaToastTimer - dt);
   if (dailyToastTimer > 0) dailyToastTimer = Math.max(0, dailyToastTimer - dt);
   if (cascadeTimer > 0) cascadeTimer = Math.max(0, cascadeTimer - dt);
@@ -1118,6 +1237,35 @@ function draw(ctx) {
   if (gs === 'MENU') drawMenu(ctx);
   if (gs === 'GAMEOVER') drawGameOver(ctx);
   if ((gs === 'MENU' || gs === 'GAMEOVER') && dailyToastTimer > 0) drawDailyToast(ctx);
+  if (renovateFlash > 0) drawRenovate(ctx);
+}
+
+// M3: full-screen "DINER RENOVATED" celebration with the new rank + signature dish.
+function drawRenovate(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  var a = GF.clamp(renovateFlash / 1.8, 0, 1);
+  ctx.save();
+  ctx.globalAlpha = Math.min(0.86, a * 1.4);
+  ctx.fillStyle = 'rgba(20,12,4,0.92)'; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+  var rank = renovateFlashRank || prestigeRank();
+  var cyc = H * 0.4;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(255,215,0,0.6)'; ctx.shadowBlur = 30 * S;
+  ctx.fillStyle = '#ffd700'; ctx.font = 'bold ' + GF.clamp(30 * S, 22, 46) + 'px sans-serif';
+  ctx.fillText(GF.t('renoTitle'), GF.cx, cyc - 70 * S);
+  ctx.shadowBlur = 0;
+  // signature dish tile
+  var sz = GF.clamp(72 * S, 50, 110);
+  drawFood(ctx, GF.cx, cyc, specialtyChain(rank), MAX_TIER, false, sz, 0);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(20 * S, 15, 30) + 'px sans-serif';
+  ctx.fillText(rankName(rank) + ' ' + prestigeStars(rank), GF.cx, cyc + sz * 0.7 + 14 * S);
+  ctx.fillStyle = '#7ed957'; ctx.font = 'bold ' + GF.clamp(14 * S, 11, 19) + 'px sans-serif';
+  ctx.fillText(GF.t('renoSignature') + ': ' + specialtyName(rank), GF.cx, cyc + sz * 0.7 + 40 * S);
+  ctx.fillStyle = '#ffd166'; ctx.font = GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+  ctx.fillText('+' + Math.round(rank * RENOVATE_MULT_STEP * 100) + '% ' + GF.t('renoBonus'), GF.cx, cyc + sz * 0.7 + 64 * S);
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
 }
 
 // Vector coin (gold disc + ring) — never an emoji (tofu-box bug in game font).
@@ -1278,7 +1426,19 @@ function drawBookStrip(ctx) {
   while (fs2 > 7.5 && ctx.measureText(daily).width > maxW) { fs2 -= 0.5; ctx.font = 'bold ' + fs2 + 'px sans-serif'; }
   ctx.fillStyle = '#7ed957';
   ctx.fillText(daily, x + h * 1.08, y + h * 0.68);
-  ctx.textBaseline = 'alphabetic';
+  // M3 prestige rank badge (right edge): gold star pill when the diner is renovated.
+  var rank = prestigeRank();
+  if (rank > 0) {
+    var stars = prestigeStars(rank);
+    var bfs = GF.clamp(11 * S, 9, 15);
+    ctx.font = 'bold ' + bfs + 'px sans-serif'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    var bw = ctx.measureText(stars).width + 12 * S;
+    var bx = x + w - bw - 4 * S, bh = h * 0.62, by = y + (h - bh) / 2;
+    GF.rr(ctx, bx, by, bw, bh, bh / 2); ctx.fillStyle = 'rgba(255,215,0,0.16)'; ctx.fill();
+    ctx.lineWidth = Math.max(1, 1.2 * S); ctx.strokeStyle = 'rgba(255,215,0,0.55)'; ctx.stroke();
+    ctx.fillStyle = '#ffd700'; ctx.fillText(stars, x + w - 8 * S, y + h / 2);
+  }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
 
 function drawBoard(ctx) {
@@ -1610,12 +1770,13 @@ function drawMenu(ctx) {
   ctx.fillText(GF.t('goalLine'), GF.cx, titleY + 46 * S);
   drawFitCenter(ctx, compactMetaLine(), GF.cx, titleY + 64 * S, Math.min(W - 34 * S, 430 * S), GF.clamp(11 * S, 9, 15), 8.5, 'bold', '#f4d28a');
   drawFitCenter(ctx, dailyCompactLine(), GF.cx, titleY + 80 * S, Math.min(W - 34 * S, 430 * S), GF.clamp(10.5 * S, 8.5, 14), 8, 'bold', '#7ed957');
+  drawFitCenter(ctx, prestigeLine(), GF.cx, titleY + 96 * S, Math.min(W - 34 * S, 430 * S), GF.clamp(11 * S, 9, 15), 8.5, 'bold', '#ffd700');
   // tutorial block (how to play) under the title, above PLAY
   var maxW = Math.min(W - 36 * S, 420 * S);
-  var blockH = drawTutorialBlock(ctx, titleY + 102 * S, maxW);
+  var blockH = drawTutorialBlock(ctx, titleY + 118 * S, maxW);
   // PLAY button
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
-  var btnY = Math.min(titleY + 102 * S + blockH + 22 * S, H - btnH - 18 * S);
+  var btnY = Math.min(titleY + 118 * S + blockH + 22 * S, H - btnH - 18 * S);
   drawPlayButton(ctx, btnW, btnH, btnY, GF.t('play'));
   if (best > 0) {
     ctx.fillStyle = '#8a7'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px sans-serif'; ctx.textAlign = 'center';
@@ -1644,23 +1805,50 @@ function drawGameOver(ctx) {
   ctx.fillText(GF.t('score') + ': ' + score, GF.cx, sy0 + 46 * S);
   ctx.fillStyle = '#8a7'; ctx.font = GF.clamp(13 * S, 10, 18) + 'px sans-serif';
   ctx.fillText(GF.t('best') + ': ' + best + '    ' + GF.t('chainsLbl') + ': ' + chainsUnlocked + '/' + NUM_CHAINS, GF.cx, sy0 + 70 * S);
-  drawFitCenter(ctx, GF.t('metaReturn'), GF.cx, sy0 + 96 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12 * S, 9.5, 16), 8.5, '', '#f4d28a');
-  drawFitCenter(ctx, GF.t('metaNextShift') + ': ' + compactMetaLine(), GF.cx, sy0 + 116 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12.5 * S, 10, 17), 8.5, 'bold', '#7ed957');
-  drawFitCenter(ctx, dailyCompactLine(), GF.cx, sy0 + 136 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(11.5 * S, 9, 15), 8, 'bold', '#ffd166');
-  // buttons: rewarded continue (one per run) above PLAY AGAIN
-  var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
-  var retryY = H - btnH - 20 * S;
-  continueBtnRect = null;
-  if (!continueUsed) {
-    var contY = retryY - btnH - 14 * S, cbx = GF.cx - btnW / 2;
-    var cg = ctx.createLinearGradient(cbx, contY, cbx, contY + btnH);
-    cg.addColorStop(0, '#5ad15a'); cg.addColorStop(1, '#2ea043');
-    GF.rr(ctx, cbx, contY, btnW, btnH, btnH / 2); ctx.fillStyle = cg; ctx.fill();
-    drawFitCenter(ctx, '▶ ' + GF.t('adContinue'), GF.cx, contY + btnH / 2, btnW - 22 * S, GF.clamp(14 * S, 11, 19), 8, 'bold', '#08240f');
-    ctx.textBaseline = 'alphabetic';
-    continueBtnRect = { x: cbx, y: contY, w: btnW, h: btnH };
+  drawFitCenter(ctx, GF.t('metaNextShift') + ': ' + compactMetaLine(), GF.cx, sy0 + 96 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12.5 * S, 10, 17), 8.5, 'bold', '#7ed957');
+  // M3 prestige plaque: the diner's current rank + progress toward the next renovation.
+  drawFitCenter(ctx, prestigeLine(), GF.cx, sy0 + 116 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(12.5 * S, 10, 17), 8.5, 'bold', '#ffd700');
+  drawFitCenter(ctx, dailyCompactLine(), GF.cx, sy0 + 134 * S, Math.min(W - 40 * S, 430 * S), GF.clamp(11 * S, 9, 14.5), 8, 'bold', '#ffd166');
+  // ── action buttons, stacked bottom-up; cap extras so mobile portrait fits ──
+  var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(50 * S, 40, 62);
+  var gap = 12 * S, bx = GF.cx - btnW / 2;
+  var stackY = H - btnH - 18 * S;
+  continueBtnRect = null; renovateBtnRect = null; headStartBtnRect = null;
+  // PLAY AGAIN always at the bottom.
+  drawPlayButton(ctx, btnW, btnH, stackY, GF.t('retry'));
+  var extras = [];   // priority order, top of stack first applied LAST so highest sits highest
+  if (canRenovate()) extras.push('reno');
+  if (!continueUsed) extras.push('cont');
+  extras.push('head');
+  extras = extras.slice(0, 2);   // at most 2 extra buttons above PLAY AGAIN (mobile budget)
+  var slotY = stackY;
+  for (var e = extras.length - 1; e >= 0; e--) {
+    slotY = slotY - btnH - gap;
+    var kind = extras[e];
+    if (kind === 'reno') {
+      var rg = ctx.createLinearGradient(bx, slotY, bx, slotY + btnH);
+      rg.addColorStop(0, '#ffe17a'); rg.addColorStop(1, '#e0a91e');
+      GF.rr(ctx, bx, slotY, btnW, btnH, btnH / 2); ctx.fillStyle = rg; ctx.fill();
+      ctx.lineWidth = Math.max(1.5, 2 * S); ctx.strokeStyle = '#fff4c2'; ctx.stroke();
+      drawFitCenter(ctx, '★ ' + GF.t('renovate'), GF.cx, slotY + btnH / 2, btnW - 22 * S, GF.clamp(15 * S, 12, 20), 8, 'bold', '#3a2400');
+      ctx.textBaseline = 'alphabetic';
+      renovateBtnRect = { x: bx, y: slotY, w: btnW, h: btnH };
+    } else if (kind === 'cont') {
+      var cg = ctx.createLinearGradient(bx, slotY, bx, slotY + btnH);
+      cg.addColorStop(0, '#5ad15a'); cg.addColorStop(1, '#2ea043');
+      GF.rr(ctx, bx, slotY, btnW, btnH, btnH / 2); ctx.fillStyle = cg; ctx.fill();
+      drawFitCenter(ctx, '▶ ' + GF.t('adContinue'), GF.cx, slotY + btnH / 2, btnW - 22 * S, GF.clamp(13.5 * S, 11, 18), 8, 'bold', '#08240f');
+      ctx.textBaseline = 'alphabetic';
+      continueBtnRect = { x: bx, y: slotY, w: btnW, h: btnH };
+    } else if (kind === 'head') {
+      var hg = ctx.createLinearGradient(bx, slotY, bx, slotY + btnH);
+      hg.addColorStop(0, '#7ec8ff'); hg.addColorStop(1, '#3a82c8');
+      GF.rr(ctx, bx, slotY, btnW, btnH, btnH / 2); ctx.fillStyle = hg; ctx.fill();
+      drawFitCenter(ctx, '▶ ' + GF.t('headStart'), GF.cx, slotY + btnH / 2, btnW - 22 * S, GF.clamp(13.5 * S, 11, 18), 8, 'bold', '#062338');
+      ctx.textBaseline = 'alphabetic';
+      headStartBtnRect = { x: bx, y: slotY, w: btnW, h: btnH };
+    }
   }
-  drawPlayButton(ctx, btnW, btnH, retryY, GF.t('retry'));
 }
 
 function drawPlayButton(ctx, w, h, y, label) {
@@ -1711,6 +1899,26 @@ function showRewardedContinue() {
     }});
   } catch (e) { clearTimeout(watchdog); finish(); }
 }
+var headStartLoading = false;
+// Head Start (rewarded): WATCH AD → start the next shift pre-stocked with a prep
+// crate of your best station's ingredients. Player-initiated, never gates play.
+function showHeadStartAd() {
+  if (headStartLoading) return;
+  headStartLoading = true;
+  var grant = function () { pendingHeadStart = true; dinerMeta.headStart = (dinerMeta.headStart || 0) + 1; headStartLoading = false; startGame(); };
+  if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) { grant(); return; }
+  var rewarded = false, opened = false, done = false;
+  var finish = function () { if (done) return; done = true; headStartLoading = false; if (rewarded) grant(); };
+  var watchdog = setTimeout(function () { if (!opened) finish(); }, 4500);
+  try {
+    window.ysdk.adv.showRewardedVideo({ callbacks: {
+      onOpen: function () { opened = true; },
+      onRewarded: function () { rewarded = true; },
+      onClose: function () { clearTimeout(watchdog); finish(); },
+      onError: function () { clearTimeout(watchdog); finish(); },
+    }});
+  } catch (e) { clearTimeout(watchdog); finish(); }
+}
 function doContinue() {
   continueUsed = true;
   // break the jam: clear the lowest-tier items so the run can resume
@@ -1731,8 +1939,11 @@ function evtXY(e) {
   if (e.changedTouches && e.changedTouches.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
   return { x: e.clientX, y: e.clientY };
 }
+function hitRect(r, x, y) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
 function overlayDown(x, y) {
   if (dailyToastHit(x, y)) return dismissDailyToast(true);
+  if (gs === 'GAMEOVER' && renovateBtnRect && hitRect(renovateBtnRect, x, y)) { doRenovate(); return true; }
+  if (gs === 'GAMEOVER' && headStartBtnRect && hitRect(headStartBtnRect, x, y)) { showHeadStartAd(); return true; }
   if (gs === 'GAMEOVER' && !continueUsed && continueBtnRect &&
       x >= continueBtnRect.x && x <= continueBtnRect.x + continueBtnRect.w &&
       y >= continueBtnRect.y && y <= continueBtnRect.y + continueBtnRect.h) {
@@ -1822,6 +2033,9 @@ window._mdInfo = function () {
     dailyToastVisible: !!dailyToast && dailyToastTimer > 0,
     dailyToastTimer: dailyToastTimer,
     dailyToastRect: dailyToastRect || dailyToastBounds(),
+    renovateBtn: renovateBtnRect, headStartBtn: headStartBtnRect,
+    prestige: prestigeRank(), canRenovate: canRenovate(), prestigeLine: prestigeLine(),
+    renovateFlash: renovateFlash,
     dinerMeta: exportDinerMeta(), metaLine: compactMetaLine(), dailyLine: dailyCompactLine(),
   };
 };
@@ -1987,6 +2201,8 @@ GF.exposeState(function () {
     hasMergePair: hasMergePair(), hasDeliverableOrder: hasDeliverableOrder(), orders: orders.length,
     dinerMeta: exportDinerMeta(), uniqueRecipes: uniqueRecipeCount(), recipeStamps: totalRecipeStamps(),
     nextStation: nextStationTarget(),
+    prestige: prestigeRank(), prestigeMult: prestigeMult(), canRenovate: canRenovate(),
+    renovateNeed: renovateNeed(), totalServed: (dinerMeta && dinerMeta.totalServed) || 0,
     dailyStreak: (dinerMeta.daily && dinerMeta.daily.streak) || 0,
     dailyPrepTickets: (dinerMeta.daily && dinerMeta.daily.prepTickets) || 0,
     dailyPendingPrep: (dinerMeta.daily && dinerMeta.daily.pendingPrep && dinerMeta.daily.pendingPrep.length) || 0,
