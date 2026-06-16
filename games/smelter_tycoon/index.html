@@ -53,6 +53,16 @@ var STRINGS = {
     tut_win: 'Win: Endless - chase your best total-coins score and the highest metal tier. Late game, Reforge the Core for permanent output multipliers.',
     tut_lose: 'Lose: Watch the HEAT bar! Taps and running smelters heat the foundry - let it max out and stay red and the whole foundry MELTS DOWN. Buy Coolant to run safely.',
     tut_tip: 'Tip: Auto-smelters earn while you rest but add heat - balance more machines against more coolant, and unlock the next metal for a big payout.',
+    // ── M1: The Permanent Foundry (owned meta across sessions) ──
+    foundry: 'YOUR FOUNDRY', slag: 'Slag', slag_full: 'Slag Ingots',
+    salvaged: 'SALVAGED', salvaged_d: 'from the wreckage of your foundry',
+    w_forge: 'Forge', w_forge_d: 'tap power',
+    w_bellows: 'Bellows', w_bellows_d: 'auto-smelter output',
+    w_crucible: 'Crucible', w_crucible_d: 'all income',
+    w_vault: 'Vault', w_vault_d: 'starting coins',
+    upgrade: 'UPGRADE', foundry_mult: 'Foundry bonus', costs: 'costs',
+    next_wing: 'Next upgrade', foundry_hint: 'Spend Slag to upgrade your foundry - bonuses carry into every run',
+    tap_foundry: 'Tap a wing to upgrade it with Slag',
   },
   ru: {
     title: 'Магнат Плавильни',
@@ -76,6 +86,16 @@ var STRINGS = {
     tut_win: 'Победа: Бесконечно - бей рекорд монет и поднимай металл выше. В конце Перекуй Ядро ради вечных множителей дохода.',
     tut_lose: 'Поражение: Следи за ЖАРОМ! Тапы и работающие плавильни греют печь - дай ей достичь предела и остаться красной, и вся плавильня ПЕРЕГРЕЕТСЯ. Покупай хладагент.',
     tut_tip: 'Совет: Автоплавильни приносят монеты в покое, но греют - балансируй машины и хладагент, и открывай новый металл ради большого куша.',
+    // ── M1: Вечная Плавильня (постоянный мета-прогресс между сессиями) ──
+    foundry: 'ВАША ПЛАВИЛЬНЯ', slag: 'Шлак', slag_full: 'Слитки Шлака',
+    salvaged: 'СПАСЕНО', salvaged_d: 'из обломков вашей плавильни',
+    w_forge: 'Горн', w_forge_d: 'сила тапа',
+    w_bellows: 'Меха', w_bellows_d: 'доход автоплавилен',
+    w_crucible: 'Тигель', w_crucible_d: 'весь доход',
+    w_vault: 'Хранилище', w_vault_d: 'стартовые монеты',
+    upgrade: 'УЛУЧШИТЬ', foundry_mult: 'Бонус плавильни', costs: 'цена',
+    next_wing: 'Следующее', foundry_hint: 'Трать Шлак на улучшение плавильни - бонусы переходят в каждый забег',
+    tap_foundry: 'Жми на крыло, чтобы улучшить его за Шлак',
   },
 };
 
@@ -143,6 +163,78 @@ var maxTierReached = 0;        // highest metal tier this run (progression)
 var totalTaps = 0;             // furnace taps this run
 var firstTap = false;          // progressive disclosure: hides TAP arrow after 1st tap
 
+// ── M1: THE PERMANENT FOUNDRY (owned meta — survives every meltdown) ───────
+// On meltdown the run is salvaged into SLAG (a persistent currency). Slag levels
+// up four owned WINGS of a permanent Foundry; every wing level grants a global
+// bonus the player carries into EVERY future run. This is the cross-session
+// reason-to-return: runs compound instead of resetting to zero, and the MENU
+// shows the Foundry the player OWNS (their levels), not a first-timer's blank.
+var FOUNDRY_KEY = 'smelter_tycoon_foundry_v1';
+// wing defs: id, perk magnitude per level. forge→tap, bellows→smelters,
+// crucible→all income, vault→starting coins each run.
+var WINGS = [
+  { id: 'forge',    perPct: 0.12 },  // +12% tap power per level
+  { id: 'bellows',  perPct: 0.10 },  // +10% auto-smelter output per level
+  { id: 'crucible', perPct: 0.06 },  // +6% ALL income per level (the global mult)
+  { id: 'vault',    perCoins: 20 },  // +20 base starting coins per level (×tier scaling)
+];
+// persistent meta state
+var slag = 0;                  // banked persistent currency
+var foundryLvl = { forge: 0, bellows: 0, crucible: 0, vault: 0 };
+var lifetimeSlag = 0;          // total slag ever salvaged (stat)
+var lastSalvage = 0;           // slag gained on the most recent meltdown (GAMEOVER card)
+var foundryRects = [];         // hit-rects for the four wings on MENU/GAMEOVER
+var foundryPulse = { forge: 0, bellows: 0, crucible: 0, vault: 0 }; // upgrade flash
+
+function foundryLoad() {
+  try {
+    var raw = localStorage.getItem(FOUNDRY_KEY);
+    if (!raw) return;
+    var s = JSON.parse(raw);
+    slag = Math.max(0, s.slag || 0);
+    lifetimeSlag = Math.max(0, s.lifetimeSlag || 0);
+    var fl = s.lvl || {};
+    foundryLvl.forge = Math.max(0, fl.forge | 0);
+    foundryLvl.bellows = Math.max(0, fl.bellows | 0);
+    foundryLvl.crucible = Math.max(0, fl.crucible | 0);
+    foundryLvl.vault = Math.max(0, fl.vault | 0);
+  } catch (e) {}
+}
+function foundrySave() {
+  try {
+    localStorage.setItem(FOUNDRY_KEY, JSON.stringify({
+      slag: slag, lifetimeSlag: lifetimeSlag, lvl: foundryLvl,
+    }));
+  } catch (e) {}
+}
+// cost to take a wing from its current level to the next (geometric in Slag)
+function wingCost(id) {
+  var lv = foundryLvl[id] || 0;
+  return Math.ceil(8 * Math.pow(1.85, lv));
+}
+// permanent global income multiplier from the Crucible wing (folds into coreMult chain)
+function foundryMult() { return 1 + (foundryLvl.crucible || 0) * 0.06; }
+// permanent perks the run starts with, from the owned Foundry
+function forgeBonus()   { return 1 + (foundryLvl.forge || 0) * 0.12; }   // ×tap power
+function bellowsBonus() { return 1 + (foundryLvl.bellows || 0) * 0.10; } // ×smelter output
+function vaultStartCoins() { return (foundryLvl.vault || 0) * 20; }      // base starting coins
+// convert a finished run's score into salvageable Slag (gentle log curve so deep
+// runs give more but early runs still feel rewarded; floor of 1 once you've earned coins)
+function salvageFromScore(sc) {
+  if (sc < 10) return 0;
+  return Math.max(1, Math.floor(Math.pow(sc, 0.34)));
+}
+function upgradeWing(id) {
+  var c = wingCost(id);
+  if (slag < c) return false;
+  slag -= c;
+  foundryLvl[id] = (foundryLvl[id] || 0) + 1;
+  foundryPulse[id] = 1;
+  foundrySave();
+  GF.sfx('levelup');
+  return true;
+}
+
 var critTimer = 0;             // seconds heat has been at/over max
 var tickAcc = 0;               // accumulator for the smelter production tick
 var newTierFlash = 0;          // full-screen flourish timer on tier unlock
@@ -159,10 +251,12 @@ var playBtnRect = null;
 
 // ── ECONOMY HELPERS ──────────────────────────────────────────────────────
 function tierValue(t) { return Math.pow(metalMul, t); }       // raw value of a tier-t smelt
-function coreMult() { return 1 + coreShards * coreShardMult; } // global output multiplier
+// global output multiplier — in-run Core Shards × the PERMANENT Foundry (Crucible wing)
+function coreMult() { return (1 + coreShards * coreShardMult) * foundryMult(); }
 function valueMult() { return Math.pow(1.5, coinValueLvl); }   // Coin Value upgrade multiplier
-function tapGain() { return tapBase * tapPower * tierValue(metalTier) * valueMult() * coreMult(); }
-function smelterPerSec() { return smelters * tierValue(metalTier) * valueMult() * coreMult(); }
+// tap income also carries the permanent Forge wing bonus; smelters carry Bellows
+function tapGain() { return tapBase * tapPower * forgeBonus() * tierValue(metalTier) * valueMult() * coreMult(); }
+function smelterPerSec() { return smelters * bellowsBonus() * tierValue(metalTier) * valueMult() * coreMult(); }
 function coinsPerSec() { return smelterPerSec(); }
 
 // upgrade costs (geometric scaling)
@@ -306,6 +400,10 @@ function meltdown() {
   if (gs === 'GAMEOVER') return;
   var newBest = score > best;
   if (newBest) { best = score; try { localStorage.setItem('smelter_tycoon_best', Math.floor(best)); } catch (e) {} }
+  // M1 SESSION-END HOOK: salvage the wreckage into permanent Slag for the Foundry.
+  // The run is gone, but it PERMANENTLY advanced something you own → reason to return.
+  lastSalvage = salvageFromScore(score);
+  if (lastSalvage > 0) { slag += lastSalvage; lifetimeSlag += lastSalvage; foundrySave(); }
   gs = 'GAMEOVER';
   GF.sfx('lose');
   GF.setShake(1.2);
@@ -318,7 +416,10 @@ function meltdown() {
 
 // ── GAME LIFECYCLE ─────────────────────────────────────────────────────────
 function startGame() {
-  coins = 0; score = 0; smelters = 0;
+  // M1: the owned Foundry's Vault wing seeds every new run with starting coins —
+  // a returning player with a built Foundry starts richer than a first-timer.
+  coins = vaultStartCoins(); score = 0; smelters = 0;
+  lastSalvage = 0;
   tapPower = 1; coinValueLvl = 0; coolantLvl = 0;
   metalTier = 0; maxTierReached = 0;
   heat = 0; critTimer = 0; tickAcc = 0;
@@ -364,6 +465,8 @@ function update(dt) {
   if (newTierFlash > 0) newTierFlash = Math.max(0, newTierFlash - dt);
   if (reforgeFlash > 0) reforgeFlash = Math.max(0, reforgeFlash - dt);
   if (furnacePulse > 0) furnacePulse = Math.max(0, furnacePulse - dt * 4);
+  // M1: decay wing upgrade flashes (these tick on MENU/GAMEOVER too)
+  for (var wk in foundryPulse) { if (foundryPulse[wk] > 0) foundryPulse[wk] = Math.max(0, foundryPulse[wk] - dt * 2.2); }
 
   GF.tutorial.update(dt);
   if (gs !== 'PLAYING') return;
@@ -882,9 +985,99 @@ function drawTutorialBlock(ctx, topY, maxW) {
   return y - topY;
 }
 
+// ── M1: THE OWNED FOUNDRY (rendered on MENU + GAMEOVER) ────────────────────
+// A returning player SEES this: four named wings at the levels they built, the
+// permanent Foundry bonus, and a Slag balance to spend — none of which a
+// first-timer has. This is the world-visible cross-session change.
+var WING_COL = { forge:'#ff9a3c', bellows:'#9fd0ff', crucible:'#ffe27a', vault:'#9af4ec' };
+function drawWingIcon(ctx, id, x, y, sz) {
+  // simple vector glyphs (never emoji — tofu on headless/Android, hygiene rule)
+  ctx.save();
+  ctx.strokeStyle = WING_COL[id]; ctx.fillStyle = WING_COL[id];
+  ctx.lineWidth = Math.max(1.6, sz * 0.10); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  var h = sz * 0.5;
+  if (id === 'forge') { // anvil
+    ctx.beginPath(); ctx.moveTo(x - h, y - h * 0.1); ctx.lineTo(x + h, y - h * 0.1);
+    ctx.lineTo(x + h * 0.55, y + h * 0.35); ctx.lineTo(x - h * 0.55, y + h * 0.35); ctx.closePath(); ctx.fill();
+    ctx.fillRect(x - h * 0.18, y + h * 0.35, h * 0.36, h * 0.5);
+    ctx.beginPath(); ctx.moveTo(x - h, y - h * 0.1); ctx.quadraticCurveTo(x - h * 1.3, y - h * 0.4, x - h * 0.6, y - h * 0.45); ctx.stroke();
+  } else if (id === 'bellows') { // gear
+    var n = 8, ro = h * 0.85, ri = h * 0.5;
+    ctx.beginPath();
+    for (var i = 0; i < n * 2; i++) { var rr = (i % 2 === 0) ? ro : ri; var a = i / (n * 2) * Math.PI * 2; var px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr; if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py); }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#241a12'; ctx.beginPath(); ctx.arc(x, y, h * 0.28, 0, Math.PI * 2); ctx.fill();
+  } else if (id === 'crucible') { // crucible pot
+    ctx.beginPath(); ctx.moveTo(x - h * 0.7, y - h * 0.5); ctx.lineTo(x + h * 0.7, y - h * 0.5);
+    ctx.lineTo(x + h * 0.45, y + h * 0.6); ctx.lineTo(x - h * 0.45, y + h * 0.6); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#fff6c0'; ctx.beginPath(); ctx.moveTo(x - h * 0.5, y - h * 0.5); ctx.lineTo(x + h * 0.5, y - h * 0.5); ctx.stroke();
+  } else { // vault — coin stack
+    for (var j = 0; j < 3; j++) {
+      ctx.beginPath(); ctx.ellipse(x, y + h * 0.45 - j * h * 0.42, h * 0.7, h * 0.26, 0, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+// Draws the foundry panel from top Y `topY`, returns the bottom Y consumed.
+function drawFoundry(ctx, topY, maxW) {
+  var S = GF.S, W = GF.W;
+  foundryRects = [];
+  var x0 = GF.cx - maxW / 2;
+  // header: title + Slag balance + live bonus
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(13 * S, 10, 17) + 'px sans-serif'; ctx.fillStyle = '#ffce8a';
+  ctx.fillText(GF.t('foundry'), x0, topY);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#9fe0ff';
+  ctx.fillText(GF.t('slag') + ': ' + fmt(slag), x0 + maxW, topY);
+  // bonus line
+  var bonusY = topY + GF.clamp(16 * S, 12, 22);
+  ctx.textAlign = 'left'; ctx.font = GF.clamp(10.5 * S, 8, 14) + 'px sans-serif'; ctx.fillStyle = '#9fb0c0';
+  ctx.fillText(GF.t('foundry_mult') + ': x' + foundryMult().toFixed(2), x0, bonusY);
+  // four wing cards in a row
+  var rowY = bonusY + GF.clamp(10 * S, 6, 14);
+  var gap = GF.clamp(7 * S, 4, 11);
+  var cw = (maxW - gap * 3) / 4;
+  var ch = GF.clamp(74 * S, 58, 96);
+  for (var i = 0; i < WINGS.length; i++) {
+    var id = WINGS[i].id;
+    var cx = x0 + i * (cw + gap);
+    var lv = foundryLvl[id] || 0;
+    var cost = wingCost(id);
+    var afford = slag >= cost;
+    var pulse = foundryPulse[id] || 0;
+    // card bg — brighten when affordable
+    var bg = afford ? 'rgba(40,52,66,0.95)' : 'rgba(26,22,18,0.92)';
+    GF.rr(ctx, cx, rowY, cw, ch, GF.clamp(8 * S, 5, 12)); ctx.fillStyle = bg; ctx.fill();
+    if (pulse > 0) { ctx.save(); ctx.globalAlpha = pulse * 0.6; GF.rr(ctx, cx, rowY, cw, ch, GF.clamp(8 * S, 5, 12)); ctx.fillStyle = WING_COL[id]; ctx.fill(); ctx.restore(); }
+    ctx.lineWidth = 1.5; ctx.strokeStyle = afford ? WING_COL[id] : 'rgba(255,255,255,0.10)';
+    GF.rr(ctx, cx, rowY, cw, ch, GF.clamp(8 * S, 5, 12)); ctx.stroke();
+    // icon
+    var icy = rowY + ch * 0.26;
+    drawWingIcon(ctx, id, cx + cw / 2, icy, Math.min(cw * 0.5, ch * 0.34));
+    // level badge (top-right corner)
+    ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+    ctx.font = 'bold ' + GF.clamp(10 * S, 8, 13) + 'px sans-serif'; ctx.fillStyle = '#fff';
+    ctx.fillText(GF.t('lvl') + lv, cx + cw - 5 * S, rowY + 4 * S);
+    // name
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(11 * S, 8.5, 14) + 'px sans-serif'; ctx.fillStyle = afford ? '#fff' : '#b8aa98';
+    ctx.fillText(GF.t('w_' + id), cx + cw / 2, rowY + ch * 0.62);
+    // cost (slag) at the bottom
+    ctx.font = GF.clamp(10 * S, 8, 13) + 'px sans-serif'; ctx.fillStyle = afford ? '#9fe0ff' : '#7a6f60';
+    ctx.fillText(fmt(cost) + ' ' + GF.t('slag'), cx + cw / 2, rowY + ch * 0.85);
+    foundryRects.push({ id: id, x: cx, y: rowY, w: cw, h: ch });
+  }
+  ctx.textBaseline = 'alphabetic';
+  var bot = rowY + ch;
+  // hint line under the cards
+  ctx.textAlign = 'center'; ctx.font = GF.clamp(9.5 * S, 7.5, 13) + 'px sans-serif'; ctx.fillStyle = '#8a7f70';
+  ctx.fillText(GF.t('foundry_hint'), GF.cx, bot + GF.clamp(11 * S, 8, 15));
+  return bot + GF.clamp(20 * S, 14, 28);
+}
+
 function drawMenu(ctx) {
   var S = GF.S, W = GF.W, H = GF.H;
-  ctx.fillStyle = 'rgba(14,10,7,0.93)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#0e0a07'; ctx.fillRect(0, 0, W, H);  // fully opaque (hard rule)
   var titleFs = GF.clamp(34 * S, 22, 50);
   ctx.shadowColor = 'rgba(255,150,60,0.55)'; ctx.shadowBlur = 26 * S;
   ctx.font = 'bold ' + titleFs + 'px sans-serif';
@@ -907,10 +1100,20 @@ function drawMenu(ctx) {
   ctx.fillText('→', GF.cx, iy);
   drawCoinSprite(ctx, GF.cx + iz, iy, iz * 0.42);
   ctx.textBaseline = 'alphabetic';
-  // tutorial block
   var maxW = Math.min(W - 36 * S, 470 * S);
+  // RETURNING PLAYER (owns a Foundry): show the owned Foundry where the tutorial
+  // block was — it IS the reason-to-return, visible the moment the menu opens.
+  // First-timers (no Slag ever) keep the clean tutorial block; the ? button always
+  // reopens how-to-play in-run, so nothing is lost.
+  var hasFoundry = lifetimeSlag > 0;
   var blockY = iy + iz * 0.85;
-  var blockH = drawTutorialBlock(ctx, blockY, maxW);
+  var blockH;
+  if (hasFoundry) {
+    blockH = drawFoundry(ctx, blockY + 6 * S, maxW) - blockY;
+  } else {
+    foundryRects = [];
+    blockH = drawTutorialBlock(ctx, blockY, maxW);
+  }
   // PLAY button — wider + animated on desktop wide viewports
   var _wide = W / H > 1.15;
   var btnW = GF.clamp((_wide ? 308 : 220) * S, 150, _wide ? 420 : 300);
@@ -946,7 +1149,7 @@ function drawMenu(ctx) {
 
 function drawGameOver(ctx) {
   var S = GF.S, W = GF.W, H = GF.H;
-  ctx.fillStyle = 'rgba(30,8,6,0.92)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#1e0806'; ctx.fillRect(0, 0, W, H);  // fully opaque (hard rule — no PLAYING bleed-through)
   var titleFs = GF.clamp(38 * S, 24, 56);
   ctx.shadowColor = 'rgba(255,70,40,0.55)'; ctx.shadowBlur = 28 * S;
   ctx.font = 'bold ' + titleFs + 'px sans-serif'; ctx.fillStyle = '#ff6b4b'; ctx.textAlign = 'center';
@@ -963,13 +1166,24 @@ function drawGameOver(ctx) {
   ctx.fillText(GF.t('best') + ': ' + fmt(best), GF.cx, sy + 28 * S);
   ctx.fillStyle = METAL_COL[maxTierReached].a; ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif';
   ctx.fillText(GF.t('reached') + ': ' + metalName(maxTierReached), GF.cx, sy + 54 * S);
+  var afterStats = sy + 54 * S;
   if (coreShards > 0) {
     ctx.fillStyle = '#9af4ec'; ctx.font = 'bold ' + GF.clamp(14 * S, 11, 19) + 'px sans-serif';
     ctx.fillText('* ' + coreShards + ' ' + GF.t('shards'), GF.cx, sy + 78 * S);
+    afterStats = sy + 78 * S;
   }
-  // PLAY AGAIN
+  // M1 SESSION-END HOOK — the salvage banner: the run is gone but it PERMANENTLY
+  // fed your Foundry. "+N Slag salvaged" then the owned Foundry to spend it on,
+  // right here, before PLAY AGAIN → the loop that pulls the player back tomorrow.
+  var salvY = afterStats + GF.clamp(30 * S, 22, 40);
+  ctx.fillStyle = '#9fe0ff'; ctx.font = 'bold ' + GF.clamp(17 * S, 13, 23) + 'px sans-serif';
+  ctx.fillText('+' + fmt(lastSalvage) + ' ' + GF.t('slag') + ' ' + GF.t('salvaged'), GF.cx, salvY);
+  // the owned Foundry — tappable to spend the slag you just earned
+  var maxW = Math.min(W - 30 * S, 470 * S);
+  var foundryBot = drawFoundry(ctx, salvY + GF.clamp(22 * S, 16, 30), maxW);
+  // PLAY AGAIN below the foundry
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
-  var btnY = Math.min(sy + 104 * S, H - btnH - 20 * S);
+  var btnY = Math.min(foundryBot + 8 * S, H - btnH - 16 * S);
   drawPlayButton(ctx, btnW, btnH, btnY, GF.t('retry'));
 }
 
@@ -994,8 +1208,23 @@ function evtXY(e) {
   return { x: e.clientX, y: e.clientY };
 }
 function overlayDown(x, y) {
-  if ((gs === 'MENU' || gs === 'GAMEOVER') && playBtnRect) {
-    if (x >= playBtnRect.x && x <= playBtnRect.x + playBtnRect.w && y >= playBtnRect.y && y <= playBtnRect.y + playBtnRect.h) {
+  if (gs === 'MENU' || gs === 'GAMEOVER') {
+    // mute button stays reachable on overlays
+    if (x >= muteBtn.x && x <= muteBtn.x + muteBtn.w && y >= muteBtn.y && y <= muteBtn.y + muteBtn.h) {
+      var m = GF.toggleMute(); GF.setMusicMuted(m); return true;
+    }
+    // M1: tap a Foundry wing to spend Slag on a permanent upgrade (no need to play first)
+    for (var i = 0; i < foundryRects.length; i++) {
+      var r = foundryRects[i];
+      if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+        if (upgradeWing(r.id)) {
+          GF.spawnParticles(r.x + r.w / 2, r.y + r.h / 2, '#9fe0ff', 12);
+          GF.spawnFloat(r.x + r.w / 2, r.y, '+1 ' + GF.t('w_' + r.id), '#9fe0ff');
+        }
+        return true;
+      }
+    }
+    if (playBtnRect && x >= playBtnRect.x && x <= playBtnRect.x + playBtnRect.w && y >= playBtnRect.y && y <= playBtnRect.y + playBtnRect.h) {
       startGame(); return true;
     }
   }
@@ -1052,6 +1281,15 @@ window._jumpLevel = function (n) {
   if (n >= 99) { startGame(); heat = curHeatMax() + meltdownMargin + 1; meltdown(); return; }
   window._setupForScreenshot(n || 1);
 };
+// M1 test seam (returning-player probe / harness): grant slag, force a wing
+// upgrade, or read the owned-foundry state. No console output; deterministic.
+window._foundryInfo = function () {
+  return { slag: slag, lifetimeSlag: lifetimeSlag, lastSalvage: lastSalvage,
+    lvl: { forge: foundryLvl.forge, bellows: foundryLvl.bellows, crucible: foundryLvl.crucible, vault: foundryLvl.vault },
+    mult: foundryMult(), rects: foundryRects.map(function (r) { return { id: r.id, x: r.x, y: r.y, w: r.w, h: r.h, cx: r.x + r.w / 2, cy: r.y + r.h / 2 }; }) };
+};
+window._grantSlag = function (n) { slag += (n || 100); lifetimeSlag += (n || 100); foundrySave(); };
+window._upgradeWing = function (id) { return upgradeWing(id); };
 // locale_overflow_check hooks
 window._setState = function (s) { gs = (s === 'PLAYING' || s === 'GAMEOVER' || s === 'MENU') ? s : gs; };
 window._getI18N = function () { return STRINGS; };
@@ -1066,6 +1304,7 @@ GF.init({
   saveKey: 'smelter_tycoon',
   onReady: function () {
     try { best = parseInt(localStorage.getItem('smelter_tycoon_best') || '0') || 0; } catch (e) {}
+    foundryLoad();  // M1: restore the permanent owned Foundry (slag + wing levels)
     // Yandex 1.9 — persist run across reload (in-run only; no cross-session prestige)
     GF.persist('smelter_tycoon_run_v1',
       function () {
@@ -1112,12 +1351,38 @@ GF.exposeState(function () {
     heat: heat, heatMax: curHeatMax(), coreShards: coreShards, coreUnlocked: coreUnlocked,
     maxTierReached: maxTierReached, coinValueLvl: coinValueLvl, coolantLvl: coolantLvl,
     critTimer: critTimer,
+    // M1: permanent owned-Foundry meta (cross-session)
+    slag: slag, lifetimeSlag: lifetimeSlag, lastSalvage: lastSalvage,
+    foundryLvl: { forge: foundryLvl.forge, bellows: foundryLvl.bellows, crucible: foundryLvl.crucible, vault: foundryLvl.vault },
+    foundryMult: foundryMult(),
     // tunables (DESIGN.md §Tunables)
     tapBase: tapBase, heatPerTap: heatPerTap, heatPerSmelterSec: heatPerSmelterSec,
     coolRate: curCoolRate(), critGrace: critGrace, meltdownMargin: meltdownMargin,
     smelterBaseCost: smelterBaseCost, costMul: costMul, metalMul: metalMul,
     coreUnlockCoins: coreUnlockCoins, coreShardMult: coreShardMult, MAX_TIER: MAX_TIER,
   };
+});
+
+// Reachability hook (Yandex 1.10.1/1.10.3 — every control on-screen, not under
+// platform chrome). Reports the live interactive hit-rects for the current screen.
+GF.exposeReach(function () {
+  var items = [];
+  if (muteBtn.w) items.push({ id: 'mute', x: muteBtn.x, y: muteBtn.y, w: muteBtn.w, h: muteBtn.h });
+  if (gs === 'PLAYING') {
+    if (L.furnaceR) items.push({ id: 'furnace', x: L.furnaceX - L.furnaceR, y: L.furnaceY - L.furnaceR, w: L.furnaceR * 2, h: L.furnaceR * 2 });
+    if (helpBtn.w) items.push({ id: 'help', x: helpBtn.x, y: helpBtn.y, w: helpBtn.w, h: helpBtn.h });
+    for (var i = 0; i < upgradeRects.length; i++) {
+      var b = upgradeRects[i];
+      items.push({ id: 'upg_' + b.kind, x: b.x, y: b.y, w: b.w, h: b.h });
+    }
+  } else { // MENU / GAMEOVER — foundry wings + the play button
+    for (var j = 0; j < foundryRects.length; j++) {
+      var r = foundryRects[j];
+      items.push({ id: 'wing_' + r.id, x: r.x, y: r.y, w: r.w, h: r.h });
+    }
+    if (playBtnRect) items.push({ id: 'play', x: playBtnRect.x, y: playBtnRect.y, w: playBtnRect.w, h: playBtnRect.h });
+  }
+  return { screen: gs, items: items };
 });
 
 // Bot contract for the progression probe (#276). Idle/incremental policy: tap the

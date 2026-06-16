@@ -63,6 +63,15 @@ var STRINGS = {
     // quest descriptions ({g} substituted)
     q_travel: 'Travel {g} m in one run', q_coins: 'Collect {g} coins today',
     q_flips: 'Flip gravity {g} times', q_runs: 'Play {g} runs today', q_zone: 'Reach Zone {g}',
+    // ── M3: FLUX + DASH RANKS + ASCEND ──
+    ranksTab: 'RANKS', flux: 'FLUX', fluxX: 'FLUX', fluxNeed: 'flux', toNext: 'to next',
+    nextRank: 'Next rank', maxRank: 'TOP RANK — fully mastered!', newRank: 'NEW RANK!',
+    ascend: 'ASCEND', ascendLocked: 'Max one gear to unlock Ascend',
+    ascendDesc: 'Ascend resets all gear to Lv1 but grants a permanent flux boost + a graze head start every run.',
+    // rank names (mastery ladder)
+    rank_rookie: 'Rookie', rank_streaker: 'Streaker', rank_blazer: 'Blazer',
+    rank_comet: 'Comet', rank_phantom: 'Phantom', rank_pulsar: 'Pulsar',
+    rank_quasar: 'Quasar', rank_nova: 'Nova', rank_ascendant: 'Ascendant',
   },
   ru: {
     title: 'Флип-Дэш',
@@ -105,6 +114,15 @@ var STRINGS = {
     // quest descriptions ({g} substituted)
     q_travel: 'Пройди {g} м за забег', q_coins: 'Собери {g} монет сегодня',
     q_flips: 'Переверни гравитацию {g} раз', q_runs: 'Сыграй {g} забегов сегодня', q_zone: 'Дойди до зоны {g}',
+    // ── M3: ФЛАКС + РАНГИ + ВОЗВЫШЕНИЕ ──
+    ranksTab: 'РАНГИ', flux: 'ФЛАКС', fluxX: 'ФЛАКС', fluxNeed: 'флакса', toNext: 'до ранга',
+    nextRank: 'След. ранг', maxRank: 'ВЫСШИЙ РАНГ — полное мастерство!', newRank: 'НОВЫЙ РАНГ!',
+    ascend: 'ВОЗВЫСИТЬСЯ', ascendLocked: 'Прокачай снарягу до макс., чтобы возвыситься',
+    ascendDesc: 'Возвышение сбрасывает всю снарягу до 1 ур., но даёт вечный бонус к флаксу и фору заряда в каждом забеге.',
+    // rank names (mastery ladder)
+    rank_rookie: 'Новичок', rank_streaker: 'Стрик', rank_blazer: 'Жар',
+    rank_comet: 'Комета', rank_phantom: 'Фантом', rank_pulsar: 'Пульсар',
+    rank_quasar: 'Квазар', rank_nova: 'Нова', rank_ascendant: 'Вознесённый',
   },
 };
 
@@ -193,6 +211,7 @@ var equipSlotRects = [];         // [{slot,x,y,w,h}] — tap a filled slot to un
 var questClaimRects = [];        // [{i,x,y,w,h,can}] — claim button
 var metaCloseRect = null;        // CLOSE button
 var metaContentRect = null;      // {x,y,w,h} content column — taps OUTSIDE it dismiss the overlay
+var ascendBtnRect = null;        // M3: ASCEND (prestige) button on the RANKS tab
 
 // Revive (rewarded ad) — one per run
 var reviveUsed = false, reviveLoading = false, invulnT = 0;
@@ -210,6 +229,85 @@ var grazeFlash = 0;    // brief glow on a fresh graze
 var OVER_DUR = 3.2;    // overdrive duration (s)
 var GRAZE_GAIN = 0.30; // charge per fresh graze (~3-4 grazes to fill)
 var shieldArmed = false;         // GEAR: Spark Shield — survive the first crash of a run once
+var chain = 0;                   // OVERDRIVE chain count this run (each overdrive w/o crash adds 1)
+var fluxFlash = 0;               // 0..1 pulse when flux is banked at run end
+
+// ── M3: FLUX + DASH RANKS (persistent mastery prestige) ─────────────────────
+// The long-tail depth layer grown from the run's OWN verbs (distance + the
+// graze→overdrive hook). Every run mints FLUX = (distance/FLUX_PER_M + overdrive
+// bonus) × the run's overdrive CHAIN multiplier × the permanent ASCEND multiplier.
+// Banked Flux climbs a 9-rank ladder; each rank grants a WORLD-VISIBLE avatar
+// AURA tier (a coloured ring + trailing flux sparks drawn in the corridor + a
+// rank emblem on the menu) — so a returning player's cube literally LOOKS more
+// advanced than it did yesterday (the apartment_cleaner test: an owned change in
+// the world, not a number). ASCEND (prestige) resets gear levels for a permanent
+// Flux multiplier once the old gear wall is reached — the goal past 150 min.
+var RANKS = [
+  { id:'rookie',    key:'rank_rookie',    flux:0,     aura:'#7aa0b8' },
+  { id:'streaker',  key:'rank_streaker',  flux:600,   aura:'#4dd0e1' },
+  { id:'blazer',    key:'rank_blazer',    flux:1800,  aura:'#a8e55a' },
+  { id:'comet',     key:'rank_comet',     flux:4200,  aura:'#ffb14d' },
+  { id:'phantom',   key:'rank_phantom',   flux:8500,  aura:'#ff5cf0' },
+  { id:'pulsar',    key:'rank_pulsar',    flux:16000, aura:'#9be7ff' },
+  { id:'quasar',    key:'rank_quasar',    flux:30000, aura:'#aa5aff' },
+  { id:'nova',      key:'rank_nova',      flux:52000, aura:'#ff7a3d' },
+  { id:'ascendant', key:'rank_ascendant', flux:90000, aura:'#fff3a8' },
+];
+var FLUX_PER_M = 4;          // metres of distance per 1 raw flux (before mults)
+var CHAIN_STEP = 0.5;        // flux-mult gained per overdrive chained (cap below)
+var CHAIN_MAX = 3.0;         // chain multiplier ceiling
+var ASCEND_BONUS = 0.15;     // permanent +15% flux per ascension (stacks)
+var fluxBanked = 0;          // FLUX minted this run (shown on the GAMEOVER card)
+// rank index for a given total flux (0..RANKS.length-1)
+function rankFor(flux) {
+  var r = 0;
+  for (var i=0;i<RANKS.length;i++) if (flux >= RANKS[i].flux) r = i;
+  return r;
+}
+function rankIdx() { return rankFor(meta ? (meta.flux || 0) : 0); }
+function rankDef() { return RANKS[rankIdx()]; }
+// permanent flux multiplier from ascensions (1.0 at 0 ascensions)
+function ascendMult() { return 1 + ASCEND_BONUS * (meta ? (meta.ascend || 0) : 0); }
+// the run's live flux multiplier (chain × ascend) — drives the in-HUD readout
+function fluxMult() { return (1 + clamp(chain, 0, (CHAIN_MAX-1)/CHAIN_STEP) * CHAIN_STEP) * ascendMult(); }
+// flux earned for a finished run of `metres`, at the current chain + ascend mult.
+// Overdrive use is rewarded via the chain (already folded into fluxMult).
+function fluxForRun(metres) {
+  var raw = metres / FLUX_PER_M;
+  return Math.max(0, Math.round(raw * fluxMult()));
+}
+// can the player ASCEND? (all gear owned AND at least one at max level — i.e. they
+// hit the old gear wall, so prestige is the next goal, never a trap before then)
+function canAscend() {
+  if (!meta) return false;
+  for (var i=0;i<GEAR_DEFS.length;i++) if (!meta.gear.owned[GEAR_DEFS[i].id]) return false;
+  for (var j=0;j<GEAR_DEFS.length;j++) if ((meta.gear.level[GEAR_DEFS[j].id]||1) >= GEAR_MAX_LVL) return true;
+  return false;
+}
+// perform an ascension: reset every owned gear to L1 (keep ownership + equips),
+// bank a permanent flux multiplier, and start the next run with a half overdrive
+// charge. Returns true if it applied.
+function doAscend() {
+  if (!meta || !canAscend()) return false;
+  for (var i=0;i<GEAR_DEFS.length;i++) { if (meta.gear.owned[GEAR_DEFS[i].id]) meta.gear.level[GEAR_DEFS[i].id] = 1; }
+  meta.ascend = (meta.ascend || 0) + 1;
+  saveMeta();
+  return true;
+}
+// bank this run's flux into the persistent total + fire a rank-up flourish if a
+// new rank was crossed. Called at game-over. Returns the flux minted.
+function bankFlux(metres) {
+  if (!meta) return 0;
+  var before = rankIdx();
+  var gained = fluxForRun(metres);
+  meta.flux = (meta.flux || 0) + gained;
+  fluxBanked = gained; fluxFlash = 1;
+  var after = rankIdx();
+  if (after > before) { rankUpToast = { def: RANKS[after], t: 4.2 }; }
+  saveMeta();
+  return gained;
+}
+var rankUpToast = null;          // { def, t } — "NEW RANK" flourish (drawn on MENU/GAMEOVER)
 
 // Tutorial overlay (MENU + reopen via ?)
 var tutorialOpen = false;
@@ -532,6 +630,7 @@ function defaultMeta() {
     login: { lastDay:'', streak:0 },
     lastSeen: 0,
     pendingIdle: 0, lastLoginReward: 0, lastStreakBonus: 0,
+    flux: 0, ascend: 0,   // M3: persistent mastery currency + prestige count
   };
 }
 function loadMeta() {
@@ -568,6 +667,8 @@ function loadMeta() {
           m.login.streak = Math.max(0, +s.login.streak || 0);
         }
         m.lastSeen = +s.lastSeen || 0;
+        m.flux = Math.max(0, +s.flux || 0);       // M3: persistent mastery currency
+        m.ascend = Math.max(0, +s.ascend || 0);   // M3: prestige count (flux multiplier)
       }
     }
   } catch (e) {}
@@ -712,7 +813,10 @@ function startRun(m) {
   gravDir = 1; flipCooldownT = 0; lastFlipFlash = 0;
   bannerT = 0; bannerTxt = '';
   reviveUsed = false; reviveLoading = false; invulnT = 0; reviveBtnRect = null;
-  heat = 0; overT = 0; grazeFlash = 0;
+  // M3: ASCEND perk — each prestige grants a starting graze-charge head start
+  // (capped under a full bar so it never auto-fires overdrive on frame 1).
+  heat = meta ? Math.min(0.5, (meta.ascend || 0) * 0.1) : 0;
+  overT = 0; grazeFlash = 0; chain = 0; fluxBanked = 0;
   shieldArmed = (gearVal('shield') > 0);   // GEAR: Spark Shield armed for ONE crash this run
   runPlaySec = 0;
   metaOpen = false;   // never carry the GEAR overlay into a run (defensive: it only draws on MENU)
@@ -753,6 +857,9 @@ function gameOver() {
   questProgress('travel', Math.floor(dist));
   // fold this run's real playtime into the cumulative meter + check gear unlocks
   bankRunPlaytime();
+  // M3: mint FLUX from this run's distance × chain × ascend mult; bank it toward
+  // the next DASH RANK (fires a rank-up toast if a threshold was crossed).
+  bankFlux(Math.floor(dist));
   if (meta) { meta.lastSeen = Date.now(); checkGearUnlocks(); saveMeta(); }
   if (mode === 'DAILY') { if (dist > dailyBest) { dailyBest = Math.floor(dist); saveDailyBest(); } }
   else { if (dist > endlessBest) { endlessBest = Math.floor(dist); saveEndlessBest(); } }
@@ -791,7 +898,11 @@ function triggerOverdrive() {
   overT = OVER_DUR;
   invulnT = Math.max(invulnT, OVER_DUR);
   heat = 0;
-  bannerTxt = GF.t('overdrive'); bannerT = 1.6;
+  // M3: each overdrive chained THIS RUN (without crashing) raises the flux mult.
+  chain += 1;
+  var mult = (1 + clamp(chain, 0, (CHAIN_MAX-1)/CHAIN_STEP) * CHAIN_STEP);
+  bannerTxt = GF.t('overdrive') + (chain > 1 ? '  ×' + mult.toFixed(1) : '');
+  bannerT = 1.6;
   GF.setShake(0.55);
   GF.spawnParticles(playerX(), player.y, '#7df9ff', 34);
   Sfx.zone();
@@ -810,6 +921,8 @@ function update(dt) {
   if (invulnT > 0) invulnT -= dt;
   if (overT > 0) overT -= dt;
   if (grazeFlash > 0) grazeFlash = Math.max(0, grazeFlash - dt * 3);
+  if (fluxFlash > 0) fluxFlash = Math.max(0, fluxFlash - dt * 1.5);
+  if (rankUpToast) { rankUpToast.t -= dt; if (rankUpToast.t <= 0) rankUpToast = null; }
   if (overT <= 0 && heat > 0) heat = Math.max(0, heat - dt * 0.05);  // slow bleed: use it
   if (promoActive) promoSteer(dt);   // promo=climax: deterministic autopilot weave
 
@@ -956,7 +1069,8 @@ function draw(ctx) {
   if (metaOpen && gs === 'MENU') drawMetaOverlay(ctx, z);
   // non-blocking flourishes (drawn above everything except the tutorial gate)
   if (!metaOpen) {
-    if (gearToast)      drawGearToast(ctx);
+    if (rankUpToast)    drawRankUpToast(ctx);   // M3: NEW RANK wins (rarest, biggest)
+    else if (gearToast) drawGearToast(ctx);
     else if (questToast) drawQuestToast(ctx);   // gear toast wins if both fire
     if (gs === 'MENU')  drawBootBanner(ctx, z);
   }
@@ -1063,6 +1177,34 @@ function drawCoins(ctx) {
 }
 function drawPlayer(ctx) {
   var px = playerX(), s = activeSkin(), sz = PLAYER_R * 2 * GF.S;
+  // M3: DASH-RANK aura — a permanent ring around the cube whose size/intensity
+  // climbs with rank. This is the WORLD-VISIBLE mark of mastery: a returning
+  // player's cube looks more advanced than yesterday's (apartment_cleaner test).
+  var ri = rankIdx();
+  if (ri > 0) {
+    var rd = rankDef(), t = performance.now() / 1000;
+    var aR = sz * (0.74 + ri * 0.05) + Math.sin(t * 2.4) * 1.4 * GF.S;
+    ctx.save();
+    ctx.globalAlpha = 0.28 + ri * 0.045;
+    ctx.strokeStyle = rd.aura; ctx.lineWidth = (1.4 + ri * 0.3) * GF.S;
+    ctx.shadowColor = rd.aura; ctx.shadowBlur = (6 + ri * 2) * GF.S;
+    ctx.beginPath(); ctx.arc(px, player.y, aR, 0, Math.PI*2); ctx.stroke();
+    ctx.restore();
+    // trailing flux sparks for the upper ranks (small orbiting motes behind)
+    if (ri >= 3) {
+      ctx.save();
+      var motes = Math.min(4, ri - 2);
+      for (var mI=0; mI<motes; mI++) {
+        var ph = t * 3 + mI * (Math.PI*2/motes);
+        var mx = px - sz*0.7 - Math.abs(Math.sin(ph)) * sz*0.5;
+        var my = player.y + Math.cos(ph) * sz*0.5;
+        ctx.globalAlpha = 0.5;
+        ctx.fillStyle = rd.aura; ctx.shadowColor = rd.aura; ctx.shadowBlur = 5*GF.S;
+        ctx.beginPath(); ctx.arc(mx, my, 2.2*GF.S, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
   ctx.save();
   ctx.globalAlpha = 0.35;
   var tg = ctx.createLinearGradient(px - sz*1.6, player.y, px, player.y);
@@ -1131,6 +1273,17 @@ function drawHUD(ctx, z) {
   ctx.font = 'bold ' + clamp(15*S,12,19) + 'px sans-serif';
   ctx.fillStyle = '#FFD700';
   ctx.fillText('◉ ' + runCoins, GF.W - pad, pad);
+
+  // M3: live FLUX multiplier (chain × ascend) — the rising-stakes readout. Only
+  // shown once the run has any chain/ascend bonus so it never clutters a fresh run.
+  var fm = fluxMult();
+  if (chain > 0 || (meta && meta.ascend > 0)) {
+    ctx.textAlign = 'right'; ctx.textBaseline = 'top';
+    var pulse = chain > 0 ? (1 + 0.12 * Math.sin(performance.now()/120)) : 1;
+    ctx.fillStyle = chain > 0 ? '#7df9ff' : 'rgba(180,235,245,0.8)';
+    ctx.font = 'bold ' + clamp(13*S,11,17) * pulse + 'px sans-serif';
+    ctx.fillText(GF.t('fluxX') + ' ×' + fm.toFixed(1), GF.W - pad, pad + clamp(20*S,17,26));
+  }
 
   // ? + mute pills (top-right, under coins) — large tap targets
   var pillS = clamp(40*S, 40, 50);
@@ -1267,7 +1420,32 @@ function drawMenu(ctx, z) {
   ctx.font = clamp(14*S,11,18) + 'px sans-serif';
   var subLines = wrapLines(ctx, GF.t('sub'), W * 0.82);
   for (var i=0;i<subLines.length;i++){ ctx.fillText(subLines[i], cx, y); y += clamp(18*S,15,22); }
-  y += 8*S;
+  y += 6*S;
+
+  // M3: DASH-RANK emblem — the returning player's earned mastery, shown right
+  // under the title so it's the FIRST thing they see on boot (a Blazer's pill is
+  // visibly brighter than a Rookie's; the aura-coloured ring previews the cube).
+  if (meta) {
+    var rd = rankDef(), ri = rankIdx();
+    var rTxt = GF.t('rank_' + rd.id), emS = clamp(13*S,11,17);
+    ctx.font = 'bold ' + emS + 'px sans-serif';
+    var emW = ctx.measureText(rTxt).width + clamp(54*S,44,68);
+    var emH = clamp(30*S,26,38), emX = cx - emW/2, emY = y;
+    rr(ctx, emX, emY, emW, emH, emH/2);
+    ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fill();
+    ctx.strokeStyle = rd.aura; ctx.lineWidth = 1.5*S;
+    ctx.shadowColor = rd.aura; ctx.shadowBlur = (4 + ri*1.5)*S;
+    rr(ctx, emX, emY, emW, emH, emH/2); ctx.stroke(); ctx.shadowBlur = 0;
+    // aura ring icon on the left of the pill (previews the in-run aura colour)
+    var icR = emH*0.30, icX = emX + emH*0.55;
+    ctx.beginPath(); ctx.arc(icX, emY + emH/2, icR, 0, Math.PI*2);
+    ctx.strokeStyle = rd.aura; ctx.lineWidth = 2*S; ctx.stroke();
+    ctx.fillStyle = rd.aura; ctx.beginPath(); ctx.arc(icX, emY + emH/2, icR*0.42, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(rTxt, icX + icR + 7*S, emY + emH/2 + 0.5*S);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    y += emH + 8*S;
+  } else { y += 8*S; }
 
   // tutorial block (Goal/Controls/Win/Lose/Tip), wrapped
   var tutKeys = ['tut_goal','tut_controls','tut_win','tut_lose','tut_tip'];
@@ -1473,7 +1651,22 @@ function drawGameOver(ctx, z) {
   ctx.fillStyle = '#FFD700';
   ctx.font = 'bold ' + clamp(16*S,13,20) + 'px sans-serif';
   ctx.fillText('◉ +' + runPayout + '  (' + GF.t('coins') + ': ' + coins + ')', cx, y);
-  y += clamp(34*S,26,42);
+  y += clamp(26*S,21,32);
+
+  // M3: FLUX minted this run toward the next DASH RANK — the cross-run progress
+  // line (chain × ascend already folded in). Always shown so every run visibly
+  // feeds the mastery ladder; rank name in the rank's aura colour.
+  if (meta) {
+    var grd = rankDef();
+    ctx.fillStyle = '#7df9ff'; ctx.font = 'bold ' + clamp(15*S,12,19) + 'px sans-serif';
+    ctx.fillText('✦ +' + fluxBanked + ' ' + GF.t('flux'), cx, y);
+    y += clamp(20*S,16,25);
+    ctx.fillStyle = grd.aura; ctx.font = clamp(12*S,10,15) + 'px sans-serif';
+    var nx = (rankIdx() < RANKS.length-1) ? RANKS[rankIdx()+1] : null;
+    var rankLine = GF.t('rank_' + grd.id) + (nx ? '  ·  ' + Math.max(0, nx.flux - (meta.flux||0)) + ' ' + GF.t('toNext') : '  ·  ' + GF.t('maxRank'));
+    ctx.fillText(rankLine, cx, y);
+    y += clamp(28*S,22,34);
+  } else { y += clamp(8*S,6,10); }
 
   var btnW = clamp(240*S,180,300), btnH = clamp(52*S,46,62), bx = cx - btnW/2;
 
@@ -1612,7 +1805,7 @@ function drawGearIcon(ctx, def, x, y, r) {
 // ── META OVERLAY (GEAR ladder + DAILY quests) — reachable from MENU ─────────
 function drawMetaOverlay(ctx, z) {
   buttons = [];
-  metaTabRects = []; gearTileRects = []; gearUpRects = []; equipSlotRects = []; questClaimRects = []; metaCloseRect = null; metaContentRect = null;
+  metaTabRects = []; gearTileRects = []; gearUpRects = []; equipSlotRects = []; questClaimRects = []; metaCloseRect = null; metaContentRect = null; ascendBtnRect = null;
   var S = GF.S, W = GF.W, H = GF.H, cx = GF.cx, ru = (GF.lang === 'ru');
   // full-canvas scrim (popup hygiene: OPAQUE wash so the MENU behind doesn't
   // bleed through the panel — 0.95 still ghosted the title/PLAY button glow)
@@ -1624,7 +1817,8 @@ function drawMetaOverlay(ctx, z) {
   ctx.fillStyle = '#fff';
   ctx.font = '900 ' + clamp(30*S,22,40) + 'px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  ctx.fillText(GF.t('gear'), cx, y);
+  var ovTitle = metaTab === 'ranks' ? GF.t('ranksTab') : (metaTab === 'quests' ? GF.t('questsTab') : GF.t('gear'));
+  ctx.fillText(ovTitle, cx, y);
   ctx.restore();
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
   y += clamp(38*S,28,48);
@@ -1641,9 +1835,11 @@ function drawMetaOverlay(ctx, z) {
   // tab row (GEAR | QUESTS) with claimable badge on QUESTS
   var maxW = Math.min(W - 24*S, 460*S);
   var contentTop = y;
-  var tabX = cx - maxW/2, tabH = clamp(36*S,30,46), tabGap = 8*S, tabW = (maxW - tabGap)/2;
+  var tabX = cx - maxW/2, tabH = clamp(36*S,30,46), tabGap = 7*S, tabW = (maxW - tabGap*2)/3;
   var cq = claimableQuests();
-  var tabs = [ { id:'gear', label:GF.t('gearTab') }, { id:'quests', label:GF.t('questsTab'), badge:cq } ];
+  // M3: third RANKS tab; badge = ASCEND available (the prestige nudge)
+  var tabs = [ { id:'gear', label:GF.t('gearTab') }, { id:'quests', label:GF.t('questsTab'), badge:cq },
+               { id:'ranks', label:GF.t('ranksTab'), badge:(canAscend() ? '!' : 0) } ];
   for (var t=0;t<tabs.length;t++) {
     var on = (metaTab === tabs[t].id), bxx = tabX + t*(tabW + tabGap);
     rr(ctx, bxx, y, tabW, tabH, 9*S);
@@ -1665,6 +1861,7 @@ function drawMetaOverlay(ctx, z) {
   var contentBottom = closeY - 12*S;
 
   if (metaTab === 'gear') drawGearTab(ctx, z, y, contentBottom, maxW);
+  else if (metaTab === 'ranks') drawRanksTab(ctx, z, y, contentBottom, maxW);
   else drawQuestsTab(ctx, z, y, contentBottom, maxW);
 
   drawButton(ctx, cx - closeW/2, closeY, closeW, closeH, GF.t('close'), z.accent, true);
@@ -1822,6 +2019,76 @@ function drawQuestsTab(ctx, z, topY, bottomY, maxW) {
   ctx.textBaseline = 'top';
 }
 
+// RANKS tab (M3): current rank + aura preview, the rank ladder with the next
+// threshold highlighted, the ascend multiplier, and the ASCEND button (active
+// only at the gear wall). The progression axis the player builds across runs.
+function drawRanksTab(ctx, z, topY, bottomY, maxW) {
+  var S = GF.S, cx = GF.cx, x = cx - maxW/2;
+  var y = topY;
+  var ri = rankIdx(), rd = RANKS[ri], flux = meta ? (meta.flux || 0) : 0;
+  var next = (ri < RANKS.length - 1) ? RANKS[ri+1] : null;
+
+  // header: current rank name + total flux + ascend multiplier
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = rd.aura; ctx.font = 'bold ' + clamp(15*S,12,19) + 'px sans-serif';
+  ctx.fillText(GF.t('rank_' + rd.id), x, y);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#7df9ff'; ctx.font = 'bold ' + clamp(13*S,11,16) + 'px sans-serif';
+  ctx.fillText('✦ ' + flux + '   ×' + ascendMult().toFixed(2), x + maxW, y + 1*S);
+  y += clamp(22*S,18,28);
+
+  // progress to next rank (the visible pull)
+  ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(210,225,245,0.85)'; ctx.font = clamp(11*S,9.5,14) + 'px sans-serif';
+  if (next) {
+    var need = next.flux - flux;
+    ctx.fillText(GF.t('nextRank') + ': ' + GF.t('rank_' + next.id) + '  ·  ' + need + ' ' + GF.t('fluxNeed'), x, y);
+    var frac = clamp((flux - rd.flux) / (next.flux - rd.flux), 0, 1);
+    var barW = maxW, barH = 7*S, barY = y + clamp(15*S,13,19);
+    rr(ctx, x, barY, barW, barH, barH/2); ctx.fillStyle = 'rgba(255,255,255,0.13)'; ctx.fill();
+    rr(ctx, x, barY, Math.max(barH, barW*frac), barH, barH/2); ctx.fillStyle = next.aura; ctx.fill();
+  } else {
+    ctx.fillStyle = '#fff3a8'; ctx.font = 'bold ' + clamp(12*S,10,15) + 'px sans-serif';
+    ctx.fillText(GF.t('maxRank'), x, y);
+  }
+  y += clamp(32*S,26,40);
+
+  // mini rank ladder — dots for each rank, current filled, future hollow
+  var dn = RANKS.length, dGap = maxW / dn, dY = y + clamp(8*S,7,11);
+  for (var i=0;i<dn;i++) {
+    var dx = x + dGap*(i+0.5), dr = clamp(6*S,5,8);
+    ctx.beginPath(); ctx.arc(dx, dY, dr, 0, Math.PI*2);
+    ctx.fillStyle = (i <= ri) ? RANKS[i].aura : 'rgba(255,255,255,0.10)';
+    ctx.fill();
+    if (i === ri) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5*S; ctx.stroke(); }
+  }
+  y += clamp(26*S,20,32);
+
+  // ascend explainer + button
+  var explLines = wrapLines(ctx, GF.t('ascendDesc'), maxW);
+  ctx.fillStyle = 'rgba(200,210,230,0.8)'; ctx.font = clamp(10.5*S,9,13.5) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var elH = clamp(15*S,12,18);
+  for (var e=0;e<explLines.length;e++){ ctx.fillText(explLines[e], cx, y); y += elH; }
+  y += clamp(10*S,8,14);
+
+  var can = canAscend();
+  var aW = clamp(220*S,180,300), aH = clamp(46*S,42,56), aX = cx - aW/2;
+  var aY = Math.min(y, bottomY - aH);
+  rr(ctx, aX, aY, aW, aH, aH/2);
+  ctx.fillStyle = can ? 'rgba(255,243,168,0.22)' : 'rgba(255,255,255,0.05)'; ctx.fill();
+  ctx.strokeStyle = can ? '#fff3a8' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = 1.5*S;
+  rr(ctx, aX, aY, aW, aH, aH/2); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (can) {
+    ctx.fillStyle = '#fff3a8'; ctx.font = '900 ' + clamp(15*S,12,19) + 'px sans-serif';
+    ctx.fillText(GF.t('ascend') + '  +' + Math.round(ASCEND_BONUS*100) + '%', cx, aY + aH/2 + 0.5*S);
+  } else {
+    ctx.fillStyle = 'rgba(180,190,210,0.75)'; ctx.font = 'bold ' + clamp(11.5*S,9.5,15) + 'px sans-serif';
+    ctx.fillText(GF.t('ascendLocked'), cx, aY + aH/2 + 0.5*S);
+  }
+  ascendBtnRect = { x:aX, y:aY, w:aW, h:aH, can:can };
+  ctx.textBaseline = 'top';
+}
+
 // ── WELCOME-BACK BANNER (login + streak + idle, shown once per boot) ────────
 function drawBootBanner(ctx, z) {
   if (bootBannerT <= 0 || !meta) return;
@@ -1884,6 +2151,31 @@ function drawQuestToast(ctx) {
   ctx.fillText(questLabel(q), x + 14*S, y + h*0.68);
   ctx.restore(); ctx.textBaseline = 'top';
 }
+// M3: NEW RANK flourish — the rarest, biggest celebration (a rank is many runs
+// of flux). Coloured in the new rank's aura so the upgrade reads instantly.
+function drawRankUpToast(ctx) {
+  if (!rankUpToast) return;
+  var S = GF.S, def = rankUpToast.def;
+  var w = clamp(286*S,230,350), h = clamp(60*S,52,74);
+  var x = GF.cx - w/2, y = clamp(GF.H * 0.13, 54, 150);
+  var a = clamp(rankUpToast.t / 0.5, 0, 1), pop = clamp((4.2 - rankUpToast.t) * 5, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.shadowColor = def.aura; ctx.shadowBlur = (12 + pop*8)*S;
+  rr(ctx, x, y, w, h, 14*S); ctx.fillStyle = 'rgba(10,14,30,0.97)'; ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = def.aura; ctx.lineWidth = 2.2*S; rr(ctx, x, y, w, h, 14*S); ctx.stroke();
+  // aura ring icon on the left
+  var icR = h*0.26, icX = x + h*0.5;
+  ctx.beginPath(); ctx.arc(icX, y + h/2, icR, 0, Math.PI*2);
+  ctx.strokeStyle = def.aura; ctx.lineWidth = 2.4*S; ctx.stroke();
+  ctx.fillStyle = def.aura; ctx.beginPath(); ctx.arc(icX, y + h/2, icR*0.42, 0, Math.PI*2); ctx.fill();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = def.aura; ctx.font = '900 ' + clamp(15*S,12,19) + 'px sans-serif';
+  ctx.fillText(GF.t('newRank'), x + h, y + h*0.36);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clamp(13*S,11,17) + 'px sans-serif';
+  ctx.fillText(GF.t('rank_' + def.id), x + h, y + h*0.68);
+  ctx.restore(); ctx.textBaseline = 'top';
+}
 
 // ── INPUT ROUTING ─────────────────────────────────────────────────────────
 // ONE input: tap/click anywhere flips gravity during PLAYING. On overlays the
@@ -1919,6 +2211,12 @@ function handleMetaPress(x, y) {
     for (var u=0;u<gearUpRects.length;u++){ var ur=gearUpRects[u]; if (hit(ur,x,y)){ if (ur.afford && buyGearUpgrade(ur.id)) { Sfx.buy(); GF.spawnParticles(x, y, GEAR_BY_ID[ur.id].col, 16); } else Sfx.click(); return; } }
     for (var ti=0;ti<gearTileRects.length;ti++){ if (hit(gearTileRects[ti], x, y)){ if (toggleEquipGear(gearTileRects[ti].id)) Sfx.click(); else Sfx.click(); return; } }
     for (var s=0;s<equipSlotRects.length;s++){ if (hit(equipSlotRects[s], x, y)){ unequipGearSlot(equipSlotRects[s].slot); Sfx.click(); return; } }
+  } else if (metaTab === 'ranks') {
+    if (ascendBtnRect && hit(ascendBtnRect, x, y)) {
+      if (ascendBtnRect.can && doAscend()) { Sfx.buy(); GF.spawnParticles(x, y, '#fff3a8', 26); GF.setShake(0.4); }
+      else Sfx.click();
+      return;
+    }
   } else {
     for (var q=0;q<questClaimRects.length;q++){ var qr=questClaimRects[q]; if (hit(qr,x,y)){ if (qr.can && claimQuest(qr.i) > 0) { Sfx.buy(); GF.spawnParticles(x, y, '#FFD700', 18); } else Sfx.click(); return; } }
   }
@@ -2014,8 +2312,28 @@ window._meta = function() {
   copy.ownedGearCount = Object.keys(meta.gear.owned).length;
   copy.shieldArmed = shieldArmed;
   copy.metaOpen = metaOpen; copy.metaTab = metaTab;
+  // M3
+  copy.rank = rankIdx(); copy.rankId = rankDef().id; copy.ascendMult = +ascendMult().toFixed(2);
+  copy.chain = chain; copy.fluxMult = +fluxMult().toFixed(2); copy.canAscend = canAscend();
   return copy;
 };
+// M3 TEST HOOKS — drive flux / rank / prestige without grinding.
+// Grant flux directly (exercises rank-up + the RANKS tab); returns new total.
+window._grantFlux = function(n) {
+  if (!meta) return 0;
+  var before = rankIdx();
+  meta.flux = Math.max(0, (meta.flux || 0) + (+n || 0));
+  if (rankIdx() > before) rankUpToast = { def: rankDef(), t: 4.2 };
+  saveMeta(); return meta.flux;
+};
+// Force-own + max every gear (so canAscend()/the ASCEND button can be exercised).
+window._maxGear = function() {
+  if (!meta) return false;
+  for (var i=0;i<GEAR_DEFS.length;i++){ meta.gear.owned[GEAR_DEFS[i].id] = true; meta.gear.level[GEAR_DEFS[i].id] = GEAR_MAX_LVL; }
+  saveMeta(); return canAscend();
+};
+// Perform an ascension (returns ascend count, or -1 if not allowed).
+window._ascend = function() { return doAscend() ? meta.ascend : -1; };
 // Force cumulative playtime (seconds) and run the SAME unlock path update() uses.
 window._addPlaytime = function(sec) {
   if (!meta) return 0;
@@ -2037,7 +2355,7 @@ window._equipGear = function(id) { return toggleEquipGear(id); };
 window._buyGear = function(id) { return buyGearUpgrade(id); };
 // Grant coins (exercise upgrade-buy paths). No console output.
 window._grantCoins = function(n) { coins += (+n || 0); saveCoins(); return coins; };
-window._openMeta = function(tab) { metaOpen = true; metaTab = (tab === 'quests' ? 'quests' : 'gear'); };
+window._openMeta = function(tab) { metaOpen = true; metaTab = (tab === 'quests' || tab === 'ranks') ? tab : 'gear'; };
 
 // ── PROMO CAPTURE (?promo=climax) ──────────────────────────────────────────
 // Boots straight into a run with a deterministic, hand-tuned corridor + an
@@ -2213,6 +2531,10 @@ GF.init({
         nextGear: ng ? ng.id : null, nextGearMin: ng ? Math.max(0, Math.ceil(ng.min - totalPlayMin())) : 0,
         questsClaimable: claimableQuests(), streak: meta ? meta.login.streak : 0,
         metaOpen: metaOpen, metaTab: metaTab,
+        // M3: flux / rank / prestige surfaced for the harness + dashboards
+        flux: meta ? (meta.flux || 0) : 0, rank: rankIdx(), rankId: rankDef().id,
+        ascend: meta ? (meta.ascend || 0) : 0, ascendMult: +ascendMult().toFixed(2),
+        chain: chain, fluxMult: +fluxMult().toFixed(2), fluxBanked: fluxBanked, canAscend: canAscend(),
         RUN_SPEED: RUN_SPEED, SPEED_RAMP: SPEED_RAMP, MAX_SPEED: MAX_SPEED,
         GRAVITY: GRAVITY, FLIP_COOLDOWN: FLIP_COOLDOWN,
         OBSTACLE_GAP: OBSTACLE_GAP, GAP_MIN: GAP_MIN, COIN_RATE: COIN_RATE,

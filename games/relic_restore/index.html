@@ -44,6 +44,10 @@ var STRINGS = {
     setgem: 'Tap the socket to set the gem',
     notenough: 'Not enough coins',
     star_lo: 'Rushed', star_mid: 'Tidy', star_hi: 'Flawless',
+    vault: 'Vault', restored: 'Restored',
+    v_gold: 'Gold', v_silver: 'Silver', v_bronze: 'Bronze', v_empty: 'Not restored',
+    v_added: 'Enshrined in your Vault!', v_again: 'Restored again',
+    v_next: 'Next treasure:', v_full: 'Vault complete — every relic restored!',
   },
   ru: {
     title: 'Реставратор Реликвий',
@@ -68,6 +72,10 @@ var STRINGS = {
     notenough: 'Мало монет',
     star_lo: 'Спешка', star_mid: 'Чисто', star_hi: 'Идеально',
     menu: 'Меню', pause: 'Пауза', score: 'Счёт', start: 'Начать',
+    vault: 'Музей', restored: 'Готово',
+    v_gold: 'Золото', v_silver: 'Серебро', v_bronze: 'Бронза', v_empty: 'Не готово',
+    v_added: 'В вашем музее!', v_again: 'Снова отреставрировано',
+    v_next: 'След. сокровище:', v_full: 'Музей собран — все реликвии готовы!',
   },
 };
 
@@ -134,10 +142,25 @@ var NUM_RELICS    = RELICS.length;
 var SPEED_GROW    = 0.18;   // coverage boost per speed-upgrade level
 
 // ── GAME STATE ───────────────────────────────────────────────────────────
-var gs = 'MENU';            // MENU | PLAYING | APPRAISE | REVEAL
+var gs = 'MENU';            // MENU | PLAYING | APPRAISE | REVEAL | SHOP_OVERLAY | VAULT
 var coins = 0, best = 0, totalStars = 0;
 var unlockedMax = 0;        // highest relic index unlocked
 var upWidth = 0, upSpeed = 0, upShine = 0;  // tool upgrade levels (0..3)
+
+// ── PERSISTENT VAULT (M1 core meta — owned, growing museum) ───────────────
+// Per-relic permanent restoration record. A returning player opens the VAULT
+// and SEES their shelf of restored treasures gleaming on tiered pedestals
+// (bronze/silver/gold by best stars), not just a coin counter. Re-restoring a
+// relic at a higher star upgrades its pedestal tier, so the museum keeps
+// growing across sessions. records[i] = { stars:bestStars(0=unrestored),
+// count:timesRestored, bestCoins }. tier = pedestal level: 0 none, 1 bronze
+// (1★ best), 2 silver (2★), 3 gold (3★). collectionValue = sum of displayed
+// relic values once restored (the showcase's growing worth).
+var relicRec = [];          // per-RELICS record (length NUM_RELICS)
+var vaultScroll = 0;        // VAULT pedestal-shelf scroll offset (px)
+var vaultMaxScroll = 0;
+var lastRestored = -1;      // relic just enshrined (flash on the next REVEAL/VAULT)
+var META_SCHEMA = 2;        // bump when meta_v1 shape changes (migration in onReady)
 
 // active restoration
 var relic = null;           // current RELICS entry
@@ -157,6 +180,7 @@ var gemSet = false, gemNeeded = false;
 var stagePop = 0;           // color-pop animation 0..1 after a stage clears
 var poppedStage = -1;
 var appraiseT = 0, appraiseStars = 0, appraiseCoins = 0, appraiseCover = 0;
+var appraiseNewBest = false;   // did this restore set a new vault best (enshrine/tier-up)?
 var bigPop = 0;             // appraisal number pop
 var revealSlide = 0.5;      // before/after slider 0..1
 var revealAuto = 1;         // auto-sweep the reveal slider
@@ -178,10 +202,66 @@ var muteBtn = {}, helpBtn = {}, shopBtn = {};
 function saveMeta() {
   try {
     localStorage.setItem('relic_restore_meta_v1', JSON.stringify({
+      schema: META_SCHEMA,
       coins: coins, best: best, totalStars: totalStars, unlockedMax: unlockedMax,
       upWidth: upWidth, upSpeed: upSpeed, upShine: upShine,
+      relics: serializeRec(),
     }));
   } catch (e) {}
+}
+
+// ── VAULT RECORD HELPERS (persistent owned museum) ────────────────────────
+function blankRec() {
+  var a = [];
+  for (var i = 0; i < NUM_RELICS; i++) a.push({ stars: 0, count: 0, bestCoins: 0 });
+  return a;
+}
+function serializeRec() {
+  // compact array-of-arrays to keep the save small: [stars,count,bestCoins]
+  var out = [];
+  for (var i = 0; i < relicRec.length; i++) {
+    var r = relicRec[i] || { stars: 0, count: 0, bestCoins: 0 };
+    out.push([r.stars | 0, r.count | 0, r.bestCoins | 0]);
+  }
+  return out;
+}
+function loadRec(arr) {
+  // fail-soft: any malformed record is ignored, never throws, never blanks the
+  // rest of the save (coins/unlocks/upgrades are loaded separately, before this).
+  relicRec = blankRec();
+  if (!arr || typeof arr.length !== 'number') return;
+  for (var i = 0; i < arr.length && i < NUM_RELICS; i++) {
+    var v = arr[i];
+    if (!v || typeof v.length !== 'number') continue;   // skip non-array cells
+    relicRec[i].stars = GF.clamp(v[0] | 0, 0, 3);        // stars only ever 0..3
+    relicRec[i].count = Math.max(0, v[1] | 0);
+    relicRec[i].bestCoins = Math.max(0, v[2] | 0);
+  }
+}
+// pedestal tier for relic i: 0 none, 1 bronze, 2 silver, 3 gold (== best stars)
+function relicTier(i) { var r = relicRec[i]; return r ? (r.stars | 0) : 0; }
+function restoredCount() { var n = 0; for (var i = 0; i < NUM_RELICS; i++) if (relicRec[i] && relicRec[i].stars > 0) n++; return n; }
+// total displayed museum worth (sum of restored relic values, scaled by tier)
+function collectionValue() {
+  var v = 0;
+  for (var i = 0; i < NUM_RELICS; i++) {
+    var r = relicRec[i]; if (r && r.stars > 0) v += RELICS[i].val * (1 + (r.stars - 1) * 0.5);
+  }
+  return Math.round(v);
+}
+// record a finished restoration into the permanent vault; returns true if it
+// raised this relic's best (new enshrine or a tier-up) — the "owned thing grew"
+// signal that pulls the player back.
+function enshrineRelic(i, stars, coinsEarned) {
+  if (!relicRec[i]) relicRec[i] = { stars: 0, count: 0, bestCoins: 0 };
+  var rec = relicRec[i];
+  stars = GF.clamp(stars | 0, 0, 3);
+  var firstEver = rec.stars === 0;
+  var tieredUp = stars > rec.stars;
+  rec.count++;                                  // increments on EVERY completion
+  if (coinsEarned > rec.bestCoins) rec.bestCoins = coinsEarned;
+  if (stars > rec.stars) rec.stars = stars;     // best-stars only ever increases
+  return firstEver || tieredUp;
 }
 
 // ── RELIC GEOMETRY ───────────────────────────────────────────────────────
@@ -398,6 +478,11 @@ function finishRelic() {
   coins += appraiseCoins;
   totalStars += stars;
   if (appraiseCoins > best) best = appraiseCoins;
+  // M1: permanently enshrine this restoration in the owned Vault museum. A
+  // first-ever restore or a star tier-up flashes the relic on the REVEAL/VAULT
+  // shelf — the "my collection grew" pull that survives the session.
+  appraiseNewBest = enshrineRelic(relicIdx, stars, appraiseCoins);
+  lastRestored = relicIdx;
   // unlock next relic tier(s) by coin gate
   for (var k = unlockedMax + 1; k < NUM_RELICS; k++) {
     if (coins >= RELICS[k].unlock) { unlockedMax = k; newUnlock = k; }
@@ -472,6 +557,7 @@ function overlayDown(x, y) {
       var rc = shopRects[i];
       if (hit(rc, x, y)) {
         if (rc.kind === 'play') { GF.sfx('tap'); startGame(); return true; }
+        if (rc.kind === 'vault') { GF.sfx('tap'); vaultScroll = 0; _vaultFrom = 'MENU'; gs = 'VAULT'; return true; }
         if (rc.kind === 'relic' && rc.idx <= unlockedMax) { GF.sfx('tap'); startRelic(rc.idx); return true; }
         if (rc.kind === 'relic') { hintMsg = GF.t('unlock') + ' ' + RELICS[rc.idx].unlock; hintT = 1.4; GF.sfx('error'); return true; }
       }
@@ -484,6 +570,7 @@ function overlayDown(x, y) {
     return true;
   }
   if (gs === 'REVEAL') {
+    if (hit(revealVaultBtn, x, y)) { GF.sfx('tap'); vaultScroll = 0; _vaultFrom = 'REVEAL'; gs = 'VAULT'; return true; }
     if (hit(L.bigBtn, x, y)) { GF.sfx('tap'); nextRelic(); return true; }
     if (hit(shopBtn, x, y)) { GF.sfx('tap'); openShop(); return true; }
     return true;
@@ -514,7 +601,12 @@ function buyUpgrade(kind) {
 
 function toggleMute() { GF.toggleMute(); GF.setMusicMuted(GF.muted); }
 
+// VAULT scroll-drag state (distinguishes a tap-to-restore from a shelf scroll)
+var vDragY = 0, vDragMoved = 0, vDragging = false;
+var _vaultFrom = 'MENU';   // where the VAULT was opened from (BACK returns here)
+
 function onDown(x, y) {
+  if (gs === 'VAULT') { vDragging = true; vDragY = y; vDragMoved = 0; return; }
   if (gs === 'SHOP_OVERLAY') { shopDown(x, y); return; }
   if (gs !== 'PLAYING') { overlayDown(x, y); return; }
   // HUD buttons
@@ -567,6 +659,13 @@ function setGem(box) {
 }
 
 function onMove(x, y) {
+  if (gs === 'VAULT') {
+    if (!vDragging) return;
+    var d = vDragY - y;
+    vaultScroll = GF.clamp(vaultScroll + d, 0, vaultMaxScroll);
+    vDragMoved += Math.abs(d); vDragY = y;
+    return;
+  }
   if (gs !== 'PLAYING' || !dragging) return;
   dragX = x; dragY = y;
   applyWipe(x, y, false);
@@ -624,6 +723,22 @@ function spawnStageFx(px, py, stg) {
 }
 
 function onUp(x, y) {
+  if (gs === 'VAULT') {
+    vDragging = false;
+    if (vDragMoved > 8 * GF.S) return;   // it was a scroll, not a tap
+    // a tap: BACK, or jump into restoring an unlocked niche
+    for (var i = 0; i < shopRects.length; i++) {
+      var rc = shopRects[i];
+      if (!hit(rc, x, y)) continue;
+      if (rc.kind === 'vback') { GF.sfx('tap'); lastRestored = -1; gs = (_vaultFrom === 'REVEAL') ? 'REVEAL' : 'MENU'; return; }
+      if (rc.kind === 'vrelic') {
+        if (rc.idx <= unlockedMax) { GF.sfx('tap'); lastRestored = -1; startRelic(rc.idx); }
+        else { hintMsg = GF.t('unlock') + ' ' + RELICS[rc.idx].unlock; hintT = 1.4; GF.sfx('error'); }
+        return;
+      }
+    }
+    return;
+  }
   dragging = false;
 }
 
@@ -717,7 +832,8 @@ function draw(ctx) {
   if (gs === 'REVEAL') drawReveal(ctx);
   if (gs === 'SHOP_OVERLAY') drawShop(ctx);
   if (gs === 'MENU') drawMenu(ctx);
-  drawMute(ctx);
+  if (gs === 'VAULT') drawVault(ctx);
+  if (gs !== 'VAULT') drawMute(ctx);
   if (hintT > 0) drawHint(ctx);
 }
 
@@ -1440,10 +1556,57 @@ function drawReveal(ctx) {
   ctx.fillText(GF.t('before'), box.cx - box.r * 0.55, box.cy - box.r - 16 * S);
   ctx.fillStyle = '#ffe27a';
   ctx.fillText(GF.t('after'), box.cx + box.r * 0.55, box.cy - box.r - 16 * S);
-  // shop + next buttons
+
+  // ── SESSION-END HOOK (M1): "enshrined in your Vault" + progress + the next
+  // empty niche, so leaving plants the reason to come back. ──────────────────
+  var hy = box.cy + box.r + 34 * S;
+  var rc2 = restoredCount();
+  // enshrine / tier-up line (the "your collection grew" beat)
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = appraiseNewBest ? '#7af0a0' : '#bfb6d0';
+  ctx.font = 'bold ' + GF.clamp(14 * S, 11, 19) + 'px Inter, system-ui, sans-serif';
+  var rec2 = relicRec[relicIdx] || { stars: appraiseStars };
+  var encore = (rec2.count > 1 && !appraiseNewBest);
+  ctx.fillText(appraiseNewBest ? GF.t('v_added') : (encore ? GF.t('v_again') : GF.t('v_added')), W / 2, hy);
+  // mini best-star row for this relic in the vault
+  var tsy = hy + 22 * S, tsw = 13 * S, tier2 = (relicRec[relicIdx] ? relicRec[relicIdx].stars : appraiseStars) | 0;
+  for (var ts = 0; ts < 3; ts++) {
+    star(ctx, W / 2 + (ts - 1) * tsw * 1.6, tsy, tsw * 0.55, tsw * 0.24, ts < tier2 ? (PED_COL[tier2] || '#ffd24a') : 'rgba(255,255,255,0.16)');
+  }
+  // vault progress: restored count + the next still-empty treasure to chase
+  ctx.fillStyle = '#cfc8dd'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('vault') + ': ' + rc2 + '/' + NUM_RELICS, W / 2, tsy + 26 * S);
+  if (rc2 < NUM_RELICS) {
+    // find the first un-restored relic and name it as the next goal
+    var nextI = -1;
+    for (var ni = 0; ni < NUM_RELICS; ni++) { if (!relicRec[ni] || relicRec[ni].stars === 0) { nextI = ni; break; } }
+    if (nextI >= 0) {
+      var nm2 = (GF.lang === 'ru' ? RELICS[nextI].nameRu : RELICS[nextI].nameEn);
+      var locked2 = nextI > unlockedMax;
+      ctx.fillStyle = '#8a83a0'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
+      ctx.fillText(GF.t('v_next') + ' ' + nm2 + (locked2 ? ' (' + RELICS[nextI].unlock + ')' : ''), W / 2, tsy + 46 * S);
+    }
+  } else {
+    ctx.fillStyle = '#7af0a0'; ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('v_full'), W / 2, tsy + 46 * S);
+  }
+
+  // shop + next buttons + a VAULT shortcut (see your growing museum now)
   drawBigButton(ctx, shopBtn, GF.t('tools') + '  (' + coins + ')', true, true);
   drawBigButton(ctx, L.bigBtn, GF.t('next'), true);
+  // small VAULT chip button (top-right under the title)
+  var vcw = GF.clamp(96 * S, 78, 140), vch = GF.clamp(34 * S, 30, 46);
+  revealVaultBtn = { x: W - vcw - 14 * S, y: H * 0.13 - vch / 2, w: vcw, h: vch };
+  ctx.save();
+  GF.rr(ctx, revealVaultBtn.x, revealVaultBtn.y, vcw, vch, 12 * S);
+  ctx.fillStyle = 'rgba(255,210,74,0.12)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,210,74,0.45)'; ctx.lineWidth = 1.3 * S; ctx.stroke();
+  ctx.fillStyle = '#ffe27a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('vault'), revealVaultBtn.x + vcw / 2, revealVaultBtn.y + vch / 2 + 1 * S);
+  ctx.restore();
 }
+var revealVaultBtn = {};
 
 function drawShop(ctx) {
   var W = GF.W, H = GF.H, S = GF.S;
@@ -1591,6 +1754,20 @@ function drawMenu(ctx) {
     shopRects.push({ x: x, y: y, w: cell, h: cell, kind: 'relic', idx: i });
   }
 
+  // VAULT button — opens the owned museum of restored treasures. Shows the
+  // restored count so the menu itself advertises the growing collection.
+  var vbw = GF.clamp(280 * S, 200, 440), vbh = GF.clamp(44 * S, 38, 60);
+  var vb = { x: (W - vbw) / 2, y: H - GF.clamp(60 * S, 48, 84) - Math.round(H * 0.14) - vbh - 12 * S, w: vbw, h: vbh };
+  ctx.save();
+  GF.rr(ctx, vb.x, vb.y, vb.w, vb.h, 14 * S);
+  ctx.fillStyle = 'rgba(255,210,74,0.10)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,210,74,0.45)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+  ctx.fillStyle = '#ffe27a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(16 * S, 13, 22) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('vault') + '   ' + restoredCount() + '/' + NUM_RELICS, vb.x + vb.w / 2, vb.y + vb.h / 2 + 1 * S);
+  ctx.restore();
+  shopRects.push({ x: vb.x, y: vb.y, w: vb.w, h: vb.h, kind: 'vault' });
+
   // PLAY button (LAST uiButton — yandex-testing clicks it)
   // bottom margin uses H*0.14 so the button always falls within the mobile-gate
   // tap-sweep (cy +40% canvas height), regardless of aspect ratio.
@@ -1606,6 +1783,124 @@ function drawLock(ctx, cx, cy, r) {
   ctx.beginPath(); ctx.arc(cx, cy - r * 0.2, r * 0.55, Math.PI, 0); ctx.stroke();
   GF.rr(ctx, cx - r * 0.7, cy - r * 0.2, r * 1.4, r * 1.1, r * 0.2); ctx.fill();
   ctx.restore();
+}
+
+// ── VAULT (M1: the owned, growing museum of restored treasures) ───────────
+// A scrollable shelf of pedestals. A restored relic stands GLEAMING on a tiered
+// pedestal (bronze/silver/gold by best stars) with its star rating + best
+// payout; an un-restored one is a dim grimy silhouette behind a "?" plaque —
+// a visible empty slot tugging the player to go fill it. This is the screen a
+// returning player opens that did NOT exist before this pass: their personal
+// trophy hall that grew while they were away.
+var PED_COL = { 1: '#a06a3a', 2: '#aeb6c4', 3: '#e8c24a' };   // bronze / silver / gold
+function tierName(t) { return t === 3 ? GF.t('v_gold') : t === 2 ? GF.t('v_silver') : t === 1 ? GF.t('v_bronze') : ''; }
+
+function drawVault(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  drawBackground(ctx);
+  shopRects = [];
+  // header
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,210,74,0.4)'; ctx.shadowBlur = 20 * S;
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(28 * S, 22, 42) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('vault'), W / 2, H * 0.075);
+  ctx.restore();
+  // restored count + total museum worth
+  var rc = restoredCount();
+  ctx.fillStyle = '#cfc8dd'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('restored') + ' ' + rc + '/' + NUM_RELICS, W / 2 - 64 * S, H * 0.075 + 26 * S);
+  drawCoinIcon(ctx, W / 2 + 22 * S, H * 0.075 + 26 * S, 9 * S);
+  ctx.fillStyle = '#ffe27a'; ctx.textAlign = 'left';
+  ctx.fillText(collectionValue() + '', W / 2 + 36 * S, H * 0.075 + 26 * S);
+
+  // scroll viewport for the pedestal shelf
+  var topY = H * 0.16, botY = H - GF.clamp(74 * S, 60, 100);
+  var cols = 3;
+  var gridW = Math.min(W - 24 * S, 460 * S);
+  var gap = 10 * S;
+  var cell = (gridW - (cols - 1) * gap) / cols;
+  var cellH = cell * 1.34;                       // taller: relic on a pedestal + plaque
+  var gx0 = (W - gridW) / 2;
+  var rows = Math.ceil(NUM_RELICS / cols);
+  var contentH = rows * (cellH + gap);
+  vaultMaxScroll = Math.max(0, contentH - (botY - topY));
+  vaultScroll = GF.clamp(vaultScroll, 0, vaultMaxScroll);
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, topY, W, botY - topY); ctx.clip();
+  for (var i = 0; i < NUM_RELICS; i++) {
+    var cc = i % cols, rr = (i / cols) | 0;
+    var x = gx0 + cc * (cell + gap), y = topY + rr * (cellH + gap) - vaultScroll;
+    if (y > botY || y + cellH < topY) continue;   // cull off-screen
+    var rec = relicRec[i] || { stars: 0, count: 0, bestCoins: 0 };
+    var restored = rec.stars > 0;
+    var tier = rec.stars | 0;
+    // niche card
+    ctx.save();
+    GF.rr(ctx, x, y, cell, cellH, 12 * S);
+    ctx.fillStyle = restored ? 'rgba(255,250,235,0.06)' : 'rgba(255,255,255,0.025)';
+    ctx.fill();
+    ctx.strokeStyle = restored ? 'rgba(' + (tier === 3 ? '255,210,74' : tier === 2 ? '180,190,210' : '190,140,90') + ',0.5)'
+                                : 'rgba(255,255,255,0.07)';
+    ctx.lineWidth = 1.5 * S; ctx.stroke();
+    var mb = { cx: x + cell / 2, cy: y + cell * 0.44, r: cell * 0.27, size: cell * 0.54 };
+    if (restored) {
+      // gleaming restored relic, freshly-enshrined one pulses
+      var pulse = (i === lastRestored) ? (0.85 + 0.15 * Math.sin(performance.now() / 200)) : 1;
+      if (tier >= 2) { ctx.save(); ctx.globalAlpha = 0.5 * pulse; ctx.shadowColor = PED_COL[tier]; ctx.shadowBlur = 16 * S; }
+      ctx.save(); GF.rr(ctx, x, y, cell, cellH, 12 * S); ctx.clip();
+      drawRelicShape(ctx, mb, RELICS[i], 1.0, RELICS[i].stages.indexOf('gem') >= 0);
+      ctx.restore();
+      if (tier >= 2) ctx.restore();
+      // pedestal slab under the relic, tinted by tier
+      var py = y + cell * 0.74;
+      ctx.fillStyle = PED_COL[tier] || '#a06a3a';
+      GF.rr(ctx, x + cell * 0.18, py, cell * 0.64, cellH * 0.07, 3 * S); ctx.fill();
+      ctx.globalAlpha = 0.35; ctx.fillStyle = '#000';
+      GF.rr(ctx, x + cell * 0.18, py + cellH * 0.055, cell * 0.64, cellH * 0.02, 2 * S); ctx.fill();
+      ctx.globalAlpha = 1;
+      // best-star row
+      var sy = y + cell * 0.92, sw = cell * 0.13;
+      for (var st = 0; st < 3; st++) {
+        var on = st < tier;
+        star(ctx, x + cell / 2 + (st - 1) * sw * 1.5, sy, sw * 0.55, sw * 0.24, on ? (PED_COL[tier] || '#ffd24a') : 'rgba(255,255,255,0.16)');
+      }
+      // name plaque
+      ctx.fillStyle = '#e6dff2'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      var fs = GF.clamp(10 * S, 8, 13); ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif';
+      var nm = (GF.lang === 'ru' ? RELICS[i].nameRu : RELICS[i].nameEn);
+      while (ctx.measureText(nm).width > cell - 8 * S && fs > 7) { fs--; ctx.font = 'bold ' + fs + 'px Inter, system-ui, sans-serif'; }
+      ctx.fillText(nm, x + cell / 2, y + cellH - 12 * S);
+    } else {
+      // empty niche: dim grimy silhouette + "?" plaque (the tug to go restore it)
+      ctx.save(); GF.rr(ctx, x, y, cell, cellH, 12 * S); ctx.clip();
+      ctx.globalAlpha = 0.22;
+      drawRelicShape(ctx, mb, RELICS[i], 0.0, false);
+      ctx.restore();
+      ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.font = 'bold ' + GF.clamp(22 * S, 16, 30) + 'px Inter, system-ui, sans-serif';
+      ctx.fillText('?', x + cell / 2, y + cell * 0.46);
+      var lockable = i > unlockedMax;
+      ctx.fillStyle = '#8a83a0'; ctx.font = 'bold ' + GF.clamp(9 * S, 7, 12) + 'px Inter, system-ui, sans-serif';
+      ctx.fillText(lockable ? (GF.t('unlock') + ' ' + RELICS[i].unlock) : GF.t('v_empty'), x + cell / 2, y + cellH - 12 * S);
+    }
+    ctx.restore();
+    // tapping an unlocked niche jumps straight into restoring that relic
+    shopRects.push({ x: x, y: y, w: cell, h: cellH, kind: 'vrelic', idx: i });
+  }
+  ctx.restore();
+  // top/bottom fade so scrolled cards clip cleanly under the header/footer
+  var fg = ctx.createLinearGradient(0, topY, 0, topY + 24 * S);
+  fg.addColorStop(0, 'rgba(21,18,28,1)'); fg.addColorStop(1, 'rgba(21,18,28,0)');
+  ctx.fillStyle = fg; ctx.fillRect(0, topY - 1, W, 26 * S);
+
+  // BACK button (last button — yandex-testing safe)
+  var bw = GF.clamp(220 * S, 170, 360), bh = GF.clamp(52 * S, 44, 72);
+  var bb = { x: (W - bw) / 2, y: H - bh - Math.round(H * 0.045), w: bw, h: bh };
+  drawBigButton(ctx, bb, GF.t('back'), true);
+  shopRects.push({ x: bb.x, y: bb.y, w: bb.w, h: bb.h, kind: 'vback' });
 }
 
 // ── TUTORIAL (demo-hand, hands-on, action-gated) ─────────────────────────────
@@ -1662,12 +1957,23 @@ GF.init({
   sprites: [],
   saveKey: 'relic_restore',
   onReady: function () {
-    // load meta (coins + unlocks + upgrades)
+    // load meta (coins + unlocks + upgrades + the persistent Vault museum)
+    relicRec = blankRec();
     try {
       var m = JSON.parse(localStorage.getItem('relic_restore_meta_v1') || '{}');
       coins = m.coins || 0; best = m.best || 0; totalStars = m.totalStars || 0;
       unlockedMax = m.unlockedMax || 0;
       upWidth = m.upWidth || 0; upSpeed = m.upSpeed || 0; upShine = m.upShine || 0;
+      if (m.relics) {
+        loadRec(m.relics);
+      } else if (m.unlockedMax) {
+        // schema-1 migration: a relic was unlocked => the player restored at
+        // least the ones before it. Back-fill a bronze (1★) record so existing
+        // players keep a populated museum instead of an empty shelf.
+        for (var mi = 0; mi < unlockedMax && mi < NUM_RELICS; mi++) {
+          relicRec[mi] = { stars: 1, count: 1, bestCoins: 0 };
+        }
+      }
     } catch (e) {}
 
     // procedural calm music bed (starts on first gesture, mute-aware)
@@ -1755,6 +2061,8 @@ GF.exposeState(function () {
     coverage: coverage, combo: combo, comboPeak: comboPeak,
     unlockedMax: unlockedMax, upWidth: upWidth, upSpeed: upSpeed, upShine: upShine,
     appraiseStars: appraiseStars, appraiseCoins: appraiseCoins,
+    restoredCount: restoredCount(), collectionValue: collectionValue(),
+    vaultOpen: gs === 'VAULT',
     // tunables (DESIGN.md §Tunables)
     BRUSH_R: BRUSH_R, BRUSH_GROW: BRUSH_GROW, STAGE_DONE: STAGE_DONE,
     COMBO_WINDOW: COMBO_WINDOW, COMBO_MAX: COMBO_MAX, COINS_BASE: COINS_BASE,
@@ -1775,6 +2083,10 @@ window._rrPlayBtn = function () {
 };
 window._rrCtaBtn = function () { return L.bigBtn; };
 window._rrToolRects = function () { return toolRects; };
+// M1 vault test seams: open the vault, read records, force-enshrine
+window._rrOpenVault = function () { vaultScroll = 0; _vaultFrom = 'MENU'; gs = 'VAULT'; };
+window._rrVault = function () { return { restored: restoredCount(), value: collectionValue(), recs: serializeRec(), gs: gs }; };
+window._rrEnshrine = function (i, stars) { var r = enshrineRelic(i | 0, stars | 0, 0); saveMeta(); return r; };
 
 })();
 </script>
