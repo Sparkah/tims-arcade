@@ -73,6 +73,11 @@ export async function onRequestPost({ request, env }) {
     await creditPrompts(env, session.uid, 1);   // refund -- the job wasn't enqueued
     return jsonError('enqueue_failed', 500);
   }
+  // Signal new work so the vibe-relay detects it with a cheap GET (gen-queue
+  // ?signal=1, 1 read) instead of a per-poll KV LIST. Without this the relay's
+  // 15s poll did a genjob: LIST every time = ~5760 list ops/day, over the free
+  // 1000/day cap by itself (2026-06-16). Best-effort; relay also stuck-sweeps.
+  try { await env.VOTES.put('genjob:signal', String(ts)); } catch (e) { /* non-fatal */ }
 
   return json({ ok: true, id, status: 'pending' });
 }

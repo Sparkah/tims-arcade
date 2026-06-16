@@ -14,6 +14,18 @@ export async function onRequestGet({ request, env }) {
   if (!env.ADMIN_TOKEN) return json({ error: 'admin_token_not_configured' }, 500);
   if (token !== env.ADMIN_TOKEN) return json({ error: 'forbidden' }, 403);
 
+  // Cheap poll path for the vibe-relay (every 15s): return the single
+  // genjob:signal value — 1 READ, 0 LIST. The relay only does the full list
+  // below when this changes (new job enqueued, see gen/submit.js) or on its own
+  // periodic stuck-sweep. The 15s poll otherwise did a genjob: LIST every time
+  // = ~5760 list ops/day, over the free 1000/day cap alone (2026-06-16).
+  // Mirrors uploads.js ?signal=1.
+  if (url.searchParams.get('signal') === '1') {
+    const r = json({ ok: true, signal: (await env.VOTES.get('genjob:signal')) || '0' });
+    r.headers.set('cache-control', 'no-store');
+    return r;
+  }
+
   let limit = parseInt(url.searchParams.get('limit') || '5', 10);
   if (!Number.isFinite(limit) || limit < 1) limit = 5;
   limit = Math.min(limit, 20);
