@@ -20,6 +20,8 @@
 import { jsonError } from '../_lib/response.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { checkRate } from '../_lib/rateLimit.js';
+import { parseCookie } from '../_lib/cookie.js';
+import { readMeta, VOTE_GATE_MIN } from '../_lib/meta.js';
 
 const MAX_IMAGES = 5;
 
@@ -52,13 +54,23 @@ export async function onRequestPost({ request, env }) {
   const rateKey = `fbrate:${ip}:${Math.floor(Date.now() / 60000)}`;
   if (!await checkRate(env, rateKey, 30, 120)) return jsonError('rate_limit', 429);
 
-  // Tally vote (skipped if neutral)
+  // Tally vote (skipped if neutral). Gated identically to /api/vote: only count a
+  // like/dislike once the player has ~5 min of active play on this slug
+  // (meta.played[slug] on the cookie uid, checked against VOTE_GATE_MIN, the
+  // drift-grace floor), so this overlay path cannot bypass the rating gate. The
+  // comment/images below are NOT gated. (Codex review 2026-06-16)
   if (vote === 'like' || vote === 'dislike') {
-    const key = `votes:${slug}`;
-    const cur = (await env.VOTES.get(key, 'json')) || { likes: 0, dislikes: 0 };
-    if (vote === 'like')    cur.likes    = (cur.likes    || 0) + 1;
-    if (vote === 'dislike') cur.dislikes = (cur.dislikes || 0) + 1;
-    await env.VOTES.put(key, JSON.stringify(cur));
+    const cookieUid = parseCookie(request.headers.get('Cookie') || '', 'uid');
+    const gateMeta = cookieUid ? await readMeta(env, cookieUid) : null;
+    const playedSec = (gateMeta && gateMeta.played && gateMeta.played[slug]) || 0;
+    if (playedSec >= VOTE_GATE_MIN) {
+      const key = `votes:${slug}`;
+      const cur = (await env.VOTES.get(key, 'json')) || { likes: 0, dislikes: 0 };
+      if (vote === 'like')    cur.likes    = (cur.likes    || 0) + 1;
+      if (vote === 'dislike') cur.dislikes = (cur.dislikes || 0) + 1;
+      await env.VOTES.put(key, JSON.stringify(cur));
+    }
+    // else: below the play gate -- skip the tally (comment/images still stored below)
   }
 
   // Note: the +5 like-bonus is granted by /api/vote, NOT here. That's the

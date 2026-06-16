@@ -20,9 +20,33 @@
 export const SECONDS_PER_PROMPT = 1800;
 export const PROMPT_BANK_CAP = 1;
 
+// Unified token economy (Tim 2026-06-16): generation is priced in the SAME
+// tokens the player earns by play (1/min), like (+5), and daily login (+10) and
+// sees in the pill -- so every earn path feeds one visible goal. Replaces the
+// old hidden "prompt" credit (30 min of play = 1 prompt), which is being retired.
+// First generation per account stays free (gated per-email in gen/submit.js).
+export const GENERATION_COST = 60;
+
+// Fairness/anti-farm vote gate (Tim 2026-06-16): a player must accumulate this
+// many seconds of ACTIVE play on a game before they may like/dislike it. Active
+// seconds are banked per (cookie uid, slug) into meta.played by the heartbeat and
+// checked by /api/vote; the play page shows a countdown until rating unlocks.
+export const VOTE_GATE_SECONDS = 300;
+
+// Server-enforced gate MINIMUM, a few seconds below VOTE_GATE_SECONDS. The play
+// page counts active seconds locally and unlocks rating at VOTE_GATE_SECONDS, but
+// the server banks slightly less (per-flush wall-clock floor + network latency,
+// ~1s/flush), so it enforces the gate a touch lower to avoid 403-ing a player who
+// legitimately reached 5 min locally. The wall-clock clamp still requires real
+// elapsed time, so this grace does not help farmers. Tim 2026-06-16.
+export const VOTE_GATE_MIN = 285;
+
 export function emptyMeta() {
   return {
     tokens: 0, lifetime: 0, streak: 0, bestStreak: 0, lastLogin: null, unlocked: [],
+    // played: { <slug>: activeSeconds } banked by the heartbeat (capped at the
+    // vote gate) -- the cookie-uid record's per-game timer for the rating gate.
+    played: {},
     // Vibe-coder economy (Tim 2026-06-15). On meta:<sessionUid> records:
     //   prompts      — spendable game-generation credits
     //   freeGranted  — has the one-time free prompt been given (per email)
@@ -54,6 +78,74 @@ export async function creditTokens(env, uid, amount) {
   m.tokens   += amount;
   m.lifetime += amount;
   await writeMeta(env, uid, m);
+}
+
+// Spend `n` tokens from a uid's visible balance (the pill / leaderboard
+// currency). Returns true if the balance covered it (and was debited), false
+// otherwise -- callers gate generation on the boolean. Debits `tokens` ONLY,
+// never `lifetime`: lifetime is total-ever-earned (the leaderboard score) and
+// must not fall when a player spends. Tim 2026-06-16.
+export async function spendTokens(env, uid, n) {
+  if (!uid || !n || n <= 0) return false;
+  const m = await readMeta(env, uid);
+  if ((m.tokens || 0) < n) return false;
+  m.tokens -= n;
+  await writeMeta(env, uid, m);
+  return true;
+}
+
+// Refund `n` spendable tokens WITHOUT touching lifetime (the leaderboard score),
+// so a spendTokens()+refund round-trip is net-zero on both the balance and the
+// leaderboard. Used for generation refunds (daily-cap / enqueue / build failure).
+export async function refundTokens(env, uid, n) {
+  if (!uid || !n || n <= 0) return;
+  const m = await readMeta(env, uid);
+  m.tokens += n;
+  await writeMeta(env, uid, m);
+}
+
+// Heartbeat meta update in ONE read-modify-write: credit play tokens AND bank
+// `seconds` of active play on `slug` toward the vote gate. Anti-farm (Codex
+// 2026-06-16): credit no more than the real wall-clock seconds elapsed since this
+// uid's last CREDITED heartbeat, so repeatedly POSTing a big `seconds` cannot mint
+// tokens or gate-time faster than time actually passes (the first call, with no
+// prior ts, trusts the already-[0,300]-clamped value). We WRITE only when a full
+// minute is credited (minutes>0) -- exactly when the old token-only credit wrote --
+// so the vote gate adds no new KV writes. `featuredMult` (2x on the featured game)
+// scales tokens only; gate time banks REAL seconds, capped at `gateSeconds`. Tim 2026-06-16.
+export async function creditPlayAndTokens(env, uid, { slug, seconds = 0, featuredMult = 1, gateSeconds = VOTE_GATE_SECONDS, now } = {}) {
+  if (!uid || !seconds || seconds <= 0) return null;
+  const m = await readMeta(env, uid);
+  const ts = now || Date.now();
+  const last = m.lastPlayTs || 0;
+  // Credit no more than the real wall-clock seconds since this uid's last CREDITED
+  // beat. On the FIRST beat (no prior ts) trust at most one client flush window
+  // (<=130s) instead of the full posted value, so a single fresh-cookie POST can't
+  // claim 300s and instantly unlock a vote (Codex review 2026-06-16); every later
+  // beat clamps to actual elapsed, so rapid re-posts never outrun real time.
+  const effective = last
+    ? Math.min(seconds, Math.max(0, Math.floor((ts - last) / 1000)))
+    : Math.min(seconds, 130);
+  if (effective <= 0) return { tokens: m.tokens, playedSlug: (m.played || {})[slug] || 0 };
+  const mult = featuredMult > 0 ? featuredMult : 1;
+  const minutes = Math.floor(effective / 60) * mult;
+
+  // Gate-time banking (real seconds, capped). We normally WRITE only when a full
+  // minute of tokens lands (write budget), but we MUST also persist a sub-minute
+  // flush that CROSSES the vote gate -- otherwise the play page unlocks locally
+  // while the server still 403s (the split-session boundary Codex flagged: e.g.
+  // 245s banked + a 55s flush). `effective` is wall-clock clamped, so this
+  // near-gate write cannot help farmers. Tim 2026-06-16.
+  const cur = slug ? ((m.played || {})[slug] || 0) : 0;
+  const nextPlayed = (slug && cur < gateSeconds) ? Math.min(gateSeconds, cur + effective) : cur;
+  const crossesGate = slug && cur < VOTE_GATE_MIN && nextPlayed >= VOTE_GATE_MIN;
+
+  if (minutes <= 0 && !crossesGate) return { tokens: m.tokens, playedSlug: cur };
+  if (minutes > 0) { m.tokens += minutes; m.lifetime += minutes; }
+  if (slug && nextPlayed !== cur) { const played = m.played || {}; played[slug] = nextPlayed; m.played = played; }
+  m.lastPlayTs = ts;
+  await writeMeta(env, uid, m);
+  return { tokens: m.tokens, playedSlug: (m.played || {})[slug] || cur };
 }
 
 // One-shot grant — credits `amount` only if `dedupKey` hasn't been seen.

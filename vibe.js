@@ -1,7 +1,7 @@
 // vibe.js -- the /create page logic. Lets a signed-in player describe a game and
 // have it built (async, by Tim's Mac relay) and played back in a sandboxed iframe.
-// Economy: 1 free prompt, then 1 per 30 min of active play, or a (placeholder) buy
-// button. Dependency-free. Tim 2026-06-15.
+// Economy: first game free, then 60 tokens per game (earned by play +1/min, rate a
+// game +5, daily login +10), or a (placeholder) buy button. Dependency-free. Tim 2026-06-16.
 (function () {
   'use strict';
 
@@ -38,21 +38,20 @@
   if (!els.composer) return;
 
   var pollTimer = null;
-  var SECONDS_PER_PROMPT = 1800;
   var myName = '';
   var lastBuild = null, buildTicker = null;
   var BUILD_ETA_MIN = 22;   // Opus game gen under heavy concurrent-claude load (sonnet fallback is faster)
 
   function show(el, on) { if (el) el.hidden = !on; }
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
-  function px(secs) { return Math.max(1, Math.ceil(secs / 60)); }
   function capture(ev, props) { try { if (window.posthog) window.posthog.capture(ev, props || {}); } catch (e) {} }
 
   var ERRORS = {
     prompt_too_short: 'Add a few more words about your game.',
     prompt_contact: 'Please describe a game -- no links or contacts.',
     prompt_blocked: "Let's keep it friendly. Try another idea.",
-    no_prompts: 'You are out of prompts for now.',
+    no_prompts: 'You need 60 tokens to make a game. Play, rate, or log in to earn them.',
+    need_tokens: 'You need 60 tokens to make a game. Play, rate, or log in to earn them.',
     daily_limit_reached: 'You have hit today\'s limit. Come back tomorrow.',
     sign_in_required: 'Please sign in first.',
     enqueue_failed: 'Something went wrong. Try again.',
@@ -64,7 +63,6 @@
     return fetch('/api/gen/quota', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (q) {
-        SECONDS_PER_PROMPT = q.secondsPerPrompt || 1800;
         if (!q.signed_in) { show(els.signin, true); show(els.composer, false); show(els.mine, false); return q; }
         show(els.signin, false);
         show(els.composer, true);
@@ -78,20 +76,20 @@
   }
 
   function renderQuota(q) {
-    var n = q.prompts || 0;
+    var cost   = q.generationCost || 60;
+    var tokens = q.tokens || 0;
     els.prompts.hidden = false;
-    els.prompts.textContent = n === 1 ? '1 prompt' : n + ' prompts';
-    if (n > 0) {
+    els.prompts.textContent = q.freeAvailable ? 'First game free' : (tokens + ' / ' + cost + ' tokens');
+    var canGen = q.freeAvailable || q.canGenerate || tokens >= cost;
+    if (canGen) {
       show(els.gate, false);
       els.generate.disabled = false;
     } else {
       show(els.gate, true);
       els.generate.disabled = true;
-      var done = (q.playProgress || 0);
-      var pct = Math.min(100, Math.round((done / SECONDS_PER_PROMPT) * 100));
-      els.gateFill.style.width = pct + '%';
-      var left = q.secondsToNext != null ? q.secondsToNext : SECONDS_PER_PROMPT;
-      els.gateText.textContent = 'Play ' + px(left) + ' more min of games to earn your next free game.';
+      els.gateFill.style.width = Math.min(100, Math.round((tokens / cost) * 100)) + '%';
+      var need = q.tokensToNext != null ? q.tokensToNext : Math.max(0, cost - tokens);
+      els.gateText.textContent = 'Earn ' + need + ' more tokens to make a game - play (+1/min), rate a game (+5), or log in daily (+10).';
     }
   }
 
@@ -117,7 +115,7 @@
           var code = (res.d && res.d.error) || 'enqueue_failed';
           setMsg(ERRORS[code] || 'Could not start the build.', 'err');
           els.generate.disabled = false;
-          if (code === 'no_prompts') loadQuota();
+          if (code === 'no_prompts' || code === 'need_tokens') loadQuota();
         }
       })
       .catch(function () { setMsg('Network error. Try again.', 'err'); els.generate.disabled = false; });

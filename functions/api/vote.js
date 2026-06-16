@@ -19,7 +19,7 @@
 
 import { readSession } from './_session.js';
 import { parseCookie } from '../_lib/cookie.js';
-import { grantOnce } from '../_lib/meta.js';
+import { grantOnce, readMeta, VOTE_GATE_MIN } from '../_lib/meta.js';
 import { jsonError } from '../_lib/response.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { checkRate } from '../_lib/rateLimit.js';
@@ -36,6 +36,20 @@ export async function onRequestPost({ request, env }) {
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
   const rateKey = `rate:${ip}:${Math.floor(Date.now() / 60000)}`;
   if (!await checkRate(env, rateKey, 30, 120)) return jsonError('rate limit', 429);
+
+  // Fairness + anti-farm gate (Tim 2026-06-16): a player can only register a
+  // like/dislike after VOTE_GATE_SECONDS of ACTIVE play on THIS game. Active
+  // seconds are banked per (cookie uid, slug) by the heartbeat into meta.played.
+  // Clearing an existing vote is always allowed. The play page shows a countdown
+  // so the gate is visible; this server check is the backstop against spoofing.
+  const settingVote = body.vote === 'like' || body.vote === 'dislike'
+                   || Number(body.deltaLike) > 0 || Number(body.deltaDislike) > 0;
+  if (settingVote) {
+    const cookieUidForGate = parseCookie(request.headers.get('Cookie') || '', 'uid');
+    const gateMeta = cookieUidForGate ? await readMeta(env, cookieUidForGate) : null;
+    const playedSec = (gateMeta && gateMeta.played && gateMeta.played[slug]) || 0;
+    if (playedSec < VOTE_GATE_MIN) return jsonError('play_to_rate', 403);
+  }
 
   const session = await readSession(request, env);
 

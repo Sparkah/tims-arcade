@@ -3,13 +3,13 @@
 //   building -> claim a pending job (so a relay restart won't double-build it)
 //   ready    -> store the generated HTML, mark ready, surface it in the creator's
 //               "My games" (reusing the upload: schema), and email the player
-//   failed   -> mark failed, refund the prompt ONCE, email the player
+//   failed   -> mark failed, refund the EXACT charge ONCE (free gen or 60 tokens), email
 // Terminal states are idempotent: a job only ever goes pending -> building ->
 // ready|failed, refunds happen exactly once, and duplicate/late posts are no-ops
 // (Codex review 2026-06-15). Tim 2026-06-15.
 
 import { json, jsonError } from '../../_lib/response.js';
-import { creditPrompts } from '../../_lib/meta.js';
+import { refundTokens } from '../../_lib/meta.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
@@ -58,7 +58,7 @@ export async function onRequestPost({ request, env }) {
       jobRec.attempts = attempts;
       jobRec.updatedTs = now;
       await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
-      try { await creditPrompts(env, jobRec.uid, 1); } catch (e) { /* best effort */ }
+      try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
       try { await emailUser(env, jobRec, null); } catch (e) { /* best effort */ }
       return json({ ok: true, status: 'failed', reason: jobRec.error });
     }
@@ -78,7 +78,7 @@ export async function onRequestPost({ request, env }) {
     jobRec.error = String(body.error || 'generation_failed').slice(0, 200);
     jobRec.updatedTs = Date.now();
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
-    try { await creditPrompts(env, jobRec.uid, 1); } catch (e) { /* best effort */ }   // refund exactly once
+    try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
     try { await emailUser(env, jobRec, null); } catch (e) { /* best effort */ }
     return json({ ok: true, status: 'failed' });
   }
@@ -131,6 +131,18 @@ export async function onRequestPost({ request, env }) {
   }
 
   return jsonError('bad_status', 400);
+}
+
+// Reverse the exact charge recorded at submit time. Called only on the first
+// transition INTO a terminal-failed state (the `terminal` guards make this run
+// once), mirroring how submit.js charged: restore the free generation, or refund
+// 60 cookie-uid tokens (never touching lifetime). Jobs enqueued before the
+// `charge` field existed have none -> nothing to reverse.
+async function refundCharge(env, jobRec) {
+  const c = jobRec && jobRec.charge;
+  if (!c) return;
+  if (c.kind === 'free' && c.freeKey) await env.VOTES.delete(c.freeKey);
+  else if (c.kind === 'tokens' && c.uid && c.amount > 0) await refundTokens(env, c.uid, c.amount);
 }
 
 function slugify(s) {

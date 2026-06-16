@@ -259,7 +259,10 @@ function legacyRefine() {
 }
 
 
+let lastMeta = {};
+
 function paintMetaPill(m) {
+  lastMeta = m || {};
   const pill   = document.getElementById('meta-pill');
   const tokens = document.getElementById('meta-pill-tokens');
   const streak = document.getElementById('meta-pill-streak');
@@ -399,6 +402,48 @@ function attachEvents() {
   const closeBtn = document.getElementById('lb-close');
   if (boardBtn) boardBtn.addEventListener('click', openLeaderboard);
   if (closeBtn) closeBtn.addEventListener('click', closeLeaderboard);
+
+  // Token explainer popover (tap the 🪙 balance) - answers "why do I need tokens".
+  const GEN_COST  = 60;
+  const tokTokens = document.getElementById('meta-pill-tokens');
+  const tokPop    = document.getElementById('token-pop');
+  const tokPopX   = document.getElementById('token-pop-x');
+  function renderTokenPop() {
+    const t = lastMeta.tokens | 0;
+    const fill = document.getElementById('token-pop-fill');
+    const txt  = document.getElementById('token-pop-prog-txt');
+    if (fill) fill.style.width = Math.min(100, Math.round(t / GEN_COST * 100)) + '%';
+    if (txt) {
+      if (t >= GEN_COST) txt.textContent = t + ' / ' + GEN_COST + ' - you can make a game now';
+      else {
+        const need = GEN_COST - t;
+        txt.textContent = t + ' / ' + GEN_COST + ' - ' + need + ' to go (play ' + need + ' min or rate ' + Math.ceil(need / 5) + ' games)';
+      }
+    }
+  }
+  if (tokTokens && tokPop) {
+    tokTokens.style.cursor = 'pointer';
+    tokTokens.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const show = tokPop.hidden;
+      if (show) renderTokenPop();
+      tokPop.hidden = !show;
+      const hint = document.getElementById('token-hint');
+      if (hint) hint.hidden = true;
+      try { localStorage.setItem('tokenHintSeen', '1'); } catch (_) {}
+    });
+    if (tokPopX) tokPopX.addEventListener('click', () => { tokPop.hidden = true; });
+    document.addEventListener('click', (e) => {
+      if (!tokPop.hidden && !tokPop.contains(e.target) && e.target !== tokTokens && !tokTokens.contains(e.target)) tokPop.hidden = true;
+    });
+  }
+  // First-visit nudge pointing at the balance (once per browser).
+  try {
+    if (!localStorage.getItem('tokenHintSeen')) {
+      const hint = document.getElementById('token-hint');
+      if (hint) { hint.hidden = false; setTimeout(() => { hint.hidden = true; }, 6000); }
+    }
+  } catch (_) {}
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     const panel = document.getElementById('lb-panel');
@@ -1322,9 +1367,12 @@ function mergeFreshVoteState(fresh) {
 }
 
 async function vote(slug, action, cardEl) {
+  const wasInSession = votedSlugsThisSession.has(slug);
   votedSlugsThisSession.add(slug);
   const prev = myVotes[slug] || null;
   const next = prev === action ? null : action;
+  // Snapshot pre-click counts so a gated 403 can roll the optimistic bump back.
+  const prevCounts = counts[slug] ? { likes: counts[slug].likes | 0, dislikes: counts[slug].dislikes | 0 } : null;
 
   // Optimistic local update — paint instantly, server reconciles
   let dl = 0, dd = 0;
@@ -1373,8 +1421,34 @@ async function vote(slug, action, cardEl) {
       // is one-shot per (uid, slug) — repeat votes don't earn — but a stale
       // pill never under-shows reality.
       if (next === 'like') refreshMetaPill();
+    } else if (r.status === 403) {
+      // Vote gate (Tim 2026-06-16): rating needs ~5 min of active play on this
+      // game. The server rejected it, so roll the optimistic state back to
+      // pre-click and nudge toward the play page, where the countdown lives.
+      if (prev) myVotes[slug] = prev; else delete myVotes[slug];
+      if (prevCounts) counts[slug] = prevCounts; else delete counts[slug];
+      if (!wasInSession) votedSlugsThisSession.delete(slug);
+      localStorage.setItem('myVotes', JSON.stringify(myVotes));
+      refreshCard(cardEl, slug);
+      showRateHint();
     }
   } catch (e) { /* offline-tolerant */ }
+}
+
+// Brief, dependency-free toast nudging the player to earn rating by playing. Shown
+// when /api/vote rejects a gallery-card vote with the 5-min play gate. (Tim 2026-06-16)
+function showRateHint() {
+  let t = document.getElementById('rate-hint-toast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'rate-hint-toast';
+    t.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1b1b22;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;line-height:1.3;z-index:9999;box-shadow:0 4px 16px rgba(0,0,0,.35);max-width:88vw;text-align:center;transition:opacity .25s;';
+    document.body.appendChild(t);
+  }
+  t.textContent = 'Play about 5 minutes to rate this game - open it and play first.';
+  t.style.opacity = '1';
+  clearTimeout(showRateHint._t);
+  showRateHint._t = setTimeout(function () { t.style.opacity = '0'; }, 2800);
 }
 
 async function refreshMetaPill() {

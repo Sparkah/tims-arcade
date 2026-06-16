@@ -54,6 +54,17 @@
     .topbar .back:hover, .topbar .vote:hover { border-color: var(--ink); color: var(--ink); }
     .topbar .vote.active.like    { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
     .topbar .vote.active.dislike { background: rgba(200,69,31,0.10); border-color: var(--warn); color: var(--warn); }
+    /* Vote gate (Tim 2026-06-16): rating unlocks after 5 min of ACTIVE play.
+       Locked thumbs read as disabled; a small clock pill counts down. */
+    .topbar .vote.locked { opacity: 0.38; cursor: not-allowed; pointer-events: none; }
+    .topbar .rate-clock {
+      display: none; align-items: center; gap: 4px;
+      font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+      letter-spacing: 0.04em; color: var(--ink-soft);
+      border: 1px dashed var(--rule); border-radius: var(--radius);
+      padding: 5px 9px; white-space: nowrap; user-select: none;
+    }
+    .topbar .rate-clock.show { display: inline-flex; }
     .topbar .title {
       font-family: var(--font-display);
       font-weight: 700;
@@ -86,6 +97,7 @@
         min-height: 32px;
       }
       .topbar .btn-label { display: none; }
+      .topbar .rate-clock { padding: 5px 7px; font-size: 12px; min-height: 32px; }
       .topbar .title {
         font-size: 13px;
         font-style: normal;
@@ -417,6 +429,7 @@
     <button class="vote" id="comments-btn" aria-label="Comments" aria-expanded="false">💬 <span id="comments-num">0</span></button>
     <button class="vote" id="share" aria-label="Share">↗ <span class="btn-label">Share</span></button>
     <button class="vote" id="suggest-btn" aria-label="Suggest a game" title="What should the factory build next?">💡 <span class="btn-label">Suggest</span></button>
+    <span class="rate-clock" id="rate-clock" aria-live="polite" title="Play to unlock rating">&#9201; rate in <span id="rate-clock-time">5:00</span></span>
     <button class="vote like"    id="like"    aria-label="Like">👍 <span id="like-num">0</span></button>
     <button class="vote dislike" id="dislike" aria-label="Dislike">👎 <span id="dislike-num">0</span></button>
   </div>
@@ -1205,6 +1218,62 @@
         if (window.posthog) posthog.capture('game_voted', { slug, action, seconds_played: Math.round(pending) });
       }
 
+      // ── Vote gate: rating unlocks after VOTE_GATE_SECONDS of ACTIVE play ──
+      // (Tim 2026-06-16). The page must be VISIBLE with real input within
+      // INACTIVE_MS for the clock to advance -- the same activity test the
+      // heartbeat uses. The server (meta.played[slug], banked by the heartbeat)
+      // is the cross-session baseline AND the real enforcer; this clock is the UX.
+      const VOTE_GATE_SECONDS = 300;
+      let bankedActive  = 0;    // server-side active seconds on this slug (0..300)
+      let sessionActive = 0;    // this session's active seconds (client clock)
+      let rateUnlocked  = false;
+      const _likeBtn    = document.getElementById('like');
+      const _dislikeBtn = document.getElementById('dislike');
+      const _rateClock  = document.getElementById('rate-clock');
+      const _rateClockT = document.getElementById('rate-clock-time');
+
+      function totalActive() { return bankedActive + sessionActive; }
+      function fmtMSS(s) {
+        s = Math.max(0, Math.round(s));
+        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+      }
+      function applyRateGate() {
+        const unlocked = totalActive() >= VOTE_GATE_SECONDS;
+        if (unlocked && !rateUnlocked) flush(false);   // push latest active time so the SERVER agrees before a vote
+        rateUnlocked = unlocked;
+        _likeBtn.classList.toggle('locked', !unlocked);
+        _dislikeBtn.classList.toggle('locked', !unlocked);
+        _rateClock.classList.toggle('show', !unlocked);
+        if (!unlocked) _rateClockT.textContent = fmtMSS(VOTE_GATE_SECONDS - totalActive());
+      }
+      // Expose to the rate-on-leave overlay (separate IIFE below).
+      window.__rateGate = {
+        unlocked: () => rateUnlocked,
+        remaining: () => Math.max(0, VOTE_GATE_SECONDS - totalActive()),
+        fmt: fmtMSS,
+      };
+
+      // Banked baseline: cookie-uid active seconds on this slug, from /api/me/meta.
+      fetch('/api/me/meta', { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : null)
+        .then(meta => {
+          const p = meta && meta.played && meta.played[slug];
+          if (typeof p === 'number') bankedActive = Math.min(VOTE_GATE_SECONDS, p);
+          applyRateGate();
+        })
+        .catch(() => applyRateGate());
+
+      // 1s clock: advances ONLY during active, visible play (mirrors the gate).
+      setInterval(() => {
+        if (rateUnlocked) return;
+        if (document.visibilityState === 'visible' && (Date.now() - lastActivity) <= INACTIVE_MS) {
+          sessionActive += 1;
+          applyRateGate();
+        }
+      }, 1000);
+
+      applyRateGate();   // initial locked paint (5:00) before meta lands
+
       // ── Comments panel ───────────────────────────────────────────────
       // Fetches /api/comments?slug=… on first open, renders the latest 10
       // anonymous notes. Re-fetches after the rate-on-leave overlay submits
@@ -1373,9 +1442,11 @@
       });
 
       function onVote(action) {
-        votedThisSession = true;
         const prev = myVotes[slug] || null;
         const next = prev === action ? null : action;
+        // Gate: can't SET a like/dislike until 5 min of active play (clearing is ok).
+        if (!rateUnlocked && next) return;
+        votedThisSession = true;
         trackVote(next || 'clear');
         let dl = 0, dd = 0;
         if (prev === 'like')    dl -= 1;
@@ -1393,7 +1464,20 @@
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ slug, deltaLike: dl, deltaDislike: dd }),
-        }).then(r => r.ok ? r.json() : null).then(updated => {
+        }).then(r => {
+          if (r.status === 403) {
+            // Server: not enough active play yet. Revert the optimistic bump + re-lock.
+            if (prev) myVotes[slug] = prev; else delete myVotes[slug];
+            localStorage.setItem('myVotes', JSON.stringify(myVotes));
+            counts.likes    = Math.max(0, counts.likes - dl);
+            counts.dislikes = Math.max(0, counts.dislikes - dd);
+            rateUnlocked = false;
+            applyRateGate();
+            paintCounts(counts);
+            return null;
+          }
+          return r.ok ? r.json() : null;
+        }).then(updated => {
           if (updated) {
             counts = updated;
             paintCounts(counts);
@@ -1442,6 +1526,19 @@
 
       function showOverlay(href) {
         pendingHref = href;
+        // Vote gate: under 5 min of active play, hide the thumbs and invite a
+        // note instead -- rating stays locked, but feedback still flows.
+        const g = window.__rateGate;
+        const row   = overlay.querySelector('.rate-row');
+        const sub   = overlay.querySelector('.rate-sub');
+        const title = overlay.querySelector('.rate-title');
+        if (g && !g.unlocked()) {
+          if (row) row.style.display = 'none';
+          if (title) title.textContent = 'Leave a note?';
+          if (sub) sub.textContent = 'Play ' + g.fmt(g.remaining()) + ' more (active) to rate this - a note still helps.';
+        } else if (row) {
+          row.style.display = '';
+        }
         overlay.style.display = 'flex';
         document.getElementById('rate-comment').focus();
       }

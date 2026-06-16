@@ -10,7 +10,8 @@ import { readSession } from '../_session.js';
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 import { checkRate } from '../../_lib/rateLimit.js';
 import { filterText } from '../../_lib/chatmod.js';
-import { grantFreePrompt, spendPrompts, creditPrompts, readMeta } from '../../_lib/meta.js';
+import { parseCookie } from '../../_lib/cookie.js';
+import { spendTokens, refundTokens, readMeta, GENERATION_COST } from '../../_lib/meta.js';
 
 const MIN_PROMPT = 3;
 const MAX_PROMPT = 500;
@@ -44,15 +45,34 @@ export async function onRequestPost({ request, env }) {
   if (!filtered.ok) return jsonError('prompt_' + (filtered.reason || 'blocked'), 400);
   const prompt = filtered.text;
 
-  // First-ever submit gets the free prompt (idempotent), then spend one.
-  await grantFreePrompt(env, session.uid);
-  const paid = await spendPrompts(env, session.uid, 1);
-  if (!paid) return jsonError('no_prompts', 402);
+  // Generation is priced in tokens -- the same balance the player earns by
+  // play/like/login and sees in the pill. The FIRST generation per account is
+  // free, gated on the SESSION (per-email) so clearing the anon cookie can't
+  // re-mint it. Subsequent generations spend GENERATION_COST tokens from the
+  // COOKIE uid's balance (where tokens accrue + are displayed). Tim 2026-06-16.
+  const cookieUid = parseCookie(request.headers.get('Cookie') || '', 'uid');
+  const sessionMeta = await readMeta(env, session.uid);
+  const freeKey = `freegen:${session.uid}`;
+  // "Free" only if NEITHER the new freegen key NOR the legacy prompt-era
+  // freeGranted flag is set, so an account that already used the old free prompt
+  // does NOT get a second free generation across the migration (Codex review 2026-06-16).
+  const isFree = !sessionMeta.freeGranted && !(await env.VOTES.get(freeKey));
+  // Accepted-risk: KV has no atomic compare-and-set, so two concurrent submits for
+  // one account can both see freegen missing (double free) or race the same 60-token
+  // balance (double spend). Same documented meta:<uid> read-modify-write race the
+  // gallery already tolerates; bounded by the 20/day cap + the IP rate limit above.
+  if (isFree) {
+    await env.VOTES.put(freeKey, '1');          // one-time free generation, claimed
+  } else {
+    const paid = cookieUid && await spendTokens(env, cookieUid, GENERATION_COST);
+    if (!paid) return jsonError('need_tokens', 402);
+  }
 
-  // Daily cap counts only paid generations -- so it never burns on no_prompts.
+  // Daily cap counts only accepted generations -- so it never burns on rejects.
   const day = new Date().toISOString().slice(0, 10);
   if (!await checkRate(env, `genrate:${session.uid}:${day}`, DAILY_GEN_CAP, 60 * 60 * 26)) {
-    await creditPrompts(env, session.uid, 1);   // refund -- nothing was enqueued
+    if (isFree) await env.VOTES.delete(freeKey);                             // restore free gen
+    else if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST); // refund tokens (not lifetime)
     return jsonError('daily_limit_reached', 429);
   }
 
@@ -60,17 +80,21 @@ export async function onRequestPost({ request, env }) {
   // enumerated (Codex review 2026-06-15).
   const id = crypto.randomUUID().replace(/-/g, '');
   const ts = Date.now();
-  const meta = await readMeta(env, session.uid);
-  const displayName = meta.displayName || (session.email || '').split('@')[0] || 'player';
+  const displayName = sessionMeta.displayName || (session.email || '').split('@')[0] || 'player';
   const jobRec = {
     id, uid: session.uid, email: session.email, prompt, displayName,
     status: 'pending', slug: null, title: null, error: null,
+    // What this job was charged, so a terminal build failure refunds the EXACT
+    // charge once (admin/gen-result.js): restore the free generation, or 60
+    // cookie-uid tokens. cookieUid may be null (no cookie) -> nothing to refund.
+    charge: isFree ? { kind: 'free', freeKey } : { kind: 'tokens', uid: cookieUid, amount: GENERATION_COST },
     ts, updatedTs: ts,
   };
   try {
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
   } catch (e) {
-    await creditPrompts(env, session.uid, 1);   // refund -- the job wasn't enqueued
+    if (isFree) await env.VOTES.delete(freeKey);                             // restore free gen
+    else if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST); // refund tokens (not lifetime)
     return jsonError('enqueue_failed', 500);
   }
   // Signal new work so the vibe-relay detects it with a cheap GET (gen-queue

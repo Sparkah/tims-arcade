@@ -21,17 +21,16 @@
 // this allows for shared connections (NAT) while blocking obvious bots.
 
 import { parseCookie } from '../_lib/cookie.js';
-import { creditTokens, accruePlay, SECONDS_PER_PROMPT, PROMPT_BANK_CAP } from '../_lib/meta.js';
+import { creditPlayAndTokens } from '../_lib/meta.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { recordActiveDay } from '../_lib/cohort.js';
 import { checkRate } from '../_lib/rateLimit.js';
 import { SOCIAL_SLUGS, touchPresence } from '../_lib/social.js';
-import { readSession } from './_session.js';
 
-// Vibe-coder economy tunables live in _lib/meta.js (single source of truth).
-// With PROMPT_BANK_CAP=1, accruePlay skips its KV write for any signed-in player
-// who already holds a prompt -- so the only per-heartbeat meta writes come from
-// players actively grinding toward their next one with an empty balance.
+// Token credit and the per-game vote-gate timer share ONE meta write per flush
+// (creditPlayAndTokens, see _lib/meta.js), so the gate adds no write-budget cost.
+// The retired "prompt" economy used to do a second meta write here; generation is
+// now priced directly in tokens (Tim 2026-06-16).
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -67,12 +66,24 @@ export async function onRequestPost({ request, env }) {
   // award the base rate.
   const uid = parseCookie(request.headers.get('Cookie') || '', 'uid');
   if (uid) {
-    let minutes = Math.floor(seconds / 60);
-    if (minutes > 0) {
+    // Creations (player-generated, sandboxed iframe -- active input can't be
+    // measured) must NOT feed the token economy or the vote gate, else idling on
+    // one would farm tokens + unlock rating. Server-check creationslug:<slug> so a
+    // client can't bypass by omitting kind (Codex review 2026-06-16). The `||`
+    // short-circuits, so the KV read only fires when kind isn't 'creation'.
+    const isCreation = body.kind === 'creation' || !!(await env.VOTES.get(`creationslug:${slug}`));
+    if (!isCreation) {
+      let featuredMult = 1;
       const featured = await env.VOTES.get(`featured:${dateUtc}`);
-      if (featured === slug) minutes *= 2;
-      await creditTokens(env, uid, minutes);
+      if (featured === slug) featuredMult = 2;
+      // ONE meta write, and ONLY when a full minute is credited (creditPlayAndTokens
+      // wall-clock-clamps and writes only when minutes>0): credit tokens (1/min, 2x on
+      // the featured game) AND bank this slug's active seconds toward the 5-min vote
+      // gate. The retired prompt economy's second meta write was removed, so net writes
+      // per flush did not increase.
+      await creditPlayAndTokens(env, uid, { slug, seconds, featuredMult });
     }
+
     // Retention cohort: log today as an active day for this uid. recordActiveDay
     // write-gates to ~1 KV write/uid/day (no-ops once today is already recorded),
     // and ANY visible-time heartbeat counts the return so short sessions aren't missed.
@@ -86,26 +97,6 @@ export async function onRequestPost({ request, env }) {
       try { await touchPresence(env, slug, uid); } catch (e) { /* never block the heartbeat */ }
     }
   }
-
-  // Vibe-coder economy: bank active play toward generation prompts on the SESSION
-  // uid (per-email), so clearing the anon cookie can't farm free prompts. Isolated
-  // + best-effort — a failure here must never break the heartbeat. Signed-in only.
-  // kind==='creation' (player-generated game, played in a sandboxed iframe where
-  // active-input can't be measured) counts toward plays/seconds METRICS only --
-  // it must NOT accrue prompts, or idling on a creation would farm the economy.
-  try {
-    if (body.kind !== 'creation') {
-      const session = await readSession(request, env);
-      if (session && session.uid) {
-        // Server-side authority: never accrue prompts for a creation slug, even if
-        // the client omits kind (Codex review 2026-06-15). One read, signed-in only.
-        const isCreation = await env.VOTES.get(`creationslug:${slug}`);
-        if (!isCreation) {
-          await accruePlay(env, session.uid, seconds, { secondsPerPrompt: SECONDS_PER_PROMPT, cap: PROMPT_BANK_CAP });
-        }
-      }
-    }
-  } catch (e) { /* never block the heartbeat */ }
 
   return new Response(null, { status: 204 });
 }
