@@ -48,6 +48,13 @@ var STRINGS = {
     v_gold: 'Gold', v_silver: 'Silver', v_bronze: 'Bronze', v_empty: 'Not restored',
     v_added: 'Enshrined in your Vault!', v_again: 'Restored again',
     v_next: 'Next treasure:', v_full: 'Vault complete — every relic restored!',
+    // ── M2 reason-to-return ──
+    commission: "Today's Commission", comm_bonus: 'Bonus', comm_done: 'Done today',
+    comm_pay: 'Commission bonus!', streak: 'Day streak', streak1: 'Day 1',
+    day_streak: 'day streak', polish_vault: 'Polish the Vault', dusty: 'Dusty',
+    donations: 'Visitor tips', collected: 'Collected', vault_tidy: 'Vault gleaming',
+    streak7: '7-day streak! Big bonus', welcome_back: 'Welcome back',
+    coins_waiting: 'waiting', restore_it: 'Restore it',
   },
   ru: {
     title: 'Реставратор Реликвий',
@@ -76,6 +83,13 @@ var STRINGS = {
     v_gold: 'Золото', v_silver: 'Серебро', v_bronze: 'Бронза', v_empty: 'Не готово',
     v_added: 'В вашем музее!', v_again: 'Снова отреставрировано',
     v_next: 'След. сокровище:', v_full: 'Музей собран — все реликвии готовы!',
+    // ── M2 reason-to-return ──
+    commission: 'Заказ дня', comm_bonus: 'Бонус', comm_done: 'Сделано сегодня',
+    comm_pay: 'Бонус за заказ!', streak: 'Дней подряд', streak1: 'День 1',
+    day_streak: 'дней подряд', polish_vault: 'Навести блеск', dusty: 'Пыльно',
+    donations: 'Чаевые гостей', collected: 'Собрано', vault_tidy: 'Музей сияет',
+    streak7: '7 дней подряд! Большой бонус', welcome_back: 'С возвращением',
+    coins_waiting: 'ждут', restore_it: 'Реставрировать',
   },
 };
 
@@ -160,7 +174,31 @@ var relicRec = [];          // per-RELICS record (length NUM_RELICS)
 var vaultScroll = 0;        // VAULT pedestal-shelf scroll offset (px)
 var vaultMaxScroll = 0;
 var lastRestored = -1;      // relic just enshrined (flash on the next REVEAL/VAULT)
-var META_SCHEMA = 2;        // bump when meta_v1 shape changes (migration in onReady)
+var META_SCHEMA = 3;        // bump when meta_v1 shape changes (migration in onReady)
+
+// ── M2 REASON-TO-RETURN (daily commission + streak + overnight patina/tips) ──
+// Grown out of M1's museum fabric: a returning player finds (a) a NEW relic
+// COMMISSIONED for today (rotates daily, pays a streak-scaled bonus, never the
+// same as yesterday) and (b) their Vault relics have accrued PATINA overnight
+// (visibly dustier pedestals) plus VISITOR DONATIONS — one "Polish the Vault"
+// tap clears the dust and collects the coins. None of this existed in M1, and
+// it is all spoken in the game's own verbs (relics / restoration / museum).
+var DAY_MS = 86400000;
+var IDLE_CAP_H = 12;            // overnight accrual caps at 12h (uncapped kills retention)
+var PATINA_FULL_H = 10;         // hours away for a Vault relic to reach full dust
+var TIP_PER_VALUE = 0.012;      // coins/hour per point of collectionValue (visitor tips)
+var COMM_BONUS_BASE = 0.5;      // commission pays +50% of relic value as bonus, ×streak mult
+var streakDays = 0;             // consecutive-day login streak
+var lastDayKey = 0;             // last calendar-day index we recorded a login
+var commDay = -1;               // day index the current commission belongs to
+var commRelic = 0;              // relic index commissioned for `commDay`
+var commDone = false;           // already restored today's commission?
+var patina = 0;                 // 0..1 overnight dust currently on the Vault (display + collectable)
+var pendingTips = 0;            // visitor-donation coins accrued while away, awaiting collect
+var lastSeenMs = 0;             // wall-clock ms of last save (for accrual on next open)
+var welcomeT = 0;               // MENU "welcome back" banner timer
+var vaultPolishPop = 0;         // Polish-the-Vault collect animation 0..1
+var commPay = 0;                // last commission bonus paid (shown on APPRAISE)
 
 // active restoration
 var relic = null;           // current RELICS entry
@@ -206,6 +244,10 @@ function saveMeta() {
       coins: coins, best: best, totalStars: totalStars, unlockedMax: unlockedMax,
       upWidth: upWidth, upSpeed: upSpeed, upShine: upShine,
       relics: serializeRec(),
+      // M2 reason-to-return state
+      streakDays: streakDays, lastDayKey: lastDayKey,
+      commDay: commDay, commRelic: commRelic, commDone: commDone,
+      patina: patina, pendingTips: pendingTips, lastSeenMs: lastSeenMs,
     }));
   } catch (e) {}
 }
@@ -262,6 +304,73 @@ function enshrineRelic(i, stars, coinsEarned) {
   if (coinsEarned > rec.bestCoins) rec.bestCoins = coinsEarned;
   if (stars > rec.stars) rec.stars = stars;     // best-stars only ever increases
   return firstEver || tieredUp;
+}
+
+// ── M2 DAILY / STREAK / IDLE HELPERS ─────────────────────────────────────
+// dayKey = whole-days since epoch in LOCAL time (so "a new day" matches the
+// player's clock, not UTC). Deterministic per calendar day.
+function dayKey() {
+  var n = new Date();
+  return Math.floor((n.getTime() - n.getTimezoneOffset() * 60000) / DAY_MS);
+}
+// streak multiplier on the commission bonus: 1.0 at day 1, +0.1/day, capped 2.0
+// (so a 7-day streak roughly doubles the bonus — a reason to keep the chain).
+function streakMult() { return GF.clamp(1 + (Math.max(1, streakDays) - 1) * 0.1, 1, 2); }
+// today's commissioned relic — deterministic from the day index, always one the
+// player can actually restore (within unlockedMax). A cheap LCG keyed by the day
+// guarantees it differs from yesterday for any unlock count > 1.
+function commissionFor(dk) {
+  var hi = Math.max(0, Math.min(unlockedMax, NUM_RELICS - 1));
+  if (hi === 0) return 0;
+  var r = ((dk * 1103515245 + 12345) >>> 8) % (hi + 1);
+  // avoid repeating yesterday's pick when there's room to choose another
+  if (hi >= 1) {
+    var prev = ((((dk - 1) * 1103515245 + 12345) >>> 8) % (hi + 1));
+    if (r === prev) r = (r + 1) % (hi + 1);
+  }
+  return r;
+}
+// Roll the calendar over on open: update the login streak, refresh today's
+// commission, and accrue overnight PATINA + visitor TIPS from time away. Called
+// once in onReady AFTER the save is loaded. Returns true if a new day started.
+function rolloverDaily() {
+  var dk = dayKey();
+  var now = Date.now();
+  var firstRun = (lastDayKey === 0 && streakDays === 0);
+  // overnight accrual (only when we have a prior session + a populated museum)
+  if (lastSeenMs > 0 && restoredCount() > 0) {
+    var hours = GF.clamp((now - lastSeenMs) / 3600000, 0, IDLE_CAP_H);
+    if (hours > 0.02) {
+      patina = GF.clamp(patina + hours / PATINA_FULL_H, 0, 1);
+      pendingTips += Math.round(collectionValue() * TIP_PER_VALUE * hours);
+    }
+  }
+  // login streak: same day = no change; +1 day = extend; gap = reset to 1
+  if (dk !== lastDayKey) {
+    if (lastDayKey > 0 && dk - lastDayKey === 1) streakDays = streakDays + 1;
+    else streakDays = 1;
+    lastDayKey = dk;
+    welcomeT = firstRun ? 0 : 2.6;   // banner only on a genuine return, not first ever
+  }
+  if (streakDays < 1) streakDays = 1;
+  // refresh today's commission if it's a new day (or never set)
+  if (commDay !== dk) { commDay = dk; commRelic = commissionFor(dk); commDone = false; }
+  lastSeenMs = now;
+  saveMeta();
+  return !firstRun && welcomeT > 0;
+}
+// Collect the overnight reward: clear the Vault patina and bank the visitor tips.
+// Thematic "you tidied the museum and the tips left while you were gone are
+// yours". Returns the coins collected (0 if nothing pending).
+function polishVault() {
+  var got = pendingTips | 0;
+  coins += got;
+  pendingTips = 0;
+  patina = 0;
+  vaultPolishPop = 1;
+  if (got > 0 && got > best) { /* tips don't set 'best' (that's a per-relic payout) */ }
+  saveMeta();
+  return got;
 }
 
 // ── RELIC GEOMETRY ───────────────────────────────────────────────────────
@@ -476,6 +585,15 @@ function finishRelic() {
   var mult = stars === 3 ? 1.0 : stars === 2 ? 0.7 : 0.45;
   appraiseCoins = Math.round((COINS_BASE + relic.val) * mult * (1 + relicIdx * 0.08));
   coins += appraiseCoins;
+  // M2: if this IS today's commissioned relic and it hasn't been done yet, pay a
+  // streak-scaled bonus on top — the daily reason-to-return reward, earned by
+  // the game's own verb (restoring) rather than a bare login popup.
+  commPay = 0;
+  if (!commDone && relicIdx === commRelic && commDay === dayKey()) {
+    commPay = Math.max(1, Math.round(relic.val * COMM_BONUS_BASE * streakMult()));
+    coins += commPay;
+    commDone = true;
+  }
   totalStars += stars;
   if (appraiseCoins > best) best = appraiseCoins;
   // M1: permanently enshrine this restoration in the owned Vault museum. A
@@ -557,6 +675,7 @@ function overlayDown(x, y) {
       var rc = shopRects[i];
       if (hit(rc, x, y)) {
         if (rc.kind === 'play') { GF.sfx('tap'); startGame(); return true; }
+        if (rc.kind === 'comm') { GF.sfx('tap'); welcomeT = 0; startRelic(GF.clamp(rc.idx | 0, 0, unlockedMax)); return true; }
         if (rc.kind === 'vault') { GF.sfx('tap'); vaultScroll = 0; _vaultFrom = 'MENU'; gs = 'VAULT'; return true; }
         if (rc.kind === 'relic' && rc.idx <= unlockedMax) { GF.sfx('tap'); startRelic(rc.idx); return true; }
         if (rc.kind === 'relic') { hintMsg = GF.t('unlock') + ' ' + RELICS[rc.idx].unlock; hintT = 1.4; GF.sfx('error'); return true; }
@@ -731,6 +850,17 @@ function onUp(x, y) {
       var rc = shopRects[i];
       if (!hit(rc, x, y)) continue;
       if (rc.kind === 'vback') { GF.sfx('tap'); lastRestored = -1; gs = (_vaultFrom === 'REVEAL') ? 'REVEAL' : 'MENU'; return; }
+      if (rc.kind === 'vpolish') {
+        var got = polishVault();
+        GF.sfx('appraise');                                   // satisfying restoration arp
+        GF.setShake(0.4);
+        // sparkle bloom across the shelf to sell the "dust swept off" moment
+        for (var sp = 0; sp < 22; sp++) {
+          GF.spawnParticles(40 * GF.S + Math.random() * (GF.W - 80 * GF.S), GF.H * 0.2 + Math.random() * GF.H * 0.5, '#ffe9a0', 2);
+        }
+        if (got > 0) GF.happytime();
+        return;
+      }
       if (rc.kind === 'vrelic') {
         if (rc.idx <= unlockedMax) { GF.sfx('tap'); lastRestored = -1; startRelic(rc.idx); }
         else { hintMsg = GF.t('unlock') + ' ' + RELICS[rc.idx].unlock; hintT = 1.4; GF.sfx('error'); }
@@ -747,6 +877,8 @@ function update(dt) {
   if (stagePop > 0) stagePop = Math.max(0, stagePop - dt * 1.6);
   if (bigPop > 0) bigPop = Math.max(0, bigPop - dt * 1.4);
   if (hintT > 0) hintT = Math.max(0, hintT - dt);
+  if (welcomeT > 0) welcomeT = Math.max(0, welcomeT - dt);      // M2 welcome-back toast
+  if (vaultPolishPop > 0) vaultPolishPop = Math.max(0, vaultPolishPop - dt * 0.6);  // M2 polish confirm
   if (newUnlock >= 0) { /* keep until next relic */ }
 
   if (gs === 'APPRAISE') { appraiseT += dt; return; }
@@ -1506,6 +1638,15 @@ function drawAppraise(ctx) {
   ctx.fillText('+' + shownCoins, W / 2 - 34 * S, cy + 98 * S);
   ctx.restore();
 
+  // 3b) M2 COMMISSION BONUS line — the daily reason-to-return payoff, shown when
+  // this restore fulfilled today's commission. Sits between coins and the unlock
+  // banner; both fit (unlock is at +146, this at +126).
+  if (commPay > 0 && appraiseT > 0.9) {
+    ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText('+' + commPay + ' ' + GF.t('comm_pay'), W / 2, cy + 126 * S);
+  }
+
   // 4) newly unlocked relic banner
   if (newUnlock >= 0 && appraiseT > 1.0) {
     ctx.fillStyle = '#7af0a0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -1691,6 +1832,93 @@ function drawBigButton(ctx, b, label, enabled, secondary) {
   ctx.restore();
 }
 
+// ── M2: streak flame chip — small pill, top-right of the MENU header ────────
+// Right edge anchored at (ax, ay-top); draws leftward so it never collides with
+// the centered title. Shows the consecutive-day login streak.
+function drawStreakChip(ctx, ax, ayTop) {
+  var S = GF.S;
+  var lbl = streakDays + '';
+  ctx.font = 'bold ' + GF.clamp(13 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+  var tw = ctx.measureText(lbl).width;
+  var ph = GF.clamp(26 * S, 22, 34), pw = tw + ph + 14 * S;   // room for flame + number
+  var x = ax - pw, y = ayTop;
+  ctx.save();
+  GF.rr(ctx, x, y, pw, ph, ph / 2);
+  ctx.fillStyle = 'rgba(255,140,40,0.16)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,150,60,0.5)'; ctx.lineWidth = 1.3 * S; ctx.stroke();
+  // little flame glyph (vector) — flickers
+  var fx = x + ph * 0.5, fy = y + ph * 0.5, fr = ph * 0.30;
+  var fl = 0.85 + 0.15 * Math.sin(performance.now() / 140);
+  ctx.beginPath();
+  ctx.moveTo(fx, fy - fr * 1.2 * fl);
+  ctx.quadraticCurveTo(fx + fr, fy - fr * 0.1, fx + fr * 0.55, fy + fr * 0.7);
+  ctx.quadraticCurveTo(fx + fr * 0.2, fy + fr * 1.1, fx, fy + fr);
+  ctx.quadraticCurveTo(fx - fr * 0.2, fy + fr * 1.1, fx - fr * 0.55, fy + fr * 0.7);
+  ctx.quadraticCurveTo(fx - fr, fy - fr * 0.1, fx, fy - fr * 1.2 * fl);
+  var fg = ctx.createLinearGradient(fx, fy - fr, fx, fy + fr);
+  fg.addColorStop(0, '#ffd24a'); fg.addColorStop(1, '#ff6a2a');
+  ctx.fillStyle = fg; ctx.fill();
+  // streak number
+  ctx.fillStyle = '#ffd9a0'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(lbl, x + ph * 0.92, y + ph / 2 + 0.5 * S);
+  ctx.restore();
+}
+
+// ── M2: TODAY'S COMMISSION card — a fresh relic commissioned for today that
+// pays a streak-scaled bonus. Returns a clickable rect ({kind:'comm'}) so a tap
+// jumps straight into restoring it. This is the screen element that is DIFFERENT
+// every day: a returning player always sees a new featured relic to restore. ──
+function drawCommission(ctx, topY) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var ci = GF.clamp(commRelic | 0, 0, NUM_RELICS - 1);
+  var rel = RELICS[ci];
+  var cw = Math.min(W - 28 * S, 440 * S), ch = GF.clamp(58 * S, 48, 78);
+  var x = (W - cw) / 2, y = topY;
+  var bonus = Math.max(1, Math.round(rel.val * COMM_BONUS_BASE * streakMult()));
+  ctx.save();
+  GF.rr(ctx, x, y, cw, ch, 14 * S);
+  // a warm gold-tinted card; pulses softly when not yet done today
+  var glow = commDone ? 0 : (0.5 + 0.5 * Math.sin(performance.now() / 420));
+  var bg = ctx.createLinearGradient(x, y, x + cw, y);
+  bg.addColorStop(0, 'rgba(120,90,30,' + (commDone ? 0.18 : 0.30) + ')');
+  bg.addColorStop(1, 'rgba(70,55,25,' + (commDone ? 0.14 : 0.22) + ')');
+  ctx.fillStyle = bg; ctx.fill();
+  if (!commDone) { ctx.shadowColor = 'rgba(255,210,74,' + (0.25 * glow) + ')'; ctx.shadowBlur = 14 * S; }
+  ctx.strokeStyle = commDone ? 'rgba(255,210,74,0.3)' : 'rgba(255,210,74,0.7)';
+  ctx.lineWidth = 1.6 * S; ctx.stroke(); ctx.shadowBlur = 0;
+  // mini relic icon (left)
+  var mb = { cx: x + ch * 0.5, cy: y + ch * 0.5, r: ch * 0.34, size: ch * 0.68 };
+  ctx.save(); GF.rr(ctx, x, y, cw, ch, 14 * S); ctx.clip();
+  drawRelicShape(ctx, mb, rel, commDone ? 1.0 : 0.0, false);  // shows DULL (pre-restore) until done
+  ctx.restore();
+  // header + relic name
+  var tx = x + ch + 6 * S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffe9b0';
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('commission').toUpperCase(), tx, y + ch * 0.30);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + GF.clamp(15 * S, 12, 21) + 'px Inter, system-ui, sans-serif';
+  var nm = (GF.lang === 'ru' ? rel.nameRu : rel.nameEn);
+  ctx.fillText(nm, tx, y + ch * 0.62);
+  // right side: bonus badge or "done today"
+  ctx.textAlign = 'right';
+  if (commDone) {
+    ctx.fillStyle = '#7af0a0';
+    ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText('✓ ' + GF.t('comm_done'), x + cw - 14 * S, y + ch * 0.5);
+  } else {
+    ctx.fillStyle = '#ffd24a';
+    ctx.font = 'bold ' + GF.clamp(13 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText('+' + bonus + ' ' + GF.t('comm_bonus'), x + cw - 14 * S, y + ch * 0.34);
+    ctx.fillStyle = '#9adfa8';
+    ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('restore_it') + ' →', x + cw - 14 * S, y + ch * 0.68);
+  }
+  ctx.restore();
+  return { x: x, y: y, w: cw, h: ch, kind: 'comm', idx: ci };
+}
+
 // ── MENU (gallery landing: collection grid + PLAY) ──────────────────────────
 function drawMenu(ctx) {
   var W = GF.W, H = GF.H, S = GF.S;
@@ -1713,9 +1941,20 @@ function drawMenu(ctx) {
   ctx.font = GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
   ctx.fillText(GF.t('best') + ': ' + best, W / 2 + 14 * S, H * 0.10 + 56 * S);
 
-  // collection grid (tap an unlocked relic to start it)
+  // ── M2: login-streak flame chip (right-aligned under the title) ──
+  drawStreakChip(ctx, W - 16 * S, H * 0.10 - 6 * S);
+
+  // ── M2: TODAY'S COMMISSION banner — a fresh relic commissioned for today
+  // that pays a streak-scaled bonus. The headline reason-to-return: a returning
+  // player sees a NEW featured relic every day, named, with its bonus. ──
+  var commY = H * 0.10 + 80 * S;
+  var commBtn = drawCommission(ctx, commY);
+  if (commBtn) shopRects.push(commBtn);
+
+  // collection grid (tap an unlocked relic to start it) — pushed below the
+  // commission banner so the daily card never overlaps the relic shelf.
   var cols = 3;
-  var gridY = H * 0.22, gridW = Math.min(W - 28 * S, 440 * S);
+  var gridY = H * 0.27, gridW = Math.min(W - 28 * S, 440 * S);
   var cell = (gridW - (cols - 1) * 10 * S) / cols;
   var gx0 = (W - gridW) / 2;
   var rows = Math.ceil(NUM_RELICS / cols);
@@ -1766,7 +2005,34 @@ function drawMenu(ctx) {
   ctx.font = 'bold ' + GF.clamp(16 * S, 13, 22) + 'px Inter, system-ui, sans-serif';
   ctx.fillText(GF.t('vault') + '   ' + restoredCount() + '/' + NUM_RELICS, vb.x + vb.w / 2, vb.y + vb.h / 2 + 1 * S);
   ctx.restore();
+  // M2: overnight badge — "coins waiting" (visitor tips) or a dusty dot, so the
+  // menu itself signals the Vault changed while away and tugs the player in.
+  if (pendingTips > 0 || patina > 0.04) {
+    var bgx = vb.x + vb.w - 8 * S, bgy = vb.y - 4 * S;
+    var lbl = pendingTips > 0 ? ('+' + pendingTips) : GF.t('dusty');
+    ctx.font = 'bold ' + GF.clamp(11 * S, 9, 15) + 'px Inter, system-ui, sans-serif';
+    var pw = ctx.measureText(lbl).width + 18 * S, ph = GF.clamp(20 * S, 17, 26);
+    ctx.save();
+    var bp = 0.7 + 0.3 * Math.sin(performance.now() / 300);
+    GF.rr(ctx, bgx - pw, bgy, pw, ph, ph / 2);
+    ctx.fillStyle = pendingTips > 0 ? 'rgba(63,224,122,' + (0.85 * bp + 0.15) + ')' : 'rgba(170,150,120,0.9)';
+    ctx.fill();
+    ctx.fillStyle = pendingTips > 0 ? '#08220f' : '#1a1626'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(lbl, bgx - pw / 2, bgy + ph / 2 + 0.5 * S);
+    ctx.restore();
+  }
   shopRects.push({ x: vb.x, y: vb.y, w: vb.w, h: vb.h, kind: 'vault' });
+
+  // M2: "welcome back" toast on a genuine return — placed in the gap between the
+  // relic grid and the Vault button so it never overlaps the commission card.
+  if (welcomeT > 0) {
+    var wbA = GF.clamp(welcomeT / 2.6, 0, 1);
+    ctx.save(); ctx.globalAlpha = wbA;
+    ctx.fillStyle = '#7af0a0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(13 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('welcome_back') + '  ·  ' + streakDays + ' ' + GF.t('day_streak'), W / 2, vb.y - 22 * S);
+    ctx.restore();
+  }
 
   // PLAY button (LAST uiButton — yandex-testing clicks it)
   // bottom margin uses H*0.14 so the button always falls within the mobile-gate
@@ -1854,6 +2120,26 @@ function drawVault(ctx) {
       drawRelicShape(ctx, mb, RELICS[i], 1.0, RELICS[i].stages.indexOf('gem') >= 0);
       ctx.restore();
       if (tier >= 2) ctx.restore();
+      // ── M2: OVERNIGHT PATINA — a dusty wash creeps over the gleaming relic the
+      // longer the player is away, so the museum visibly needs re-tending. The
+      // returning player literally SEES their trophies dusted (cleared by the
+      // Polish-the-Vault tap below). Speckled so it reads as dust, not a flat dim.
+      if (patina > 0.02) {
+        ctx.save();
+        GF.rr(ctx, x, y, cell, cellH * 0.66, 12 * S); ctx.clip();
+        ctx.globalAlpha = GF.clamp(patina * 0.6, 0, 0.6);
+        ctx.fillStyle = '#6b5a3a';
+        ctx.fillRect(x, y, cell, cellH * 0.66);
+        // a few dust specks for texture
+        ctx.globalAlpha = GF.clamp(patina * 0.5, 0, 0.5); ctx.fillStyle = '#8a7a55';
+        for (var dp = 0; dp < 6; dp++) {
+          var sd = (i * 7 + dp * 13) % 97;
+          var dxp = x + (sd / 97) * cell;
+          var dyp = y + (((sd * 3) % 89) / 89) * cell * 0.6;
+          ctx.beginPath(); ctx.arc(dxp, dyp, 1.6 * S, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.restore();
+      }
       // pedestal slab under the relic, tinted by tier
       var py = y + cell * 0.74;
       ctx.fillStyle = PED_COL[tier] || '#a06a3a';
@@ -1896,9 +2182,40 @@ function drawVault(ctx) {
   fg.addColorStop(0, 'rgba(21,18,28,1)'); fg.addColorStop(1, 'rgba(21,18,28,0)');
   ctx.fillStyle = fg; ctx.fillRect(0, topY - 1, W, 26 * S);
 
-  // BACK button (last button — yandex-testing safe)
+  // BACK button (last button — yandex-testing safe). Reserve room above it for
+  // the M2 "Polish the Vault" action when there's overnight dust / tips pending.
   var bw = GF.clamp(220 * S, 170, 360), bh = GF.clamp(52 * S, 44, 72);
   var bb = { x: (W - bw) / 2, y: H - bh - Math.round(H * 0.045), w: bw, h: bh };
+
+  // ── M2: POLISH THE VAULT — clears the overnight patina AND banks the visitor
+  // donations accrued while away. The one-tap "do something new in 60s" beat:
+  // dust sweeps off the trophies, tip coins fly in. Hidden once nothing pends.
+  if (pendingTips > 0 || patina > 0.04) {
+    var pvw = GF.clamp(260 * S, 200, 420), pvh = GF.clamp(48 * S, 42, 64);
+    var pv = { x: (W - pvw) / 2, y: bb.y - pvh - 12 * S, w: pvw, h: pvh };
+    ctx.save();
+    var pp = 1 + 0.03 * Math.sin(performance.now() / 320);
+    var pw2 = pv.w * pp, ph2 = pv.h * pp, pxx = pv.x + pv.w / 2 - pw2 / 2, pyy = pv.y + pv.h / 2 - ph2 / 2;
+    GF.rr(ctx, pxx, pyy, pw2, ph2, ph2 / 2);
+    var pg = ctx.createLinearGradient(pxx, pyy, pxx, pyy + ph2);
+    pg.addColorStop(0, '#ffd24a'); pg.addColorStop(1, '#e0982a');
+    ctx.shadowColor = 'rgba(255,210,74,0.5)'; ctx.shadowBlur = 16 * S;
+    ctx.fillStyle = pg; ctx.fill(); ctx.shadowBlur = 0;
+    ctx.fillStyle = '#3a2610'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(15 * S, 12, 21) + 'px Inter, system-ui, sans-serif';
+    var plbl = GF.t('polish_vault') + (pendingTips > 0 ? '  +' + pendingTips : '');
+    ctx.fillText(plbl, pv.x + pv.w / 2, pv.y + pv.h / 2);
+    ctx.restore();
+    shopRects.push({ x: pv.x, y: pv.y, w: pv.w, h: pv.h, kind: 'vpolish' });
+  } else if (vaultPolishPop > 0) {
+    // freshly polished: a brief "Vault gleaming" confirmation in the same band
+    ctx.save(); ctx.globalAlpha = GF.clamp(vaultPolishPop, 0, 1);
+    ctx.fillStyle = '#7af0a0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(14 * S, 11, 19) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('vault_tidy'), W / 2, bb.y - 26 * S);
+    ctx.restore();
+  }
+
   drawBigButton(ctx, bb, GF.t('back'), true);
   shopRects.push({ x: bb.x, y: bb.y, w: bb.w, h: bb.h, kind: 'vback' });
 }
@@ -1974,7 +2291,19 @@ GF.init({
           relicRec[mi] = { stars: 1, count: 1, bestCoins: 0 };
         }
       }
+      // M2 fields (schema 3) — absent on schema-1/2 saves; rolloverDaily() then
+      // treats this open as the first day and starts the streak at 1 cleanly.
+      streakDays = m.streakDays || 0; lastDayKey = m.lastDayKey || 0;
+      commDay = (typeof m.commDay === 'number') ? m.commDay : -1;
+      commRelic = m.commRelic || 0; commDone = !!m.commDone;
+      patina = GF.clamp(m.patina || 0, 0, 1); pendingTips = Math.max(0, m.pendingTips | 0);
+      lastSeenMs = m.lastSeenMs || 0;
     } catch (e) {}
+
+    // M2: roll the calendar over — update streak, pick today's commission, and
+    // accrue overnight patina + visitor tips from time away (folded BEFORE we
+    // decide the boot screen so MENU/Vault already show the fresh daily state).
+    rolloverDaily();
 
     // procedural calm music bed (starts on first gesture, mute-aware)
     GF.startMusic({ preset: 'calm', muted: GF.muted });
@@ -2063,6 +2392,9 @@ GF.exposeState(function () {
     appraiseStars: appraiseStars, appraiseCoins: appraiseCoins,
     restoredCount: restoredCount(), collectionValue: collectionValue(),
     vaultOpen: gs === 'VAULT',
+    // M2 reason-to-return state
+    streakDays: streakDays, commRelic: commRelic, commDone: commDone, commPay: commPay,
+    patina: patina, pendingTips: pendingTips,
     // tunables (DESIGN.md §Tunables)
     BRUSH_R: BRUSH_R, BRUSH_GROW: BRUSH_GROW, STAGE_DONE: STAGE_DONE,
     COMBO_WINDOW: COMBO_WINDOW, COMBO_MAX: COMBO_MAX, COINS_BASE: COINS_BASE,
@@ -2087,6 +2419,24 @@ window._rrToolRects = function () { return toolRects; };
 window._rrOpenVault = function () { vaultScroll = 0; _vaultFrom = 'MENU'; gs = 'VAULT'; };
 window._rrVault = function () { return { restored: restoredCount(), value: collectionValue(), recs: serializeRec(), gs: gs }; };
 window._rrEnshrine = function (i, stars) { var r = enshrineRelic(i | 0, stars | 0, 0); saveMeta(); return r; };
+// M2 test seams: inspect daily state, simulate time-away accrual, run a polish.
+window._rrDaily = function () {
+  return { streakDays: streakDays, commRelic: commRelic, commDone: commDone, commPay: commPay,
+           patina: patina, pendingTips: pendingTips, lastSeenMs: lastSeenMs, lastDayKey: lastDayKey };
+};
+// Pretend the player was away `hours` then re-opened: backdate lastSeenMs and
+// the day key, then re-run the rollover so patina/tips/streak accrue as on a
+// real return. Used by the returning-player probe to verify the 60s payoff.
+window._rrSimAway = function (hours, days) {
+  hours = (typeof hours === 'number') ? hours : 12;
+  days = (typeof days === 'number') ? days : 1;
+  lastSeenMs = Date.now() - hours * 3600000;
+  lastDayKey = dayKey() - Math.max(0, days | 0);
+  commDay = -1;                         // force a fresh commission for "today"
+  rolloverDaily();
+  return window._rrDaily();
+};
+window._rrPolish = function () { return polishVault(); };
 
 })();
 </script>
