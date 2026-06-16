@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Treasure Sweep Web</title>
+  <script src="/sdk.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #18130d;
+      --panel: #2c2115;
+      --ink: #fff2d2;
+      --muted: #caa96e;
+      --gold: #ffd05a;
+      --blue: #49c7e8;
+      --green: #79d66b;
+      --red: #e95b4f;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      display: grid;
+      place-items: center;
+    }
+
+    #game {
+      width: 100vw;
+      height: 100dvh;
+      display: block;
+      touch-action: none;
+      background: #120f0b;
+    }
+
+    #sr-state {
+      position: fixed;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" aria-label="Treasure Sweep Web game canvas"></canvas>
+  <div id="sr-state" aria-live="polite"></div>
+  <script>
+  (() => {
+    "use strict";
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const srState = document.getElementById("sr-state");
+
+    const W = 900;
+    const H = 1200;
+    const ASSET = "assets/";
+    const imageNames = [
+      "bg_sandbox", "bg_beach", "bg_desert", "tool_detector", "tool_brush",
+      "battery", "coins", "upgrade_brush", "upgrade_detector", "upgrade_loot",
+      "item_snorkel", "item_sword", "item_amulet", "item_mask", "item_watch",
+      "item_towel", "item_flipflop", "item_bucket", "item_compass",
+    ];
+    const imgs = {};
+    let audioCtx = null;
+    let musicTimer = 0;
+    let musicStep = 0;
+
+    for (const name of imageNames) {
+      const img = new Image();
+      img.src = `${ASSET}${name}.png`;
+      imgs[name] = img;
+    }
+
+    const LOCATIONS = [
+      {
+        id: "sandbox",
+        name: "Sandbox",
+        bg: "bg_sandbox",
+        target: 4,
+        unlockNeed: 0,
+        runSeconds: 75,
+        items: ["item_bucket", "item_compass", "item_watch", "item_flipflop", "item_towel"],
+      },
+      {
+        id: "beach",
+        name: "Beach",
+        bg: "bg_beach",
+        target: 5,
+        unlockNeed: 6,
+        runSeconds: 80,
+        items: ["item_snorkel", "item_watch", "item_towel", "item_flipflop", "item_compass"],
+      },
+      {
+        id: "desert",
+        name: "Desert Temple",
+        bg: "bg_desert",
+        target: 6,
+        unlockNeed: 13,
+        runSeconds: 90,
+        items: ["item_sword", "item_amulet", "item_mask", "item_compass", "item_watch"],
+      },
+    ];
+
+    const ITEM_NAMES = {
+      item_snorkel: "Snorkel Mask",
+      item_sword: "Khopesh",
+      item_amulet: "Winged Amulet",
+      item_mask: "Pharaoh Mask",
+      item_watch: "Wristwatch",
+      item_towel: "Beach Towel",
+      item_flipflop: "Flip Flop",
+      item_bucket: "Sand Bucket",
+      item_compass: "Sun Compass",
+      battery: "Energy Battery",
+    };
+
+    const UPGRADE_DEFS = {
+      radius: {
+        title: "Detector",
+        icon: "upgrade_detector",
+        baseCost: 70,
+        max: 7,
+        desc: (lv) => `signal radius +${lv * 14}%`,
+      },
+      brush: {
+        title: "Brush",
+        icon: "upgrade_brush",
+        baseCost: 55,
+        max: 7,
+        desc: (lv) => `dig speed +${lv * 16}%`,
+      },
+      loot: {
+        title: "Loot",
+        icon: "upgrade_loot",
+        baseCost: 90,
+        max: 6,
+        desc: (lv) => `item value +${lv * 20}%`,
+      },
+    };
+
+    const defaultSave = () => ({
+      version: 1,
+      coins: 120,
+      energy: 6,
+      energyLast: Date.now(),
+      collected: {},
+      locationRuns: {},
+      upgrades: { radius: 1, brush: 1, loot: 1 },
+      currentLocation: "sandbox",
+      bestRun: 0,
+    });
+
+    const state = {
+      mode: "menu",
+      save: loadSave(),
+      buttons: [],
+      pointer: { x: W * 0.5, y: H * 0.55, down: false, active: false },
+      detector: { x: W * 0.5, y: H * 0.58, tx: W * 0.5, ty: H * 0.58, signal: 0 },
+      run: null,
+      summary: null,
+      particles: [],
+      toast: "",
+      toastT: 0,
+      lastTick: performance.now(),
+      scale: 1,
+      ox: 0,
+      oy: 0,
+      safe: { top: 0, right: 0, bottom: 0, left: 0 },
+      muted: loadMuted(),
+      srTimer: 0,
+    };
+
+    function loadMuted() {
+      try {
+        return localStorage.getItem("treasure-sweep-muted") === "1";
+      } catch {
+        return false;
+      }
+    }
+
+    function loadSave() {
+      try {
+        const raw = localStorage.getItem("treasure-sweep-web-save");
+        const parsed = raw ? JSON.parse(raw) : null;
+        const save = Object.assign(defaultSave(), parsed || {});
+        save.upgrades = Object.assign({ radius: 1, brush: 1, loot: 1 }, save.upgrades || {});
+        save.collected = save.collected || {};
+        save.locationRuns = save.locationRuns || {};
+        applyEnergyRegen(save);
+        return save;
+      } catch {
+        return defaultSave();
+      }
+    }
+
+    function saveGame() {
+      try {
+        state.save.energyLast = Date.now();
+        localStorage.setItem("treasure-sweep-web-save", JSON.stringify(state.save));
+      } catch {
+        // Storage can be unavailable in private browsing; gameplay continues.
+      }
+    }
+
+    function applyEnergyRegen(save) {
+      const cap = energyCapFor(save);
+      const elapsed = Math.max(0, Date.now() - (save.energyLast || Date.now()));
+      const gained = Math.floor(elapsed / 90000);
+      if (gained > 0) {
+        save.energy = Math.min(cap, (save.energy || 0) + gained);
+        save.energyLast = Date.now();
+      }
+    }
+
+    function energyCapFor(save) {
+      return 6 + Math.max(0, save?.upgrades?.loot || 1) - 1;
+    }
+
+    function energyCap() {
+      return energyCapFor(state.save);
+    }
+
+    function uniqueCollectedCount() {
+      return Object.keys(state.save.collected).length;
+    }
+
+    function currentLocation() {
+      return LOCATIONS.find((l) => l.id === state.save.currentLocation) || LOCATIONS[0];
+    }
+
+    function platformSafeInsets() {
+      return { top: 0, right: 0, bottom: 0, left: 0 };
+    }
+
+    function isLocationUnlocked(loc) {
+      return uniqueCollectedCount() >= loc.unlockNeed;
+    }
+
+    function costFor(id) {
+      const def = UPGRADE_DEFS[id];
+      const lv = state.save.upgrades[id] || 1;
+      return Math.round(def.baseCost * Math.pow(1.72, lv - 1));
+    }
+
+    function showToast(text) {
+      state.toast = text;
+      state.toastT = 2.2;
+    }
+
+    function ensureAudio() {
+      if (state.muted) return;
+      if (!audioCtx) {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        audioCtx = new Ctx();
+        scheduleMusic();
+      }
+      if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+    }
+
+    function scheduleMusic() {
+      if (musicTimer || !audioCtx) return;
+      const notes = [196, 246.94, 293.66, 329.63, 246.94, 220];
+      musicTimer = window.setInterval(() => {
+        if (!audioCtx || document.hidden) return;
+        tone(notes[musicStep % notes.length], 0.18, 0.018, "triangle");
+        musicStep += 1;
+      }, 560);
+    }
+
+    function tone(freq, dur, gainValue, type = "sine") {
+      if (!audioCtx || state.muted) return;
+      const now = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, now);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(gainValue, now + 0.018);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(now);
+      osc.stop(now + dur + 0.03);
+    }
+
+    function playSfx(kind) {
+      if (!audioCtx) return;
+      if (kind === "start") tone(330, 0.08, 0.045, "square");
+      else if (kind === "reveal") tone(520, 0.11, 0.05, "triangle");
+      else if (kind === "collect") {
+        tone(660, 0.08, 0.052, "triangle");
+        window.setTimeout(() => tone(880, 0.08, 0.04, "triangle"), 70);
+      } else if (kind === "upgrade") tone(740, 0.14, 0.05, "sine");
+      else if (kind === "end") tone(220, 0.18, 0.045, "sawtooth");
+    }
+
+    function toggleMute() {
+      state.muted = !state.muted;
+      try {
+        localStorage.setItem("treasure-sweep-muted", state.muted ? "1" : "0");
+      } catch {
+        // Audio preference persistence is optional.
+      }
+      if (state.muted) audioCtx?.suspend?.().catch(() => {});
+      else ensureAudio();
+      showToast(state.muted ? "Sound muted" : "Sound on");
+    }
+
+    function seedFromRun(loc) {
+      const n = (state.save.locationRuns[loc.id] || 0) + 1;
+      let seed = 2166136261;
+      const s = `${loc.id}:${n}:${state.save.coins}:${uniqueCollectedCount()}`;
+      for (let i = 0; i < s.length; i++) {
+        seed ^= s.charCodeAt(i);
+        seed = Math.imul(seed, 16777619);
+      }
+      return seed >>> 0;
+    }
+
+    function rng(seed) {
+      let x = seed || 123456789;
+      return () => {
+        x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+        return ((x >>> 0) / 4294967296);
+      };
+    }
+
+    function startRun() {
+      const loc = currentLocation();
+      if (!isLocationUnlocked(loc)) {
+        showToast(`Find ${loc.unlockNeed} treasures to unlock`);
+        return;
+      }
+      if (state.save.energy <= 0) {
+        showToast("Energy is empty. Batteries can refill it during runs.");
+        return;
+      }
+      state.save.energy -= 1;
+      state.save.locationRuns[loc.id] = (state.save.locationRuns[loc.id] || 0) + 1;
+      const random = rng(seedFromRun(loc));
+      const count = loc.target + Math.min(3, Math.floor((state.save.locationRuns[loc.id] || 1) / 3));
+      const hidden = [];
+      for (let i = 0; i < count; i++) {
+        const itemKey = loc.items[i % loc.items.length];
+        hidden.push(spawnTreasure(random, itemKey, i));
+      }
+      if (random() < 0.85 || state.save.energy < energyCap()) hidden.push(spawnTreasure(random, "battery", 99));
+      state.run = {
+        loc,
+        time: loc.runSeconds,
+        maxTime: loc.runSeconds,
+        hidden,
+        found: [],
+        coins: 0,
+        revealed: 0,
+        sweepPct: 0,
+        ended: false,
+      };
+      state.detector.x = W * 0.5;
+      state.detector.y = H * 0.58;
+      state.detector.tx = state.detector.x;
+      state.detector.ty = state.detector.y;
+      state.mode = "run";
+      playSfx("start");
+      saveGame();
+    }
+
+    function spawnTreasure(random, itemKey, index) {
+      const padX = 132;
+      const padY = 210;
+      const x = padX + random() * (W - padX * 2);
+      const y = padY + random() * (H - padY * 2);
+      const rareRoll = random();
+      const rarity = rareRoll > 0.95 ? "legendary" : rareRoll > 0.82 ? "rare" : "common";
+      return {
+        id: `${itemKey}-${index}-${Math.floor(random() * 1e6)}`,
+        itemKey,
+        name: ITEM_NAMES[itemKey] || "Treasure",
+        x, y,
+        r: itemKey === "battery" ? 42 : 36 + random() * 16,
+        rarity,
+        state: "hidden",
+        lock: 0,
+        brush: 0,
+        pulse: random() * Math.PI * 2,
+      };
+    }
+
+    function endRun(reason) {
+      if (!state.run || state.run.ended) return;
+      state.run.ended = true;
+      const fullClear = state.run.hidden.every((h) => h.state === "collected");
+      let bonus = 0;
+      if (fullClear) bonus = Math.round(40 + state.run.loc.target * 18);
+      state.save.coins += state.run.coins + bonus;
+      state.save.bestRun = Math.max(state.save.bestRun || 0, state.run.coins + bonus);
+      state.summary = {
+        reason,
+        found: state.run.found.slice(),
+        coins: state.run.coins,
+        bonus,
+        fullClear,
+        location: state.run.loc.name,
+      };
+      state.mode = "summary";
+      playSfx("end");
+      saveGame();
+    }
+
+    function buyUpgrade(id) {
+      const def = UPGRADE_DEFS[id];
+      const lv = state.save.upgrades[id] || 1;
+      if (lv >= def.max) {
+        showToast(`${def.title} is maxed`);
+        return;
+      }
+      const cost = costFor(id);
+      if (state.save.coins < cost) {
+        showToast(`Need ${cost - state.save.coins} more coins`);
+        return;
+      }
+      state.save.coins -= cost;
+      state.save.upgrades[id] = lv + 1;
+      if (id === "loot") state.save.energy = Math.min(energyCap(), state.save.energy + 1);
+      showToast(`${def.title} upgraded`);
+      playSfx("upgrade");
+      saveGame();
+    }
+
+    function update(dt) {
+      state.toastT = Math.max(0, state.toastT - dt);
+      for (let i = state.particles.length - 1; i >= 0; i--) {
+        const p = state.particles[i];
+        p.t -= dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 90 * dt;
+        if (p.t <= 0) state.particles.splice(i, 1);
+      }
+      if (state.mode !== "run" || !state.run) return;
+
+      const run = state.run;
+      run.time -= dt;
+      if (run.time <= 0) {
+        endRun(run.found.length >= run.loc.target ? "cleared" : "time");
+        return;
+      }
+
+      const d = state.detector;
+      const catchup = 9 + (state.save.upgrades.radius || 1) * 0.8;
+      d.x += (d.tx - d.x) * Math.min(1, dt * catchup);
+      d.y += (d.ty - d.y) * Math.min(1, dt * catchup);
+      d.x = clamp(d.x, 72, W - 72);
+      d.y = clamp(d.y, 160, H - 95);
+
+      const radius = detectorRadius();
+      let best = null;
+      let bestSignal = 0;
+      for (const h of run.hidden) {
+        if (h.state === "collected") continue;
+        h.pulse += dt * 5;
+        const dist = Math.hypot(h.x - d.x, h.y - d.y);
+        const signal = clamp(1 - dist / radius, 0, 1);
+        if (signal > bestSignal) {
+          bestSignal = signal;
+          best = h;
+        }
+        if (h.state === "hidden" && signal > 0.62) {
+          h.lock += dt * (0.9 + signal);
+          if (h.lock >= 1) reveal(h);
+        } else if (h.state === "hidden") {
+          h.lock = Math.max(0, h.lock - dt * 0.55);
+        }
+      }
+      d.signal = bestSignal;
+
+      if (best && best.state === "revealed") {
+        const dist = Math.hypot(best.x - d.x, best.y - d.y);
+        const brushing = state.pointer.down && dist < 88;
+        if (brushing) {
+          best.brush += dt * brushSpeed();
+          spawnDust(best.x, best.y, 2);
+          if (best.brush >= 1) collect(best);
+        }
+      }
+      run.sweepPct = run.hidden.length ? run.hidden.filter((h) => h.state === "collected").length / run.hidden.length : 0;
+      if (run.found.length >= run.loc.target && run.hidden.every((h) => h.state !== "hidden")) {
+        endRun("cleared");
+      }
+    }
+
+    function detectorRadius() {
+      return 132 + (state.save.upgrades.radius || 1) * 22;
+    }
+
+    function brushSpeed() {
+      return 0.48 + (state.save.upgrades.brush || 1) * 0.17;
+    }
+
+    function reveal(h) {
+      h.state = "revealed";
+      h.lock = 1;
+      state.run.revealed += 1;
+      playSfx("reveal");
+      for (let i = 0; i < 16; i++) spawnParticle(h.x, h.y, "#f4d09b", 130);
+    }
+
+    function collect(h) {
+      if (h.state === "collected") return;
+      h.state = "collected";
+      let value = h.itemKey === "battery" ? 0 : (h.rarity === "legendary" ? 130 : h.rarity === "rare" ? 74 : 36);
+      value = Math.round(value * (1 + ((state.save.upgrades.loot || 1) - 1) * 0.2));
+      if (h.itemKey === "battery") {
+        state.save.energy = Math.min(energyCap(), state.save.energy + 2);
+        showToast("+2 energy battery");
+      } else {
+        state.save.collected[`${state.run.loc.id}:${h.itemKey}`] = true;
+        state.run.coins += value;
+        state.run.found.push({ name: h.name, itemKey: h.itemKey, rarity: h.rarity, value });
+        showToast(`${h.name} +${value}`);
+      }
+      for (let i = 0; i < 26; i++) spawnParticle(h.x, h.y, h.itemKey === "battery" ? "#75d7ff" : "#ffd45a", 210);
+      playSfx("collect");
+      saveGame();
+    }
+
+    function spawnDust(x, y, n) {
+      for (let i = 0; i < n; i++) spawnParticle(x + rand(-34, 34), y + rand(-28, 28), "#d8a65d", 65);
+    }
+
+    function spawnParticle(x, y, color, speed) {
+      const a = Math.random() * Math.PI * 2;
+      const s = speed * (0.35 + Math.random() * 0.8);
+      state.particles.push({
+        x, y,
+        vx: Math.cos(a) * s,
+        vy: Math.sin(a) * s - speed * 0.22,
+        r: 3 + Math.random() * 5,
+        color,
+        t: 0.45 + Math.random() * 0.5,
+        max: 0.95,
+      });
+    }
+
+    function render() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      drawViewportBackdrop();
+      ctx.setTransform(state.scale, 0, 0, state.scale, state.ox, state.oy);
+      state.buttons = [];
+      if (state.mode === "menu") drawMenu();
+      else if (state.mode === "locations") drawLocations();
+      else if (state.mode === "upgrades") drawUpgrades();
+      else if (state.mode === "collection") drawCollection();
+      else if (state.mode === "summary") drawSummary();
+      else if (state.mode === "run") drawRun();
+      drawToast();
+    }
+
+    function drawViewportBackdrop() {
+      const loc = state.mode === "run" && state.run ? state.run.loc : currentLocation();
+      const img = imgs[loc.bg];
+      if (img && img.complete && img.naturalWidth) {
+        drawImageCover(img, 0, 0, canvas.width, canvas.height);
+      } else {
+        const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+        g.addColorStop(0, "#8d6123");
+        g.addColorStop(1, "#2c2115");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      ctx.fillStyle = "rgba(23, 16, 8, .48)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    function drawBackground(loc) {
+      const img = imgs[loc.bg];
+      if (img && img.complete && img.naturalWidth) drawImageCover(img, 0, 0, W, H);
+      else {
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, "#d99b38");
+        g.addColorStop(1, "#f5d88a");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+      }
+      ctx.fillStyle = "rgba(35, 23, 11, 0.18)";
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    function drawMenu() {
+      const loc = currentLocation();
+      drawBackground(loc);
+      drawTopBar();
+      panel(62, 80, 776, 305, "rgba(51,35,18,.82)");
+      drawText("Treasure Sweep Web", W / 2, 140, 52, "#fff2c7", "center", "900");
+      drawText("Detector signal. Brush the sand. Complete collections.", W / 2, 196, 25, "#ffe5a4", "center", "700");
+      drawText(`Current site: ${loc.name}`, W / 2, 244, 30, "#7fe2ff", "center", "850");
+      drawButton(178, 290, 250, 72, "Start Run", startRun, { primary: true });
+      drawButton(472, 290, 250, 72, "Locations", () => state.mode = "locations");
+
+      const y = 430;
+      drawLocationPreview(currentLocation(), 70, y, 235, 270);
+      panel(335, y, 495, 270, "rgba(37, 27, 18, .82)");
+      drawText("Run shape", 370, y + 46, 28, "#ffe9b4", "left", "850");
+      statLine("Energy", `${state.save.energy}/${energyCap()}`, 370, y + 91, "#65ddff");
+      statLine("Coins", state.save.coins, 370, y + 131, "#ffd35d");
+      statLine("Unique finds", uniqueCollectedCount(), 370, y + 171, "#b8ff86");
+      statLine("Best haul", state.save.bestRun || 0, 370, y + 211, "#fff2d2");
+
+      drawButton(88, 760, 220, 62, "Collection", () => state.mode = "collection");
+      drawButton(340, 760, 220, 62, "Upgrades", () => state.mode = "upgrades");
+      drawButton(592, 760, 220, 62, "Practice", () => {
+        state.save.energy = Math.max(1, state.save.energy);
+        startRun();
+      });
+
+      drawText("APK-derived web port: Unity art/data reference rebuilt as native canvas.", W / 2, H - 56, 20, "rgba(255,241,204,.72)", "center", "650");
+    }
+
+    function drawLocations() {
+      drawBackground(currentLocation());
+      drawTopBar();
+      drawText("Choose Location", W / 2, 100, 42, "#fff1c7", "center", "900");
+      LOCATIONS.forEach((loc, i) => {
+        const x = 62 + i * 279;
+        const y = 165;
+        drawLocationPreview(loc, x, y, 235, 290);
+        const unlocked = isLocationUnlocked(loc);
+        if (!unlocked) {
+          ctx.fillStyle = "rgba(0,0,0,.52)";
+          roundRect(x, y, 235, 290, 24);
+          ctx.fill();
+          drawText(`Needs ${loc.unlockNeed} finds`, x + 118, y + 148, 22, "#ffe3a2", "center", "800");
+        }
+        drawButton(x + 18, y + 305, 199, 58, state.save.currentLocation === loc.id ? "Selected" : unlocked ? "Select" : "Locked", () => {
+          if (unlocked) {
+            state.save.currentLocation = loc.id;
+            saveGame();
+            state.mode = "menu";
+          } else showToast(`Find ${loc.unlockNeed - uniqueCollectedCount()} more treasures`);
+        }, { disabled: !unlocked, primary: state.save.currentLocation === loc.id });
+      });
+      drawButton(315, 1020, 270, 64, "Back", () => state.mode = "menu");
+    }
+
+    function drawLocationPreview(loc, x, y, w, h) {
+      panel(x, y, w, h, "rgba(54,39,21,.9)");
+      const img = imgs[loc.bg];
+      if (img && img.complete && img.naturalWidth) {
+        ctx.save();
+        roundClip(x + 12, y + 12, w - 24, h - 76, 20);
+        drawImageCover(img, x + 12, y + 12, w - 24, h - 76);
+        ctx.restore();
+      }
+      drawText(loc.name, x + w / 2, y + h - 42, 24, "#fff2ce", "center", "850");
+      drawText(`${loc.target} finds`, x + w / 2, y + h - 16, 18, "#ffd969", "center", "750");
+    }
+
+    function drawRun() {
+      const run = state.run;
+      drawBackground(run.loc);
+      drawHud();
+      for (const h of run.hidden) {
+        if (h.state === "hidden") {
+          drawHiddenHint(h);
+        } else if (h.state === "revealed") {
+          drawRevealed(h);
+        } else if (h.state === "collected") {
+          drawCollectedMark(h);
+        }
+      }
+      drawDetector();
+      drawParticles();
+      drawButton(24, H - 82, 148, 54, "Exit", () => endRun("quit"), { small: true });
+    }
+
+    function drawHud() {
+      const run = state.run;
+      panel(18, 18, W - 36, 118, "rgba(38, 28, 18, .78)");
+      drawText(run.loc.name, 44, 52, 26, "#fff2c7", "left", "850");
+      drawText(`${Math.ceil(run.time)}s`, W - 52, 52, 30, run.time < 15 ? "#ff8078" : "#fff2c7", "right", "900");
+      drawText(`Find ${Math.min(run.found.length, run.loc.target)}/${run.loc.target}`, 44, 96, 24, "#8eeeff", "left", "850");
+      drawText(`+${run.coins}`, W - 52, 96, 24, "#ffd65d", "right", "850");
+      meter(260, 72, 360, 18, run.time / run.maxTime, "#60d8ff", "rgba(255,255,255,.18)");
+      meter(260, 101, 360, 16, run.sweepPct, "#ffe16c", "rgba(255,255,255,.18)");
+      signalGauge(644, 72, 158, 40, state.detector.signal);
+      drawButton(W - 188, 24, 82, 36, state.muted ? "Sound" : "Mute", toggleMute, { small: true });
+    }
+
+    function drawHiddenHint(h) {
+      if (state.detector.signal < 0.24) return;
+      const dist = Math.hypot(h.x - state.detector.x, h.y - state.detector.y);
+      const a = clamp(1 - dist / detectorRadius(), 0, 1);
+      ctx.save();
+      ctx.globalAlpha = a * 0.55;
+      ctx.strokeStyle = "#f7dc87";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, 22 + Math.sin(h.pulse) * 6, 0, Math.PI * 2);
+      ctx.stroke();
+      if (h.lock > 0) {
+        meter(h.x - 42, h.y - 50, 84, 10, h.lock, "#ffdf6a", "rgba(0,0,0,.25)");
+      }
+      ctx.restore();
+    }
+
+    function drawRevealed(h) {
+      ctx.save();
+      ctx.fillStyle = "rgba(91, 57, 28, .66)";
+      ctx.beginPath();
+      ctx.ellipse(h.x, h.y + 8, h.r + 28, h.r + 17, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,230,160,.75)";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      const img = imgs[h.itemKey];
+      if (img && img.complete && img.naturalWidth) {
+        ctx.globalAlpha = 0.35 + h.brush * 0.65;
+        const s = 54 + h.brush * 46;
+        ctx.drawImage(img, h.x - s / 2, h.y - s / 2, s, s);
+      }
+      meter(h.x - 52, h.y + h.r + 34, 104, 12, h.brush, "#95e6ff", "rgba(0,0,0,.32)");
+      ctx.restore();
+    }
+
+    function drawCollectedMark(h) {
+      ctx.save();
+      ctx.globalAlpha = 0.38;
+      ctx.fillStyle = "#ffd65a";
+      ctx.beginPath();
+      ctx.arc(h.x, h.y, 13, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawDetector() {
+      const d = state.detector;
+      const sig = d.signal;
+      const radius = detectorRadius();
+      ctx.save();
+      ctx.globalAlpha = 0.16 + sig * 0.28;
+      ctx.strokeStyle = sig > 0.65 ? "#ffdd62" : "#62d7ff";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, radius * (0.35 + sig * 0.08), 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.42 + sig * 0.45;
+      const img = imgs.tool_detector;
+      if (img && img.complete && img.naturalWidth) {
+        ctx.translate(d.x, d.y);
+        ctx.rotate(-0.18 + Math.sin(performance.now() / 320) * 0.04);
+        ctx.drawImage(img, -76, -58, 152, 120);
+      } else {
+        ctx.fillStyle = "#1b2730";
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, 44, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+
+      const near = state.run && state.run.hidden.find((h) => h.state === "revealed" && Math.hypot(h.x - d.x, h.y - d.y) < 90);
+      if (near) {
+        const img = imgs.tool_brush;
+        ctx.save();
+        ctx.globalAlpha = state.pointer.down ? 0.96 : 0.72;
+        ctx.translate(d.x + 48, d.y + 42);
+        ctx.rotate(-0.82);
+        if (img && img.complete && img.naturalWidth) ctx.drawImage(img, -38, -38, 76, 86);
+        ctx.restore();
+      }
+    }
+
+    function drawSummary() {
+      drawBackground(currentLocation());
+      drawTopBar();
+      const s = state.summary || { found: [], coins: 0, bonus: 0, fullClear: false };
+      panel(72, 72, 756, 840, "rgba(40, 29, 17, .9)");
+      drawText(s.fullClear ? "Clean Sweep" : s.reason === "time" ? "Run Complete" : "Run Ended", W / 2, 134, 48, "#fff2c7", "center", "900");
+      drawText(`${s.location} haul`, W / 2, 182, 24, "#8de8ff", "center", "800");
+      drawText(`${s.coins + s.bonus} coins`, W / 2, 238, 42, "#ffd65d", "center", "900");
+      if (s.bonus) drawText(`Full clear bonus +${s.bonus}`, W / 2, 278, 22, "#b8ff86", "center", "850");
+      const y0 = 330;
+      if (!s.found.length) drawText("No treasure found. Upgrade detector radius and try again.", W / 2, y0, 24, "#ffe0a4", "center", "750");
+      s.found.slice(0, 7).forEach((f, i) => {
+        const y = y0 + i * 62;
+        const img = imgs[f.itemKey];
+        if (img && img.complete && img.naturalWidth) ctx.drawImage(img, 178, y - 28, 50, 50);
+        drawText(f.name, 246, y, 25, "#fff2d2", "left", "820");
+        drawText(f.rarity, 540, y, 21, rarityColor(f.rarity), "left", "800");
+        drawText(`+${f.value}`, 722, y, 24, "#ffd65d", "right", "850");
+      });
+      drawButton(128, 810, 190, 64, "Again", startRun, { primary: true });
+      drawButton(356, 810, 190, 64, "Upgrades", () => state.mode = "upgrades");
+      drawButton(584, 810, 190, 64, "Menu", () => state.mode = "menu");
+    }
+
+    function drawUpgrades() {
+      drawBackground(currentLocation());
+      drawTopBar();
+      drawText("Upgrades", W / 2, 102, 44, "#fff2c7", "center", "900");
+      drawText(`${state.save.coins} coins`, W / 2, 146, 25, "#ffd65d", "center", "850");
+      Object.keys(UPGRADE_DEFS).forEach((id, i) => {
+        const def = UPGRADE_DEFS[id];
+        const lv = state.save.upgrades[id] || 1;
+        const y = 210 + i * 202;
+        panel(72, y, 756, 158, "rgba(41,30,18,.88)");
+        const img = imgs[def.icon];
+        if (img && img.complete && img.naturalWidth) ctx.drawImage(img, 104, y + 23, 112, 104);
+        drawText(def.title, 246, y + 52, 31, "#fff2c7", "left", "900");
+        drawText(`Level ${lv}/${def.max} - ${def.desc(lv)}`, 246, y + 92, 22, "#ffe4a0", "left", "750");
+        const cost = lv >= def.max ? "MAX" : `${costFor(id)}`;
+        drawButton(632, y + 48, 154, 64, cost, () => buyUpgrade(id), { primary: lv < def.max, disabled: lv >= def.max });
+      });
+      drawButton(190, 880, 220, 66, "Menu", () => state.mode = "menu");
+      drawButton(490, 880, 220, 66, "Start", startRun, { primary: true });
+    }
+
+    function drawCollection() {
+      drawBackground(currentLocation());
+      drawTopBar();
+      drawText("Collection", W / 2, 88, 44, "#fff2c7", "center", "900");
+      drawText(`${uniqueCollectedCount()} unique treasures`, W / 2, 132, 24, "#b8ff86", "center", "820");
+      const seen = state.save.collected;
+      const all = [];
+      for (const loc of LOCATIONS) {
+        for (const itemKey of loc.items) {
+          const id = `${loc.id}:${itemKey}`;
+          if (!all.find((x) => x.id === id)) all.push({ id, itemKey, loc: loc.name });
+        }
+      }
+      all.slice(0, 18).forEach((it, i) => {
+        const col = i % 3;
+        const row = Math.floor(i / 3);
+        const x = 64 + col * 276;
+        const y = 190 + row * 132;
+        panel(x, y, 224, 108, seen[it.id] ? "rgba(52,40,22,.9)" : "rgba(28,25,22,.74)");
+        const img = imgs[it.itemKey];
+        ctx.globalAlpha = seen[it.id] ? 1 : 0.22;
+        if (img && img.complete && img.naturalWidth) ctx.drawImage(img, x + 15, y + 17, 70, 70);
+        ctx.globalAlpha = 1;
+        drawText(seen[it.id] ? ITEM_NAMES[it.itemKey] : "Unknown", x + 98, y + 43, 18, seen[it.id] ? "#fff2d2" : "#9e8a68", "left", "850");
+        drawText(it.loc, x + 98, y + 73, 16, "#d7b16c", "left", "700");
+      });
+      drawButton(315, 1036, 270, 64, "Back", () => state.mode = "menu");
+    }
+
+    function drawTopBar() {
+      panel(18, 18, W - 36, 46, "rgba(29,22,15,.82)");
+      drawIcon(imgs.coins, 38, 27, 32, 28);
+      drawText(String(state.save.coins), 78, 50, 21, "#ffd65d", "left", "850");
+      drawIcon(imgs.battery, 214, 22, 32, 38);
+      drawText(`${state.save.energy}/${energyCap()}`, 256, 50, 21, "#8eeeff", "left", "850");
+      drawButton(W - 188, 25, 82, 32, state.muted ? "Sound" : "Mute", toggleMute, { small: true });
+      drawText(`${uniqueCollectedCount()} finds`, W - 210, 50, 21, "#b8ff86", "right", "850");
+    }
+
+    function drawParticles() {
+      for (const p of state.particles) {
+        ctx.save();
+        ctx.globalAlpha = clamp(p.t / p.max, 0, 1);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    function drawToast() {
+      if (state.toastT <= 0 || !state.toast) return;
+      ctx.save();
+      ctx.globalAlpha = clamp(state.toastT, 0, 1);
+      panel(130, H - 150, 640, 58, "rgba(30,23,16,.9)");
+      drawText(state.toast, W / 2, H - 113, 22, "#fff2c7", "center", "850");
+      ctx.restore();
+    }
+
+    function drawButton(x, y, w, h, label, onClick, opts = {}) {
+      const disabled = !!opts.disabled;
+      const primary = !!opts.primary;
+      const fill = disabled ? "rgba(74,68,58,.76)" : primary ? "rgba(218,155,48,.96)" : "rgba(62,45,27,.92)";
+      panel(x, y, w, h, fill, primary ? "#ffec9a" : "rgba(255,230,170,.58)");
+      drawText(label, x + w / 2, y + h / 2 + (opts.small ? 7 : 8), opts.small ? 19 : 23, disabled ? "#a79a82" : primary ? "#271907" : "#fff2c7", "center", "900");
+      state.buttons.push({ x, y, w, h, onClick, disabled, label });
+    }
+
+    function drawText(text, x, y, size, color, align = "left", weight = "700") {
+      ctx.save();
+      ctx.font = `${weight} ${size}px Inter, ui-sans-serif, system-ui, sans-serif`;
+      ctx.textAlign = align;
+      ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "rgba(50,30,10,.62)";
+      ctx.lineWidth = Math.max(3, size * 0.13);
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y);
+      ctx.restore();
+    }
+
+    function statLine(label, value, x, y, color) {
+      drawText(label, x, y, 22, "#dec18b", "left", "750");
+      drawText(String(value), x + 360, y, 26, color, "right", "900");
+    }
+
+    function panel(x, y, w, h, fill = "rgba(0,0,0,.5)", stroke = "rgba(255,230,160,.38)") {
+      ctx.save();
+      ctx.fillStyle = fill;
+      roundRect(x, y, w, h, Math.min(24, h * 0.22));
+      ctx.fill();
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function meter(x, y, w, h, value, fill, back) {
+      ctx.save();
+      roundRect(x, y, w, h, h / 2);
+      ctx.fillStyle = back;
+      ctx.fill();
+      roundRect(x, y, Math.max(h, w * clamp(value, 0, 1)), h, h / 2);
+      ctx.fillStyle = fill;
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function signalGauge(x, y, w, h, sig) {
+      panel(x, y, w, h, "rgba(0,0,0,.24)", "rgba(255,230,160,.25)");
+      for (let i = 0; i < 5; i++) {
+        ctx.fillStyle = sig > i / 5 ? ["#74ddff", "#8cf6bf", "#fff07a", "#ffba57", "#ff6b58"][i] : "rgba(255,255,255,.16)";
+        roundRect(x + 14 + i * 27, y + 11, 18, h - 22, 7);
+        ctx.fill();
+      }
+    }
+
+    function drawIcon(img, x, y, w, h) {
+      if (img && img.complete && img.naturalWidth) ctx.drawImage(img, x, y, w, h);
+    }
+
+    function drawImageCover(img, x, y, w, h) {
+      const s = Math.max(w / img.naturalWidth, h / img.naturalHeight);
+      const iw = img.naturalWidth * s;
+      const ih = img.naturalHeight * s;
+      ctx.drawImage(img, x + (w - iw) / 2, y + (h - ih) / 2, iw, ih);
+    }
+
+    function roundRect(x, y, w, h, r) {
+      r = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    function roundClip(x, y, w, h, r) {
+      roundRect(x, y, w, h, r);
+      ctx.clip();
+    }
+
+    function rarityColor(rarity) {
+      if (rarity === "legendary") return "#ff92df";
+      if (rarity === "rare") return "#75d7ff";
+      return "#ffe4a0";
+    }
+
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+    function rand(a, b) { return a + Math.random() * (b - a); }
+
+    function resize() {
+      const dpr = Math.min(2, window.devicePixelRatio || 1);
+      const cssW = window.innerWidth;
+      const cssH = window.innerHeight;
+      canvas.style.width = `${cssW}px`;
+      canvas.style.height = `${cssH}px`;
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+      const sx = canvas.width / W;
+      const sy = canvas.height / H;
+      state.scale = Math.min(sx, sy);
+      state.ox = (canvas.width - W * state.scale) / 2;
+      state.oy = (canvas.height - H * state.scale) / 2;
+      state.safe = platformSafeInsets();
+      render();
+    }
+
+    function toWorld(clientX, clientY) {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = canvas.width / rect.width;
+      return {
+        x: ((clientX - rect.left) * dpr - state.ox) / state.scale,
+        y: ((clientY - rect.top) * dpr - state.oy) / state.scale,
+      };
+    }
+
+    function pointerSet(e, down) {
+      e.preventDefault();
+      const p = toWorld(e.clientX, e.clientY);
+      state.pointer.x = p.x;
+      state.pointer.y = p.y;
+      state.pointer.down = down;
+      state.pointer.active = true;
+      if (state.mode === "run") {
+        state.detector.tx = p.x;
+        state.detector.ty = p.y;
+      }
+    }
+
+    canvas.addEventListener("pointerdown", (e) => {
+      ensureAudio();
+      pointerSet(e, true);
+      const p = state.pointer;
+      for (let i = state.buttons.length - 1; i >= 0; i--) {
+        const b = state.buttons[i];
+        if (!b.disabled && p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
+          b.onClick();
+          render();
+          return;
+        }
+      }
+    });
+    canvas.addEventListener("pointermove", (e) => pointerSet(e, state.pointer.down));
+    canvas.addEventListener("pointerup", (e) => pointerSet(e, false));
+    canvas.addEventListener("pointercancel", () => state.pointer.down = false);
+    canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    window.addEventListener("keydown", (e) => {
+      ensureAudio();
+      if (e.key === "f" || e.key === "F") {
+        if (!document.fullscreenElement) canvas.requestFullscreen?.();
+        else document.exitFullscreen?.();
+      }
+      if (state.mode === "run") {
+        const step = 45;
+        if (e.key === "ArrowLeft" || e.key === "a") state.detector.tx -= step;
+        if (e.key === "ArrowRight" || e.key === "d") state.detector.tx += step;
+        if (e.key === "ArrowUp" || e.key === "w") state.detector.ty -= step;
+        if (e.key === "ArrowDown" || e.key === "s") state.detector.ty += step;
+        if (e.key === " ") state.pointer.down = true;
+      }
+    });
+    window.addEventListener("keyup", (e) => {
+      if (e.key === " ") state.pointer.down = false;
+    });
+    window.addEventListener("resize", resize);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) saveGame();
+      if (audioCtx) {
+        if (document.hidden) audioCtx.suspend().catch(() => {});
+        else audioCtx.resume().catch(() => {});
+      }
+      state.lastTick = performance.now();
+    });
+
+    function loop(now) {
+      const dt = Math.min(0.08, (now - state.lastTick) / 1000 || 0);
+      state.lastTick = now;
+      update(dt);
+      render();
+      state.srTimer += dt;
+      if (state.srTimer > 1) {
+        state.srTimer = 0;
+        srState.textContent = renderGameToText();
+      }
+      requestAnimationFrame(loop);
+    }
+
+    function renderGameToText() {
+      const run = state.run;
+      return JSON.stringify({
+        coordinateSystem: "logical canvas 900x1200, origin top-left, x right, y down",
+        mode: state.mode,
+        coins: state.save.coins,
+        energy: state.save.energy,
+        location: currentLocation().id,
+        uniqueCollected: uniqueCollectedCount(),
+        upgrades: state.save.upgrades,
+        detector: {
+          x: Math.round(state.detector.x),
+          y: Math.round(state.detector.y),
+          signal: Number(state.detector.signal.toFixed(2)),
+          radius: detectorRadius(),
+        },
+        run: run ? {
+          time: Math.ceil(run.time),
+          target: run.loc.target,
+          found: run.found.length,
+          revealed: run.revealed,
+          coins: run.coins,
+          hidden: run.hidden.filter((h) => h.state !== "collected").map((h) => ({
+            x: Math.round(h.x),
+            y: Math.round(h.y),
+            state: h.state,
+            item: h.name,
+            lock: Number(h.lock.toFixed(2)),
+            brush: Number(h.brush.toFixed(2)),
+          })).slice(0, 8),
+        } : null,
+        buttons: state.buttons.map((b) => ({ label: b.label, x: b.x, y: b.y, w: b.w, h: b.h, disabled: b.disabled })).slice(0, 12),
+      });
+    }
+
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = (ms) => {
+      const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+      for (let i = 0; i < steps; i++) update(1 / 60);
+      render();
+      return renderGameToText();
+    };
+    window.__treasureSweepDebug = {
+      startRun,
+      setMode: (mode) => { state.mode = mode; render(); },
+      revealAll: () => {
+        if (!state.run) return;
+        for (const h of state.run.hidden) reveal(h);
+        render();
+      },
+      collectAll: () => {
+        if (!state.run) return;
+        for (const h of state.run.hidden) collect(h);
+        render();
+      },
+      state,
+    };
+
+    resize();
+    try {
+      window.ysdk?.features?.LoadingAPI?.ready?.();
+    } catch {
+      // Platform bridge is optional for the gallery build.
+    }
+    if (window.__GF_AUTOSTART) startRun();
+    requestAnimationFrame(loop);
+  })();
+  </script>
+</body>
+</html>
