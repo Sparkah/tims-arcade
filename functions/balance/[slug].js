@@ -21,8 +21,11 @@
 //   recruitHp.baseCap,2
 
 const SHEET_CSV = {
-  // slug -> published-to-web CSV URL. Add when the sheet exists:
-  // merge_conquest: 'https://docs.google.com/spreadsheets/d/e/<PUB_ID>/pub?gid=0&single=true&output=csv',
+  // slug -> a CSV URL for the game's balance sheet. We fetch SERVER-SIDE, so the
+  // sheet only needs "anyone with the link can view" (no publish-to-web needed);
+  // the /export endpoint returns raw cells (gviz mis-types the "2|4" cost cells,
+  // so do NOT use gviz here). Tim's sheet, 2026-06-16:
+  merge_conquest: 'https://docs.google.com/spreadsheets/d/1IeBqoruXP7INus9Mc88n-0FIq13epAjJuzk-MOZ1XzQ/export?format=csv',
 };
 
 const CORS = {
