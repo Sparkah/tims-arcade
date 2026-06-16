@@ -1,7 +1,8 @@
 // vibe.js -- the /create page logic. Lets a signed-in player describe a game and
 // have it built (async, by Tim's Mac relay) and played back in a sandboxed iframe.
-// Economy: first game free, then 60 tokens per game (earned by play +1/min, rate a
-// game +5, daily login +10), or a (placeholder) buy button. Dependency-free. Tim 2026-06-16.
+// Economy: 60 tokens per game. New accounts get a 60-token signup bonus on first
+// sign-in (covers the first game), then earn more by play (+1/min), rate (+5), or
+// daily login (+10), or a (placeholder) buy button. Dependency-free. Tim 2026-06-16.
 (function () {
   'use strict';
 
@@ -78,9 +79,9 @@
   function renderQuota(q) {
     var cost   = q.generationCost || 60;
     var tokens = q.tokens || 0;
+    var canGen = q.canGenerate || tokens >= cost;
     els.prompts.hidden = false;
-    els.prompts.textContent = q.freeAvailable ? 'First game free' : (tokens + ' / ' + cost + ' tokens');
-    var canGen = q.freeAvailable || q.canGenerate || tokens >= cost;
+    els.prompts.textContent = canGen ? (cost + ' tokens ready') : (tokens + ' / ' + cost + ' tokens');
     if (canGen) {
       show(els.gate, false);
       els.generate.disabled = false;

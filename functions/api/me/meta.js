@@ -34,7 +34,8 @@ function daysBetween(a, b) {
 }
 
 import { parseCookie } from '../../_lib/cookie.js';
-import { readMeta, writeMeta, emptyMeta } from '../../_lib/meta.js';
+import { readMeta, writeMeta, emptyMeta, grantSignupBonus } from '../../_lib/meta.js';
+import { readSession } from '../_session.js';
 
 export async function onRequestGet({ request, env }) {
   const uid = parseCookie(request.headers.get('Cookie') || '', 'uid');
@@ -42,6 +43,14 @@ export async function onRequestGet({ request, env }) {
     return new Response(JSON.stringify(emptyMeta()), {
       headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
     });
+  }
+
+  // First signed-in load grants the one-time 60-token signup bonus to this cookie
+  // balance (idempotent per email). Done BEFORE readMeta so the +60 is reflected in
+  // the response and the daily-login read-modify-write below sees it. Best-effort.
+  const session = await readSession(request, env);
+  if (session && session.uid) {
+    try { await grantSignupBonus(env, session.uid, uid); } catch (e) { /* never block meta */ }
   }
 
   const meta = await readMeta(env, uid);

@@ -1,17 +1,17 @@
 // POST /api/gen/submit  { prompt: string }
 // The player describes a game in one sentence. Requires sign-in (magic-link).
-// Spends 1 prompt (first is free per email; more are earned by 30 min of ACTIVE
-// play -- see heartbeat.js -- or "bought" via the placeholder pay button). Enqueues
+// Spends GENERATION_COST tokens (new accounts get a 60-token signup bonus on first
+// sign-in that covers the first game; more are earned by play/rate/login). Enqueues
 // an async build job that Tim's Mac relay (Shared/tools/vibe-relay) picks up,
 // generates with claude --print, and posts back to /api/admin/gen-result.
-// Tim 2026-06-15.
+// Tim 2026-06-16.
 
 import { readSession } from '../_session.js';
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 import { checkRate } from '../../_lib/rateLimit.js';
 import { filterText } from '../../_lib/chatmod.js';
 import { parseCookie } from '../../_lib/cookie.js';
-import { spendTokens, refundTokens, readMeta, GENERATION_COST } from '../../_lib/meta.js';
+import { spendTokens, refundTokens, readMeta, grantSignupBonus, GENERATION_COST } from '../../_lib/meta.js';
 
 const MIN_PROMPT = 3;
 const MAX_PROMPT = 500;
@@ -45,34 +45,28 @@ export async function onRequestPost({ request, env }) {
   if (!filtered.ok) return jsonError('prompt_' + (filtered.reason || 'blocked'), 400);
   const prompt = filtered.text;
 
-  // Generation is priced in tokens -- the same balance the player earns by
-  // play/like/login and sees in the pill. The FIRST generation per account is
-  // free, gated on the SESSION (per-email) so clearing the anon cookie can't
-  // re-mint it. Subsequent generations spend GENERATION_COST tokens from the
-  // COOKIE uid's balance (where tokens accrue + are displayed). Tim 2026-06-16.
+  // Generation always costs GENERATION_COST tokens from the COOKIE uid balance --
+  // the visible/spendable pill balance. New accounts get a 60-token signup bonus on
+  // their first signed-in load (grantSignupBonus), which covers the first game, so
+  // there is no separate "free" path. Accepted-risk: KV has no compare-and-set, so
+  // two concurrent submits for one balance can race a double-spend -- the same
+  // documented meta:<uid> read-modify-write race, bounded by the 20/day cap + the IP
+  // rate limit above. Tim 2026-06-16.
   const cookieUid = parseCookie(request.headers.get('Cookie') || '', 'uid');
-  const sessionMeta = await readMeta(env, session.uid);
-  const freeKey = `freegen:${session.uid}`;
-  // "Free" only if NEITHER the new freegen key NOR the legacy prompt-era
-  // freeGranted flag is set, so an account that already used the old free prompt
-  // does NOT get a second free generation across the migration (Codex review 2026-06-16).
-  const isFree = !sessionMeta.freeGranted && !(await env.VOTES.get(freeKey));
-  // Accepted-risk: KV has no atomic compare-and-set, so two concurrent submits for
-  // one account can both see freegen missing (double free) or race the same 60-token
-  // balance (double spend). Same documented meta:<uid> read-modify-write race the
-  // gallery already tolerates; bounded by the 20/day cap + the IP rate limit above.
-  if (isFree) {
-    await env.VOTES.put(freeKey, '1');          // one-time free generation, claimed
-  } else {
-    const paid = cookieUid && await spendTokens(env, cookieUid, GENERATION_COST);
-    if (!paid) return jsonError('need_tokens', 402);
-  }
+  const sessionMeta = await readMeta(env, session.uid);   // for displayName
+  // Ensure a newly-signed-in account has its one-time signup bonus BEFORE spending,
+  // so a direct / stale-tab / API submit (that never hit /quota or /me/meta first)
+  // isn't wrongly rejected with need_tokens (Codex 2026-06-16). Idempotent per email.
+  // Best-effort like the quota/me-meta call sites: a KV hiccup in the grant must not
+  // 500 the submit -- spendTokens below still gates the actual charge.
+  try { await grantSignupBonus(env, session.uid, cookieUid); } catch (e) { /* never block submit */ }
+  const paid = cookieUid && await spendTokens(env, cookieUid, GENERATION_COST);
+  if (!paid) return jsonError('need_tokens', 402);
 
   // Daily cap counts only accepted generations -- so it never burns on rejects.
   const day = new Date().toISOString().slice(0, 10);
   if (!await checkRate(env, `genrate:${session.uid}:${day}`, DAILY_GEN_CAP, 60 * 60 * 26)) {
-    if (isFree) await env.VOTES.delete(freeKey);                             // restore free gen
-    else if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST); // refund tokens (not lifetime)
+    if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
     return jsonError('daily_limit_reached', 429);
   }
 
@@ -85,16 +79,15 @@ export async function onRequestPost({ request, env }) {
     id, uid: session.uid, email: session.email, prompt, displayName,
     status: 'pending', slug: null, title: null, error: null,
     // What this job was charged, so a terminal build failure refunds the EXACT
-    // charge once (admin/gen-result.js): restore the free generation, or 60
-    // cookie-uid tokens. cookieUid may be null (no cookie) -> nothing to refund.
-    charge: isFree ? { kind: 'free', freeKey } : { kind: 'tokens', uid: cookieUid, amount: GENERATION_COST },
+    // charge once (admin/gen-result.js): 60 cookie-uid tokens. cookieUid may be
+    // null (no cookie) -> nothing to refund.
+    charge: { kind: 'tokens', uid: cookieUid, amount: GENERATION_COST },
     ts, updatedTs: ts,
   };
   try {
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
   } catch (e) {
-    if (isFree) await env.VOTES.delete(freeKey);                             // restore free gen
-    else if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST); // refund tokens (not lifetime)
+    if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
     return jsonError('enqueue_failed', 500);
   }
   // Signal new work so the vibe-relay detects it with a cheap GET (gen-queue

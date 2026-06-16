@@ -10,22 +10,18 @@
 // keys (`meta:<uid>:tokens` as an integer-only counter) and recompose on
 // read.
 
-// Vibe-coder economy tunables (single source of truth -- imported by heartbeat.js
-// and gen/quota.js so they can't drift). Tim 2026-06-15.
-//   SECONDS_PER_PROMPT: 30 min of ACTIVE play earns 1 generation prompt.
-//   PROMPT_BANK_CAP:    accrual stops (and, crucially, the per-flush KV write is
-//                       SKIPPED) once a player holds this many prompts -- so the
-//                       only signed-in players writing meta per heartbeat are
-//                       those actively grinding with an empty balance.
-export const SECONDS_PER_PROMPT = 1800;
-export const PROMPT_BANK_CAP = 1;
-
 // Unified token economy (Tim 2026-06-16): generation is priced in the SAME
 // tokens the player earns by play (1/min), like (+5), and daily login (+10) and
 // sees in the pill -- so every earn path feeds one visible goal. Replaces the
 // old hidden "prompt" credit (30 min of play = 1 prompt), which is being retired.
-// First generation per account stays free (gated per-email in gen/submit.js).
+// New accounts get SIGNUP_BONUS tokens on first signed-in load (gated per-email),
+// which covers their first generation -- so there is no separate "free" path.
 export const GENERATION_COST = 60;
+
+// One-time signup bonus, granted on the first signed-in load (per email) and
+// credited to the COOKIE-uid balance (the visible/spendable pill balance) so a
+// new player can make a game right away. Idempotent per email. Tim 2026-06-16.
+export const SIGNUP_BONUS = 60;
 
 // Fairness/anti-farm vote gate (Tim 2026-06-16): a player must accumulate this
 // many seconds of ACTIVE play on a game before they may like/dislike it. Active
@@ -47,13 +43,9 @@ export function emptyMeta() {
     // played: { <slug>: activeSeconds } banked by the heartbeat (capped at the
     // vote gate) -- the cookie-uid record's per-game timer for the rating gate.
     played: {},
-    // Vibe-coder economy (Tim 2026-06-15). On meta:<sessionUid> records:
-    //   prompts      — spendable game-generation credits
-    //   freeGranted  — has the one-time free prompt been given (per email)
-    //   playProgress — active seconds banked toward the next earned prompt
-    //   lastPlayTs   — last heartbeat ts, for the wall-clock anti-farm cap
-    //   displayName  — public creator name shown on published creations
-    prompts: 0, freeGranted: false, playProgress: 0, lastPlayTs: 0, displayName: null,
+    // lastPlayTs: last credited heartbeat ts (wall-clock anti-farm clamp).
+    // displayName: public creator name shown on published creations.
+    lastPlayTs: 0, displayName: null,
   };
 }
 
@@ -102,6 +94,32 @@ export async function refundTokens(env, uid, n) {
   const m = await readMeta(env, uid);
   m.tokens += n;
   await writeMeta(env, uid, m);
+}
+
+// One-time signup bonus: gated PER EMAIL (sessionUid flag) but credited to the
+// COOKIE uid -- the visible/spendable balance the pill shows. Idempotent: grants
+// at most once per email, even across cookie resets or repeat sign-ins (the
+// per-email flag survives; clearing the cookie just forfeits the credited tokens,
+// so it can't be farmed). creditTokens bumps lifetime too, which is intended --
+// the bonus counts toward the leaderboard. Returns true only on the grant. Tim 2026-06-16.
+export async function grantSignupBonus(env, sessionUid, cookieUid, amount = SIGNUP_BONUS) {
+  if (!sessionUid || !cookieUid) return false;
+  const flagKey = `bonus60:${sessionUid}`;
+  if (await env.VOTES.get(flagKey)) return false;
+  // Set the flag BEFORE crediting so the common case is at-most-once. Residual KV
+  // race (Codex 2026-06-16): two concurrent first-loads (me/meta + quota) can both
+  // read the flag missing and double-grant -- the same non-atomic meta:<uid> race the
+  // whole economy already documents; the true fix is a D1 / Durable-Object atomic
+  // claim, planned before real traffic. If the credit itself fails, roll the flag
+  // back so the bonus isn't permanently lost (a later load retries).
+  await env.VOTES.put(flagKey, '1');
+  try {
+    await creditTokens(env, cookieUid, amount);
+  } catch (e) {
+    try { await env.VOTES.delete(flagKey); } catch (_) { /* best effort */ }
+    return false;
+  }
+  return true;
 }
 
 // Heartbeat meta update in ONE read-modify-write: credit play tokens AND bank
@@ -161,68 +179,7 @@ export async function grantOnce(env, uid, dedupKey, amount, ttlSeconds = 60 * 60
   return true;
 }
 
-// ── Vibe-coder prompt economy ───────────────────────────────────────────────
-// "Prompts" are the currency for player game-generation: 1 free per email, then
-// 1 earned per 30 min of ACTIVE play, or buy (placeholder). These operate on the
-// SESSION uid's meta record so a cleared anon cookie can't re-mint the free grant
-// or the balance. Same documented read-modify-write race as the token helpers —
-// acceptable at gallery volume; shard or move to D1 if multi-tab users lose credits.
-
-// One-time free prompt per account. Idempotent: returns true only the first time.
-export async function grantFreePrompt(env, uid) {
-  if (!uid) return false;
-  const m = await readMeta(env, uid);
-  if (m.freeGranted) return false;
-  m.freeGranted = true;
-  m.prompts = (m.prompts || 0) + 1;
-  await writeMeta(env, uid, m);
-  return true;
-}
-
-// Credit `n` prompts (e.g. a purchase or an admin grant). No-op on bad input.
-export async function creditPrompts(env, uid, n) {
-  if (!uid || !n || n <= 0) return;
-  const m = await readMeta(env, uid);
-  m.prompts = (m.prompts || 0) + n;
-  await writeMeta(env, uid, m);
-}
-
-// Spend `n` prompts. Returns true if the balance covered it (and was debited),
-// false otherwise — callers gate generation on the boolean.
-export async function spendPrompts(env, uid, n = 1) {
-  if (!uid || !n || n <= 0) return false;
-  const m = await readMeta(env, uid);
-  if ((m.prompts || 0) < n) return false;
-  m.prompts -= n;
-  await writeMeta(env, uid, m);
-  return true;
-}
-
-// Bank `seconds` of active play toward the next earned prompt, rolling whole
-// SECONDS_PER_PROMPT chunks into +1 prompt each. Skips the write entirely once
-// the bank is full (prompts >= cap) so it costs only a read in the common case —
-// this is the heartbeat write-budget guard. Returns the post-state for callers
-// that want to surface progress.
-export async function accruePlay(env, uid, seconds, { secondsPerPrompt = SECONDS_PER_PROMPT, cap = PROMPT_BANK_CAP, now = Date.now() } = {}) {
-  if (!uid || !seconds || seconds <= 0) return null;
-  const m = await readMeta(env, uid);
-  if ((m.prompts || 0) >= cap) return { prompts: m.prompts, playProgress: m.playProgress || 0, capped: true };
-  // Anti-farm (Codex review 2026-06-15): credit no more than the real wall-clock
-  // elapsed since this uid's last heartbeat, so POSTing a large `seconds` value
-  // repeatedly cannot mint prompts faster than time actually passes. The first
-  // call (no prior ts) trusts the already-clamped value.
-  const last = m.lastPlayTs || 0;
-  const elapsed = last ? Math.max(0, Math.floor((now - last) / 1000)) : seconds;
-  const effective = Math.min(seconds, elapsed);
-  m.lastPlayTs = now;
-  if (effective > 0) {
-    m.playProgress = (m.playProgress || 0) + effective;
-    if (m.playProgress >= secondsPerPrompt) {
-      const earned = Math.floor(m.playProgress / secondsPerPrompt);
-      m.prompts = (m.prompts || 0) + earned;
-      m.playProgress -= earned * secondsPerPrompt;
-    }
-  }
-  await writeMeta(env, uid, m);
-  return { prompts: m.prompts, playProgress: m.playProgress, capped: false };
-}
+// (The legacy "prompt" generation economy -- grantFreePrompt / creditPrompts /
+// spendPrompts / accruePlay + SECONDS_PER_PROMPT / PROMPT_BANK_CAP -- was retired
+// 2026-06-16 when generation moved to the unified token economy above. Removed as
+// dead code; in-flight pre-migration jobs still refund via gen-result.js.)
