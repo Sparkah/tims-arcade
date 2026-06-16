@@ -91,6 +91,9 @@ var STRINGS = {
     ev_combo: 'Combo Mayhem', ev_comboD: 'Combos hold longer for bigger chains',
     eventReward: 'Hit the goal for a guaranteed RARE part', eventDone: 'EVENT PART CLAIMED',
     perfect: 'PERFECT!', stuntDone: 'STUNT!', sweetHint: 'Release in the GREEN for a PERFECT launch',
+    wreckYard: 'WRECK YARD', trophyUnlock: 'TROPHY EARNED!', nextTrophy: 'Next trophy: {n} {f} to {t}',
+    tier1: 'Bronze', tier2: 'Silver', tier3: 'Gold',
+    wf_crate: 'Crates', wf_cone: 'Cones', wf_tire: 'Tires', wf_car: 'Cars', wf_tower: 'Towers', wf_tnt: 'TNT', wf_air: 'Sky',
   },
   ru: {
     title: 'Краш Багги', sub: 'Отпусти для ЗАПУСКА!',
@@ -161,6 +164,9 @@ var STRINGS = {
     ev_combo: 'Комбо-хаос', ev_comboD: 'Комбо держится дольше для длинных цепочек',
     eventReward: 'Достигни цели ради гарантированной РЕДКОЙ детали', eventDone: 'ДЕТАЛЬ СОБЫТИЯ ПОЛУЧЕНА',
     perfect: 'ИДЕАЛЬНО!', stuntDone: 'ТРЮК!', sweetHint: 'Отпусти в ЗЕЛЁНОЙ зоне для ИДЕАЛЬНОГО запуска',
+    wreckYard: 'СВАЛКА', trophyUnlock: 'ТРОФЕЙ ПОЛУЧЕН!', nextTrophy: 'До {t} ({f}): ещё {n}',
+    tier1: 'Бронза', tier2: 'Серебро', tier3: 'Золото',
+    wf_crate: 'Ящики', wf_cone: 'Конусы', wf_tire: 'Шины', wf_car: 'Машины', wf_tower: 'Башни', wf_tnt: 'Динамит', wf_air: 'Небо',
   },
 };
 
@@ -210,6 +216,9 @@ var meta = {
   // M3 — weekly EVENT: one world modifier picked by the ISO week, with a headline
   // target that grants a guaranteed rare part once (the FOMO return trigger).
   event: { week: '', prog: 0, claimed: false },
+  // WRECK YARD: lifetime count of every prop type smashed across ALL runs. The core
+  // destruction verb finally compounds into something owned + visible — see TROPHIES.
+  wrecked: {},
 };
 function freshUp() { return { engine: 0, nitro: 0, armor: 0, wheels: 0, ramp: 0 }; }
 function ensureCarUp(id) { if (!meta.carUp[id]) meta.carUp[id] = freshUp(); return meta.carUp[id]; }
@@ -243,6 +252,7 @@ function loadMeta() {
         if (s.mastery && typeof s.mastery === 'object') meta.mastery = { xp: Math.max(0, s.mastery.xp | 0) };
         if (s.stunts && typeof s.stunts === 'object' && Array.isArray(s.stunts.list)) meta.stunts = { week: s.stunts.week || '', list: s.stunts.list };
         if (s.event && typeof s.event === 'object') meta.event = { week: s.event.week || '', prog: s.event.prog | 0, claimed: !!s.event.claimed };
+        if (s.wrecked && typeof s.wrecked === 'object') { for (var wk in s.wrecked) if (typeof s.wrecked[wk] === 'number') meta.wrecked[wk] = Math.max(0, s.wrecked[wk] | 0); }
         var isV2 = (s.carUp && typeof s.carUp === 'object') || Array.isArray(s.ownedDaily);
         if (s.carUp && typeof s.carUp === 'object') {       // v2 per-car upgrades
           for (var id in s.carUp) { var u = freshUp(); for (var k in u) if (typeof s.carUp[id][k] === 'number') u[k] = s.carUp[id][k] | 0; meta.carUp[id] = u; }
@@ -365,7 +375,57 @@ function recalcBonus() {
   var stars = prestigeStars(meta.vehicle);
   b.spd += 0.06 * stars; b.scrap += 0.08 * stars;
   b.scrap += masteryPerk();          // M3: permanent global scrap % from Mastery rank
+  b.scrap += trophyScrapBonus();     // WRECK YARD: permanent scrap % from earned trophies
   _bonus = b;
+}
+
+// ── WRECK YARD TROPHIES ───────────────────────────────────────────────────
+// The destruction verb compounds: lifetime smash counts per prop FAMILY earn
+// permanent display TROPHIES (3 tiers each), each granting a small global scrap
+// bonus folded into recalcBonus. A returning player opens to a fuller junk yard +
+// trophy shelf + an unlock toast — destruction made permanent in the world.
+// fam = the wreck-yard family key; props is the list of in-run p.type values that
+// feed it; tiers = [bronze, silver, gold] smash thresholds; bonus = scrap % PER tier.
+var TROPHIES = [
+  { fam: 'crate', props: ['crate', 'barrel'], col: '#b9803f', tiers: [40, 220, 900], bonus: 0.015 },
+  { fam: 'cone',  props: ['cone', 'sign'],    col: '#ff8a3c', tiers: [30, 180, 700], bonus: 0.012 },
+  { fam: 'tire',  props: ['tire', 'boost'],   col: '#1c1c22', tiers: [25, 140, 560], bonus: 0.015 },
+  { fam: 'car',   props: ['car'],             col: '#7b8aa0', tiers: [20, 120, 480], bonus: 0.025 },
+  { fam: 'tower', props: ['tower'],           col: '#9aa7bd', tiers: [12, 70,  300], bonus: 0.025 },
+  { fam: 'tnt',   props: ['tnt'],             col: '#ff5a2e', tiers: [10, 60,  260], bonus: 0.03  },
+  { fam: 'air',   props: ['bird', 'plane', 'comet', 'ufo'], col: '#7fe0ff', tiers: [15, 90, 360], bonus: 0.02 },
+];
+var PROP2FAM = (function () { var m = {}; for (var i = 0; i < TROPHIES.length; i++) for (var j = 0; j < TROPHIES[i].props.length; j++) m[TROPHIES[i].props[j]] = TROPHIES[i]; return m; })();
+function wreckCount(fam) { return meta.wrecked[fam] | 0; }
+function trophyTier(t) { var n = wreckCount(t.fam), r = 0; for (var i = 0; i < t.tiers.length; i++) if (n >= t.tiers[i]) r = i + 1; return r; }  // 0..3
+function trophyScrapBonus() { var s = 0; for (var i = 0; i < TROPHIES.length; i++) s += trophyTier(TROPHIES[i]) * TROPHIES[i].bonus; return s; }
+function trophyTotalEarned() { var s = 0; for (var i = 0; i < TROPHIES.length; i++) s += trophyTier(TROPHIES[i]); return s; }       // 0..21
+function trophyTotalWrecks() { var s = 0; for (var k in meta.wrecked) s += meta.wrecked[k] | 0; return s; }
+// next un-earned tier across all families, by fewest smashes remaining (the menu pull)
+function nextTrophyHint() {
+  var best = null;
+  for (var i = 0; i < TROPHIES.length; i++) {
+    var t = TROPHIES[i], tier = trophyTier(t); if (tier >= 3) continue;
+    var need = t.tiers[tier] - wreckCount(t.fam);
+    if (best === null || need < best.need) best = { fam: t.fam, tier: tier, need: need };
+  }
+  return best;
+}
+// called once per smash from handleSmash — bumps the lifetime count and, on a tier
+// cross, fires the unlock toast + recalcs the permanent bonus.
+function tallyWreck(type) {
+  var t = PROP2FAM[type]; if (!t) return;
+  var before = trophyTier(t);
+  meta.wrecked[t.fam] = wreckCount(t.fam) + 1;
+  var after = trophyTier(t);
+  if (after > before) {
+    flashTrophy = { fam: t.fam, tier: after }; flashTrophyT = 2.6;
+    GF.sfx('unlock'); GF.sfx('reward'); recalcBonus();
+    // persist on the RARE tier-cross only (<=21 times ever per save) so an earned
+    // trophy + its permanent scrap bonus survive a tab-close mid-run. NOT per-smash
+    // (that would be a per-frame localStorage write — build-hygiene violation).
+    saveMeta();
+  }
 }
 function equipItemById(id) {
   if (equippedAnywhere(id)) { GF.sfx('error'); return; }
@@ -471,6 +531,7 @@ var lbOpen = false, lbButtons = [];      // leaderboard overlay
 var lbCache = { state: 'idle', entries: [], you: null, t: 0 };   // idle|loading|ready|error
 var flashScrap = 0, flashScrapT = 0, flashCar = '', flashCarT = 0;
 var flashRank = -1, flashRankT = 0;     // M3 rank-up banner
+var flashTrophy = null, flashTrophyT = 0;  // WRECK YARD trophy-unlock toast {fam,tier}
 var _pendingAd = false;
 
 var rr = GF.rr, clamp = GF.clamp, lerp = GF.lerp;
@@ -744,6 +805,7 @@ function handleSmash(p) {
   if (p.dead) return;
   if (p.type === 'boost') {
     if (p.used) return; p.used = true; p.dead = true;
+    tallyWreck('boost');
     buggy.vy = -Math.max(560, Math.abs(buggy.vy) * 0.5 + 520);
     buggy.onGround = false; buggy.restT = 0;
     GF.setShake(0.35); sfxRL('merge', 60);
@@ -762,6 +824,7 @@ function handleSmash(p) {
     return;
   }
   p.dead = true; smashes++; combo++; comboT = COMBO_WINDOW * evComboWindowMul();
+  tallyWreck(p.type);                                                      // WRECK YARD lifetime tally
   questProgress('smash');
   stuntProgress('smashW', 1, false);                                       // M3 weekly stunt
   stuntProgress('combo', comboMult(), true);                               // run-peak combo
@@ -962,6 +1025,7 @@ function draw(c) {
   if (lbOpen) drawLeaderboard(c);
   GF.tutorial.draw(c);
   drawRankUp(c);
+  drawTrophyUp(c);
 }
 // M3 RANK-UP banner — a brief celebratory toast when Mastery rank increases.
 function drawRankUp(c) {
@@ -979,6 +1043,36 @@ function drawRankUp(c) {
   c.fillText(GF.t('rankUp'), W / 2, by + bh * 0.4);
   c.fillStyle = '#fff'; c.font = 'bold ' + clamp(15 * S, 12, 21) + 'px Inter, system-ui, sans-serif';
   c.fillText(GF.t('rank' + Math.max(0, flashRank)) + '  ·  ' + GF.t('rankPerk').replace('{n}', Math.round(masteryPerk() * 100)), W / 2, by + bh * 0.72);
+  c.restore();
+}
+// WRECK YARD trophy-unlock toast — fired mid-run when a smash crosses a tier.
+function drawTrophyUp(c) {
+  if (flashTrophyT <= 0 || !flashTrophy) return;
+  flashTrophyT -= 1 / 60;
+  var W = GF.W, H = GF.H, S = GF.S, a = Math.min(1, flashTrophyT * 1.4);
+  var fam = flashTrophy.fam, tier = flashTrophy.tier;
+  var tcol = ['#cd7f32', '#cdd6e6', '#ffd700'][tier - 1] || '#ffd700';
+  c.save(); c.globalAlpha = a; c.textAlign = 'center';
+  var bw = clamp(320 * S, 230, 440), bh = clamp(64 * S, 50, 86), bx = W / 2 - bw / 2, by = H * 0.22;
+  c.fillStyle = 'rgba(18,24,38,0.92)'; c.shadowColor = tcol; c.shadowBlur = 22 * S;
+  rr(c, bx, by, bw, bh, 14 * S); c.fill(); c.shadowBlur = 0;
+  c.strokeStyle = tcol; c.lineWidth = 2 * S; rr(c, bx, by, bw, bh, 14 * S); c.stroke();
+  drawTrophyIcon(c, bx + 30 * S, by + bh / 2, clamp(15 * S, 11, 20), tcol);
+  c.fillStyle = tcol; c.font = 'bold ' + clamp(16 * S, 13, 23) + 'px Inter, system-ui, sans-serif';
+  c.fillText(GF.t('trophyUnlock'), W / 2 + 12 * S, by + bh * 0.4);
+  c.fillStyle = '#fff'; c.font = 'bold ' + clamp(13 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+  c.fillText(GF.t('tier' + tier) + ' ' + GF.t('wf_' + fam), W / 2 + 12 * S, by + bh * 0.72);
+  c.restore();
+}
+// a small vector trophy cup (no emoji) — used by the toast + the garage shelf.
+function drawTrophyIcon(c, X, Y, r, col) {
+  c.save(); c.translate(X, Y); c.fillStyle = col;
+  c.beginPath(); c.moveTo(-r * 0.6, -r * 0.7); c.lineTo(r * 0.6, -r * 0.7); c.lineTo(r * 0.42, r * 0.05); c.lineTo(-r * 0.42, r * 0.05); c.closePath(); c.fill();  // cup
+  c.lineWidth = Math.max(1, r * 0.16); c.strokeStyle = col;                                   // handles
+  c.beginPath(); c.arc(-r * 0.62, -r * 0.36, r * 0.28, 0.4, 3.6); c.stroke();
+  c.beginPath(); c.arc(r * 0.62, -r * 0.36, r * 0.28, -0.46, 2.74, true); c.stroke();
+  c.fillRect(-r * 0.12, r * 0.05, r * 0.24, r * 0.4);                                          // stem
+  c.fillRect(-r * 0.42, r * 0.45, r * 0.84, r * 0.22);                                         // base
   c.restore();
 }
 var _skyGrad = { key: '' };
@@ -1375,7 +1469,17 @@ function drawMenu(c) {
   c.fillStyle = '#cdd6e6'; c.font = clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
   c.fillText(GF.t('sub'), W / 2, H * 0.30 + 32 * S);
   if (meta.bestDist > 0) { c.fillStyle = '#ffd166'; c.font = 'bold ' + clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif'; c.fillText(GF.t('best') + ': ' + meta.bestDist + ' ' + GF.t('dist'), W / 2, H * 0.30 + 56 * S); }
+  // WRECK YARD: a junk mountain that visibly GROWS with everything you've ever
+  // smashed — the returning player SEES their destruction made permanent (drawn
+  // UNDER the buggy so the buggy sits on the heap).
+  drawWreckPile(c, W / 2, H * 0.50 + clamp(26 * S, 18, 36), clamp(2.4 * S, 1.6, 3.2));
   drawMiniBuggyColored(c, W / 2, H * 0.50, clamp(2.4 * S, 1.6, 3.2), curVeh());
+  // next-trophy pull (surfaced OUTSIDE the garage)
+  var nh = nextTrophyHint();
+  if (nh) {
+    c.textAlign = 'center'; c.fillStyle = '#9fb2c8'; c.font = clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
+    c.fillText(GF.t('nextTrophy').replace('{n}', nh.need).replace('{t}', GF.t('tier' + (nh.tier + 1))).replace('{f}', GF.t('wf_' + nh.fam)), W / 2, H * 0.50 + clamp(46 * S, 34, 60));
+  }
   var bw = clamp(260 * S, 180, 380), bh = clamp(60 * S, 46, 78);
   var hw = clamp(112 * S, 86, 160), hg = clamp(10 * S, 8, 14);
   var qReady = questsReadyCount(), pile = idlePreview();
@@ -1405,6 +1509,41 @@ function drawMiniBuggyColored(c, X, Y, u, v) {
   voxBox(c, -w * 0.18, -h * 0.62, w * 0.46, h * 0.45, v.accent, 0.2);
   c.fillStyle = '#f2c39b'; c.fillRect(-w * 0.02, -h * 0.92, 11 * u, 11 * u);
   c.fillStyle = '#274b8f'; c.fillRect(-w * 0.04, -h * 0.6, 14 * u, 14 * u);
+  c.restore();
+}
+// WRECK YARD junk mountain for the menu — chunk count scales (log) with lifetime
+// wrecks so it visibly grows over a player's history. Deterministic layout (a tiny
+// seeded PRNG) so it doesn't shimmer between frames; colours sampled from the
+// trophy families the player has actually smashed.
+function drawWreckPile(c, X, baseY, u) {
+  var total = trophyTotalWrecks();
+  if (total <= 0) return;
+  var n = Math.min(64, Math.round(6 + Math.log(1 + total) * 7));   // grows, capped
+  // colours weighted by what THIS player wrecked most
+  var pal = [], i;
+  for (i = 0; i < TROPHIES.length; i++) { var cnt = wreckCount(TROPHIES[i].fam); if (cnt > 0) pal.push(TROPHIES[i].col); }
+  if (!pal.length) pal = ['#b9803f'];
+  var seed = 1337, rnd = function () { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  var W = Math.min(GF.W * 0.7, (90 + n * 2.2) * u * 0.5);          // heap half-width
+  var pileH = clamp((10 + Math.sqrt(n) * 6) * u * 0.5, 14, GF.H * 0.16);
+  c.save();
+  // soft shadow base
+  c.fillStyle = 'rgba(0,0,0,0.22)';
+  c.beginPath(); c.ellipse(X, baseY + 2 * u, W * 1.06, pileH * 0.26, 0, 0, 6.28); c.fill();
+  for (i = 0; i < n; i++) {
+    var fx = (rnd() * 2 - 1);                                       // -1..1 across width
+    var heap = 1 - fx * fx;                                         // parabolic mound profile
+    var bx = X + fx * W;
+    var by = baseY - rnd() * heap * pileH;
+    var s = (3 + rnd() * 4) * u * 0.5;
+    c.fillStyle = pal[(Math.floor(rnd() * pal.length)) % pal.length];
+    c.globalAlpha = 0.78 + rnd() * 0.22;
+    c.fillRect(bx - s / 2, by - s, s, s);
+    // a darker facet for voxel read
+    c.globalAlpha *= 0.5; c.fillStyle = '#000';
+    c.fillRect(bx - s / 2, by - s * 0.34, s, s * 0.34);
+    c.globalAlpha = 1;
+  }
   c.restore();
 }
 function drawMenuCorner(c) {
@@ -1672,13 +1811,15 @@ function drawGarage(c) {
   var shopH = hdrH + 3 * (rowH + rowGap);
   var questsH = questsSectionH(S, hdrH, rowH, rowGap);
   var stuntsH = stuntsSectionH(S, hdrH, rowH, rowGap);
-  sc.setContentHeight(gridH + 34 * S + questsH + 12 * S + stuntsH + 14 * S + UPGRADES.length * (rowH + rowGap) + (rowH + rowGap) + itemsH + shopH + 20 * S);
+  var trophiesH = trophiesSectionH(S, hdrH, rowH, rowGap);
+  sc.setContentHeight(gridH + 34 * S + questsH + 12 * S + stuntsH + 12 * S + trophiesH + 14 * S + UPGRADES.length * (rowH + rowGap) + (rowH + rowGap) + itemsH + shopH + 20 * S);
   sc.begin(c);
   var cy = 6 * S;
   drawVehicleGrid(c, gx, cy, gw);
   cy += gridH + 14 * S;
   cy = drawQuestsSection(c, gx, cy, gw, hdrH, rowH, rowGap) + 8 * S;
   cy = drawStuntsSection(c, gx, cy, gw, hdrH, rowH, rowGap) + 8 * S;
+  cy = drawTrophiesSection(c, gx, cy, gw, hdrH, rowH, rowGap) + 8 * S;
   // per-car header — upgrades/parts are SEPARATE for each car; stars from prestige
   c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillStyle = '#7ed957'; c.font = 'bold ' + clamp(13 * S, 11, 17) + 'px Inter, system-ui, sans-serif';
   c.fillText(GF.t('veh_' + meta.vehicle), gx + 6 * S, cy + 4 * S);
@@ -1874,6 +2015,46 @@ function drawInfoBadge(c, x, y, S, payload) {
   garageRows.push({ x: x - hr, y: y - hr, w: hr * 2, h: hr * 2, kind: 'info', info: payload });
 }
 // ── DAILY JOBS + IDLE-PILE garage section (the "reason to return" surface) ──
+// ── WRECK YARD trophy shelf (garage section) ──────────────────────────────
+function trophiesSectionH(S, hdrH, rowH, rowGap) {
+  var cols = 4, rows = Math.ceil(TROPHIES.length / cols);
+  var cellH = clamp(70 * S, 56, 92);
+  return hdrH + rows * (cellH + rowGap);
+}
+function drawTrophiesSection(c, x, y, w, hdrH, rowH, rowGap) {
+  var S = GF.S;
+  c.textAlign = 'left'; c.textBaseline = 'middle'; c.fillStyle = '#ffd166'; c.font = 'bold ' + clamp(13 * S, 11, 17) + 'px Inter, system-ui, sans-serif';
+  c.fillText(GF.t('wreckYard'), x + 6 * S, y + hdrH / 2);
+  var earned = trophyTotalEarned(), bonusPct = Math.round(trophyScrapBonus() * 100);
+  c.textAlign = 'right'; c.fillStyle = '#9fb2c8'; c.font = clamp(10 * S, 8, 13) + 'px Inter, system-ui, sans-serif';
+  c.fillText(earned + '/21  ·  +' + bonusPct + '% ' + GF.t('scrap'), x + w - 6 * S, y + hdrH / 2);
+  c.textBaseline = 'alphabetic'; y += hdrH;
+  var cols = 4, gap = rowGap, cw = (w - gap * (cols - 1)) / cols, ch = clamp(70 * S, 56, 92);
+  for (var i = 0; i < TROPHIES.length; i++) {
+    var t = TROPHIES[i], col = Math.floor(i % cols), rrow = Math.floor(i / cols);
+    var cx = x + col * (cw + gap), cy = y + rrow * (ch + gap);
+    var tier = trophyTier(t), n = wreckCount(t.fam);
+    var tcol = tier === 0 ? '#3a4256' : ['#cd7f32', '#cdd6e6', '#ffd700'][tier - 1];
+    c.fillStyle = tier > 0 ? '#1a2233' : '#141a28'; rr(c, cx, cy, cw, ch, 8 * S); c.fill();
+    if (tier === 3) { c.strokeStyle = '#ffd700'; c.lineWidth = 1.5 * S; rr(c, cx, cy, cw, ch, 8 * S); c.stroke(); }
+    drawTrophyIcon(c, cx + cw / 2, cy + ch * 0.32, clamp(15 * S, 11, 20), tcol);
+    // family label
+    c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = tier > 0 ? '#dfe7ff' : '#6a7488';
+    c.font = 'bold ' + clamp(10.5 * S, 9, 14) + 'px Inter, system-ui, sans-serif';
+    c.fillText(GF.t('wf_' + t.fam), cx + cw / 2, cy + ch * 0.62);
+    // tier dots (3) + progress text
+    var dotY = cy + ch * 0.78, dr = clamp(2.6 * S, 2, 3.4), dgap = clamp(9 * S, 7, 12);
+    for (var d = 0; d < 3; d++) {
+      c.beginPath(); c.arc(cx + cw / 2 - dgap + d * dgap, dotY, dr, 0, 6.28);
+      c.fillStyle = d < tier ? ['#cd7f32', '#cdd6e6', '#ffd700'][d] : '#39435a'; c.fill();
+    }
+    c.fillStyle = '#8b97ad'; c.font = clamp(8.5 * S, 7, 11) + 'px Inter, system-ui, sans-serif';
+    var label = tier >= 3 ? ('MAX ' + n) : (n + '/' + t.tiers[tier]);
+    c.fillText(label, cx + cw / 2, cy + ch * 0.93);
+  }
+  c.textAlign = 'left'; c.textBaseline = 'alphabetic';
+  return y + Math.ceil(TROPHIES.length / cols) * (ch + gap);
+}
 function questsSectionH(S, hdrH, rowH, rowGap) {
   var idleH = idlePreview() > 0 ? (rowH * 0.86 + rowGap) : 0;
   return hdrH + idleH + 3 * (rowH + rowGap);
@@ -2623,6 +2804,7 @@ GF.init({
         eventProg: meta.event.prog | 0, eventGoal: eventGoal(), runPeakH: runPeakH, lastLaunchPerfect: !!lastLaunchPerfect,
         ownedCars: meta.ownedCars.slice(), canBuy: (affordableNewCar() || {}).id || null, caps: curVeh().caps,
         items: meta.itemsInv.length, equipped: equipList(meta.vehicle).length, stars: prestigeStars(meta.vehicle),
+        wreckTotal: trophyTotalWrecks(), trophies: trophyTotalEarned(), trophyBonus: +trophyScrapBonus().toFixed(3),
         airTop: Math.round(airTop), airHigh: props.filter(function (p) { return p.air && !p.dead && -p.y > airTop * 0.5; }).length,
         bonus: { spd: +_bonus.spd.toFixed(2), nitro: _bonus.nitro, armor: _bonus.armor, scrap: +_bonus.scrap.toFixed(2) },
         unlockedVehicles: ALL_CARS.filter(vehUnlocked).map(function (v) { return v.id; }),
