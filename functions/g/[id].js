@@ -43,7 +43,14 @@ export async function onRequestGet({ request, env, params }) {
   // Access control (Codex review 2026-06-15): a published creation is public; an
   // unpublished/private one is owner-only. So unpublish actually revokes the link.
   const rec = await env.VOTES.get(`upload:${id}`, 'json');
-  if (rec && !rec.published) {
+  if (!rec) {
+    // Access metadata missing (e.g. the upload write failed after the blob landed):
+    // default-DENY rather than serve open (Codex 2026-06-16). Fall back to the
+    // genjob record so the creator can still reach their own game.
+    const job = await env.VOTES.get(`genjob:${id}`, 'json');
+    const s = await readSession(request, env);
+    if (!job || !s || s.uid !== job.uid) return new Response('Not found', { status: 404 });
+  } else if (!rec.published) {
     const s = await readSession(request, env);
     if (!s || s.uid !== rec.uid) return new Response('Not found', { status: 404 });
   }

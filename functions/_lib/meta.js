@@ -126,24 +126,30 @@ export async function grantSignupBonus(env, sessionUid, cookieUid, amount = SIGN
 // `seconds` of active play on `slug` toward the vote gate. Anti-farm (Codex
 // 2026-06-16): credit no more than the real wall-clock seconds elapsed since this
 // uid's last CREDITED heartbeat, so repeatedly POSTing a big `seconds` cannot mint
-// tokens or gate-time faster than time actually passes (the first call, with no
-// prior ts, trusts the already-[0,300]-clamped value). We WRITE only when a full
-// minute is credited (minutes>0) -- exactly when the old token-only credit wrote --
-// so the vote gate adds no new KV writes. `featuredMult` (2x on the featured game)
+// tokens or gate-time faster than time actually passes. The FIRST beat for a uid
+// stamps lastPlayTs and credits nothing (a fresh cookie can't claim time it never
+// spent -- that previously ~halved the vote gate); that baseline stamp is exactly
+// ONE extra KV write per new uid (bounded, negligible vs the 1000/day budget).
+// Every LATER beat writes only on a full credited minute (minutes>0) -- as the old
+// token-only credit did -- so steady-state play adds no new writes. `featuredMult` (2x on the featured game)
 // scales tokens only; gate time banks REAL seconds, capped at `gateSeconds`. Tim 2026-06-16.
 export async function creditPlayAndTokens(env, uid, { slug, seconds = 0, featuredMult = 1, gateSeconds = VOTE_GATE_SECONDS, now } = {}) {
   if (!uid || !seconds || seconds <= 0) return null;
   const m = await readMeta(env, uid);
   const ts = now || Date.now();
   const last = m.lastPlayTs || 0;
-  // Credit no more than the real wall-clock seconds since this uid's last CREDITED
-  // beat. On the FIRST beat (no prior ts) trust at most one client flush window
-  // (<=130s) instead of the full posted value, so a single fresh-cookie POST can't
-  // claim 300s and instantly unlock a vote (Codex review 2026-06-16); every later
-  // beat clamps to actual elapsed, so rapid re-posts never outrun real time.
-  const effective = last
-    ? Math.min(seconds, Math.max(0, Math.floor((ts - last) / 1000)))
-    : Math.min(seconds, 130);
+  if (!last) {
+    // FIRST observed beat for this uid: establish the baseline timestamp WITHOUT
+    // crediting. Trusting the first beat let a fresh cookie claim up to ~130s it
+    // never spent, which ~halved the 5-min vote gate (Codex 2026-06-16). Later
+    // beats credit only real elapsed, so play/gate time can't outrun the clock.
+    m.lastPlayTs = ts;
+    await writeMeta(env, uid, m);
+    return { tokens: m.tokens, playedSlug: (m.played || {})[slug] || 0 };
+  }
+  // Credit no more than the real wall-clock seconds since this uid's last credited
+  // beat, so rapid re-posts can't mint tokens or gate-time faster than time passes.
+  const effective = Math.min(seconds, Math.max(0, Math.floor((ts - last) / 1000)));
   if (effective <= 0) return { tokens: m.tokens, playedSlug: (m.played || {})[slug] || 0 };
   const mult = featuredMult > 0 ? featuredMult : 1;
   const minutes = Math.floor(effective / 60) * mult;

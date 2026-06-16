@@ -68,7 +68,11 @@ export async function onRequestPost({ request, env }) {
       delivery = r.ok ? 'resend-ok' : `resend-${r.status}`;
     } catch (e) { delivery = 'resend-error'; }
   }
-  console.log(`auth/request: ${email} → ${magicLink} (delivery=${delivery})`);
+  // Log the FULL link only when it couldn't be emailed (no Resend / dev) -- the one
+  // case the owner needs it from logs. Otherwise the link is a live login credential
+  // and must not sit in logs (Codex 2026-06-16); log just the email + delivery.
+  if (delivery === 'resend-ok') console.log(`auth/request: ${email} (delivery=resend-ok)`);
+  else console.log(`auth/request: ${email} (delivery=${delivery}) link=${magicLink}`);
 
   // Dev mode: return the magic link in the response so Tim doesn't have
   // to dig through CF logs while building/testing.
