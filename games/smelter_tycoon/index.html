@@ -63,6 +63,19 @@ var STRINGS = {
     upgrade: 'UPGRADE', foundry_mult: 'Foundry bonus', costs: 'costs',
     next_wing: 'Next upgrade', foundry_hint: 'Spend Slag to upgrade your foundry - bonuses carry into every run',
     tap_foundry: 'Tap a wing to upgrade it with Slag',
+    // ── M2: The Order Ledger (daily contracts + streak + overnight idle) ──
+    orders: "TODAY'S ORDERS", order_done: 'DONE', order_claim: 'CLAIM',
+    claim_all: 'CLAIM ALL', reward: 'reward',
+    streak: 'Streak', day: 'Day', days: 'days',
+    overnight: 'forged overnight', welcome_back: 'Welcome back!',
+    new_orders: 'New orders posted - smelt to fill them!',
+    idle_hint: 'Your Crucible forges Slag while you are away (max 10h)',
+    // contract titles (use {n}/{m} placeholders filled at render)
+    o_earn: 'Smelt {m} coins this run',
+    o_taps: 'Tap the furnace {m} times',
+    o_tier: 'Reach {tier}',
+    o_smelters: 'Run {m} auto-smelters',
+    o_reforge: 'Reforge the Core',
   },
   ru: {
     title: 'Магнат Плавильни',
@@ -96,6 +109,18 @@ var STRINGS = {
     upgrade: 'УЛУЧШИТЬ', foundry_mult: 'Бонус плавильни', costs: 'цена',
     next_wing: 'Следующее', foundry_hint: 'Трать Шлак на улучшение плавильни - бонусы переходят в каждый забег',
     tap_foundry: 'Жми на крыло, чтобы улучшить его за Шлак',
+    // ── M2: Журнал Заказов (дневные контракты + серия + ночной доход) ──
+    orders: 'ЗАКАЗЫ НА СЕГОДНЯ', order_done: 'ГОТОВО', order_claim: 'ЗАБРАТЬ',
+    claim_all: 'ЗАБРАТЬ ВСЁ', reward: 'награда',
+    streak: 'Серия', day: 'День', days: 'дн.',
+    overnight: 'выковано за ночь', welcome_back: 'С возвращением!',
+    new_orders: 'Новые заказы - плавь, чтобы их выполнить!',
+    idle_hint: 'Ваш Тигель куёт Шлак, пока вас нет (макс 10ч)',
+    o_earn: 'Выплавь {m} монет за забег',
+    o_taps: 'Ударь по печи {m} раз',
+    o_tier: 'Достигни {tier}',
+    o_smelters: 'Запусти {m} автоплавилен',
+    o_reforge: 'Перекуй Ядро',
   },
 };
 
@@ -162,6 +187,8 @@ var coreUnlocked = false;      // has Reforge been offered this run
 var maxTierReached = 0;        // highest metal tier this run (progression)
 var totalTaps = 0;             // furnace taps this run
 var firstTap = false;          // progressive disclosure: hides TAP arrow after 1st tap
+var reforgeCount = 0;          // reforges this run (M2 contract reads this)
+var maxTierEver = 0;           // M2: highest metal tier EVER reached (lifetime, persisted w/ foundry) — scales contracts
 
 // ── M1: THE PERMANENT FOUNDRY (owned meta — survives every meltdown) ───────
 // On meltdown the run is salvaged into SLAG (a persistent currency). Slag levels
@@ -193,6 +220,7 @@ function foundryLoad() {
     var s = JSON.parse(raw);
     slag = Math.max(0, s.slag || 0);
     lifetimeSlag = Math.max(0, s.lifetimeSlag || 0);
+    maxTierEver = GF.clamp(s.maxTierEver | 0, 0, MAX_TIER);  // M2: lifetime tier (scales contracts)
     var fl = s.lvl || {};
     foundryLvl.forge = Math.max(0, fl.forge | 0);
     foundryLvl.bellows = Math.max(0, fl.bellows | 0);
@@ -203,7 +231,7 @@ function foundryLoad() {
 function foundrySave() {
   try {
     localStorage.setItem(FOUNDRY_KEY, JSON.stringify({
-      slag: slag, lifetimeSlag: lifetimeSlag, lvl: foundryLvl,
+      slag: slag, lifetimeSlag: lifetimeSlag, maxTierEver: maxTierEver, lvl: foundryLvl,
     }));
   } catch (e) {}
 }
@@ -233,6 +261,186 @@ function upgradeWing(id) {
   foundrySave();
   GF.sfx('levelup');
   return true;
+}
+
+// ── M2: THE ORDER LEDGER (reason-to-return — grown from the smelting fabric) ──
+// Three SMELTING CONTRACTS roll each calendar day. They are goals in the game's
+// own verbs (smelt coins, tap the furnace, reach a metal, run smelters) that pay
+// SLAG into the owned Foundry when filled in a run. One contract is pre-stamped
+// ~70% complete each day (momentum transfer) so a returning player finishes &
+// CLAIMS within ~60s. The Foundry's Crucible also forges Slag OVERNIGHT (capped
+// 10h, scaled by a daily-login STREAK). So each new day a returning player SEES
+// fresh orders + banked idle Slag + a longer streak, and DOES new short-term
+// goals — all in the foundry/smelting fabric, not a bolt-on reward popup.
+var LEDGER_KEY = 'smelter_tycoon_ledger_v1';
+var IDLE_SLAG_PER_HR = 1.4;    // base Slag/hour the Crucible forges idle (× crucibleLvl × streak)
+var IDLE_CAP_HOURS   = 10;     // overnight accrual cap (uncapped kills retention)
+// contract templates — type, the run-stat it watches, and Slag reward.
+// {base, span} → goal = base + rng*span (scaled by the player's foundry depth so
+// goals stay achievable as the foundry grows). reward in Slag.
+var CONTRACT_DEFS = [
+  { type: 'earn',     reward: 14, base: 8000,  span: 22000 },  // total coins this run
+  { type: 'taps',     reward: 9,  base: 60,    span: 90 },     // furnace taps this run
+  { type: 'smelters', reward: 11, base: 6,     span: 8 },      // auto-smelters owned (peak)
+  { type: 'tier',     reward: 16, base: 2,     span: 3 },      // reach metal tier (index)
+  { type: 'reforge',  reward: 22, base: 1,     span: 0 },      // reforge the core once
+];
+// persistent ledger state
+var contracts = [];            // [{type, goal, reward, prog, claimed}]
+var ledgerDay = 0;             // day-stamp (floor(now/DAY)) the current contracts belong to
+var loginStreak = 0;          // consecutive-day login streak
+var bestStreak = 0;           // highest streak ever (stat)
+var lastSeenMs = 0;           // ms timestamp of last session end (for idle accrual)
+var idleSlagPending = 0;       // Slag forged overnight, shown in the welcome banner
+var showWelcome = 0;           // welcome-back banner timer (seconds)
+var ledgerRects = [];          // hit-rects for claimable contracts on MENU/GAMEOVER
+var ledgerPulse = [];          // per-contract claim flash
+// run-peak trackers the contracts read (smelters can be reset by reforge, so peak)
+var peakSmelters = 0;
+
+var DAY_MS = 86400000;
+function dayStamp(ms) { return Math.floor((ms || Date.now()) / DAY_MS); }
+// streak multiplier on idle accrual: +15% per streak-day, capped at 7 days (×2.05)
+function streakMult() { return 1 + 0.15 * Math.min(loginStreak, 7); }
+// Slag the Crucible forges per real hour while away (0 until the Crucible is built)
+function idleSlagPerHour() { return IDLE_SLAG_PER_HR * (foundryLvl.crucible || 0) * streakMult(); }
+
+function ledgerLoad() {
+  try {
+    var raw = localStorage.getItem(LEDGER_KEY);
+    if (!raw) return;
+    var s = JSON.parse(raw);
+    loginStreak = Math.max(0, s.streak | 0);
+    bestStreak = Math.max(0, s.bestStreak | 0);
+    lastSeenMs = Math.max(0, s.lastSeen || 0);
+    ledgerDay = Math.max(0, s.day | 0);
+    if (Array.isArray(s.contracts)) {
+      contracts = s.contracts.map(function (c) {
+        return { type: c.type, goal: c.goal, reward: c.reward,
+          prog: Math.max(0, c.prog || 0), claimed: !!c.claimed };
+      });
+    }
+  } catch (e) {}
+}
+function ledgerSave() {
+  try {
+    localStorage.setItem(LEDGER_KEY, JSON.stringify({
+      streak: loginStreak, bestStreak: bestStreak, lastSeen: lastSeenMs,
+      day: ledgerDay, contracts: contracts,
+    }));
+  } catch (e) {}
+}
+// deterministic per-day RNG so the same day's roll is stable across reloads
+function dayRng(day, salt) {
+  var x = Math.sin(day * 9301 + salt * 49297 + 233280) * 43758.5453;
+  return x - Math.floor(x);
+}
+// pick 3 distinct contract types for `day` and build goals scaled to foundry depth
+function rollContracts(day) {
+  var idx = [0, 1, 2, 3, 4];
+  // Fisher-Yates with the deterministic day RNG
+  for (var i = idx.length - 1; i > 0; i--) {
+    var j = Math.floor(dayRng(day, i * 3 + 1) * (i + 1));
+    var t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+  }
+  var depth = (foundryLvl.crucible || 0) + (foundryLvl.bellows || 0) + maxTierEver;
+  var growth = 1 + depth * 0.18;  // goals scale gently as the foundry grows
+  var picked = idx.slice(0, 3);
+  var out = [];
+  for (var k = 0; k < picked.length; k++) {
+    var d = CONTRACT_DEFS[picked[k]];
+    var r = dayRng(day, picked[k] * 7 + 11);
+    var goal;
+    if (d.type === 'earn')        goal = Math.round((d.base + r * d.span) * growth / 1000) * 1000;
+    else if (d.type === 'taps')   goal = Math.round((d.base + r * d.span) * Math.min(growth, 2.2));
+    else if (d.type === 'smelters') goal = Math.round(d.base + r * d.span + depth * 0.4);
+    else if (d.type === 'tier')   goal = GF.clamp(Math.round(d.base + r * d.span + maxTierEver * 0.4), 1, MAX_TIER);
+    else goal = 1; // reforge
+    out.push({ type: d.type, goal: Math.max(1, goal), reward: d.reward, prog: 0, claimed: false });
+  }
+  // MOMENTUM TRANSFER: pre-stamp the FIRST contract ~70% complete so a returning
+  // player can finish & claim it within the first ~60s of the run.
+  if (out.length) out[0].prog = Math.floor(out[0].goal * 0.7);
+  return out;
+}
+// called once on boot — handle the daily roll-over, streak, and overnight idle
+function ledgerOnBoot() {
+  var nowMs = Date.now();
+  var today = dayStamp(nowMs);
+  var firstEver = (lastSeenMs === 0 && contracts.length === 0 && ledgerDay === 0);
+  // overnight idle accrual (only if we've been away and own a Crucible)
+  if (lastSeenMs > 0) {
+    var awayHrs = Math.min(IDLE_CAP_HOURS, Math.max(0, (nowMs - lastSeenMs) / 3600000));
+    var gained = Math.floor(awayHrs * idleSlagPerHour());
+    if (gained > 0) {
+      slag += gained; lifetimeSlag += gained; idleSlagPending = gained; foundrySave();
+    }
+  }
+  // daily roll-over: new calendar day → streak + fresh contracts
+  if (today !== ledgerDay || contracts.length === 0) {
+    if (lastSeenMs > 0) {
+      var lastDay = dayStamp(lastSeenMs);
+      if (today === lastDay + 1) loginStreak += 1;           // consecutive day
+      else if (today > lastDay) loginStreak = 1;             // skipped ≥1 day → reset to 1
+      // (same calendar day with contracts already rolled won't reach here)
+    } else {
+      loginStreak = Math.max(1, loginStreak);
+    }
+    if (loginStreak > bestStreak) bestStreak = loginStreak;
+    contracts = rollContracts(today);
+    ledgerDay = today;
+    if (!firstEver) showWelcome = 4.5;  // banner: new orders + (maybe) idle slag + streak
+  } else if (idleSlagPending > 0) {
+    showWelcome = 4.5;  // same-day reopen but earned idle slag → still greet
+  }
+  lastSeenMs = nowMs;
+  ledgerSave();
+}
+// live progress for a contract from the current run state (peak-aware)
+function contractCurrent(c) {
+  if (c.type === 'earn')     return score;
+  if (c.type === 'taps')     return totalTaps;
+  if (c.type === 'smelters') return peakSmelters;
+  if (c.type === 'tier')     return maxTierReached;
+  if (c.type === 'reforge')  return reforgeCount;
+  return 0;
+}
+// refresh each contract's stored progress from the live run (called in update).
+// IMPORTANT: progress changes nearly every frame during active play, so the
+// localStorage write is THROTTLED (hard rule: no per-frame localStorage). The
+// in-memory prog updates every frame (so the UI/claim is always live); the disk
+// write happens at most every ledgerSaveEvery seconds, plus on leave/meltdown.
+var ledgerSaveAcc = 0, ledgerDirty = false, ledgerSaveEvery = 2.5;
+function ledgerTrack(dt) {
+  if (!contracts.length) return;
+  for (var i = 0; i < contracts.length; i++) {
+    var c = contracts[i];
+    if (c.claimed) continue;
+    var cur = contractCurrent(c);
+    // keep the pre-stamped head-start: never let live progress LOWER stored prog
+    if (cur > c.prog) { c.prog = cur; ledgerDirty = true; }
+  }
+  ledgerSaveAcc += (dt || 0);
+  if (ledgerDirty && ledgerSaveAcc >= ledgerSaveEvery) {
+    ledgerSaveAcc = 0; ledgerDirty = false; ledgerSave();
+  }
+}
+function contractDone(c) { return c.prog >= c.goal; }
+// claim a finished contract's Slag reward into the owned Foundry
+function claimContract(i) {
+  var c = contracts[i];
+  if (!c || c.claimed || !contractDone(c)) return false;
+  c.claimed = true;
+  slag += c.reward; lifetimeSlag += c.reward;
+  ledgerPulse[i] = 1;
+  foundrySave(); ledgerSave();
+  GF.sfx('reward');
+  return true;
+}
+function claimableCount() {
+  var n = 0;
+  for (var i = 0; i < contracts.length; i++) if (!contracts[i].claimed && contractDone(contracts[i])) n++;
+  return n;
 }
 
 var critTimer = 0;             // seconds heat has been at/over max
@@ -326,6 +534,7 @@ function buySmelter() {
   var c = smelterCost();
   if (coins < c) return;
   coins -= c; smelters++;
+  if (smelters > peakSmelters) peakSmelters = smelters;  // M2: contract reads the run peak
   GF.sfx('unlock');
   GF.spawnFloat(GF.cx, L.listY - 10 * GF.S, '+1 ' + GF.t('u_smelter'), '#ff9a3c');
   GF.spawnParticles(GF.cx, L.furnaceY + L.furnaceR, '#ff9a3c', 10);
@@ -365,6 +574,7 @@ function unlockNextTier() {
   if (coins < c) return;
   coins -= c; metalTier++;
   if (metalTier > maxTierReached) maxTierReached = metalTier;
+  if (metalTier > maxTierEver) { maxTierEver = metalTier; foundrySave(); }  // M2: lifetime tier scales contracts
   newTierFlash = 1.4;
   GF.sfx('evolve');
   GF.setShake(0.5);
@@ -377,6 +587,7 @@ function reforge() {
   // grant shards scaled to how far past the unlock threshold you got
   var gain = Math.max(1, Math.floor(Math.pow(score / coreUnlockCoins, 0.5) * 3));
   coreShards += gain;
+  reforgeCount++;  // M2: the "Reforge the Core" contract reads this
   // reset the run economy (NOT score/best — score is the chase; shards persist this run)
   coins = 0; smelters = 0; tapPower = 1; coinValueLvl = 0; coolantLvl = 0;
   metalTier = 0; heat = 0; critTimer = 0;
@@ -404,6 +615,9 @@ function meltdown() {
   // The run is gone, but it PERMANENTLY advanced something you own → reason to return.
   lastSalvage = salvageFromScore(score);
   if (lastSalvage > 0) { slag += lastSalvage; lifetimeSlag += lastSalvage; foundrySave(); }
+  // M2: flush final contract progress so a run that FILLED a contract leaves it
+  // claimable on the GAMEOVER/MENU board (the throttled in-run save may lag).
+  ledgerTrack(0); ledgerSave();
   gs = 'GAMEOVER';
   GF.sfx('lose');
   GF.setShake(1.2);
@@ -425,6 +639,7 @@ function startGame() {
   heat = 0; critTimer = 0; tickAcc = 0;
   coreShards = 0; coreUnlocked = false;
   totalTaps = 0; firstTap = false;
+  reforgeCount = 0; peakSmelters = 0;  // M2: per-run contract trackers
   newTierFlash = 0; reforgeFlash = 0; furnacePulse = 0; coinsPerSecDisp = 0;
   flyCoins = [];
   gs = 'PLAYING';
@@ -467,6 +682,9 @@ function update(dt) {
   if (furnacePulse > 0) furnacePulse = Math.max(0, furnacePulse - dt * 4);
   // M1: decay wing upgrade flashes (these tick on MENU/GAMEOVER too)
   for (var wk in foundryPulse) { if (foundryPulse[wk] > 0) foundryPulse[wk] = Math.max(0, foundryPulse[wk] - dt * 2.2); }
+  // M2: decay welcome-back banner + contract claim flashes (MENU/GAMEOVER too)
+  if (showWelcome > 0) showWelcome = Math.max(0, showWelcome - dt);
+  for (var pi = 0; pi < ledgerPulse.length; pi++) { if (ledgerPulse[pi] > 0) ledgerPulse[pi] = Math.max(0, ledgerPulse[pi] - dt * 2.2); }
 
   GF.tutorial.update(dt);
   if (gs !== 'PLAYING') return;
@@ -500,6 +718,9 @@ function update(dt) {
 
   // smoothed coins/sec readout
   coinsPerSecDisp = GF.lerp(coinsPerSecDisp, coinsPerSec(), Math.min(1, dt * 5));
+
+  // M2: keep the daily contracts' progress in sync with the live run
+  ledgerTrack(dt);
 }
 
 // ── INPUT ────────────────────────────────────────────────────────────────
@@ -1075,6 +1296,130 @@ function drawFoundry(ctx, topY, maxW) {
   return bot + GF.clamp(20 * S, 14, 28);
 }
 
+// ── M2: human-readable contract title (fills {m}/{tier} placeholders) ──────
+function contractTitle(c) {
+  var s = GF.t('o_' + c.type) || c.type;
+  s = s.replace('{m}', fmt(c.goal));
+  if (c.type === 'tier') s = s.replace('{tier}', metalName(c.goal));
+  return s;
+}
+// ── M2: THE ORDER LEDGER panel — daily contracts + streak pips. Compact rows
+// (name + mini progress bar + state). Tappable CLAIM pills bank Slag into the
+// Foundry. Drawn on MENU + GAMEOVER above the play button. Returns bottom Y. ──
+function drawLedger(ctx, topY, maxW) {
+  var S = GF.S;
+  ledgerRects = [];
+  var x0 = GF.cx - maxW / 2;
+  // header row: "TODAY'S ORDERS" left, streak pips right
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 16) + 'px sans-serif'; ctx.fillStyle = '#ffce8a';
+  ctx.fillText(GF.t('orders'), x0, topY);
+  // streak pips (7-day) on the right
+  var pipR = GF.clamp(3.6 * S, 2.6, 5.2);
+  var pipGap = GF.clamp(9 * S, 6.5, 12);
+  var pipsW = 7 * pipGap;
+  var px = x0 + maxW - pipsW + pipGap * 0.5;
+  ctx.font = GF.clamp(9.5 * S, 7.5, 12) + 'px sans-serif'; ctx.fillStyle = '#9fb0c0'; ctx.textAlign = 'right';
+  ctx.fillText(GF.t('streak') + ' ' + loginStreak, px - pipGap * 0.5 - 4 * S, topY);
+  for (var p = 0; p < 7; p++) {
+    var on = p < Math.min(loginStreak, 7);
+    ctx.beginPath(); ctx.arc(px + p * pipGap, topY, pipR, 0, Math.PI * 2);
+    ctx.fillStyle = on ? '#ffb84b' : 'rgba(255,255,255,0.16)'; ctx.fill();
+  }
+  // three contract rows
+  var rowY = topY + GF.clamp(15 * S, 11, 21);
+  var rh = GF.clamp(30 * S, 24, 40);
+  var rgap = GF.clamp(6 * S, 4, 9);
+  for (var i = 0; i < contracts.length; i++) {
+    var c = contracts[i];
+    var ry = rowY + i * (rh + rgap);
+    var done = contractDone(c);
+    var claimable = done && !c.claimed;
+    var pulse = ledgerPulse[i] || 0;
+    // row bg — claimable rows glow gold; claimed rows dim
+    var bg = claimable ? 'rgba(48,40,18,0.95)' : (c.claimed ? 'rgba(20,17,14,0.85)' : 'rgba(30,26,22,0.92)');
+    GF.rr(ctx, x0, ry, maxW, rh, GF.clamp(7 * S, 5, 10)); ctx.fillStyle = bg; ctx.fill();
+    if (pulse > 0) { ctx.save(); ctx.globalAlpha = pulse * 0.55; GF.rr(ctx, x0, ry, maxW, rh, GF.clamp(7 * S, 5, 10)); ctx.fillStyle = '#ffd166'; ctx.fill(); ctx.restore(); }
+    ctx.lineWidth = 1.4; ctx.strokeStyle = claimable ? '#ffce5a' : 'rgba(255,255,255,0.09)';
+    GF.rr(ctx, x0, ry, maxW, rh, GF.clamp(7 * S, 5, 10)); ctx.stroke();
+    var pad = GF.clamp(9 * S, 6, 13);
+    // right-side state widget reserves width FIRST (so text never overlaps it)
+    var stW = GF.clamp(62 * S, 48, 84);
+    var stX = x0 + maxW - pad - stW;
+    // contract title (clipped to the space left of the state widget)
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x0 + pad, ry, stX - x0 - pad - 6 * S, rh); ctx.clip();
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+    ctx.fillStyle = c.claimed ? '#8a8074' : '#f2e6d2';
+    ctx.fillText(contractTitle(c), x0 + pad, ry + rh * 0.34);
+    ctx.restore();
+    // mini progress bar under the title
+    var barY = ry + rh * 0.70, barH = GF.clamp(4 * S, 3, 6);
+    var barW = stX - x0 - pad * 2;
+    GF.rr(ctx, x0 + pad, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
+    var frac = GF.clamp(c.prog / c.goal, 0, 1);
+    if (frac > 0) {
+      GF.rr(ctx, x0 + pad, barY, Math.max(barH, barW * frac), barH, barH / 2);
+      ctx.fillStyle = c.claimed ? '#6a6258' : (done ? '#7fe07f' : '#ffb84b'); ctx.fill();
+    }
+    // progress fraction text (small, left of bar end) — for in-progress rows
+    if (!done) {
+      ctx.textAlign = 'left'; ctx.font = GF.clamp(8.5 * S, 7, 11) + 'px sans-serif'; ctx.fillStyle = '#9a8f80';
+      ctx.fillText(fmt(Math.min(c.prog, c.goal)) + ' / ' + fmt(c.goal), x0 + pad, ry + rh * 0.34 + GF.clamp(11 * S, 9, 14));
+    }
+    // state widget: CLAIM pill (tappable) / DONE / reward chip
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (claimable) {
+      GF.rr(ctx, stX, ry + rh * 0.18, stW, rh * 0.64, GF.clamp(6 * S, 4, 9));
+      ctx.fillStyle = '#ffce5a'; ctx.fill();
+      ctx.fillStyle = '#3a2408'; ctx.font = 'bold ' + GF.clamp(10.5 * S, 8.5, 13) + 'px sans-serif';
+      ctx.fillText('+' + c.reward + ' ' + GF.t('order_claim'), stX + stW / 2, ry + rh / 2);
+      ledgerRects.push({ i: i, x: stX, y: ry, w: stW + pad, h: rh });  // generous hit area
+    } else if (c.claimed) {
+      ctx.fillStyle = '#7fe07f'; ctx.font = 'bold ' + GF.clamp(10 * S, 8, 13) + 'px sans-serif';
+      ctx.fillText('✓ ' + GF.t('order_done'), stX + stW / 2, ry + rh / 2);
+    } else {
+      // reward chip (what you'll earn)
+      ctx.fillStyle = '#9fe0ff'; ctx.font = GF.clamp(10 * S, 8, 13) + 'px sans-serif';
+      ctx.fillText('+' + c.reward + ' ' + GF.t('slag'), stX + stW / 2, ry + rh / 2);
+    }
+  }
+  ctx.textBaseline = 'alphabetic';
+  return rowY + contracts.length * (rh + rgap) - rgap + GF.clamp(8 * S, 5, 12);
+}
+// ── M2: WELCOME-BACK banner (overnight idle Slag + new orders) ─────────────
+function drawWelcomeBanner(ctx) {
+  if (showWelcome <= 0) return;
+  var S = GF.S, W = GF.W, H = GF.H;
+  var a = Math.min(1, showWelcome / 0.6) * Math.min(1, showWelcome > 4 ? (4.5 - showWelcome) / 0.5 + 1 : 1);
+  a = GF.clamp(a, 0, 1);
+  var bw = Math.min(W - 28 * S, 440 * S);
+  var bh = GF.clamp((idleSlagPending > 0 ? 76 : 58) * S, 48, 110);
+  var bx = GF.cx - bw / 2, by = GF.clamp(H * 0.10, 30 * S, H * 0.16);
+  ctx.save(); ctx.globalAlpha = a;
+  GF.rr(ctx, bx, by, bw, bh, GF.clamp(12 * S, 8, 16));
+  var bg = ctx.createLinearGradient(bx, by, bx, by + bh);
+  bg.addColorStop(0, 'rgba(38,30,20,0.97)'); bg.addColorStop(1, 'rgba(28,22,16,0.97)');
+  ctx.fillStyle = bg; ctx.fill();
+  ctx.lineWidth = 1.6; ctx.strokeStyle = 'rgba(255,200,100,0.5)';
+  GF.rr(ctx, bx, by, bw, bh, GF.clamp(12 * S, 8, 16)); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif'; ctx.fillStyle = '#ffce8a';
+  ctx.fillText(GF.t('welcome_back'), GF.cx, by + bh * (idleSlagPending > 0 ? 0.26 : 0.36));
+  if (idleSlagPending > 0) {
+    ctx.font = 'bold ' + GF.clamp(14 * S, 11, 18) + 'px sans-serif'; ctx.fillStyle = '#9fe0ff';
+    ctx.fillText('+' + fmt(idleSlagPending) + ' ' + GF.t('slag') + ' ' + GF.t('overnight'), GF.cx, by + bh * 0.55);
+    ctx.font = GF.clamp(10.5 * S, 8.5, 14) + 'px sans-serif'; ctx.fillStyle = '#b8a890';
+    ctx.fillText(GF.t('new_orders'), GF.cx, by + bh * 0.80);
+  } else {
+    ctx.font = GF.clamp(11.5 * S, 9, 15) + 'px sans-serif'; ctx.fillStyle = '#b8a890';
+    ctx.fillText(GF.t('new_orders'), GF.cx, by + bh * 0.68);
+  }
+  ctx.restore();
+  ctx.textBaseline = 'alphabetic';
+}
+
 function drawMenu(ctx) {
   var S = GF.S, W = GF.W, H = GF.H;
   ctx.fillStyle = '#0e0a07'; ctx.fillRect(0, 0, W, H);  // fully opaque (hard rule)
@@ -1109,9 +1454,12 @@ function drawMenu(ctx) {
   var blockY = iy + iz * 0.85;
   var blockH;
   if (hasFoundry) {
-    blockH = drawFoundry(ctx, blockY + 6 * S, maxW) - blockY;
+    // M1 Foundry (own + upgrade) THEN M2 Order Ledger (today's contracts + streak)
+    var fBot = drawFoundry(ctx, blockY + 6 * S, maxW);
+    var lBot = drawLedger(ctx, fBot + GF.clamp(4 * S, 2, 7), maxW);
+    blockH = lBot - blockY;
   } else {
-    foundryRects = [];
+    foundryRects = []; ledgerRects = [];
     blockH = drawTutorialBlock(ctx, blockY, maxW);
   }
   // PLAY button — wider + animated on desktop wide viewports
@@ -1145,6 +1493,8 @@ function drawMenu(ctx) {
     ctx.fillStyle = '#caa'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText(GF.t('best') + ': ' + fmt(best), GF.cx, btnY + btnH + 22 * S);
   }
+  // M2: welcome-back banner (overnight idle Slag + new orders) — drawn last, on top
+  drawWelcomeBanner(ctx);
 }
 
 function drawGameOver(ctx) {
@@ -1178,9 +1528,29 @@ function drawGameOver(ctx) {
   var salvY = afterStats + GF.clamp(30 * S, 22, 40);
   ctx.fillStyle = '#9fe0ff'; ctx.font = 'bold ' + GF.clamp(17 * S, 13, 23) + 'px sans-serif';
   ctx.fillText('+' + fmt(lastSalvage) + ' ' + GF.t('slag') + ' ' + GF.t('salvaged'), GF.cx, salvY);
-  // the owned Foundry — tappable to spend the slag you just earned
   var maxW = Math.min(W - 30 * S, 470 * S);
-  var foundryBot = drawFoundry(ctx, salvY + GF.clamp(22 * S, 16, 30), maxW);
+  // M2: a contract you FILLED this run is claimable here — a single CLAIM ALL pill
+  // (the full per-contract board lives on the MENU). Only drawn when something is
+  // claimable, so the GAMEOVER card never overflows on mobile.
+  ledgerRects = [];
+  var claimY = salvY + GF.clamp(24 * S, 18, 32);
+  var nClaim = claimableCount();
+  var goBlockTop = claimY;
+  if (nClaim > 0) {
+    var totReward = 0;
+    for (var ci = 0; ci < contracts.length; ci++) if (!contracts[ci].claimed && contractDone(contracts[ci])) totReward += contracts[ci].reward;
+    var pw = Math.min(W - 60 * S, 300 * S), ph = GF.clamp(38 * S, 30, 50);
+    var pxr = GF.cx - pw / 2;
+    GF.rr(ctx, pxr, claimY, pw, ph, GF.clamp(9 * S, 6, 13)); ctx.fillStyle = '#ffce5a'; ctx.fill();
+    ctx.fillStyle = '#3a2408'; ctx.font = 'bold ' + GF.clamp(13.5 * S, 11, 17) + 'px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(GF.t('claim_all') + '  +' + totReward + ' ' + GF.t('slag') + ' (' + nClaim + ')', GF.cx, claimY + ph / 2);
+    ctx.textBaseline = 'alphabetic';
+    ledgerRects.push({ claimAll: true, x: pxr, y: claimY, w: pw, h: ph });
+    goBlockTop = claimY + ph + GF.clamp(10 * S, 6, 14);
+  }
+  // the owned Foundry — tappable to spend the slag you just earned
+  var foundryBot = drawFoundry(ctx, goBlockTop + GF.clamp(4 * S, 2, 8), maxW);
   // PLAY AGAIN below the foundry
   var btnW = GF.clamp(220 * S, 150, 300), btnH = GF.clamp(52 * S, 42, 64);
   var btnY = Math.min(foundryBot + 8 * S, H - btnH - 16 * S);
@@ -1213,6 +1583,24 @@ function overlayDown(x, y) {
     if (x >= muteBtn.x && x <= muteBtn.x + muteBtn.w && y >= muteBtn.y && y <= muteBtn.y + muteBtn.h) {
       var m = GF.toggleMute(); GF.setMusicMuted(m); return true;
     }
+    // M2: tap a CLAIM pill (MENU per-contract) or CLAIM ALL pill (GAMEOVER) to
+    // bank the contract's Slag reward into the owned Foundry.
+    for (var li = 0; li < ledgerRects.length; li++) {
+      var lr = ledgerRects[li];
+      if (x >= lr.x && x <= lr.x + lr.w && y >= lr.y && y <= lr.y + lr.h) {
+        if (lr.claimAll) {
+          var any = false;
+          for (var ci = 0; ci < contracts.length; ci++) { if (claimContract(ci)) any = true; }
+          if (any) { GF.spawnParticles(GF.cx, lr.y + lr.h / 2, '#ffce5a', 16); GF.happytime(); }
+        } else {
+          if (claimContract(lr.i)) {
+            GF.spawnParticles(lr.x + lr.w / 2, lr.y + lr.h / 2, '#ffce5a', 14);
+            GF.spawnFloat(lr.x + lr.w / 2, lr.y, '+' + contracts[lr.i].reward + ' ' + GF.t('slag'), '#ffce5a');
+          }
+        }
+        return true;
+      }
+    }
     // M1: tap a Foundry wing to spend Slag on a permanent upgrade (no need to play first)
     for (var i = 0; i < foundryRects.length; i++) {
       var r = foundryRects[i];
@@ -1225,6 +1613,7 @@ function overlayDown(x, y) {
       }
     }
     if (playBtnRect && x >= playBtnRect.x && x <= playBtnRect.x + playBtnRect.w && y >= playBtnRect.y && y <= playBtnRect.y + playBtnRect.h) {
+      showWelcome = 0; idleSlagPending = 0;  // M2: dismiss the welcome banner on PLAY
       startGame(); return true;
     }
   }
@@ -1238,6 +1627,12 @@ cv.addEventListener('touchend', function (e) { e.preventDefault(); }, { passive:
 document.addEventListener('keydown', function (e) {
   if (gs === 'PLAYING' && e.code === 'Space') { e.preventDefault(); if (!GF.tutorial.active) tapFurnace(); }
 });
+// M2: stamp "last seen now" whenever the player leaves, so the NEXT boot measures
+// real away-time for the overnight idle-Slag accrual (not the whole prior session).
+function ledgerMark() { lastSeenMs = Date.now(); ledgerSave(); }
+document.addEventListener('visibilitychange', function () { if (document.hidden) ledgerMark(); });
+window.addEventListener('pagehide', ledgerMark);
+window.addEventListener('beforeunload', ledgerMark);
 
 // ── SCREENSHOT HATCH (Yandex 5.1.1 — populated mid-run, ≥70% gameplay) ────
 window._setupForScreenshot = function (level) {
@@ -1290,6 +1685,24 @@ window._foundryInfo = function () {
 };
 window._grantSlag = function (n) { slag += (n || 100); lifetimeSlag += (n || 100); foundrySave(); };
 window._upgradeWing = function (id) { return upgradeWing(id); };
+// M2 test seams (Order Ledger). Deterministic; no console output.
+window._ledgerInfo = function () {
+  return { streak: loginStreak, bestStreak: bestStreak, day: ledgerDay, maxTierEver: maxTierEver,
+    idlePending: idleSlagPending, idlePerHr: idleSlagPerHour(), claimable: claimableCount(),
+    contracts: contracts.map(function (c) { return { type: c.type, goal: c.goal, prog: c.prog, reward: c.reward, claimed: c.claimed, done: contractDone(c) }; }),
+    rects: ledgerRects.map(function (r) { return { i: r.i, claimAll: !!r.claimAll, x: r.x, y: r.y, w: r.w, h: r.h, cx: r.x + r.w / 2, cy: r.y + r.h / 2 }; }) };
+};
+// Simulate the player having last been seen `hoursAgo` hours ago, then re-run the
+// boot accrual/roll-over (lets a probe verify idle Slag + a fresh daily roll).
+window._simReturn = function (hoursAgo) {
+  lastSeenMs = Date.now() - (hoursAgo || 18) * 3600000;
+  ledgerDay = dayStamp(lastSeenMs);
+  idleSlagPending = 0; showWelcome = 0;
+  ledgerSave();
+  ledgerOnBoot();
+  return window._ledgerInfo();
+};
+window._claimAll = function () { var n = 0; for (var i = 0; i < contracts.length; i++) if (claimContract(i)) n++; return n; };
 // locale_overflow_check hooks
 window._setState = function (s) { gs = (s === 'PLAYING' || s === 'GAMEOVER' || s === 'MENU') ? s : gs; };
 window._getI18N = function () { return STRINGS; };
@@ -1305,6 +1718,8 @@ GF.init({
   onReady: function () {
     try { best = parseInt(localStorage.getItem('smelter_tycoon_best') || '0') || 0; } catch (e) {}
     foundryLoad();  // M1: restore the permanent owned Foundry (slag + wing levels)
+    ledgerLoad();   // M2: restore the Order Ledger (daily contracts + streak + last-seen)
+    ledgerOnBoot(); // M2: daily roll-over, login streak, overnight idle-Slag accrual
     // Yandex 1.9 — persist run across reload (in-run only; no cross-session prestige)
     GF.persist('smelter_tycoon_run_v1',
       function () {
@@ -1355,6 +1770,12 @@ GF.exposeState(function () {
     slag: slag, lifetimeSlag: lifetimeSlag, lastSalvage: lastSalvage,
     foundryLvl: { forge: foundryLvl.forge, bellows: foundryLvl.bellows, crucible: foundryLvl.crucible, vault: foundryLvl.vault },
     foundryMult: foundryMult(),
+    // M2: the Order Ledger (daily contracts + streak + overnight idle accrual)
+    loginStreak: loginStreak, bestStreak: bestStreak, ledgerDay: ledgerDay,
+    maxTierEver: maxTierEver, idleSlagPending: idleSlagPending,
+    idleSlagPerHour: idleSlagPerHour(), streakMult: streakMult(),
+    claimable: claimableCount(),
+    contracts: contracts.map(function (c) { return { type: c.type, goal: c.goal, prog: c.prog, reward: c.reward, claimed: c.claimed, done: contractDone(c) }; }),
     // tunables (DESIGN.md §Tunables)
     tapBase: tapBase, heatPerTap: heatPerTap, heatPerSmelterSec: heatPerSmelterSec,
     coolRate: curCoolRate(), critGrace: critGrace, meltdownMargin: meltdownMargin,
@@ -1375,10 +1796,14 @@ GF.exposeReach(function () {
       var b = upgradeRects[i];
       items.push({ id: 'upg_' + b.kind, x: b.x, y: b.y, w: b.w, h: b.h });
     }
-  } else { // MENU / GAMEOVER — foundry wings + the play button
+  } else { // MENU / GAMEOVER — foundry wings + claimable contracts + the play button
     for (var j = 0; j < foundryRects.length; j++) {
       var r = foundryRects[j];
       items.push({ id: 'wing_' + r.id, x: r.x, y: r.y, w: r.w, h: r.h });
+    }
+    for (var k = 0; k < ledgerRects.length; k++) {
+      var lr = ledgerRects[k];
+      items.push({ id: lr.claimAll ? 'claim_all' : ('claim_' + lr.i), x: lr.x, y: lr.y, w: lr.w, h: lr.h });
     }
     if (playBtnRect) items.push({ id: 'play', x: playBtnRect.x, y: playBtnRect.y, w: playBtnRect.w, h: playBtnRect.h });
   }
@@ -1394,8 +1819,8 @@ window.__gfBot = {
   actions: function () {
     if (gs !== 'PLAYING') return [];
     var a = [];
-    if (heat < heatMax * 0.7) a.push('tap');
-    a.push('smelter', 'power', 'value', 'cool');
+    if (heat < curHeatMax() * 0.7) a.push('tap');
+    a.push('smelter', 'power', 'value', 'cool', 'tier', 'reforge');
     return a;
   },
   act: function (x) {
@@ -1405,6 +1830,8 @@ window.__gfBot = {
     else if (x === 'power') buyTapPower();
     else if (x === 'value') buyCoinValue();
     else if (x === 'cool') buyCoolant();
+    else if (x === 'tier') unlockNextTier();
+    else if (x === 'reforge') reforge();
   }
 };
 
