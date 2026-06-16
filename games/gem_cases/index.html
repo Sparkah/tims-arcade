@@ -53,6 +53,11 @@ var STRINGS = {
     pickaxe: 'Pickaxe', drill: 'Auto-Drill', lvl: 'Lv', mined: 'mined',
     veinFull: 'Open cases, then SOCKET a gem to grow your mine', socketDone: 'SOCKETED!',
     tierUp: 'MINE TIER UP!', maxLvl: 'MAX',
+    // ── DAILY MINING COMMISSION (M2 reason-to-return) ──
+    commission: "TODAY'S COMMISSION", comClaim: 'CLAIM', comDone: 'CLAIMED',
+    comOpen: 'Open cases', comSocket: 'Socket gems', comMine: 'Mine coins', comSell: 'Sell gems',
+    comReward: 'reward', overnight: 'mined overnight', streakX: 'streak bonus',
+    tut5: "Each day a fresh COMMISSION is posted on your mine - it starts almost done from your overnight haul, so one action claims it. Longer login streaks pay a bigger bounty.",
   },
   ru: {
     title: 'Самоцветы',
@@ -70,7 +75,7 @@ var STRINGS = {
     tut1: 'Цель: открывай кейсы с самоцветами, собери все камни, повышай ценность коллекции.',
     tut2: 'Управление: нажми ОТКРЫТЬ, чтобы крутить ленту. Когда выпадет камень, ОСТАВЬ его или ПРОДАЙ за монеты.',
     tut3: 'Победа: собери набор, чтобы открыть следующий, более редкий кейс. Лови мифические камни!',
-    tut4: 'Помещай камни В ШАХТУ, чтобы растить её: добывай монеты тапом, улучшай Кирку и Бур. Шахта приносит монеты за ночь — заходи каждый день.',
+    tut4: 'Помещай камни В ШАХТУ, чтобы растить её: добывай монеты тапом, улучшай Кирку и Бур. Шахта приносит монеты за ночь - заходи каждый день.',
     coinPack: 'Набор монет', buy: 'КУПИТЬ', complete_b: 'собран',
     collection: 'Коллекция', sets: 'наборов', tapAny: 'нажми, чтобы продолжить',
     vein: 'ВАША ШАХТА', socket: 'В ШАХТУ', socketed: 'в шахте', mineTap: 'добывай',
@@ -78,6 +83,11 @@ var STRINGS = {
     pickaxe: 'Кирка', drill: 'Бур', lvl: 'Ур', mined: 'добыто',
     veinFull: 'Открой кейс и помести камень в шахту, чтобы расти', socketDone: 'В ШАХТЕ!',
     tierUp: 'УРОВЕНЬ ШАХТЫ!', maxLvl: 'МАКС',
+    // ── DAILY MINING COMMISSION (M2 reason-to-return) ──
+    commission: 'ЗАДАНИЕ ДНЯ', comClaim: 'ЗАБРАТЬ', comDone: 'ВЫПОЛНЕНО',
+    comOpen: 'Открой кейсы', comSocket: 'Помести камни', comMine: 'Добудь монеты', comSell: 'Продай камни',
+    comReward: 'награда', overnight: 'добыто за ночь', streakX: 'бонус серии',
+    tut5: 'Каждый день на шахте появляется новое ЗАДАНИЕ - оно почти готово благодаря ночной добыче, и завершить его можно одним действием. Чем длиннее серия входов, тем больше награда.',
   },
 };
 
@@ -225,6 +235,33 @@ var mineTapFx = [];             // floaty "+N" coins on tap
 var socketFlash = 0;           // brief "SOCKETED!" pulse timer
 var tierUpFlash = 0;           // brief "MINE TIER UP!" pulse timer
 
+// ── DAILY MINING COMMISSION (M2 reason-to-return) ────────────────────────────
+// A fresh directed task posted on the mine each UTC day, expressed in the game's
+// OWN verbs (open / socket / mine-taps / sell). It opens ~70% pre-filled (the
+// overnight drill haul + a momentum baseline seed it) so the FIRST action of the
+// session completes it for an immediate coin bounty paid INTO the mine economy.
+// The login streak scales the bounty, making the streak a real in-game rate.
+// Live mirrors of meta.com* (hydrated in onReady); persisted across sessions.
+var comType = '';               // 'open' | 'socket' | 'mine' | 'sell'
+var comTarget = 0;              // total needed
+var comBase = 0;                // pre-credited baseline (~70% — momentum transfer)
+var comProg = 0;               // progress accrued by today's actions
+var comDone = 0;               // 1 once the bounty is claimed
+var comReward = 0;             // the streak-scaled coin bounty
+var comFlash = 0;              // brief CLAIM celebration pulse
+// task table: each is a verb the player already does on/around the mine.
+var COM_TYPES = [
+  { id: 'open',   key: 'comOpen',   tgt: [3, 4, 5],     baseFrac: 0.70 },
+  { id: 'socket', key: 'comSocket', tgt: [2, 3],        baseFrac: 0.70 },
+  { id: 'mine',   key: 'comMine',   tgt: [200, 300, 450], baseFrac: 0.72 },
+  { id: 'sell',   key: 'comSell',   tgt: [3, 4, 5],     baseFrac: 0.70 },
+];
+function comReadyToClaim() { return comTarget > 0 && !comDone && (comBase + comProg) >= comTarget; }
+function comTaskLabel() {
+  for (var i = 0; i < COM_TYPES.length; i++) if (COM_TYPES[i].id === comType) return GF.t(COM_TYPES[i].key);
+  return '';
+}
+
 // fx
 var sparkles = [];              // reveal sparkle layer (independent of GF particles)
 var newBurst = 0;               // NEW! flourish timer
@@ -290,6 +327,9 @@ function defaultMeta() {
     pick: 0,                   // pickaxe upgrade level (raises coins-per-tap)
     drill: 0,                  // auto-drill upgrade level (raises overnight rate)
     minedTotal: 0,             // lifetime coins tapped out of the mine (a stat)
+    // ── DAILY COMMISSION (M2). comDay = UTC day the active task was rolled. ──
+    comDay: '',                // empty / stale day → rolled fresh on claimOnOpen
+    comType: '', comTarget: 0, comBase: 0, comProg: 0, comDone: 0, comReward: 0,
   };
 }
 function loadMeta() {
@@ -321,6 +361,14 @@ function loadMeta() {
         m.pick = GF.clamp(+s.pick || 0, 0, PICK_MAX);
         m.drill = GF.clamp(+s.drill || 0, 0, DRILL_MAX);
         m.minedTotal = +s.minedTotal || 0;
+        // daily commission (M2 — back-compat: pre-M2 saves have none → rolled fresh)
+        m.comDay = s.comDay || '';
+        m.comType = s.comType || '';
+        m.comTarget = +s.comTarget || 0;
+        m.comBase = +s.comBase || 0;
+        m.comProg = +s.comProg || 0;
+        m.comDone = +s.comDone || 0;
+        m.comReward = +s.comReward || 0;
       }
     }
   } catch (e) {}
@@ -333,6 +381,9 @@ function saveMeta() {
   // mine (M1 owned-meta) — persist the live structure on every save event
   meta.vein = vein; meta.veinTier = veinTier(); meta.pick = pick; meta.drill = drill;
   meta.minedTotal = minedTotal;
+  // daily commission (M2) — persist live progress so a mid-task reload resumes
+  meta.comType = comType; meta.comTarget = comTarget; meta.comBase = comBase;
+  meta.comProg = comProg; meta.comDone = comDone; meta.comReward = comReward;
   try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
 }
 window.addEventListener('pagehide', function () { try { meta.lastClose = Date.now(); saveMeta(); } catch (e) {} });
@@ -418,7 +469,65 @@ function claimOnOpen() {
     dailyClaim = 30 + meta.streak * 15 + (meta.streak % 7 === 0 ? 120 : 0);
     coins += dailyClaim;
   }
+  // ── DAILY COMMISSION (M2): roll a fresh task once per UTC day ───────────────
+  rollCommissionIfNeeded(today);
   meta.lastClose = now;
+  saveMeta();
+}
+
+// Roll today's mining commission if none exists for `today`. The task opens
+// ~70% pre-filled (momentum transfer) — and for the MINE task the overnight
+// drill haul literally seeds part of the baseline, so a returning player's first
+// action claims it. Streak scales the bounty (a real in-game rate).
+function rollCommissionIfNeeded(today) {
+  if (meta.comDay === today && meta.comTarget > 0) return;   // already rolled today
+  // deterministic-per-day pick so a reload re-rolls the SAME task (no reroll abuse)
+  var seed = 0, ds = today + '|' + (meta.bestStreak || 0);
+  for (var i = 0; i < ds.length; i++) seed = (seed * 31 + ds.charCodeAt(i)) >>> 0;
+  var def = COM_TYPES[seed % COM_TYPES.length];
+  var tgt = def.tgt[(seed >> 4) % def.tgt.length];
+  // baseline: pre-fill the bar so the FIRST action of the session claims it
+  // (momentum transfer). For small COUNT tasks (open/socket/sell) seed exactly
+  // target-1 so a single tap/socket/sell finishes it. For the larger MINE (coin)
+  // task seed ~70% and let the overnight drill haul push it the rest of the way.
+  var base;
+  if (def.id === 'mine') {
+    base = Math.floor(tgt * def.baseFrac);
+    if (idleClaim > 0) base += Math.floor(idleClaim * 0.5);   // overnight pile visibly pre-fills it
+  } else {
+    base = Math.max(1, tgt - 1);                              // one action to finish
+  }
+  if (base >= tgt) base = tgt - 1;                            // never auto-complete on boot
+  var streak = Math.max(1, meta.streak || 1);
+  // bounty scales with the task tier AND the login streak (capped 2.5x).
+  var rewardBase = (def.id === 'mine') ? Math.round(tgt * 0.6) : 90 + tgt * 18;
+  var reward = Math.round(rewardBase * Math.min(2.5, 1 + streak * 0.15));
+  // write BOTH meta and the LIVE mirrors. (A later saveMeta() mirrors LIVE→meta,
+  // so the live vars must be the source of truth from the moment we roll — else a
+  // save before onReady hydrates them would clobber meta back to empty.)
+  comType = def.id; comTarget = tgt; comBase = base; comProg = 0; comDone = 0; comReward = reward;
+  meta.comDay = today; meta.comType = comType; meta.comTarget = comTarget;
+  meta.comBase = comBase; meta.comProg = comProg; meta.comDone = comDone; meta.comReward = comReward;
+}
+
+// credit progress toward today's commission (called from the gameplay verbs).
+// noSave=true on the hot tap path (tapMine already throttles its own saves).
+function bumpCommission(type, amt, noSave) {
+  if (!comType || comDone || comType !== type) return;
+  comProg += amt;
+  // no auto-claim — the player taps the card to CLAIM (a deliberate beat); but
+  // persist progress so a reload mid-task resumes exactly where it was.
+  if (!noSave) saveMeta();
+}
+
+// claim the completed commission bounty into the mine economy (coins).
+function claimCommission() {
+  if (!comReadyToClaim()) return;
+  coins += comReward; comDone = 1; comFlash = 1.4;
+  GF.sfx('levelup');
+  GF.spawnFloat(GF.cx, GF.H * 0.42, '+' + comReward, '#ffd24a');
+  GF.spawnParticles(GF.cx, GF.H * 0.44, '#ffe08a', 30);
+  try { GF.happytime(); } catch (e) {}
   saveMeta();
 }
 
@@ -472,6 +581,7 @@ function startSpin(isFree) {
     coins -= s.cost;
   }
   spinCount++; opens++; lifetimeOpens++;
+  bumpCommission('open', 1);   // M2: opens count toward today's commission
   // pre-roll the result
   var rar = rollRarity(curSet);
   var winner = pickGem(curSet, rar);
@@ -572,6 +682,7 @@ function sellGem(doubled) {
   if (doubled) val *= 2;
   coins += val;
   reveal.decided = true;
+  bumpCommission('sell', 1);   // M2: sells count toward today's commission
   GF.spawnFloat(GF.cx, GF.H * 0.34, '+' + val, '#ffd24a');
   sellSound();
   saveMeta();
@@ -603,6 +714,7 @@ function socketGem() {
   var beforeTier = veinTier();
   vein[g.id] = (vein[g.id] || 0) + 1;
   reveal.decided = true;
+  bumpCommission('socket', 1);   // M2: sockets count toward today's commission
   GF.sfx('unlock');
   GF.spawnFloat(GF.cx, GF.H * 0.34, GF.t('socketDone'), RARITY[reveal.rarity].glow);
   GF.spawnParticles(GF.cx, GF.H * 0.40, RARITY[reveal.rarity].glow, 22);
@@ -621,6 +733,7 @@ function socketGem() {
 function tapMine() {
   var amt = minePerTap();
   coins += amt; minedTotal += amt;
+  bumpCommission('mine', amt, true);   // M2: mined coins count (hot path: no per-tap save)
   GF.sfx('coin');
   // floaty rises from the tapped spot
   if (mineL) mineTapFx.push({ x: mineL.tapX + (Math.random() - 0.5) * 30 * GF.S, y: mineL.tapY, t: 0, amt: amt });
@@ -973,6 +1086,7 @@ function update(dt) {
   GF.tutorial.update(dt);
   if (bootBannerT > 0) bootBannerT -= dt;
   if (newBurst > 0) newBurst -= dt * 1.4;
+  if (comFlash > 0) comFlash -= dt;   // M2: commission CLAIM celebration pulse
   updateSparkles(dt);
   updateMineFx(dt);
   if (setCompleteFlash) { setCompleteFlash.t += dt; if (setCompleteFlash.t > 3.2) setCompleteFlash = null; }
@@ -1202,14 +1316,83 @@ function drawIdleStage(ctx, dt) {
   var bob = Math.sin(tt * 1.5) * 4 * S;
   var caseR = Math.min((splitY - L.stageTop) * 0.30, L.CW * 0.18);
   drawCaseIcon(ctx, cx, caseCy - 8 * S + bob, caseR, s);
-  // set name + completion under the case (compact, single line)
+  // set name + completion under the case (compact, single line). Sits higher now
+  // to leave room for the daily-commission band just above the mine.
   var done = setOwnedCount(curSet), tot = s.gems.length;
+  var comBandH = Math.round(GF.clamp(46 * S, 38, 60));
   ctx.fillStyle = '#e8eefc'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.font = 'bold ' + Math.round(GF.clamp(18 * S, 14, 25)) + 'px system-ui, sans-serif';
-  ctx.fillText((GF.lang === 'ru' ? s.ru : s.en) + '  ' + done + '/' + tot, cx, splitY - 14 * S);
+  ctx.font = 'bold ' + Math.round(GF.clamp(17 * S, 13, 24)) + 'px system-ui, sans-serif';
+  ctx.fillText((GF.lang === 'ru' ? s.ru : s.en) + '  ' + done + '/' + tot, cx, splitY - comBandH - 16 * S);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  // ── DAILY COMMISSION band (M2) — the fresh daily reason, in the game's verbs ──
+  drawCommission(ctx, splitY - comBandH - 4 * S, comBandH);
   // ── THE MINE ────────────────────────────────────────────────────────────────
   drawMine(ctx, splitY + 4 * S, L.stageBot, dt);
+}
+
+// The daily mining commission card: task label + a progress bar that opens
+// ~70% full (the overnight haul / momentum seed), with a CLAIM button when full.
+// This is the world-visible thing a returning player SEES & finishes in 60s.
+function drawCommission(ctx, top, h) {
+  var S = GF.S, CX = L.CX, CW = L.CW, p = L.pad;
+  hit.com = null;
+  if (!comType || comTarget <= 0 || h < 30 * S) return;
+  var x = CX + p, w = CW - p * 2;
+  var ready = comReadyToClaim();
+  var claimed = !!comDone;
+  // panel
+  GF.rr(ctx, x, top, w, h, Math.round(10 * S));
+  var pulse = ready ? (0.5 + 0.5 * Math.sin(nowMs() / 280)) : 0;
+  var pg = ctx.createLinearGradient(x, top, x, top + h);
+  if (claimed) { pg.addColorStop(0, 'rgba(22,28,40,0.92)'); pg.addColorStop(1, 'rgba(16,20,30,0.95)'); }
+  else { pg.addColorStop(0, 'rgba(34,30,18,0.95)'); pg.addColorStop(1, 'rgba(22,18,12,0.97)'); }
+  ctx.fillStyle = pg; ctx.fill();
+  ctx.strokeStyle = claimed ? 'rgba(90,100,120,0.4)' : hexA('#ffd24a', 0.4 + pulse * 0.5);
+  ctx.lineWidth = 1.5; ctx.stroke();
+  // title (left) + task (small)
+  var tx = x + 12 * S, ty = top + h * 0.32;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = claimed ? '#7d8aa0' : '#ffd98a';
+  ctx.font = 'bold ' + Math.round(GF.clamp(10 * S, 8, 13)) + 'px system-ui, sans-serif';
+  var cur = Math.min(comTarget, comBase + comProg);
+  ctx.fillText(GF.t('commission') + '  ·  ' + comTaskLabel() + ' ' + cur + '/' + comTarget, tx, ty);
+  // progress bar (lower portion, leaves room on the right for the CLAIM chip)
+  var chipW = Math.round(GF.clamp(74 * S, 58, 96));
+  var barX = tx, barY = top + h * 0.64, barW = w - 24 * S - chipW - 8 * S, barH = Math.round(GF.clamp(8 * S, 6, 12));
+  var frac = GF.clamp(cur / comTarget, 0, 1);
+  GF.rr(ctx, barX, barY - barH / 2, barW, barH, barH / 2); ctx.fillStyle = 'rgba(0,0,0,0.45)'; ctx.fill();
+  if (frac > 0) {
+    GF.rr(ctx, barX, barY - barH / 2, barW * frac, barH, barH / 2);
+    ctx.fillStyle = claimed ? '#5a6478' : (ready ? '#5ad24a' : '#e7c98a'); ctx.fill();
+  }
+  // reward readout under/right of the bar
+  ctx.textAlign = 'left'; ctx.fillStyle = claimed ? '#6b7385' : '#caa24a';
+  ctx.font = '600 ' + Math.round(GF.clamp(9 * S, 7, 12)) + 'px system-ui, sans-serif';
+  // CLAIM / CLAIMED chip on the right
+  var chipX = x + w - 12 * S - chipW, chipY = top + (h - h * 0.56) / 2, chipH = h * 0.56;
+  GF.rr(ctx, chipX, chipY, chipW, chipH, Math.round(8 * S));
+  if (claimed) {
+    ctx.fillStyle = 'rgba(40,46,64,0.7)'; ctx.fill();
+    ctx.fillStyle = '#7d8aa0'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + Math.round(GF.clamp(10 * S, 8, 13)) + 'px system-ui, sans-serif';
+    ctx.fillText(GF.t('comDone'), chipX + chipW / 2, chipY + chipH / 2 + 1);
+  } else if (ready) {
+    var cg = ctx.createLinearGradient(chipX, chipY, chipX, chipY + chipH);
+    cg.addColorStop(0, '#5ad24a'); cg.addColorStop(1, '#3aa233');
+    ctx.fillStyle = cg; ctx.fill();
+    ctx.fillStyle = '#0c1a0c'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + Math.round(GF.clamp(11 * S, 9, 14)) + 'px system-ui, sans-serif';
+    ctx.fillText(GF.t('comClaim'), chipX + chipW / 2, chipY + chipH * 0.34 + 1);
+    ctx.fillStyle = '#cdebc0'; ctx.font = 'bold ' + Math.round(GF.clamp(9 * S, 7, 12)) + 'px system-ui, sans-serif';
+    ctx.fillText('+' + comReward, chipX + chipW / 2, chipY + chipH * 0.72);
+    hit.com = { x: chipX, y: chipY, w: chipW, h: chipH };
+  } else {
+    ctx.fillStyle = 'rgba(40,40,52,0.7)'; ctx.fill();
+    ctx.fillStyle = '#caa24a'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + Math.round(GF.clamp(10 * S, 8, 13)) + 'px system-ui, sans-serif';
+    ctx.fillText('+' + comReward, chipX + chipW / 2, chipY + chipH / 2 + 1);
+  }
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
 
 // The owned mine: a stone wall with your socketed gems embedded in it, a tier
@@ -1709,7 +1892,8 @@ function drawLock(ctx, cx, cy, r) {
 function drawBootBanner(ctx) {
   var parts = [];
   if (dailyClaim > 0) parts.push(GF.t('streakDay') + ' ' + streakNow + ' ' + GF.t('streakBonus') + ': +' + dailyClaim);
-  if (idleClaim > 0) parts.push('+' + idleClaim + ' ' + GF.t('awayCoins'));
+  // M2: frame the idle pile as the MINE's overnight haul (it seeds today's commission)
+  if (idleClaim > 0) parts.push(GF.t('overnight') + ': +' + idleClaim);
   if (!parts.length) return;
   var S = GF.S;
   var a = GF.clamp(bootBannerT / 0.5, 0, 1);
@@ -1980,7 +2164,7 @@ function buildRanks(myVal) {
 function drawHelp(ctx) {
   var H = GF.H, S = GF.S, CX = L.CX, CW = L.CW;
   drawOverlayFrame(ctx, GF.t('help'), '#9aa6c0');
-  var lines = [GF.t('tut1'), GF.t('tut2'), GF.t('tut3'), GF.t('tut4')];
+  var lines = [GF.t('tut1'), GF.t('tut2'), GF.t('tut3'), GF.t('tut4'), GF.t('tut5')];
   var fs = Math.round(GF.clamp(15 * S, 12, 19));
   var maxW = CW - L.pad * 2 - 8 * S;
   var x0 = CX + L.pad + 4 * S;
@@ -2081,6 +2265,9 @@ function onTap(x, y) {
 
   // reel spinning — ignore taps
   if (reel) return;
+
+  // DAILY COMMISSION (idle screen): tap the CLAIM chip when the task is full.
+  if (hit.com && inRect(x, y, hit.com)) { claimCommission(); return; }
 
   // THE MINE (idle screen): tap the mine to chip coins; tap an upgrade chip to buy.
   if (mineL) {
@@ -2253,14 +2440,17 @@ window._tapMine = function () { tapMine(); };
 window._buyPick = function () { buyPick(); };
 window._buyDrill = function () { buyDrill(); };
 window._mineInfo = function () { return { count: veinCount(), tier: veinTier(), toNext: veinToNext(), value: veinValue(), perTap: minePerTap(), perHr: minePerHour(), pick: pick, drill: drill, mined: minedTotal }; };
+// M2 daily commission inspector (used by the returning-player / loop probes)
+window._comInfo = function () { return { day: meta ? meta.comDay : '', type: comType, target: comTarget, base: comBase, prog: comProg, cur: Math.min(comTarget, comBase + comProg), reward: comReward, ready: comReadyToClaim(), done: !!comDone, hit: hit.com || null, streak: meta ? (meta.streak || 0) : 0 }; };
 window._gemInfo = function () {
   return {
     gs: gs, coins: coins, ownedCount: Object.keys(owned).filter(function (k) { return owned[k] > 0; }).length,
     opens: opens, topRarity: topRarity, collectionValue: collectionValue(),
     curSet: curSet, spinning: !!reel, revealing: !!reveal,
     veinCount: veinCount(), veinTier: veinTier(), veinValue: veinValue(), pick: pick, drill: drill,
+    comType: comType, comCur: Math.min(comTarget, comBase + comProg), comTarget: comTarget, comReady: comReadyToClaim(), comDone: !!comDone,
     reelWinner: reel ? reel.winner.id : null, revealGem: reveal ? reveal.gem.id : null,
-    hit: { open: hit.open, keep: hit.keep, socket: hit.socket, sell: hit.sell, pills: hit.pills, cases: hit.cases, mine: mineL },
+    hit: { open: hit.open, keep: hit.keep, socket: hit.socket, sell: hit.sell, pills: hit.pills, cases: hit.cases, mine: mineL, com: hit.com },
     sets: SETS.map(function (s, i) { return { id: s.id, owned: setOwnedCount(i), total: s.gems.length, unlocked: setUnlocked(i), complete: setIsComplete(i) }; }),
   };
 };
@@ -2268,33 +2458,40 @@ window._gemInfo = function () {
 // ── BOT CONTRACT (progression_trials / progression_probe steering wheel) ─────
 // getActions() = what's possible right now; doAction(a) performs one. Drives the
 // FULL loop headless so the balance curve can be measured, not guessed.
-GF.exposeBot && GF.exposeBot(
-  function () {
-    var acts = [];
-    if (reveal && !reveal.decided) {
-      var isNew = !(owned[reveal.gem.id] > 0);
-      acts.push(isNew ? 'keep' : 'sell');
-      if (veinCount() < 24 && (reveal.rarity >= 2 || isNew)) acts.push('socket'); // socket the good ones
-    } else if (!reel) {
-      if (coins >= SETS[curSet].cost) acts.push('open');
-      else acts.push('free');                 // can't afford → rewarded free case path
-      if (veinCount() > 0) acts.push('tap');   // chip the mine for coins
-      if (coins >= pickCost() && pick < PICK_MAX) acts.push('pick');
-      if (coins >= drillCost() && drill < DRILL_MAX) acts.push('drill');
-    }
-    return acts;
-  },
-  function (a) {
-    if (a === 'open') { startSpin(false); }
-    else if (a === 'free') { watchFreeCase(); }
-    else if (a === 'keep') { keepGem(); }
-    else if (a === 'socket') { socketGem(); }
-    else if (a === 'sell') { sellGem(false); }
-    else if (a === 'tap') { tapMine(); }
-    else if (a === 'pick') { buyPick(); }
-    else if (a === 'drill') { buyDrill(); }
+function botActions() {
+  var acts = [];
+  if (reveal && !reveal.decided) {
+    var isNew = !(owned[reveal.gem.id] > 0);
+    acts.push(isNew ? 'keep' : 'sell');
+    if (veinCount() < 24 && (reveal.rarity >= 2 || isNew)) acts.push('socket'); // socket the good ones
+  } else if (!reel) {
+    if (comReadyToClaim()) acts.push('claim');   // M2: bank the daily commission first
+    if (coins >= SETS[curSet].cost) acts.push('open');
+    else acts.push('free');                 // can't afford → rewarded free case path
+    if (veinCount() > 0) acts.push('tap');   // chip the mine for coins
+    if (coins >= pickCost() && pick < PICK_MAX) acts.push('pick');
+    if (coins >= drillCost() && drill < DRILL_MAX) acts.push('drill');
   }
-);
+  return acts;
+}
+function botAct(a) {
+  if (a === 'open') { startSpin(false); }
+  else if (a === 'free') { watchFreeCase(); }
+  else if (a === 'keep') { keepGem(); }
+  else if (a === 'socket') { socketGem(); }
+  else if (a === 'sell') { sellGem(false); }
+  else if (a === 'tap') { tapMine(); }
+  else if (a === 'pick') { buyPick(); }
+  else if (a === 'drill') { buyDrill(); }
+  else if (a === 'claim') { claimCommission(); }
+}
+GF.exposeBot && GF.exposeBot(botActions, botAct);
+// This game ships an OLDER bundled gf-lib.js that predates exposeBot/__gfStep, so
+// GF.exposeBot above no-ops and progression_trials reports UNMEASURABLE. Provide
+// the seams LOCALLY (faithful ports of the template) so the balance curve and the
+// daily-commission loop are measurable. Only define what's missing.
+if (!window.__gfBot) { window.__gfBot = { actions: function () { try { return botActions(); } catch (e) { return []; } }, act: function (a) { try { return botAct(a); } catch (e) {} } }; }
+if (!window.__gfStep) { window.__gfStep = function (n, dt) { n = n | 0; dt = (typeof dt === 'number' && dt > 0) ? dt : (1 / 60); var i = 0; for (; i < n; i++) { try { update(dt); } catch (e) { return i; } } return i; }; }
 
 // ════════════════════════════════════════════════════════════════════════════
 // BOOT
@@ -2309,10 +2506,14 @@ GF.init({
     coins = meta.coins; owned = meta.owned; opens = meta.opens; topRarity = meta.topRarity;
     // hydrate the live mine (M1 owned-meta) from persisted meta
     vein = meta.vein || {}; pick = meta.pick || 0; drill = meta.drill || 0; minedTotal = meta.minedTotal || 0;
-    claimOnOpen();
-    // Yandex 1.9 — persist the live session across reload (coins/owned/curSet/mine)
+    // hydrate the live daily-commission (M2) mirrors from meta FIRST, so the
+    // saveMeta() inside claimOnOpen() (LIVE→meta) does not clobber a same-day task.
+    comType = meta.comType || ''; comTarget = meta.comTarget || 0; comBase = meta.comBase || 0;
+    comProg = meta.comProg || 0; comDone = meta.comDone || 0; comReward = meta.comReward || 0;
+    claimOnOpen();   // rolls today's commission (sets BOTH live + meta) if the day changed
+    // Yandex 1.9 — persist the live session across reload (coins/owned/curSet/mine/commission)
     GF.persist('gem_cases_run_v1',
-      function () { return { coins: coins, owned: owned, opens: opens, topRarity: topRarity, curSet: curSet, vein: vein, pick: pick, drill: drill, minedTotal: minedTotal }; },
+      function () { return { coins: coins, owned: owned, opens: opens, topRarity: topRarity, curSet: curSet, vein: vein, pick: pick, drill: drill, minedTotal: minedTotal, comDay: meta ? meta.comDay : '', comType: comType, comTarget: comTarget, comBase: comBase, comProg: comProg, comDone: comDone, comReward: comReward }; },
       function (st) {
         if (!st) return;
         if (typeof st.coins === 'number') coins = st.coins;
@@ -2324,6 +2525,13 @@ GF.init({
         if (typeof st.pick === 'number') pick = GF.clamp(st.pick, 0, PICK_MAX);
         if (typeof st.drill === 'number') drill = GF.clamp(st.drill, 0, DRILL_MAX);
         if (typeof st.minedTotal === 'number') minedTotal = st.minedTotal;
+        // restore live commission only if it's still the SAME day we rolled for
+        if (st.comDay && meta && st.comDay === meta.comDay && typeof st.comTarget === 'number' && st.comTarget > 0) {
+          comType = st.comType || comType; comTarget = st.comTarget; comBase = +st.comBase || comBase;
+          comProg = +st.comProg || 0; comDone = +st.comDone || 0; comReward = +st.comReward || comReward;
+          meta.comType = comType; meta.comTarget = comTarget; meta.comBase = comBase;
+          meta.comProg = comProg; meta.comDone = comDone; meta.comReward = comReward;
+        }
       }
     );
     // make sure curSet points at an unlocked case
@@ -2370,6 +2578,12 @@ GF.exposeState(function () {
     veinTier: veinTier(),
     pick: pick,
     drill: drill,
+    streak: meta ? (meta.streak || 0) : 0,
+    comType: comType,
+    comProgress: Math.min(comTarget, comBase + comProg),
+    comTarget: comTarget,
+    comReady: comReadyToClaim(),
+    comDone: !!comDone,
     spinning: !!reel,
     revealing: !!reveal,
   };
