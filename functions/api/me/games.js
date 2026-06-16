@@ -20,7 +20,7 @@
 // 1000/day. See Knowledge/Learnings/KV List Budget.
 
 import { readSession } from '../_session.js';
-import { edgeCached } from '../_lib/edgecache.js';
+import { edgeCached } from '../../_lib/edgecache.js';
 
 export async function onRequestGet({ request, env }) {
   const session = await readSession(request, env);
