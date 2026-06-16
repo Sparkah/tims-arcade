@@ -45,9 +45,14 @@ var STRINGS = {
     tut1: 'Goal: open gem cases, collect every gem, grow your collection value.',
     tut2: 'Controls: tap OPEN to spin the reel. When it lands, KEEP the gem or SELL it for coins.',
     tut3: 'Win: complete a case set to unlock the next, rarer case. Chase the Mythic gems!',
-    tut4: 'Tip: sell duplicates for coins, then open more. Come back daily for a free case.',
+    tut4: 'SOCKET gems into YOUR MINE to grow it: tap the mine for coins, upgrade your Pickaxe & Auto-Drill. The mine pays you overnight, so come back daily.',
     coinPack: 'Coin Pack', buy: 'BUY', complete_b: 'completed',
     collection: 'Collection', sets: 'sets', tapAny: 'tap to continue',
+    vein: 'YOUR MINE', socket: 'SOCKET', socketed: 'socketed', mineTap: 'tap to mine',
+    tier: 'Tier', nextTier: 'to next tier', perTap: '/tap', perHr: '/hr',
+    pickaxe: 'Pickaxe', drill: 'Auto-Drill', lvl: 'Lv', mined: 'mined',
+    veinFull: 'Open cases, then SOCKET a gem to grow your mine', socketDone: 'SOCKETED!',
+    tierUp: 'MINE TIER UP!', maxLvl: 'MAX',
   },
   ru: {
     title: 'Самоцветы',
@@ -65,9 +70,14 @@ var STRINGS = {
     tut1: 'Цель: открывай кейсы с самоцветами, собери все камни, повышай ценность коллекции.',
     tut2: 'Управление: нажми ОТКРЫТЬ, чтобы крутить ленту. Когда выпадет камень, ОСТАВЬ его или ПРОДАЙ за монеты.',
     tut3: 'Победа: собери набор, чтобы открыть следующий, более редкий кейс. Лови мифические камни!',
-    tut4: 'Совет: продавай повторы за монеты и открывай ещё. Заходи каждый день за бесплатным кейсом.',
+    tut4: 'Помещай камни В ШАХТУ, чтобы растить её: добывай монеты тапом, улучшай Кирку и Бур. Шахта приносит монеты за ночь — заходи каждый день.',
     coinPack: 'Набор монет', buy: 'КУПИТЬ', complete_b: 'собран',
     collection: 'Коллекция', sets: 'наборов', tapAny: 'нажми, чтобы продолжить',
+    vein: 'ВАША ШАХТА', socket: 'В ШАХТУ', socketed: 'в шахте', mineTap: 'добывай',
+    tier: 'Ур.', nextTier: 'до уровня', perTap: '/тап', perHr: '/час',
+    pickaxe: 'Кирка', drill: 'Бур', lvl: 'Ур', mined: 'добыто',
+    veinFull: 'Открой кейс и помести камень в шахту, чтобы расти', socketDone: 'В ШАХТЕ!',
+    tierUp: 'УРОВЕНЬ ШАХТЫ!', maxLvl: 'МАКС',
   },
 };
 
@@ -199,6 +209,22 @@ var idleClaim = 0, dailyClaim = 0, streakNow = 0;
 var meta = null;
 var META_KEY = 'gem_cases_meta_v1';
 
+// ── THE MINE (M1 owned-meta: socket kept gems into a mine you grow & own) ────
+// Live mirrors of meta.vein/pick/drill (hydrated in onReady). The mine is the
+// persistent OWNED structure: every gem you SOCKET stays embedded in it across
+// sessions, visibly fills the mine wall, raises its tier, and pays a passive
+// coins/hour (overnight) + coins-per-tap (the tapper). Grown from the case
+// fabric — its only input is gems you pulled and chose to socket.
+var vein = {};                  // gemId -> count socketed (the owned structure)
+var pick = 0;                   // pickaxe level → coins per manual tap
+var drill = 0;                  // auto-drill level → overnight coins/hour
+var minedTotal = 0;             // lifetime tapped coins (stat)
+var PICK_MAX = 8, DRILL_MAX = 8;
+var TIER_STEP = 4;              // sockets per mine tier
+var mineTapFx = [];             // floaty "+N" coins on tap
+var socketFlash = 0;           // brief "SOCKETED!" pulse timer
+var tierUpFlash = 0;           // brief "MINE TIER UP!" pulse timer
+
 // fx
 var sparkles = [];              // reveal sparkle layer (independent of GF particles)
 var newBurst = 0;               // NEW! flourish timer
@@ -258,6 +284,12 @@ function defaultMeta() {
     streak: 0,
     bestStreak: 0,
     seenTut: 0,
+    // ── THE MINE (M1 owned-meta: kept gems socketed into a growing mine) ──
+    vein: {},                  // gemId -> count socketed into the mine (persists)
+    veinTier: 0,               // mine tier (derived from sockets, cached for boot art)
+    pick: 0,                   // pickaxe upgrade level (raises coins-per-tap)
+    drill: 0,                  // auto-drill upgrade level (raises overnight rate)
+    minedTotal: 0,             // lifetime coins tapped out of the mine (a stat)
   };
 }
 function loadMeta() {
@@ -281,6 +313,14 @@ function loadMeta() {
         m.streak = +s.streak || 0;
         m.bestStreak = +s.bestStreak || 0;
         m.seenTut = +s.seenTut || 0;
+        // mine state (back-compat: pre-mine saves simply have none)
+        if (s.vein && typeof s.vein === 'object') {
+          for (var vk in s.vein) { if (GEM_BY_ID[vk]) m.vein[vk] = Math.max(0, +s.vein[vk] || 0); }
+        }
+        m.veinTier = +s.veinTier || 0;
+        m.pick = GF.clamp(+s.pick || 0, 0, PICK_MAX);
+        m.drill = GF.clamp(+s.drill || 0, 0, DRILL_MAX);
+        m.minedTotal = +s.minedTotal || 0;
       }
     }
   } catch (e) {}
@@ -290,6 +330,9 @@ function saveMeta() {
   if (!meta) return;
   meta.coins = coins; meta.owned = owned; meta.opens = opens; meta.topRarity = topRarity;
   meta.bestValue = Math.max(meta.bestValue || 0, collectionValue());
+  // mine (M1 owned-meta) — persist the live structure on every save event
+  meta.vein = vein; meta.veinTier = veinTier(); meta.pick = pick; meta.drill = drill;
+  meta.minedTotal = minedTotal;
   try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
 }
 window.addEventListener('pagehide', function () { try { meta.lastClose = Date.now(); saveMeta(); } catch (e) {} });
@@ -321,6 +364,30 @@ function setsCompletedCount() {
   return n;
 }
 
+// ── MINE DERIVED ─────────────────────────────────────────────────────────────
+// Total gems socketed (the mine's "size"); its tier; the value it holds.
+function veinCount() { var n = 0; for (var id in vein) n += vein[id] || 0; return n; }
+function veinTier() { return Math.floor(veinCount() / TIER_STEP); }     // 0,1,2,…
+function veinToNext() { return TIER_STEP - (veinCount() % TIER_STEP); } // sockets to next tier
+function veinValue() {                  // collection value embedded in the mine
+  var v = 0; for (var id in vein) { if (vein[id] > 0 && GEM_BY_ID[id]) v += GEM_BY_ID[id].value * vein[id]; }
+  return v;
+}
+// A higher mine = a richer mine. Per-tap & per-hour both scale with the value
+// you socketed (so socketing a Legendary materially boosts the tapper) and your
+// upgrade levels — the "own economy with upgrades" the player asked for.
+function minePerTap() { return Math.round((1 + veinValue() / 220) * (1 + pick * 0.8)); }
+function minePerHour() { return Math.round((4 + veinValue() / 90) * (1 + drill * 0.7)); }
+function pickCost() { return 120 * Math.pow(2, pick); }   // doubling upgrade curve
+function drillCost() { return 200 * Math.pow(2, drill); }
+// up to 8 most-valuable socketed gems shown embedded in the mine wall
+function veinShowcase() {
+  var arr = [];
+  for (var id in vein) { if (vein[id] > 0 && GEM_BY_ID[id]) arr.push(GEM_BY_ID[id]); }
+  arr.sort(function (a, b) { return b.value - a.value; });
+  return arr.slice(0, 8);
+}
+
 // daily free case available?
 function dailyReady() { return !meta || meta.lastDaily !== utcDayStr(0); }
 
@@ -328,11 +395,14 @@ function dailyReady() { return !meta || meta.lastDaily !== utcDayStr(0); }
 function claimOnOpen() {
   idleClaim = 0; dailyClaim = 0; streakNow = meta.streak || 0;
   var now = Date.now();
-  // overnight coin vein (idle), capped ~10h, scales with collection value
+  // overnight coin vein (idle), capped ~10h. The MINE's auto-drill is the engine:
+  // the more you've socketed + the higher your drill, the bigger the pile waiting
+  // tomorrow — the session-end return hook, grown from the owned mine.
   if (meta.lastClose > 0) {
     var hrs = Math.min(10, (now - meta.lastClose) / 3600000);
     if (hrs >= 0.05) {
-      var rate = 6 + Math.floor(collectionValue() / 300);   // coins/hour
+      var legacy = 6 + Math.floor(collectionValue() / 300);   // floor: always trickles
+      var rate = Math.max(legacy, minePerHour());             // mine drives it once built
       idleClaim = Math.round(hrs * rate);
       if (idleClaim > 0) { coins += idleClaim; }
     }
@@ -521,6 +591,64 @@ function onSetComplete(si) {
   saveMeta();
 }
 var setCompleteFlash = null;
+
+// ── MINE ACTIONS (the M1 owned-meta loop) ────────────────────────────────────
+// SOCKET the revealed gem into the mine: it leaves the reveal and embeds itself
+// permanently into the mine wall. This is the choice that GROWS the owned thing
+// (vs KEEP=collection value, SELL=coins). Crossing a tier threshold visibly
+// upgrades the mine + a celebratory pop — that's what a returning player SEES.
+function socketGem() {
+  if (!reveal || reveal.decided) return;
+  var g = reveal.gem;
+  var beforeTier = veinTier();
+  vein[g.id] = (vein[g.id] || 0) + 1;
+  reveal.decided = true;
+  GF.sfx('unlock');
+  GF.spawnFloat(GF.cx, GF.H * 0.34, GF.t('socketDone'), RARITY[reveal.rarity].glow);
+  GF.spawnParticles(GF.cx, GF.H * 0.40, RARITY[reveal.rarity].glow, 22);
+  socketFlash = 1.0;
+  if (veinTier() > beforeTier) {
+    tierUpFlash = 1.6; GF.setShake(1.2); GF.sfx('levelup');
+    try { GF.happytime(); } catch (e) {}
+  }
+  saveMeta();
+  reveal = null;
+}
+
+// the TAPPER: tap the mine to chip coins out of it. Yield scales with what you
+// socketed + your pickaxe level. Its own little economy: a second coin source
+// (besides selling dupes) and a coin SINK via the two upgrades below.
+function tapMine() {
+  var amt = minePerTap();
+  coins += amt; minedTotal += amt;
+  GF.sfx('coin');
+  // floaty rises from the tapped spot
+  if (mineL) mineTapFx.push({ x: mineL.tapX + (Math.random() - 0.5) * 30 * GF.S, y: mineL.tapY, t: 0, amt: amt });
+  if (mineTapFx.length > 14) mineTapFx.shift();
+  // light, cheap save throttle: persist coins occasionally, not every tap
+  mineTapsSinceSave++;
+  if (mineTapsSinceSave >= 8) { mineTapsSinceSave = 0; saveMeta(); }
+}
+var mineTapsSinceSave = 0;
+
+function buyPick() {
+  if (pick >= PICK_MAX) return;
+  var c = pickCost(); if (coins < c) { GF.spawnFloat(GF.cx, GF.H * 0.5, GF.t('need'), '#ff8a8a'); return; }
+  coins -= c; pick++; GF.sfx('levelup'); GF.spawnFloat(GF.cx, GF.H * 0.5, GF.t('pickaxe') + ' ' + GF.t('lvl') + (pick), '#ffe08a'); saveMeta();
+}
+function buyDrill() {
+  if (drill >= DRILL_MAX) return;
+  var c = drillCost(); if (coins < c) { GF.spawnFloat(GF.cx, GF.H * 0.5, GF.t('need'), '#ff8a8a'); return; }
+  coins -= c; drill++; GF.sfx('levelup'); GF.spawnFloat(GF.cx, GF.H * 0.5, GF.t('drill') + ' ' + GF.t('lvl') + (drill), '#9be0ff'); saveMeta();
+}
+function updateMineFx(dt) {
+  for (var i = mineTapFx.length - 1; i >= 0; i--) {
+    var f = mineTapFx[i]; f.t += dt; f.y -= 40 * GF.S * dt;
+    if (f.t > 0.8) mineTapFx.splice(i, 1);
+  }
+  if (socketFlash > 0) socketFlash -= dt * 1.3;
+  if (tierUpFlash > 0) tierUpFlash -= dt;
+}
 
 function burstSparkles(rar) {
   var n = 14 + rar * 10;
@@ -846,6 +974,7 @@ function update(dt) {
   if (bootBannerT > 0) bootBannerT -= dt;
   if (newBurst > 0) newBurst -= dt * 1.4;
   updateSparkles(dt);
+  updateMineFx(dt);
   if (setCompleteFlash) { setCompleteFlash.t += dt; if (setCompleteFlash.t > 3.2) setCompleteFlash = null; }
   if (reveal) {
     reveal.t += dt;
@@ -1055,28 +1184,175 @@ function drawStage(ctx, dt) {
   drawIdleStage(ctx, dt);
 }
 
-// idle: a glowing "case" with the set's hero gem floating, inviting a tap
+// idle: the case sits in the UPPER stage; YOUR MINE (the owned meta) fills the
+// LOWER stage — a tappable mine wall that grows with every gem you socket.
+var mineL = null;   // mine layout rect (set each idle frame, read by onTap)
 function drawIdleStage(ctx, dt) {
   var s = SETS[curSet], S = GF.S;
-  var cx = L.ccx, cy = L.stageMidY;
+  var cx = L.ccx;
   var tt = nowMs() / 1000;
-  // soft pedestal glow
-  var g = ctx.createRadialGradient(cx, cy + L.stageH * 0.18, 6, cx, cy + L.stageH * 0.18, L.stageH * 0.7);
-  g.addColorStop(0, hexA(s.col, 0.22)); g.addColorStop(1, hexA(s.col, 0));
-  ctx.fillStyle = g; ctx.fillRect(L.CX, L.stageTop, L.CW, L.stageH);
-  // the case (a faceted chest/crate drawn as a rounded box with gem facets)
-  var bob = Math.sin(tt * 1.5) * 5 * S;
-  var caseR = Math.min(L.stageH * 0.30, L.CW * 0.20);
-  drawCaseIcon(ctx, cx, cy - L.stageH * 0.06 + bob, caseR, s);
-  // set name + completion under the case
+  // split the stage: top ~52% = the case, bottom ~48% = the mine.
+  var splitY = L.stageTop + L.stageH * 0.52;
+  var caseCy = L.stageTop + (splitY - L.stageTop) * 0.50;
+  // soft pedestal glow behind the case
+  var g = ctx.createRadialGradient(cx, caseCy + 10 * S, 6, cx, caseCy + 10 * S, L.stageH * 0.5);
+  g.addColorStop(0, hexA(s.col, 0.20)); g.addColorStop(1, hexA(s.col, 0));
+  ctx.fillStyle = g; ctx.fillRect(L.CX, L.stageTop, L.CW, splitY - L.stageTop);
+  // the case (a faceted chest/crate)
+  var bob = Math.sin(tt * 1.5) * 4 * S;
+  var caseR = Math.min((splitY - L.stageTop) * 0.30, L.CW * 0.18);
+  drawCaseIcon(ctx, cx, caseCy - 8 * S + bob, caseR, s);
+  // set name + completion under the case (compact, single line)
   var done = setOwnedCount(curSet), tot = s.gems.length;
   ctx.fillStyle = '#e8eefc'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.font = 'bold ' + Math.round(GF.clamp(22 * S, 16, 30)) + 'px system-ui, sans-serif';
-  ctx.fillText(GF.lang === 'ru' ? s.ru : s.en, cx, cy + L.stageH * 0.26);
-  ctx.fillStyle = hexA(s.col, 0.9);
-  ctx.font = '600 ' + Math.round(GF.clamp(13 * S, 10, 17)) + 'px system-ui, sans-serif';
-  ctx.fillText(done + ' / ' + tot + '  ' + GF.t('collection'), cx, cy + L.stageH * 0.26 + Math.round(22 * S));
+  ctx.font = 'bold ' + Math.round(GF.clamp(18 * S, 14, 25)) + 'px system-ui, sans-serif';
+  ctx.fillText((GF.lang === 'ru' ? s.ru : s.en) + '  ' + done + '/' + tot, cx, splitY - 14 * S);
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  // ── THE MINE ────────────────────────────────────────────────────────────────
+  drawMine(ctx, splitY + 4 * S, L.stageBot, dt);
+}
+
+// The owned mine: a stone wall with your socketed gems embedded in it, a tier
+// badge, per-tap / per-hour readouts, a big tap target, and two upgrade chips.
+function drawMine(ctx, top, bot, dt) {
+  var S = GF.S, CX = L.CX, CW = L.CW, p = L.pad;
+  var x = CX + p, w = CW - p * 2;
+  var h = bot - top;
+  if (h < 40 * S) { mineL = null; return; }   // too cramped (shouldn't happen) — skip safely
+  // panel
+  GF.rr(ctx, x, top, w, h, Math.round(12 * S));
+  var pg = ctx.createLinearGradient(x, top, x, top + h);
+  pg.addColorStop(0, 'rgba(30,26,20,0.95)'); pg.addColorStop(1, 'rgba(18,15,12,0.97)');
+  ctx.fillStyle = pg; ctx.fill();
+  ctx.strokeStyle = hexA('#caa24a', 0.45 + (tierUpFlash > 0 ? 0.4 * tierUpFlash : 0)); ctx.lineWidth = 1.5; ctx.stroke();
+  // header row: ⛏ YOUR MINE · Tier N
+  var hy = top + 16 * S;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#e7c98a'; ctx.font = 'bold ' + Math.round(GF.clamp(13 * S, 10, 16)) + 'px system-ui, sans-serif';
+  drawPick(ctx, x + 12 * S, hy, 7 * S, '#e7c98a');
+  ctx.fillText(GF.t('vein') + '  ·  ' + GF.t('tier') + ' ' + veinTier(), x + 24 * S, hy + 1);
+  // rates (right-aligned): +N/tap   +N/hr
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#ffd98a'; ctx.font = 'bold ' + Math.round(GF.clamp(12 * S, 9, 15)) + 'px system-ui, sans-serif';
+  ctx.fillText('+' + minePerTap() + GF.t('perTap') + '   +' + minePerHour() + GF.t('perHr'), x + w - 12 * S, hy + 1);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  // socket wall — a row of slots; filled slots show your top socketed gems
+  var wallY = hy + 14 * S;
+  var wallH = Math.max(26 * S, h * 0.30);
+  var show = veinShowcase();
+  var slots = 8;
+  var pad2 = 10 * S;
+  var slotGap = 5 * S;
+  var slotW = (w - pad2 * 2 - slotGap * (slots - 1)) / slots;
+  var slotH = Math.min(wallH, slotW * 1.15);
+  for (var i = 0; i < slots; i++) {
+    var sx = x + pad2 + i * (slotW + slotGap);
+    var sy = wallY;
+    GF.rr(ctx, sx, sy, slotW, slotH, 4 * S);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(120,96,60,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+    if (show[i]) {
+      var gm = show[i];
+      drawGem(ctx, sx + slotW / 2, sy + slotH / 2, Math.min(slotW, slotH) * 0.42, gm, gm.rarity, 0.95, nowMs() / 1000 + i);
+    } else {
+      // empty socket: faint pick mark
+      ctx.fillStyle = 'rgba(140,116,72,0.35)';
+      ctx.beginPath(); ctx.arc(sx + slotW / 2, sy + slotH / 2, Math.min(slotW, slotH) * 0.12, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  // progress to next tier (thin bar under the wall)
+  var barY = wallY + slotH + 7 * S;
+  var barH = 4 * S;
+  var frac = ((veinCount() % TIER_STEP) / TIER_STEP);
+  GF.rr(ctx, x + pad2, barY, w - pad2 * 2, barH, barH / 2); ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fill();
+  if (frac > 0) { GF.rr(ctx, x + pad2, barY, (w - pad2 * 2) * frac, barH, barH / 2); ctx.fillStyle = '#e7c98a'; ctx.fill(); }
+  // bottom row: TAP-TO-MINE target (left) + two upgrade chips (right)
+  var rowY = barY + barH + 8 * S;
+  var rowH = Math.max(30 * S, bot - rowY - 8 * S);
+  if (veinCount() === 0) {
+    // empty mine: a clear prompt instead of dead controls
+    mineL = { tapX: x + w / 2, tapY: rowY + rowH / 2, tap: null, pick: null, drill: null };
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#b89a64'; ctx.font = '600 ' + Math.round(GF.clamp(11 * S, 9, 14)) + 'px system-ui, sans-serif';
+    wrapCenter(ctx, GF.t('veinFull'), x + w / 2, rowY + rowH / 2, w - 24 * S, 14 * S);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    return;
+  }
+  // TAP target (a chunky "mine" button, left ~46%)
+  var tapW = w * 0.44, tapX = x + pad2, tapH = rowH;
+  var tg = ctx.createLinearGradient(tapX, rowY, tapX, rowY + tapH);
+  tg.addColorStop(0, '#caa24a'); tg.addColorStop(1, '#8a6a2a');
+  GF.rr(ctx, tapX, rowY, tapW, tapH, Math.round(9 * S)); ctx.fillStyle = tg; ctx.fill();
+  drawPick(ctx, tapX + 16 * S, rowY + tapH / 2, 9 * S, '#3a2a10');
+  ctx.fillStyle = '#2a1d08'; ctx.font = 'bold ' + Math.round(GF.clamp(13 * S, 10, 16)) + 'px system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('mineTap'), tapX + 30 * S, rowY + tapH / 2 + 1);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  // two upgrade chips stacked on the right ~50%
+  var upX = tapX + tapW + 8 * S;
+  var upW = x + w - pad2 - upX;
+  var upH = (tapH - 6 * S) / 2;
+  var pickMax = pick >= PICK_MAX, drillMax = drill >= DRILL_MAX;
+  drawUpChip(ctx, upX, rowY, upW, upH, GF.t('pickaxe'), pick, pickMax ? GF.t('maxLvl') : fmt(pickCost()), coins >= pickCost() && !pickMax, '#ffd98a');
+  drawUpChip(ctx, upX, rowY + upH + 6 * S, upW, upH, GF.t('drill'), drill, drillMax ? GF.t('maxLvl') : fmt(drillCost()), coins >= drillCost() && !drillMax, '#9be0ff');
+  // floaty tapped coins
+  for (var f = 0; f < mineTapFx.length; f++) {
+    var fx = mineTapFx[f];
+    ctx.globalAlpha = Math.max(0, 1 - fx.t / 0.8);
+    ctx.fillStyle = '#ffe8a0'; ctx.font = 'bold ' + Math.round(GF.clamp(13 * S, 10, 17)) + 'px system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.fillText('+' + fx.amt, fx.x, fx.y);
+    ctx.globalAlpha = 1; ctx.textAlign = 'left';
+  }
+  mineL = {
+    tapX: tapX + tapW / 2, tapY: rowY + tapH / 2,
+    tap: { x: tapX, y: rowY, w: tapW, h: tapH },
+    pick: pickMax ? null : { x: upX, y: rowY, w: upW, h: upH },
+    drill: drillMax ? null : { x: upX, y: rowY + upH + 6 * S, w: upW, h: upH },
+  };
+}
+
+// a compact upgrade chip: NAME Lv·N  [cost coin]  — dimmed if unaffordable
+function drawUpChip(ctx, x, y, w, h, name, lvl, costTxt, afford, col) {
+  var S = GF.S;
+  GF.rr(ctx, x, y, w, h, Math.round(7 * S));
+  ctx.fillStyle = afford ? 'rgba(40,46,64,0.95)' : 'rgba(26,30,42,0.9)'; ctx.fill();
+  ctx.strokeStyle = hexA(col, afford ? 0.6 : 0.25); ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = afford ? shade(col, 0.1) : '#6b7385';
+  ctx.font = 'bold ' + Math.round(GF.clamp(11 * S, 8, 14)) + 'px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText(name + ' ' + GF.t('lvl') + lvl, x + 8 * S, y + h / 2 + 1);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = afford ? '#ffe8a0' : '#6b7385';
+  ctx.font = 'bold ' + Math.round(GF.clamp(11 * S, 8, 14)) + 'px system-ui, sans-serif';
+  ctx.fillText(costTxt, x + w - 8 * S, y + h / 2 + 1);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+
+// a tiny vector pickaxe glyph (no emoji — tofu-safe on headless/Android)
+function drawPick(ctx, cx, cy, r, col) {
+  ctx.save();
+  ctx.strokeStyle = col; ctx.lineWidth = Math.max(1.4, r * 0.28); ctx.lineCap = 'round';
+  // handle
+  ctx.beginPath(); ctx.moveTo(cx - r * 0.7, cy + r * 0.9); ctx.lineTo(cx + r * 0.5, cy - r * 0.8); ctx.stroke();
+  // head (arc)
+  ctx.beginPath(); ctx.moveTo(cx - r * 0.2, cy - r * 1.15);
+  ctx.quadraticCurveTo(cx + r * 0.5, cy - r * 0.8, cx + r * 1.15, cy - r * 0.2); ctx.stroke();
+  ctx.restore();
+}
+
+// center-wrap a short string into up to 2 lines around (cx, cy)
+function wrapCenter(ctx, str, cx, cy, maxW, lh) {
+  var words = str.split(' '), lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = test;
+  }
+  if (cur) lines.push(cur);
+  if (lines.length > 2) { lines = [lines[0], lines.slice(1).join(' ')]; }
+  var y0 = cy - (lines.length - 1) * lh / 2;
+  for (var j = 0; j < lines.length; j++) ctx.fillText(lines[j], cx, y0 + j * lh);
 }
 
 function drawCaseIcon(ctx, cx, cy, r, s) {
@@ -1259,18 +1535,22 @@ function drawReveal(ctx, dt) {
 
 function drawDecisionButtons(ctx) {
   var S = GF.S, CW = L.CW;
-  var gap = Math.round(12 * S);
-  var bw = (L.openW - gap) / 2;
   var bh = L.openH;
   var y = L.openY;
   var x0 = L.openX;            // already column-centered in layout()
   var sval = RARITY[reveal.rarity].sval;
+  // THREE choices now (the mine added a verb): KEEP (collection) · SOCKET (mine) · SELL (coins)
+  var gap = Math.round(8 * S);
+  var bw = (L.openW - gap * 2) / 3;
   // KEEP (left, green)
   drawBtn(ctx, x0, y, bw, bh, GF.t('keep'), '#2ee07a', '#23a657', '#06240f');
+  // SOCKET (middle, amber — the owned-mine verb)
+  drawBtn(ctx, x0 + bw + gap, y, bw, bh, GF.t('socket'), '#e7c98a', '#b58a3a', '#2a1d08');
   // SELL (right, gold) with +N
-  drawBtn(ctx, x0 + bw + gap, y, bw, bh, GF.t('sell') + '  +' + sval, '#ffd166', '#f0a93a', '#2a1c06');
+  drawBtn(ctx, x0 + (bw + gap) * 2, y, bw, bh, GF.t('sell') + ' +' + sval, '#ffd166', '#f0a93a', '#2a1c06');
   hit.keep = { x: x0, y: y, w: bw, h: bh };
-  hit.sell = { x: x0 + bw + gap, y: y, w: bw, h: bh };
+  hit.socket = { x: x0 + bw + gap, y: y, w: bw, h: bh };
+  hit.sell = { x: x0 + (bw + gap) * 2, y: y, w: bw, h: bh };
   // SELL 2x via ad — a slim button below, in the case-strip band, only if a sell makes sense
   var ay = L.caseY + Math.round(8 * S);
   var aw = GF.clamp(260 * S, 170, Math.min(380, CW - L.pad * 2)), ah = Math.round(GF.clamp(34 * S, 26, 44));
@@ -1793,6 +2073,7 @@ function onTap(x, y) {
   // reveal decision
   if (reveal) {
     if (inRect(x, y, hit.keep)) { keepGem(); return; }
+    if (hit.socket && inRect(x, y, hit.socket)) { socketGem(); return; }
     if (inRect(x, y, hit.sell)) { sellGem(false); return; }
     if (inRect(x, y, hit.sell2x)) { watchSell2x(); return; }
     return;
@@ -1800,6 +2081,13 @@ function onTap(x, y) {
 
   // reel spinning — ignore taps
   if (reel) return;
+
+  // THE MINE (idle screen): tap the mine to chip coins; tap an upgrade chip to buy.
+  if (mineL) {
+    if (mineL.pick && inRect(x, y, mineL.pick)) { buyPick(); return; }
+    if (mineL.drill && inRect(x, y, mineL.drill)) { buyDrill(); return; }
+    if (mineL.tap && inRect(x, y, mineL.tap)) { tapMine(); return; }
+  }
 
   // pills
   if (hit.pills) {
@@ -1921,9 +2209,13 @@ window._setupForScreenshot = function (n) {
   } else if (n === 3) {
     overlay = 'VAULT'; curSet = 0; vaultTab = 0; grantSet(0, 6); grantSet(1, 3);
   } else {
-    // deep late-game: most of meadow+ember, some frost+cosmic — busy Vault
+    // deep late-game: most of meadow+ember, some frost+cosmic — busy Vault + mine
     grantSet(0, 6); grantSet(1, 6); grantSet(2, 4); grantSet(3, 2);
     meta.setsDone['meadow'] = 1; meta.setsDone['ember'] = 1;
+    // a built mine: socket a spread of gems so the wall + tier read as lived-in
+    vein = { mossheart: 2, cloverstone: 1, sunard: 1, thorngleam: 1 };
+    var emberGems = SETS[1].gems; if (emberGems[3]) vein[emberGems[3].id] = 1; if (emberGems[4]) vein[emberGems[4].id] = 1;
+    pick = 3; drill = 2;
     overlay = 'VAULT'; vaultTab = 2; coins = 4200; opens = 60;
   }
   topRarity = Math.max(topRarity, 3);
@@ -1955,16 +2247,54 @@ window.__readScroll = function () { return { scrollY: scrollY, scrollMax: scroll
 window.__muteRect = function () { return hit.mute ? { x: hit.mute.x, y: hit.mute.y, w: hit.mute.w, h: hit.mute.h } : null; };
 window.__forceBroke = function () { coins = 0; freeCaseCdUntil = 0; reel = null; reveal = null; overlay = null; saveMeta(); };
 window._gemOpen = function () { if (!reel && !reveal) startSpin(true); };
+// mine test seams
+window._socket = function () { if (reveal && !reveal.decided) socketGem(); };
+window._tapMine = function () { tapMine(); };
+window._buyPick = function () { buyPick(); };
+window._buyDrill = function () { buyDrill(); };
+window._mineInfo = function () { return { count: veinCount(), tier: veinTier(), toNext: veinToNext(), value: veinValue(), perTap: minePerTap(), perHr: minePerHour(), pick: pick, drill: drill, mined: minedTotal }; };
 window._gemInfo = function () {
   return {
     gs: gs, coins: coins, ownedCount: Object.keys(owned).filter(function (k) { return owned[k] > 0; }).length,
     opens: opens, topRarity: topRarity, collectionValue: collectionValue(),
     curSet: curSet, spinning: !!reel, revealing: !!reveal,
+    veinCount: veinCount(), veinTier: veinTier(), veinValue: veinValue(), pick: pick, drill: drill,
     reelWinner: reel ? reel.winner.id : null, revealGem: reveal ? reveal.gem.id : null,
-    hit: { open: hit.open, keep: hit.keep, sell: hit.sell, pills: hit.pills, cases: hit.cases },
+    hit: { open: hit.open, keep: hit.keep, socket: hit.socket, sell: hit.sell, pills: hit.pills, cases: hit.cases, mine: mineL },
     sets: SETS.map(function (s, i) { return { id: s.id, owned: setOwnedCount(i), total: s.gems.length, unlocked: setUnlocked(i), complete: setIsComplete(i) }; }),
   };
 };
+
+// ── BOT CONTRACT (progression_trials / progression_probe steering wheel) ─────
+// getActions() = what's possible right now; doAction(a) performs one. Drives the
+// FULL loop headless so the balance curve can be measured, not guessed.
+GF.exposeBot && GF.exposeBot(
+  function () {
+    var acts = [];
+    if (reveal && !reveal.decided) {
+      var isNew = !(owned[reveal.gem.id] > 0);
+      acts.push(isNew ? 'keep' : 'sell');
+      if (veinCount() < 24 && (reveal.rarity >= 2 || isNew)) acts.push('socket'); // socket the good ones
+    } else if (!reel) {
+      if (coins >= SETS[curSet].cost) acts.push('open');
+      else acts.push('free');                 // can't afford → rewarded free case path
+      if (veinCount() > 0) acts.push('tap');   // chip the mine for coins
+      if (coins >= pickCost() && pick < PICK_MAX) acts.push('pick');
+      if (coins >= drillCost() && drill < DRILL_MAX) acts.push('drill');
+    }
+    return acts;
+  },
+  function (a) {
+    if (a === 'open') { startSpin(false); }
+    else if (a === 'free') { watchFreeCase(); }
+    else if (a === 'keep') { keepGem(); }
+    else if (a === 'socket') { socketGem(); }
+    else if (a === 'sell') { sellGem(false); }
+    else if (a === 'tap') { tapMine(); }
+    else if (a === 'pick') { buyPick(); }
+    else if (a === 'drill') { buyDrill(); }
+  }
+);
 
 // ════════════════════════════════════════════════════════════════════════════
 // BOOT
@@ -1977,10 +2307,12 @@ GF.init({
   onReady: function () {
     meta = loadMeta();
     coins = meta.coins; owned = meta.owned; opens = meta.opens; topRarity = meta.topRarity;
+    // hydrate the live mine (M1 owned-meta) from persisted meta
+    vein = meta.vein || {}; pick = meta.pick || 0; drill = meta.drill || 0; minedTotal = meta.minedTotal || 0;
     claimOnOpen();
-    // Yandex 1.9 — persist the live session across reload (coins/owned/curSet)
+    // Yandex 1.9 — persist the live session across reload (coins/owned/curSet/mine)
     GF.persist('gem_cases_run_v1',
-      function () { return { coins: coins, owned: owned, opens: opens, topRarity: topRarity, curSet: curSet }; },
+      function () { return { coins: coins, owned: owned, opens: opens, topRarity: topRarity, curSet: curSet, vein: vein, pick: pick, drill: drill, minedTotal: minedTotal }; },
       function (st) {
         if (!st) return;
         if (typeof st.coins === 'number') coins = st.coins;
@@ -1988,19 +2320,32 @@ GF.init({
         if (typeof st.opens === 'number') opens = st.opens;
         if (typeof st.topRarity === 'number') topRarity = st.topRarity;
         if (typeof st.curSet === 'number') curSet = GF.clamp(st.curSet, 0, SETS.length - 1);
+        if (st.vein) vein = st.vein;
+        if (typeof st.pick === 'number') pick = GF.clamp(st.pick, 0, PICK_MAX);
+        if (typeof st.drill === 'number') drill = GF.clamp(st.drill, 0, DRILL_MAX);
+        if (typeof st.minedTotal === 'number') minedTotal = st.minedTotal;
       }
     );
     // make sure curSet points at an unlocked case
     if (!setUnlocked(curSet)) curSet = 0;
     // welcome-back banner if there's anything to show
     if (idleClaim > 0 || dailyClaim > 0) bootBannerT = 4.0;
-    // first-run tutorial: ONE screen + ONE action ("Tap OPEN")
+    // first-run tutorial: ONE screen + ONE action ("Tap OPEN").
+    // Platform builds (Yandex/CrazyGames) set __GF_AUTOSTART → drop straight into
+    // play with no tutorial gate (CLAUDE.md hard rule #9). The game has no menu
+    // (gs is always OPEN), so "autostart" = suppress the tutorial overlay; the
+    // help (?) pill keeps the how-to reachable in-game.
     layout();
-    GF.tutorial.start([
-      { text: GF.t('tapOpen'),
-        target: function () { return { x: L.ccx, y: L.openY + L.openH / 2, r: Math.max(L.openW, L.openH) * 0.5 }; },
-        advance: 'click_target', onAdvance: function () { meta.seenTut = 1; saveMeta(); } },
-    ], { storageKey: 'gem_cases_tut_v1' });
+    if (window.__GF_AUTOSTART && !window._silent) {
+      try { localStorage.setItem('gem_cases_tut_v1', '1'); } catch (e) {}
+      meta.seenTut = 1;
+    } else {
+      GF.tutorial.start([
+        { text: GF.t('tapOpen'),
+          target: function () { return { x: L.ccx, y: L.openY + L.openH / 2, r: Math.max(L.openW, L.openH) * 0.5 }; },
+          advance: 'click_target', onAdvance: function () { meta.seenTut = 1; saveMeta(); } },
+      ], { storageKey: 'gem_cases_tut_v1' });
+    }
     saveMeta();
   },
   onUpdate: update,
@@ -2021,6 +2366,10 @@ GF.exposeState(function () {
     topRarity: topRarity,
     curSet: curSet,
     setsDone: setsCompletedCount(),
+    veinCount: veinCount(),
+    veinTier: veinTier(),
+    pick: pick,
+    drill: drill,
     spinning: !!reel,
     revealing: !!reveal,
   };

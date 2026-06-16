@@ -44,6 +44,13 @@ var STRINGS = {
     tut_lose: 'Smash a red BOMB and lose a life. Lose all 3 lives and the run ends.',
     tut_tip: 'Fill the RAGE bar and tap it to blow up the whole room - bombs are safe during RAGE.',
     sound: 'SOUND',
+    hall: 'THE HALL', hall_title: 'THE HALL', hall_sub: 'Trophies you smashed & kept',
+    trophy_found: 'TROPHY CAPTURED!', trophy_hint: 'A golden RELIC! Smash it to keep it forever.',
+    hall_bonus: 'Cash bonus', hall_locked: 'Hidden in the rooms ahead',
+    hall_progress: 'Hall', next_relic: 'Next relic may be in the room ahead',
+    tr_vase: 'Golden Vase', tr_bust: 'Bronze Bust', tr_skull: 'Crystal Skull',
+    tr_idol: 'Jade Idol', tr_orb: 'Amethyst Orb', tr_safe: 'Gilded Safe',
+    tr_tv: 'Relic Screen', tr_crown: 'Royal Cabinet',
   },
   ru: {
     title: 'Комната ярости', sub: 'Круши всё',
@@ -67,6 +74,13 @@ var STRINGS = {
     tut_lose: 'Разобьёшь красную БОМБУ - теряешь жизнь. Потерял все 3 - конец.',
     tut_tip: 'Накопи ЯРОСТЬ и жми полосу, чтобы разнести всю комнату - в ярости бомбы безопасны.',
     sound: 'ЗВУК',
+    hall: 'ЗАЛ ТРОФЕЕВ', hall_title: 'ЗАЛ ТРОФЕЕВ', hall_sub: 'Трофеи, что ты разбил и забрал',
+    trophy_found: 'ТРОФЕЙ ЗАХВАЧЕН!', trophy_hint: 'Золотая РЕЛИКВИЯ! Разбей, чтобы забрать навсегда.',
+    hall_bonus: 'Бонус к монетам', hall_locked: 'Скрыт в комнатах впереди',
+    hall_progress: 'Зал', next_relic: 'Реликвия может ждать в следующей комнате',
+    tr_vase: 'Золотая ваза', tr_bust: 'Бронзовый бюст', tr_skull: 'Хрустальный череп',
+    tr_idol: 'Нефритовый идол', tr_orb: 'Аметистовый шар', tr_safe: 'Золочёный сейф',
+    tr_tv: 'Экран-реликвия', tr_crown: 'Царский шкаф',
   },
 };
 
@@ -128,6 +142,26 @@ var THEMES = [
   { name:'warehouse', bg:['#2a2533','#100d15'], types:['crate','shelf','block','statue','safe','cabinet','tv','monitor','micro','vase'] },
 ];
 
+// ── TROPHIES (M1 persistent owned meta — "The Hall") ───────────────────────
+// Rare landmark objects that sometimes appear in a room. SMASH one and its
+// remains are CAPTURED into your Hall — a permanent collection you own across
+// sessions. Each owned trophy grants a small permanent CASH bonus, so every
+// returning run pays more. Discovery order is fixed (the next undiscovered one
+// is what the room ahead might be hiding) — that's the session-end pull.
+// base = the catalogue shape this trophy is drawn from (reuses object vectors);
+// hue rotates them to gold/jade/etc; bonus = +% cash while owned.
+var TROPHIES = [
+  { id:'tr_vase',   base:'vase',    tint:'#f4c542', accent:'#a87a16', bonus:0.06 },
+  { id:'tr_bust',   base:'statue',  tint:'#c98a4a', accent:'#7a4d20', bonus:0.06 },
+  { id:'tr_skull',  base:'lamp',    tint:'#d8f0ff', accent:'#7fb8d8', bonus:0.08 },
+  { id:'tr_idol',   base:'mug',     tint:'#5fd68f', accent:'#2a8a52', bonus:0.08 },
+  { id:'tr_orb',    base:'plate',   tint:'#b07adb', accent:'#6a3aa0', bonus:0.10 },
+  { id:'tr_safe',   base:'safe',    tint:'#e0c24a', accent:'#9a7a16', bonus:0.10 },
+  { id:'tr_tv',     base:'tv',      tint:'#5fe0d0', accent:'#1f8a7a', bonus:0.12 },
+  { id:'tr_crown',  base:'cabinet', tint:'#ffd24a', accent:'#b08010', bonus:0.14 },
+];
+var TROPHY_DROP_BASE = 0.16;  // spawn chance per room (only when an undiscovered trophy remains)
+
 // ── TOOLS ──────────────────────────────────────────────────────────────────
 // dmg, aoe radius (design px, 0=none), cost, rageMult perk
 var TOOLS = [
@@ -153,6 +187,12 @@ var shards = [];            // polygon debris
 var owned = { 0:true }, equipped = 0;
 var lastDailyDay = -1;
 var bestPending = false;
+// ── TROPHY / HALL meta (persistent owned collection) ───────────────────────
+var trophies = {};          // { tr_id: true } — captured & owned forever
+var hallOpen = false;       // Hall overlay visible
+var trophyToastT = 0;       // "TROPHY CAPTURED!" banner timer
+var trophyToastId = null;   // which trophy the toast is for
+var gainedTrophyThisRun = false;  // for the session-end pull line
 var _pendingAd = false;
 var curSwipe = 0, swipeDestroyed = 0, pdown = false, lastPX = 0, lastPY = 0;
 
@@ -176,6 +216,35 @@ function playTop(){ return Math.max(64*S(), 56) + 8; }
 function playBot(){ return GF.H - rageBarH() - 6; }
 function rageBarH(){ return GF.clamp(70*S(), 56, 96); }
 function comboMult(){ return Math.min(1 + Math.floor(combo/4), COMBO_MULT_CAP); }
+
+// ── TROPHY / HALL helpers (M1 persistent owned meta) ───────────────────────
+function trophyCount(){ var n=0; for (var i=0;i<TROPHIES.length;i++) if (trophies[TROPHIES[i].id]) n++; return n; }
+// the next trophy not yet owned — discovery is ordered, so THIS is what the
+// rooms ahead might be hiding (the session-end reason to keep going).
+function nextUndiscovered(){
+  for (var i=0;i<TROPHIES.length;i++){ if (!trophies[TROPHIES[i].id]) return TROPHIES[i]; }
+  return null;
+}
+// permanent cash multiplier from every trophy you own (the world-visible payoff:
+// a returning player's smashes pay more the moment they reload).
+function cashBonus(){ var b=0; for (var i=0;i<TROPHIES.length;i++) if (trophies[TROPHIES[i].id]) b+=TROPHIES[i].bonus; return b; }
+function trophyById(id){ for (var i=0;i<TROPHIES.length;i++) if (TROPHIES[i].id===id) return TROPHIES[i]; return null; }
+// capture: smashing a trophy object banks it into the Hall forever + big cash
+function captureTrophy(o, rc){
+  if (o.trophy && !trophies[o.trophy]){
+    trophies[o.trophy] = true;
+    gainedTrophyThisRun = true;
+    trophyToastT = 2.4; trophyToastId = o.trophy;
+    var tdef = trophyById(o.trophy);
+    var reward = 120 + room*25;
+    cash += reward; runCash += reward;
+    GF.sfx('unlock'); GF.sfx('win');
+    GF.spawnParticles(rc.x, rc.y, tdef?tdef.tint:'#ffd54a', 26);
+    GF.spawnFloat(rc.x, rc.y - rc.h*0.5, '+'+reward, '#ffd54a');
+    GF.setShake(1.2);
+    checkpoint();
+  }
+}
 
 function evXY(e){
   var r = cv.getBoundingClientRect();
@@ -226,6 +295,26 @@ function spawnRoom(n){
       var hp = m.hp + (n>3 && Math.random()<0.3 ? 1 : 0);
       objects.push({ bomb:false, type:tk, t:t, mat:t.mat, m:m, fx:fx, fy:fy,
         sc:rnd(0.9,1.12), hp:hp, maxhp:hp, dead:false, lastSwipe:-1, rot:rnd(-0.05,0.05) });
+    }
+  }
+  // ── TROPHY injection (M1 owned-meta hook): from room 2, while an undiscovered
+  // relic remains, a rare golden landmark may appear. Smashing it banks it into
+  // the Hall forever. Chance ramps a little with room depth so progress never stalls.
+  var nextTr = nextUndiscovered();
+  if (nextTr && n >= 2){
+    var chance = Math.min(TROPHY_DROP_BASE + (n-2)*0.03, 0.42);
+    if (Math.random() < chance){
+      // convert a random NON-bomb object slot into the trophy (keeps room count stable)
+      var cand = [];
+      for (var qi=0;qi<objects.length;qi++) if (!objects[qi].bomb) cand.push(qi);
+      if (cand.length){
+        var slot = cand[(Math.random()*cand.length)|0];
+        var old = objects[slot];
+        var tdef = TYPES[nextTr.base] || TYPES.vase;
+        objects[slot] = { bomb:false, trophy:nextTr.id, trdef:nextTr, type:nextTr.base, t:tdef,
+          mat:tdef.mat, m:MAT[tdef.mat], fx:old.fx, fy:old.fy, sc:1.25,
+          hp:2, maxhp:2, dead:false, lastSwipe:-1, rot:0, ph:Math.random()*6.28 };
+      }
     }
   }
   // shuffle so bombs aren't clustered in the first cells
@@ -290,8 +379,10 @@ function destroy(o, rc, fromRage){
   var mult = comboMult() * (rageMode?2:1);
   var sv = Math.round((o.bomb?40:m.score) * mult);
   score += sv;
-  var cg = (o.bomb?6:m.cash) * (rageMode?2:1);
+  // owned trophies grant a permanent cash bonus — the world-visible payoff of the Hall
+  var cg = Math.round((o.bomb?6:m.cash) * (rageMode?2:1) * (1 + cashBonus()));
   cash += cg; runCash += cg;
+  if (o.trophy) captureTrophy(o, rc);
   if (!rageMode) rage = Math.min(RAGE_MAX, rage + (o.bomb?8:m.rage) * TOOLS[equipped].rageMult);
   combo++; comboTimer = COMBO_WINDOW_SEC;
   spawnShards(rc, m.shard, o.bomb?12:(8 + (m.hp>1?5:0)));
@@ -382,6 +473,7 @@ function restart(){
   score = 0; room = 1; lives = MAX_LIVES; combo = 0; comboTimer = 0;
   rage = 0; rageMode = false; rageTimer = 0; flashT = 0;
   bestPending = false; runCash = 0;
+  gainedTrophyThisRun = false;
   shards = []; rings = [];
   spawnRoom(1);
   GF.gameStarted();
@@ -414,8 +506,9 @@ function reopenCoach(){
 function saveMeta(){
   try {
     var ow = []; for (var k in owned) if (owned[k]) ow.push(+k);
+    var tr = []; for (var tk in trophies) if (trophies[tk]) tr.push(tk);
     localStorage.setItem('rage_room_meta_v1', JSON.stringify({
-      cash:cash, owned:ow, equipped:equipped, best:best, daily:lastDailyDay
+      cash:cash, owned:ow, equipped:equipped, best:best, daily:lastDailyDay, trophies:tr
     }));
   } catch(e){}
 }
@@ -428,6 +521,8 @@ function loadMeta(){
       owned = {0:true};
       if (m.owned) for (var i=0;i<m.owned.length;i++) owned[m.owned[i]] = true;
       if (!owned[equipped]) equipped = 0;
+      trophies = {};
+      if (m.trophies) for (var ti=0;ti<m.trophies.length;ti++){ if (trophyById(m.trophies[ti])) trophies[m.trophies[ti]] = true; }
     }
   } catch(e){}
 }
@@ -437,6 +532,7 @@ function checkpoint(){ saveMeta(); GF.saveRun(); }
 function onDown(p){
   // overlay layers first (priority: help > shop > gameover > hub)
   if (helpOpen){ if (hitUI(p)) return; helpOpen = false; return; }
+  if (hallOpen){ hitUI(p); return; }
   if (shopOpen){ hitUI(p); return; }
   if (gs === 'GAMEOVER'){ hitUI(p); return; }
   if (paused){ hitUI(p); return; }
@@ -449,7 +545,7 @@ function onDown(p){
   hitAt(p.x, p.y, false);
 }
 function onMove(p){
-  if (!pdown || paused || shopOpen || helpOpen || gs!=='PLAYING' || roomClearT>0) return;
+  if (!pdown || paused || shopOpen || helpOpen || hallOpen || gs!=='PLAYING' || roomClearT>0) return;
   // interpolate along the swipe so fast drags don't skip objects
   var steps = Math.max(1, Math.floor(GF.dist(lastPX,lastPY,p.x,p.y) / (14*S())));
   for (var i=1;i<=steps;i++){
@@ -539,8 +635,9 @@ function update(dt){
   updateShards(dt);
   for (var i=rings.length-1;i>=0;i--){ var rg=rings[i]; rg.r += (rg.max-rg.r)*0.18 + 2; rg.life -= dt*2.2; if (rg.life<=0) rings.splice(i,1); }
   if (flashT>0) flashT = Math.max(0, flashT-dt);
+  if (trophyToastT>0) trophyToastT = Math.max(0, trophyToastT-dt);
 
-  if (gs!=='PLAYING' || paused || helpOpen) return;
+  if (gs!=='PLAYING' || paused || helpOpen || hallOpen) return;
 
   for (var j=0;j<objects.length;j++){ if (objects[j].shakeT>0) objects[j].shakeT-=dt; }
 
@@ -582,7 +679,24 @@ function draw(c){
     c.beginPath(); c.ellipse(rc.x, rc.y+rc.h*0.5, rc.w*0.42, rc.h*0.12, 0, 0, 6.28); c.fill();
     c.save(); c.translate(rc.x+ox, rc.y+oy);
     if (o.bomb) drawBomb(c, rc.w, rc.h, o);
-    else {
+    else if (o.trophy){
+      // golden landmark: glow halo + tinted material + sparkle so it reads as RARE
+      var td = o.trdef || {tint:'#ffd54a',accent:'#a87a16'};
+      var pulse = 0.5 + 0.5*Math.sin(Date.now()/220 + (o.ph||0));
+      c.save();
+      c.shadowColor = td.tint; c.shadowBlur = (16+8*pulse)*s;
+      var gm = { fill:td.tint, accent:td.accent, shard:td.tint, hp:o.maxhp };
+      o.t.draw(c, rc.w, rc.h, gm);
+      c.restore();
+      if (o.maxhp>1 && o.hp<o.maxhp) drawCracks(c, rc.w, rc.h, 1-o.hp/o.maxhp);
+      // sparkle marks
+      c.fillStyle='rgba(255,255,255,'+(0.5+0.5*pulse)+')';
+      for (var sp=0; sp<3; sp++){
+        var sa=(o.ph||0)+sp*2.1+Date.now()/600;
+        var srx=Math.cos(sa)*rc.w*0.42, sry=Math.sin(sa*1.3)*rc.h*0.42;
+        c.beginPath(); c.arc(srx, sry, 1.6*s, 0, 6.28); c.fill();
+      }
+    } else {
       o.t.draw(c, rc.w, rc.h, o.m);
       if (o.maxhp>1 && o.hp<o.maxhp) drawCracks(c, rc.w, rc.h, 1-o.hp/o.maxhp);
     }
@@ -605,11 +719,13 @@ function draw(c){
   drawHUD(c, W, H);
   drawRageBar(c, W, H);
   if (roomClearT>0) drawRoomCleared(c, W, H);
+  if (trophyToastT>0) drawTrophyToast(c, W, H);
   if (coachActive) drawCoach(c, W, H);
 
-  if (paused && !shopOpen && !helpOpen) drawHub(c, W, H);
-  if (gs==='GAMEOVER' && !shopOpen && !helpOpen) drawGameOver(c, W, H);
+  if (paused && !shopOpen && !helpOpen && !hallOpen) drawHub(c, W, H);
+  if (gs==='GAMEOVER' && !shopOpen && !helpOpen && !hallOpen) drawGameOver(c, W, H);
   if (shopOpen) drawShop(c, W, H);     // shop draws above hub/gameover so it works from either
+  if (hallOpen) drawHall(c, W, H);     // the Hall (owned-trophy collection) overlays too
   if (helpOpen) drawHelp(c, W, H);
 }
 
@@ -664,6 +780,16 @@ function drawHUD(c, W, H){
   c.textAlign='center'; c.textBaseline='top';
   c.fillStyle='#cdd6ea'; c.font='bold '+(GF.clamp(13*s,11,16))+'px '+FONT;
   c.fillText(GF.t('room')+' '+room+'  -  '+aliveJunk(), W/2, 12*s);
+
+  // live-trophy hint: when a golden relic is in the room, nudge the player to smash it
+  if (trophyToastT<=0){
+    var hasTrophy=false; for (var ti=0;ti<objects.length;ti++){ if (objects[ti].trophy && !objects[ti].dead){ hasTrophy=true; break; } }
+    if (hasTrophy){
+      var hp2=0.55+0.45*Math.sin(Date.now()/260);
+      c.fillStyle='rgba(255,210,90,'+(0.55+0.4*hp2)+')'; c.font='bold '+(GF.clamp(12*s,10,15))+'px '+FONT;
+      c.fillText(GF.t('trophy_hint'), W/2, 12*s+18*s);
+    }
+  }
 
   // score (top right)
   c.textAlign='right';
@@ -737,9 +863,17 @@ function drawHub(c, W, H){
   c.font='bold '+(GF.clamp(34*s,24,46))+'px '+FONT;
   c.fillText(GF.t('paused'), W/2, H*0.16);
 
-  var bw=Math.min(W-64*s, 360*s), bx=W/2-bw/2, bh=GF.clamp(56*s,46,68), gap=14*s;
-  var y=H*0.26;
+  // hall progress + active cash bonus (the owned-meta status, surfaced OUTSIDE the menu list)
+  var tc=trophyCount(), cb=Math.round(cashBonus()*100);
+  c.font='bold '+(GF.clamp(15*s,12,19))+'px '+FONT; c.fillStyle='#ffd54a';
+  c.fillText(GF.t('hall_progress')+' '+tc+'/'+TROPHIES.length + (cb>0? '   +'+cb+'% '+GF.t('cash'):''), W/2, H*0.215);
+
+  var bw=Math.min(W-64*s, 360*s), bx=W/2-bw/2, bh=GF.clamp(54*s,44,64), gap=12*s;
+  var y=H*0.255;
   bigBtn(c, GF.t('resume'), bx, y, bw, bh, ['#2ee07a','#23a657'], function(){ paused=false; GF.gameStarted(); GF.sfx('click'); }); y+=bh+gap;
+  // HALL — the owned trophy collection (badge-glows when a relic is close, i.e. found ones < total)
+  var hallGlow = trophyCount() < TROPHIES.length;
+  bigBtn(c, GF.t('hall')+'  '+trophyCount()+'/'+TROPHIES.length, bx, y, bw, bh, ['#caa12e','#9a7016'], function(){ hallOpen=true; GF.sfx('click'); }, hallGlow); y+=bh+gap;
   bigBtn(c, GF.t('tools'),  bx, y, bw, bh, ['#5b8cff','#3a5fd0'], function(){ shopOpen=true; GF.sfx('click'); }); y+=bh+gap;
   var dailyReady = todayIdx() !== lastDailyDay;
   bigBtn(c, GF.t('daily') + (dailyReady? '  +'+DAILY_AMOUNT : ''), bx, y, bw, bh, dailyReady?['#ffb02e','#e0791f']:['#3a3550','#272338'], function(){ claimDaily(); }, dailyReady); y+=bh+gap;
@@ -758,6 +892,87 @@ function claimDaily(){
   lastDailyDay = todayIdx(); cash += DAILY_AMOUNT;
   GF.sfx('reward'); GF.spawnFloat(GF.W/2, GF.H*0.4, '+'+DAILY_AMOUNT, '#ffd54a');
   checkpoint();
+}
+
+// ── THE HALL — owned-trophy collection (M1 persistent meta) ────────────────
+// A returning player opens this and SEES their growing gallery of conquered
+// relics + the live cash bonus those relics grant. Owned ones render as gold
+// pedestals; the next undiscovered one shows a "?" silhouette = the pull.
+function drawHall(c, W, H){
+  uiButtons = [];
+  scrim(c, W, H, 0.95);
+  var s=S();
+  c.textAlign='center'; c.textBaseline='top';
+  c.fillStyle='#ffd54a'; c.font='bold '+(GF.clamp(28*s,20,38))+'px '+FONT;
+  c.fillText(GF.t('hall_title'), W/2, H*0.07);
+  c.fillStyle='#cdd6ea'; c.font=(GF.clamp(13*s,11,16))+'px '+FONT;
+  c.fillText(GF.t('hall_sub'), W/2, H*0.07+38*s);
+  // active cash bonus banner
+  var cb=Math.round(cashBonus()*100);
+  c.fillStyle='#3ddc84'; c.font='bold '+(GF.clamp(15*s,12,19))+'px '+FONT;
+  c.fillText(GF.t('hall_bonus')+': +'+cb+'%   ('+trophyCount()+'/'+TROPHIES.length+')', W/2, H*0.07+60*s);
+
+  // pedestal grid (2 columns)
+  var cols=2, cellW=Math.min((W-56*s)/cols, 190*s), gx=(W-cellW*cols-18*s)/2;
+  var cellH=GF.clamp(96*s,78,116), gy=H*0.20, gap=14*s;
+  var nextId = nextUndiscovered() ? nextUndiscovered().id : null;
+  for (var i=0;i<TROPHIES.length;i++){
+    var tdef=TROPHIES[i], col=i%cols, rrow=(i/cols)|0;
+    var px=gx+col*(cellW+18*s), py=gy+rrow*(cellH+gap);
+    var owned_=!!trophies[tdef.id], isNext=(tdef.id===nextId);
+    // card bg
+    var fa = owned_? ['#3a2f12','#241d0a'] : (isNext? ['#26223a','#1a1726'] : ['#1c1a24','#141118']);
+    var g=c.createLinearGradient(px,py,px,py+cellH); g.addColorStop(0,fa[0]); g.addColorStop(1,fa[1]);
+    GF.rr(c,px,py,cellW,cellH,12*s); c.fillStyle=g; c.fill();
+    if (owned_){ c.strokeStyle=tdef.tint; c.lineWidth=2*s; GF.rr(c,px,py,cellW,cellH,12*s); c.stroke(); }
+    // pedestal + trophy icon
+    var ix=px+cellW*0.32, iy=py+cellH*0.52;
+    c.fillStyle='rgba(0,0,0,0.35)'; c.beginPath(); c.ellipse(ix,iy+cellH*0.22,cellW*0.16,cellH*0.05,0,0,6.28); c.fill();
+    if (owned_){
+      c.save(); c.translate(ix, iy); c.shadowColor=tdef.tint; c.shadowBlur=10*s;
+      var td=TYPES[tdef.base]||TYPES.vase;
+      td.draw(c, td.bw*s*0.7, td.bh*s*0.7, { fill:tdef.tint, accent:tdef.accent, shard:tdef.tint, hp:1 });
+      c.restore();
+    } else {
+      // locked silhouette "?"
+      c.fillStyle = isNext? 'rgba(255,210,90,0.65)' : 'rgba(150,150,170,0.30)';
+      c.textAlign='center'; c.textBaseline='middle'; c.font='bold '+(GF.clamp(34*s,24,46))+'px '+FONT;
+      c.fillText('?', ix, iy);
+    }
+    // name + bonus / locked label
+    c.textAlign='left'; c.textBaseline='top';
+    c.fillStyle = owned_? '#ffe9a8' : (isNext? '#cdd6ea' : '#6a6f80');
+    c.font='bold '+(GF.clamp(13*s,11,16))+'px '+FONT;
+    var nm = owned_? GF.t(tdef.id) : (isNext? GF.t(tdef.id) : '???');
+    c.fillText(nm, px+cellW*0.50, py+cellH*0.30);
+    c.fillStyle = owned_? '#3ddc84' : '#8a8f9e';
+    c.font=(GF.clamp(11*s,9,14))+'px '+FONT;
+    c.fillText('+'+Math.round(tdef.bonus*100)+'% '+GF.t('cash'), px+cellW*0.50, py+cellH*0.52);
+    if (!owned_ && isNext){ c.fillStyle='#caa12e'; c.fillText(GF.t('hall_locked'), px+cellW*0.50, py+cellH*0.70); }
+  }
+  var rows=Math.ceil(TROPHIES.length/cols);
+  var by=gy+rows*(cellH+gap)+6*s;
+  var bw=Math.min(W-64*s,360*s);
+  bigBtn(c, GF.t('back'), W/2-bw/2, Math.min(by, H-72*s), bw, GF.clamp(52*s,44,62), ['#caa12e','#9a7016'], function(){ hallOpen=false; GF.sfx('click'); });
+}
+
+// "TROPHY CAPTURED!" banner shown briefly in-play when a relic is smashed
+function drawTrophyToast(c, W, H){
+  var s=S(), a=Math.min(1, trophyToastT/0.3) * Math.min(1, trophyToastT*2);
+  var tdef = trophyToastId ? trophyById(trophyToastId) : null;
+  var bw=Math.min(W-48*s, 380*s), bx=W/2-bw/2, bh=GF.clamp(64*s,52,80), by=H*0.32;
+  c.save(); c.globalAlpha=Math.max(0,a);
+  c.shadowColor=tdef?tdef.tint:'#ffd54a'; c.shadowBlur=24*s;
+  var g=c.createLinearGradient(bx,by,bx,by+bh); g.addColorStop(0,'#caa12e'); g.addColorStop(1,'#7a5a12');
+  GF.rr(c,bx,by,bw,bh,14*s); c.fillStyle=g; c.fill();
+  c.restore();
+  c.save(); c.globalAlpha=Math.max(0,a);
+  c.textAlign='center'; c.textBaseline='middle';
+  c.fillStyle='#fff'; c.font='bold '+(GF.clamp(18*s,14,24))+'px '+FONT;
+  c.fillText(GF.t('trophy_found'), W/2, by+bh*0.34);
+  c.fillStyle='#ffe9a8'; c.font='bold '+(GF.clamp(15*s,12,19))+'px '+FONT;
+  c.fillText(tdef?GF.t(tdef.id):'', W/2, by+bh*0.68);
+  c.restore();
 }
 
 function drawShop(c, W, H){
@@ -838,17 +1053,25 @@ function drawGameOver(c, W, H){
   var s=S();
   c.textAlign='center'; c.textBaseline='middle';
   c.fillStyle='#ff6a4a'; c.font='bold '+(GF.clamp(40*s,26,54))+'px '+FONT;
-  c.fillText(GF.t('gameover'), W/2, H*0.24);
+  c.fillText(GF.t('gameover'), W/2, H*0.20);
   c.fillStyle='#cdd6ea'; c.font=(GF.clamp(18*s,14,24))+'px '+FONT;
-  c.fillText(GF.t('score')+': '+score, W/2, H*0.34);
+  c.fillText(GF.t('score')+': '+score, W/2, H*0.29);
   c.fillStyle= bestPending?'#ffd54a':'#8a93a8'; c.font='bold '+(GF.clamp(15*s,12,19))+'px '+FONT;
-  c.fillText(GF.t('best')+': '+best + (bestPending?'  '+GF.t('new_mark'):''), W/2, H*0.40);
+  c.fillText(GF.t('best')+': '+best + (bestPending?'  '+GF.t('new_mark'):''), W/2, H*0.345);
+  // session-end pull: Hall progress + the next relic still hiding in the rooms ahead
+  var nextTr = nextUndiscovered();
+  c.fillStyle='#caa12e'; c.font='bold '+(GF.clamp(13*s,11,16))+'px '+FONT;
+  c.fillText(GF.t('hall_progress')+' '+trophyCount()+'/'+TROPHIES.length + '   +'+Math.round(cashBonus()*100)+'% '+GF.t('cash'), W/2, H*0.395);
+  if (nextTr){ c.fillStyle='#9aa6bd'; c.font=(GF.clamp(11*s,10,14))+'px '+FONT; c.fillText(GF.t('next_relic'), W/2, H*0.43); }
 
-  var bw=Math.min(W-64*s,360*s), bx=W/2-bw/2, bh=GF.clamp(58*s,48,70);
-  var y=H*0.52;
-  bigBtn(c, GF.t('retry'), bx, y, bw, bh, ['#2ee07a','#23a657'], function(){ restart(); GF.sfx('click'); }); y+=bh+14*s;
-  bigBtn(c, GF.t('double_cash'), bx, y, bw, bh*0.86, ['#ffb02e','#e0791f'], function(){ watchDoubleCash(); }); y+=bh+12*s;
-  bigBtn(c, GF.t('tools'), bx, y, bw, bh*0.82, ['#5b8cff','#3a5fd0'], function(){ shopOpen=true; GF.sfx('click'); });   // shop overlays gameover (see draw/onDown precedence)
+  var bw=Math.min(W-64*s,360*s), bx=W/2-bw/2, bh=GF.clamp(56*s,46,68);
+  var y=H*0.49;
+  bigBtn(c, GF.t('retry'), bx, y, bw, bh, ['#2ee07a','#23a657'], function(){ restart(); GF.sfx('click'); }); y+=bh+11*s;
+  bigBtn(c, GF.t('double_cash'), bx, y, bw, bh*0.84, ['#ffb02e','#e0791f'], function(){ watchDoubleCash(); }); y+=bh+9*s;
+  // two compact buttons on one row: HALL (owned collection) + TOOLS
+  var halfW=(bw-10*s)/2, hb=bh*0.80;
+  bigBtn(c, GF.t('hall')+' '+trophyCount()+'/'+TROPHIES.length, bx, y, halfW, hb, ['#caa12e','#9a7016'], function(){ hallOpen=true; GF.sfx('click'); }, trophyCount()<TROPHIES.length);
+  bigBtn(c, GF.t('tools'), bx+halfW+10*s, y, halfW, hb, ['#5b8cff','#3a5fd0'], function(){ shopOpen=true; GF.sfx('click'); });   // shop overlays gameover (see draw/onDown precedence)
 }
 function watchDoubleCash(){
   if (!_pendingAd){ return; }
@@ -1159,10 +1382,33 @@ GF.init({
         if (s.gs==='GAMEOVER'){ room=1; score=0; lives=MAX_LIVES; return; }   // don't resume a dead run on reload
         room=s.room||1; score=s.score||0; lives=(s.lives==null?MAX_LIVES:s.lives); if (lives<=0) lives=MAX_LIVES; }
     );
-    GF.exposeState(function(){ return { gs:gs, score:score, room:room, lives:lives, combo:combo, cash:cash, rage:Math.round(rage), paused:paused, shopOpen:shopOpen, helpOpen:helpOpen, coach:coachActive, clearT:Math.round(roomClearT*100)/100 }; });
+    GF.exposeState(function(){ return { gs:gs, score:score, room:room, lives:lives, combo:combo, cash:cash, rage:Math.round(rage), paused:paused, shopOpen:shopOpen, helpOpen:helpOpen, hallOpen:hallOpen, coach:coachActive, clearT:Math.round(roomClearT*100)/100, trophies:trophyCount(), cashBonus:Math.round(cashBonus()*100) }; });
+    // progression-probe steering wheel: list available actions + perform one
+    if (GF.exposeBot) GF.exposeBot(
+      function(){
+        if (gs==='GAMEOVER') return ['retry'];
+        var acts=[];
+        for (var bi=0;bi<objects.length;bi++){ if (!objects[bi].dead && !objects[bi].bomb) acts.push('smash'); }
+        if (rage>=RAGE_MAX && !rageMode) acts.push('rage');
+        return acts.length?acts:['retry'];
+      },
+      function(a){
+        if (a==='retry'){ restart(); return; }
+        if (a==='rage'){ if (rage>=RAGE_MAX && !rageMode) triggerRage(); return; }
+        // smash a random live non-bomb object (trophies included — drives the meta)
+        var live=[]; for (var bi=0;bi<objects.length;bi++){ var o=objects[bi]; if(!o.dead && !o.bomb) live.push(o); }
+        if (live.length){ var o=live[(Math.random()*live.length)|0]; var rc=objRect(o); o.hp-=TOOLS[equipped].dmg; if(o.hp<=0) destroy(o,rc,false); else hitFx(o,rc); }
+      }
+    );
     if (gs!=='PLAYING') gs='PLAYING';
     spawnRoom(room);
     startCoach();
+    // ▶ PLATFORM AUTOSTART (CLAUDE.md #9): on Yandex/CG drop straight into play —
+    // suppress the first-session coach so platform players land IN the game.
+    if (window.__GF_AUTOSTART && !window._silent){
+      coachActive = false;
+      try { localStorage.setItem(COACH_KEY,'1'); } catch(e){}
+    }
     startMusic();   // procedural background bed (started for real on first user gesture)
     GF.gameStarted();
   },
@@ -1177,6 +1423,7 @@ window._jumpLevel = function(){
   try{ localStorage.setItem(COACH_KEY,'1'); }catch(e){}
   room=4; lives=MAX_LIVES; score=4200; cash=1400; combo=14; comboTimer=COMBO_WINDOW_SEC;
   owned={0:true,1:true,2:true,3:true}; equipped=2;
+  trophies={ tr_vase:true, tr_bust:true, tr_skull:true };   // show a partly-filled Hall
   rage=RAGE_MAX*0.8; rageMode=false;
   spawnRoom(4);
 };
@@ -1202,10 +1449,11 @@ window._setRageView = function(){
 };
 // locale_overflow_check.js hooks
 window._setState = function(stt){
-  paused=false; shopOpen=false; helpOpen=false; gs='PLAYING';
+  paused=false; shopOpen=false; helpOpen=false; hallOpen=false; gs='PLAYING';
   if (stt==='GAMEOVER'){ gs='GAMEOVER'; }
   else if (stt==='MENU' || stt==='HUB' || stt==='PAUSED'){ paused=true; }
   else if (stt==='SHOP' || stt==='TOOLS'){ paused=true; shopOpen=true; }
+  else if (stt==='HALL'){ paused=true; hallOpen=true; }
   else if (stt==='HELP'){ helpOpen=true; }
 };
 window._getI18N   = function(){ return STRINGS; };

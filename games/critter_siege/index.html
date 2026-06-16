@@ -39,6 +39,15 @@ var STRINGS = {
     e_crawler: 'Crawler', e_runner: 'Runner', e_tank: 'Tank',
     e_flyer: 'Flyer', e_shielded: 'Shielded', e_swarm: 'Swarm', e_boss: 'Brood Boss',
     newunit: 'New defender', newfoe: 'New critter',
+    embers: 'Embers', workshop: 'HEARTH WORKSHOP', upgrade: 'UPGRADE',
+    maxed: 'MAX', banked: 'Embers banked', nextup: 'Next upgrade',
+    workshopbtn: 'WORKSHOP', back: 'BACK', cost: 'cost', lvl: 'Lv',
+    earned: 'You earned', tip_workshop: 'Spend Embers to make your defenders permanently stronger.',
+    u_vigor: 'Hearth Vigor', u_vigor_d: '+1 starting heart',
+    u_wellspring: 'Sap Wellspring', u_wellspring_d: '+15 start SAP, +1 regen',
+    u_fangs: 'Sharper Fangs', u_fangs_d: '+12% defender damage',
+    u_claws: 'Quick Claws', u_claws_d: '+8% fire rate',
+    u_harvest: 'Ember Harvest', u_harvest_d: '+20% Embers earned',
   },
   ru: {
     title: 'Осада грядки',
@@ -57,6 +66,15 @@ var STRINGS = {
     e_crawler: 'Ползун', e_runner: 'Бегун', e_tank: 'Танк',
     e_flyer: 'Летун', e_shielded: 'Щитовик', e_swarm: 'Рой', e_boss: 'Матка',
     newunit: 'Новый защитник', newfoe: 'Новая зверушка',
+    embers: 'Угли', workshop: 'КУЗНЯ ОЧАГА', upgrade: 'УЛУЧШИТЬ',
+    maxed: 'МАКС', banked: 'Углей в копилке', nextup: 'Следующее',
+    workshopbtn: 'КУЗНЯ', back: 'НАЗАД', cost: 'цена', lvl: 'Ур',
+    earned: 'Вы заработали', tip_workshop: 'Трать угли, чтобы навсегда усилить защитников.',
+    u_vigor: 'Сила очага', u_vigor_d: '+1 сердце в начале',
+    u_wellspring: 'Источник сока', u_wellspring_d: '+15 сока, +1 к восполнению',
+    u_fangs: 'Острые клыки', u_fangs_d: '+12% к урону защитников',
+    u_claws: 'Быстрые когти', u_claws_d: '+8% к скорости стрельбы',
+    u_harvest: 'Сбор углей', u_harvest_d: '+20% к добыче углей',
   },
 };
 
@@ -95,6 +113,28 @@ var DEF_ORDER = ['zapper','bramble','frost','splash','saptap','howitzer'];
 // Unlock schedule: wave at which each defender becomes available in the tray.
 var DEF_UNLOCK_WAVE = { zapper:1, bramble:2, frost:3, splash:5, saptap:7, howitzer:11 };
 
+// ── HEARTH WORKSHOP (M1 persistent owned meta) ──────────────────────────────
+// Embers are minted from kills + wave clears and banked at run-end. They buy
+// permanent upgrades, each OWNED across sessions and expressed in the game's own
+// combat fabric (lives / SAP / defender damage / fire-rate). Order = tree order.
+var UPGRADES = [
+  { id:'vigor',      key:'u_vigor',      dkey:'u_vigor_d',      max:3, base:14, step:14, color:'#ff5a6e' },
+  { id:'wellspring', key:'u_wellspring', dkey:'u_wellspring_d', max:4, base:12, step:12, color:'#ffd24a' },
+  { id:'fangs',      key:'u_fangs',      dkey:'u_fangs_d',      max:5, base:10, step:9,  color:'#5ad6ff' },
+  { id:'claws',      key:'u_claws',      dkey:'u_claws_d',      max:5, base:12, step:10, color:'#c77dff' },
+  { id:'harvest',    key:'u_harvest',    dkey:'u_harvest_d',    max:4, base:16, step:16, color:'#ff9a4d' },
+];
+function upgById(id) { for (var i = 0; i < UPGRADES.length; i++) if (UPGRADES[i].id === id) return UPGRADES[i]; return null; }
+function upgLevel(id) { return metaUpg[id] || 0; }
+function upgCost(u) { var lv = upgLevel(u.id); return (lv >= u.max) ? -1 : u.base + u.step * lv; }
+// Derived multipliers applied at run start / per defender.
+function bonusLives()  { return upgLevel('vigor'); }
+function bonusSapStart(){ return upgLevel('wellspring') * 15; }
+function bonusSapRegen(){ return upgLevel('wellspring'); }
+function dmgMult()     { return 1 + upgLevel('fangs') * 0.12; }
+function rateMult()    { return 1 - upgLevel('claws') * 0.08; }   // lower cd = faster
+function emberMult()   { return 1 + upgLevel('harvest') * 0.20; }
+
 // ── ENEMY DEFINITIONS ───────────────────────────────────────────────────────
 var ENS = {
   crawler:   { key:'e_crawler',  hp:12, spd:34, life:1, r:22, color:'#8ad17a', reward:3 },
@@ -109,9 +149,14 @@ var ENS = {
 var ENEMY_DEBUT = { crawler:1, runner:2, tank:4, flyer:6, shielded:8, swarmling:9 };
 
 // ── GAME STATE ──────────────────────────────────────────────────────────────
-var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WON
+var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WON | WORKSHOP
 var wave = 1, lives = START_LIVES, sap = SAP_START, score = 0, kills = 0;
 var bestWave = 0;
+var embers = 0;             // banked meta currency (persistent)
+var metaUpg = {};           // { upgradeId: level } (persistent)
+var runEmbers = 0;          // Embers earned in the CURRENT run (banked on end)
+var lastBanked = 0;         // Embers banked by the most recent run (for end screen)
+var workshopFrom = 'MENU';  // where the workshop was opened from (return target)
 var endless = false;
 var breather = false, breatherT = 0;
 var spawnTimer = 0, toSpawn = [], aliveThisWave = 0, waveTotal = 0;
@@ -134,6 +179,37 @@ var hearthPulse = 0;
 // ── PERSISTENCE ─────────────────────────────────────────────────────────────
 function loadBest() { try { bestWave = parseInt(localStorage.getItem('critter_siege_best') || '0') || 0; } catch (e) {} }
 function saveBest() { try { localStorage.setItem('critter_siege_best', String(bestWave)); } catch (e) {} }
+
+// Hearth Workshop meta save schema (embers + per-upgrade levels).
+function loadMeta() {
+  try {
+    var raw = localStorage.getItem('critter_siege_meta_v1');
+    if (raw) {
+      var s = JSON.parse(raw);
+      embers = Math.max(0, (s && s.embers) | 0);
+      metaUpg = (s && s.upg) ? s.upg : {};
+    }
+  } catch (e) { embers = 0; metaUpg = {}; }
+  // clamp loaded levels to current caps (forward-compat)
+  for (var i = 0; i < UPGRADES.length; i++) {
+    var u = UPGRADES[i];
+    if (metaUpg[u.id]) metaUpg[u.id] = GF.clamp(metaUpg[u.id] | 0, 0, u.max);
+  }
+}
+function saveMeta() {
+  try { localStorage.setItem('critter_siege_meta_v1', JSON.stringify({ embers: embers | 0, upg: metaUpg })); } catch (e) {}
+}
+// Cheapest upgrade the player can still buy that they cannot yet afford or just afforded —
+// drives the "Next upgrade: X (M more)" return hook on the end screen.
+function nextUpgradeHint() {
+  var best = null, bestCost = 1e9;
+  for (var i = 0; i < UPGRADES.length; i++) {
+    var u = UPGRADES[i]; var c = upgCost(u);
+    if (c < 0) continue;                       // maxed
+    if (c < bestCost) { bestCost = c; best = u; }
+  }
+  return best ? { u: best, cost: bestCost } : null;
+}
 
 // ── LAYOUT ──────────────────────────────────────────────────────────────────
 function computeLayout() {
@@ -280,7 +356,7 @@ function fireProjectile(def, target) {
   var d = DEFS[def.key];
   var p = getProj();
   p.x = def.x; p.y = def.y - cellH * 0.3;
-  p.dmg = d.dmg; p.lane = def.lane;
+  p.dmg = d.dmg * dmgMult(); p.lane = def.lane;
   p.color = d.shot || '#fff';
   p.kind = def.kind;
   p.splashR = (d.splashR || 0) * laneW;
@@ -315,7 +391,7 @@ function update(dt) {
   if (gs !== 'PLAYING') return;
   if (GF.tutorial.active) return;   // freeze world while tutorial panel up
 
-  sap = Math.min(SAP_MAX, sap + SAP_REGEN * dt);
+  sap = Math.min(SAP_MAX, sap + (SAP_REGEN + bonusSapRegen()) * dt);
 
   if (breather) {
     breatherT -= dt;
@@ -332,6 +408,8 @@ function update(dt) {
       // wave cleared
       bestWave = Math.max(bestWave, endless ? WAVE_COUNT + (wave - WAVE_COUNT) : wave);
       saveBest();
+      // wave-clear Ember bonus (bosses pay extra), scaled by Ember Harvest.
+      runEmbers += (3 + (isBossWave(wave) ? 6 : 0)) * emberMult();
       if (wave >= WAVE_COUNT && !endless) { winGame(); return; }
       breather = true; breatherT = BREATHER_SEC;
       GF.saveRun();
@@ -362,7 +440,7 @@ function updateDefenders(dt) {
     def.cd -= dt;
     if (def.cd <= 0) {
       var tgt = targetInLane(def.lane, def.y);
-      if (tgt) { def.cd = d.rate; fireProjectile(def, tgt); def.flash = 1; }
+      if (tgt) { def.cd = d.rate * rateMult(); fireProjectile(def, tgt); def.flash = 1; }
     }
   }
 }
@@ -447,6 +525,8 @@ function killEnemy(e) {
   kills++;
   score += e.reward;
   sap = Math.min(SAP_MAX, sap + Math.round(e.reward * 0.5));
+  // Embers: minted from each kill (boss pays a chunk), scaled by Ember Harvest.
+  runEmbers += (e.boss ? 8 : 1) * emberMult();
   GF.spawnParticles(e.x, e.y, ENS[e.type].color, e.boss ? 26 : 9);
   GF.spawnFloat(e.x, e.y, '+' + Math.round(e.reward * 0.5), '#ffd24a');
   GF.sfx(e.boss ? 'levelup' : 'hit');
@@ -491,7 +571,8 @@ function newGrid() { grid = []; for (var l = 0; l < LANES; l++) { grid[l] = []; 
 
 function startGame() {
   endless = false;
-  wave = 1; lives = START_LIVES; sap = SAP_START; score = 0; kills = 0;
+  wave = 1; lives = START_LIVES + bonusLives(); sap = SAP_START + bonusSapStart(); score = 0; kills = 0;
+  runEmbers = 0;
   enemies.length = 0; defenders.length = 0; projectiles.length = 0;
   newGrid();
   sel = 'zapper';
@@ -508,7 +589,7 @@ function retry() { startGame(); }
 
 function startEndless() {
   endless = true;
-  lives = START_LIVES; sap = SAP_START;
+  lives = START_LIVES + bonusLives(); sap = SAP_START + bonusSapStart();
   enemies.length = 0; defenders.length = 0; projectiles.length = 0;
   newGrid();
   sel = 'zapper';
@@ -520,9 +601,17 @@ function startEndless() {
   GF.saveRun();
 }
 
+// Bank the current run's Embers into the persistent meta wallet (idempotent per run).
+function bankEmbers() {
+  lastBanked = Math.round(runEmbers);
+  if (lastBanked > 0) { embers += lastBanked; saveMeta(); }
+  runEmbers = 0;
+}
+
 function winGame() {
   bestWave = Math.max(bestWave, WAVE_COUNT);
   saveBest();
+  bankEmbers();
   gs = 'WON';
   GF.sfx('win');
   GF.gameEnded();
@@ -533,6 +622,7 @@ function winGame() {
 function gameOver() {
   bestWave = Math.max(bestWave, endless ? WAVE_COUNT + (wave - WAVE_COUNT) : wave);
   saveBest();
+  bankEmbers();
   gs = 'GAMEOVER';
   GF.sfx('lose');
   GF.gameEnded();
@@ -540,6 +630,21 @@ function gameOver() {
 }
 
 function toMenu() { gs = 'MENU'; GF.saveRun(); }
+
+// ── WORKSHOP (open / buy / close) ───────────────────────────────────────────
+function openWorkshop(from) { workshopFrom = from || 'MENU'; gs = 'WORKSHOP'; GF.sfx('tap'); }
+function closeWorkshop() { gs = (workshopFrom === 'PAUSE') ? 'PLAYING' : 'MENU'; GF.sfx('tap'); }
+function buyUpgrade(u) {
+  var c = upgCost(u);
+  if (c < 0 || embers < c) { GF.setShake(0.2); return false; }
+  embers -= c;
+  metaUpg[u.id] = upgLevel(u.id) + 1;
+  saveMeta();
+  GF.sfx('levelup');
+  // float the confirmation high (under the header), clear of the upgrade rows
+  GF.spawnFloat(GF.cx, GF.H * 0.18, '+' + GF.t(u.key), u.color);
+  return true;
+}
 
 // ── SCREENSHOT / GATE HOOKS ─────────────────────────────────────────────────
 window._jumpLevel = function(n) {
@@ -611,6 +716,7 @@ function populateField(w) {
 var _playBtn = null, _retryBtn = null, _menuBtn = null, _endlessBtn = null;
 var _wonMenuBtn = null, _helpBtn = null, _trayBtns = [];
 var _muteBtn = { x: 0, y: 0, w: 0, h: 0 };
+var _workshopBtn = null, _shopBtns = [], _shopBackBtn = null, _pauseBtn = null;
 
 function draw(ctx) {
   drawBg(ctx);
@@ -622,6 +728,7 @@ function draw(ctx) {
   if (gs === 'MENU') drawMenu(ctx);
   if (gs === 'GAMEOVER') drawGameOver(ctx);
   if (gs === 'WON') drawWon(ctx);
+  if (gs === 'WORKSHOP') drawWorkshop(ctx);
   if (gs === 'PLAYING') GF.tutorial.draw(ctx);
 }
 
@@ -830,6 +937,15 @@ function drawHUD(ctx) {
   GF.rr(ctx, mx, qy, msz, msz, msz / 2); ctx.fill();
   ctx.strokeStyle = 'rgba(255,255,255,0.25)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
   GF.drawMuteIcon(ctx, mx + msz / 2, qy + msz / 2, msz * 0.28, GF.muted);
+
+  // Workshop / pause button (left of mute) — meta reachable mid-run (no need to lose)
+  var wsz = msz;
+  var wx = mx - wsz - GF.clamp(6 * S, 4, 10);
+  _pauseBtn = { x: wx, y: qy, w: wsz, h: wsz };
+  ctx.fillStyle = 'rgba(255,160,70,0.14)';
+  GF.rr(ctx, wx, qy, wsz, wsz, wsz / 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,184,74,0.55)'; ctx.lineWidth = 1.5 * S; ctx.stroke();
+  drawEmberGlyph(ctx, wx + wsz / 2, qy + wsz / 2 + wsz * 0.06, wsz * 0.24);
 }
 
 function upNextLabel() {
@@ -983,13 +1099,51 @@ function drawMenu(ctx) {
     ctx.fillText(GF.t('play'), cx, dY + dH / 2 + 1);
   }
 
+  var capY = by + bh + GF.clamp(12 * S, 8, 18);
   if (bestWave > 0) {
     ctx.fillStyle = '#9fb6a0';
     ctx.font = 'bold ' + GF.clamp(13 * S, 10, 17) + 'px sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     var bwLbl = bestWave > WAVE_COUNT ? ('∞' + (bestWave - WAVE_COUNT)) : (bestWave + '/' + WAVE_COUNT);
-    ctx.fillText(GF.t('best') + ': ' + bwLbl, cx, by + bh + GF.clamp(14 * S, 9, 20));
+    ctx.fillText(GF.t('best') + ': ' + bwLbl, cx, capY);
+    capY += GF.clamp(20 * S, 14, 26);
   }
+
+  // WORKSHOP button (the owned meta entry) — shows banked Embers right on it.
+  var wbw = Math.min(W * 0.6, GF.clamp(230 * S, 170, 300));
+  var wbh = GF.clamp(46 * S, 38, 58);
+  var wby = Math.min(capY + GF.clamp(4 * S, 2, 8), H - wbh - GF.clamp(14 * S, 10, 22));
+  _workshopBtn = { x: cx - wbw / 2, y: wby, w: wbw, h: wbh };
+  GF.rr(ctx, _workshopBtn.x, wby, wbw, wbh, wbh / 2);
+  ctx.fillStyle = 'rgba(255,160,70,0.16)'; ctx.fill();
+  ctx.strokeStyle = '#ffb84a'; ctx.lineWidth = 2 * S; GF.rr(ctx, _workshopBtn.x, wby, wbw, wbh, wbh / 2); ctx.stroke();
+  ctx.fillStyle = '#ffd27a';
+  ctx.font = 'bold ' + GF.clamp(16 * S, 13, 21) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  drawEmberGlyph(ctx, cx - ctx.measureText(GF.t('workshopbtn')).width / 2 - GF.clamp(16 * S, 11, 20), wby + wbh / 2, GF.clamp(7 * S, 5, 10));
+  ctx.fillText(GF.t('workshopbtn'), cx + GF.clamp(8 * S, 5, 12), wby + wbh / 2 + 1);
+  ctx.fillStyle = '#ffcf7a';
+  ctx.font = 'bold ' + GF.clamp(12 * S, 10, 15) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillText(embers + ' ' + GF.t('embers'), cx, wby + wbh + GF.clamp(6 * S, 4, 10));
+}
+
+// Small vector ember glyph (no emoji — headless/Android safe).
+function drawEmberGlyph(ctx, x, y, r) {
+  ctx.save();
+  ctx.fillStyle = '#ff7a2a';
+  ctx.beginPath();
+  ctx.moveTo(x, y - r * 1.3);
+  ctx.bezierCurveTo(x + r, y - r * 0.2, x + r * 0.7, y + r, x, y + r);
+  ctx.bezierCurveTo(x - r * 0.7, y + r, x - r, y - r * 0.2, x, y - r * 1.3);
+  ctx.fill();
+  ctx.fillStyle = '#ffd24a';
+  ctx.beginPath();
+  ctx.moveTo(x, y - r * 0.4);
+  ctx.bezierCurveTo(x + r * 0.5, y + r * 0.1, x + r * 0.35, y + r * 0.7, x, y + r * 0.7);
+  ctx.bezierCurveTo(x - r * 0.35, y + r * 0.7, x - r * 0.5, y + r * 0.1, x, y - r * 0.4);
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawBigButton(ctx, label, cx, y, w, h, c0, c1) {
@@ -1016,6 +1170,32 @@ function drawSmallButton(ctx, label, cx, y, c) {
   return { x: x, y: y, w: w, h: h };
 }
 
+// Shared end-screen footer: Embers earned this run + the one-upgrade-away hook.
+// This is the session-end "reason to return" — leaving plants the next goal.
+function drawEndEmbers(ctx, yTop) {
+  var S = GF.S, cx = GF.W / 2, y = yTop;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  if (lastBanked > 0) {
+    ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px sans-serif';
+    var et = GF.t('earned') + ' +' + lastBanked + ' ' + GF.t('embers');
+    var etw = ctx.measureText(et).width;
+    drawEmberGlyph(ctx, cx - etw / 2 - GF.clamp(14 * S, 9, 18), y + GF.clamp(8 * S, 5, 12), GF.clamp(7 * S, 5, 10));
+    ctx.fillStyle = '#ffd27a';
+    ctx.fillText(et, cx, y); y += GF.clamp(24 * S, 18, 32);
+  }
+  var hint = nextUpgradeHint();
+  if (hint) {
+    var need = Math.max(0, hint.cost - embers);
+    ctx.fillStyle = '#bcdcc0';
+    ctx.font = GF.clamp(12 * S, 10, 16) + 'px sans-serif';
+    var msg = (need <= 0)
+      ? (GF.t('nextup') + ': ' + GF.t(hint.u.key) + ' - ' + GF.t('upgrade') + '!')
+      : (GF.t('nextup') + ': ' + GF.t(hint.u.key) + ' (' + need + ' ' + GF.t('embers') + ')');
+    ctx.fillText(msg, cx, y);
+  }
+  return y;
+}
+
 function drawGameOver(ctx) {
   drawScrim(ctx, 0.82);
   var S = GF.S, H = GF.H, cx = GF.W / 2;
@@ -1030,8 +1210,13 @@ function drawGameOver(ctx) {
   ctx.fillText(GF.t('reached') + ' ' + wlbl, cx, H * 0.27 + GF.clamp(50 * S, 38, 66));
   ctx.fillStyle = '#ffd24a';
   ctx.fillText(GF.t('score') + ': ' + score, cx, H * 0.27 + GF.clamp(78 * S, 58, 100));
-  _retryBtn = drawBigButton(ctx, GF.t('retry'), cx, H * 0.52, GF.clamp(240*S,180,320), GF.clamp(56*S,44,70), '#e8932a', '#f0b85a');
-  _menuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.52 + GF.clamp(74 * S, 56, 96), 'rgba(255,255,255,0.14)');
+  // Embers banked + next-upgrade hook (the reason to return)
+  drawEndEmbers(ctx, H * 0.27 + GF.clamp(116 * S, 90, 144));
+  var rbH = GF.clamp(54 * S, 44, 68);
+  var ry0 = Math.min(H * 0.55, H - rbH * 3 - GF.clamp(56 * S, 40, 80));
+  _retryBtn = drawBigButton(ctx, GF.t('retry'), cx, ry0, GF.clamp(240*S,180,320), rbH, '#e8932a', '#f0b85a');
+  _workshopBtn = drawSmallButton(ctx, GF.t('workshopbtn') + '  (' + embers + ')', cx, ry0 + rbH + GF.clamp(12 * S, 8, 18), 'rgba(255,160,70,0.22)');
+  _menuBtn = drawSmallButton(ctx, GF.t('menu'), cx, ry0 + rbH + GF.clamp(12 * S, 8, 18) + GF.clamp(58 * S, 46, 72), 'rgba(255,255,255,0.14)');
 }
 
 function drawWon(ctx) {
@@ -1045,8 +1230,114 @@ function drawWon(ctx) {
   ctx.font = GF.clamp(16 * S, 12, 21) + 'px sans-serif';
   ctx.fillStyle = '#dcdce6';
   ctx.fillText(GF.t('score') + ': ' + score, cx, H * 0.25 + GF.clamp(52 * S, 40, 70));
-  _endlessBtn = drawBigButton(ctx, GF.t('endless'), cx, H * 0.48, GF.clamp(250*S,190,330), GF.clamp(56*S,44,70), '#3a78c8', '#5a98e8');
-  _wonMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, H * 0.48 + GF.clamp(74 * S, 56, 96), 'rgba(255,255,255,0.14)');
+  drawEndEmbers(ctx, H * 0.25 + GF.clamp(86 * S, 66, 110));
+  var ebH = GF.clamp(54 * S, 44, 68);
+  var ey0 = Math.min(H * 0.52, H - ebH * 3 - GF.clamp(56 * S, 40, 80));
+  _endlessBtn = drawBigButton(ctx, GF.t('endless'), cx, ey0, GF.clamp(250*S,190,330), ebH, '#3a78c8', '#5a98e8');
+  _workshopBtn = drawSmallButton(ctx, GF.t('workshopbtn') + '  (' + embers + ')', cx, ey0 + ebH + GF.clamp(12 * S, 8, 18), 'rgba(255,160,70,0.22)');
+  _wonMenuBtn = drawSmallButton(ctx, GF.t('menu'), cx, ey0 + ebH + GF.clamp(12 * S, 8, 18) + GF.clamp(58 * S, 46, 72), 'rgba(255,255,255,0.14)');
+}
+
+function drawWorkshop(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H, cx = W / 2;
+  // Fully opaque backdrop (overlay hygiene — no bleed-through).
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1a1208'); g.addColorStop(1, '#0c0a06');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  var pad = GF.clamp(16 * S, 11, 22);
+  // Header
+  ctx.shadowColor = 'rgba(255,150,60,0.5)'; ctx.shadowBlur = 20 * S;
+  ctx.fillStyle = '#ffd27a';
+  ctx.font = 'bold ' + GF.clamp(26 * S, 19, 34) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var hy = GF.clamp(18 * S, 12, 28);
+  ctx.fillText(GF.t('workshop'), cx, hy);
+  ctx.shadowBlur = 0;
+  // Embers balance
+  var balY = hy + GF.clamp(34 * S, 26, 46);
+  ctx.font = 'bold ' + GF.clamp(20 * S, 15, 26) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  var balTxt = embers + ' ' + GF.t('embers');
+  var btw = ctx.measureText(balTxt).width;
+  drawEmberGlyph(ctx, cx - btw / 2 - GF.clamp(16 * S, 11, 20), balY, GF.clamp(9 * S, 6, 12));
+  ctx.fillStyle = '#ffcf7a'; ctx.textAlign = 'center';
+  ctx.fillText(balTxt, cx + GF.clamp(8 * S, 5, 12), balY);
+
+  // Tip line
+  ctx.fillStyle = '#b8a98a';
+  ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  var tipY = balY + GF.clamp(18 * S, 13, 24);
+  var tipLines = wrapLines(ctx, GF.t('tip_workshop'), W * 0.86);
+  for (var ti = 0; ti < tipLines.length; ti++) { ctx.fillText(tipLines[ti], cx, tipY); tipY += GF.clamp(15 * S, 12, 19); }
+
+  // Upgrade rows
+  _shopBtns = [];
+  var backH = GF.clamp(46 * S, 38, 58);
+  var listTop = tipY + GF.clamp(10 * S, 6, 14);
+  var listBottom = H - backH - GF.clamp(24 * S, 16, 34);
+  var rowGap = GF.clamp(9 * S, 5, 13);
+  var rowH = Math.min(GF.clamp(74 * S, 58, 92), (listBottom - listTop - rowGap * (UPGRADES.length - 1)) / UPGRADES.length);
+  var rx = pad, rw = W - pad * 2;
+  for (var i = 0; i < UPGRADES.length; i++) {
+    var u = UPGRADES[i];
+    var ry = listTop + i * (rowH + rowGap);
+    var lv = upgLevel(u.id);
+    var cost = upgCost(u);
+    var maxed = (cost < 0);
+    var afford = (!maxed && embers >= cost);
+    // row bg
+    ctx.fillStyle = 'rgba(255,255,255,0.05)';
+    GF.rr(ctx, rx, ry, rw, rowH, 12 * S); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.10)'; ctx.lineWidth = 1 * S;
+    GF.rr(ctx, rx, ry, rw, rowH, 12 * S); ctx.stroke();
+    // accent pip
+    ctx.fillStyle = u.color;
+    GF.rr(ctx, rx + GF.clamp(8 * S, 5, 12), ry + rowH * 0.22, GF.clamp(5 * S, 3, 7), rowH * 0.56, 3 * S); ctx.fill();
+    // name + desc
+    var tx = rx + GF.clamp(22 * S, 15, 30);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillStyle = '#f0e8d8';
+    ctx.font = 'bold ' + GF.clamp(15 * S, 12, 19) + 'px sans-serif';
+    ctx.fillText(GF.t(u.key) + '  ' + GF.t('lvl') + ' ' + lv + '/' + u.max, tx, ry + GF.clamp(10 * S, 6, 14));
+    ctx.fillStyle = '#a89a82';
+    ctx.font = GF.clamp(11 * S, 9, 14) + 'px sans-serif';
+    ctx.fillText(GF.t(u.dkey), tx, ry + GF.clamp(30 * S, 23, 40));
+    // level dots
+    var dotR = GF.clamp(3.5 * S, 2.5, 5), dotY = ry + rowH - GF.clamp(13 * S, 9, 18);
+    for (var d2 = 0; d2 < u.max; d2++) {
+      ctx.beginPath(); ctx.arc(tx + dotR + d2 * (dotR * 2 + 4 * S), dotY, dotR, 0, Math.PI * 2);
+      ctx.fillStyle = d2 < lv ? u.color : 'rgba(255,255,255,0.18)'; ctx.fill();
+    }
+    // buy button
+    var bbw = GF.clamp(96 * S, 74, 120), bbh = rowH - GF.clamp(20 * S, 13, 28);
+    var bbx = rx + rw - bbw - GF.clamp(10 * S, 6, 14), bby = ry + (rowH - bbh) / 2;
+    if (maxed) {
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      GF.rr(ctx, bbx, bby, bbw, bbh, bbh / 2); ctx.fill();
+      ctx.fillStyle = '#9fe8b5';
+      ctx.font = 'bold ' + GF.clamp(13 * S, 10, 17) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(GF.t('maxed'), bbx + bbw / 2, bby + bbh / 2 + 1);
+    } else {
+      var g2 = ctx.createLinearGradient(bbx, bby, bbx, bby + bbh);
+      if (afford) { g2.addColorStop(0, '#f0b85a'); g2.addColorStop(1, '#e8932a'); }
+      else { g2.addColorStop(0, 'rgba(120,110,90,0.5)'); g2.addColorStop(1, 'rgba(90,80,60,0.5)'); }
+      GF.rr(ctx, bbx, bby, bbw, bbh, bbh / 2); ctx.fillStyle = g2; ctx.fill();
+      ctx.fillStyle = afford ? '#fff' : 'rgba(255,255,255,0.5)';
+      ctx.font = 'bold ' + GF.clamp(14 * S, 11, 18) + 'px sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      drawEmberGlyph(ctx, bbx + bbw / 2 - ctx.measureText(String(cost)).width / 2 - GF.clamp(11 * S, 7, 14), bby + bbh / 2, GF.clamp(5.5 * S, 4, 8));
+      ctx.fillText(cost, bbx + bbw / 2 + GF.clamp(6 * S, 4, 9), bby + bbh / 2 + 1);
+      _shopBtns.push({ x: bbx, y: bby, w: bbw, h: bbh, id: u.id });
+    }
+  }
+
+  // BACK button
+  var backW = Math.min(W * 0.5, GF.clamp(200 * S, 150, 260));
+  var backY = H - backH - GF.clamp(14 * S, 10, 22);
+  _shopBackBtn = drawBigButton(ctx, GF.t('back'), cx, backY, backW, backH, '#3a4a5a', '#5a6a7a');
 }
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
@@ -1055,14 +1346,27 @@ function hit(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y 
 function onTap(x, y) {
   if (GF.tutorial.active) { GF.tutorial.handleClick(x, y); return; }
 
-  if (gs === 'MENU') { if (hit(_playBtn, x, y)) startGame(); return; }
+  if (gs === 'MENU') {
+    if (hit(_playBtn, x, y)) startGame();
+    else if (hit(_workshopBtn, x, y)) openWorkshop('MENU');
+    return;
+  }
+  if (gs === 'WORKSHOP') {
+    for (var si = 0; si < _shopBtns.length; si++) {
+      if (hit(_shopBtns[si], x, y)) { var u = upgById(_shopBtns[si].id); if (u) buyUpgrade(u); return; }
+    }
+    if (hit(_shopBackBtn, x, y)) closeWorkshop();
+    return;
+  }
   if (gs === 'GAMEOVER') {
     if (hit(_retryBtn, x, y)) retry();
+    else if (hit(_workshopBtn, x, y)) openWorkshop('MENU');
     else if (hit(_menuBtn, x, y)) toMenu();
     return;
   }
   if (gs === 'WON') {
     if (hit(_endlessBtn, x, y)) startEndless();
+    else if (hit(_workshopBtn, x, y)) openWorkshop('MENU');
     else if (hit(_wonMenuBtn, x, y)) toMenu();
     return;
   }
@@ -1070,6 +1374,7 @@ function onTap(x, y) {
 
   if (hit(_muteBtn, x, y)) { GF.toggleMute(); GF.setMusicMuted(GF.muted); return; }
   if (hit(_helpBtn, x, y)) { GF.tutorial.reopen(); return; }
+  if (hit(_pauseBtn, x, y)) { openWorkshop('PAUSE'); return; }
 
   for (var i = 0; i < _trayBtns.length; i++) {
     if (hit(_trayBtns[i], x, y)) { sel = _trayBtns[i].key; firstRunGuide = false; return; }
@@ -1115,6 +1420,14 @@ GF.exposeState(function() {
     sel: sel,
     unlocked: unlockedList().length,
     isBoss: isBossWave(wave),
+    embers: embers,
+    runEmbers: Math.round(runEmbers),
+    upgVigor: upgLevel('vigor'),
+    upgWellspring: upgLevel('wellspring'),
+    upgFangs: upgLevel('fangs'),
+    upgClaws: upgLevel('claws'),
+    upgHarvest: upgLevel('harvest'),
+    upgTotal: upgLevel('vigor') + upgLevel('wellspring') + upgLevel('fangs') + upgLevel('claws') + upgLevel('harvest'),
     START_LIVES: START_LIVES,
     SAP_START: SAP_START,
     SAP_REGEN: SAP_REGEN,
@@ -1131,6 +1444,44 @@ GF.exposeState(function() {
 });
 window._getI18N = function() { return STRINGS; };
 
+// ── BOT CONTRACT (progression_trials steering wheel) ────────────────────────
+// getActions() lists what the player could do now; doAction(a) performs one.
+GF.exposeBot(
+  function getActions() {
+    if (gs === 'MENU') return ['play'];
+    if (gs === 'GAMEOVER') return ['retry'];
+    if (gs === 'WON') return ['endless'];
+    if (gs !== 'PLAYING' || breather) return ['wait'];
+    var acts = [];
+    var list = unlockedList();
+    // try to place the cheapest affordable defender in a lane that has an enemy
+    for (var i = 0; i < list.length; i++) if (canAfford(list[i])) { acts.push('place:' + list[i]); }
+    if (!acts.length) acts.push('wait');
+    return acts;
+  },
+  function doAction(a) {
+    if (a === 'play') { startGame(); return; }
+    if (a === 'retry') { retry(); return; }
+    if (a === 'endless') { startEndless(); return; }
+    if (a === 'wait') return;
+    if (a.indexOf('place:') === 0) {
+      var key = a.slice(6);
+      if (!DEFS[key] || !defUnlocked(key) || !canAfford(key)) return;
+      sel = key;
+      // aim at the lane with the most-advanced (lowest-on-screen) enemy
+      var bestLane = 0, bestY = -1;
+      for (var i = 0; i < enemies.length; i++) { var e = enemies[i]; if (!e.dead && e.y > bestY) { bestY = e.y; bestLane = e.lane; } }
+      // first empty row from the bottom in that lane (defend deepest)
+      for (var r = CELL_ROWS - 1; r >= 0; r--) { if (!grid[bestLane][r]) { placeAt(bestLane, r); return; } }
+    }
+  }
+);
+
+// ── META TEST SEAMS (headless verification only; no gameplay effect) ─────────
+window._grantEmbers = function(n) { embers += (n | 0); saveMeta(); return embers; };
+window._buyUpgrade = function(id) { var u = upgById(id); return u ? buyUpgrade(u) : false; };
+window._openWorkshop = function() { openWorkshop('MENU'); };
+
 // ── BOOT ────────────────────────────────────────────────────────────────────
 GF.init({
   designW: 540,
@@ -1140,6 +1491,7 @@ GF.init({
   saveKey: 'critter_siege',
   onReady: function() {
     loadBest();
+    loadMeta();
     computeLayout();
     newGrid();
     GF.persist('critter_siege_run_v1',
