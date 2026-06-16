@@ -39,6 +39,21 @@ var STRINGS = {
     away: 'away', owned: 'OWNED', drive: 'DRIVE', driving: 'DRIVING', locked: 'LOCKED',
     unlock: 'UNLOCK', new_car: 'NEW CAR!', perk: 'Perk', close: 'CLOSE',
     coins_short: 'c', back: 'BACK', desktop_hint: 'Hold the LEFT / RIGHT half of the window to steer',
+    // ── M2 reason-to-return ──
+    daily_spot: "TODAY'S SPOT", daily_spot_short: 'DAILY',
+    daily_done: 'DONE TODAY', daily_try: 'TRIES', valet: 'VALET PILE',
+    collect: 'COLLECT', collected: '+%n collected', shelf: 'SHELF',
+    streak: 'STREAK', day_streak: '%n-day streak', come_back: 'New spot tomorrow',
+    medal_gold: 'GOLD', medal_silver: 'SILVER', medal_bronze: 'BRONZE',
+    trophy: 'TROPHY', trophy3: '3-day regular', trophy7: '7-day veteran',
+    valet_hint: 'Your cars earn coins while away', new_trophy: 'NEW TROPHY!',
+    daily_cleared: 'SPOT CLEARED', best_medal: 'Best', no_tries: 'Back tomorrow',
+    welcome_back: 'WELCOME BACK',
+    // ── M3 car tune / mastery ──
+    tune: 'TUNE', tune_lv: 'TUNE %n', tune_max: 'CHROME', tune_up: 'TUNE UP!',
+    chromed: 'CHROMED!', tune_boost: 'BOOST', watch_ad: 'WATCH AD',
+    tune_hint: 'Drive this car to tune it', chrome_count: '%n chromed',
+    tune_xp_short: 'xp', boost_reward: '+%n tune',
   },
   ru: {
     title: 'Tight Spot',
@@ -57,6 +72,21 @@ var STRINGS = {
     away: 'осталось', owned: 'ЕСТЬ', drive: 'ВЫБРАТЬ', driving: 'В ИГРЕ', locked: 'ЗАКРЫТО',
     unlock: 'ОТКРЫТЬ', new_car: 'НОВОЕ АВТО!', perk: 'Бонус', close: 'ЗАКРЫТЬ',
     coins_short: 'м', back: 'НАЗАД', desktop_hint: 'Удерживай ЛЕВУЮ / ПРАВУЮ половину окна для руля',
+    // ── M2 reason-to-return ──
+    daily_spot: 'МЕСТО ДНЯ', daily_spot_short: 'ДЕНЬ',
+    daily_done: 'СЕГОДНЯ ГОТОВО', daily_try: 'ПОПЫТКИ', valet: 'ДОХОД ГАРАЖА',
+    collect: 'ЗАБРАТЬ', collected: '+%n получено', shelf: 'ПОЛКА',
+    streak: 'СЕРИЯ', day_streak: 'серия %n дн.', come_back: 'Новое место завтра',
+    medal_gold: 'ЗОЛОТО', medal_silver: 'СЕРЕБРО', medal_bronze: 'БРОНЗА',
+    trophy: 'КУБОК', trophy3: 'завсегдатай 3 дня', trophy7: 'ветеран 7 дней',
+    valet_hint: 'Машины копят монеты, пока вас нет', new_trophy: 'НОВЫЙ КУБОК!',
+    daily_cleared: 'МЕСТО ПРОЙДЕНО', best_medal: 'Лучшее', no_tries: 'Заходи завтра',
+    welcome_back: 'С ВОЗВРАЩЕНИЕМ',
+    // ── M3 car tune / mastery ──
+    tune: 'ТЮНИНГ', tune_lv: 'ТЮНИНГ %n', tune_max: 'ХРОМ', tune_up: 'ТЮНИНГ +1!',
+    chromed: 'ХРОМ!', tune_boost: 'УСИЛИТЬ', watch_ad: 'РЕКЛАМА',
+    tune_hint: 'Катайся на этом авто для тюнинга', chrome_count: 'хром: %n',
+    tune_xp_short: 'оп', boost_reward: '+%n тюнинг',
   },
 };
 var SPRITE_NAMES = []; // procedural art
@@ -178,8 +208,12 @@ var carToast = null;          // { car, t } — NEW CAR flourish on unlock
 var garageOpen = false;       // GARAGE overlay open?
 var garageScroll = 0;         // not used yet (list fits) — reserved
 
-// the active car's perk multipliers, folded into physics each frame
+// the active car's perk multipliers, folded into physics each frame.
 function curCar() { return carById(activeCar); }
+// M3: the active car's TUNE-SCALED perk (base interpolated toward the tuned
+// ceiling by its tune level). Defined later (tunedPerk needs CARS); the physics
+// and the park-tolerance check both read THIS so a tuned car is felt in the run.
+function curPerk() { return tunedPerk(curCar()); }
 
 // next not-yet-owned car on the ladder (the session-end "next car in N" hook)
 function nextLockedCar() {
@@ -188,6 +222,127 @@ function nextLockedCar() {
 }
 function canAfford(c) { return c && coins >= c.cost; }
 
+// ════════════════════════════════════════════════════════════════════════════
+// ── M2 REASON-TO-RETURN (iteration #2) ───────────────────────────────────────
+// Grown from THIS game's fabric (precision parking + an OWNED garage + coins),
+// NOT a bolt-on login/quest kit. Three mechanics, one loop:
+//   1. THE DAILY SPOT — a daily-seeded "tightest spot of the day", a never-before-
+//      driven parking puzzle that's different every day, 3 attempts, banks a
+//      persistent MEDAL (gold/silver/bronze by crashes) onto a garage shelf.
+//      => a returning player opens to a NEW bay to thread (world-visible, in the
+//         game's own verb), not a popup.
+//   2. VALET PILE — the cars idling in your garage earn coins while you're away
+//      (rate scales with how many cars you OWN — ownership IS the fabric), capped
+//      at VALET_CAP_H hours (the cap is the return trigger). Shown as a COLLECT
+//      pile sitting among the cars you built, claimed with one tap.
+//   3. STREAK -> TROPHIES — a daily-login streak that, at 3 and 7 days, drops a
+//      permanent TROPHY onto the garage shelf (world-visible ownership) + a
+//      streak coin gift. Surfaced as trophies you own, never a bare number.
+var VALET_CAP_H   = 8;     // idle accrual caps at 8h (cap = the return trigger)
+var VALET_PER_H   = 9;     // coins/hour PER owned car (so the garage you built works)
+var DAILY_TRIES   = 3;     // attempts at today's Daily Spot
+var STREAK_GIFT   = 6;     // coins/day of streak granted on a new login day
+// M2 runtime state (persisted in the same META_KEY)
+var dailyKey = 0;          // daySeed() of the Daily Spot last engaged
+var dailyTriesLeft = DAILY_TRIES;
+var dailyBestMedal = 0;    // 0 none, 1 bronze, 2 silver, 3 gold — TODAY's best
+var medalShelf = { gold: 0, silver: 0, bronze: 0 }; // lifetime medals (the shelf)
+var lastLoginDay = 0;      // daySeed() of last login (for streak + valet timing)
+var lastValetMs = 0;       // wall-clock ms of last valet settle (idle accrual base)
+var streak = 0;            // consecutive-day login streak
+var trophies = {};         // id -> true (3==regular, 7==veteran) — the shelf
+var valetPending = 0;      // coins accrued while away, waiting to COLLECT
+var dailyMode = false;     // true while PLAYING the Daily Spot (vs campaign/endless)
+var welcomeBack = null;    // { t } welcome-back ribbon timer on first return-boot
+var streakToast = null;    // { kind:'trophy'|'gift', id, t } flourish
+
+// ════════════════════════════════════════════════════════════════════════════
+// ── M3 DEPTH: CAR TUNE / MASTERY (iteration #3) ──────────────────────────────
+// The structural layer that keeps the garage alive once all 6 cars are OWNED.
+// Each car you DRIVE earns TUNE XP on every clean park; XP banks PER CAR and
+// levels that specific car L1→L5. A tune level is not a number — it visibly
+// upgrades the car (tune pips on its garage glyph + a brighter body, then a
+// CHROME finish at L5) AND scales the car's REAL handling perk: the turn /
+// creep / forgiveness multipliers (which already fold into the physics each
+// frame) interpolate from their base value toward a tuned ceiling. So the car
+// you drive most becomes measurably better and looks different — a per-car
+// progression CURVE woven into the existing handling fabric, not a bolt-on.
+// CHROME (L5) cars are counted on the shelf: a long-tail collection-completion
+// meta (chrome the whole garage). MONETIZATION: a player-initiated, rewarded
+// TUNE BOOST button on any not-yet-maxed car — WATCH AD → +TUNE XP, a pure
+// accelerator that NEVER gates play and no-ops on the gallery.
+var TUNE_MAX     = 5;                      // L1 (base, owned) .. L5 (chrome)
+var TUNE_XP_REQ  = [0, 6, 16, 32, 56];     // cumulative XP to reach L1..L5
+var TUNE_BOOST_XP = 8;                     // XP granted by one rewarded TUNE BOOST
+// per-car perk CEILING deltas at full tune (L5); base is the car's own value.
+// turn/pos/ang INCREASE (better), creep DECREASES (slower = more time). The
+// effective multiplier at level L is base + delta * (L-1)/(TUNE_MAX-1).
+var TUNE_DELTA = { turn: 0.12, creep: -0.07, pos: 0.20, ang: 0.20 };
+var tuneXp = {};           // car id -> banked tune XP (persisted in META_KEY)
+var tuneToast = null;      // { id, level, chrome, t } flourish on a tune level-up
+// XP banked on the most recent clean park (for the LEVELCLEAR / earnings strip)
+var lastTuneGain = 0;
+var lastTuneLevelUp = 0;   // the new tune level if the last park leveled the car, else 0
+
+// current tune LEVEL of a car id (1..TUNE_MAX) from its banked XP.
+function tuneLevel(id) {
+  var xp = tuneXp[id] || 0, lv = 1;
+  for (var i = 1; i < TUNE_XP_REQ.length; i++) { if (xp >= TUNE_XP_REQ[i]) lv = i + 1; }
+  return lv;
+}
+function isChrome(id) { return tuneLevel(id) >= TUNE_MAX; }
+// XP into the CURRENT level and XP span to the NEXT (for the progress bar).
+function tuneProgress(id) {
+  var xp = tuneXp[id] || 0, lv = tuneLevel(id);
+  if (lv >= TUNE_MAX) return { lv: lv, cur: 1, span: 1, max: true };
+  var lo = TUNE_XP_REQ[lv - 1], hi = TUNE_XP_REQ[lv];
+  return { lv: lv, cur: Math.max(0, xp - lo), span: Math.max(1, hi - lo), max: false };
+}
+// how many cars are fully tuned (CHROME) — the collection-completion counter.
+function chromeCount() { var n = 0; for (var i = 0; i < CARS.length; i++) if (ownedCars[CARS[i].id] && isChrome(CARS[i].id)) n++; return n; }
+// the active car's TUNE-SCALED perk multipliers (base interpolated toward ceiling).
+function tunedPerk(c) {
+  var lv = tuneLevel(c.id);
+  var f = (TUNE_MAX > 1) ? (lv - 1) / (TUNE_MAX - 1) : 0; // 0 at L1 .. 1 at L5
+  return {
+    turn:  c.turn  + TUNE_DELTA.turn  * f,
+    creep: c.creep + TUNE_DELTA.creep * f,
+    pos:   c.pos   + TUNE_DELTA.pos   * f,
+    ang:   c.ang   + TUNE_DELTA.ang   * f,
+  };
+}
+// brighten a car body hex toward white by the tune fraction (visible upgrade).
+function tuneBodyColor(c) {
+  var lv = tuneLevel(c.id);
+  if (lv >= TUNE_MAX) return '#eef4ff'; // CHROME: near-white sheen
+  var f = (TUNE_MAX > 1) ? (lv - 1) / (TUNE_MAX - 1) * 0.55 : 0;
+  var h = c.body.replace('#', '');
+  var r = parseInt(h.substr(0, 2), 16), g = parseInt(h.substr(2, 2), 16), b = parseInt(h.substr(4, 2), 16);
+  r = Math.round(r + (255 - r) * f); g = Math.round(g + (255 - g) * f); b = Math.round(b + (255 - b) * f);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+// bank tune XP onto the DRIVEN car for a clean park; flags a level-up for the FX.
+function gainTuneXp(amt) {
+  var id = activeCar;
+  if (isChrome(id)) { lastTuneGain = 0; lastTuneLevelUp = 0; return; } // maxed: no more XP
+  var before = tuneLevel(id);
+  tuneXp[id] = (tuneXp[id] || 0) + amt;
+  lastTuneGain = amt;
+  var after = tuneLevel(id);
+  lastTuneLevelUp = (after > before) ? after : 0;
+  if (after > before) {
+    tuneToast = { id: id, level: after, chrome: after >= TUNE_MAX, t: 3.4 };
+    if (GF.sfx) GF.sfx(after >= TUNE_MAX ? 'unlock' : 'levelup');
+  }
+}
+
+function dayDiff(a, b) { // whole-day gap between two daySeed() ints (approx, calendar)
+  if (!a || !b) return 999;
+  var pa = new Date(Math.floor(a/10000), Math.floor(a/100)%100 - 1, a%100);
+  var pb = new Date(Math.floor(b/10000), Math.floor(b/100)%100 - 1, b%100);
+  return Math.round((pb - pa) / 86400000);
+}
+
 // ── M1 meta persistence (separate key from the run-state save) ───────────────
 var META_KEY = 'tight_spot_meta_v1';
 function saveMeta() {
@@ -195,6 +350,12 @@ function saveMeta() {
     localStorage.setItem(META_KEY, JSON.stringify({
       coins: Math.round(coins), ownedCars: ownedCars, activeCar: activeCar,
       clearedOnce: clearedOnce,
+      // M2
+      dailyKey: dailyKey, dailyTriesLeft: dailyTriesLeft, dailyBestMedal: dailyBestMedal,
+      medalShelf: medalShelf, lastLoginDay: lastLoginDay, lastValetMs: lastValetMs,
+      streak: streak, trophies: trophies,
+      // M3 car tune / mastery
+      tuneXp: tuneXp,
     }));
   } catch (e) {}
 }
@@ -211,8 +372,86 @@ function loadMeta() {
     }
     activeCar = (s.activeCar != null && ownedCars[+s.activeCar]) ? +s.activeCar : 0;
     clearedOnce = (s.clearedOnce && typeof s.clearedOnce === 'object') ? s.clearedOnce : {};
+    // M2
+    dailyKey = +s.dailyKey || 0;
+    dailyTriesLeft = (s.dailyTriesLeft != null) ? Math.max(0, Math.min(DAILY_TRIES, +s.dailyTriesLeft)) : DAILY_TRIES;
+    dailyBestMedal = Math.max(0, Math.min(3, +s.dailyBestMedal || 0));
+    if (s.medalShelf && typeof s.medalShelf === 'object') {
+      medalShelf = { gold: Math.max(0, +s.medalShelf.gold || 0),
+                     silver: Math.max(0, +s.medalShelf.silver || 0),
+                     bronze: Math.max(0, +s.medalShelf.bronze || 0) };
+    }
+    lastLoginDay = +s.lastLoginDay || 0;
+    lastValetMs = +s.lastValetMs || 0;
+    streak = Math.max(0, +s.streak || 0);
+    trophies = (s.trophies && typeof s.trophies === 'object') ? s.trophies : {};
+    // M3: per-car tune XP (only keep entries for real, owned-or-known car ids)
+    tuneXp = {};
+    if (s.tuneXp && typeof s.tuneXp === 'object') {
+      for (var tk in s.tuneXp) { if (carById(+tk).id === +tk) tuneXp[+tk] = Math.max(0, +s.tuneXp[tk] || 0); }
+    }
   } catch (e) {}
 }
+
+// ── M2: roll the day over (called once at boot, after loadMeta) ──────────────
+// Computes the valet pile from idle time, advances/resets the streak, resets the
+// Daily Spot if it's a new calendar day, and grants streak trophies/gifts. This
+// is what makes the FIRST 60s of a return visibly different from yesterday.
+function rolloverDay() {
+  var today = daySeed();
+  var nowMs = Date.now();
+  // 1. VALET: accrue idle coins since the last settle (scaled by owned-car count),
+  //    capped at VALET_CAP_H. First-ever session seeds the clock, no pile.
+  if (lastValetMs > 0) {
+    var hrs = Math.max(0, (nowMs - lastValetMs) / 3600000);
+    hrs = Math.min(hrs, VALET_CAP_H);
+    var ownedN = Object.keys(ownedCars).length;
+    var pile = Math.floor(hrs * VALET_PER_H * ownedN);
+    if (pile > 0) valetPending += pile;
+  }
+  lastValetMs = nowMs;
+  // 2. STREAK + daily reset (calendar-day based)
+  if (lastLoginDay === 0) {
+    streak = 1; // first ever login
+  } else {
+    var gap = dayDiff(lastLoginDay, today);
+    if (gap === 0) { /* same day, streak unchanged */ }
+    else if (gap === 1) { streak = streak + 1; }   // consecutive day
+    else { streak = 1; }                            // missed >=1 day, reset
+  }
+  var isNewDay = (lastLoginDay !== today);
+  lastLoginDay = today;
+  // 3. DAILY SPOT reset on a new calendar day (fresh puzzle + fresh tries)
+  if (dailyKey !== today) {
+    dailyKey = today;
+    dailyTriesLeft = DAILY_TRIES;
+    dailyBestMedal = 0;
+  }
+  // 4. STREAK gift + trophies (only when the day actually advanced)
+  if (isNewDay && streak > 1) {
+    var gift = STREAK_GIFT * Math.min(streak, 7);
+    coins += gift;
+    streakToast = { kind: 'gift', amt: gift, t: 3.4 };
+    if (streak >= 7 && !trophies[7]) { trophies[7] = true; streakToast = { kind: 'trophy', id: 7, t: 4.0 }; }
+    else if (streak >= 3 && !trophies[3]) { trophies[3] = true; streakToast = { kind: 'trophy', id: 3, t: 4.0 }; }
+  }
+  // welcome-back ribbon if there's anything to come back FOR (pile or returning day)
+  if (valetPending > 0 || (isNewDay && lastLoginDay)) welcomeBack = { t: 3.2 };
+  saveMeta();
+}
+function collectValet() {
+  if (valetPending <= 0) return;
+  coins += valetPending;
+  if (GF.spawnFloat) GF.spawnFloat(GF.cx, GF.H * 0.30, '+' + valetPending + curStrings().coins_short, '#ffd24a');
+  valetPending = 0;
+  if (GF.sfx) GF.sfx('coin');
+  saveMeta();
+}
+// medal tier from crashes on a clean Daily Spot park (0=gold,1-2=silver,>=3=bronze)
+function medalForCrashes(cr) { return cr === 0 ? 3 : (cr <= 2 ? 2 : 1); }
+function medalName(m) { var s = curStrings(); return m === 3 ? s.medal_gold : m === 2 ? s.medal_silver : s.medal_bronze; }
+function medalColor(m) { return m === 3 ? '#ffd24a' : m === 2 ? '#cdd6e3' : '#e0975a'; }
+function shelfTotal() { return medalShelf.gold + medalShelf.silver + medalShelf.bronze; }
 // Flush deferred in-memory progress when the tab is hidden/closed (Build Hygiene #2).
 window.addEventListener('pagehide', function () { try { saveMeta(); } catch (e) {} });
 document.addEventListener('visibilitychange', function () { if (document.hidden) { try { saveMeta(); } catch (e) {} } });
@@ -389,7 +628,41 @@ function genEndlessLevel(idx) {
   return L;
 }
 
+// ── M2: THE DAILY SPOT — one tough daily-seeded puzzle, different every day ───
+// Reuses the daySeed RNG but biases hard: a narrow bay, both flank cars, a
+// partition and a cone chicane, sometimes sideways. This is the never-driven
+// "tightest spot of the day" a returning player opens to.
+var DAILY_LVL = -1; // sentinel level index for the Daily Spot
+function genDailySpot() {
+  var rng = mulberry32(daySeed() * 977 + 401);
+  var sideways = rng() < 0.45;
+  var bw = Math.round(CAR_W + 12 - rng() * 4); // tight: ~34-38
+  var bayX = 110 + Math.round(rng() * 140);
+  var L = { start: { x: 150 + Math.round(rng()*60), y: 585, h: 0 },
+            bay: { x: bayX, y: 120 + Math.round(rng()*24),
+                   w: bw, l: sideways ? 86 : 98, heading: sideways ? PI/2 : 0 },
+            walls: [], obstacles: [], cones: [] };
+  // always both flank cars (the classic squeeze)
+  if (sideways) {
+    L.obstacles.push(carBox(bayX, L.bay.y - 74, PI/2));
+    L.obstacles.push(carBox(bayX, L.bay.y + 74, PI/2));
+  } else {
+    L.obstacles.push(carBox(bayX - 64, L.bay.y, 0));
+    L.obstacles.push(carBox(bayX + 64, L.bay.y, 0));
+  }
+  // a dog-leg partition
+  var wx = 100 + Math.round(rng() * 160);
+  L.walls.push({ x1: wx, y1: 600, x2: wx, y2: 320 + Math.round(rng()*50) });
+  // a cone chicane (2-3 cones)
+  var nc = 2 + Math.round(rng());
+  for (var i = 0; i < nc; i++) {
+    L.cones.push({ x: 90 + Math.round(rng() * 180), y: 260 + i * 70 + Math.round(rng()*30) });
+  }
+  return L;
+}
+
 function levelData(n) {
+  if (n === DAILY_LVL) return genDailySpot();
   if (n <= AUTHORED_LEVELS) return LEVELS[n - 1];
   return genEndlessLevel(n - AUTHORED_LEVELS);
 }
@@ -539,8 +812,8 @@ function parkedInBay() {
   var bc = rectCorners(bay.x, bay.y, bay.w, bay.l, bay.heading);
   // all four car corners inside bay polygon
   for (var i = 0; i < 4; i++) if (!pointInPoly(corners[i].x, corners[i].y, bc)) return false;
-  // active-car forgiveness perk widens the heading/position tolerances (M1 garage)
-  var pc = curCar();
+  // active-car forgiveness perk widens the tolerances (M1 garage + M3 tune-scaled)
+  var pc = curPerk();
   // heading aligned (mod PI so either nose direction along the bay axis is OK)
   var dh = Math.abs(angDiff(car.heading, bay.heading));
   if (dh > PI / 2) dh = PI - dh;
@@ -677,6 +950,10 @@ function onCrash() {
   GF.spawnParticles(fx(car.x), fy(car.y), '#ffd24a', 12);
   gs = 'CRASH';
   crashT = CRASH_RESET_SEC;
+  if (dailyMode) { // each scrape in the Daily Spot costs a try (it's a challenge, not free retry)
+    dailyTriesLeft = Math.max(0, dailyTriesLeft - 1);
+    saveMeta();
+  }
   GF.saveRun();
 }
 
@@ -698,6 +975,40 @@ function onParked() {
   GF.spawnFloat(fx(car.x), fy(car.y) - 44 * GF.S, '+' + lastEarned + curStrings().coins_short, '#ffd24a');
   if (GF.sfx) GF.sfx('coin');
   checkCarUnlock();
+  // ── M3: bank TUNE XP onto the DRIVEN car (the per-car mastery curve) ────────
+  // A clean park tunes the car you're driving: +1 base + the stars you earned
+  // (so a sharper park tunes faster). The Daily Spot adds a bonus below. A
+  // level-up brightens the car + may CHROME it — felt next drive (gainTuneXp FX).
+  var tuneGain = 1 + earnedStars + (dailyMode ? 2 : 0);
+  gainTuneXp(tuneGain);
+  if (lastTuneGain > 0) {
+    var tlbl = lastTuneLevelUp ? (lastTuneLevelUp >= TUNE_MAX ? curStrings().chromed : curStrings().tune_up)
+                               : ('+' + lastTuneGain + ' ' + curStrings().tune);
+    GF.spawnFloat(fx(car.x), fy(car.y) - 84 * GF.S, tlbl,
+                  lastTuneLevelUp >= TUNE_MAX ? '#eef4ff' : '#7fd0ff');
+  }
+  // ── M2: DAILY SPOT clean park → bank a MEDAL onto the shelf ────────────────
+  if (dailyMode) {
+    var m = medalForCrashes(crashes); // 3 gold / 2 silver / 1 bronze
+    // upgrade the day's best; the shelf banks the BEST tier earned today (once)
+    if (m > dailyBestMedal) {
+      // remove a previously-banked lower medal for today, add the new tier
+      if (dailyBestMedal === 1) medalShelf.bronze = Math.max(0, medalShelf.bronze - 1);
+      else if (dailyBestMedal === 2) medalShelf.silver = Math.max(0, medalShelf.silver - 1);
+      if (m === 3) medalShelf.gold += 1; else if (m === 2) medalShelf.silver += 1; else medalShelf.bronze += 1;
+      dailyBestMedal = m;
+    }
+    dailyTriesLeft = 0; // a clean park ends the day's challenge
+    earnedStars = m;    // reuse the stars row to show the medal tier on the result
+    GF.spawnFloat(fx(car.x), fy(car.y) - 64 * GF.S, medalName(m), medalColor(m));
+    GF.happytime();
+    gs = 'LEVELCLEAR';
+    steerLeft = steerRight = false;
+    saveMeta();
+    GF.gameEnded();
+    GF.saveRun();
+    return;
+  }
   // persist best
   if (!endless) {
     if (earnedStars > (bestStars[lvl] || 0)) bestStars[lvl] = earnedStars;
@@ -747,12 +1058,55 @@ function driveCar(id) {
   saveMeta();
   return true;
 }
+// ── M3: rewarded TUNE BOOST — player-initiated, +XP, never gates play ────────
+// Uses GF.rewardedAd: onReward fires ONLY on a confirmed reward (Yandex / CG /
+// GamePush). On the gallery / local / no-fill it resolves shown:false → onReward
+// never fires, so nothing bad happens (the button just does nothing). Guards
+// against double-fire while an ad is open.
+var _boostInFlight = false;
+function tuneBoostAd(id) {
+  if (_boostInFlight) return;
+  if (!ownedCars[id] || isChrome(id)) return;
+  if (GF.sfx) GF.sfx('tap');
+  if (!GF.rewardedAd) return; // no ad layer at all → safe no-op
+  _boostInFlight = true;
+  GF.rewardedAd(function onReward() {
+    var prevActive = activeCar;
+    activeCar = id;                  // grant onto THIS car
+    gainTuneXp(TUNE_BOOST_XP);       // banks XP, may level-up + CHROME (with FX)
+    activeCar = prevActive;          // don't change the driven car as a side effect
+    if (GF.spawnFloat) GF.spawnFloat(GF.cx, GF.H * 0.30,
+      curStrings().boost_reward.replace('%n', String(TUNE_BOOST_XP)), '#7fd0ff');
+    saveMeta();
+    _boostInFlight = false;
+  }, function onSkip() { _boostInFlight = false; });
+}
 
 function advance() { // from LEVELCLEAR → next level
+  if (dailyMode) { dailyMode = false; goMenu(); return; } // Daily Spot has no "next"
   startLevel(lvl + 1);
 }
 function startEndless() { // from WIN → first endless level
+  dailyMode = false;
   startLevel(AUTHORED_LEVELS + 1);
+}
+// ── M2: enter THE DAILY SPOT (the never-driven puzzle of the day) ────────────
+function startDailySpot() {
+  // stamp today so completing the daily LOCKS today (a reload won't offer it fresh)
+  if (dailyKey !== daySeed()) { dailyKey = daySeed(); dailyTriesLeft = DAILY_TRIES; dailyBestMedal = 0; }
+  if (dailyTriesLeft <= 0) return; // out of tries today
+  dailyMode = true;
+  endless = false;
+  lvl = DAILY_LVL;
+  crashes = 0;
+  stars = 3;
+  attemptTimer = 0;
+  garageOpen = false;
+  welcomeBack = null;
+  loadLevel(DAILY_LVL);
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
 }
 
 // ── ADS (Yandex) - user-click only, throttled. No auto-fire. ────────────────
@@ -768,9 +1122,21 @@ function update(dt) {
   pulseT += dt;
   layoutField();
   if (carToast) { carToast.t -= dt; if (carToast.t <= 0) carToast = null; }
+  if (welcomeBack) { welcomeBack.t -= dt; if (welcomeBack.t <= 0) welcomeBack = null; }
+  if (streakToast) { streakToast.t -= dt; if (streakToast.t <= 0) streakToast = null; }
+  if (tuneToast) { tuneToast.t -= dt; if (tuneToast.t <= 0) tuneToast = null; }
   if (gs === 'CRASH') {
     crashT -= dt;
     if (crashT <= 0) {
+      // Daily Spot: a scrape spends a try; out of tries ends the run (no medal).
+      if (dailyMode && dailyTriesLeft <= 0) {
+        earnedStars = 0; lastParkPerfect = false; lastEarned = 0;
+        gs = 'LEVELCLEAR';
+        steerLeft = steerRight = false;
+        GF.gameEnded();
+        GF.saveRun();
+        return;
+      }
       // forgiving instant retry of the same level
       var d = levelData(lvl);
       resetCar(d.start);
@@ -787,8 +1153,8 @@ function update(dt) {
   attemptTimer += dt;
   if (steerHintFade > 0) steerHintFade = Math.max(0, steerHintFade - dt * 0.6);
 
-  // active-car perks fold into handling here (M1 garage)
-  var pc = curCar();
+  // active-car perks fold into handling here (M1 garage + M3 tune-scaled)
+  var pc = curPerk();
   // steering
   var steer = (steerRight ? 1 : 0) - (steerLeft ? 1 : 0);
   if (steer !== 0) car.heading += steer * (TURN_RATE * pc.turn) * dt;
@@ -862,6 +1228,82 @@ function draw(ctx) {
   // mute button + NEW CAR toast float above everything
   drawMuteBtn(ctx);
   if (carToast) drawCarToast(ctx);
+  // M2: welcome-back ribbon + streak/trophy flourish (top, over everything)
+  drawReturnToasts(ctx);
+}
+
+// ── M2: returning-player flourishes (welcome-back + streak gift/trophy) ──────
+function drawReturnToasts(ctx) {
+  var s = curStrings();
+  // welcome-back ribbon — only on MENU/garage, points the player at the pile/daily
+  if (welcomeBack && (gs === 'MENU')) {
+    var a = GF.clamp(welcomeBack.t / 0.4, 0, 1);
+    ctx.save(); ctx.globalAlpha = a;
+    var rw = Math.min(GF.W * 0.8, 340 * GF.S), rh = GF.clamp(34 * GF.S, 28, 44);
+    var rx = GF.cx - rw / 2, ry = GF.H * 0.045;
+    GF.rr(ctx, rx, ry, rw, rh, rh / 2);
+    ctx.fillStyle = 'rgba(57,217,138,0.92)'; ctx.fill();
+    ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+    ctx.fillStyle = '#06140d'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(s.welcome_back, GF.cx, ry + rh / 2 + 1);
+    ctx.restore();
+  }
+  // streak gift / trophy toast — center banner, over MENU and garage
+  if (streakToast) {
+    var a2 = GF.clamp(streakToast.t / 0.5, 0, 1);
+    ctx.save(); ctx.globalAlpha = Math.min(1, a2);
+    var bw = Math.min(GF.W * 0.84, 380 * GF.S), bh = GF.clamp(70 * GF.S, 56, 92);
+    var bx = GF.cx - bw / 2, by = GF.H * 0.40;
+    GF.rr(ctx, bx, by, bw, bh, 14 * GF.S);
+    ctx.fillStyle = 'rgba(20,24,34,0.96)'; ctx.fill();
+    ctx.strokeStyle = '#ffd24a'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (streakToast.kind === 'trophy') {
+      drawTrophy(ctx, bx + bh * 0.5, by + bh / 2, bh * 0.3, true);
+      ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 21) + 'px sans-serif';
+      ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left';
+      ctx.fillText(s.new_trophy, bx + bh * 0.9, by + bh * 0.36);
+      ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+      ctx.fillStyle = '#cdd6e3';
+      ctx.fillText(streakToast.id >= 7 ? s.trophy7 : s.trophy3, bx + bh * 0.9, by + bh * 0.64);
+    } else {
+      ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 21) + 'px sans-serif';
+      ctx.fillStyle = '#ffd24a';
+      ctx.fillText(s.day_streak.replace('%n', String(streak)), GF.cx, by + bh * 0.34);
+      var icr = GF.clamp(8 * GF.S, 6, 12);
+      var gt = '+' + streakToast.amt;
+      ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 22) + 'px sans-serif';
+      var gtW = ctx.measureText(gt).width;
+      var grp = icr * 2 + 5 * GF.S + gtW;
+      drawCoin(ctx, GF.cx - grp / 2 + icr, by + bh * 0.66, icr);
+      ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left';
+      ctx.fillText(gt, GF.cx - grp / 2 + icr * 2 + 5 * GF.S, by + bh * 0.66 + 1);
+    }
+    ctx.restore();
+  }
+  // ── M3: TUNE level-up / CHROME flourish (over MENU, LEVELCLEAR, garage) ────
+  if (tuneToast && (gs === 'MENU' || gs === 'LEVELCLEAR' || gs === 'WIN')) {
+    var a3 = GF.clamp(tuneToast.t / 0.5, 0, 1);
+    var chrome = tuneToast.chrome;
+    ctx.save(); ctx.globalAlpha = Math.min(1, a3);
+    var tbw = Math.min(GF.W * 0.82, 360 * GF.S), tbh = GF.clamp(62 * GF.S, 50, 82);
+    var tbx = GF.cx - tbw / 2, tby = GF.H * 0.30;
+    GF.rr(ctx, tbx, tby, tbw, tbh, 14 * GF.S);
+    ctx.fillStyle = 'rgba(16,22,32,0.96)'; ctx.fill();
+    ctx.strokeStyle = chrome ? '#eef4ff' : '#7fd0ff'; ctx.lineWidth = 2; ctx.stroke();
+    // a tuned-car glyph on the left
+    var gc = carById(tuneToast.id);
+    drawCarGlyph(ctx, tbx + tbh * 0.5, tby + tbh / 2, tbh * 0.46, chrome ? '#eef4ff' : tuneBodyColor(gc));
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(16 * GF.S, 12, 22) + 'px sans-serif';
+    ctx.fillStyle = chrome ? '#eef4ff' : '#7fd0ff';
+    ctx.fillText(chrome ? s.chromed : s.tune_up, tbx + tbh * 0.9, tby + tbh * 0.36);
+    ctx.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = '#cdd6e3';
+    var sub = carName(gc) + ' — ' + (chrome ? s.tune_max : s.tune_lv.replace('%n', String(tuneToast.level)));
+    ctx.fillText(sub, tbx + tbh * 0.9, tby + tbh * 0.64);
+    ctx.restore();
+  }
 }
 
 // On desktop/wide windows the portrait field is a centered strip; fill the dead
@@ -1118,9 +1560,21 @@ function drawHUD(ctx) {
   ctx.font = 'bold ' + fs + 'px sans-serif';
   ctx.textBaseline = 'top';
   ctx.textAlign = 'left';
-  ctx.fillStyle = '#fff';
-  var label = endless ? (curStrings().daily + ' ' + (lvl - AUTHORED_LEVELS)) : (curStrings().lvl + ' ' + lvl);
+  ctx.fillStyle = dailyMode ? '#ffd24a' : '#fff';
+  var label = dailyMode ? curStrings().daily_spot_short
+            : endless ? (curStrings().daily + ' ' + (lvl - AUTHORED_LEVELS))
+            : (curStrings().lvl + ' ' + lvl);
   ctx.fillText(label, 14 * GF.S, 14 * GF.S);
+  // ── M2: Daily Spot tries-left dots (right of the DAILY label) ─────────────
+  if (dailyMode) {
+    var lblW = ctx.measureText(label).width;
+    var tdr = GF.clamp(4 * GF.S, 3, 6);
+    for (var ti = 0; ti < DAILY_TRIES; ti++) {
+      ctx.beginPath();
+      ctx.arc(14 * GF.S + lblW + 14 * GF.S + ti * tdr * 2.8, 14 * GF.S + fs * 0.5, tdr, 0, PI * 2);
+      ctx.fillStyle = ti < dailyTriesLeft ? '#ffd24a' : 'rgba(160,180,210,0.3)'; ctx.fill();
+    }
+  }
 
   // ── M1: permanent COIN readout (top-left, under LVL) ──────────────────────
   var coinR = GF.clamp(8 * GF.S, 6, 12);
@@ -1128,7 +1582,24 @@ function drawHUD(ctx) {
   drawCoin(ctx, 14 * GF.S + coinR, coinY + coinR, coinR);
   ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 21) + 'px sans-serif';
   ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText(String(Math.round(coins)), 14 * GF.S + coinR * 2 + 6 * GF.S, coinY + coinR + 1);
+  var coinTxt = String(Math.round(coins));
+  ctx.fillText(coinTxt, 14 * GF.S + coinR * 2 + 6 * GF.S, coinY + coinR + 1);
+  // ── M3: active-car TUNE badge (so the in-RUN world reflects the car's tune) ─
+  // A returning player who tuned/chromed their car SEES it here mid-run, not just
+  // in the menu. Cyan "TUNE n", near-white "CHROME" at max.
+  (function() {
+    var lv = tuneLevel(activeCar), maxed = isChrome(activeCar);
+    var bx = 14 * GF.S + coinR * 2 + 6 * GF.S + ctx.measureText(coinTxt).width + 12 * GF.S;
+    var bh = GF.clamp(18 * GF.S, 15, 26), by = coinY + coinR + 1 - bh / 2;
+    ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+    var tlab = maxed ? curStrings().tune_max : (curStrings().tune + ' ' + lv);
+    var bw = ctx.measureText(tlab).width + 14 * GF.S;
+    GF.rr(ctx, bx, by, bw, bh, bh / 2);
+    ctx.fillStyle = maxed ? 'rgba(220,232,255,0.18)' : 'rgba(56,96,140,0.45)'; ctx.fill();
+    ctx.strokeStyle = maxed ? '#eef4ff' : 'rgba(127,208,255,0.8)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = maxed ? '#eef4ff' : '#bfe6ff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(tlab, bx + 7 * GF.S, by + bh / 2 + 1);
+  })();
   // "next car: N away" hint OUTSIDE the menu (the pull to keep playing)
   var nl = nextLockedCar();
   if (nl) {
@@ -1283,21 +1754,26 @@ function drawMenu(ctx) {
     drawPrimaryBtn(ctx, GF.cx - drawW / 2, drawY, drawW, drawH, curStrings().play);
   }
 
-  // ── M1: GARAGE button + coin balance on the menu ──────────────────────────
-  var gBtnW = GF.clamp(220 * GF.S, 150, 300), gBtnH = GF.clamp(46 * GF.S, 38, 58);
+  // ── M1+M2: DAILY SPOT + GARAGE buttons (two-up row) + coin balance ─────────
+  var rowW = GF.clamp(224 * GF.S, 154, 304), gBtnH = GF.clamp(46 * GF.S, 38, 58);
   var gY = drawY + drawH + 16 * GF.S;
-  // keep it on-screen on short portraits
+  // keep the row on-screen on short portraits
   gY = Math.min(gY, GF.H - gBtnH - 44 * GF.S);
-  var gX = GF.cx - gBtnW / 2;
-  drawSecondaryBtn(ctx, gX, gY, gBtnW, gBtnH, curStrings().garage);
-  // a coin pip + balance on the right end of the garage button
+  var halfGap = 8 * GF.S, halfW = (rowW - halfGap) / 2;
+  var dX = GF.cx - rowW / 2, gX = dX + halfW + halfGap;
+  // DAILY SPOT (left) — gold when today's spot is unplayed, checked when done
+  var dailyAvail = (dailyKey !== daySeed() || dailyTriesLeft > 0) && dailyBestMedal === 0;
+  drawDailyBtn(ctx, dX, gY, halfW, gBtnH, dailyAvail);
+  uiButtons.push({ x: dX, y: gY, w: halfW, h: gBtnH, fn: function(){ openGarage(); } });
+  // GARAGE (right)
+  drawSecondaryBtn(ctx, gX, gY, halfW, gBtnH, curStrings().garage);
   var nl = nextLockedCar();
-  var badge = nl && canAfford(nl);
+  var badge = (nl && canAfford(nl)) || valetPending > 0;
   if (badge) {
-    ctx.beginPath(); ctx.arc(gX + gBtnW - 14 * GF.S, gY + 12 * GF.S, 5 * GF.S, 0, PI * 2);
+    ctx.beginPath(); ctx.arc(gX + halfW - 13 * GF.S, gY + 12 * GF.S, 5 * GF.S, 0, PI * 2);
     ctx.fillStyle = '#ffd24a'; ctx.fill();
   }
-  uiButtons.push({ x: gX, y: gY, w: gBtnW, h: gBtnH, fn: openGarage });
+  uiButtons.push({ x: gX, y: gY, w: halfW, h: gBtnH, fn: openGarage });
 
   // coin balance line
   ctx.textBaseline = 'alphabetic';
@@ -1342,6 +1818,33 @@ function drawSecondaryBtn(ctx, x, y, w, h, label) {
   ctx.fillText(label, x + w / 2, y + h / 2);
   ctx.textBaseline = 'alphabetic';
 }
+// ── M2: DAILY SPOT menu button (gold = unplayed today, dimmed+check = done) ──
+function drawDailyBtn(ctx, x, y, w, h, avail) {
+  GF.rr(ctx, x, y, w, h, h / 2);
+  if (avail) {
+    var g = ctx.createLinearGradient(x, y, x, y + h);
+    g.addColorStop(0, '#ffd24a'); g.addColorStop(1, '#e0a83a');
+    ctx.fillStyle = g; ctx.fill();
+    ctx.fillStyle = '#1a1406';
+  } else {
+    ctx.fillStyle = 'rgba(50,58,76,0.95)'; ctx.fill();
+    ctx.strokeStyle = 'rgba(160,180,210,0.45)'; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.fillStyle = '#9fb0c4';
+  }
+  ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(curStrings().daily_spot_short, x + w / 2, y + h / 2);
+  ctx.textBaseline = 'alphabetic';
+  if (avail) { // pulsing dot to draw the eye to the fresh puzzle
+    var t = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
+    var a = 0.5 + 0.5 * Math.sin(t * 3.2);
+    ctx.beginPath(); ctx.arc(x + w - 13 * GF.S, y + 12 * GF.S, 4.5 * GF.S, 0, PI * 2);
+    ctx.fillStyle = 'rgba(255,80,80,' + (0.55 + 0.45 * a).toFixed(2) + ')'; ctx.fill();
+  } else if (dailyBestMedal > 0) { // a tiny medal dot showing today's best
+    ctx.beginPath(); ctx.arc(x + w - 13 * GF.S, y + 12 * GF.S, 4.5 * GF.S, 0, PI * 2);
+    ctx.fillStyle = medalColor(dailyBestMedal); ctx.fill();
+  }
+}
 
 // ── M1 GARAGE OVERLAY (the owned collection — reachable from MENU + mid-run) ──
 // Lays the 6-car ladder as a vertical list of rows. Each row: a colored car
@@ -1374,14 +1877,18 @@ function drawGarage(ctx) {
   // rows
   var listW = Math.min(GF.W * 0.92, 460 * GF.S);
   var listX = GF.cx - listW / 2;
-  var rowH = GF.clamp(74 * GF.S, 56, 92);
-  var rowGap = 8 * GF.S;
-  var y = balY + cr * 2 + 14 * GF.S;
   // CLOSE button sits at the bottom; cap the list so it never overlaps it
   var closeH = GF.clamp(46 * GF.S, 38, 58);
   var closeY = GF.H - closeH - 16 * GF.S;
-  var nameFs = GF.clamp(15 * GF.S, 12, 20);
+  var nameFs = GF.clamp(14 * GF.S, 12, 19);
   var perkFs = GF.clamp(11 * GF.S, 9, 15);
+
+  // ── M2 HEADER BAND: Daily Spot + Valet pile + the Shelf (world-visible) ────
+  var y = drawGarageM2Header(ctx, listX, listW, balY + cr * 2 + 12 * GF.S, closeY);
+
+  // car rows: shrink a touch so all 6 fit under the M2 band on a 852 portrait
+  var rowH = GF.clamp(66 * GF.S, 52, 84);
+  var rowGap = 7 * GF.S;
 
   for (var i = 0; i < CARS.length; i++) {
     var c = CARS[i];
@@ -1393,26 +1900,78 @@ function drawGarage(ctx) {
     ctx.fillStyle = active ? 'rgba(40,64,52,0.92)' : 'rgba(28,34,46,0.92)'; ctx.fill();
     ctx.strokeStyle = active ? 'rgba(57,217,138,0.9)' : 'rgba(120,140,170,0.28)';
     ctx.lineWidth = active ? 2 : 1; ctx.stroke();
-    // car swatch (mini top-down body in the car's colors; dimmed if locked)
+    // car swatch (mini top-down body; M3 tune brightens it, chrome = near-white)
     ctx.save();
     if (!owned) ctx.globalAlpha = 0.4;
-    drawCarGlyph(ctx, listX + rowH * 0.46, y + rowH / 2, rowH * 0.5, c.body);
+    drawCarGlyph(ctx, listX + rowH * 0.46, y + rowH / 2, rowH * 0.5, owned ? tuneBodyColor(c) : c.body);
+    // M3: CHROME ring around a fully-tuned car's glyph (collection-completion)
+    if (owned && isChrome(c.id)) {
+      ctx.beginPath(); ctx.arc(listX + rowH * 0.46, y + rowH / 2, rowH * 0.34, 0, PI * 2);
+      ctx.strokeStyle = '#eef4ff'; ctx.lineWidth = 2; ctx.stroke();
+    }
     ctx.restore();
     // name + perk
     ctx.textAlign = 'left';
     ctx.font = 'bold ' + nameFs + 'px sans-serif';
     ctx.fillStyle = owned ? '#fff' : '#9fb0c4'; ctx.textBaseline = 'top';
     var tx = listX + rowH * 0.86;
-    ctx.fillText(carName(c), tx, y + rowH * 0.18);
+    ctx.fillText(carName(c), tx, y + rowH * 0.16);
     ctx.font = perkFs + 'px sans-serif';
     ctx.fillStyle = '#9fb0c4';
-    var perkLines = wrapLines(ctx, carPerk(c), listW - (tx - listX) - GF.clamp(96 * GF.S, 72, 120));
-    for (var pl = 0; pl < Math.min(2, perkLines.length); pl++) {
-      ctx.fillText(perkLines[pl], tx, y + rowH * 0.46 + pl * (perkFs + 2 * GF.S));
-    }
-    // status pill (right side)
+    // M3: leave the bottom strip of the row for the tune bar, so cap the perk to
+    // ONE line here (the full perk is felt in handling, not the menu).
+    var perkLines = wrapLines(ctx, carPerk(c), listW - (tx - listX) - GF.clamp(150 * GF.S, 120, 200));
+    ctx.fillText(perkLines[0] || '', tx, y + rowH * 0.40);
+    // status pill geometry (right side) — computed BEFORE the tune bar so the bar
+    // can be clamped to never run under the right-side controls (pill / BOOST).
     var pillW = GF.clamp(92 * GF.S, 70, 116), pillH = GF.clamp(34 * GF.S, 28, 44);
     var pillX = listX + listW - pillW - 10 * GF.S, pillY = y + (rowH - pillH) / 2;
+    var bbW = GF.clamp(62 * GF.S, 50, 82), bbH = GF.clamp(30 * GF.S, 26, 40);
+    var bbX = pillX - bbW - 8 * GF.S, bbY = y + (rowH - bbH) / 2;
+    // the left edge of the right-side control cluster (BOOST shows only for an
+    // owned, not-yet-maxed car; otherwise the pill is the leftmost right control).
+    var rightCtrlX = (owned && !isChrome(c.id)) ? bbX : pillX;
+    // ── M3: TUNE bar + level (owned cars only) ────────────────────────────────
+    if (owned) {
+      var tp = tuneProgress(c.id);
+      var barX = tx, barY = y + rowH * 0.72, barH = GF.clamp(6 * GF.S, 5, 9);
+      // label: "TUNE 3" or "CHROME"
+      ctx.font = 'bold ' + GF.clamp(10 * GF.S, 9, 14) + 'px sans-serif';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = tp.max ? '#eef4ff' : '#7fd0ff';
+      var tlab = tp.max ? curStrings().tune_max : curStrings().tune_lv.replace('%n', String(tp.lv));
+      ctx.fillText(tlab, barX, barY + barH / 2);
+      var tlabW = ctx.measureText(tlab).width + 8 * GF.S;
+      // bar width: fill the space up to the right-side controls, clamped to a sane
+      // range so it never overlaps the BOOST/pill (mobile-portrait-safe).
+      var barW = GF.clamp((rightCtrlX - 10 * GF.S) - (barX + tlabW), 48 * GF.S, 168 * GF.S);
+      // bar track
+      GF.rr(ctx, barX + tlabW, barY, barW, barH, barH / 2);
+      ctx.fillStyle = 'rgba(120,140,170,0.25)'; ctx.fill();
+      var frac = tp.max ? 1 : GF.clamp(tp.cur / tp.span, 0, 1);
+      if (frac > 0.02) {
+        GF.rr(ctx, barX + tlabW, barY, barW * frac, barH, barH / 2);
+        ctx.fillStyle = tp.max ? '#eef4ff' : '#39d98a'; ctx.fill();
+      }
+    }
+    // ── M3: rewarded TUNE BOOST button (owned, not-yet-maxed) ─────────────────
+    // Player-INITIATED, rewarded-only: WATCH AD → +TUNE_BOOST_XP. Never gates
+    // play; no-ops on the gallery (GF.rewardedAd resolves shown:false). Sits just
+    // left of the status pill, vertically centered.
+    if (owned && !isChrome(c.id)) {
+      GF.rr(ctx, bbX, bbY, bbW, bbH, bbH / 2);
+      ctx.fillStyle = 'rgba(38,56,82,0.95)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(127,208,255,0.7)'; ctx.lineWidth = 1.4; ctx.stroke();
+      // a tiny play-triangle + BOOST label (ad affordance)
+      ctx.beginPath();
+      var ptx = bbX + 11 * GF.S, pty = bbY + bbH / 2, ps = 5 * GF.S;
+      ctx.moveTo(ptx - ps * 0.5, pty - ps); ctx.lineTo(ptx + ps, pty); ctx.lineTo(ptx - ps * 0.5, pty + ps);
+      ctx.closePath(); ctx.fillStyle = '#7fd0ff'; ctx.fill();
+      ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+      ctx.fillStyle = '#bfe6ff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(curStrings().tune_boost, bbX + 20 * GF.S, bbY + bbH / 2 + 1);
+      garageBtns.push({ x: bbX, y: bbY, w: bbW, h: bbH, fn: (function(cid){ return function(){ tuneBoostAd(cid); }; })(c.id) });
+    }
     (function(car, ownd, act, px, py, pw, ph) {
       if (act) {
         GF.rr(ctx, px, py, pw, ph, ph / 2); ctx.fillStyle = 'rgba(57,217,138,0.25)'; ctx.fill();
@@ -1455,6 +2014,181 @@ function pillLabel(ctx, txt, col, px, py, pw, ph) {
   ctx.fillStyle = col; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(txt, px + pw / 2, py + ph / 2 + 1);
 }
+
+// ── M2: a vector MEDAL disc (ribbon + star) ─────────────────────────────────
+function drawMedal(ctx, x, y, r, tier) {
+  var col = medalColor(tier);
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x, y, r, 0, PI * 2);
+  ctx.fillStyle = col; ctx.fill();
+  ctx.lineWidth = Math.max(1, r * 0.14); ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.stroke();
+  // inner star
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  drawStar(ctx, x, y, r * 0.55);
+  ctx.restore();
+}
+// ── M2: a vector TROPHY cup ─────────────────────────────────────────────────
+function drawTrophy(ctx, x, y, r, on) {
+  ctx.save();
+  ctx.fillStyle = on ? '#ffd24a' : 'rgba(120,140,170,0.35)';
+  ctx.strokeStyle = on ? 'rgba(0,0,0,0.3)' : 'rgba(120,140,170,0.5)';
+  ctx.lineWidth = Math.max(1, r * 0.12);
+  // cup bowl
+  ctx.beginPath();
+  ctx.moveTo(x - r * 0.6, y - r * 0.7);
+  ctx.lineTo(x + r * 0.6, y - r * 0.7);
+  ctx.lineTo(x + r * 0.42, y + r * 0.15);
+  ctx.lineTo(x - r * 0.42, y + r * 0.15);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  // handles
+  ctx.beginPath(); ctx.arc(x - r * 0.6, y - r * 0.4, r * 0.28, PI * 0.5, PI * 1.5); ctx.stroke();
+  ctx.beginPath(); ctx.arc(x + r * 0.6, y - r * 0.4, r * 0.28, -PI * 0.5, PI * 0.5); ctx.stroke();
+  // stem + base
+  ctx.fillRect(x - r * 0.1, y + r * 0.15, r * 0.2, r * 0.35);
+  ctx.fillRect(x - r * 0.4, y + r * 0.5, r * 0.8, r * 0.2);
+  ctx.restore();
+}
+
+// ── M2 GARAGE HEADER: the reason-to-return surfaces, in the owned garage ─────
+// Returns the Y at which the car list should start. Draws (and registers hit-
+// rects for): the DAILY SPOT card (play it / tries / today's medal), the VALET
+// pile with COLLECT, and the SHELF (lifetime medals + streak trophies).
+function drawGarageM2Header(ctx, listX, listW, topY, closeY) {
+  var s = curStrings();
+  var gap = 8 * GF.S;
+  var cardH = GF.clamp(64 * GF.S, 50, 80);
+  var leftW = listW * 0.56, rightW = listW - leftW - gap;
+  var rx = listX, ry = topY;
+  // ── DAILY SPOT card (left) ──────────────────────────────────────────────
+  var fresh = (dailyKey !== daySeed()); // never engaged today
+  var triesLeft = fresh ? DAILY_TRIES : dailyTriesLeft;
+  var done = (!fresh && triesLeft <= 0) || dailyBestMedal > 0;
+  GF.rr(ctx, rx, ry, leftW, cardH, 11 * GF.S);
+  ctx.fillStyle = done ? 'rgba(28,34,46,0.92)' : 'rgba(46,40,18,0.92)'; ctx.fill();
+  ctx.strokeStyle = done ? 'rgba(120,140,170,0.3)' : 'rgba(255,210,74,0.7)';
+  ctx.lineWidth = done ? 1 : 1.6; ctx.stroke();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  ctx.fillStyle = done ? '#9fb0c4' : '#ffd24a';
+  ctx.fillText(s.daily_spot, rx + 12 * GF.S, ry + 9 * GF.S);
+  if (done) {
+    // show today's result + come-back line
+    ctx.textBaseline = 'middle';
+    if (dailyBestMedal > 0) {
+      drawMedal(ctx, rx + 22 * GF.S, ry + cardH * 0.66, 11 * GF.S, dailyBestMedal);
+      ctx.font = 'bold ' + GF.clamp(13 * GF.S, 11, 18) + 'px sans-serif';
+      ctx.fillStyle = medalColor(dailyBestMedal); ctx.textAlign = 'left';
+      ctx.fillText(medalName(dailyBestMedal), rx + 38 * GF.S, ry + cardH * 0.66 + 1);
+    } else {
+      ctx.font = GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+      ctx.fillStyle = '#8aa'; ctx.textAlign = 'left';
+      ctx.fillText(s.no_tries, rx + 12 * GF.S, ry + cardH * 0.66 + 1);
+    }
+  } else {
+    // PLAY button + tries dots
+    var pbW = GF.clamp(76 * GF.S, 60, 100), pbH = GF.clamp(28 * GF.S, 24, 36);
+    var pbX = rx + leftW - pbW - 10 * GF.S, pbY = ry + (cardH - pbH) / 2;
+    var pg = ctx.createLinearGradient(pbX, pbY, pbX, pbY + pbH);
+    pg.addColorStop(0, '#ffd24a'); pg.addColorStop(1, '#e0a83a');
+    GF.rr(ctx, pbX, pbY, pbW, pbH, pbH / 2); ctx.fillStyle = pg; ctx.fill();
+    ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = '#1a1406'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(s.play, pbX + pbW / 2, pbY + pbH / 2 + 1);
+    garageBtns.push({ x: pbX, y: pbY, w: pbW, h: pbH, fn: function(){ startDailySpot(); } });
+    // tries dots (bottom-left)
+    var dr = 4 * GF.S, dy = ry + cardH - 13 * GF.S;
+    for (var t = 0; t < DAILY_TRIES; t++) {
+      ctx.beginPath(); ctx.arc(rx + 14 * GF.S + t * dr * 2.8, dy, dr, 0, PI * 2);
+      ctx.fillStyle = t < triesLeft ? '#ffd24a' : 'rgba(160,180,210,0.28)'; ctx.fill();
+    }
+    ctx.font = GF.clamp(10 * GF.S, 9, 14) + 'px sans-serif';
+    ctx.fillStyle = '#8aa'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(s.daily_try, rx + 14 * GF.S + DAILY_TRIES * dr * 2.8 + 4 * GF.S, dy);
+  }
+  // ── VALET pile card (right) ─────────────────────────────────────────────
+  var vx = rx + leftW + gap, vy = ry;
+  var hasPile = valetPending > 0;
+  GF.rr(ctx, vx, vy, rightW, cardH, 11 * GF.S);
+  ctx.fillStyle = hasPile ? 'rgba(40,56,40,0.92)' : 'rgba(28,34,46,0.92)'; ctx.fill();
+  ctx.strokeStyle = hasPile ? 'rgba(57,217,138,0.7)' : 'rgba(120,140,170,0.3)';
+  ctx.lineWidth = hasPile ? 1.6 : 1; ctx.stroke();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+  ctx.fillStyle = hasPile ? '#9af0c4' : '#8aa';
+  ctx.fillText(s.valet, vx + 11 * GF.S, vy + 9 * GF.S);
+  if (hasPile) {
+    // pile amount + COLLECT button
+    var icr = 7 * GF.S;
+    ctx.textBaseline = 'middle';
+    drawCoin(ctx, vx + 11 * GF.S + icr, vy + cardH * 0.62, icr);
+    ctx.font = 'bold ' + GF.clamp(15 * GF.S, 12, 21) + 'px sans-serif';
+    ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left';
+    ctx.fillText('+' + valetPending, vx + 11 * GF.S + icr * 2 + 5 * GF.S, vy + cardH * 0.62 + 1);
+    var cbW2 = GF.clamp(78 * GF.S, 60, 104), cbH2 = GF.clamp(26 * GF.S, 22, 34);
+    var cbX2 = vx + rightW - cbW2 - 9 * GF.S, cbY2 = vy + (cardH - cbH2) / 2;
+    var cg = ctx.createLinearGradient(cbX2, cbY2, cbX2, cbY2 + cbH2);
+    cg.addColorStop(0, '#39d98a'); cg.addColorStop(1, '#23b06b');
+    GF.rr(ctx, cbX2, cbY2, cbW2, cbH2, cbH2 / 2); ctx.fillStyle = cg; ctx.fill();
+    ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = '#06140d'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(s.collect, cbX2 + cbW2 / 2, cbY2 + cbH2 / 2 + 1);
+    garageBtns.push({ x: cbX2, y: cbY2, w: cbW2, h: cbH2, fn: function(){ collectValet(); } });
+  } else {
+    ctx.font = GF.clamp(10 * GF.S, 9, 13) + 'px sans-serif';
+    ctx.fillStyle = '#667'; ctx.textBaseline = 'top';
+    var vh = wrapLines(ctx, s.valet_hint, rightW - 22 * GF.S);
+    for (var vl = 0; vl < Math.min(2, vh.length); vl++) {
+      ctx.fillText(vh[vl], vx + 11 * GF.S, vy + cardH * 0.42 + vl * (11 * GF.S));
+    }
+  }
+  // ── SHELF strip: lifetime medals + streak trophies (the owned record) ───
+  var shY = ry + cardH + gap;
+  var shH = GF.clamp(34 * GF.S, 28, 44);
+  GF.rr(ctx, listX, shY, listW, shH, 9 * GF.S);
+  ctx.fillStyle = 'rgba(24,28,38,0.9)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(120,140,170,0.22)'; ctx.lineWidth = 1; ctx.stroke();
+  var sx = listX + 12 * GF.S, scy = shY + shH / 2;
+  ctx.font = 'bold ' + GF.clamp(10 * GF.S, 9, 14) + 'px sans-serif';
+  ctx.fillStyle = '#8aa'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(s.shelf, sx, scy); sx += ctx.measureText(s.shelf).width + 12 * GF.S;
+  // medal counts (gold/silver/bronze) — only show tiers earned
+  var mr = 8 * GF.S;
+  var tiers = [ [3, medalShelf.gold], [2, medalShelf.silver], [1, medalShelf.bronze] ];
+  for (var mi = 0; mi < tiers.length; mi++) {
+    var tier = tiers[mi][0], cnt = tiers[mi][1];
+    drawMedal(ctx, sx + mr, scy, mr, tier);
+    ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = cnt > 0 ? medalColor(tier) : 'rgba(120,140,170,0.4)';
+    ctx.fillText(String(cnt), sx + mr * 2 + 3 * GF.S, scy + 1);
+    sx += mr * 2 + 3 * GF.S + ctx.measureText(String(cnt)).width + 12 * GF.S;
+  }
+  // ── M3: CHROME count (cars fully tuned) — the collection-completion meta ──
+  var chN = chromeCount();
+  if (chN > 0) {
+    // a small chrome diamond + "n" (only once at least one car is chromed)
+    ctx.save();
+    ctx.translate(sx + mr, scy); ctx.rotate(PI / 4);
+    GF.rr(ctx, -mr * 0.72, -mr * 0.72, mr * 1.44, mr * 1.44, mr * 0.3);
+    ctx.fillStyle = '#eef4ff'; ctx.fill();
+    ctx.restore();
+    ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 17) + 'px sans-serif';
+    ctx.fillStyle = '#eef4ff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(chN), sx + mr * 2 + 3 * GF.S, scy + 1);
+  }
+  // streak + trophies on the right end of the shelf
+  var tx2 = listX + listW - 12 * GF.S;
+  var tr = 9 * GF.S;
+  drawTrophy(ctx, tx2 - tr, scy, tr, !!trophies[7]); tx2 -= tr * 2 + 6 * GF.S;
+  drawTrophy(ctx, tx2 - tr, scy, tr, !!trophies[3]); tx2 -= tr * 2 + 10 * GF.S;
+  if (streak > 0) {
+    ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+    ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    var stTxt = s.day_streak.replace('%n', String(streak));
+    ctx.fillText(stTxt, tx2, scy);
+  }
+  return shY + shH + GF.clamp(10 * GF.S, 7, 14);
+}
+
 function openGarage() { garageOpen = true; if (GF.sfx) GF.sfx('tap'); }
 function closeGarage() { garageOpen = false; if (GF.sfx) GF.sfx('tap'); saveMeta(); }
 function garageHit(px, py) {
@@ -1553,9 +2287,34 @@ function drawLevelClear(ctx) {
   ctx.fillStyle = 'rgba(10,14,18,0.82)';
   ctx.fillRect(0, 0, GF.W, GF.H);
   var titleFs = GF.clamp(34 * GF.S, 22, 52);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+
+  // ── M2: DAILY SPOT result screen (medal earned, or out of tries) ──────────
+  if (dailyMode) {
+    var won = dailyBestMedal > 0;
+    ctx.font = 'bold ' + titleFs + 'px sans-serif';
+    ctx.fillStyle = won ? medalColor(dailyBestMedal) : '#ff8a5e';
+    ctx.fillText(won ? curStrings().daily_cleared : curStrings().no_tries, GF.cx, GF.H * 0.26);
+    if (won) {
+      drawMedal(ctx, GF.cx, GF.H * 0.26 + GF.clamp(54 * GF.S, 38, 80), GF.clamp(30 * GF.S, 22, 44), dailyBestMedal);
+      ctx.font = 'bold ' + GF.clamp(16 * GF.S, 13, 22) + 'px sans-serif';
+      ctx.fillStyle = medalColor(dailyBestMedal); ctx.textAlign = 'center';
+      ctx.fillText(medalName(dailyBestMedal), GF.cx, GF.H * 0.26 + GF.clamp(96 * GF.S, 70, 130));
+      drawEarningsStrip(ctx, GF.H * 0.52);
+    }
+    // come-back line
+    ctx.font = GF.clamp(13 * GF.S, 11, 18) + 'px sans-serif';
+    ctx.fillStyle = '#8aa'; ctx.textAlign = 'center';
+    ctx.fillText(curStrings().come_back, GF.cx, GF.H * 0.62);
+    var dbW = GF.clamp(220 * GF.S, 150, 300), dbH = GF.clamp(54 * GF.S, 42, 66);
+    var dbX = GF.cx - dbW / 2, dbY = GF.H * 0.70;
+    drawPrimaryBtn(ctx, dbX, dbY, dbW, dbH, curStrings().menu);
+    uiButtons.push({ x: dbX, y: dbY, w: dbW, h: dbH, fn: advance }); // advance() routes daily→menu
+    return;
+  }
+
   ctx.font = 'bold ' + titleFs + 'px sans-serif';
   ctx.fillStyle = '#39d98a';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
   ctx.fillText(curStrings()[lastParkPerfect ? 'perfect' : 'clear'], GF.cx, GF.H * 0.26);
 
   var starSz = GF.clamp(32 * GF.S, 22, 48);
@@ -1676,6 +2435,10 @@ GF.init({
     } catch (e) { bestStars = []; }
     // M1: load the persistent garage meta (coins / owned cars / active car)
     loadMeta();
+    // M2: roll the day over — accrue the valet pile, advance the streak, reset
+    // the Daily Spot on a new calendar day, grant streak trophies/gifts. This is
+    // what makes a returning player's first 60s visibly different from yesterday.
+    rolloverDay();
     GF.persist('tight_spot_run_v1',
       function() {
         return { gs: (gs === 'PLAYING' || gs === 'CRASH') ? 'PLAYING' : gs,
@@ -1742,6 +2505,15 @@ GF.exposeState(function() {
     coins: Math.round(coins), activeCar: activeCar,
     ownedCount: Object.keys(ownedCars).length, lastEarned: lastEarned,
     garageOpen: garageOpen, nextCarCost: (nextLockedCar() ? nextLockedCar().cost : 0),
+    // M2 reason-to-return
+    dailyMode: dailyMode, dailyTriesLeft: dailyTriesLeft, dailyBestMedal: dailyBestMedal,
+    valetPending: valetPending, streak: streak,
+    medalsTotal: shelfTotal(), trophyCount: (trophies[3]?1:0) + (trophies[7]?1:0),
+    welcomeBack: !!welcomeBack,
+    // M3 car tune / mastery
+    activeTune: tuneLevel(activeCar), activeTuneXp: (tuneXp[activeCar] || 0),
+    chromeCount: chromeCount(), tuneXpTotal: (function(){ var t=0; for (var k in tuneXp) t += tuneXp[k]||0; return t; })(),
+    lastTuneGain: lastTuneGain, lastTuneLevelUp: lastTuneLevelUp,
     CREEP_SPEED: CREEP_SPEED, TURN_RATE: TURN_RATE, FRICTION: FRICTION,
     CAR_W: CAR_W, CAR_L: CAR_L, CONE_R: CONE_R,
     ANGLE_TOL: ANGLE_TOL, POS_TOL: POS_TOL, SETTLE_SEC: SETTLE_SEC,
@@ -1763,12 +2535,19 @@ GF.exposeBot(
     else if (gs === 'PLAYING' && !tutorialOpen) acts.push('park');
     var nl = nextLockedCar();
     if (nl && canAfford(nl) && (gs === 'PLAYING' || gs === 'LEVELCLEAR' || gs === 'WIN' || gs === 'MENU')) acts.push('buycar');
+    if ((gs === 'MENU') && valetPending > 0) acts.push('collect');
+    if ((gs === 'MENU') && dailyTriesLeft > 0 && dailyBestMedal === 0 && !dailyMode) acts.push('daily');
+    // NB: the M3 rewarded TUNE BOOST is a player-initiated ACCELERATOR, not the
+    // organic path — deliberately NOT exposed to the bot, so progression_trials
+    // measures the natural park-driven tune curve (XP banked per clean park).
     return acts;
   },
   function doAction(a) {
     if (a === 'play') { startLevel(gs === 'WIN' ? AUTHORED_LEVELS + 1 : maxLevel); return; }
     if (a === 'next') { advance(); return; }
     if (a === 'buycar') { var nl = nextLockedCar(); if (nl) buyCar(nl.id); return; }
+    if (a === 'collect') { collectValet(); return; }
+    if (a === 'daily') { startDailySpot(); return; }
     if (a === 'recover') { // skip the crash freeze straight back to PLAYING
       var d = levelData(lvl); resetCar(d.start); gs = 'PLAYING'; return;
     }
@@ -1798,10 +2577,34 @@ window._grant = function(n) { coins += (n || 100); saveMeta(); };
 window._buyCar = function(id) { return buyCar(id || 1); };
 window._driveCar = function(id) { return driveCar(id || 0); };
 window._openGarage = function() { openGarage(); };
+// M2 reason-to-return test seams (safe to ship)
+window._startDaily = function() { dailyKey = 1; startDailySpot(); /* startDailySpot re-stamps dailyKey=today + resets tries */ };
+window._setValet = function(n) { valetPending = Math.max(0, n || 0); saveMeta(); };
+window._collectValet = function() { collectValet(); };
+window._simReturn = function(daysAway) { // simulate leaving for N days then returning
+  var d = Math.max(0, daysAway == null ? 1 : daysAway);
+  lastValetMs = Date.now() - d * 86400000;
+  // back-date lastLoginDay by d days so the streak/daily logic treats it as a return
+  var past = new Date(); past.setDate(past.getDate() - d);
+  lastLoginDay = past.getFullYear()*10000 + (past.getMonth()+1)*100 + past.getDate();
+  dailyKey = lastLoginDay; saveMeta();
+  rolloverDay();
+  return { valetPending: valetPending, streak: streak, dailyTriesLeft: dailyTriesLeft,
+           welcomeBack: !!welcomeBack };
+};
+// M3 car tune / mastery test seams (safe to ship)
+window._tuneXp = function(id, n) { var i = (id == null ? activeCar : id); tuneXp[i] = (tuneXp[i] || 0) + (n == null ? 10 : n); saveMeta(); return tuneLevel(i); };
+window._setTuneXp = function(id, n) { var i = (id == null ? activeCar : id); tuneXp[i] = Math.max(0, n || 0); saveMeta(); return tuneLevel(i); };
+window._tuneInfo = function(id) { var i = (id == null ? activeCar : id);
+  return { id: i, xp: (tuneXp[i] || 0), level: tuneLevel(i), chrome: isChrome(i),
+           perk: tunedPerk(carById(i)), chromeCount: chromeCount() }; };
 window._tightSpotInfo = function() {
   return { coins: Math.round(coins), activeCar: activeCar, owned: Object.keys(ownedCars).map(Number),
            garageOpen: garageOpen, nextCar: (nextLockedCar() ? nextLockedCar().id : -1),
-           nextCost: (nextLockedCar() ? nextLockedCar().cost : 0), gs: gs };
+           nextCost: (nextLockedCar() ? nextLockedCar().cost : 0), gs: gs,
+           dailyMode: dailyMode, dailyTriesLeft: dailyTriesLeft, dailyBestMedal: dailyBestMedal,
+           valetPending: valetPending, streak: streak, medalsTotal: shelfTotal(),
+           activeTune: tuneLevel(activeCar), chromeCount: chromeCount() };
 };
 
 })();
