@@ -1294,10 +1294,12 @@ function logVariantClick(slug, variant) {
 // (scorecard P2, review-20260611-194919). Two shields:
 //   1. slugs voted THIS page load keep their in-memory numbers;
 //   2. a vote's authoritative server response is stashed in sessionStorage
-//      for 7 min and overlaid on the next load's counts/boot payload.
-// 420s == boot.js STALE_SERVE_MAX (360s) + edge TTL (60s) exactly — boot
+//      for ~17 min and overlaid on the next load's counts/boot payload.
+// 1020s == boot.js STALE_SERVE_MAX (960s) + edge TTL (60s) exactly — boot
 // never serves data older than this shield; change them together.
-const VOTE_OVERRIDE_TTL_MS = 420 * 1000;
+// (Raised 420->1020 on 2026-06-16 with the snapshot rebuild cadence, to keep
+// KV list ops under the free 1000/day cap — see boot.js / counts.js.)
+const VOTE_OVERRIDE_TTL_MS = 1020 * 1000;
 
 function mergeFreshVoteState(fresh) {
   for (const slug of votedSlugsThisSession) {

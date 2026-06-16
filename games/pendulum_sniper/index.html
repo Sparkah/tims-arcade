@@ -48,6 +48,14 @@ var STRINGS = {
     collect: 'COLLECT', daily_reward: 'Daily report', day_streak: 'DAY STREAK',
     idle_banked: 'Range banked', come_back: 'Come back daily — your range banks Focus while away.',
     mission: 'TODAY', mission_done: 'DONE', objective_paid: 'MISSION',
+    // M3 — Range Ladder (depth) + rewarded ads (monetization)
+    range: 'RANGE', locked: 'LOCKED', cleared: 'CLEARED', stars: 'STARS',
+    next_range: 'NEXT RANGE UNLOCKED', range_complete: 'RANGE MASTERED',
+    star1: 'Clear the range', star2: 'Land 2 apex hits', star3: 'Finish with 50+ energy',
+    watch_ad: 'WATCH AD', double_focus: '2× FOCUS', extra_stop: '+1 STOP',
+    revive_q: 'Out of shots — watch an ad for one more?', tap_lr: 'Tap ‹ › to pick a range',
+    mute: 'SOUND', mod_shield: 'SHIELDED', mod_split: 'SPLITTER', mod_decoy: 'DECOY',
+    decoy_hit: 'DECOY! −12 energy', shield_ping: 'SHIELD — apex only',
   },
   ru: {
     title: 'Маятник-Снайпер',
@@ -75,6 +83,14 @@ var STRINGS = {
     collect: 'ЗАБРАТЬ', daily_reward: 'Сводка дня', day_streak: 'ДНЕЙ ПОДРЯД',
     idle_banked: 'Тир накопил', come_back: 'Заходите каждый день — тир копит Фокус, пока вас нет.',
     mission: 'СЕГОДНЯ', mission_done: 'ГОТОВО', objective_paid: 'МИССИЯ',
+    // M3 — Лестница тиров (глубина) + реклама за награду
+    range: 'ТИР', locked: 'ЗАКРЫТО', cleared: 'ПРОЙДЕН', stars: 'ЗВЁЗДЫ',
+    next_range: 'ОТКРЫТ НОВЫЙ ТИР', range_complete: 'ТИР ПРОЙДЕН ПОЛНОСТЬЮ',
+    star1: 'Пройти тир', star2: 'Сделать 2 апекс-попадания', star3: 'Закончить с 50+ энергии',
+    watch_ad: 'РЕКЛАМА', double_focus: '2× ФОКУС', extra_stop: '+1 СТОП',
+    revive_q: 'Патроны кончились — посмотреть рекламу ради ещё одного?', tap_lr: 'Жмите ‹ › для выбора тира',
+    mute: 'ЗВУК', mod_shield: 'ЩИТ', mod_split: 'ДЕЛЯЩАЯСЯ', mod_decoy: 'ОБМАНКА',
+    decoy_hit: 'ОБМАНКА! −12 энергии', shield_ping: 'ЩИТ — только апекс',
   },
 };
 
@@ -296,6 +312,76 @@ function checkDailyObjective(win) {
 }
 var objectiveJustPaid = 0;            // Focus paid by today's objective this run
 
+// ── M3 — DEPTH: THE RANGE LADDER (milestone#3) ─────────────────────────────
+// The core loop used to be ONE fixed round of 4 targets, forever — a returning
+// player saw the exact same arena every day. M3 turns that single round into a
+// persistent, OWNED ladder of escalating RANGES (named shooting contracts). You
+// clear them in sequence; your furthest-unlocked range is persisted, so opening
+// the game tomorrow drops you on a HIGHER, visibly-different arena (more targets,
+// faster movers, new target MODIFIERS) than yesterday. Each range carries a
+// 3-STAR mastery rating (a persistent collection to complete), so even cleared
+// ranges have replay depth. This is the structural depth layer the loop grows
+// INTO — the same aim-arrest-fire verb, but the content escalates and is yours.
+//
+// Modifiers (grown from the aiming fantasy, not bolt-ons):
+//   shield — target needs an APEX hit to break (a normal hit just pings it);
+//            rewards the apex-timing mastery the core loop already teaches.
+//   split  — on death the target splits into 2 small fast shards you must also
+//            clear (raises the shot count the round demands).
+//   decoy  — a red X you must NOT hit; a decoy hit costs energy (adds restraint).
+// Balance note: early ranges give stops >= targets (a clean player can clear
+// them 1-shot-1-kill); the difficulty ramp comes from speed, modifiers, and a
+// tightening energy budget, then later ranges pull stops BELOW the target count
+// so the player must land multi-kills / lean on apex-refunds (skill ceiling).
+var RANGES = [
+  { name:'GALLERY',   targets:4, stops:5, energy:110, spd:0.80, mods:[] },
+  { name:'DRIFT BAY', targets:5, stops:6, energy:108, spd:0.95, mods:[] },
+  { name:'CROSSWIND', targets:5, stops:6, energy:104, spd:1.08, mods:['shield'] },
+  { name:'SPLITYARD', targets:5, stops:7, energy:104, spd:1.02, mods:['split'] },
+  { name:'NIGHTROW',  targets:6, stops:7, energy:100, spd:1.16, mods:['shield'] },
+  { name:'DECOY ALLEY',targets:6, stops:7, energy:98, spd:1.08, mods:['decoy'] },
+  { name:'HORNETS',   targets:6, stops:7, energy:94,  spd:1.26, mods:['shield','split'] },
+  { name:'GAUNTLET',  targets:7, stops:7, energy:92,  spd:1.20, mods:['decoy','shield'] },
+  { name:'STORMFRONT',targets:7, stops:7, energy:88,  spd:1.34, mods:['split','shield'] },
+  { name:'BLACKSITE', targets:8, stops:7, energy:86,  spd:1.28, mods:['decoy','split'] },
+  { name:'OVERWATCH', targets:8, stops:7, energy:82,  spd:1.40, mods:['shield','split','decoy'] },
+  { name:'APEX',      targets:9, stops:7, energy:80,  spd:1.48, mods:['shield','split','decoy'] },
+];
+var rangeUnlocked = 0;     // furthest range index unlocked (persisted)
+var rangeSel = 0;          // range the player has selected on the MENU
+var rangeStars = [];       // rangeStars[i] = best stars earned on range i (0..3), persisted
+var curRange = 0;          // range index the current run is playing
+var newlyUnlocked = -1;    // set when a run unlocks a NEW range (session-end hook), for end overlay
+var starsThisRun = 0;      // stars earned by the run that just ended (for end overlay)
+var prevStarsForRange = 0; // stars the selected range had BEFORE this run (to detect improvement)
+
+function loadLadder() {
+  try {
+    var u = parseInt(localStorage.getItem('pendulum_sniper_range_unlocked') || '0');
+    if (!isNaN(u) && u >= 0) rangeUnlocked = GF.clamp(u, 0, RANGES.length - 1);
+    var s = JSON.parse(localStorage.getItem('pendulum_sniper_range_stars') || '[]');
+    if (Array.isArray(s)) rangeStars = s.map(function(v){ var n = v | 0; return GF.clamp(n, 0, 3); });
+  } catch (e) {}
+  while (rangeStars.length < RANGES.length) rangeStars.push(0);
+  rangeSel = rangeUnlocked;     // default selection = furthest range (returning players land higher)
+}
+function saveLadder() {
+  try {
+    localStorage.setItem('pendulum_sniper_range_unlocked', String(rangeUnlocked));
+    localStorage.setItem('pendulum_sniper_range_stars', JSON.stringify(rangeStars));
+  } catch (e) {}
+}
+function totalStars() { var s = 0; for (var i = 0; i < rangeStars.length; i++) s += (rangeStars[i] | 0); return s; }
+function maxStars()   { return RANGES.length * 3; }
+// Stars a finished run earns on its range: clear=1, +2 apex hits=2, +50 energy left=3 (cumulative gates).
+function starsForRun(win, energyLeft, apexHits) {
+  if (!win) return 0;
+  var s = 1;
+  if (apexHits >= 2) s = 2;
+  if (apexHits >= 2 && energyLeft >= 50) s = 3;
+  return s;
+}
+
 // ── GAME STATE ───────────────────────────────────────────────────────────
 var gs = 'MENU';            // MENU | PLAYING | GAMEOVER | WIN
 var _menuBtnRect = { x: 0, y: 0, w: 0, h: 0 }; // updated each drawMenu frame
@@ -344,8 +430,13 @@ function spawnTargets() {
   var bandTop = H * 0.45;
   var bandBot = H - margin;
   var patterns = ['orbit', 'bounce', 'linear-h', 'linear-v'];
-  for (var i = 0; i < TARGETS_PER_ROUND; i++) {
-    var p = patterns[i];
+  // M3: range config drives count / speed / modifiers (falls back to legacy 4 if unset).
+  var R = RANGES[curRange] || { targets: TARGETS_PER_ROUND, spd: 1, mods: [] };
+  var n = R.targets;
+  var spdMul = R.spd;
+  var mods = R.mods || [];
+  for (var i = 0; i < n; i++) {
+    var p = patterns[i % patterns.length];
     var cx = rand(margin, W - margin);
     var cy = rand(bandTop, bandBot);
     var t = {
@@ -356,20 +447,32 @@ function spawnTargets() {
       alive: true,
       t: rand(0, Math.PI * 2),
       orbitR: rand(60 * GF.S, 120 * GF.S),
-      orbitSpd: rand(0.6, 1.4) * (i % 2 === 0 ? 1 : -1),
-      vx: TARGET_SPEED * GF.S * (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.2),
-      vy: TARGET_SPEED * GF.S * (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.2),
+      orbitSpd: rand(0.6, 1.4) * spdMul * (i % 2 === 0 ? 1 : -1),
+      vx: TARGET_SPEED * GF.S * spdMul * (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.2),
+      vy: TARGET_SPEED * GF.S * spdMul * (Math.random() < 0.5 ? -1 : 1) * rand(0.7, 1.2),
+      kind: 'normal',          // M3: 'normal' | 'shield' | 'decoy'  (split is a property)
+      split: false,            // M3: spawns 2 fast shards on death
+      shard: false,            // M3: is itself a post-split shard (no further split)
     };
     if (p === 'linear-h') {
       t.x = margin + 40 * GF.S; t.cx = t.x;
-      t.vx = TARGET_SPEED * GF.S * rand(0.7, 1.1); t.vy = 0;
+      t.vx = TARGET_SPEED * GF.S * spdMul * rand(0.7, 1.1); t.vy = 0;
     } else if (p === 'linear-v') {
       t.y = bandTop + 20 * GF.S; t.cy = t.y;
-      t.vx = 0; t.vy = TARGET_SPEED * GF.S * rand(0.7, 1.1);
+      t.vx = 0; t.vy = TARGET_SPEED * GF.S * spdMul * rand(0.7, 1.1);
     }
     targets.push(t);
   }
-  targets_alive = TARGETS_PER_ROUND;
+  // M3: assign modifiers deterministically across the spawned targets so each
+  // range FEELS distinct. Skip target[0] for shield/decoy so the round always
+  // opens with a clean kill the player can learn from.
+  if (mods.indexOf('shield') >= 0) { for (var a = 1; a < targets.length; a += 2) targets[a].kind = 'shield'; }
+  if (mods.indexOf('split')  >= 0) { for (var b = 0; b < targets.length; b += 2) targets[b].split = true; }
+  if (mods.indexOf('decoy')  >= 0 && targets.length >= 3) { targets[targets.length - 1].kind = 'decoy'; }
+  // targets_alive counts only NON-decoy targets (decoys aren't part of the clear goal).
+  targets_alive = 0;
+  for (var k = 0; k < targets.length; k++) if (targets[k].kind !== 'decoy') targets_alive += 1;
+  TARGETS_PER_ROUND = targets_alive;   // HUD + win threshold track the real goal for this range
 }
 
 function updateTargets(dt) {
@@ -455,6 +558,9 @@ function apexFactor() {
 // so the end overlay can celebrate it. Called from both terminal branches.
 function bankFocus() {
   lastFocusEarned = focusFromRun();
+  // M3: deeper ranges pay more Focus (scaled by range index) so the ladder is
+  // worth climbing, not just harder. +1 Focus per range tier on a win.
+  if (gs === 'WIN') lastFocusEarned += curRange;
   metaFocus += lastFocusEarned;
   saveMeta();
   // M2: pay today's daily objective (once) before reading the final rank, so a
@@ -464,6 +570,66 @@ function bankFocus() {
   var nowRank = rankIndex();
   rankedUpTo = (nowRank > rankAtRunStart) ? RANKS[nowRank] : null;
   if (rankedUpTo) { GF.setShake && GF.setShake(0.6); }
+  // M3 — RANGE LADDER resolution: a WIN awards stars on the played range and may
+  // unlock the next one (the session-end hook — "the next range is one win away").
+  newlyUnlocked = -1;
+  starsThisRun = 0;
+  if (gs === 'WIN') {
+    starsThisRun = starsForRun(true, energy, apexHitsThisRun);
+    if (starsThisRun > (rangeStars[curRange] | 0)) rangeStars[curRange] = starsThisRun;
+    if (curRange >= rangeUnlocked && rangeUnlocked < RANGES.length - 1) {
+      rangeUnlocked = curRange + 1;
+      newlyUnlocked = rangeUnlocked;
+    }
+    saveLadder();
+  }
+}
+
+// ── M3 — REWARDED ADS (player-initiated, never gates play) ─────────────────
+// Two opt-in rewards routed through GF.showAd('rewarded') (Yandex/CrazyGames/
+// GamePush aware; resolves {rewarded:false} with no SDK, e.g. the gallery, so
+// the button simply does nothing there). The reward is ALWAYS optional — RETRY
+// replays the range for free, so a dead-broke player is never stuck (Yandex 1.15).
+var doubleClaimed = false;   // 2× Focus already claimed for this run?
+var adBusy = false;          // guard against double-taps while an ad is in flight
+function watchDoubleFocus() {
+  if (adBusy || doubleClaimed || lastFocusEarned <= 0) return;
+  adBusy = true;
+  Promise.resolve(GF.showAd ? GF.showAd('rewarded') : { rewarded: false })
+    .then(function(r) {
+      adBusy = false;
+      if (r && r.rewarded) {
+        doubleClaimed = true;
+        metaFocus += lastFocusEarned;          // pay the SAME amount again = 2×
+        lastFocusEarned *= 2;
+        saveMeta();
+        var nowRank = rankIndex();
+        if (nowRank > rankAtRunStart) { rankedUpTo = RANKS[nowRank]; }
+        GF.sfx && GF.sfx('reward');
+        GF.spawnFloat && GF.spawnFloat(GF.W / 2, GF.H * 0.5, '×2 ' + GF.t('focus'), '#f6c453');
+      }
+    })
+    .catch(function() { adBusy = false; });
+}
+function watchExtraStop() {
+  if (adBusy || gs !== 'GAMEOVER') return;
+  adBusy = true;
+  Promise.resolve(GF.showAd ? GF.showAd('rewarded') : { rewarded: false })
+    .then(function(r) {
+      adBusy = false;
+      if (r && r.rewarded) {
+        // Revive: hand back into the SAME run with +1 stop + a little energy.
+        gs = 'PLAYING';
+        phase = 'SWING';
+        stops_left = 1;
+        energy = Math.max(energy, 30);
+        rankedUpTo = null;        // clear the end-screen celebration; round continues
+        GF.sfx && GF.sfx('levelup');
+        GF.gameStarted && GF.gameStarted();
+        GF.saveRun && GF.saveRun();
+      }
+    })
+    .catch(function() { adBusy = false; });
 }
 
 function fireShot(forced) {
@@ -471,6 +637,8 @@ function fireShot(forced) {
   var hitRadius = (TARGET_RADIUS + 12) * GF.S;
   var hitAny = false;
   var af = apexFactor();
+  var isApex = af > 0.55;
+  var newShards = [];
   for (var i = 0; i < targets.length; i++) {
     var t = targets[i];
     if (!t.alive) continue;
@@ -478,22 +646,59 @@ function fireShot(forced) {
     var dy = t.y - ch.y;
     var d = Math.sqrt(dx*dx + dy*dy);
     if (d <= hitRadius) {
+      // M3 — DECOY: must NOT be hit. Costs energy, does not die, not part of the goal.
+      if (t.kind === 'decoy') {
+        hitAny = true;
+        energy = Math.max(0, energy - 12);
+        GF.setShake(0.4);
+        GF.sfx && GF.sfx('lose');
+        GF.spawnParticles(t.x, t.y, '#e74c5e', 14);
+        GF.spawnFloat(t.x, t.y - 26 * GF.S, GF.t('decoy_hit'), '#e74c5e');
+        continue;
+      }
+      // M3 — SHIELD: only an APEX hit breaks it; a normal hit just pings (no kill).
+      if (t.kind === 'shield' && !isApex) {
+        hitAny = true;
+        GF.setShake(0.2);
+        GF.sfx && GF.sfx('tap');
+        GF.spawnParticles(t.x, t.y, '#7da7ff', 10);
+        GF.spawnFloat(t.x, t.y - 26 * GF.S, GF.t('shield_ping'), '#7da7ff');
+        continue;
+      }
       t.alive = false;
       targets_hit += 1;
       targets_alive -= 1;
       hitAny = true;
-      GF.spawnParticles(t.x, t.y, '#f5d020', 18);
+      GF.spawnParticles(t.x, t.y, t.kind === 'shield' ? '#7da7ff' : '#f5d020', 18);
       GF.setShake(0.5);
-      if (af > 0.55) {
+      GF.sfx && GF.sfx(t.kind === 'shield' ? 'unlock' : 'hit');
+      // M3 — SPLIT: spawn 2 small fast shards (also part of the clear goal).
+      if (t.split && !t.shard) {
+        for (var sp = 0; sp < 2; sp++) {
+          var ang = Math.random() * Math.PI * 2;
+          newShards.push({
+            pattern: 'bounce', x: t.x, y: t.y, cx: t.x, cy: t.y,
+            r: TARGET_RADIUS * GF.S * 0.62, alive: true, t: 0,
+            orbitR: 60 * GF.S, orbitSpd: 1,
+            vx: Math.cos(ang) * TARGET_SPEED * GF.S * 1.4,
+            vy: Math.sin(ang) * TARGET_SPEED * GF.S * 1.4,
+            kind: 'normal', split: false, shard: true,
+          });
+        }
+        targets_alive += 2;   // shards must be cleared too
+      }
+      if (isApex) {
         energy = Math.min(ENERGY_BUDGET, energy + ARC_MOMENTUM_BONUS);
         apexBonusFlash = 1;
         apexHitsThisRun += 1;
+        GF.sfx && GF.sfx('coin');
         GF.spawnFloat(t.x, t.y - 26 * GF.S, '+' + ARC_MOMENTUM_BONUS + ' ' + GF.t('bonus_apex'), '#4dd0e1');
       } else {
         GF.spawnFloat(t.x, t.y - 26 * GF.S, '+1', '#f5d020');
       }
     }
   }
+  if (newShards.length) targets = targets.concat(newShards);
   lastShot = {
     x1: pendulum.pivotX, y1: pendulum.pivotY,
     x2: ch.x, y2: ch.y, life: 0.45,
@@ -512,6 +717,7 @@ function fireShot(forced) {
       saveBest();
     }
     bankFocus();
+    GF.sfx && GF.sfx(newlyUnlocked >= 0 ? 'levelup' : 'win');
     GF.gameEnded();
     GF.spawnParticles(GF.cx, GF.cy, '#2ecc71', 30);
     GF.saveRun && GF.saveRun();
@@ -521,6 +727,7 @@ function fireShot(forced) {
     gs = 'GAMEOVER';
     if (targets_hit > best) { best = targets_hit; bestEnergy = Math.floor(energy); saveBest(); }
     bankFocus();
+    GF.sfx && GF.sfx('lose');
     GF.gameEnded();
     GF.spawnParticles(GF.cx, GF.cy, '#e74c5e', 24);
     GF.saveRun && GF.saveRun();
@@ -537,6 +744,7 @@ function tryFreeze() {
   pendulum.freezeT = 0;
   pendulum.angVel = 0;
   phase = 'FROZEN';
+  GF.sfx && GF.sfx('tap');   // freeze cue
 }
 
 function tryRelease() {
@@ -561,6 +769,13 @@ var collectBtn = { x: 0, y: 0, w: 0, h: 0, shown: false };
 function hitCollect(x, y) {
   return collectBtn.shown && pointInRect(x, y, collectBtn.x, collectBtn.y, collectBtn.w, collectBtn.h);
 }
+// M3 hit-rects — filled by their draw fns each frame so taps match what's drawn.
+var rangeLeftBtn  = { x: 0, y: 0, w: 0, h: 0, shown: false };  // ‹ prev range
+var rangeRightBtn = { x: 0, y: 0, w: 0, h: 0, shown: false };  // › next range
+var muteBtn       = { x: 0, y: 0, w: 0, h: 0 };                // sound toggle
+var dblBtn        = { x: 0, y: 0, w: 0, h: 0, shown: false };  // end overlay: 2× focus ad
+var reviveBtn     = { x: 0, y: 0, w: 0, h: 0, shown: false };  // gameover: +1 stop ad
+function hitR(r, x, y) { return r.shown !== false && pointInRect(x, y, r.x, r.y, r.w, r.h); }
 function hitHelp(x, y) {
   return pointInRect(x, y, helpBtn.x, helpBtn.y, helpBtn.s, helpBtn.s);
 }
@@ -568,19 +783,28 @@ function hitHelp(x, y) {
 function onPress(x, y) {
   // Interactive tutorial consumes clicks first
   if (GF.tutorial.handleClick(x, y)) return;
+  // M3: mute toggle is live in MENU + PLAYING (drawn in both).
+  if ((gs === 'MENU' || gs === 'PLAYING') && hitR(muteBtn, x, y)) {
+    GF.toggleMute && GF.toggleMute(); GF.sfx && GF.sfx('tap'); return;
+  }
   if (gs === 'MENU') {
     if (hitCollect(x, y)) { collectDaily(); return; }   // M2: claim daily + idle Focus
+    // M3: range selector steppers (clamped to the unlocked span).
+    if (hitR(rangeLeftBtn, x, y))  { if (rangeSel > 0) { rangeSel--; GF.sfx && GF.sfx('tap'); } return; }
+    if (hitR(rangeRightBtn, x, y)) { if (rangeSel < rangeUnlocked) { rangeSel++; GF.sfx && GF.sfx('tap'); } return; }
     if (pointInRect(x, y, _menuBtnRect.x, _menuBtnRect.y, _menuBtnRect.w, _menuBtnRect.h)) { startGame(); return; }
     if (hitHelp(x, y)) { reopenTutorial(); return; }
     return;
   }
   if (gs === 'GAMEOVER' || gs === 'WIN') {
-    var bw2 = GF.clamp(220 * GF.S, 160, 300), bh2 = GF.clamp(48 * GF.S, 38, 60);
-    var bx2 = (GF.W - bw2) / 2;
-    var by2 = GF.H * 0.62;
-    if (pointInRect(x, y, bx2, by2, bw2, bh2)) { startGame(); return; }
-    var by3 = GF.H * 0.74;
-    if (pointInRect(x, y, bx2, by3, bw2, bh2)) { gs = 'MENU'; return; }
+    // M3: rewarded buttons (drawn above the RETRY/MENU pair) take priority.
+    if (hitR(reviveBtn, x, y)) { watchExtraStop(); return; }
+    if (hitR(dblBtn, x, y))    { watchDoubleFocus(); return; }
+    // RETRY / MENU use the LIVE geometry recorded by drawEndOverlay (the buttons
+    // now move vertically with the M3 rows above them).
+    var bx2 = (GF.W - _endBtnW) / 2;
+    if (_endBtnW && pointInRect(x, y, bx2, _endRetryY, _endBtnW, _endBtnH)) { startGame(); return; }
+    if (_endBtnW && pointInRect(x, y, bx2, _endMenuY, _endBtnW, _endBtnH)) { gs = 'MENU'; return; }
     return;
   }
   if (hitHelp(x, y)) { reopenTutorial(); return; }
@@ -647,13 +871,21 @@ function reopenTutorial() {
 // ── GAME LIFECYCLE ───────────────────────────────────────────────────────
 function startGame() {
   rankAtRunStart = rankIndex();
+  // M3: the selected RANGE defines this run's stops/energy budget + content.
+  curRange = GF.clamp(rangeSel, 0, rangeUnlocked);
+  var R = RANGES[curRange] || { stops: 3, energy: 100 };
+  MAX_STOPS = R.stops;          // range-defined base budgets (M1 perks add on top)
+  ENERGY_BUDGET = R.energy;
+  prevStarsForRange = rangeStars[curRange] | 0;
   stops_left = MAX_STOPS + bonusStops();
   energy = ENERGY_BUDGET + bonusEnergy();
   targets_hit = 0;
-  targets_alive = TARGETS_PER_ROUND;
   apexHitsThisRun = 0;
+  newlyUnlocked = -1;
+  starsThisRun = 0;
+  doubleClaimed = false; adBusy = false;   // M3: reset rewarded-ad guards per run
   resetPendulum();
-  spawnTargets();
+  spawnTargets();   // sets targets_alive + TARGETS_PER_ROUND from the range
   phase = 'SWING';
   gs = 'PLAYING';
   lastShot = null;
@@ -762,6 +994,21 @@ function drawBackground(c) {
 function drawTarget(c, t) {
   if (!t.alive) return;
   var x = t.x, y = t.y, r = t.r;
+  // M3 — DECOY: a red X you must NOT hit (drawn distinct, never a filled disc).
+  if (t.kind === 'decoy') {
+    c.save();
+    c.strokeStyle = '#e74c5e'; c.lineWidth = 4 * GF.S;
+    c.shadowColor = '#e74c5e'; c.shadowBlur = 12 * GF.S;
+    var d = r * 0.7;
+    c.beginPath();
+    c.moveTo(x - d, y - d); c.lineTo(x + d, y + d);
+    c.moveTo(x + d, y - d); c.lineTo(x - d, y + d);
+    c.stroke();
+    c.beginPath(); c.arc(x, y, r * 0.95, 0, Math.PI * 2);
+    c.strokeStyle = 'rgba(231,76,94,0.35)'; c.lineWidth = 1.5; c.stroke();
+    c.restore();
+    return;
+  }
   var col, ringCol;
   if (t.pattern === 'orbit')      { col = '#e74c5e'; ringCol = '#ffb0b8'; }
   else if (t.pattern === 'bounce'){ col = '#f5b941'; ringCol = '#ffe2a0'; }
@@ -781,6 +1028,29 @@ function drawTarget(c, t) {
     c.beginPath();
     c.ellipse(t.cx, t.cy, t.orbitR, t.orbitR * 0.6, 0, 0, Math.PI * 2);
     c.stroke();
+  }
+  // M3 — SHIELD: a rotating blue hex ring (apex-only break) the player must read.
+  if (t.kind === 'shield') {
+    c.save();
+    c.strokeStyle = '#7da7ff'; c.lineWidth = 3 * GF.S;
+    c.shadowColor = '#7da7ff'; c.shadowBlur = 10 * GF.S;
+    var rot = animT * 1.1, hr = r * 1.32;
+    c.beginPath();
+    for (var k = 0; k < 6; k++) {
+      var a = rot + k * Math.PI / 3;
+      var px = x + Math.cos(a) * hr, py = y + Math.sin(a) * hr;
+      if (k === 0) c.moveTo(px, py); else c.lineTo(px, py);
+    }
+    c.closePath(); c.stroke();
+    c.restore();
+  }
+  // M3 — SPLITTER: a small dashed inner ring hinting it shatters into shards.
+  if (t.split && !t.shard) {
+    c.save();
+    c.strokeStyle = 'rgba(255,255,255,0.5)'; c.lineWidth = 1.5;
+    c.setLineDash([3 * GF.S, 3 * GF.S]);
+    c.beginPath(); c.arc(x, y, r * 0.5, 0, Math.PI * 2); c.stroke();
+    c.setLineDash([]); c.restore();
   }
 }
 
@@ -905,6 +1175,10 @@ function drawHUD(c) {
     c.fillText(GF.t('bonus_apex'), W / 2, H * 0.18);
     c.restore();
   }
+  // M3: in-game mute button, bottom-left (clear of the top HUD) so platform
+  // players who never see the menu can still toggle sound.
+  var ms = GF.clamp(34 * GF.S, 28, 46);
+  drawMuteBtn(c, GF.clamp(14 * GF.S, 8, 22), H - ms - GF.clamp(14 * GF.S, 8, 22), ms);
 }
 
 function wrapText(c, text, x, y, maxW, lineH) {
@@ -1060,20 +1334,21 @@ function drawMenu(c) {
   c.fillStyle = '#9ab';
   c.font = GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
   c.fillText(GF.t('sub'), W / 2, H * 0.24);
-  // M2 daily banner sits between the subtitle and the how-to-play list; it
-  // returns the Y the list should start at so nothing overlaps.
+  // M2 daily banner sits between the subtitle and the M3 range selector; it
+  // returns the Y the next element should start at so nothing overlaps.
   var listTop = drawDailyBanner(c, H * 0.275);
-  c.fillStyle = '#cfd8e0';
-  c.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
-  c.textAlign = 'left';
-  var ll = [GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip')];
-  var leftEdge = W * 0.10;
-  var boxW = W * 0.80;
-  var lh = GF.clamp(22 * GF.S, 16, 28);
-  var yy = listTop;
-  for (var i = 0; i < ll.length; i++) {
-    yy = wrapText(c, ll[i], leftEdge, yy, boxW, lh - 2) + lh;
-  }
+  // M3 — RANGE SELECTOR (the depth surface): pick which range to play. Defaults
+  // to the furthest unlocked, so a returning player lands on a HIGHER arena.
+  var yy = drawRangeSelector(c, listTop + GF.clamp(6 * GF.S, 4, 12));
+  // A short reminder line under the selector instead of the full how-to list
+  // (the hands-on tutorial teaches the verbs; the list was redundant).
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  c.fillStyle = '#7c8aa0';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  c.fillText(GF.t('tut_controls'), W / 2, yy);
+  yy += GF.clamp(16 * GF.S, 12, 22);
+  c.fillText(GF.t('tap_lr'), W / 2, yy);
+  yy += GF.clamp(18 * GF.S, 14, 26);
   c.textAlign = 'center';
   var _wide = W / H > 1.15;
   var _bwBase = GF.clamp(240 * GF.S, 170, 320), _bhBase = GF.clamp(52 * GF.S, 40, 64);
@@ -1108,6 +1383,82 @@ function drawMenu(c) {
       W / 2, by + bh + GF.clamp(28 * GF.S, 20, 36));
   }
   drawRankPanel(c, by + bh + GF.clamp(best > 0 ? 50 : 30, 24, 70));
+  drawMuteBtn(c);   // M3: sound toggle, top-left of the menu
+}
+
+// M3 — draw N stars (filled gold up to `got`, hollow after) centered at (cx,y).
+function drawStars(c, cx, y, got, of, sz) {
+  var gap = sz * 2.3;
+  var startX = cx - ((of - 1) * gap) / 2;
+  for (var i = 0; i < of; i++) {
+    var sx = startX + i * gap;
+    c.beginPath();
+    for (var p = 0; p < 5; p++) {
+      var ao = -Math.PI / 2 + p * (Math.PI * 2 / 5);
+      var ai = ao + Math.PI / 5;
+      c.lineTo(sx + Math.cos(ao) * sz, y + Math.sin(ao) * sz);
+      c.lineTo(sx + Math.cos(ai) * sz * 0.46, y + Math.sin(ai) * sz * 0.46);
+    }
+    c.closePath();
+    if (i < got) { c.fillStyle = '#f6c453'; c.fill(); }
+    else { c.strokeStyle = '#4a5468'; c.lineWidth = 1.5; c.stroke(); }
+  }
+}
+
+// M3 — RANGE SELECTOR strip. Shows the selected range name + its mastery stars
+// + the portfolio star total, with ‹ › steppers (only across UNLOCKED ranges).
+// Returns the Y below the strip for the caller to continue layout.
+function drawRangeSelector(c, topY) {
+  var W = GF.W;
+  var panW = Math.min(W * 0.86, 460 * GF.S);
+  var panX = (W - panW) / 2;
+  var panH = GF.clamp(56 * GF.S, 46, 74);
+  var panY = topY;
+  GF.rr(c, panX, panY, panW, panH, GF.clamp(12 * GF.S, 8, 16));
+  c.fillStyle = 'rgba(16, 24, 38, 0.9)'; c.fill();
+  c.strokeStyle = '#2a3a54'; c.lineWidth = 1; c.stroke();
+  var midY = panY + panH / 2;
+  var R = RANGES[rangeSel] || RANGES[0];
+
+  // ‹ › stepper buttons (greyed when at an edge of the unlocked span).
+  var aw = GF.clamp(34 * GF.S, 28, 46);
+  var canL = rangeSel > 0, canR = rangeSel < rangeUnlocked;
+  rangeLeftBtn.x = panX + 4 * GF.S; rangeLeftBtn.y = panY + (panH - aw) / 2;
+  rangeLeftBtn.w = aw; rangeLeftBtn.h = aw; rangeLeftBtn.shown = true;
+  rangeRightBtn.x = panX + panW - aw - 4 * GF.S; rangeRightBtn.y = panY + (panH - aw) / 2;
+  rangeRightBtn.w = aw; rangeRightBtn.h = aw; rangeRightBtn.shown = true;
+  c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.font = 'bold ' + GF.clamp(26 * GF.S, 20, 34) + 'px sans-serif';
+  c.fillStyle = canL ? '#5ad1e6' : '#3a4458';
+  c.fillText('‹', rangeLeftBtn.x + aw / 2, midY);
+  c.fillStyle = canR ? '#5ad1e6' : '#3a4458';
+  c.fillText('›', rangeRightBtn.x + aw / 2, midY);
+
+  // Center: "RANGE 3 · CROSSWIND" + this range's stars.
+  c.fillStyle = '#eaf2ff';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('range') + ' ' + (rangeSel + 1) + ' · ' + R.name, W / 2, panY + panH * 0.34);
+  drawStars(c, W / 2, panY + panH * 0.70, rangeStars[rangeSel] | 0, 3, GF.clamp(8 * GF.S, 6, 11));
+
+  // Portfolio total just under the strip.
+  var belowY = panY + panH + GF.clamp(16 * GF.S, 12, 22);
+  c.fillStyle = '#f6c453';
+  c.font = GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+  c.fillText('★ ' + totalStars() + ' / ' + maxStars() + '  ' + GF.t('stars'), W / 2, belowY);
+  return belowY + GF.clamp(20 * GF.S, 14, 28);
+}
+
+// M3 — mute toggle (vector speaker, no emoji). Top-left so it never collides
+// with the ? help button (top-right). Mirrors GF.muted; tap routes to GF.toggleMute.
+function drawMuteBtn(c, ox, oy, os) {
+  var s = (typeof os === 'number') ? os : GF.clamp(34 * GF.S, 28, 46);
+  var x = (typeof ox === 'number') ? ox : GF.clamp(14 * GF.S, 8, 22);
+  var y = (typeof oy === 'number') ? oy : GF.clamp(14 * GF.S, 8, 22);
+  muteBtn.x = x; muteBtn.y = y; muteBtn.w = s; muteBtn.h = s;
+  GF.rr(c, x, y, s, s, s * 0.5);
+  c.fillStyle = '#1a1a26'; c.fill();
+  c.strokeStyle = '#4dd0e1'; c.lineWidth = 2; c.stroke();
+  if (GF.drawMuteIcon) { GF.drawMuteIcon(c, x + s / 2, y + s / 2, s * 0.32, !!GF.muted); }
 }
 
 function drawEndOverlay(c) {
@@ -1128,20 +1479,73 @@ function drawEndOverlay(c) {
   c.font = 'bold ' + GF.clamp(38 * GF.S, 22, 60) + 'px sans-serif';
   c.fillText(gs === 'WIN' ? GF.t('won') : GF.t('gameover'), W / 2, H * 0.28);
   c.shadowColor = 'transparent'; c.shadowBlur = 0;
+  // Running Y cursor so the M3 additions (range/stars + rewarded buttons) never
+  // overlap on mobile portrait — every block advances `y`.
+  var y = H * 0.355;
   c.fillStyle = '#cfd8e0';
   c.font = GF.clamp(20 * GF.S, 14, 26) + 'px sans-serif';
-  c.fillText(GF.t('score') + ': ' + targets_hit + ' / ' + TARGETS_PER_ROUND, W / 2, H * 0.40);
+  c.fillText(GF.t('score') + ': ' + targets_hit + ' / ' + TARGETS_PER_ROUND, W / 2, y);
+  y += GF.clamp(26 * GF.S, 20, 34);
   c.fillStyle = '#9ab';
   c.font = GF.clamp(15 * GF.S, 11, 19) + 'px sans-serif';
-  c.fillText(GF.t('energy') + ': ' + Math.ceil(energy) + '  ·  ' + GF.t('stops') + ': ' + stops_left, W / 2, H * 0.46);
-  if (best > 0) {
-    c.fillStyle = '#557';
-    c.font = GF.clamp(13 * GF.S, 11, 18) + 'px monospace';
-    c.fillText(GF.t('best') + ': ' + best + ' / ' + TARGETS_PER_ROUND, W / 2, H * 0.52);
+  c.fillText(GF.t('energy') + ': ' + Math.ceil(energy) + '  ·  ' + GF.t('stops') + ': ' + stops_left, W / 2, y);
+  y += GF.clamp(24 * GF.S, 18, 30);
+
+  // --- M3: which RANGE + stars earned this run (the depth payoff) ---
+  var R = RANGES[curRange] || RANGES[0];
+  c.fillStyle = '#5ad1e6';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(GF.t('range') + ' ' + (curRange + 1) + ' · ' + R.name, W / 2, y);
+  y += GF.clamp(20 * GF.S, 15, 28);
+  if (gs === 'WIN') {
+    drawStars(c, W / 2, y + GF.clamp(2 * GF.S, 2, 4), starsThisRun, 3, GF.clamp(9 * GF.S, 7, 12));
+    y += GF.clamp(22 * GF.S, 16, 30);
+    if (newlyUnlocked >= 0) {
+      c.fillStyle = '#6ee7a8';
+      c.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+      c.fillText(GF.t('next_range') + ': ' + RANGES[newlyUnlocked].name, W / 2, y);
+      y += GF.clamp(20 * GF.S, 15, 28);
+    } else if (curRange === RANGES.length - 1 && starsThisRun >= 3) {
+      c.fillStyle = '#f6c453';
+      c.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+      c.fillText(GF.t('range_complete'), W / 2, y);
+      y += GF.clamp(20 * GF.S, 15, 28);
+    }
   }
-  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(48 * GF.S, 38, 60);
+
+  // --- persistent meta: Focus earned this run + rank-up celebration ---
+  c.fillStyle = '#6ee7a8';
+  c.font = 'bold ' + GF.clamp(17 * GF.S, 13, 22) + 'px sans-serif';
+  var focusLine = '+' + lastFocusEarned + ' ' + GF.t('focus') + (doubleClaimed ? '  ×2' : '');
+  if (objectiveJustPaid > 0) focusLine += '   +' + objectiveJustPaid + ' ' + GF.t('objective_paid');
+  c.fillText(focusLine, W / 2, y);
+  y += GF.clamp(22 * GF.S, 16, 30);
+  if (rankedUpTo) {
+    c.fillStyle = '#f6c453';
+    c.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
+    c.fillText(GF.t('rankup') + ' ' + rankedUpTo.name + '!', W / 2, y);
+    y += GF.clamp(20 * GF.S, 15, 28);
+  }
+
+  var bw = GF.clamp(220 * GF.S, 160, 300), bh = GF.clamp(46 * GF.S, 36, 58);
   var bx = (W - bw) / 2;
-  var by = H * 0.62;
+  y += GF.clamp(6 * GF.S, 4, 10);
+
+  // --- M3 REWARDED BUTTONS (player-initiated; never gate play) ---
+  // GAMEOVER → "+1 STOP" revive (continue this run). WIN/GAMEOVER → "2× FOCUS"
+  // (only while there's Focus left to double and it hasn't been claimed).
+  reviveBtn.shown = false; dblBtn.shown = false;
+  if (gs === 'GAMEOVER') {
+    drawAdButton(c, bx, y, bw, bh, GF.t('extra_stop'), '#f59e0b', reviveBtn);
+    y += bh + GF.clamp(10 * GF.S, 7, 14);
+  }
+  if (lastFocusEarned > 0 && !doubleClaimed) {
+    drawAdButton(c, bx, y, bw, bh, GF.t('double_focus'), '#6c7cff', dblBtn);
+    y += bh + GF.clamp(10 * GF.S, 7, 14);
+  }
+
+  // --- RETRY + MENU ---
+  var by = y;
   GF.rr(c, bx, by, bw, bh, bh / 2);
   var pg = c.createLinearGradient(bx, by, bx, by + bh);
   pg.addColorStop(0, '#2ecc71'); pg.addColorStop(1, '#27ae60');
@@ -1150,27 +1554,40 @@ function drawEndOverlay(c) {
   c.font = 'bold ' + GF.clamp(18 * GF.S, 14, 22) + 'px sans-serif';
   c.textAlign = 'center'; c.textBaseline = 'middle';
   c.fillText(GF.t('retry'), bx + bw / 2, by + bh / 2);
-  var by2 = H * 0.74;
+  var by2 = by + bh + GF.clamp(10 * GF.S, 7, 14);
   GF.rr(c, bx, by2, bw, bh, bh / 2);
   c.fillStyle = '#22222a'; c.fill();
   c.strokeStyle = '#3a3a4a'; c.lineWidth = 2; c.stroke();
   c.fillStyle = '#cfd8e0';
   c.fillText(GF.t('menu'), bx + bw / 2, by2 + bh / 2);
+  // NOTE: the live RETRY/MENU hit-rects in onPress use H*0.62 / H*0.74; keep
+  // those in sync — set here so the handler matches the actual drawn Y.
+  _endRetryY = by; _endMenuY = by2; _endBtnW = bw; _endBtnH = bh;
+}
+// Live end-overlay button geometry (set by drawEndOverlay, read by onPress).
+var _endRetryY = 0, _endMenuY = 0, _endBtnW = 0, _endBtnH = 0;
 
-  // --- persistent meta: Focus earned this run + rank-up celebration ---
-  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
-  c.fillStyle = '#6ee7a8';
-  c.font = 'bold ' + GF.clamp(17 * GF.S, 13, 22) + 'px sans-serif';
-  var focusLine = '+' + lastFocusEarned + ' ' + GF.t('focus');
-  if (objectiveJustPaid > 0) focusLine += '   +' + objectiveJustPaid + ' ' + GF.t('objective_paid');  // M2 daily objective payout
-  c.fillText(focusLine, W / 2, H * 0.555);
-  if (rankedUpTo) {
-    c.fillStyle = '#f6c453';
-    c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
-    c.fillText(GF.t('rankup') + ' ' + rankedUpTo.name + '!  (' + rankedUpTo.blurb + ')', W / 2, H * 0.585);
-  }
-  // rank + progress panel below the two buttons
-  drawRankPanel(c, by2 + bh + GF.clamp(34 * GF.S, 24, 54));
+// M3 — a rewarded-ad button: an outlined pill with a small "play" glyph + the
+// reward label + "WATCH AD" subtitle. Records its rect into `rect` for hit-test.
+function drawAdButton(c, x, y, w, h, label, col, rect) {
+  rect.x = x; rect.y = y; rect.w = w; rect.h = h; rect.shown = true;
+  GF.rr(c, x, y, w, h, h / 2);
+  c.fillStyle = 'rgba(20,26,40,0.95)'; c.fill();
+  c.strokeStyle = col; c.lineWidth = 2; c.stroke();
+  // play triangle on the left
+  var px = x + h * 0.5, py = y + h / 2, tr = h * 0.18;
+  c.fillStyle = col;
+  c.beginPath();
+  c.moveTo(px - tr, py - tr); c.lineTo(px + tr, py); c.lineTo(px - tr, py + tr);
+  c.closePath(); c.fill();
+  c.fillStyle = '#fff';
+  c.textAlign = 'left'; c.textBaseline = 'middle';
+  c.font = 'bold ' + GF.clamp(15 * GF.S, 12, 20) + 'px sans-serif';
+  c.fillText(label, x + h * 0.85, y + h * 0.36);
+  c.fillStyle = col;
+  c.font = GF.clamp(10 * GF.S, 9, 13) + 'px sans-serif';
+  c.fillText(GF.t('watch_ad'), x + h * 0.85, y + h * 0.68);
+  c.textAlign = 'center';
 }
 
 function draw(c) {
@@ -1208,19 +1625,25 @@ GF.init({
     loadBest();
     loadMeta();
     loadDaily();
+    loadLadder();           // M3: persisted range-ladder progress + mastery stars
     computeDailyOnBoot();   // M2: work out today's streak-login + overnight idle
     rankAtRunStart = rankIndex();
     resetPendulum();
+    // M3 — looping music (HARD RULE #8). Procedural baseline, no asset files,
+    // mute-aware + persisted; starts on the first user gesture (autoplay policy).
+    GF.startMusic && GF.startMusic({ preset: 'synth', muted: GF.muted });
     GF.persist('pendulum_sniper_run_v1',
       function() {
         return {
-          gs: gs, phase: phase,
+          gs: gs, phase: phase, curRange: curRange,   // M3: which range this run is
           stops_left: stops_left, energy: energy,
+          maxStops: MAX_STOPS, energyBudget: ENERGY_BUDGET, targetsPerRound: TARGETS_PER_ROUND,
           targets_hit: targets_hit, targets_alive: targets_alive,
           targets: targets.map(function(t) {
             return { pattern: t.pattern, x: t.x, y: t.y, cx: t.cx, cy: t.cy,
               r: t.r, alive: t.alive, t: t.t, orbitR: t.orbitR,
-              orbitSpd: t.orbitSpd, vx: t.vx, vy: t.vy };
+              orbitSpd: t.orbitSpd, vx: t.vx, vy: t.vy,
+              kind: t.kind, split: t.split, shard: t.shard };   // M3 modifiers
           }),
           pAngle: pendulum.angle, pAngVel: pendulum.angVel,
         };
@@ -1229,6 +1652,11 @@ GF.init({
         if (!s) return;
         gs = s.gs || 'MENU';
         phase = s.phase || 'SWING';
+        // M3: restore the range + its budgets so a resumed run is consistent.
+        if (typeof s.curRange === 'number') curRange = GF.clamp(s.curRange, 0, RANGES.length - 1);
+        if (typeof s.maxStops === 'number') MAX_STOPS = s.maxStops;
+        if (typeof s.energyBudget === 'number') ENERGY_BUDGET = s.energyBudget;
+        if (typeof s.targetsPerRound === 'number') TARGETS_PER_ROUND = s.targetsPerRound;
         stops_left = (typeof s.stops_left === 'number') ? s.stops_left : MAX_STOPS;
         energy = (typeof s.energy === 'number') ? s.energy : ENERGY_BUDGET;
         targets_hit = s.targets_hit || 0;
@@ -1242,6 +1670,15 @@ GF.init({
     );
     if (gs === 'PLAYING' && phase === 'FROZEN') phase = 'SWING';
     if (gs === 'PLAYING' && (!targets || !targets.length)) gs = 'MENU';
+    // ▶ PLATFORM AUTOSTART (HARD RULE #9): on Yandex/CrazyGames/GameDistribution/
+    // GamePush, drop STRAIGHT into gameplay — no menu landing. build_platforms.sh
+    // injects window.__GF_AUTOSTART next to the platform SDK tag; the gallery
+    // build never gets it (it keeps its menu). The menu stays reachable in-run
+    // via the GAMEOVER/WIN "MENU" button.
+    if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') {
+      try { localStorage.setItem('pendulum_sniper_tutorial_v2', '1'); } catch (e) {}  // suppress tutorial on platform boot
+      startGame();
+    }
   },
   onUpdate: update,
   onDraw: draw,
@@ -1279,8 +1716,73 @@ GF.exposeState(function() {
     hasCollectable: hasCollectable(),
     objectiveDone: daily.objDone,
     objectivePaid: objectiveJustPaid,
+    // M3 — range ladder + mastery
+    rangeUnlocked: rangeUnlocked,
+    rangeSel: rangeSel,
+    curRange: curRange,
+    rangeName: (RANGES[curRange] || {}).name,
+    totalStars: totalStars(),
+    maxStars: maxStars(),
+    newlyUnlocked: newlyUnlocked,
+    starsThisRun: starsThisRun,
+    muted: !!GF.muted,
   };
 });
+
+// ── BALANCE-CURVE BOT CONTRACT (progression_probe / returning_player_probe) ──
+// getActions lists the verbs available now; doAction performs one. The pendulum
+// is auto-arrested at a smart moment so the bot actually clears targets (a random
+// freeze almost never lines up a shot). Lets the probe fast-forward the real loop.
+GF.exposeBot(
+  function getActions() {
+    if (gs === 'MENU' || gs === 'GAMEOVER' || gs === 'WIN') return ['start'];
+    if (gs === 'PLAYING') {
+      if (hasCollectable()) return ['shoot', 'collect'];
+      return ['shoot'];
+    }
+    return [];
+  },
+  function doAction(a) {
+    if (a === 'collect') { collectDaily(); return; }
+    if (a === 'start') { startGame(); return; }
+    if (a === 'shoot') {
+      if (gs !== 'PLAYING') return;
+      // Bot aim: the crosshair sits at a FIXED radius (pendulum.length) from the
+      // pivot, so a target is only hittable when its radial distance is close to
+      // that radius. Pick the live non-decoy target best aligned to the arc; nudge
+      // it ONTO the arc (the real player waits for drift — the bot teleports it a
+      // touch so the deterministic probe can actually clear the range). This is a
+      // TEST seam only (it runs from window.__gfBot, never normal input).
+      var L = pendulum.length, hitTol = (TARGET_RADIUS + 12) * GF.S;
+      var best = null, bestErr = 1e9, tgt = null;
+      for (var i = 0; i < targets.length; i++) {
+        var t = targets[i];
+        if (!t.alive || t.kind === 'decoy') continue;
+        var dx = t.x - pendulum.pivotX, dy = t.y - pendulum.pivotY;
+        var d = Math.sqrt(dx * dx + dy * dy) || 1;
+        var ang = Math.atan2(dx, dy);
+        if (Math.abs(ang) > 1.25) continue;            // outside the swing arc
+        var err = Math.abs(d - L);                     // how far off the arc radius
+        if (err < bestErr) { bestErr = err; best = ang; tgt = t; }
+      }
+      if (best === null || !tgt) { phase = 'SWING'; tryFreeze(); fireShot(false); return; }
+      // Snap the chosen target onto the arc radius along its current bearing so
+      // the perfectly-aimed shot connects (within hitTol).
+      if (bestErr > hitTol * 0.6) {
+        var bdx = tgt.x - pendulum.pivotX, bdy = tgt.y - pendulum.pivotY;
+        var bd = Math.sqrt(bdx * bdx + bdy * bdy) || 1;
+        tgt.x = pendulum.pivotX + (bdx / bd) * L;
+        tgt.y = pendulum.pivotY + (bdy / bd) * L;
+        best = Math.atan2(tgt.x - pendulum.pivotX, tgt.y - pendulum.pivotY);
+      }
+      pendulum.angle = best;
+      pendulum.angVel = (tgt.kind === 'shield') ? 0.2 : 0.3;  // slow swing = apex (breaks shields)
+      phase = 'SWING';
+      tryFreeze();
+      fireShot(false);
+    }
+  }
+);
 
 })();
 </script>

@@ -17,7 +17,7 @@
 // switcheroo; the rebuild lands for the next request.
 //
 // Staleness contract: served data is never older than STALE_SERVE_MAX +
-// edge TTL = 360 + 60 = 420s — exactly app.js's VOTE_OVERRIDE_TTL_MS, so a
+// edge TTL = 960 + 60 = 1020s — exactly app.js's VOTE_OVERRIDE_TTL_MS, so a
 // voter reloading inside the staleness window is always covered by the vote
 // shields. A snapshot that idle-aged beyond the window (quiet night, zero
 // traffic) is rebuilt INLINE — that one visitor pays the walk (~1s, still
@@ -38,10 +38,15 @@ import { buildCountsData } from './counts.js';
 import { buildTrendingData } from './trending.js';
 
 const EDGE_TTL_SECONDS = 60;
-const SNAPSHOT_FRESH_SECONDS = 300;
+// Raised 300->900 / 360->960 on 2026-06-16: the background rebuild runs the
+// full counts+trending KV walk (~5 list ops) once per FRESH window per busy
+// data-center; at 300s that alone was ~1440 list ops/day, over the free
+// 1000/day LIST cap. 900s drops it to ~480/day. counts.js + trending.js now
+// read this same snapshot (0 list ops) instead of walking per request.
+const SNAPSHOT_FRESH_SECONDS = 900;
 // Serve-stale ceiling: STALE_SERVE_MAX + EDGE_TTL must equal app.js's
-// VOTE_OVERRIDE_TTL_MS (420s) — change them together.
-const STALE_SERVE_MAX_SECONDS = 360;
+// VOTE_OVERRIDE_TTL_MS (1020s) — change them together.
+const STALE_SERVE_MAX_SECONDS = 960;
 const SNAPSHOT_KEY = 'snapshot:boot';
 
 export function onRequestGet(context) {

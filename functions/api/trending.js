@@ -22,22 +22,37 @@
 import { edgeCached } from '../_lib/edgecache.js';
 
 const CACHE_TTL_SECONDS = 120;
+const SNAPSHOT_KEY = 'snapshot:boot';
+// Gate at boot.js SNAPSHOT_FRESH_SECONDS (900) — see counts.js. Trending carries
+// NO vote data (no likes/dislikes), so it isn't bound by the vote shield; the
+// 900s gate just keeps the hero ranking reasonably fresh.
+const SNAPSHOT_MAX_AGE_SECONDS = 900;
 
 export function onRequestGet({ env }) {
   return edgeCached('/api-trending', {}, () => buildTrending(env));
 }
 
 async function buildTrending(env) {
-  const data = await buildTrendingData(env);
-  return new Response(
-    JSON.stringify(data),
-    {
-      headers: {
-        'content-type': 'application/json',
-        'cache-control': `public, max-age=30, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=60`,
-      },
+  // Prefer boot's shared snapshot (1 read, ZERO list ops) — same rationale as
+  // counts.js. boot keeps snapshot:boot.trending fresh; fall back to the live
+  // daily:+comment: walk only when it's missing or staler than boot serves.
+  try {
+    const snap = await env.VOTES.get(SNAPSHOT_KEY, 'json');
+    if (snap && Number.isFinite(snap.ts) && snap.trending && typeof snap.trending === 'object'
+        && (Date.now() - snap.ts) / 1000 < SNAPSHOT_MAX_AGE_SECONDS) {
+      return trendingResponse(snap.trending);
     }
-  );
+  } catch (e) { /* fall through to the live walk */ }
+  return trendingResponse(await buildTrendingData(env));
+}
+
+function trendingResponse(data) {
+  return new Response(JSON.stringify(data), {
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': `public, max-age=30, s-maxage=${CACHE_TTL_SECONDS}, stale-while-revalidate=60`,
+    },
+  });
 }
 
 // Data-only builder, shared with /api/boot (the homepage's single

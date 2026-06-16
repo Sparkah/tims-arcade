@@ -71,6 +71,15 @@ var STRINGS = {
     gift_lure: 'Play gift: free lures', gift_charm: 'Rare charm: next catch is rare+',
     gift_perk: 'Sanctuary token: echoes + lures', charm_active: 'Rare charm ready',
     nightly_rare: 'Nightly rare incoming',
+    // ── Nightly Commission + Roost Patron (M2 reason-to-return) ──
+    commission: 'Tonight\'s Commission', commission_short: 'Commission',
+    patron_circling: 'A Patron circles the cave', patron_roosted: 'Patron roosted!',
+    patron_joins: 'joins the cave song', new_patron: 'New Patron tonight',
+    q_catch: 'Net {n} bats', q_pulse: 'Send {n} echo pulses',
+    q_lane: 'Net {n} {fam}', q_rare: 'Net {n} rare bats', q_target: 'Reach the night target',
+    commission_done: 'Commission complete!', commission_claim: 'Roost the Patron',
+    streak_bonus: 'Streak head start', patrons: 'Patrons', patron: 'Patron',
+    of: 'of', tap_patron: 'Tap the glowing Patron to net it',
   },
   ru: {
     title: 'Логово',
@@ -115,6 +124,15 @@ var STRINGS = {
     gift_lure: 'Дар игры: бесплатные приманки', gift_charm: 'Талисман: следующий улов редкий+',
     gift_perk: 'Жетон святилища: эхо и приманки', charm_active: 'Талисман готов',
     nightly_rare: 'Редкий этой ночью',
+    // ── Nightly Commission + Roost Patron (M2 reason-to-return) ──
+    commission: 'Заказ этой ночи', commission_short: 'Заказ',
+    patron_circling: 'Покровитель кружит в пещере', patron_roosted: 'Покровитель поселился!',
+    patron_joins: 'входит в песню пещеры', new_patron: 'Новый Покровитель',
+    q_catch: 'Поймай {n} мышей', q_pulse: 'Пошли {n} эхо',
+    q_lane: 'Поймай {n} {fam}', q_rare: 'Поймай {n} редких', q_target: 'Достигни цели ночи',
+    commission_done: 'Заказ выполнен!', commission_claim: 'Поселить Покровителя',
+    streak_bonus: 'Фора за серию', patrons: 'Покровители', patron: 'Покровитель',
+    of: 'из', tap_patron: 'Коснись сияющего Покровителя, чтобы поймать',
   },
 };
 
@@ -223,6 +241,18 @@ var meta = {
   // ── family set-bonus bookkeeping (effects derive from dex; this only gates the
   //    one-time "Family complete!" toast so it never re-fires on reload) ──
   famSeen: {},        // famId -> 1 once its completion toast has shown
+  // ── NIGHTLY COMMISSION + ROOST PATRON (M2 reason-to-return) ──
+  // A 3-task commission re-rolls each calendar day (seeded from seed^dayIndex).
+  // Completing it ROOSTS the night's PATRON: a permanent glowing resident in the
+  // Sanctuary whose extra shimmer voice joins the cave song (tomorrow sounds
+  // richer). Streak pre-fills task progress (momentum transfer) + lifts patron rarity.
+  commDay: -1,        // dayIndex the current commission was rolled for
+  commTasks: [],      // [{type, need, prog, fam?}] the 3 daily tasks
+  commDone: 0,        // 1 once all tasks are met AND the patron has been roosted
+  commClaimable: 0,   // 1 when all tasks met but the patron isn't roosted yet
+  patrons: {},        // speciesId -> 1 for every patron permanently roosted (the new hall residents)
+  patronToday: '',    // speciesId of tonight's commissioned patron (the circling bat)
+  patronSeen: {},     // dayIndex -> 1 so the "new patron tonight" toast fires once/day
 };
 var SAVE_KEY = 'roost';
 
@@ -272,7 +302,7 @@ var choir = {
   next: 0, step: 0, bar: 0, timer: null, on: false, started: false, extPaused: false,
   bpm: 84, root: 196, scale: [0, 2, 4, 5, 7, 9, 11], prog: [0, 5, 3, 4], contour: [0, 1, 2, 1, 0, 2, 1, 0],
   flash: [],            // {uid, t} visual ping when a singer fires
-  hReward: { boom: false, bell: false, shimmer: false },  // family-set harmony layers
+  hReward: { boom: false, bell: false, shimmer: false, patron: 0 },  // family-set + patron harmony layers
 };
 var CHOIR_ROOTS = [196.00, 174.61, 220.00, 164.81, 246.94, 233.08];
 var CHOIR_PROGS = [[0,5,3,4],[0,3,4,0],[5,3,0,4],[0,4,5,3],[0,5,1,4]];
@@ -323,6 +353,10 @@ function rebuildRoster() {
   choir.hReward.boom = hasReward('boom');
   choir.hReward.bell = hasReward('bell');
   choir.hReward.shimmer = hasReward('shimmer');
+  // PATRON harmony: any roosted patron adds an extra high arpeggiated shimmer to
+  // the cave song (so returning after roosting a patron, the song is audibly
+  // richer). Intensity grows with how many patrons live in the hall.
+  choir.hReward.patron = patronCount();
 }
 
 // synth voice per lane (all WebAudio, zero samples). The call layer owns its
@@ -398,6 +432,13 @@ function choirHarmony(when, step, chord) {
   }
   if (choir.hReward.shimmer) {         // airy high fifth shimmer
     if (step === 8) { voiceTone(choirFreq(chord[1], 24), when, sd * 6, 'sine', 0.022, { attack: 0.02, release: 1.0 }); }
+  }
+  if (choir.hReward.patron > 0) {      // patron shimmer: a sparse high triad arp,
+    // brighter the more patrons roost (capped). A returning player hears this
+    // layer appear the night after they complete their first commission.
+    var pg = Math.min(0.05, 0.022 + choir.hReward.patron * 0.006);
+    if (step === 2 || step === 10) { voiceTone(choirFreq(chord[2 % chord.length], 24), when, sd * 3, 'triangle', pg, { attack: 0.01, release: 0.7 }); }
+    if (choir.hReward.patron >= 3 && step === 6) { voiceTone(choirFreq(chord[1], 36), when, sd * 2, 'sine', pg * 0.7, { attack: 0.01, release: 0.5 }); }
   }
 }
 function choirSchedule() {
@@ -515,11 +556,28 @@ function spawnBat(underPulse, forced) {
   };
   bats.push(b);
 }
+// ── THE PATRON — a glowing commissioned bat that circles the sky while the
+// nightly commission is open. It IS a normal catchable bat (so netting it
+// advances the catch quota), but it is force-revealed, marked `patron`, and
+// re-arrives a few seconds after it leaves/gets caught — so it remains the
+// visible reason to keep playing tonight. Once the commission is claimed
+// (meta.commDone) it stops re-arriving.
+var patronSpawnT = 0;
+function spawnPatronBat() {
+  // don't double-up; one patron in the sky at a time
+  for (var i = 0; i < bats.length; i++) if (bats[i].patron && !bats[i].caught) return;
+  var id = meta.patronToday || pickPatronForDay(meta.commDay);
+  var sp = speciesById(id);
+  spawnBat(false, sp);
+  var b = bats[bats.length - 1];
+  if (b) { b.patron = 1; b.cloakAlpha = 1; b.amp *= 1.25; b.baseSpeed *= 0.9; }
+}
 
 // ── ECHO PULSE — lure + reveal ───────────────────────────────────────────────
 function sendPulse(x, y, free) {
   pulses.push({ x: x, y: y, r: 6 * GF.S, max: lureRadius() * GF.S, t: 0, life: 1 });
   GF.sfx('spawn');
+  if (gs === 'PLAYING') commProgress('pulse', 1);   // NIGHTLY COMMISSION: count echo pulses
   // reveal + pull nearby cloaked bats; also chance to draw a fresh rare in
   for (var i = 0; i < bats.length; i++) {
     var b = bats[i]; if (b.caught) continue;
@@ -586,6 +644,11 @@ function catchBat(b) {
   GF.juice.punch(0.5 + sp.rar * 0.15);
   playCatchCall(sp);
 
+  // ── NIGHTLY COMMISSION tracking (catch-verb tasks) ──
+  commProgress('catch', 1);
+  commProgress('lane', 1, sp.fam);
+  if (sp.rar >= 2) commProgress('rare', 1);
+
   GF.funnel.mark('first_upgrade');  // reuse: first catch funnel signal
   GF.saveRun();
 }
@@ -645,10 +708,16 @@ function startNight() {
   nightTarget = GF.clamp(nightTarget, 8, 40);
   rng = mulberry((meta.seed ^ (meta.nightNo * 0x9E3779B1)) >>> 0);
   gs = 'PLAYING';
+  ensureCommission();            // refresh the nightly commission (day-rollover safe)
   rebuildRoster();
   startChoir();
   // seed a few bats so the cave isn't empty on entry
   for (var i = 0; i < 5; i++) spawnBat(false);
+  // NIGHTLY COMMISSION: while the patron is uncommissioned, a glowing PATRON bat
+  // circles the sky as the visible reason-to-play (catch it like any bat; it
+  // re-arrives through the night so it stays on screen as the quest reminder).
+  patronSpawnT = 0;
+  if (!meta.commDone) spawnPatronBat();
   // Veilwings set-bonus: a guaranteed rare+ arrival is seeded into the night
   // (revealed so it's catchable), announced via a small banner.
   if (hasReward('nightly')) {
@@ -669,7 +738,7 @@ function endNight() {
   // overlay doesn't linger on the dawn screen and swallow RETRY taps.
   if (GF.tutorial.active) { GF.tutorial.active = false; try { localStorage.setItem('roost_tutorial_v1', '1'); } catch (e) {} }
   GF.gameEnded();
-  if (caught >= nightTarget && caught > 0) GF.happytime();
+  if (caught >= nightTarget && caught > 0) { GF.happytime(); commProgress('target', 1); }   // commission: reach-target task
   GF.saveRun();
 }
 
@@ -782,6 +851,119 @@ function computeIdle() {
   return { n: n, banked: banked, list: arr };
 }
 
+// ── NIGHTLY COMMISSION + ROOST PATRON (M2 — the reason to return) ────────────
+// Each calendar day the cave commissions a PATRON: a special glowing bat that
+// visibly circles the night sky. A 3-task COMMISSION (expressed entirely in the
+// game's own verbs — net bats, send pulses, net a family, finish the night)
+// gates roosting that patron. Complete it and the patron PERMANENTLY joins the
+// Sanctuary as a glowing resident AND adds a shimmer voice to the cave choir —
+// so a returning player tomorrow SEES a new occupant in the hall and HEARS a
+// richer song. Streak pre-fills task progress (momentum transfer) + lifts the
+// patron's rarity. Effects derive from meta.patrons, so they reload cleanly.
+//
+// Patron pool = the rare+/glow chase species (so a roosted patron always reads
+// as a "good" bird and brings a distinct high voice).
+var PATRON_POOL = ['ember', 'shade', 'gilded', 'nocturne', 'tremor', 'tolling', 'aurabel', 'lumen', 'astra'];
+// commission task templates: each picks a need scaled by the night number so it
+// is always completable within a night or two. type drives the live tracker.
+function pickPatronForDay(di) {
+  var pr = mulberry((meta.seed ^ (di * 0x85EBCA6B) ^ 0x51) >>> 0);
+  // streak lifts the floor of the pool (later entries are rarer/glowier)
+  var floor = Math.min(PATRON_POOL.length - 1, Math.floor((meta.streak || 0) / 3));
+  var span = PATRON_POOL.length - floor;
+  var idx = floor + Math.floor(pr() * span);
+  return PATRON_POOL[GF.clamp(idx, 0, PATRON_POOL.length - 1)];
+}
+function rollCommission(di) {
+  var cr = mulberry((meta.seed ^ (di * 0x27D4EB2F)) >>> 0);
+  var tgt = Math.round((10 + meta.nightNo * 2) * (CFG.tuning.target_mult || 1));
+  tgt = GF.clamp(tgt, 8, 40);
+  var tasks = [];
+  // task 1 — always a catch quota (the core verb), a bit above one night's target
+  tasks.push({ type: 'catch', need: GF.clamp(Math.round(tgt * 0.9), 6, 30), prog: 0 });
+  // task 2 — pulses (teaches the lure economy)
+  tasks.push({ type: 'pulse', need: 3 + Math.floor(cr() * 3), prog: 0 });
+  // task 3 — a collection-flavoured goal: net members of a random family, OR
+  // net rares, OR simply reach the night target (variety per day).
+  var roll = cr();
+  if (roll < 0.5) {
+    var fam = FAMILIES[Math.floor(cr() * FAMILIES.length)];
+    tasks.push({ type: 'lane', fam: fam.id, need: 2 + Math.floor(cr() * 2), prog: 0 });
+  } else if (roll < 0.78) {
+    tasks.push({ type: 'rare', need: 1 + Math.floor(cr() * 2), prog: 0 });
+  } else {
+    tasks.push({ type: 'target', need: 1, prog: 0 });
+  }
+  // STREAK HEAD START (momentum transfer): a running streak pre-fills each task
+  // ~12% per streak-day (capped ~55%) so a returning regular opens to visible
+  // progress, not a blank board.
+  var head = Math.min(0.55, (meta.streak || 0) * 0.12);
+  if (head > 0) for (var i = 0; i < tasks.length; i++) tasks[i].prog = Math.floor(tasks[i].need * head);
+  return tasks;
+}
+// Ensure today's commission exists; re-roll on a new calendar day. Called on
+// boot AND at the start of each night so a day-rollover mid-session refreshes it.
+function ensureCommission() {
+  var di = dayIndex(monotonicNow());
+  if (meta.commDay === di && meta.commTasks && meta.commTasks.length === 3) return false;
+  meta.commDay = di;
+  meta.commTasks = rollCommission(di);
+  meta.patronToday = pickPatronForDay(di);
+  // recompute completion: if a returning player's streak head-start already
+  // satisfies the board, mark it claimable (so they can roost the patron at once).
+  meta.commDone = 0;
+  meta.commClaimable = commissionMet() ? 1 : 0;
+  var fresh = !(meta.patronSeen && meta.patronSeen[di]);
+  if (fresh) { if (!meta.patronSeen) meta.patronSeen = {}; meta.patronSeen[di] = 1; }
+  GF.saveRun();
+  return fresh;   // true the FIRST time today's patron is shown (drives the toast)
+}
+function commissionMet() {
+  if (!meta.commTasks || !meta.commTasks.length) return false;
+  for (var i = 0; i < meta.commTasks.length; i++) { var t = meta.commTasks[i]; if (t.prog < t.need) return false; }
+  return true;
+}
+function commissionProgress() {  // 0..1 across all tasks (for the HUD ring)
+  if (!meta.commTasks || !meta.commTasks.length) return 0;
+  var p = 0, n = meta.commTasks.length;
+  for (var i = 0; i < n; i++) { var t = meta.commTasks[i]; p += Math.min(1, t.prog / Math.max(1, t.need)); }
+  return p / n;
+}
+// advance commission tasks of a given type. lane tasks pass the species' family.
+function commProgress(type, amount, fam) {
+  if (meta.commDone || !meta.commTasks || !meta.commTasks.length) return;
+  var changed = false;
+  for (var i = 0; i < meta.commTasks.length; i++) {
+    var t = meta.commTasks[i];
+    if (t.prog >= t.need) continue;
+    if (t.type !== type) continue;
+    if (type === 'lane' && t.fam !== fam) continue;
+    t.prog = Math.min(t.need, t.prog + (amount || 1)); changed = true;
+  }
+  if (changed && !meta.commClaimable && commissionMet()) {
+    meta.commClaimable = 1;
+    showToast(GF.t('commission_done'), '#ffd76b');
+    GF.sfx('reward'); GF.juice.flash('#ffd76b', 0.4);
+  }
+  if (changed) GF.saveRun();
+}
+// ROOST the patron: permanent Sanctuary resident + a new choir shimmer voice +
+// it counts in the dex. This is the world-visible payoff a returning player sees.
+function roostPatron() {
+  if (!meta.commClaimable || meta.commDone) return;
+  var id = meta.patronToday || pickPatronForDay(meta.commDay);
+  var sp = speciesById(id);
+  meta.patrons[id] = 1;
+  if (!meta.dex[id]) { meta.dex[id] = 1; }       // a patron you didn't have also fills the dex
+  meta.commDone = 1; meta.commClaimable = 0;
+  meta.echoes += 20 + (meta.streak || 0) * 3;
+  rebuildRoster();                                // patron voice + any new dex entry join the song
+  showToast(GF.t('patron_roosted') + ' ' + speciesName(sp), sp.col);
+  GF.sfx('reward'); GF.juice.flash(sp.col, 0.55); GF.happytime && GF.happytime();
+  GF.saveRun();
+}
+function patronCount() { var n = 0; for (var k in meta.patrons) if (meta.patrons[k]) n++; return n; }
+
 // Screenshot/QA fast-forward hook. n=99 -> terminal (NIGHTDONE) so the gflib
 // adapter's forceGameOver + state-cycle + retry-tap tests can run. n=2 -> the
 // living SANCTUARY hall (the headline). n=1 (default) -> a busy gameplay night.
@@ -863,6 +1045,15 @@ function update(dt) {
   var interval = GF.clamp(1.05 - meta.nightNo * 0.015, 0.5, 1.1);
   if (spawnAcc >= interval && bats.length < 24) { spawnAcc = 0; spawnBat(false); }
 
+  // PATRON re-arrival: while the commission is open keep the glowing patron on
+  // screen — if none is flying, bring it back ~3.5s after it left/was caught.
+  if (!meta.commDone) {
+    var patronUp = false;
+    for (var pb = 0; pb < bats.length; pb++) { if (bats[pb].patron && !bats[pb].caught) { patronUp = true; break; } }
+    if (patronUp) patronSpawnT = 0;
+    else { patronSpawnT += dt; if (patronSpawnT >= 3.5 && bats.length < 24) { patronSpawnT = 0; spawnPatronBat(); } }
+  }
+
   // update bats
   for (var i = bats.length - 1; i >= 0; i--) {
     var b = bats[i];
@@ -921,7 +1112,7 @@ function onPress(cx0, cy0) {
       // else it's a normal free echo; lures just make pulses STRONGER/rarer)
       var free = false;
       if (meta.lures > 0) { meta.lures--; free = true; }
-      sendPulse(cx0, cy0, free);
+      sendPulse(cx0, cy0, free);   // commission 'pulse' task is tracked inside sendPulse
       if (free) { meta.echoes += 0; GF.saveRun(); }
     }
     return;
@@ -1034,10 +1225,24 @@ function drawBat(ctx, b) {
   ctx.scale(b.dir, 1);
   var alpha = b.fade * (b.sp.cloak ? b.cloakAlpha : 1);
   ctx.globalAlpha = alpha;
-  // glow for glowing/rare species
-  if (sp.glow || sp.rar >= 2) {
+  // PATRON aura: a soft pulsing halo + a small crown star so the commissioned
+  // bat reads as special and draws the eye (the visible reason-to-play tonight).
+  if (b.patron && !b.caught) {
+    var pp = 0.5 + 0.5 * Math.sin(b.flap * 0.6 + b.t * 2.4);
     ctx.save();
-    ctx.shadowColor = sp.col; ctx.shadowBlur = (sp.glow ? 22 : 10) * s;
+    ctx.globalAlpha = alpha * (0.30 + 0.30 * pp);
+    ctx.strokeStyle = sp.col; ctx.lineWidth = 2.2 * s; ctx.shadowColor = sp.col; ctx.shadowBlur = 18 * s;
+    ctx.beginPath(); ctx.arc(0, -1 * s, (20 + 4 * pp) * s, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+    // crown star above the head (drawn upright regardless of facing dir)
+    ctx.save(); ctx.scale(b.dir, 1);
+    ctx.globalAlpha = alpha; drawStar(ctx, 0, -20 * s, 4 * s, '#ffe79a');
+    ctx.restore();
+  }
+  // glow for glowing/rare species
+  if (sp.glow || sp.rar >= 2 || b.patron) {
+    ctx.save();
+    ctx.shadowColor = sp.col; ctx.shadowBlur = (sp.glow || b.patron ? 22 : 10) * s;
   }
   // wings (two membranes)
   ctx.fillStyle = sp.wing;
@@ -1059,7 +1264,7 @@ function drawBat(ctx, b) {
   ctx.moveTo(-3.6 * s, -9 * s); ctx.lineTo(-5 * s, -14 * s); ctx.lineTo(-1.6 * s, -10 * s); ctx.closePath();
   ctx.moveTo(3.6 * s, -9 * s); ctx.lineTo(5 * s, -14 * s); ctx.lineTo(1.6 * s, -10 * s); ctx.closePath();
   ctx.fill();
-  if (sp.glow || sp.rar >= 2) ctx.restore();
+  if (sp.glow || sp.rar >= 2 || b.patron) ctx.restore();
   // eyes
   ctx.globalAlpha = alpha;
   ctx.fillStyle = sp.glow ? '#ffffff' : '#10101c';
@@ -1148,6 +1353,55 @@ function drawHUD(ctx) {
   if (meta.lures > 0) ctx.fillText(GF.t('lure_used') + ': ' + meta.lures, 16 * S, by);
   ctx.textAlign = 'right'; ctx.fillStyle = '#bfa8ff';
   ctx.fillText(GF.t('singers') + ': ' + choir.roster.length, GF.W - 16 * S, by);
+
+  // ── NIGHTLY COMMISSION strip (left, just under echoes) — live task progress
+  // so the reason-to-play is always on screen. Tappable to jump to the board.
+  if (meta.commTasks && meta.commTasks.length && !meta.commDone) {
+    drawCommissionHUD(ctx, 16 * S, tcy + r + 12 * S);
+  }
+}
+// compact 3-dot commission tracker on the HUD. Each task = a tiny pill with its
+// short label + prog/need; a filled check when met. Taps open the board (the
+// NIGHTDONE commission panel) so the player can roost the patron when ready.
+function drawCommissionHUD(ctx, x, y) {
+  var S = GF.S;
+  var met = commissionMet();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = met ? '#ffd76b' : '#9fb0d0';
+  ctx.font = 'bold ' + GF.clamp(11 * S, 9, 14) + 'px Inter, system-ui, sans-serif';
+  var hdr = GF.t('commission_short');
+  ctx.fillText(hdr, x, y);
+  // a slim row of task dots
+  var dotY = y + 16 * S, dx = x, gap = 6 * S;
+  for (var i = 0; i < meta.commTasks.length; i++) {
+    var t = meta.commTasks[i], done = t.prog >= t.need;
+    var label = commTaskShort(t);
+    ctx.font = 'bold ' + GF.clamp(10 * S, 8, 13) + 'px Inter, system-ui, sans-serif';
+    var tw = ctx.measureText(label).width + 14 * S;
+    ctx.fillStyle = done ? 'rgba(40,46,30,0.85)' : 'rgba(20,24,40,0.8)';
+    rrFill(ctx, dx, dotY - 9 * S, tw, 18 * S, 9 * S);
+    ctx.strokeStyle = done ? '#ffd76b' : 'rgba(120,140,190,0.45)'; ctx.lineWidth = 1.1 * S; rrStroke(ctx, dx, dotY - 9 * S, tw, 18 * S, 9 * S);
+    ctx.fillStyle = done ? '#ffd76b' : '#cdd8ee'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, dx + 7 * S, dotY);
+    dx += tw + gap;
+  }
+  // tappable region -> open the commission board (NIGHTDONE shows it). We bank +
+  // end the night via leaveToMenu? No — keep playing: just surface the board by
+  // routing a tap to the NIGHTDONE-style panel is heavy; instead a tap when the
+  // commission is CLAIMABLE roosts the patron directly (fast path), else no-op.
+  if (met) {
+    topBtns.push({ x: x - 4 * S, y: y - 10 * S, w: dx - x + 8 * S, h: 36 * S, fn: function () { if (meta.commClaimable) roostPatron(); } });
+  }
+}
+// short task label for the HUD/board: "5/9 net", "1/3 echo", etc.
+function commTaskShort(t) {
+  var v = t.prog + '/' + t.need;
+  if (t.type === 'catch') return v + ' ' + (GF.lang === 'ru' ? 'лов' : 'net');
+  if (t.type === 'pulse') return v + ' ' + (GF.lang === 'ru' ? 'эхо' : 'echo');
+  if (t.type === 'rare') return v + ' ' + GF.t('rare').toLowerCase().slice(0, 4);
+  if (t.type === 'lane') { var f = familyById(t.fam); return v + ' ' + familyName(f); }
+  if (t.type === 'target') return (t.prog >= t.need ? '1/1' : '0/1') + ' ' + GF.t('target').toLowerCase();
+  return v;
 }
 // top-bar center-y that always keeps a chip of radius r fully on-screen, even
 // when S is tiny (short-landscape). Reachability gate: pinned items must sit
@@ -1233,6 +1487,11 @@ function drawMenu(ctx) {
   menuChip(ctx, rx + sw + sgap, rowY, sw, sh, GF.t('sanctuary'), '#bfa8ff', function () { openSanctuary('MENU'); });
   menuChip(ctx, rx + (sw + sgap) * 2, rowY, sw, sh, GF.t('shop'), '#7fe0c8', function () { prevScreen = 'MENU'; gs = 'SHOP'; });
 
+  // NIGHTLY COMMISSION board on the menu too, when there's vertical room — so a
+  // returning player who boots to MENU immediately sees tonight's patron + tasks.
+  var boardTop = rowY + sh + 14 * S;
+  if (boardTop + 150 * S < H * 0.90) drawCommissionBoard(ctx, boardTop);
+
   // best night + streak footer
   ctx.fillStyle = '#5f6f92'; ctx.font = GF.clamp(12 * S, 10, 16) + 'px Inter, system-ui, sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
@@ -1313,6 +1572,75 @@ function drawNightDone(ctx) {
   menuChip(ctx, rx, rowY, sw, sh, GF.t('dex'), '#6db8ff', function () { prevScreen = 'NIGHTDONE'; gs = 'DEX'; dexScroll = null; });
   menuChip(ctx, rx + sw + sgap, rowY, sw, sh, GF.t('sanctuary'), '#bfa8ff', function () { openSanctuary('NIGHTDONE'); });
   menuChip(ctx, rx + (sw + sgap) * 2, rowY, sw, sh, GF.t('shop'), '#7fe0c8', function () { prevScreen = 'NIGHTDONE'; gs = 'SHOP'; });
+
+  // NIGHTLY COMMISSION board — the reason-to-return surface, shown right where
+  // the player lands after a night. Full 3-task list + the patron + claim CTA.
+  drawCommissionBoard(ctx, rowY + sh + 16 * S);
+}
+// ── COMMISSION BOARD (shared by NIGHTDONE + MENU) ───────────────────────────
+// Renders the commission card: tonight's patron portrait, the 3 tasks with
+// progress bars, and the "Roost the Patron" CTA when the board is met. Returns
+// the bottom Y so the caller can place footers below it.
+function drawCommissionBoard(ctx, topY) {
+  var W = GF.W, S = GF.S;
+  if (!meta.commTasks || !meta.commTasks.length) return topY;
+  var bw = GF.clamp(300 * S, 220, 420), bx = W / 2 - bw / 2;
+  var rowH = 22 * S, headH = 50 * S;
+  var bh = headH + meta.commTasks.length * rowH + (meta.commDone ? 8 * S : 44 * S) + 14 * S;
+  // panel
+  ctx.fillStyle = 'rgba(14,16,30,0.92)'; rrFill(ctx, bx, topY, bw, bh, 14 * S);
+  ctx.strokeStyle = meta.commClaimable ? '#ffd76b' : 'rgba(120,140,190,0.4)'; ctx.lineWidth = 1.4 * S; rrStroke(ctx, bx, topY, bw, bh, 14 * S);
+  // header: patron portrait + title
+  var sp = speciesById(meta.patronToday || pickPatronForDay(meta.commDay));
+  var roosted = !!meta.patrons[sp.id];
+  var fake = { x: bx + 24 * S, y: topY + 24 * S, dir: 1, sp: sp, flap: performance.now() / 200, fade: 1, cloakAlpha: 1, patron: !roosted };
+  drawBatPortrait(ctx, fake, 0.85);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#ffd76b'; ctx.font = 'bold ' + GF.clamp(14 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText(GF.t('commission'), bx + 44 * S, topY + 20 * S);
+  ctx.fillStyle = roosted ? '#9bffd0' : sp.col; ctx.font = GF.clamp(12 * S, 10, 15) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText((roosted ? GF.t('patron_roosted') + ' ' : GF.t('patron') + ': ') + speciesName(sp), bx + 44 * S, topY + 38 * S);
+  // tasks
+  var ty = topY + headH;
+  for (var i = 0; i < meta.commTasks.length; i++) {
+    var t = meta.commTasks[i], done = t.prog >= t.need, frac = Math.min(1, t.prog / Math.max(1, t.need));
+    var ry = ty + i * rowH;
+    // bar bg
+    var barX = bx + 16 * S, barW = bw - 32 * S - 52 * S, barY = ry + 6 * S, barH = 8 * S;
+    ctx.fillStyle = 'rgba(255,255,255,0.08)'; rrFill(ctx, barX, barY, barW, barH, barH / 2);
+    ctx.fillStyle = done ? '#9bffd0' : '#6db8ff'; rrFill(ctx, barX, barY, barW * frac, barH, barH / 2);
+    // label
+    ctx.fillStyle = done ? '#9bffd0' : '#cdd8ee'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.font = GF.clamp(11 * S, 9, 14) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(commTaskLabel(t), barX, ry - 1 * S);
+    // count / check
+    ctx.textAlign = 'right'; ctx.fillStyle = done ? '#9bffd0' : '#9fb0d0';
+    ctx.fillText(t.prog + '/' + t.need, bx + bw - 16 * S, ry + 5 * S);
+    if (done) drawCheck(ctx, bx + bw - 12 * S, ry - 4 * S, 5 * S, '#9bffd0');
+  }
+  // CTA (claim) — only when claimable and not yet roosted this commission
+  if (meta.commClaimable && !meta.commDone) {
+    var cby = ty + meta.commTasks.length * rowH + 4 * S, cbh = 36 * S, cbw = bw - 32 * S, cbx = bx + 16 * S;
+    var _t = performance.now() / 1000, _k = Math.sin(_t * 2.4);
+    ctx.save(); ctx.shadowColor = 'rgba(255,215,107,' + (0.4 + 0.28 * _k).toFixed(3) + ')'; ctx.shadowBlur = (16 + 8 * _k) * S;
+    var grad = ctx.createLinearGradient(cbx, cby, cbx, cby + cbh); grad.addColorStop(0, '#ffe79a'); grad.addColorStop(1, '#ffc24d');
+    rrFill(ctx, cbx, cby, cbw, cbh, cbh / 2); ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+    ctx.fillStyle = '#2a1e06'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold ' + GF.clamp(14 * S, 11, 18) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('commission_claim'), W / 2, cby + cbh / 2);
+    ctx.textBaseline = 'alphabetic';
+    menuBtns.push({ x: cbx, y: cby, w: cbw, h: cbh, fn: function () { roostPatron(); } });
+  }
+  return topY + bh;
+}
+// full task label for the board ("Net 9 bats", "Send 3 echo pulses", ...)
+function commTaskLabel(t) {
+  if (t.type === 'catch') return GF.t('q_catch').replace('{n}', t.need);
+  if (t.type === 'pulse') return GF.t('q_pulse').replace('{n}', t.need);
+  if (t.type === 'rare') return GF.t('q_rare').replace('{n}', t.need);
+  if (t.type === 'lane') { var f = familyById(t.fam); return GF.t('q_lane').replace('{n}', t.need).replace('{fam}', familyName(f)); }
+  if (t.type === 'target') return GF.t('q_target');
+  return '';
 }
 
 // ── DEX (species album) ─────────────────────────────────────────────────────
@@ -1542,7 +1870,7 @@ function buildSanctLayout() {
   sanctLayout = { slots: slots, cols: cols, cellW: cellW, cellH: cellH, rows: Math.ceil(sorted.length / cols) };
 }
 function ensureSanctLayout() {
-  var sig = Math.round(GF.W) + 'x' + Math.round(GF.H) + '|' + GF.S.toFixed(3) + '|' + Object.keys(meta.dex).length + '|' + SPECIES.length + '|' + GF.lang;
+  var sig = Math.round(GF.W) + 'x' + Math.round(GF.H) + '|' + GF.S.toFixed(3) + '|' + Object.keys(meta.dex).length + '|' + SPECIES.length + '|' + GF.lang + '|' + patronCount();
   if (sig !== _sanctSig || !sanctLayout) { _sanctSig = sig; buildSanctLayout(); }
 }
 function sanctContentHeight() {
@@ -1583,7 +1911,10 @@ function drawSanctuary(ctx) {
   ctx.fillText(GF.t('sanctuary'), W / 2, 40 * S);
   var have = 0; for (var i = 0; i < SPECIES.length; i++) if (meta.dex[SPECIES[i].id]) have++;
   ctx.fillStyle = '#bfa8ff'; ctx.font = GF.clamp(13 * S, 11, 17) + 'px Inter, system-ui, sans-serif';
-  ctx.fillText(have + ' / ' + SPECIES.length, W / 2, 60 * S);
+  var subline = have + ' / ' + SPECIES.length;
+  var pc = patronCount();
+  if (pc > 0) subline += '   ·   ' + GF.t('patrons') + ': ' + pc;
+  ctx.fillText(subline, W / 2, 60 * S);
 
   // scroll viewport (between header strip and the info/back footer)
   var infoH = sanctSel ? GF.clamp(96 * S, 80, 120) : 0;
@@ -1677,6 +2008,15 @@ function drawSanctSlot(ctx, sl) {
     if (sanctSel && sanctSel.id === sp.id) {
       ctx.save(); ctx.strokeStyle = RAR_COL[sp.rar]; ctx.lineWidth = 2 * S; ctx.globalAlpha = 0.8;
       ctx.beginPath(); ctx.arc(cx, cy, 24 * S, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+    }
+    // PATRON resident: a permanent golden ring + crown so roosted patrons read
+    // as honoured residents in the hall (the visible payoff of the commission).
+    if (meta.patrons[sp.id]) {
+      var pk = 0.5 + 0.5 * Math.sin(now / 600 + sp.lane);
+      ctx.save(); ctx.globalAlpha = 0.35 + 0.3 * pk;
+      ctx.strokeStyle = '#ffe79a'; ctx.lineWidth = 2 * S; ctx.shadowColor = '#ffd76b'; ctx.shadowBlur = 14 * S;
+      ctx.beginPath(); ctx.arc(cx, cy, 26 * S, 0, Math.PI * 2); ctx.stroke(); ctx.restore();
+      drawStar(ctx, cx, cy - 30 * S, 4 * S, '#ffe79a');
     }
     _pBat.x = cx; _pBat.y = cy; _pBat.dir = 1; _pBat.sp = sp; _pBat.flap = 0.25 + 0.15 * Math.sin(now / 520 + sp.lane); _pBat.fade = 1; _pBat.cloakAlpha = 1;
     drawBatPortrait(ctx, _pBat, scale * (sl.cellW / (52 * S)));
@@ -1798,7 +2138,15 @@ function drawWelcomeBack(ctx) {
   }
   ctx.textAlign = 'center';
   ctx.fillStyle = '#9fd8e6'; ctx.font = 'bold ' + GF.clamp(15 * S, 12, 20) + 'px Inter, system-ui, sans-serif';
-  ctx.fillText('+' + welcomeBack.banked + ' ' + GF.t('echoes'), W / 2, y + Math.min(5, welcomeBack.list.length) * 40 * S + 16 * S);
+  var echoY = y + Math.min(5, welcomeBack.list.length) * 40 * S + 16 * S;
+  ctx.fillText('+' + welcomeBack.banked + ' ' + GF.t('echoes'), W / 2, echoY);
+  // NEW PATRON tonight (commission grown from the catch loop) — the returning
+  // player sees a fresh commissioned patron waiting in the cave.
+  if (welcomeBack.newPatron) {
+    var psp = speciesById(welcomeBack.newPatron);
+    ctx.fillStyle = '#ffd76b'; ctx.font = GF.clamp(13 * S, 11, 17) + 'px Inter, system-ui, sans-serif';
+    ctx.fillText(GF.t('new_patron') + ': ' + speciesName(psp), W / 2, echoY + 24 * S);
+  }
 
   // claim button
   var bw = GF.clamp(220 * S, 160, 300), bh = GF.clamp(54 * S, 44, 70), bx = W / 2 - bw / 2, by = H * 0.78;
@@ -1973,6 +2321,14 @@ GF.init({
     var idle = computeIdle();
     if (idle) welcomeBack = idle;
     meta.lastSeen = monotonicNow();
+    // NIGHTLY COMMISSION: roll today's patron + tasks on boot so a returning
+    // player immediately sees a NEW patron commissioned + the board (with their
+    // streak head-start already filled). freshPatron => fold it into the return.
+    var freshPatron = ensureCommission();
+    if (freshPatron) {
+      if (welcomeBack) welcomeBack.newPatron = meta.patronToday;   // show on the welcome modal
+      else showToast(GF.t('new_patron'), '#ffd76b');
+    }
     GF.saveRun();
 
     // ── MUSIC (hard rule #8): procedural bed via gf-lib; the species CALLS are
@@ -2014,7 +2370,7 @@ GF.init({
     // Report a harness-canonical state name: our terminal screen is NIGHTDONE,
     // but the QA adapter's menu-button/terminal set is {MENU,PLAYING,GAMEOVER}.
     // Map NIGHTDONE -> GAMEOVER for the gate so retry/cycle tests recognise it.
-    GF.exposeState(function () { return { gs: (gs === 'NIGHTDONE' ? 'GAMEOVER' : gs), caught: caught, echoes: meta.echoes, dex: Object.keys(meta.dex).length, night: meta.nightNo, singers: choir.roster.length, noise: _inputN }; });
+    GF.exposeState(function () { return { gs: (gs === 'NIGHTDONE' ? 'GAMEOVER' : gs), caught: caught, echoes: meta.echoes, dex: Object.keys(meta.dex).length, night: meta.nightNo, singers: choir.roster.length, noise: _inputN, patrons: patronCount(), commProg: +commissionProgress().toFixed(3), commClaimable: meta.commClaimable }; });
     // Reachability gate: report the live button rects of the CURRENT screen. The
     // overlay screens populate menuBtns/topBtns every frame; DEX scrolls so its
     // cards are reported in content space against the dex scroll region.
@@ -2051,10 +2407,15 @@ GF.init({
       { name: 'SHOP', go: function () { prevScreen = 'MENU'; gs = 'SHOP'; } },
       { name: 'SANCTUARY', go: function () { openSanctuary('MENU'); } },
     ]);
-    GF.exposeBot && GF.exposeBot(function () { return gs === 'PLAYING' ? ['catch', 'pulse'] : ['start']; }, function (a) {
+    GF.exposeBot && GF.exposeBot(function () {
+      if (gs === 'PLAYING') { var acts = ['catch', 'pulse']; if (meta.commClaimable) acts.push('roost'); return acts; }
+      if (meta.commClaimable) return ['start', 'roost'];
+      return ['start'];
+    }, function (a) {
       if (a === 'start' && gs !== 'PLAYING') startNight();
       else if (a === 'catch') { var b = nearestBat(); if (b) catchBat(b); }
       else if (a === 'pulse') sendPulse(GF.W * (0.3 + Math.random() * 0.4), GF.H * (0.3 + Math.random() * 0.3), false);
+      else if (a === 'roost') roostPatron();   // claim the commission's patron (a real player action)
     });
 
     // Test-only probes (guarded; never used in production).

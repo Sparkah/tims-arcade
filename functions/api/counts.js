@@ -22,13 +22,36 @@
 import { edgeCached } from '../_lib/edgecache.js';
 
 const CACHE_TTL_SECONDS = 60;
+const SNAPSHOT_KEY = 'snapshot:boot';
+// Gate at boot.js SNAPSHOT_FRESH_SECONDS (900), NOT STALE_SERVE_MAX (960): the
+// served response is edge-cached s-maxage=60 (no stale-while-revalidate on this
+// endpoint), so worst-case cross-user staleness = 900 + 60 = 960s, which stays
+// under app.js VOTE_OVERRIDE_TTL_MS (1020s) — a just-voted user is never shown
+// pre-vote like counts. Keep these in sync (Codex review 2026-06-16).
+const SNAPSHOT_MAX_AGE_SECONDS = 900;
 
 export function onRequestGet({ env }) {
   return edgeCached('/api-counts', {}, () => buildCounts(env));
 }
 
 async function buildCounts(env) {
-  const out = await buildCountsData(env);
+  // Prefer boot's shared snapshot: 1 read, ZERO list ops. counts.js used to
+  // walk votes:+plays:+seconds:+comment: (4 list ops + ~1 read/key over the
+  // whole catalogue) on every 60s edge-miss, on nearly every page — the
+  // dominant consumer of the free 1000/day KV LIST cap (2026-06-16 incident).
+  // boot.js keeps snapshot:boot fresh in the background; serve its .counts and
+  // fall back to the live walk only when it's missing or older than boot serves.
+  try {
+    const snap = await env.VOTES.get(SNAPSHOT_KEY, 'json');
+    if (snap && Number.isFinite(snap.ts) && snap.counts && typeof snap.counts === 'object'
+        && (Date.now() - snap.ts) / 1000 < SNAPSHOT_MAX_AGE_SECONDS) {
+      return countsResponse(snap.counts);
+    }
+  } catch (e) { /* fall through to the live walk */ }
+  return countsResponse(await buildCountsData(env));
+}
+
+function countsResponse(out) {
   return new Response(JSON.stringify(out), {
     headers: {
       'content-type': 'application/json',
