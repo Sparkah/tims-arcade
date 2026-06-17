@@ -21,6 +21,7 @@
 // this allows for shared connections (NAT) while blocking obvious bots.
 
 import { parseCookie } from '../_lib/cookie.js';
+import { readSession } from './_session.js';
 import { creditPlayAndTokens } from '../_lib/meta.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { recordActiveDay } from '../_lib/cohort.js';
@@ -43,6 +44,20 @@ export async function onRequestPost({ request, env }) {
   // Clamp to [0, 300] — caps anyone trying to spam huge numbers
   const seconds = Math.max(0, Math.min(300, parseInt(body.seconds) || 0));
   if (seconds === 0) return new Response(null, { status: 204 });
+
+  // Exclude the OWNER's own traffic from ALL analytics (player counts, retention,
+  // playtime) when signed in as an internal account -- his handful of devices
+  // otherwise dominate every metric. INTERNAL_UIDS (Pages env, comma-separated) holds
+  // the session uids to drop; a signed-in session payload already carries
+  // uid = emailToUid(email), so no recompute is needed. Targeted no-op only -- no
+  // effect on any other user, no cohort key change (Tim 2026-06-17, Codex-reviewed).
+  const internalUids = new Set(String(env.INTERNAL_UIDS || '').split(',').map((s) => s.trim()).filter(Boolean));
+  if (internalUids.size) {
+    const session = await readSession(request, env);
+    if (session && session.uid && internalUids.has(session.uid)) {
+      return new Response(null, { status: 204 });   // owner's own play: count nothing
+    }
+  }
 
   // rate limit by IP
   const ip = request.headers.get('cf-connecting-ip') || 'unknown';
