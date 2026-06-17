@@ -149,7 +149,7 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) return;
-        if (s.status === 'ready' && s.playUrl) { stopPolling(); clearJob(); onReady(s); }
+        if (s.status === 'ready' && s.playUrl) { stopPolling(); clearJob(); onReady(s, id); }
         else if (s.status === 'failed') { stopPolling(); clearJob(); onFailed(s); }
         else { lastBuild = { s: s, recvAt: Date.now() }; renderBuildStatus(); }   // pending/building -> live status
       })
@@ -194,12 +194,25 @@
 
   function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch (e) {} }
 
-  function onReady(s) {
+  function onReady(s, id) {
     show(els.building, false);
     show(els.failed, false);
     show(els.ready, true);
     els.readyTitle.textContent = (s.title ? '"' + s.title + '" is ready!' : 'Your game is ready!');
-    els.open.href = s.playUrl;
+    // Full-screen open uses the WRAPPED player (/cplay) so the new game gets the
+    // same back-to-gallery chrome as published games. s.playUrl is the RAW /g/<id>
+    // sandbox host -- bare, no nav -- which strands mobile players with no way out.
+    // The inline preview iframe below still embeds the raw host (create.html itself
+    // supplies the back link).
+    if (id) {
+      var qp = new URLSearchParams({ id: id });
+      if (s.slug)  qp.set('slug', s.slug);
+      if (s.title) qp.set('title', s.title);
+      if (myName)  qp.set('by', myName);
+      els.open.href = '/cplay?' + qp.toString();
+    } else {
+      els.open.href = s.playUrl;
+    }
     els.frameWrap.innerHTML = '';
     var iframe = document.createElement('iframe');
     iframe.className = 'create-frame';
