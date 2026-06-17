@@ -76,6 +76,8 @@
     sign_in_required: 'Please sign in first.',
     enqueue_failed: 'Something went wrong. Try again.',
     bad_json: 'Something went wrong. Try again.',
+    already_improving: 'You are already improving this game - hang tight.',
+    iterate_not_found: 'That game could not be found.',
   };
 
   // ---- quota / routing ----
@@ -168,7 +170,7 @@
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (s) {
         if (!s) return;
-        if (s.status === 'ready' && s.playUrl) { stopPolling(); clearJob(); onReady(s, id); }
+        if (s.status === 'ready' && s.playUrl) { stopPolling(); clearJob(); onReady(s); }
         else if (s.status === 'failed') { stopPolling(); clearJob(); onFailed(s); }
         else { lastBuild = { s: s, recvAt: Date.now() }; renderBuildStatus(); }   // pending/building -> live status
       })
@@ -213,24 +215,25 @@
 
   function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch (e) {} }
 
-  function onReady(s, id) {
+  function onReady(s) {
     show(els.building, false);
     show(els.failed, false);
     show(els.ready, true);
     els.readyTitle.textContent = (s.title ? '"' + s.title + '" is ready!' : 'Your game is ready!');
-    // Full-screen open uses the WRAPPED player (/cplay) so the new game gets the
-    // same back-to-gallery chrome as published games. s.playUrl is the RAW /g/<id>
-    // sandbox host -- bare, no nav -- which strands mobile players with no way out.
-    // The inline preview iframe below still embeds the raw host (create.html itself
-    // supplies the back link).
-    if (id) {
-      var qp = new URLSearchParams({ id: id });
+    // Full-screen open uses the WRAPPED player (/cplay) so the game keeps the same
+    // back-to-gallery chrome as published games (s.playUrl is the RAW /g/<id> sandbox
+    // host -- bare, no nav). The PLAY id is parsed from playUrl, so this is correct for
+    // a fresh build (/g/<jobId>) AND an in-place upgrade (/g/<baseId>). The inline
+    // preview iframe still embeds the raw host (create.html supplies its own back link).
+    var playId = (String(s.playUrl || '').match(/\/g\/([0-9a-z]{8,40})/) || [])[1] || '';
+    if (playId) {
+      var qp = new URLSearchParams({ id: playId });
       if (s.slug)  qp.set('slug', s.slug);
       if (s.title) qp.set('title', s.title);
       if (myName)  qp.set('by', myName);
       els.open.href = '/cplay?' + qp.toString();
     } else {
-      els.open.href = s.playUrl;
+      els.open.href = s.playUrl || '#';
     }
     els.frameWrap.innerHTML = '';
     var iframe = document.createElement('iframe');
@@ -266,6 +269,34 @@
       .catch(function () {});
   }
 
+  // Iterate on an existing creation: prompt a change, enqueue an IN-PLACE upgrade
+  // (iterateId), then hand to the shared build/poll UI. onReady shows the upgraded
+  // game (status.playUrl points at the base game). Tim 2026-06-17.
+  function improve(g) {
+    if (!g || !g.id) return;
+    var change = (window.prompt('What should change or be added to "' + (g.title || g.slug || 'your game') + '"?\n(Costs 60 tokens, like a new build.)') || '').trim();
+    if (!change) return;
+    if (change.length < 3) { toast('Add a few more words about the change.', 'err'); return; }
+    toast('Sending your change...');
+    fetch('/api/gen/submit', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      credentials: 'same-origin', body: JSON.stringify({ iterateId: g.id, prompt: change }),
+    })
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }, function () { return { ok: false, d: {} }; }); })
+      .then(function (res) {
+        if (res.ok && res.d && res.d.id) {
+          capture('vibe_improve_submit', { id: g.id });
+          try { window.scrollTo(0, 0); } catch (e) {}
+          beginJob(res.d.id);   // build-status view + polling; onReady shows the upgraded game
+        } else {
+          var code = (res.d && res.d.error) || 'enqueue_failed';
+          toast(ERRORS[code] || 'Could not start the improvement.', 'err');
+          if (code === 'need_tokens' || code === 'no_prompts') loadQuota();
+        }
+      })
+      .catch(function () { toast('Network error. Try again.', 'err'); });
+  }
+
   function creationCard(g) {
     var min = Math.round((g.seconds || 0) / 60);
     var card = document.createElement('div');
@@ -282,6 +313,12 @@
     var play = document.createElement('a'); play.className = 'create-mini-btn'; play.textContent = 'Play'; play.target = '_blank'; play.rel = 'noopener';
     play.href = '/cplay?id=' + encodeURIComponent(g.id) + '&slug=' + encodeURIComponent(g.slug || '') + '&title=' + encodeURIComponent(g.title || '') + '&by=' + encodeURIComponent(myName || '');
     acts.appendChild(play);
+    // Improve -- iterate IN PLACE: prompt a change, the relay evolves THIS game and
+    // overwrites it (same link + plays/likes). Reuses the build/poll UI; costs 60
+    // tokens like a fresh build. (Tim 2026-06-17: creation "upgrade" button.)
+    var imp = document.createElement('button'); imp.type = 'button'; imp.className = 'create-mini-btn'; imp.textContent = 'Improve';
+    imp.addEventListener('click', function () { improve(g); });
+    acts.appendChild(imp);
     // Publish / unpublish -- repaint from the API's authoritative {published}
     // response, NOT a re-fetch. KV is eventually consistent, so re-reading
     // /api/me/games right after the write returns the STALE flag and the button

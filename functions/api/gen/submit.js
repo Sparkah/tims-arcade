@@ -45,6 +45,24 @@ export async function onRequestPost({ request, env }) {
   if (!filtered.ok) return jsonError('prompt_' + (filtered.reason || 'blocked'), 400);
   const prompt = filtered.text;
 
+  // Optional in-place ITERATE: evolve an EXISTING creation instead of building fresh.
+  // The change instruction IS `prompt`; iterateId names the game to upgrade. Must be
+  // the caller's OWN vibe creation. Checked BEFORE charging so a bad target never
+  // costs tokens. (Tim 2026-06-17: "upgrade button ... prompt further and iterate".)
+  let baseId = null;
+  const iterateId = String(body.iterateId || '').toLowerCase();
+  if (iterateId) {
+    if (!/^[0-9a-z]{8,40}$/.test(iterateId)) return jsonError('bad_id', 400);
+    const base = await env.VOTES.get(`upload:${iterateId}`, 'json');
+    if (!base || base.source !== 'vibe') return jsonError('iterate_not_found', 404);
+    if (base.uid !== session.uid) return jsonError('forbidden', 403);
+    // One in-flight improvement per game: a second concurrent iterate would carry the
+    // same stale base HTML and clobber the first (Codex review 2026-06-17). Released
+    // when the job goes terminal in gen-result; the TTL backstops a stuck build.
+    if (await env.VOTES.get(`iteratelock:${iterateId}`)) return jsonError('already_improving', 409);
+    baseId = iterateId;
+  }
+
   // Generation always costs GENERATION_COST tokens from the COOKIE uid balance --
   // the visible/spendable pill balance. New accounts get a 60-token signup bonus on
   // their first signed-in load (grantSignupBonus), which covers the first game, so
@@ -78,6 +96,7 @@ export async function onRequestPost({ request, env }) {
   const jobRec = {
     id, uid: session.uid, email: session.email, prompt, displayName,
     status: 'pending', slug: null, title: null, error: null,
+    baseId,   // non-null => in-place upgrade of that creation (gen-result overwrites it)
     // What this job was charged, so a terminal build failure refunds the EXACT
     // charge once (admin/gen-result.js): 60 cookie-uid tokens. cookieUid may be
     // null (no cookie) -> nothing to refund.
@@ -95,6 +114,9 @@ export async function onRequestPost({ request, env }) {
   // 15s poll did a genjob: LIST every time = ~5760 list ops/day, over the free
   // 1000/day cap by itself (2026-06-16). Best-effort; relay also stuck-sweeps.
   try { await env.VOTES.put('genjob:signal', String(ts)); } catch (e) { /* non-fatal */ }
+  // Hold the per-game improve lock while this iterate is in flight (released on the
+  // job's terminal transition in gen-result; 2h TTL backstops a stuck build).
+  if (baseId) { try { await env.VOTES.put(`iteratelock:${baseId}`, id, { expirationTtl: 7200 }); } catch (e) { /* non-fatal */ } }
 
   return json({ ok: true, id, status: 'pending' });
 }

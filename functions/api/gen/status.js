@@ -16,6 +16,8 @@ export async function onRequestGet({ request, env }) {
   if (!jobRec) return jsonError('not_found', 404);
 
   const ready = jobRec.status === 'ready';
+  // In-place iterate jobs play at the BASE game's URL, not the (build-only) job id.
+  const playId = jobRec.baseId || id;
   // Extra fields so the creator's page can show LIVE progress (elapsed, ETA,
   // attempt count, last retry reason) instead of a static "building". Tim 2026-06-15.
   const r = json({
@@ -24,7 +26,7 @@ export async function onRequestGet({ request, env }) {
     title: jobRec.title || null,
     slug: jobRec.slug || null,
     error: jobRec.error || null,
-    playUrl: ready ? `/g/${id}` : null,
+    playUrl: ready ? `/g/${playId}` : null,
     attempts: jobRec.attempts || 0,
     queuedAt: jobRec.ts || 0,
     updatedAt: jobRec.updatedTs || 0,

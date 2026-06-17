@@ -41,14 +41,21 @@ export async function onRequestGet({ request, env }) {
       const readyPending = jobRec.status === 'pending' && (!jobRec.retryAfter || jobRec.retryAfter <= now);
       const stuck = jobRec.status === 'building' && (now - (jobRec.updatedTs || 0)) > STUCK_MS;
       if (readyPending || stuck) {
-        jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts });
+        jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts, baseId: jobRec.baseId || null });
       }
     }
     cursor = page.list_complete ? null : page.cursor;
   } while (cursor && jobs.length < 200);
 
   jobs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-  const r = json({ ok: true, jobs: jobs.slice(0, limit) });
+  const out = jobs.slice(0, limit);
+  // For in-place iterate jobs, attach the CURRENT game HTML so the relay can evolve it.
+  // Only for the jobs we actually return -> bounds the extra KV reads + response size.
+  for (const j of out) {
+    if (j.baseId) { j.iterate = true; j.baseHtml = (await env.VOTES.get(`genblob:${j.baseId}`)) || ''; }
+    delete j.baseId;
+  }
+  const r = json({ ok: true, jobs: out });
   r.headers.set('cache-control', 'no-store');
   return r;
 }
