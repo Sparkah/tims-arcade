@@ -35,6 +35,9 @@
     mine: $('create-mine'),
     list: $('create-list'),
     creatorName: $('vibe-creator-name'),
+    stats: $('create-stats'),
+    statsGrid: $('create-stats-grid'),
+    statsEarn: $('create-stats-earn'),
   };
   if (!els.composer) return;
 
@@ -85,7 +88,7 @@
     return fetch('/api/gen/quota', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (q) {
-        if (!q.signed_in) { show(els.signin, true); show(els.composer, false); show(els.mine, false); return q; }
+        if (!q.signed_in) { show(els.signin, true); show(els.composer, false); show(els.mine, false); show(els.stats, false); return q; }
         show(els.signin, false);
         show(els.composer, true);
         if (els.creatorName && !els.creatorName.value && q.displayName) els.creatorName.value = q.displayName;
@@ -113,6 +116,31 @@
       var need = q.tokensToNext != null ? q.tokensToNext : Math.max(0, cost - tokens);
       els.gateText.textContent = 'Earn ' + need + ' more tokens to make a game - play (+1/min), rate a game (+5), or log in daily (+10).';
     }
+    renderStats(q);
+  }
+
+  // Token analytics -- ONLY data we already store: balance + lifetime-earned + login
+  // streak (we keep no per-source breakdown), plus the fixed cost. Tim 2026-06-17.
+  function renderStats(q) {
+    if (!els.stats || !els.statsGrid) return;
+    // Coerce to numbers so a corrupted KV field can never become markup below.
+    var cost = +q.generationCost || 60;
+    var tokens = +q.tokens || 0;
+    var lifetime = +q.lifetime || 0;
+    var streak = +q.streak || 0, best = +q.bestStreak || 0;
+    var canMake = Math.floor(tokens / cost);
+    var tiles = [
+      [tokens, 'tokens now'],
+      [canMake, canMake === 1 ? 'game you can make' : 'games you can make'],
+      [cost, 'cost per game / improvement'],
+      [lifetime, 'earned all-time'],
+      [streak + 'd', 'login streak' + (best > streak ? ' (best ' + best + 'd)' : '')],
+    ];
+    els.statsGrid.innerHTML = tiles.map(function (t) {
+      return '<div class="create-stat"><div class="n">' + t[0] + '</div><div class="l">' + t[1] + '</div></div>';
+    }).join('');
+    if (els.statsEarn) els.statsEarn.textContent = 'Earn tokens by playing (+1/min), rating a game (+5, after 5 min on it), and logging in daily (+10, with bonuses at 3/7/14/30/60-day streaks). Each new game or improvement costs ' + cost + ' tokens.';
+    show(els.stats, true);
   }
 
   // ---- generate ----

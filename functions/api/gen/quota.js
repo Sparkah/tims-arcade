@@ -36,6 +36,12 @@ export async function onRequestGet({ request, env }) {
     signed_in: true,
     email: session.email,
     tokens,
+    // Already-saved economy aggregates (NOT new tracking) for the /create analytics
+    // panel: total ever earned + login streak. We do NOT store a per-source breakdown
+    // of where tokens came from, so the UI shows the lifetime total + the earn rates.
+    lifetime: m.lifetime || 0,
+    streak: m.streak || 0,
+    bestStreak: m.bestStreak || 0,
     generationCost: GENERATION_COST,
     canGenerate: tokens >= GENERATION_COST,
     tokensToNext: Math.max(0, GENERATION_COST - tokens),
