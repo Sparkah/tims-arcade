@@ -47,6 +47,25 @@
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
   function capture(ev, props) { try { if (window.posthog) window.posthog.capture(ev, props || {}); } catch (e) {} }
 
+  // Brief, dependency-free confirmation toast. Publish/unpublish/delete do NOT
+  // reload the page, so the action needs visible feedback (Tim 2026-06-17: a
+  // publish looked like a no-op until a manual reload). Bottom-center, safe-area
+  // aware so it clears the iOS Safari toolbar.
+  function toast(msg, kind) {
+    var t = document.getElementById('vibe-toast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'vibe-toast';
+      t.style.cssText = 'position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);color:#fff;padding:11px 17px;border-radius:10px;font-size:14px;line-height:1.3;z-index:9999;box-shadow:0 6px 20px rgba(0,0,0,.4);max-width:88vw;text-align:center;pointer-events:none;transition:opacity .25s;';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.style.background = kind === 'err' ? '#7a2230' : '#1f7a4d';
+    t.style.opacity = '1';
+    clearTimeout(toast._t);
+    toast._t = setTimeout(function () { t.style.opacity = '0'; }, 3000);
+  }
+
   var ERRORS = {
     prompt_too_short: 'Add a few more words about your game.',
     prompt_contact: 'Please describe a game -- no links or contacts.',
@@ -263,26 +282,69 @@
     var play = document.createElement('a'); play.className = 'create-mini-btn'; play.textContent = 'Play'; play.target = '_blank'; play.rel = 'noopener';
     play.href = '/cplay?id=' + encodeURIComponent(g.id) + '&slug=' + encodeURIComponent(g.slug || '') + '&title=' + encodeURIComponent(g.title || '') + '&by=' + encodeURIComponent(myName || '');
     acts.appendChild(play);
-    // Publish / unpublish
-    var pub = document.createElement('button'); pub.type = 'button'; pub.className = 'create-mini-btn' + (g.published ? ' on' : '');
-    pub.textContent = g.published ? 'Published ✓' : 'Publish to gallery';
-    pub.addEventListener('click', function () { pub.disabled = true; creationAction(g.id, g.published ? 'unpublish' : 'publish', loadCreations); });
+    // Publish / unpublish -- repaint from the API's authoritative {published}
+    // response, NOT a re-fetch. KV is eventually consistent, so re-reading
+    // /api/me/games right after the write returns the STALE flag and the button
+    // silently reverts (the bug Tim hit: publish looked like a no-op until reload).
+    var pub = document.createElement('button'); pub.type = 'button';
+    function paintPub() {
+      pub.className = 'create-mini-btn' + (g.published ? ' on' : '');
+      pub.textContent = g.published ? 'Published ✓' : 'Publish to gallery';
+      pub.disabled = false;
+    }
+    paintPub();
+    pub.addEventListener('click', function () {
+      var want = !g.published;
+      // Publishing makes the game public under the creator's name -- confirm intent
+      // (Tim expected a confirmation step). Unpublish stays frictionless.
+      if (want && !confirm('Publish "' + (g.title || g.slug) + '" to the public gallery?\nAnyone will be able to play it. You can unpublish anytime.')) return;
+      pub.disabled = true;
+      pub.textContent = want ? 'Publishing...' : 'Removing...';
+      creationAction(g.id, want ? 'publish' : 'unpublish', function (ok, d) {
+        // Paint from the server's authoritative {published}. A missing boolean
+        // (even alongside ok) is a failure, not an optimistic assumption.
+        if (ok && typeof d.published === 'boolean') {
+          g.published = d.published;
+          paintPub();
+          toast(g.published ? 'Published! Your game is now in the gallery.' : 'Removed from the gallery.');
+        } else {
+          paintPub();   // revert to the prior state
+          toast('Could not update. Please try again.', 'err');
+        }
+      });
+    });
     acts.appendChild(pub);
-    // Delete
+    // Delete -- drop the card straight from the DOM on success (no stale re-fetch).
     var del = document.createElement('button'); del.type = 'button'; del.className = 'create-mini-btn danger'; del.textContent = 'Delete';
-    del.addEventListener('click', function () { if (confirm('Delete "' + (g.title || g.slug) + '"? This cannot be undone.')) { del.disabled = true; creationAction(g.id, 'delete', loadCreations); } });
+    del.addEventListener('click', function () {
+      if (!confirm('Delete "' + (g.title || g.slug) + '"? This cannot be undone.')) return;
+      del.disabled = true; del.textContent = 'Deleting...';
+      creationAction(g.id, 'delete', function (ok, d) {
+        if (ok && d.deleted === true) {
+          card.remove();
+          toast('Deleted.');
+          if (!els.list.children.length) show(els.mine, false);
+        } else {
+          del.disabled = false; del.textContent = 'Delete';
+          toast('Could not delete. Please try again.', 'err');
+        }
+      });
+    });
     acts.appendChild(del);
     meta.appendChild(t); meta.appendChild(stats); meta.appendChild(acts);
     card.appendChild(cover); card.appendChild(meta);
     return card;
   }
 
-  function creationAction(id, action, cb) {
+  // onResult(ok, data): ok reflects HTTP status AND the body's {ok:true}; data
+  // carries {published} (publish/unpublish) or {deleted} (delete) so callers paint
+  // the UI from the server's authoritative state instead of re-fetching stale KV.
+  function creationAction(id, action, onResult) {
     if (!id) return;
     fetch('/api/me/creations', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ id: id, action: action }) })
-      .then(function (r) { return r.json(); })
-      .then(function () { if (cb) cb(); })
-      .catch(function () {});
+      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok && !!d && d.ok === true, d: d || {} }; }, function () { return { ok: false, d: {} }; }); })
+      .then(function (res) { if (onResult) onResult(res.ok, res.d); })
+      .catch(function () { if (onResult) onResult(false, {}); });
   }
 
   function saveCreatorName() {
