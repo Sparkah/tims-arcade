@@ -1,5 +1,5 @@
 export default {
-  "generated": "2026-06-17T11:42:19.604288+00:00",
+  "generated": "2026-06-19T11:38:07.581798+00:00",
   "core_platforms": [
     "yandex",
     "crazygames",
@@ -106,10 +106,14 @@ export default {
           "status": "not_started"
         },
         "gamepush": {
-          "status": "not_started"
+          "status": "built"
         }
       },
-      "other": null,
+      "other": {
+        "playgama": {
+          "status": "submitted"
+        }
+      },
       "readyPlatforms": [
         "gamedistribution",
         "gamepush"
@@ -824,6 +828,31 @@ export default {
         "gamedistribution",
         "gamepush"
       ]
+    },
+    "2048 Brain Rot Band": {
+      "gameDir": "Games/197_nubik_2048",
+      "engagement": null,
+      "platforms": {
+        "yandex": {
+          "status": "built"
+        },
+        "crazygames": {
+          "status": "not_started"
+        },
+        "gamedistribution": {
+          "status": "not_started"
+        },
+        "gamepush": {
+          "status": "not_started"
+        }
+      },
+      "other": null,
+      "readyPlatforms": [
+        "yandex",
+        "crazygames",
+        "gamedistribution",
+        "gamepush"
+      ]
     }
   },
   "untracked": [],
@@ -833,7 +862,7 @@ export default {
       "approved": 0,
       "submitted": 20,
       "rejected": 3,
-      "built": 4
+      "built": 5
     },
     "crazygames": {
       "live": 0,
@@ -854,7 +883,7 @@ export default {
       "approved": 0,
       "submitted": 0,
       "rejected": 0,
-      "built": 1
+      "built": 2
     }
   }
 };
