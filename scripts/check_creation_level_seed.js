@@ -76,6 +76,14 @@ async function main() {
   const preserved = JSON.parse(env.store.get('creation-levels:abc12345'));
   if (preserved.levels[0].name !== 'Creator Edit') throw new Error('creator levels were overwritten');
 
+  await mod.writeCreationLevels(env, 'defaulted', mod.defaultLevels(), { source: 'creator-admin', updatedTs: 1000 });
+  const recovered = await mod.seedCreationLevelsFromHtml(env, 'defaulted', html, { updatedTs: 1001 });
+  if (!recovered.seeded || recovered.count !== 2) throw new Error('saved generic default was not replaceable by seed');
+  const recoveredStored = JSON.parse(env.store.get('creation-levels:defaulted'));
+  if (recoveredStored.source !== 'embedded-seed' || recoveredStored.levels[0].name !== 'Seed Level A') {
+    throw new Error('saved generic default did not recover to seed levels');
+  }
+
   console.log('PASS creation-level seed');
 }
 

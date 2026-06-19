@@ -127,6 +127,29 @@ async function main() {
     throw new Error(`unexpected iterate levelSeed metadata: ${JSON.stringify(iterJob.levelSeed)}`);
   }
 
+  const defaultBaseId = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+  const defaultJobId = 'ffffffffffffffffffffffffffffffff';
+  const defaultEnv = makeEnv({
+    [`upload:${defaultBaseId}`]: JSON.stringify({ source: 'vibe', uid: 'u3', slug: 'default-game-eeee', title: 'Default Game', published: false, ts: 6 }),
+    [`genjob:${defaultJobId}`]: JSON.stringify({ status: 'building', uid: 'u3', baseId: defaultBaseId, email: '', prompt: 'iterate default', ts: 7 }),
+    [`creation-levels:${defaultBaseId}`]: JSON.stringify({
+      schema: 'game-factory-generic-levels-v1',
+      source: 'creator-admin',
+      updatedTs: 8,
+      levels: [{ name: 'Level 1', width: 360, height: 640, player: { x: 180, y: 560 }, goal: { x: 180, y: 100 }, objects: [], notes: '' }],
+    }),
+  });
+  const defaultIter = await postReady(mod, defaultEnv, defaultJobId, htmlWithSeed('Recovered Game', [
+    { name: 'Recovered Built In', player: { x: 20, y: 500 }, goal: { x: 320, y: 90 }, objects: [] },
+  ]));
+  if (defaultIter.status !== 200 || !defaultIter.body || defaultIter.body.status !== 'ready') {
+    throw new Error(`default iterate ready failed: ${defaultIter.status} ${defaultIter.text}`);
+  }
+  const recovered = JSON.parse(defaultEnv.store.get(`creation-levels:${defaultBaseId}`));
+  if (recovered.source !== 'embedded-seed' || recovered.levels[0].name !== 'Recovered Built In') {
+    throw new Error('saved generic fallback was not replaced by embedded seed');
+  }
+
   console.log('PASS creation-level acceptance');
 }
 

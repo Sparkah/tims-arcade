@@ -85,6 +85,24 @@ function hasLevelArray(stored) {
   return !!(stored && Array.isArray(stored.levels) && stored.levels.length);
 }
 
+function stableLevel(value) {
+  return {
+    name: value.name || '',
+    width: value.width,
+    height: value.height,
+    player: value.player,
+    goal: value.goal,
+    objects: value.objects || [],
+    notes: value.notes || '',
+  };
+}
+
+function isDefaultLevelSet(levels) {
+  const clean = sanitizeLevels(levels).map(stableLevel);
+  const fallback = defaultLevels().map(stableLevel);
+  return JSON.stringify(clean) === JSON.stringify(fallback);
+}
+
 export function normalizeLevelPayload(stored) {
   if (!hasLevelArray(stored)) {
     return {
@@ -179,7 +197,7 @@ export async function seedCreationLevelsFromHtml(env, id, html, options = {}) {
   const existing = await env.VOTES.get(levelsKey(id), 'json');
   if (hasLevelArray(existing)) {
     const source = cleanText(existing.source, 40);
-    if (!source || source !== 'embedded-seed') {
+    if ((!source || source !== 'embedded-seed') && !isDefaultLevelSet(existing.levels)) {
       return {
         seeded: false,
         reason: source ? `existing_${source}` : 'existing_levels',
