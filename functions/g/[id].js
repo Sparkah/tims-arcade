@@ -15,6 +15,8 @@ const ID_RE = /^[0-9a-z]{8,40}$/;
 
 const CSP = [
   // sandbox FIRST: opaque origin + no same-origin powers, applied to this doc.
+  // Fullscreen is controlled by the embedding iframe's allowfullscreen attribute;
+  // CSP sandbox has no valid allow-fullscreen token.
   "sandbox allow-scripts allow-pointer-lock",
   "default-src 'none'",
   "script-src 'unsafe-inline'",

@@ -270,7 +270,8 @@
     var iframe = document.createElement('iframe');
     iframe.className = 'create-frame';
     iframe.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
-    iframe.setAttribute('allow', 'fullscreen; autoplay');
+    iframe.setAttribute('allow', 'autoplay');
+    iframe.setAttribute('allowfullscreen', '');
     iframe.setAttribute('title', s.title || 'Your game');
     iframe.src = s.playUrl;
     els.frameWrap.appendChild(iframe);

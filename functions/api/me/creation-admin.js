@@ -5,6 +5,7 @@
 
 import { readSession } from '../_session.js';
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
+import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord, verifyPasswordRecord } from '../../_lib/gameEditorAuth.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
@@ -82,14 +83,6 @@ function sanitizeLevels(levels) {
   return clean.length ? clean : defaultLevels();
 }
 
-function makePassword() {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
-  let out = '';
-  for (const b of bytes) out += alphabet[b % alphabet.length];
-  return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8)}`;
-}
-
 async function readCreation(env, id) {
   const rec = await env.VOTES.get(`upload:${id}`, 'json');
   if (!rec || rec.source !== 'vibe') return null;
@@ -118,7 +111,7 @@ async function passwordOk(rec, password) {
 
 async function ensureAdminPassword(env, id, rec) {
   if (rec.adminPasswordHash) return { rec, password: null };
-  const password = makePassword();
+  const password = makeReadablePassword();
   rec.adminPasswordHash = await makeEditorPasswordRecord(password);
   rec.adminPasswordSetAt = Date.now();
   await env.VOTES.put(`upload:${id}`, JSON.stringify(rec), { expirationTtl: TTL });
@@ -197,7 +190,7 @@ export async function onRequestPost({ request, env }) {
 
   if (action === 'reset-password') {
     if (!owner) return jsonError('owner_required', 403);
-    const password = makePassword();
+    const password = makeReadablePassword();
     rec.adminPasswordHash = await makeEditorPasswordRecord(password);
     rec.adminPasswordSetAt = Date.now();
     await env.VOTES.put(`upload:${id}`, JSON.stringify(rec), { expirationTtl: TTL });

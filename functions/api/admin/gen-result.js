@@ -11,6 +11,7 @@
 import { json, jsonError } from '../../_lib/response.js';
 import { refundTokens } from '../../_lib/meta.js';
 import { requireAdmin } from '../../_lib/adminAuth.js';
+import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
@@ -19,14 +20,6 @@ const JOB_TTL = 60 * 60 * 24 * 7;
 const MAX_HTML = 600 * 1024;          // 600 KB cap for a single-file game
 const QUEUE_MAX_MS = 5 * 24 * 60 * 60 * 1000;   // keep retrying for up to 5 days (Tim 2026-06-15)
 const MAX_ATTEMPTS = 30;                         // safety cap so a truly-unbuildable prompt can't loop forever
-
-function makeAdminPassword() {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const bytes = crypto.getRandomValues(new Uint8Array(10));
-  let out = '';
-  for (const b of bytes) out += alphabet[b % alphabet.length];
-  return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8)}`;
-}
 
 export async function onRequestPost({ request, env }) {
   const guard = await requireAdmin(request, env);
@@ -139,7 +132,7 @@ export async function onRequestPost({ request, env }) {
       }
       let adminPassword = null;
       if (!base.adminPasswordHash) {
-        adminPassword = makeAdminPassword();
+        adminPassword = makeReadablePassword();
         base.adminPasswordHash = await makeEditorPasswordRecord(adminPassword);
         base.adminPasswordSetAt = now;
       }
@@ -161,7 +154,7 @@ export async function onRequestPost({ request, env }) {
     const slug = `${slugify(title)}-${id.slice(-4)}`;
 
     await env.VOTES.put(`genblob:${id}`, html, { expirationTtl: BLOB_TTL });
-    const adminPassword = makeAdminPassword();
+    const adminPassword = makeReadablePassword();
     const adminPasswordHash = await makeEditorPasswordRecord(adminPassword);
 
     let hasCover = false;

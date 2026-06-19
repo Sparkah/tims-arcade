@@ -1,5 +1,6 @@
 import { getAdminPassword, getSessionSecret, isAdminRequest, safeEqual } from './adminAuth.js';
 import { parseCookie } from './cookie.js';
+import { base64url, fromBase64url, hmacSha256 } from './crypto.js';
 
 const COOKIE_PREFIX = 'gf_editor_';
 const SESSION_SECONDS = 3 * 24 * 60 * 60;
@@ -7,31 +8,6 @@ const HASH_ITERATIONS = 100000;
 
 export function accessKey(slug) {
   return `game-editor:${slug}:access`;
-}
-
-function base64url(bytes) {
-  let bin = '';
-  for (const b of new Uint8Array(bytes)) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-function fromBase64url(value) {
-  const padded = String(value || '').replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(String(value || '').length / 4) * 4, '=');
-  const bin = atob(padded);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-async function hmac(payload, secret) {
-  const key = await crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-  return base64url(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload)));
 }
 
 function cookieName(slug) {
@@ -94,7 +70,7 @@ export async function editorPasswordMatches(env, slug, password) {
     return safeEqual(String(password || ''), stored.password);
   }
   const fallback = env.GAME_FACTORY_DEFAULT_EDITOR_PASSWORD || getAdminPassword(env);
-  return safeEqual(String(password || ''), fallback);
+  return !!fallback && safeEqual(String(password || ''), fallback);
 }
 
 export async function editorAccessInfo(env, slug) {
@@ -124,10 +100,12 @@ export async function resetEditorPassword(env, slug) {
 }
 
 export async function createEditorCookie(request, env, slug) {
+  const secret = getSessionSecret(env);
+  if (!secret) throw new Error('editor session secret is not configured');
   const expires = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
   const nonce = crypto.randomUUID().replace(/-/g, '');
   const payload = `v1.${slug}.${expires}.${nonce}`;
-  const sig = await hmac(payload, getSessionSecret(env));
+  const sig = await hmacSha256(payload, secret);
   return `${cookieName(slug)}=${payload}.${sig}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_SECONDS}${secureSuffix(request)}`;
 }
 
@@ -138,12 +116,14 @@ export function clearEditorCookie(request, slug) {
 export async function hasEditorSession(request, env, slug) {
   const value = parseCookie(request.headers.get('Cookie') || '', cookieName(slug));
   if (!value) return false;
+  const secret = getSessionSecret(env);
+  if (!secret) return false;
   const parts = value.split('.');
   if (parts.length !== 5 || parts[0] !== 'v1' || parts[1] !== slug) return false;
   const expires = Number(parts[2]);
   if (!Number.isFinite(expires) || expires < Math.floor(Date.now() / 1000)) return false;
   const payload = parts.slice(0, 4).join('.');
-  const expected = await hmac(payload, getSessionSecret(env));
+  const expected = await hmacSha256(payload, secret);
   return safeEqual(parts[4], expected);
 }
 
