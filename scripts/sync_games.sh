@@ -128,10 +128,25 @@ for ((i = 0; i < COUNT; i++)); do
     [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
   done
 
+  # Vendored root libraries + runtime data files the game loads directly. Phaser
+  # games bundle phaser.min.js locally (CLAUDE.md: no external CDN for Yandex/CG);
+  # some load balance.json / levels.csv from the root. index.html references them
+  # relatively, so without these the game can't boot (or falls back to a stub).
+  # Static/runtime files, no mid-write guard. Deliberately NOT balance.sources.json
+  # — it holds the Google Sheet id (same leak class as audio_manifest.json below).
+  for f in phaser.min.js balance.json levels.csv; do
+    [[ -f "$GAME_DIR/$f" ]] && cp "$GAME_DIR/$f" "$OUT_GAMES/$SLUG/$f"
+  done
+
   # Audio: ship ONLY the runtime loop to the public CDN. bg_full.mp3 (the raw
   # multi-minute source track) is unused bloat, and audio_manifest.json leaks the
   # Suno task_id + account credit balance. Keep both in the Games/ source only.
   rm -f "$OUT_GAMES/$SLUG/audio/bg_full.mp3" "$OUT_GAMES/$SLUG/audio/audio_manifest.json"
+
+  # Drop raw/source asset subfolders (e.g. monsters_raw/ — the rembg source PNGs).
+  # The game loads the processed assets/monsters/ only, so the raw inputs are dead
+  # CDN weight that fails the pre-push scorecard (2026-06-19).
+  rm -rf "$OUT_GAMES/$SLUG/assets/"*_raw 2>/dev/null || true
 
   # Copy optional sibling files used by the game-factory framework.
   # gf-lib.js is a hard runtime dependency (defines GF.*), so a half-written
