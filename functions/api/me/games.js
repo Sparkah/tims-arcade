@@ -63,6 +63,7 @@ async function buildMyGames(env, session) {
       status: row.status || 'pending',
       published: !!row.published,
       hasCover: !!row.hasCover,
+      adminUrl: row.source === 'vibe' && row.id ? `/creator-admin?id=${encodeURIComponent(row.id)}` : null,
       ts: row.ts || 0,
       sandboxUrl: row.sandboxUrl || null,
       plays: parseInt(playsRaw) || 0,

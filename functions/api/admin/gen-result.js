@@ -10,6 +10,8 @@
 
 import { json, jsonError } from '../../_lib/response.js';
 import { refundTokens } from '../../_lib/meta.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
+import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
@@ -18,11 +20,17 @@ const MAX_HTML = 600 * 1024;          // 600 KB cap for a single-file game
 const QUEUE_MAX_MS = 5 * 24 * 60 * 60 * 1000;   // keep retrying for up to 5 days (Tim 2026-06-15)
 const MAX_ATTEMPTS = 30;                         // safety cap so a truly-unbuildable prompt can't loop forever
 
+function makeAdminPassword() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(10));
+  let out = '';
+  for (const b of bytes) out += alphabet[b % alphabet.length];
+  return `${out.slice(0, 4)}-${out.slice(4, 8)}-${out.slice(8)}`;
+}
+
 export async function onRequestPost({ request, env }) {
-  // Header-only token: keeps the secret out of URLs / access logs.
-  const token = request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
-  if (token !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
 
   let body;
   try { body = await request.json(); } catch { return jsonError('bad_json', 400); }
@@ -129,6 +137,12 @@ export async function onRequestPost({ request, env }) {
       if (coverB64 && coverB64.length < 700 * 1024) {
         try { await env.VOTES.put(`creationcover:${baseId}`, coverB64, { expirationTtl: BLOB_TTL }); hasCover = true; } catch (e) { /* best effort */ }
       }
+      let adminPassword = null;
+      if (!base.adminPasswordHash) {
+        adminPassword = makeAdminPassword();
+        base.adminPasswordHash = await makeEditorPasswordRecord(adminPassword);
+        base.adminPasswordSetAt = now;
+      }
       // Keep slug / title / published / created-ts / author / uid (stable link + stats);
       // refresh quality + cover + updatedTs.
       base.quality = quality; base.hasCover = hasCover; base.status = 'live'; base.updatedTs = now;
@@ -138,7 +152,7 @@ export async function onRequestPost({ request, env }) {
       jobRec.status = 'ready'; jobRec.title = base.title; jobRec.slug = base.slug; jobRec.quality = quality; jobRec.updatedTs = now;
       await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
       await clearIterLock(env, jobRec);
-      try { await emailUser(env, jobRec, `/g/${baseId}`, true); } catch (e) { /* best effort */ }
+      try { await emailUser(env, jobRec, `/g/${baseId}`, true, { adminPath: `/creator-admin?id=${baseId}`, adminPassword }); } catch (e) { /* best effort */ }
       return json({ ok: true, status: 'ready', slug: base.slug, playUrl: `/g/${baseId}` });
     }
 
@@ -147,6 +161,8 @@ export async function onRequestPost({ request, env }) {
     const slug = `${slugify(title)}-${id.slice(-4)}`;
 
     await env.VOTES.put(`genblob:${id}`, html, { expirationTtl: BLOB_TTL });
+    const adminPassword = makeAdminPassword();
+    const adminPasswordHash = await makeEditorPasswordRecord(adminPassword);
 
     let hasCover = false;
     if (coverB64 && coverB64.length < 700 * 1024) {
@@ -171,13 +187,14 @@ export async function onRequestPost({ request, env }) {
       uid: jobRec.uid, email: jobRec.email,
       status: 'live', sandboxUrl: `/g/${id}`, source: 'vibe', ts: jobRec.ts,
       published: false, quality, hasCover,
+      adminPasswordHash, adminPasswordSetAt: now,
     };
     try { await env.VOTES.put(`upload:${id}`, JSON.stringify(rec), { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
     // Server-side "this slug is a creation" index so heartbeat can refuse to accrue
     // prompts for creation plays even if the client omits kind (Codex review 2026-06-15).
     try { await env.VOTES.put(`creationslug:${slug}`, id, { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
 
-    try { await emailUser(env, jobRec, `/g/${id}`); } catch (e) { /* best effort */ }
+    try { await emailUser(env, jobRec, `/g/${id}`, false, { adminPath: `/creator-admin?id=${id}`, adminPassword }); } catch (e) { /* best effort */ }
     return json({ ok: true, status: 'ready', slug, playUrl: `/g/${id}` });
   }
 
@@ -206,15 +223,22 @@ function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'game';
 }
 
-async function emailUser(env, jobRec, playPath, isUpdate) {
+async function emailUser(env, jobRec, playPath, isUpdate, adminInfo = {}) {
   if (!env.RESEND_API_KEY || !jobRec.email) return;
   const origin = 'https://game-factory.tech';
   const ready = !!playPath;
   const subject = ready ? (isUpdate ? 'Your game was updated' : 'Your game is ready to play') : 'Your game could not be built';
   const link = ready ? origin + playPath : origin + '/create';
+  const adminLink = ready && adminInfo.adminPath ? origin + adminInfo.adminPath : '';
+  const adminBlock = adminLink
+    ? `<p><a href="${adminLink}">Open your game admin panel</a></p>` +
+      (adminInfo.adminPassword
+        ? `<p>Admin password: <code>${escapeHtml(adminInfo.adminPassword)}</code><br><small>Save this password. It lets you edit levels for this game.</small></p>`
+        : `<p><small>Your existing game admin password still works.</small></p>`)
+    : '';
   const html = ready
     ? `<p>Your game <b>${escapeHtml(jobRec.title || 'game')}</b> ${isUpdate ? 'was updated and is ready' : 'is ready'}.</p>` +
-      `<p><a href="${link}">Play it now</a></p><p>-- game-factory.tech</p>`
+      `<p><a href="${link}">Play it now</a></p>${adminBlock}<p>-- game-factory.tech</p>`
     : `<p>Sorry, we could not build your game this time, so your prompt was refunded.</p>` +
       `<p><a href="${link}">Try again</a></p><p>-- game-factory.tech</p>`;
   await fetch('https://api.resend.com/emails', {

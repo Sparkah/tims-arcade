@@ -30,6 +30,7 @@
     frameWrap: $('create-frame-wrap'),
     again: $('vibe-again'),
     open: $('vibe-open'),
+    admin: $('vibe-admin'),
     failed: $('create-failed'),
     retry: $('vibe-retry'),
     mine: $('create-mine'),
@@ -260,13 +261,15 @@
       if (s.title) qp.set('title', s.title);
       if (myName)  qp.set('by', myName);
       els.open.href = '/cplay?' + qp.toString();
+      if (els.admin) els.admin.href = '/creator-admin?id=' + encodeURIComponent(playId);
     } else {
       els.open.href = s.playUrl || '#';
+      if (els.admin) els.admin.href = '/creator';
     }
     els.frameWrap.innerHTML = '';
     var iframe = document.createElement('iframe');
     iframe.className = 'create-frame';
-    iframe.setAttribute('sandbox', 'allow-scripts allow-pointer-lock allow-fullscreen');
+    iframe.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
     iframe.setAttribute('allow', 'fullscreen; autoplay');
     iframe.setAttribute('title', s.title || 'Your game');
     iframe.src = s.playUrl;
@@ -341,10 +344,14 @@
     var play = document.createElement('a'); play.className = 'create-mini-btn'; play.textContent = 'Play'; play.target = '_blank'; play.rel = 'noopener';
     play.href = '/cplay?id=' + encodeURIComponent(g.id) + '&slug=' + encodeURIComponent(g.slug || '') + '&title=' + encodeURIComponent(g.title || '') + '&by=' + encodeURIComponent(myName || '');
     acts.appendChild(play);
+    // Admin -- level builder + owner-only iterate controls for this generated game.
+    var admin = document.createElement('a'); admin.className = 'create-mini-btn'; admin.textContent = 'Admin';
+    admin.href = g.adminUrl || ('/creator-admin?id=' + encodeURIComponent(g.id));
+    acts.appendChild(admin);
     // Improve -- iterate IN PLACE: prompt a change, the relay evolves THIS game and
     // overwrites it (same link + plays/likes). Reuses the build/poll UI; costs 60
     // tokens like a fresh build. (Tim 2026-06-17: creation "upgrade" button.)
-    var imp = document.createElement('button'); imp.type = 'button'; imp.className = 'create-mini-btn'; imp.textContent = 'Improve';
+    var imp = document.createElement('button'); imp.type = 'button'; imp.className = 'create-mini-btn'; imp.textContent = 'Iterate';
     imp.addEventListener('click', function () { improve(g); });
     acts.appendChild(imp);
     // Publish / unpublish -- repaint from the API's authoritative {published}
