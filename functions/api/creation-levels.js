@@ -5,20 +5,9 @@
 
 import { readSession } from './_session.js';
 import { json, jsonError } from '../_lib/response.js';
+import { readCreationLevels } from '../_lib/creationLevels.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
-
-function defaultLevels() {
-  return [{
-    name: 'Level 1',
-    width: 360,
-    height: 640,
-    player: { x: 180, y: 560 },
-    goal: { x: 180, y: 100 },
-    objects: [],
-    notes: '',
-  }];
-}
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
@@ -32,15 +21,15 @@ export async function onRequestGet({ request, env }) {
     if (!session || session.uid !== rec.uid) return jsonError('not_found', 404);
   }
 
-  const stored = await env.VOTES.get(`creation-levels:${id}`, 'json');
-  const levels = Array.isArray(stored && stored.levels) && stored.levels.length ? stored.levels : defaultLevels();
+  const data = await readCreationLevels(env, id);
   const r = json({
     ok: true,
     id,
     slug: rec.slug || '',
-    schema: (stored && stored.schema) || 'game-factory-generic-levels-v1',
-    levels,
-    updatedTs: (stored && stored.updatedTs) || 0,
+    schema: data.schema,
+    levels: data.levels,
+    updatedTs: data.updatedTs,
+    source: data.source,
   });
   r.headers.set('cache-control', rec.published ? 'public, max-age=0, s-maxage=30' : 'no-store');
   return r;

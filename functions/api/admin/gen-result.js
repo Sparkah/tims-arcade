@@ -13,6 +13,7 @@ import { refundTokens } from '../../_lib/meta.js';
 import { requireAdmin } from '../../_lib/adminAuth.js';
 import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
+import { extractEmbeddedLevelSeed, seedCreationLevelsFromHtml } from '../../_lib/creationLevels.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
@@ -91,6 +92,7 @@ export async function onRequestPost({ request, env }) {
     const html = String(body.html || '');
     if (html.length < 64) return jsonError('empty_html', 400);
     if (html.length > MAX_HTML) return jsonError('html_too_large', 413);
+    if (!extractEmbeddedLevelSeed(html)) return jsonError('missing_level_seed', 400);
     // Cover screenshot (base64 PNG from the relay's quality-smoke). Stored as-is;
     // /api/creation-cover decodes + serves it. Capped so a giant shot can't bust KV.
     const coverB64 = String(body.cover || '');
@@ -126,6 +128,7 @@ export async function onRequestPost({ request, env }) {
       // but the job unmarked -> the relay re-applies the change on retry: a benign
       // double-apply, never a lost/garbage original (accepted, Codex 2026-06-17).
       await env.VOTES.put(`genblob:${baseId}`, html, { expirationTtl: BLOB_TTL });   // overwrite + refresh 30-day life
+      const levelSeed = await seedCreationLevelsFromHtml(env, baseId, html, { updatedTs: now });
       let hasCover = !!base.hasCover;
       if (coverB64 && coverB64.length < 700 * 1024) {
         try { await env.VOTES.put(`creationcover:${baseId}`, coverB64, { expirationTtl: BLOB_TTL }); hasCover = true; } catch (e) { /* best effort */ }
@@ -142,7 +145,7 @@ export async function onRequestPost({ request, env }) {
       try { await env.VOTES.put(`upload:${baseId}`, JSON.stringify(base), { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
       try { await env.VOTES.put(`creationslug:${base.slug}`, baseId, { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
 
-      jobRec.status = 'ready'; jobRec.title = base.title; jobRec.slug = base.slug; jobRec.quality = quality; jobRec.updatedTs = now;
+      jobRec.status = 'ready'; jobRec.title = base.title; jobRec.slug = base.slug; jobRec.quality = quality; jobRec.updatedTs = now; jobRec.levelSeed = levelSeed;
       await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
       await clearIterLock(env, jobRec);
       try { await emailUser(env, jobRec, `/g/${baseId}`, true, { adminPath: `/creator-admin?id=${baseId}`, adminPassword }); } catch (e) { /* best effort */ }
@@ -154,6 +157,7 @@ export async function onRequestPost({ request, env }) {
     const slug = `${slugify(title)}-${id.slice(-4)}`;
 
     await env.VOTES.put(`genblob:${id}`, html, { expirationTtl: BLOB_TTL });
+    const levelSeed = await seedCreationLevelsFromHtml(env, id, html, { updatedTs: now });
     const adminPassword = makeReadablePassword();
     const adminPasswordHash = await makeEditorPasswordRecord(adminPassword);
 
@@ -167,6 +171,7 @@ export async function onRequestPost({ request, env }) {
     jobRec.slug = slug;
     jobRec.quality = quality;
     jobRec.updatedTs = now;
+    jobRec.levelSeed = levelSeed;
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
 
     // Surface in the creator's "My games" via the existing upload: schema. Private
