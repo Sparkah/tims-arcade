@@ -248,7 +248,7 @@
     show(els.building, false);
     show(els.failed, false);
     show(els.ready, true);
-    els.readyTitle.textContent = (s.title ? '"' + s.title + '" is ready!' : 'Your game is ready!');
+    els.readyTitle.textContent = (s.versionName || s.title ? '"' + (s.versionName || s.title) + '" is ready!' : 'Your game is ready!');
     // Full-screen open uses the WRAPPED player (/cplay) so the game keeps the same
     // back-to-gallery chrome as published games (s.playUrl is the RAW /g/<id> sandbox
     // host -- bare, no nav). The PLAY id is parsed from playUrl, so this is correct for
@@ -337,7 +337,9 @@
     cover.className = 'create-mine-cover';
     if (g.hasCover && g.id) { var im = document.createElement('img'); im.alt = ''; im.loading = 'lazy'; im.src = '/api/creation-cover?id=' + g.id; cover.appendChild(im); }
     var meta = document.createElement('div'); meta.className = 'create-mine-meta';
-    var t = document.createElement('div'); t.className = 'create-mine-title'; t.textContent = g.title || g.slug || 'Untitled';
+    var t = document.createElement('div'); t.className = 'create-mine-title'; t.textContent = g.versionName || g.title || g.slug || 'Untitled';
+    var summary = document.createElement('div'); summary.className = 'create-mine-summary';
+    summary.textContent = g.lastUpdateSummary || '';
     var stats = document.createElement('div'); stats.className = 'create-mine-stats';
     stats.textContent = (g.plays || 0) + ' plays · ' + min + ' min played · ' + (g.likes || 0) + ' likes';
     var acts = document.createElement('div'); acts.className = 'create-mine-acts';
@@ -404,7 +406,9 @@
       });
     });
     acts.appendChild(del);
-    meta.appendChild(t); meta.appendChild(stats); meta.appendChild(acts);
+    meta.appendChild(t);
+    if (g.lastUpdateSummary) meta.appendChild(summary);
+    meta.appendChild(stats); meta.appendChild(acts);
     card.appendChild(cover); card.appendChild(meta);
     return card;
   }

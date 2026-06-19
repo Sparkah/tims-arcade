@@ -12,6 +12,7 @@ import { checkRate } from '../../_lib/rateLimit.js';
 import { filterText } from '../../_lib/chatmod.js';
 import { parseCookie } from '../../_lib/cookie.js';
 import { spendTokens, refundTokens, readMeta, grantSignupBonus, GENERATION_COST } from '../../_lib/meta.js';
+import { appendCreationHistoryEvent, makeVersionName } from '../../_lib/creationHistory.js';
 
 const MIN_PROMPT = 3;
 const MAX_PROMPT = 500;
@@ -44,12 +45,18 @@ export async function onRequestPost({ request, env }) {
   const filtered = filterText(rawPrompt, MAX_PROMPT, { phone: false });   // allow big numbers in game ideas
   if (!filtered.ok) return jsonError('prompt_' + (filtered.reason || 'blocked'), 400);
   const prompt = filtered.text;
+  // Strong, unguessable id (128-bit) so the private /g/<id> link can't be
+  // enumerated (Codex review 2026-06-15). Created before optional lock acquisition
+  // so an iterate can reserve its in-flight slot before any token charge.
+  const id = crypto.randomUUID().replace(/-/g, '');
+  const ts = Date.now();
 
   // Optional in-place ITERATE: evolve an EXISTING creation instead of building fresh.
   // The change instruction IS `prompt`; iterateId names the game to upgrade. Must be
   // the caller's OWN vibe creation. Checked BEFORE charging so a bad target never
   // costs tokens. (Tim 2026-06-17: "upgrade button ... prompt further and iterate".)
   let baseId = null;
+  let baseRec = null;
   const iterateId = String(body.iterateId || '').toLowerCase();
   if (iterateId) {
     if (!/^[0-9a-z]{8,40}$/.test(iterateId)) return jsonError('bad_id', 400);
@@ -61,6 +68,18 @@ export async function onRequestPost({ request, env }) {
     // when the job goes terminal in gen-result; the TTL backstops a stuck build.
     if (await env.VOTES.get(`iteratelock:${iterateId}`)) return jsonError('already_improving', 409);
     baseId = iterateId;
+    baseRec = base;
+  }
+  let lockHeld = false;
+  if (baseId) {
+    try {
+      await env.VOTES.put(`iteratelock:${baseId}`, id, { expirationTtl: 7200 });
+      const currentLock = await env.VOTES.get(`iteratelock:${baseId}`);
+      if (currentLock && currentLock !== id) return jsonError('already_improving', 409);
+      lockHeld = true;
+    } catch (e) {
+      return jsonError('enqueue_failed', 500);
+    }
   }
 
   // Generation always costs GENERATION_COST tokens from the COOKIE uid balance --
@@ -79,24 +98,29 @@ export async function onRequestPost({ request, env }) {
   // 500 the submit -- spendTokens below still gates the actual charge.
   try { await grantSignupBonus(env, session.uid, cookieUid); } catch (e) { /* never block submit */ }
   const paid = cookieUid && await spendTokens(env, cookieUid, GENERATION_COST);
-  if (!paid) return jsonError('need_tokens', 402);
+  if (!paid) {
+    if (lockHeld) await releaseIterLock(env, baseId, id);
+    return jsonError('need_tokens', 402);
+  }
 
   // Daily cap counts only accepted generations -- so it never burns on rejects.
   const day = new Date().toISOString().slice(0, 10);
   if (!await checkRate(env, `genrate:${session.uid}:${day}`, DAILY_GEN_CAP, 60 * 60 * 26)) {
     if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
+    if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('daily_limit_reached', 429);
   }
 
-  // Strong, unguessable id (128-bit) so the private /g/<id> link can't be
-  // enumerated (Codex review 2026-06-15).
-  const id = crypto.randomUUID().replace(/-/g, '');
-  const ts = Date.now();
   const displayName = sessionMeta.displayName || (session.email || '').split('@')[0] || 'player';
+  const targetCreationId = baseId || id;
+  const currentVersion = Math.max(1, Math.floor(Number(baseRec && baseRec.versionNumber) || 1));
+  const versionNumber = baseId ? currentVersion + 1 : 1;
+  const versionName = makeVersionName(baseRec && (baseRec.title || baseRec.slug), versionNumber);
   const jobRec = {
     id, uid: session.uid, email: session.email, prompt, displayName,
     status: 'pending', slug: null, title: null, error: null,
     baseId,   // non-null => in-place upgrade of that creation (gen-result overwrites it)
+    targetCreationId, versionNumber, versionName,
     // What this job was charged, so a terminal build failure refunds the EXACT
     // charge once (admin/gen-result.js): 60 cookie-uid tokens. cookieUid may be
     // null (no cookie) -> nothing to refund.
@@ -107,6 +131,7 @@ export async function onRequestPost({ request, env }) {
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
   } catch (e) {
     if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
+    if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('enqueue_failed', 500);
   }
   // Signal new work so the vibe-relay detects it with a cheap GET (gen-queue
@@ -114,9 +139,29 @@ export async function onRequestPost({ request, env }) {
   // 15s poll did a genjob: LIST every time = ~5760 list ops/day, over the free
   // 1000/day cap by itself (2026-06-16). Best-effort; relay also stuck-sweeps.
   try { await env.VOTES.put('genjob:signal', String(ts)); } catch (e) { /* non-fatal */ }
-  // Hold the per-game improve lock while this iterate is in flight (released on the
-  // job's terminal transition in gen-result; 2h TTL backstops a stuck build).
-  if (baseId) { try { await env.VOTES.put(`iteratelock:${baseId}`, id, { expirationTtl: 7200 }); } catch (e) { /* non-fatal */ } }
+  try {
+    await appendCreationHistoryEvent(env, targetCreationId, {
+      id: `request:${id}`,
+      role: 'player',
+      type: 'request',
+      status: 'queued',
+      versionNumber,
+      versionName,
+      text: prompt,
+      summary: '',
+      ts,
+      jobId: id,
+    });
+  } catch (e) { /* non-fatal: the job is already queued */ }
 
-  return json({ ok: true, id, status: 'pending' });
+  return json({ ok: true, id, status: 'pending', targetCreationId, versionNumber, versionName });
+}
+
+async function releaseIterLock(env, baseId, jobId) {
+  if (!baseId) return;
+  try {
+    const key = `iteratelock:${baseId}`;
+    const current = await env.VOTES.get(key);
+    if (!current || current === jobId) await env.VOTES.delete(key);
+  } catch (e) { /* best effort */ }
 }

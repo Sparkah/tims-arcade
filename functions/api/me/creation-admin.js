@@ -8,6 +8,7 @@ import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
 import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord, verifyPasswordRecord } from '../../_lib/gameEditorAuth.js';
 import { readCreationLevels, writeCreationLevels } from '../../_lib/creationLevels.js';
+import { readCreationHistory, synthesizeInitialHistory } from '../../_lib/creationHistory.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const TTL = 60 * 60 * 24 * 30;
@@ -47,13 +48,20 @@ function publicRec(id, rec, owner) {
     published: !!rec.published,
     owner: !!owner,
     hasAdminPassword: !!rec.adminPasswordHash,
+    versionNumber: rec.versionNumber || 1,
+    versionName: rec.versionName || '',
+    lastUpdateSummary: rec.lastUpdateSummary || '',
     playUrl: `/cplay?id=${encodeURIComponent(id)}&slug=${encodeURIComponent(rec.slug || '')}&title=${encodeURIComponent(rec.title || '')}`,
   };
 }
 
 async function responseFor(request, env, id, rec, owner) {
   const access = owner ? await ensureAdminPassword(env, id, rec) : { rec, password: null };
-  const data = await readCreationLevels(env, id);
+  const [data, historyPayload] = await Promise.all([
+    readCreationLevels(env, id),
+    readCreationHistory(env, id),
+  ]);
+  const history = historyPayload.events.length ? historyPayload.events : synthesizeInitialHistory({ ...access.rec, id });
   const r = json({
     ok: true,
     game: publicRec(id, access.rec, owner),
@@ -61,6 +69,7 @@ async function responseFor(request, env, id, rec, owner) {
     schema: data.schema,
     updatedTs: data.updatedTs,
     source: data.source,
+    history,
     generatedPassword: access.password,
   });
   r.headers.set('cache-control', 'no-store');

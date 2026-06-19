@@ -14,6 +14,7 @@ import { requireAdmin } from '../../_lib/adminAuth.js';
 import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
 import { extractEmbeddedLevelSeed, seedCreationLevelsFromHtml } from '../../_lib/creationLevels.js';
+import { appendCreationHistoryEvent, buildFailureSummary, buildResultSummary, makeVersionName } from '../../_lib/creationHistory.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
@@ -34,7 +35,14 @@ export async function onRequestPost({ request, env }) {
 
   const jobRec = await env.VOTES.get(`genjob:${id}`, 'json');
   if (!jobRec) return jsonError('not_found', 404);
+  if (!jobRec.id) jobRec.id = id;
   const terminal = jobRec.status === 'ready' || jobRec.status === 'failed';
+  if (terminal && status === 'ready' && jobRec.status === 'ready') {
+    try { await appendRequestHistory(env, jobRec.targetCreationId || jobRec.baseId || id, jobRec); } catch (e) { /* best effort */ }
+    try { await appendReadyHistory(env, jobRec.targetCreationId || jobRec.baseId || id, jobRec, jobRec.updatedTs || Date.now()); } catch (e) { /* best effort */ }
+  } else if (terminal && (status === 'failed' || status === 'requeue') && jobRec.status === 'failed') {
+    try { await appendFailedHistory(env, jobRec, jobRec.error, jobRec.updatedTs || Date.now()); } catch (e) { /* best effort */ }
+  }
 
   if (status === 'building') {
     if (terminal) return json({ ok: true, status: jobRec.status, noop: true });  // don't revert a finished job
@@ -62,6 +70,7 @@ export async function onRequestPost({ request, env }) {
       await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
       try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
       try { await clearIterLock(env, jobRec); } catch (e) { /* best effort */ }
+      try { await appendFailedHistory(env, jobRec, jobRec.error, now); } catch (e) { /* best effort */ }
       try { await emailUser(env, jobRec, null); } catch (e) { /* best effort */ }
       return json({ ok: true, status: 'failed', reason: jobRec.error });
     }
@@ -83,6 +92,7 @@ export async function onRequestPost({ request, env }) {
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
     try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
     try { await clearIterLock(env, jobRec); } catch (e) { /* best effort */ }
+    try { await appendFailedHistory(env, jobRec, jobRec.error, jobRec.updatedTs); } catch (e) { /* best effort */ }
     try { await emailUser(env, jobRec, null); } catch (e) { /* best effort */ }
     return json({ ok: true, status: 'failed' });
   }
@@ -111,6 +121,7 @@ export async function onRequestPost({ request, env }) {
         await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
         try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }
         await clearIterLock(env, jobRec);
+        try { await appendFailedHistory(env, jobRec, jobRec.error, now); } catch (e) { /* best effort */ }
         return json({ ok: true, status: 'failed', reason: 'base_gone' });
       }
       if (base.uid !== jobRec.uid) {
@@ -120,6 +131,7 @@ export async function onRequestPost({ request, env }) {
         await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
         try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }
         await clearIterLock(env, jobRec);
+        try { await appendFailedHistory(env, jobRec, jobRec.error, now); } catch (e) { /* best effort */ }
         return json({ ok: true, status: 'failed', reason: 'ownership_mismatch' });
       }
 
@@ -141,15 +153,24 @@ export async function onRequestPost({ request, env }) {
       }
       // Keep slug / title / published / created-ts / author / uid (stable link + stats);
       // refresh quality + cover + updatedTs.
+      const baseVersion = Math.max(1, Math.floor(Number(base.versionNumber) || 1));
+      const plannedVersion = Math.floor(Number(jobRec.versionNumber));
+      const versionNumber = Math.max(baseVersion + 1, Number.isFinite(plannedVersion) && plannedVersion > 0 ? plannedVersion : 1);
+      const versionName = makeVersionName(base.title || base.slug, versionNumber);
+      const summary = buildResultSummary({ prompt: jobRec.prompt, html, levelSeed, isUpdate: true });
       base.quality = quality; base.hasCover = hasCover; base.status = 'live'; base.updatedTs = now;
+      base.versionNumber = versionNumber; base.versionName = versionName; base.lastUpdateSummary = summary;
       try { await env.VOTES.put(`upload:${baseId}`, JSON.stringify(base), { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
       try { await env.VOTES.put(`creationslug:${base.slug}`, baseId, { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
 
       jobRec.status = 'ready'; jobRec.title = base.title; jobRec.slug = base.slug; jobRec.quality = quality; jobRec.updatedTs = now; jobRec.levelSeed = levelSeed;
+      jobRec.targetCreationId = baseId; jobRec.versionNumber = versionNumber; jobRec.versionName = versionName; jobRec.summary = summary;
       await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
       await clearIterLock(env, jobRec);
-      try { await emailUser(env, jobRec, `/g/${baseId}`, true, { adminPath: `/creator-admin?id=${baseId}`, adminPassword }); } catch (e) { /* best effort */ }
-      return json({ ok: true, status: 'ready', slug: base.slug, playUrl: `/g/${baseId}` });
+      try { await appendRequestHistory(env, baseId, jobRec); } catch (e) { /* best effort */ }
+      try { await appendReadyHistory(env, baseId, jobRec, now); } catch (e) { /* best effort */ }
+      try { await emailUser(env, jobRec, `/g/${baseId}`, true, { adminPath: `/creator-admin?id=${baseId}`, adminPassword, versionName, summary }); } catch (e) { /* best effort */ }
+      return json({ ok: true, status: 'ready', slug: base.slug, playUrl: `/g/${baseId}`, versionNumber, versionName, summary });
     }
 
     // ---- Fresh build (new creation) ----
@@ -160,6 +181,10 @@ export async function onRequestPost({ request, env }) {
     const levelSeed = await seedCreationLevelsFromHtml(env, id, html, { updatedTs: now });
     const adminPassword = makeReadablePassword();
     const adminPasswordHash = await makeEditorPasswordRecord(adminPassword);
+    const plannedVersion = Math.floor(Number(jobRec.versionNumber));
+    const versionNumber = Number.isFinite(plannedVersion) && plannedVersion > 0 ? plannedVersion : 1;
+    const versionName = makeVersionName(title, versionNumber);
+    const summary = buildResultSummary({ prompt: jobRec.prompt, html, levelSeed, isUpdate: false });
 
     let hasCover = false;
     if (coverB64 && coverB64.length < 700 * 1024) {
@@ -172,6 +197,10 @@ export async function onRequestPost({ request, env }) {
     jobRec.quality = quality;
     jobRec.updatedTs = now;
     jobRec.levelSeed = levelSeed;
+    jobRec.targetCreationId = id;
+    jobRec.versionNumber = versionNumber;
+    jobRec.versionName = versionName;
+    jobRec.summary = summary;
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
 
     // Surface in the creator's "My games" via the existing upload: schema. Private
@@ -186,14 +215,17 @@ export async function onRequestPost({ request, env }) {
       status: 'live', sandboxUrl: `/g/${id}`, source: 'vibe', ts: jobRec.ts,
       published: false, quality, hasCover,
       adminPasswordHash, adminPasswordSetAt: now,
+      versionNumber, versionName, lastUpdateSummary: summary,
     };
     try { await env.VOTES.put(`upload:${id}`, JSON.stringify(rec), { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
     // Server-side "this slug is a creation" index so heartbeat can refuse to accrue
     // prompts for creation plays even if the client omits kind (Codex review 2026-06-15).
     try { await env.VOTES.put(`creationslug:${slug}`, id, { expirationTtl: BLOB_TTL }); } catch (e) { /* best effort */ }
 
-    try { await emailUser(env, jobRec, `/g/${id}`, false, { adminPath: `/creator-admin?id=${id}`, adminPassword }); } catch (e) { /* best effort */ }
-    return json({ ok: true, status: 'ready', slug, playUrl: `/g/${id}` });
+    try { await appendRequestHistory(env, id, jobRec); } catch (e) { /* best effort */ }
+    try { await appendReadyHistory(env, id, jobRec, now); } catch (e) { /* best effort */ }
+    try { await emailUser(env, jobRec, `/g/${id}`, false, { adminPath: `/creator-admin?id=${id}`, adminPassword, versionName, summary }); } catch (e) { /* best effort */ }
+    return json({ ok: true, status: 'ready', slug, playUrl: `/g/${id}`, versionNumber, versionName, summary });
   }
 
   return jsonError('bad_status', 400);
@@ -217,6 +249,54 @@ async function clearIterLock(env, jobRec) {
   if (jobRec && jobRec.baseId) { try { await env.VOTES.delete(`iteratelock:${jobRec.baseId}`); } catch (e) { /* best effort */ } }
 }
 
+async function appendRequestHistory(env, creationId, jobRec) {
+  if (!jobRec || !jobRec.prompt) return;
+  await appendCreationHistoryEvent(env, creationId, {
+    id: `request:${jobRec.id}`,
+    role: 'player',
+    type: 'request',
+    status: 'queued',
+    versionNumber: jobRec.versionNumber || 1,
+    versionName: jobRec.versionName || makeVersionName(jobRec.title || 'Game', jobRec.versionNumber || 1),
+    text: jobRec.prompt,
+    summary: '',
+    ts: jobRec.ts || Date.now(),
+    jobId: jobRec.id,
+  });
+}
+
+async function appendReadyHistory(env, creationId, jobRec, ts) {
+  await appendCreationHistoryEvent(env, creationId, {
+    id: `result:${jobRec.id}`,
+    role: 'studio',
+    type: 'result',
+    status: 'ready',
+    versionNumber: jobRec.versionNumber || 1,
+    versionName: jobRec.versionName || makeVersionName(jobRec.title || 'Game', jobRec.versionNumber || 1),
+    text: '',
+    summary: jobRec.summary || '',
+    ts,
+    jobId: jobRec.id,
+  });
+}
+
+async function appendFailedHistory(env, jobRec, error, ts) {
+  const creationId = jobRec && (jobRec.targetCreationId || jobRec.baseId || jobRec.id);
+  if (!creationId) return;
+  await appendCreationHistoryEvent(env, creationId, {
+    id: `failed:${jobRec.id}`,
+    role: 'studio',
+    type: 'failed',
+    status: 'failed',
+    versionNumber: jobRec.versionNumber || 1,
+    versionName: jobRec.versionName || makeVersionName(jobRec.title || 'Game', jobRec.versionNumber || 1),
+    text: '',
+    summary: buildFailureSummary(error || jobRec.error),
+    ts,
+    jobId: jobRec.id,
+  });
+}
+
 function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'game';
 }
@@ -225,9 +305,16 @@ async function emailUser(env, jobRec, playPath, isUpdate, adminInfo = {}) {
   if (!env.RESEND_API_KEY || !jobRec.email) return;
   const origin = 'https://game-factory.tech';
   const ready = !!playPath;
-  const subject = ready ? (isUpdate ? 'Your game was updated' : 'Your game is ready to play') : 'Your game could not be built';
+  const versionName = adminInfo.versionName || jobRec.versionName || '';
+  const summary = adminInfo.summary || jobRec.summary || '';
+  const subject = ready
+    ? (isUpdate ? `Your game was updated: ${versionName || jobRec.title || 'new version'}` : 'Your game is ready to play')
+    : 'Your game could not be built';
   const link = ready ? origin + playPath : origin + '/create';
   const adminLink = ready && adminInfo.adminPath ? origin + adminInfo.adminPath : '';
+  const summaryBlock = ready && summary
+    ? `<p><b>${escapeHtml(versionName || 'Latest version')}</b><br>${escapeHtml(summary)}</p>`
+    : '';
   const adminBlock = adminLink
     ? `<p><a href="${adminLink}">Open your game admin panel</a></p>` +
       (adminInfo.adminPassword
@@ -236,7 +323,7 @@ async function emailUser(env, jobRec, playPath, isUpdate, adminInfo = {}) {
     : '';
   const html = ready
     ? `<p>Your game <b>${escapeHtml(jobRec.title || 'game')}</b> ${isUpdate ? 'was updated and is ready' : 'is ready'}.</p>` +
-      `<p><a href="${link}">Play it now</a></p>${adminBlock}<p>-- game-factory.tech</p>`
+      summaryBlock + `<p><a href="${link}">Play it now</a></p>${adminBlock}<p>-- game-factory.tech</p>`
     : `<p>Sorry, we could not build your game this time, so your prompt was refunded.</p>` +
       `<p><a href="${link}">Try again</a></p><p>-- game-factory.tech</p>`;
   await fetch('https://api.resend.com/emails', {

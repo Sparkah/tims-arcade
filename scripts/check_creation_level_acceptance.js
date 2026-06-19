@@ -99,6 +99,20 @@ async function main() {
   if (!freshEnv.store.has(`upload:${freshId}`) || !freshEnv.store.has(`genblob:${freshId}`)) {
     throw new Error('fresh build did not store upload/genblob');
   }
+  const freshUpload = JSON.parse(freshEnv.store.get(`upload:${freshId}`));
+  if (freshUpload.versionNumber !== 1 || freshUpload.versionName !== 'Seeded Game v1') {
+    throw new Error(`fresh build did not stamp version metadata: ${JSON.stringify({ versionNumber: freshUpload.versionNumber, versionName: freshUpload.versionName })}`);
+  }
+  if (!/Editable levels imported: 2/.test(freshUpload.lastUpdateSummary || '')) {
+    throw new Error(`fresh build summary did not mention seeded levels: ${freshUpload.lastUpdateSummary}`);
+  }
+  const freshHistory = JSON.parse(freshEnv.store.get(`creation-history:${freshId}`));
+  if (!freshHistory.events || freshHistory.events.length !== 2 || freshHistory.events[0].id !== `request:${freshId}` || freshHistory.events[1].id !== `result:${freshId}`) {
+    throw new Error('fresh build did not write request/result history');
+  }
+  if (freshHistory.events[0].versionName !== 'Seeded Game v1') {
+    throw new Error(`fresh request history did not get final version name: ${freshHistory.events[0].versionName}`);
+  }
 
   const baseId = 'cccccccccccccccccccccccccccccccc';
   const jobId = 'dddddddddddddddddddddddddddddddd';
@@ -125,6 +139,17 @@ async function main() {
   const iterJob = JSON.parse(iterEnv.store.get(`genjob:${jobId}`));
   if (!iterJob.levelSeed || iterJob.levelSeed.seeded !== false || iterJob.levelSeed.reason !== 'existing_creator-admin') {
     throw new Error(`unexpected iterate levelSeed metadata: ${JSON.stringify(iterJob.levelSeed)}`);
+  }
+  const iterUpload = JSON.parse(iterEnv.store.get(`upload:${baseId}`));
+  if (iterUpload.versionNumber !== 2 || iterUpload.versionName !== 'Seeded Game v2') {
+    throw new Error(`iterate did not increment version metadata: ${JSON.stringify({ versionNumber: iterUpload.versionNumber, versionName: iterUpload.versionName })}`);
+  }
+  if (!/Saved editable levels preserved: 1/.test(iterUpload.lastUpdateSummary || '')) {
+    throw new Error(`iterate summary did not mention preserved creator levels: ${iterUpload.lastUpdateSummary}`);
+  }
+  const iterHistory = JSON.parse(iterEnv.store.get(`creation-history:${baseId}`));
+  if (!iterHistory.events || iterHistory.events.length !== 2 || iterHistory.events[0].id !== `request:${jobId}` || iterHistory.events[1].id !== `result:${jobId}`) {
+    throw new Error('iterate did not write request/result history');
   }
 
   const defaultBaseId = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';

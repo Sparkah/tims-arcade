@@ -52,6 +52,14 @@
     .json-preview { min-height:130px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
     .password-box { border:1px solid rgba(255,209,102,.45); background:rgba(255,209,102,.09); border-radius:8px; padding:10px; color:#ffe3a0; }
     .empty-note { color:var(--muted); font-size:13px; }
+    .history-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px; max-block-size:340px; overflow-y:auto; scrollbar-gutter:stable; }
+    .history-item { border:1px solid var(--line); background:#10131a; border-radius:8px; padding:10px; overflow-wrap:anywhere; }
+    .history-item.player { margin-left:18px; background:#121827; border-color:rgba(122,162,247,.45); }
+    .history-item.studio { margin-right:18px; }
+    .history-item.failed { border-color:rgba(247,118,142,.55); }
+    .history-head { display:flex; justify-content:space-between; gap:8px; flex-wrap:wrap; color:var(--muted); font-size:12px; }
+    .history-version { color:var(--ink); font-weight:700; }
+    .history-text { margin:6px 0 0; white-space:pre-wrap; font-size:13px; }
     @media (max-width: 860px) {
       .shell { grid-template-columns:1fr; padding:10px; }
       canvas { max-height:none; }
@@ -87,7 +95,7 @@
     var app = document.getElementById('app');
     var titleEl = document.getElementById('title');
     var playLink = document.getElementById('playLink');
-    var state = { game:null, levels:[], index:0, tool:'select', selected:null, drag:null, password:'', dirty:false };
+    var state = { game:null, levels:[], history:[], index:0, tool:'select', selected:null, drag:null, password:'', dirty:false, poll:null };
     var els = {};
 
     function esc(v) { var d = document.createElement('div'); d.textContent = String(v == null ? '' : v); return d.innerHTML; }
@@ -131,16 +139,24 @@
     }
 
     function mount(data) {
+      stopUpdatePoll();
       state.game = data.game;
       state.levels = Array.isArray(data.levels) && data.levels.length ? data.levels : [defaultLevel(1)];
+      state.history = Array.isArray(data.history) ? data.history : [];
       state.index = 0; state.selected = null; state.dirty = false;
-      titleEl.textContent = (state.game && state.game.title ? state.game.title : 'Game') + ' admin';
+      titleEl.textContent = (state.game && (state.game.versionName || state.game.title) ? (state.game.versionName || state.game.title) : 'Game') + ' admin';
       if (state.game && state.game.playUrl) playLink.href = state.game.playUrl;
       renderShell(data.generatedPassword || '');
       bind();
       syncAll();
+      renderHistory();
       if (data.generatedPassword) showPassword(data.generatedPassword);
       setStatus('Loaded ' + state.levels.length + ' level' + (state.levels.length === 1 ? '' : 's') + '.', 'ok');
+      var pendingJob = pendingJobFromHistory();
+      if (pendingJob) {
+        setStatus('Checking queued update...');
+        startUpdatePoll(pendingJob);
+      }
     }
 
     function renderShell(newPassword) {
@@ -165,7 +181,8 @@
             '<label for="levelNotes" style="margin-top:8px">Designer notes</label><textarea id="levelNotes" maxlength="500"></textarea></section>' +
           '<section class="panel"><h2>Save</h2><div class="actions"><button id="saveLevels" class="primary" type="button">Save levels</button><button id="resetPassword" type="button">Reset password</button></div>' +
             '<div id="passwordBox" style="margin-top:10px">' + (newPassword ? passwordHtml(newPassword) : '') + '</div><p class="hint">Saved levels are delivered to the game wrapper. Games generated after this update know how to use them; older games may need Iterate once.</p></section>' +
-          '<section class="panel" id="iterate"><h2>Iterate</h2><form id="iterateForm"><label for="iteratePrompt">Change request</label><textarea id="iteratePrompt" maxlength="500" placeholder="Make this game use my saved levels, add level select, and tune level 3 to be easier"></textarea>' +
+          '<section class="panel"><h2>Update chat</h2><ol id="historyList" class="history-list" aria-label="Update history"></ol></section>' +
+          '<section class="panel" id="iterate"><h2>Iterate</h2><form id="iterateForm" action="/api/gen/submit" method="post"><label for="iteratePrompt">Message builder</label><textarea id="iteratePrompt" name="prompt" maxlength="500" placeholder="Make this game use my saved levels, add level select, and tune level 3 to be easier"></textarea>' +
             '<button id="iterateBtn" class="good" type="submit" style="margin-top:10px">Iterate this game</button></form><p id="iterateHint" class="hint"></p></section>' +
           '<section class="panel"><h2>Level JSON</h2><textarea id="jsonPreview" class="json-preview" readonly spellcheck="false"></textarea></section>' +
         '</aside></div>';
@@ -178,11 +195,97 @@
       return '<div class="password-box"><strong>Admin password</strong><br><code>' + esc(password) + '</code><div class="hint">Save this now. It is only shown once.</div></div>';
     }
     function showPassword(password) { document.getElementById('passwordBox').innerHTML = passwordHtml(password); }
+    function formatTime(ts) {
+      if (!ts) return '';
+      try { return new Date(ts).toLocaleString([], { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }); } catch (e) { return ''; }
+    }
+    function renderHistory() {
+      if (!els.history) return;
+      var items = (state.history || []).slice().sort(function (a, b) { return (a.ts || 0) - (b.ts || 0); });
+      if (!items.length) {
+        els.history.innerHTML = '<li class="empty-note">No updates yet.</li>';
+        return;
+      }
+      els.history.innerHTML = items.map(function (item) {
+        var role = item.role === 'player' ? 'player' : 'studio';
+        var status = item.status === 'failed' || item.type === 'failed' ? ' failed' : '';
+        var label = role === 'player' ? 'Player request' : (item.status === 'ready' ? 'Game update' : 'Builder');
+        var text = item.summary || item.text || '';
+        var version = item.versionName || (item.versionNumber ? ('Version ' + item.versionNumber) : 'Update');
+        return '<li class="history-item ' + role + status + '">' +
+          '<div class="history-head"><span><span class="history-version">' + esc(version) + '</span> · ' + esc(label) + '</span><time>' + esc(formatTime(item.ts)) + '</time></div>' +
+          (text ? '<p class="history-text">' + esc(text) + '</p>' : '') +
+          '</li>';
+      }).join('');
+      els.history.scrollTop = els.history.scrollHeight;
+    }
+    function pushHistoryEvent(item) {
+      state.history = (state.history || []).filter(function (existing) { return existing.id !== item.id; });
+      state.history.push(item);
+      renderHistory();
+    }
+    function pendingJobFromHistory() {
+      var terminal = {};
+      (state.history || []).forEach(function (item) {
+        if (item.jobId && (item.status === 'ready' || item.status === 'failed')) terminal[item.jobId] = true;
+      });
+      for (var i = (state.history || []).length - 1; i >= 0; i--) {
+        var item = state.history[i];
+        if (item && item.jobId && !terminal[item.jobId] && (item.status === 'queued' || item.status === 'building')) return item.jobId;
+      }
+      return '';
+    }
+    function stopUpdatePoll() {
+      if (state.poll) { clearInterval(state.poll); state.poll = null; }
+    }
+    function refreshAdmin() {
+      fetch(api + '?id=' + encodeURIComponent(id), { credentials:'same-origin', cache:'no-store' })
+        .then(function (r) { return r.json().then(function (d) { if (!r.ok || !d.ok) throw new Error((d && d.error) || 'load_failed'); return d; }); })
+        .then(mount)
+        .catch(function () {
+          if (state.password) post({ action:'load' }).then(mount).catch(function () {});
+        });
+    }
+    function startUpdatePoll(jobId) {
+      stopUpdatePoll();
+      pollUpdate(jobId);
+      state.poll = setInterval(function () { pollUpdate(jobId); }, 4000);
+    }
+    function pollUpdate(jobId) {
+      fetch('/api/gen/status?id=' + encodeURIComponent(jobId), { cache:'no-store' })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (s) {
+          if (!s) return;
+          if (s.status === 'ready') {
+            stopUpdatePoll();
+            setStatus((s.versionName || 'Update') + ' is ready.', 'ok');
+            if (els.iterateHint) els.iterateHint.textContent = s.summary || 'Update finished.';
+            refreshAdmin();
+          } else if (s.status === 'failed') {
+            stopUpdatePoll();
+            pushHistoryEvent({
+              id:'failed:' + jobId, role:'studio', type:'failed', status:'failed',
+              versionNumber:s.versionNumber || 1, versionName:s.versionName || 'Update',
+              summary:'Update failed. Tokens were refunded.', ts:Date.now(), jobId:jobId,
+            });
+            setStatus('Update failed. Tokens were refunded.', 'error');
+            if (els.iterateHint) els.iterateHint.textContent = 'Try another change request.';
+            var button = document.getElementById('iterateBtn'); if (button) button.disabled = false;
+            refreshAdmin();
+          } else {
+            var phase = s.status === 'building' ? 'Building' : 'Queued';
+            setStatus(phase + ' ' + (s.versionName || 'the update') + '...', '');
+            if (els.iterateHint) els.iterateHint.textContent = 'This page will refresh when the update is ready.';
+          }
+        })
+        .catch(function () {});
+    }
 
     function bind() {
       els.canvas = document.getElementById('field'); els.ctx = els.canvas.getContext('2d');
       els.status = document.getElementById('status'); els.levelSelect = document.getElementById('levelSelect');
       els.selected = document.getElementById('selectedLabel'); els.json = document.getElementById('jsonPreview');
+      els.history = document.getElementById('historyList'); els.iterateHint = document.getElementById('iterateHint');
       els.inputs = {
         x:document.getElementById('inX'),
         y:document.getElementById('inY'),
@@ -371,7 +474,17 @@
       button.disabled = true; setStatus('Sending iterate job...');
       fetch('/api/gen/submit', { method:'POST', credentials:'same-origin', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ iterateId:id, prompt:prompt }) })
         .then(function (r) { return r.json().then(function (d) { if (!r.ok) throw new Error((d && d.error) || 'iterate_failed'); return d; }); })
-        .then(function () { setStatus('Iterate queued. Watch progress on /create.', 'ok'); location.href = '/create'; })
+        .then(function (d) {
+          document.getElementById('iteratePrompt').value = '';
+          pushHistoryEvent({
+            id:'request:' + d.id, role:'player', type:'request', status:'queued',
+            versionNumber:d.versionNumber || 1, versionName:d.versionName || 'Next version',
+            text:prompt, summary:'', ts:Date.now(), jobId:d.id,
+          });
+          setStatus((d.versionName || 'Update') + ' queued.', 'ok');
+          if (els.iterateHint) els.iterateHint.textContent = 'This page will refresh when the update is ready.';
+          startUpdatePoll(d.id);
+        })
         .catch(function (e) { setStatus(e.message || 'Could not iterate.', 'error'); button.disabled = false; });
     }
 
