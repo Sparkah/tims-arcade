@@ -591,7 +591,7 @@
   var rResume = null, rQuit = null, rHudPause = null, rHudMenu = null, rPauseForge = null;
   var rShop = [];
   var rWeapons = [];
-  var laserT = 0, laserX0 = 0, laserY0 = 0, laserX1 = 0, laserY1 = 0;
+  var laserT = 0, laserX0 = 0, laserY0 = 0, laserX1 = 0, laserY1 = 0, laserBurstT = 0, laserBurstMax = 0;
   var SAVE_META = 'bloodtread_rebuild_meta';
   var SAVE_BANK = 'bloodtread_rebuild_bank';
   var SAVE_BEST = 'bloodtread_rebuild_best';
@@ -1155,6 +1155,7 @@
 
   function updateWorldFx(dt) {
     if (laserT > 0) laserT = Math.max(0, laserT - dt * 7.0);
+    if (laserBurstT > 0) laserBurstT = Math.max(0, laserBurstT - dt);
     for (var i = boomN - 1; i >= 0; i--) {
       boomT[i] += dt;
       if (boomT[i] >= boomMax[i]) removeBoom(i);
@@ -1553,6 +1554,8 @@
     eN = 0; bN = 0; mN = 0; pN = 0; dN = 0; cN = 0; tN = 0; vN = 0; gN = 0; sN = 0; boomN = 0; bubbleN = 0;
     dCursor = 0; pCursor = 0; cCursor = 0; tCursor = 0; vCursor = 0; gCursor = 0; sCursor = 0; boomCursor = 0; bubbleCursor = 0; trackAcc = 0; veinAcc = 0; unleashTrailAcc = 0;
     laserT = 0;
+    laserBurstT = 0;
+    laserBurstMax = 0;
     syncTankTiersFromMeta();
     resetLeeches();
     resetEnvironmentState();
@@ -2048,12 +2051,23 @@
     player.turret += aimErr * Math.min(0.5, dt * 9.6);
     var weapon = currentWeapon();
     if (weapon.id === 'laser') {
+      var laserTier = currentWeaponTier();
+      var laserAimOk = Math.abs(angleDelta(player.turret, a)) < 0.38 || laserBurstT > 0 || state.fireCd < -0.16;
+      if (laserBurstT <= 0) {
+        laserT = 0;
+        if (state.fireCd > 0 || !laserAimOk) return;
+        laserBurstMax = 0.17 + laserTier * 0.012;
+        laserBurstT = laserBurstMax;
+        state.fireCd = laserBurstMax + Math.max(0.18, 0.34 - laserTier * 0.022);
+        playSfx('laser', 0.30, 0.08, 0.98 + rnd() * 0.05);
+      }
       var ca = Math.cos(player.turret);
       var sa = Math.sin(player.turret);
       var range = 720;
-      var width = 12 + currentWeaponTier() * 1.3;
-      var bestLen = 180;
-      var dps = player.dmg * player.fireRate * 1.65;
+      var width = 12 + laserTier * 1.3;
+      var beamPower = Math.min(1, (laserBurstMax - laserBurstT) / 0.045) * Math.min(1, laserBurstT / 0.055);
+      beamPower = Math.max(0.28, beamPower) * (0.86 + 0.14 * Math.sin(state.t * 48));
+      var dps = player.dmg * player.fireRate * 2.75 * beamPower;
       for (var le = eN - 1; le >= 0; le--) {
         var rx = ex[le] - player.x;
         var ry = ey[le] - player.y;
@@ -2062,7 +2076,6 @@
         var side = Math.abs(-rx * sa + ry * ca);
         if (side > width + er[le]) continue;
         ehp[le] -= dps * dt;
-        bestLen = Math.max(bestLen, along + er[le]);
         if (((state.tick + le) & 7) === 0 && effectAllowed(ex[le], ey[le], eN > 850 ? 1 : 2)) {
           spawnParticle(ex[le], ey[le], -ca * 40, -sa * 40, 1.8, 0.15, 0);
         }
@@ -2070,11 +2083,10 @@
       }
       laserX0 = player.x + ca * 24;
       laserY0 = player.y + sa * 24;
-      laserX1 = player.x + ca * Math.min(range, bestLen);
-      laserY1 = player.y + sa * Math.min(range, bestLen);
-      laserT = 1;
+      laserX1 = player.x + ca * range;
+      laserY1 = player.y + sa * range;
+      laserT = beamPower;
       player.recoil = Math.max(player.recoil, 0.32);
-      playSfx('laser', 0.24, 0.17, 0.98 + rnd() * 0.05);
       return;
     }
     if (state.fireCd > 0) return;
@@ -2918,10 +2930,6 @@
         queueSpriteRot('lp_thirst', tankThirstTier * 64, 0, 64, 64, sx, sy + breathe * screenLen(0.6), size * (1 + (breathW - 1) * 1.35), size * (1 + (breathH - 1) * 1.2), hullA, 1, 1, 1, 0.96);
         tankLayerSprites++;
       }
-      if (spriteTextures.lp_frenzy && tankFrenzyTier > 0) {
-        queueSpriteRot('lp_frenzy', tankFrenzyTier * 64, 0, 64, 64, sx, sy, size * (1 + (breathW - 1) * 1.55), size * (1 + (breathH - 1) * 1.55), hullA, 1, 0.90 + pulse * 0.12, 0.90 + pulse * 0.12, 0.74);
-        tankLayerSprites++;
-      }
       if (spriteTextures.lp_core && tankCoreTier > 0) {
         queueSpriteRot('lp_core', tankCoreTier * 64, 0, 64, 64, sx, sy + breathe * screenLen(0.8), size * (1 + (breathW - 1) * 1.7), size * (1 + (breathH - 1) * 1.7), hullA, 1 + pulse * 0.04, 1, 1, 0.9);
         tankLayerSprites++;
@@ -3234,39 +3242,28 @@
     var unleashA = Math.max(player.unleashFlash, player.unleash > 0 ? 0.22 + 0.18 * Math.sin(state.t * 10) : 0);
     if (unleashA > 0.01) {
       var burst = player.unleashFlash;
-      var rays = 9;
-      for (var u = 0; u < rays; u++) {
-        var a0 = u / rays * TWO_PI + state.t * 0.42 + Math.sin(state.t * 5 + u) * 0.08;
-        var root = 16;
-        var len = 48 + burst * 42 + tankFrenzyTier * 3;
-        var x0 = player.x + Math.cos(a0) * root;
-        var y0 = player.y + Math.sin(a0) * root;
-        var x1 = player.x + Math.cos(a0) * len;
-        var y1 = player.y + Math.sin(a0) * len;
-        var cx0 = player.x + Math.cos(a0 + 0.32) * (len * 0.56);
-        var cy0 = player.y + Math.sin(a0 + 0.32) * (len * 0.56);
-        n = addCurveInst(n, x0, y0, cx0, cy0, x1, y1, 4.2, 0.36, 0.0, 0.018, 0.55 * unleashA, 0.25, 2);
-        n = addCurveInst(n, x0, y0, cx0, cy0, x1, y1, 1.7, 1.0, 0.08, 0.12, 0.62 * unleashA, 0.72, 2);
+      var ring = 25 + burst * 18 + tankFrenzyTier * 1.4;
+      n = addInst(n, player.x, player.y, ring, ring * 0.72, player.hull, 0, 0.45, 0.006, 0.025, 0.18 * unleashA, 0.22);
+      n = addInst(n, player.x, player.y, ring * 0.42, ring * 0.28, player.hull, 0, 1.0, 0.055, 0.085, 0.22 * unleashA, 0.62);
+      for (var u = 0; u < 4; u++) {
+        var trail = player.hull + Math.PI + (u - 1.5) * 0.18;
+        var side = player.hull + Math.PI * 0.5;
+        var off = (u - 1.5) * 6;
+        var dist = 18 + u * 8 + burst * 18;
+        n = addInst(n, player.x + Math.cos(trail) * dist + Math.cos(side) * off, player.y + Math.sin(trail) * dist + Math.sin(side) * off, 3.0 + burst * 4.0, 2.0 + burst * 2.6, trail, 0, 0.82, 0.025, 0.05, 0.40 * unleashA, 0.25);
       }
     }
     if (core > 0) {
-      var veinCount = Math.min(6, 2 + Math.floor(core * 0.75));
-      for (var v = 0; v < veinCount; v++) {
-        var va = player.hull + (v / veinCount) * TWO_PI + Math.sin(state.t * 1.7 + v) * 0.12;
-        var rootR = 5 + (v & 1) * 4;
-        var lenV = 11 + core * 1.2 + Math.sin(state.t * 5.8 + v) * 1.8;
-        var x0v = player.x + Math.cos(va) * rootR;
-        var y0v = player.y + Math.sin(va) * rootR;
-        var x1v = player.x + Math.cos(va) * lenV;
-        var y1v = player.y + Math.sin(va) * lenV;
-        var aV = 0.30 + pulse * 0.18 + (player.unleash > 0 ? 0.18 : 0);
-        n = addLineInst(n, x0v, y0v, x1v, y1v, 2.2, 0.22, 0.004, 0.018, aV, 0.12);
-        n = addLineInst(n, x0v, y0v, x1v, y1v, 0.9, 1.0, 0.07, 0.10, aV + 0.12, 0.62);
-        var pop = Math.max(0, Math.sin(state.t * 7.2 + v * 1.9));
-        if (pop > 0.74 || player.unleash > 0) {
-          var pr = (1.4 + pop * 2.2 + (player.unleash > 0 ? 0.6 : 0)) * (0.8 + core * 0.05);
-          n = addInst(n, x1v, y1v, pr, pr, 0, 0, 1.0, 0.06, 0.09, (pop * 0.42 + (player.unleash > 0 ? 0.16 : 0)), 0.75);
-        }
+      var coreCount = Math.min(5, 2 + Math.floor(core * 0.45));
+      for (var v = 0; v < coreCount; v++) {
+        var pop = Math.max(0, Math.sin(state.t * 6.8 + v * 1.7));
+        var localX = -7 + v * 3.6;
+        var localY = ((v & 1) ? 5 : -5) + Math.sin(state.t * 3.2 + v) * 0.8;
+        var ca = Math.cos(player.hull), sa = Math.sin(player.hull);
+        var pxv = player.x + localX * ca - localY * sa;
+        var pyv = player.y + localX * sa + localY * ca;
+        var pr = (1.6 + pop * 2.4 + core * 0.12) * (player.unleash > 0 ? 1.22 : 1);
+        n = addInst(n, pxv, pyv, pr, pr * 0.82, player.hull, 0, 0.92, 0.035, 0.065, 0.24 + pop * 0.28 + (player.unleash > 0 ? 0.10 : 0), 0.55);
       }
     }
     if (player.recoil > 0.02) {
@@ -3274,16 +3271,6 @@
       var my0 = player.y + Math.sin(player.turret) * 43;
       var mr = 5 + player.recoil * 12;
       n = addInst(n, mx0, my0, mr, mr, 0, 0, 1.0, 0.42, 0.15, 0.55 * player.recoil, 0.8);
-    }
-    if (tankFrenzyTier > 0 && perf.leechInst <= 0) {
-      var idleN = Math.min(5, 2 + tankFrenzyTier);
-      for (var i = 0; i < idleN; i++) {
-        var a = i / idleN * TWO_PI + state.t * 0.55;
-        var len = 22 + tankFrenzyTier * 3 + Math.sin(state.t * 5 + i) * 5;
-        var x1 = player.x + Math.cos(a) * 13;
-        var y1 = player.y + Math.sin(a) * 13;
-        n = addLineInst(n, x1, y1, player.x + Math.cos(a) * len, player.y + Math.sin(a) * len, 3.6, 0.65, 0.025, 0.045, 0.42, 0.4);
-      }
     }
     perf.tankFeelInst = n - start;
     return n;
@@ -3460,8 +3447,18 @@
 
     if (laserT > 0) {
       var la = Math.min(1, laserT);
-      n = addLineInst(n, laserX0, laserY0, laserX1, laserY1, 10.5, 0.36, 0.02, 0.045, 0.56 * la, 0.55);
-      n = addLineInst(n, laserX0, laserY0, laserX1, laserY1, 4.0, 1.0, 0.13, 0.22, 0.82 * la, 0.72);
+      var lp = 0.78 + 0.22 * Math.sin(state.t * 54);
+      var lwa = Math.atan2(laserY1 - laserY0, laserX1 - laserX0);
+      n = addLineInst(n, laserX0, laserY0, laserX1, laserY1, 13.0 + la * 2.2, 0.24, 0.004, 0.026, 0.36 * la, 0.35);
+      n = addLineInst(n, laserX0, laserY0, laserX1, laserY1, 6.4 + lp * 1.4, 0.92, 0.055, 0.095, 0.70 * la, 0.68);
+      n = addLineInst(n, laserX0, laserY0, laserX1, laserY1, 2.0 + lp * 0.9, 1.0, 0.56, 0.56, 0.86 * la, 0.78);
+      n = addInst(n, laserX0 + Math.cos(lwa) * 8, laserY0 + Math.sin(lwa) * 8, 8.5 + la * 5.5, 6.0 + la * 3.2, lwa, 0, 1.0, 0.12, 0.12, 0.70 * la, 0.72);
+      if (la > 0.45) {
+        for (var ls = 1; ls <= 3; ls++) {
+          var kls = ls * 0.22 + 0.11 * Math.sin(state.t * 18 + ls);
+          n = addInst(n, laserX0 + (laserX1 - laserX0) * kls, laserY0 + (laserY1 - laserY0) * kls, 3.2, 2.0, lwa, 0, 1.0, 0.18, 0.18, 0.26 * la, 0.45);
+        }
+      }
     }
 
     for (var p = 0; p < pN; p++) {
@@ -3730,8 +3727,7 @@
       ['lp_treads', tankTreadsTier],
       ['lp_armor', tankArmorTier],
       ['lp_thirst', tankThirstTier],
-      ['lp_core', tankCoreTier],
-      ['lp_frenzy', tankFrenzyTier]
+      ['lp_core', tankCoreTier]
     ];
     var drawn = false;
     hud.save();
