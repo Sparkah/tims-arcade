@@ -2042,16 +2042,29 @@
 
   function autoFire(dt, nearest) {
     state.fireCd -= dt;
-    if (nearest < 0 || nearest >= eN || eN <= 0) return;
+    var weapon = currentWeapon();
+    if (nearest < 0 || nearest >= eN || eN <= 0) {
+      if (weapon.id === 'laser') {
+        laserT = 0;
+        laserBurstT = 0;
+        laserBurstMax = 0;
+      }
+      return;
+    }
     var dx = ex[nearest] - player.x;
     var dy = ey[nearest] - player.y;
     var d = Math.sqrt(dx * dx + dy * dy) || 1;
     var a = Math.atan2(dy, dx);
     var aimErr = angleDelta(player.turret, a);
     player.turret += aimErr * Math.min(0.5, dt * 9.6);
-    var weapon = currentWeapon();
     if (weapon.id === 'laser') {
       var laserTier = currentWeaponTier();
+      if (Math.abs(dx) > viewWorldW * 0.50 || Math.abs(dy) > viewWorldH * 0.50) {
+        laserT = 0;
+        laserBurstT = 0;
+        laserBurstMax = 0;
+        return;
+      }
       var laserAimOk = Math.abs(angleDelta(player.turret, a)) < 0.38 || laserBurstT > 0 || state.fireCd < -0.16;
       if (laserBurstT <= 0) {
         laserT = 0;
@@ -2898,7 +2911,7 @@
     if (!spriteTextures.weapon_projectiles) return false;
     var row = clampInt(brow[i], 0, 3);
     var tier = clampInt(btier[i], 0, 5);
-    var size = row === WEAPON_ROW.missile ? 42 : row === WEAPON_ROW.flak ? 26 : 34;
+    var size = row === WEAPON_ROW.missile ? 44 : row === WEAPON_ROW.flak ? 26 : 42;
     var pxs = worldToScreenX(bx[i]);
     var pys = worldToScreenY(by[i]);
     var screenSize = screenLen(size);
