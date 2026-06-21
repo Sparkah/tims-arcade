@@ -326,6 +326,8 @@
   var blife = new Float32Array(MAX_BULLETS);
   var bdmg = new Float32Array(MAX_BULLETS);
   var bkind = new Uint8Array(MAX_BULLETS);
+  var brow = new Uint8Array(MAX_BULLETS);
+  var btier = new Uint8Array(MAX_BULLETS);
   var brad = new Float32Array(MAX_BULLETS);
   var bN = 0;
 
@@ -575,6 +577,10 @@
   ];
   var WEAPON_BY_ID = Object.create(null);
   for (var wi0 = 0; wi0 < WEAPONS.length; wi0++) WEAPON_BY_ID[WEAPONS[wi0].id] = WEAPONS[wi0];
+  var WEAPON_ROW = { cannon: 0, flak: 1, laser: 2, missile: 3 };
+  var WEAPON_TURRET_CELL = 48;
+  var WEAPON_PROJECTILE_CELL = 32;
+  var weaponMeta = { cannon: 0, flak: 0, laser: 0, missile: 0 };
   var equipWeapon = 'cannon';
   var ownedWeapons = { cannon: 1 };
   var bestTime = 0;
@@ -599,16 +605,37 @@
     return WEAPON_BY_ID[equipWeapon] || WEAPON_BY_ID.cannon;
   }
 
+  function weaponRow(id) {
+    return WEAPON_ROW[id] == null ? 0 : WEAPON_ROW[id];
+  }
+
+  function weaponTier(id) {
+    return clampInt(weaponMeta[id] || 0, 0, MAXTIER);
+  }
+
+  function currentWeaponTier() {
+    return weaponTier(equipWeapon);
+  }
+
+  function weaponAtlasTier(id) {
+    return clampInt(weaponTier(id), 0, 5);
+  }
+
+  function syncLegacyCannonMeta() {
+    META.cannon = currentWeaponTier();
+  }
+
   function trackCost(id) {
-    return META[id] >= MAXTIER ? null : TIER_COST[META[id]];
+    var tier = id === 'cannon' ? currentWeaponTier() : META[id];
+    return tier >= MAXTIER ? null : TIER_COST[tier];
   }
 
   function trackEffect(id) {
-    var t = META[id];
+    var t = id === 'cannon' ? currentWeaponTier() : META[id];
     var n = Math.min(MAXTIER, t + 1);
     if (id === 'armor') return 'HP ' + (42 + MA_HP[t]) + (t < MAXTIER ? ' -> ' + (42 + MA_HP[n]) : '');
     if (id === 'core') return 'Regen ' + MA_REGEN[t] + '/s' + (t < MAXTIER ? ' -> ' + MA_REGEN[n] + '/s' : '');
-    if (id === 'cannon') return 'Damage x' + MA_DMG[t].toFixed(2) + (t < MAXTIER ? ' -> x' + MA_DMG[n].toFixed(2) : '');
+    if (id === 'cannon') return weaponName(equipWeapon) + ' power x' + MA_DMG[t].toFixed(2) + (t < MAXTIER ? ' -> x' + MA_DMG[n].toFixed(2) : '');
     if (id === 'treads') return 'Speed +' + Math.round((MA_SPD[t] - 1) * 100) + '%' + (t < MAXTIER ? ' -> +' + Math.round((MA_SPD[n] - 1) * 100) + '%' : '');
     if (id === 'thirst') return 'Heal ' + MA_THIRST[t] + (t < MAXTIER ? ' -> ' + MA_THIRST[n] : '');
     if (id === 'frenzy') return 'Lash x' + MA_FRENZY[t].toFixed(2) + (t < MAXTIER ? ' -> x' + MA_FRENZY[n].toFixed(2) : '');
@@ -617,10 +644,17 @@
 
   function saveMeta() {
     try {
+      syncLegacyCannonMeta();
       var m = {
         armor: META.armor, core: META.core, cannon: META.cannon,
         treads: META.treads, thirst: META.thirst, frenzy: META.frenzy,
-        owned: ownedWeapons, weapon: equipWeapon
+        owned: ownedWeapons, weapon: equipWeapon,
+        weaponMeta: {
+          cannon: weaponMeta.cannon,
+          flak: weaponMeta.flak,
+          laser: weaponMeta.laser,
+          missile: weaponMeta.missile
+        }
       };
       localStorage.setItem(SAVE_META, JSON.stringify(m));
       localStorage.setItem(SAVE_BANK, String(Math.floor(totalBank)));
@@ -634,25 +668,36 @@
       for (var k in META) {
         if (typeof m[k] === 'number') META[k] = clampInt(m[k], 0, MAXTIER);
       }
+      if (m.weaponMeta && typeof m.weaponMeta === 'object') {
+        for (var wm = 0; wm < WEAPONS.length; wm++) {
+          var wid = WEAPONS[wm].id;
+          if (typeof m.weaponMeta[wid] === 'number') weaponMeta[wid] = clampInt(m.weaponMeta[wid], 0, MAXTIER);
+        }
+      } else {
+        weaponMeta.cannon = META.cannon;
+      }
       if (m.owned && typeof m.owned === 'object') ownedWeapons = m.owned;
       ownedWeapons.cannon = 1;
       if (typeof m.weapon === 'string' && ownedWeapons[m.weapon] && WEAPON_BY_ID[m.weapon]) equipWeapon = m.weapon;
+      syncLegacyCannonMeta();
       totalBank = parseInt(localStorage.getItem(SAVE_BANK) || '0', 10) || 0;
       bestTime = parseInt(localStorage.getItem(SAVE_BEST) || '0', 10) || 0;
     } catch (err) {}
   }
 
   function syncTankTiersFromMeta() {
+    syncLegacyCannonMeta();
     tankArmorTier = META.armor;
     tankCoreTier = META.core;
-    tankCannonTier = META.cannon;
+    tankCannonTier = currentWeaponTier();
     tankTreadsTier = META.treads;
     tankThirstTier = META.thirst;
     tankFrenzyTier = META.frenzy;
   }
 
   function applyMetaToPlayer() {
-    var cannonTier = META.cannon;
+    var cannonTier = currentWeaponTier();
+    META.cannon = cannonTier;
     player.maxHp = 42 + MA_HP[META.armor];
     player.hp = player.maxHp;
     player.speed = 205 * MA_SPD[META.treads];
@@ -675,10 +720,15 @@
     selectedTrack = id;
     if (cost == null || totalBank < cost) return false;
     totalBank -= cost;
-    META[id] = Math.min(MAXTIER, META[id] + 1);
+    if (id === 'cannon') {
+      weaponMeta[equipWeapon] = Math.min(MAXTIER, currentWeaponTier() + 1);
+      META.cannon = weaponMeta[equipWeapon];
+    } else {
+      META[id] = Math.min(MAXTIER, META[id] + 1);
+    }
     saveMeta();
     syncTankTiersFromMeta();
-    playTone(390 + META[id] * 35, 0.09, 0.035);
+    playTone(390 + (id === 'cannon' ? currentWeaponTier() : META[id]) * 35, 0.09, 0.035);
     return true;
   }
 
@@ -688,6 +738,7 @@
     if (ownedWeapons[id]) {
       equipWeapon = id;
       saveMeta();
+      syncTankTiersFromMeta();
       playTone(260, 0.055, 0.026);
       return true;
     }
@@ -696,6 +747,7 @@
     ownedWeapons[id] = 1;
     equipWeapon = id;
     saveMeta();
+    syncTankTiersFromMeta();
     playTone(520, 0.12, 0.045);
     return true;
   }
@@ -709,6 +761,7 @@
   function cheatMaxAll() {
     for (var k in META) META[k] = MAXTIER;
     for (var i = 0; i < WEAPONS.length; i++) ownedWeapons[WEAPONS[i].id] = 1;
+    for (var wmi = 0; wmi < WEAPONS.length; wmi++) weaponMeta[WEAPONS[wmi].id] = MAXTIER;
     totalBank = 999999;
     equipWeapon = 'missile';
     saveMeta();
@@ -718,6 +771,7 @@
 
   function cheatReset() {
     for (var k in META) META[k] = 0;
+    for (var wmi = 0; wmi < WEAPONS.length; wmi++) weaponMeta[WEAPONS[wmi].id] = 0;
     ownedWeapons = { cannon: 1 };
     equipWeapon = 'cannon';
     totalBank = 0;
@@ -799,7 +853,13 @@
     ephase[i] = ephase[l]; eface[i] = eface[l]; ecd[i] = ecd[l]; etype[i] = etype[l];
   }
 
-  function spawnBullet(x, y, vx, vy, dmg, kind, radius, life) {
+  function projectileRowForKind(kind) {
+    if (kind === 2) return WEAPON_ROW.flak;
+    if (kind === 1) return WEAPON_ROW.missile;
+    return WEAPON_ROW.cannon;
+  }
+
+  function spawnBullet(x, y, vx, vy, dmg, kind, radius, life, visualRow, visualTier) {
     var i;
     if (bN < MAX_BULLETS) i = bN++;
     else i = (state.tick + bN) % MAX_BULLETS;
@@ -807,13 +867,15 @@
     blife[i] = life == null ? 0.95 : life;
     bdmg[i] = dmg;
     bkind[i] = kind || 0;
+    brow[i] = clampInt(visualRow == null ? weaponRow(equipWeapon) : visualRow, 0, 3);
+    btier[i] = clampInt(visualTier == null ? currentWeaponTier() : visualTier, 0, 5);
     brad[i] = radius || 0;
   }
 
   function removeBullet(i) {
     var l = --bN;
     if (i === l) return;
-    bx[i] = bx[l]; by[i] = by[l]; bvx[i] = bvx[l]; bvy[i] = bvy[l]; blife[i] = blife[l]; bdmg[i] = bdmg[l]; bkind[i] = bkind[l]; brad[i] = brad[l];
+    bx[i] = bx[l]; by[i] = by[l]; bvx[i] = bvx[l]; bvy[i] = bvy[l]; blife[i] = blife[l]; bdmg[i] = bdmg[l]; bkind[i] = bkind[l]; brow[i] = brow[l]; btier[i] = btier[l]; brad[i] = brad[l];
   }
 
   function spawnMote(x, y, v) {
@@ -1989,7 +2051,7 @@
       var ca = Math.cos(player.turret);
       var sa = Math.sin(player.turret);
       var range = 720;
-      var width = 12 + META.cannon * 1.3;
+      var width = 12 + currentWeaponTier() * 1.3;
       var bestLen = 180;
       var dps = player.dmg * player.fireRate * 1.65;
       for (var le = eN - 1; le >= 0; le--) {
@@ -2031,7 +2093,7 @@
       var missiles = player.barrels >= 4 ? 2 : 1;
       for (var m = 0; m < missiles && bN < MAX_BULLETS; m++) {
         var ma = player.turret + (m - (missiles - 1) * 0.5) * 0.22;
-        spawnBullet(player.x + Math.cos(ma) * 30, player.y + Math.sin(ma) * 30, Math.cos(ma) * 420, Math.sin(ma) * 420, player.dmg * 1.65, 1, 64 + META.cannon * 5, 1.85);
+        spawnBullet(player.x + Math.cos(ma) * 30, player.y + Math.sin(ma) * 30, Math.cos(ma) * 420, Math.sin(ma) * 420, player.dmg * 1.65, 1, 64 + currentWeaponTier() * 5, 1.85);
       }
       state.fireCd = 3.8 / player.fireRate;
       playSfx('missile', 0.42, 0.075);
@@ -2269,6 +2331,8 @@
     addSpriteAsset('brute_base', 'sprites/brute.png');
     addSpriteAsset('tank_body', 'sprites/tank_body.png');
     addSpriteAsset('tank_turret', 'sprites/tank_turret.png');
+    addSpriteAsset('weapon_turrets', 'art_refs/turrets/weapon_turrets_arcade_bio.png');
+    addSpriteAsset('weapon_projectiles', 'art_refs/turrets/weapon_projectiles_arcade_bio.png');
     var layers = ['treads', 'armor', 'thirst', 'core', 'cannon', 'frenzy'];
     for (var li = 0; li < layers.length; li++) {
       addSpriteAsset('lp_' + layers[li], 'art_refs/parts/layer_' + layers[li] + '.png');
@@ -2818,6 +2882,18 @@
     return queueSprite(key, frame * 160, 0, Math.min(160, meta.w), Math.min(160, meta.h), sx, sy, w, size, 1, 1, 1, alpha);
   }
 
+  function queueWeaponProjectileSprite(i, angle) {
+    if (!spriteTextures.weapon_projectiles) return false;
+    var row = clampInt(brow[i], 0, 3);
+    var tier = clampInt(btier[i], 0, 5);
+    var size = row === WEAPON_ROW.missile ? 42 : row === WEAPON_ROW.flak ? 26 : 34;
+    var pxs = worldToScreenX(bx[i]);
+    var pys = worldToScreenY(by[i]);
+    var screenSize = screenLen(size);
+    if (pxs < -screenSize || pxs > cssW + screenSize || pys < -screenSize || pys > cssH + screenSize) return true;
+    return queueSpriteRot('weapon_projectiles', tier * WEAPON_PROJECTILE_CELL, row * WEAPON_PROJECTILE_CELL, WEAPON_PROJECTILE_CELL, WEAPON_PROJECTILE_CELL, pxs, pys, screenSize, screenSize, angle, 1, 1, 1, 0.96);
+  }
+
   function queueOldTankSprite() {
     if (!OLD_TANK || !spriteTextures.tank_body || !spriteTextures.tank_turret) return false;
     var alive = tankRageLevel();
@@ -2830,7 +2906,7 @@
     var sx = cssW * 0.5;
     var sy = cssH * 0.5 + bob;
     var hot = Math.max(player.hurt, player.recoil * 0.5);
-    if (TANK_LAYERS && spriteTextures.lp_treads && spriteTextures.lp_armor && spriteTextures.lp_cannon) {
+    if (TANK_LAYERS && spriteTextures.lp_treads && spriteTextures.lp_armor && (spriteTextures.weapon_turrets || spriteTextures.lp_cannon)) {
       var size = screenLen(92);
       var hullA = player.hull + Math.PI * 0.5;
       var turretA = player.turret + Math.PI * 0.5;
@@ -2850,7 +2926,11 @@
         queueSpriteRot('lp_core', tankCoreTier * 64, 0, 64, 64, sx, sy + breathe * screenLen(0.8), size * (1 + (breathW - 1) * 1.7), size * (1 + (breathH - 1) * 1.7), hullA, 1 + pulse * 0.04, 1, 1, 0.9);
         tankLayerSprites++;
       }
-      queueSpriteRot('lp_cannon', tankCannonTier * 64, 0, 64, 64, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), size, size, turretA, 1 + hot * 0.22, 1, 1, 1);
+      if (spriteTextures.weapon_turrets) {
+        queueSpriteRot('weapon_turrets', weaponAtlasTier(equipWeapon) * WEAPON_TURRET_CELL, weaponRow(equipWeapon) * WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), screenLen(104), screenLen(104), player.turret, 1 + hot * 0.22, 1, 1, 1);
+      } else {
+        queueSpriteRot('lp_cannon', tankCannonTier * 64, 0, 64, 64, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), size, size, turretA, 1 + hot * 0.22, 1, 1, 1);
+      }
       perf.tankSprites = tankLayerSprites;
       return true;
     }
@@ -3367,6 +3447,7 @@
 
     for (var b = 0; b < bN; b++) {
       var ba = Math.atan2(bvy[b], bvx[b]);
+      if (usingOldSprites && queueWeaponProjectileSprite(b, ba)) continue;
       if (bkind[b] === 1) {
         n = addInst(n, bx[b], by[b], 17, 5.2, ba, 1, 1.0, 0.62, 0.18, 0.98, 0.56);
         n = addInst(n, bx[b] - Math.cos(ba) * 10, by[b] - Math.sin(ba) * 10, 7, 4, ba, 0, 1.0, 0.22, 0.08, 0.55, 0.55);
@@ -3650,8 +3731,7 @@
       ['lp_armor', tankArmorTier],
       ['lp_thirst', tankThirstTier],
       ['lp_core', tankCoreTier],
-      ['lp_frenzy', tankFrenzyTier],
-      ['lp_cannon', tankCannonTier]
+      ['lp_frenzy', tankFrenzyTier]
     ];
     var drawn = false;
     hud.save();
@@ -3663,6 +3743,19 @@
       var cell = Math.max(1, Math.floor(img.naturalHeight || 64));
       hud.drawImage(img, tier * cell, 0, cell, cell, Math.round(cx - size * 0.5), Math.round(cy - size * 0.5), Math.round(size), Math.round(size));
       drawn = true;
+    }
+    var weaponImg = spriteImages.weapon_turrets;
+    if (weaponImg && weaponImg.complete && weaponImg.naturalWidth) {
+      var wtSize = Math.round(size * 1.12);
+      hud.drawImage(weaponImg, weaponAtlasTier(equipWeapon) * WEAPON_TURRET_CELL, weaponRow(equipWeapon) * WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, Math.round(cx - wtSize * 0.5), Math.round(cy - wtSize * 0.5), wtSize, wtSize);
+      drawn = true;
+    } else {
+      var cannonImg = spriteImages.lp_cannon;
+      if (cannonImg && cannonImg.complete && cannonImg.naturalWidth) {
+        var cannonCell = Math.max(1, Math.floor(cannonImg.naturalHeight || 64));
+        hud.drawImage(cannonImg, tankCannonTier * cannonCell, 0, cannonCell, cannonCell, Math.round(cx - size * 0.5), Math.round(cy - size * 0.5), Math.round(size), Math.round(size));
+        drawn = true;
+      }
     }
     hud.restore();
     if (drawn) return;
@@ -4435,6 +4528,12 @@
       bank: totalBank,
       bestTime: bestTime,
       weapon: equipWeapon,
+      weaponMeta: {
+        cannon: weaponMeta.cannon,
+        flak: weaponMeta.flak,
+        laser: weaponMeta.laser,
+        missile: weaponMeta.missile
+      },
       ownedWeapons: ownedWeapons,
       audio: {
         muted: audioMuted,
@@ -4452,7 +4551,7 @@
       'mode=' + state.mode + (state.paused ? ' paused' : '') + ' time=' + fmtTime(state.t) + ' enemies=' + eN + ' bullets=' + bN + ' motes=' + mN + ' particles=' + pN,
       'bank=' + Math.floor(totalBank) + ' best=' + fmtTime(bestTime) + ' weapon=' + weaponName(equipWeapon) + ' owned=' + Object.keys(ownedWeapons).join(','),
       'audio=' + (audioMuted ? 'muted' : (audioCtx ? audioCtx.state : 'locked')) + ' samples=' + Object.keys(audioBuffers).length,
-      'meta armor=' + META.armor + ' core=' + META.core + ' cannon=' + META.cannon + ' treads=' + META.treads + ' thirst=' + META.thirst + ' frenzy=' + META.frenzy,
+      'meta armor=' + META.armor + ' core=' + META.core + ' cannon=' + META.cannon + ' treads=' + META.treads + ' thirst=' + META.thirst + ' frenzy=' + META.frenzy + ' weaponTiers=' + weaponMeta.cannon + '/' + weaponMeta.flak + '/' + weaponMeta.laser + '/' + weaponMeta.missile,
       state.mode === 'LEVELUP' ? 'upgrades=1:' + upgradeNames[upgradePick[0]] + ' 2:' + upgradeNames[upgradePick[1]] + ' 3:' + upgradeNames[upgradePick[2]] : 'level=' + player.level + ' xp=' + Math.floor(player.xp) + '/' + player.xpNext,
       'fps=' + perf.fps.toFixed(1) + ' frame=' + perf.frameMs.toFixed(2) + ' update=' + perf.updateMs.toFixed(2) + ' render=' + perf.renderMs.toFixed(2) + ' detail=' + perf.creatureDetails,
       'camera zoom=' + cameraZoom.toFixed(2) + ' world=' + Math.round(viewWorldW) + 'x' + Math.round(viewWorldH) + ' joystick=' + (useJoystick ? (joyActive ? 'active' : 'ready') : 'off'),
