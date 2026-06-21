@@ -98,6 +98,17 @@
   var audioLast = Object.create(null);
   var musicEl = null;
   var hudImages = Object.create(null);
+
+  // colour palette - mirrors the original Bloodtread COL object
+  var BT_CRIM    = '#c41228';
+  var BT_CRIM_HI = '#ff334a';
+  var BT_BLOOD   = '#6e0a16';
+  var BT_BLOOD_DK = '#3a060d';
+  var BT_BONE    = '#d8cbb0';
+  var BT_BONE_DIM = '#9b8f78';
+  var BT_IRON    = '#3b342d';
+  var BT_IRON_LO = '#241f1a';
+
   var SFX_FILES = {
     cannon: 'audio/sfx/cannon.mp3',
     flak: 'audio/sfx/flak.mp3',
@@ -3510,19 +3521,61 @@
     return !!r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
   }
 
+  function hudRR(x, y, w, h, r) {
+    r = Math.min(r, w * 0.5, h * 0.5);
+    hud.beginPath();
+    hud.moveTo(x + r, y);
+    hud.lineTo(x + w - r, y);
+    hud.arcTo(x + w, y, x + w, y + r, r);
+    hud.lineTo(x + w, y + h - r);
+    hud.arcTo(x + w, y + h, x + w - r, y + h, r);
+    hud.lineTo(x + r, y + h);
+    hud.arcTo(x, y + h, x, y + h - r, r);
+    hud.lineTo(x, y + r);
+    hud.arcTo(x, y, x + r, y, r);
+    hud.closePath();
+  }
+
   function drawPanel(alpha) {
-    hud.fillStyle = 'rgba(8,4,3,' + alpha + ')';
+    hud.fillStyle = 'rgba(8,5,4,' + alpha + ')';
     hud.fillRect(0, 0, cssW, cssH);
+    var gd = hud.createLinearGradient(0, 0, 0, cssH);
+    gd.addColorStop(0, 'rgba(8,3,3,0.55)');
+    gd.addColorStop(0.4, 'rgba(8,3,3,0.0)');
+    gd.addColorStop(1, 'rgba(8,3,3,0.88)');
+    hud.fillStyle = gd;
+    hud.fillRect(0, 0, cssW, cssH);
+    // blood-mechanical corner ticks
+    var tk = 20, mg = 4;
+    hud.strokeStyle = 'rgba(196,18,40,0.34)';
+    hud.lineWidth = 1.5;
+    hud.beginPath();
+    hud.moveTo(mg + tk, mg); hud.lineTo(mg, mg); hud.lineTo(mg, mg + tk);
+    hud.moveTo(cssW - mg - tk, mg); hud.lineTo(cssW - mg, mg); hud.lineTo(cssW - mg, mg + tk);
+    hud.moveTo(mg + tk, cssH - mg); hud.lineTo(mg, cssH - mg); hud.lineTo(mg, cssH - mg - tk);
+    hud.moveTo(cssW - mg - tk, cssH - mg); hud.lineTo(cssW - mg, cssH - mg); hud.lineTo(cssW - mg, cssH - mg - tk);
+    hud.stroke();
   }
 
   function drawButton(x, y, w, h, label, primary) {
-    hud.fillStyle = primary ? 'rgba(130,38,28,0.92)' : 'rgba(31,20,16,0.92)';
-    hud.strokeStyle = primary ? '#ffb05c' : '#684233';
-    hud.lineWidth = primary ? 2 : 1;
-    hud.fillRect(x, y, w, h);
-    hud.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    hud.fillStyle = primary ? '#fff2cf' : '#e7c7a8';
-    hud.font = '700 ' + Math.max(12, Math.min(18, h * 0.34)) + 'px ui-monospace, monospace';
+    var r = h * 0.5;
+    var gr = hud.createLinearGradient(x, y, x, y + h);
+    if (primary) {
+      gr.addColorStop(0, BT_CRIM);
+      gr.addColorStop(1, BT_BLOOD_DK);
+    } else {
+      gr.addColorStop(0, '#332a24');
+      gr.addColorStop(1, '#1d1714');
+    }
+    hud.fillStyle = gr;
+    hudRR(x, y, w, h, r);
+    hud.fill();
+    hud.strokeStyle = primary ? BT_CRIM_HI : BT_BONE_DIM;
+    hud.lineWidth = primary ? 2 : 1.5;
+    hudRR(x + 0.5, y + 0.5, w - 1, h - 1, Math.max(1, r - 0.5));
+    hud.stroke();
+    hud.fillStyle = '#fff';
+    hud.font = '700 ' + Math.max(13, Math.min(21, h * 0.40)) + 'px sans-serif';
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
     hud.fillText(label, x + w * 0.5, y + h * 0.5);
@@ -3530,13 +3583,16 @@
   }
 
   function drawHudButton(x, y, w, h, label) {
-    hud.fillStyle = 'rgba(16,9,7,0.66)';
-    hud.strokeStyle = 'rgba(255,176,92,0.62)';
-    hud.lineWidth = 1;
-    hud.fillRect(x, y, w, h);
-    hud.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    hud.fillStyle = '#f2d5b5';
-    hud.font = '800 ' + Math.max(10, Math.min(13, h * 0.34)) + 'px ui-monospace, monospace';
+    var r = h * 0.5;
+    hud.fillStyle = 'rgba(10,5,4,0.80)';
+    hudRR(x, y, w, h, r);
+    hud.fill();
+    hud.strokeStyle = 'rgba(196,18,40,0.50)';
+    hud.lineWidth = 1.2;
+    hudRR(x + 0.5, y + 0.5, w - 1, h - 1, Math.max(1, r - 0.5));
+    hud.stroke();
+    hud.fillStyle = BT_BONE;
+    hud.font = '700 ' + Math.max(10, Math.min(12, h * 0.38)) + 'px sans-serif';
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
     hud.fillText(label, x + w * 0.5, y + h * 0.5);
@@ -3545,25 +3601,44 @@
 
   function drawJoystick() {
     if (!useJoystick || state.mode !== 'PLAYING' || state.paused) return;
-    var bx = joyActive ? joyBaseX : Math.max(76, cssW * 0.18);
-    var by = joyActive ? joyBaseY : Math.max(96, cssH - 92);
+    var bx = joyActive ? joyBaseX : Math.max(66, cssW * 0.16);
+    var by = joyActive ? joyBaseY : Math.max(88, cssH - 88);
     var kx = joyActive ? joyKnobX : bx;
     var ky = joyActive ? joyKnobY : by;
-    var a = joyActive ? 0.78 : 0.46;
     hud.save();
-    hud.globalAlpha = a;
-    hud.lineWidth = joyActive ? 3 : 2;
-    hud.strokeStyle = '#ffb05c';
-    hud.fillStyle = joyActive ? 'rgba(20,10,8,0.36)' : 'rgba(20,10,8,0.30)';
+    // outer ring - subtle when idle, visible when active
+    hud.globalAlpha = joyActive ? 0.68 : 0.19;
+    hud.lineWidth = joyActive ? 2 : 1;
+    hud.strokeStyle = joyActive ? BT_CRIM_HI : BT_BONE_DIM;
+    hud.fillStyle = joyActive ? 'rgba(18,6,5,0.34)' : 'rgba(8,4,3,0.16)';
     hud.beginPath();
     hud.arc(bx, by, joyRadius, 0, TWO_PI);
     hud.fill();
     hud.stroke();
-    hud.globalAlpha = joyActive ? 0.92 : 0.58;
-    hud.fillStyle = '#c41228';
-    hud.strokeStyle = '#ffe1b8';
+    // cross-hair tick lines on idle ring
+    if (!joyActive) {
+      hud.lineWidth = 0.7;
+      var t = joyRadius * 0.32;
+      hud.beginPath();
+      hud.moveTo(bx - t, by); hud.lineTo(bx + t, by);
+      hud.moveTo(bx, by - t); hud.lineTo(bx, by + t);
+      hud.stroke();
+    }
+    // knob
+    var knobR = Math.max(14, joyRadius * 0.28);
+    hud.globalAlpha = joyActive ? 0.92 : 0.38;
+    if (joyActive) {
+      var kg = hud.createRadialGradient(kx - knobR * 0.25, ky - knobR * 0.25, 0, kx, ky, knobR);
+      kg.addColorStop(0, BT_CRIM_HI);
+      kg.addColorStop(1, BT_BLOOD);
+      hud.fillStyle = kg;
+    } else {
+      hud.fillStyle = BT_BLOOD;
+    }
+    hud.strokeStyle = joyActive ? 'rgba(255,180,160,0.70)' : 'rgba(150,60,50,0.36)';
+    hud.lineWidth = 1;
     hud.beginPath();
-    hud.arc(kx, ky, Math.max(18, joyRadius * 0.34), 0, TWO_PI);
+    hud.arc(kx, ky, knobR, 0, TWO_PI);
     hud.fill();
     hud.stroke();
     hud.restore();
@@ -3590,25 +3665,7 @@
       drawn = true;
     }
     hud.restore();
-    if (drawn) {
-      var pulse = 0.5 + Math.sin(performance.now() * 0.006) * 0.5;
-      var bloom = hudImages.bloom;
-      var heart = hudImages.heart;
-      hud.save();
-      hud.imageSmoothingEnabled = false;
-      if (bloom && bloom.complete && bloom.naturalWidth) {
-        hud.globalAlpha = 0.22 + pulse * 0.16;
-        var bs = size * (0.98 + pulse * 0.12);
-        hud.drawImage(bloom, Math.round(cx - bs * 0.5), Math.round(cy - bs * 0.5), Math.round(bs), Math.round(bs));
-      }
-      if (heart && heart.complete && heart.naturalWidth) {
-        hud.globalAlpha = 0.76 + pulse * 0.18;
-        var hs = size * (0.27 + pulse * 0.035);
-        hud.drawImage(heart, Math.round(cx - hs * 0.5), Math.round(cy - hs * 0.5), Math.round(hs), Math.round(hs));
-      }
-      hud.restore();
-      return;
-    }
+    if (drawn) return;
     hud.fillStyle = '#120907';
     hud.fillRect(cx - size * 0.38, cy - size * 0.26, size * 0.76, size * 0.52);
     hud.fillStyle = '#6d4c39';
@@ -3622,177 +3679,242 @@
 
   function drawMenu() {
     var hero = hudImages.hero;
+    hud.fillStyle = '#050302';
+    hud.fillRect(0, 0, cssW, cssH);
     if (hero && hero.complete && hero.naturalWidth) {
       var sc = Math.max(cssW / hero.naturalWidth, cssH / hero.naturalHeight);
       var dw = hero.naturalWidth * sc;
       var dh = hero.naturalHeight * sc;
-      hud.globalAlpha = 0.58;
+      hud.globalAlpha = 0.48;
       hud.drawImage(hero, (cssW - dw) * 0.5, (cssH - dh) * 0.5, dw, dh);
       hud.globalAlpha = 1;
-      drawPanel(0.58);
+      var gd = hud.createLinearGradient(0, 0, 0, cssH);
+      gd.addColorStop(0, 'rgba(8,5,4,0.55)');
+      gd.addColorStop(0.4, 'rgba(8,5,4,0.08)');
+      gd.addColorStop(1, 'rgba(8,5,4,0.92)');
+      hud.fillStyle = gd;
+      hud.fillRect(0, 0, cssW, cssH);
     } else {
-      drawPanel(0.82);
+      drawPanel(0.90);
     }
     rShop.length = 0;
     rWeapons.length = 0;
-    var w = Math.min(430, cssW - 36);
+    var w = Math.min(440, cssW - 32);
     var x = (cssW - w) * 0.5;
-    var titleY = Math.max(62, cssH * 0.14);
+    var titleY = cssH * 0.44;
+    // large glowing title
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
-    hud.fillStyle = '#fff0d2';
-    hud.font = '900 ' + Math.max(32, Math.min(56, cssW * 0.08)) + 'px ui-monospace, monospace';
+    hud.shadowColor = BT_CRIM;
+    hud.shadowBlur = Math.max(16, Math.min(28, cssW * 0.05));
+    hud.fillStyle = '#fff';
+    hud.font = '900 ' + Math.max(30, Math.min(62, cssW * 0.115)) + 'px sans-serif';
     hud.fillText('BLOODTREAD', cssW * 0.5, titleY);
-    hud.fillStyle = '#c9a88f';
-    hud.font = '13px ui-monospace, monospace';
-    hud.fillText('BANK ' + Math.floor(totalBank) + '  BEST ' + fmtTime(bestTime) + '  WEAPON ' + weaponName(equipWeapon), cssW * 0.5, titleY + 34);
-    drawHudTankPreview(cssW * 0.5, titleY + 112, Math.min(132, Math.max(88, cssH * 0.16)));
-    var by = Math.min(cssH - 190, titleY + 190);
-    rPlay = drawButton(x, by, w, 48, 'START RUN', true);
-    rForge = drawButton(x, by + 60, w, 46, 'BLOODFORGE  ' + Math.floor(totalBank), false);
-    rCheat = drawButton(x, by + 116, w, 42, 'CHEATS', false);
-    hud.fillStyle = '#9b7d68';
-    hud.font = '12px ui-monospace, monospace';
-    hud.fillText('tracks ' + META.armor + '/' + META.core + '/' + META.cannon + '/' + META.treads + '/' + META.thirst + '/' + META.frenzy, cssW * 0.5, by + 180);
+    hud.shadowBlur = 0;
+    // tagline
+    hud.fillStyle = BT_BONE_DIM;
+    hud.font = Math.max(11, Math.min(17, cssW * 0.032)) + 'px sans-serif';
+    hud.fillText('CRUSH. BLEED. EVOLVE.', cssW * 0.5, titleY + Math.max(20, cssH * 0.038));
+    // buttons below title
+    var by = Math.min(cssH - 185, titleY + cssH * 0.15);
+    var btnH = Math.max(44, Math.min(54, cssH * 0.072));
+    rPlay  = drawButton(x, by, w, btnH, 'START RUN', true);
+    rForge = drawButton(x, by + btnH + 12, w, btnH - 4, 'BLOODFORGE   ' + Math.floor(totalBank), false);
+    // weapon + track info
+    hud.fillStyle = BT_BONE_DIM;
+    hud.font = Math.max(10, Math.min(13, cssH * 0.018)) + 'px sans-serif';
+    var infoY = by + btnH * 2 + 22;
+    hud.fillText('weapon: ' + weaponName(equipWeapon) + '   tracks: ' + META.armor + '-' + META.core + '-' + META.cannon + '-' + META.treads + '-' + META.thirst + '-' + META.frenzy, cssW * 0.5, infoY);
+    if (bestTime > 0) {
+      hud.fillText('BEST ' + fmtTime(bestTime), cssW * 0.5, infoY + 18);
+    }
+    // CHEATS corner button (top-left, small)
+    var chw = Math.max(58, Math.min(92, cssW * 0.155)), chh = Math.max(22, Math.min(30, cssH * 0.04));
+    var cms = 10;
+    hud.fillStyle = 'rgba(0,0,0,0.48)';
+    hud.strokeStyle = '#5a2a26';
+    hud.lineWidth = 1.2;
+    hudRR(cms, cms, chw, chh, 5);
+    hud.fill(); hud.stroke();
+    hud.fillStyle = BT_BONE_DIM;
+    hud.font = '700 ' + Math.max(9, Math.min(12, chh * 0.48)) + 'px sans-serif';
+    hud.fillText('CHEATS', cms + chw * 0.5, cms + chh * 0.5);
+    rCheat = { x: cms, y: cms, w: chw, h: chh };
+    hud.textAlign = 'start';
   }
 
   function drawShop() {
-    drawPanel(0.91);
+    drawPanel(0.96);
     var w = Math.min(520, cssW - 28);
     var x = (cssW - w) * 0.5;
-    var y = Math.max(18, cssH * 0.035);
+    var y = Math.max(16, cssH * 0.032);
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
-    hud.fillStyle = '#ffbc74';
-    hud.font = '900 24px ui-monospace, monospace';
-    hud.fillText('BLOODFORGE', cssW * 0.5, y + 16);
-    hud.fillStyle = '#f4d9bc';
-    hud.font = '13px ui-monospace, monospace';
-    hud.fillText('BLOOD ' + Math.floor(totalBank), cssW * 0.5, y + 42);
+    // BLOODFORGE title with crim glow
+    hud.shadowColor = BT_CRIM;
+    hud.shadowBlur = 14;
+    hud.fillStyle = BT_CRIM_HI;
+    hud.font = '900 ' + Math.max(18, Math.min(26, cssH * 0.038)) + 'px sans-serif';
+    hud.fillText('BLOODFORGE', cssW * 0.5, y + 14);
+    hud.shadowBlur = 0;
+    hud.fillStyle = BT_BONE;
+    hud.font = 'bold ' + Math.max(11, Math.min(14, cssH * 0.02)) + 'px sans-serif';
+    hud.fillText('BLOOD: ' + Math.floor(totalBank), cssW * 0.5, y + 36);
     drawHudTankPreview(cssW * 0.5, y + 100, Math.min(104, cssH * 0.15));
 
     rWeapons.length = 0;
     var wy = y + 158;
     var gap = 6;
     var ww = (w - gap * 3) / 4;
+    var wsH = Math.max(36, Math.min(44, cssH * 0.058));
     for (var wi = 0; wi < WEAPONS.length; wi++) {
       var W = WEAPONS[wi];
       var rx = x + wi * (ww + gap);
       var owned = !!ownedWeapons[W.id];
       var eq = equipWeapon === W.id;
-      hud.fillStyle = eq ? 'rgba(62,30,24,0.95)' : 'rgba(20,13,11,0.94)';
-      hud.strokeStyle = eq ? '#ffb05c' : (owned ? '#76503c' : '#3c2a23');
-      hud.lineWidth = eq ? 2 : 1;
-      hud.fillRect(rx, wy, ww, 46);
-      hud.strokeRect(rx + 0.5, wy + 0.5, ww - 1, 45);
-      hud.fillStyle = 'rgb(' + Math.round(W.r * 255) + ',' + Math.round(W.g * 255) + ',' + Math.round(W.b * 255) + ')';
-      hud.fillRect(rx + 8, wy + 10, 8, 8);
-      hud.fillStyle = owned ? '#fbe5c8' : '#967866';
-      hud.font = '700 10px ui-monospace, monospace';
-      hud.fillText(W.name, rx + ww * 0.5, wy + 17);
-      hud.fillStyle = eq ? '#ffbd72' : (owned ? '#c9a88f' : (totalBank >= W.cost ? '#fff1c4' : '#775d50'));
-      hud.fillText(eq ? 'EQUIPPED' : (owned ? 'EQUIP' : String(W.cost)), rx + ww * 0.5, wy + 34);
-      rWeapons.push({ x: rx, y: wy, w: ww, h: 46, id: W.id });
+      hud.fillStyle = eq ? '#2a1714' : '#140e0c';
+      hud.strokeStyle = eq ? BT_CRIM_HI : (owned ? '#6a3a32' : '#3a2622');
+      hud.lineWidth = eq ? 2.2 : 1.2;
+      hudRR(rx, wy, ww, wsH, 7);
+      hud.fill(); hud.stroke();
+      // weapon colour dot
+      var wdot = 'rgb(' + Math.round(W.r * 255) + ',' + Math.round(W.g * 255) + ',' + Math.round(W.b * 255) + ')';
+      hud.fillStyle = wdot;
+      hud.beginPath(); hud.arc(rx + 9, wy + wsH * 0.32, 3, 0, TWO_PI); hud.fill();
+      hud.fillStyle = owned ? '#fff' : BT_BONE_DIM;
+      hud.font = 'bold ' + Math.max(8, Math.min(10, wsH * 0.25)) + 'px sans-serif';
+      hud.fillText(W.name, rx + ww * 0.5 + 4, wy + wsH * 0.34);
+      hud.fillStyle = eq ? wdot : (owned ? BT_BONE_DIM : (totalBank >= W.cost ? '#fff' : '#7a5a54'));
+      hud.font = 'bold ' + Math.max(7, Math.min(9, wsH * 0.22)) + 'px sans-serif';
+      hud.fillText(eq ? 'EQUIPPED' : (owned ? 'EQUIP' : String(W.cost)), rx + ww * 0.5, wy + wsH * 0.74);
+      rWeapons.push({ x: rx, y: wy, w: ww, h: wsH, id: W.id });
     }
 
     rShop.length = 0;
-    var rowH = Math.max(34, Math.min(44, (cssH - wy - 120) / TRACKS.length));
-    var top = wy + 58;
+    var rowH = Math.max(40, Math.min(58, (cssH - wy - wsH - 96) / TRACKS.length - 4));
+    var top = wy + wsH + 14;
     for (var i = 0; i < TRACKS.length; i++) {
       var tr = TRACKS[i];
-      var ry = top + i * (rowH + 5);
+      var ry = top + i * (rowH + 4);
       var tier = META[tr.id];
       var cost = trackCost(tr.id);
       var sel = selectedTrack === tr.id;
-      hud.fillStyle = sel ? 'rgba(42,26,19,0.96)' : 'rgba(21,14,11,0.94)';
-      hud.strokeStyle = sel ? '#ffb05c' : '#5c3a30';
-      hud.lineWidth = sel ? 2 : 1;
-      hud.fillRect(x, ry, w, rowH);
-      hud.strokeRect(x + 0.5, ry + 0.5, w - 1, rowH - 1);
+      hud.fillStyle = sel ? '#241a14' : '#16100d';
+      hud.strokeStyle = sel ? BT_CRIM_HI : '#5a2a26';
+      hud.lineWidth = sel ? 2.2 : 1.2;
+      hudRR(x, ry, w, rowH, 9);
+      hud.fill(); hud.stroke();
+      // icon medallion
+      var mx = x + 22, my = ry + rowH * 0.5, mr = Math.max(11, rowH * 0.32);
+      hud.fillStyle = '#0d0807';
+      hud.beginPath(); hud.arc(mx, my, mr, 0, TWO_PI); hud.fill();
+      hud.strokeStyle = BT_CRIM; hud.lineWidth = 1.2;
+      hud.beginPath(); hud.arc(mx, my, mr, 0, TWO_PI); hud.stroke();
       hud.textAlign = 'left';
-      hud.fillStyle = '#f7dec1';
-      hud.font = '700 12px ui-monospace, monospace';
-      hud.fillText(tr.name, x + 12, ry + rowH * 0.38);
-      hud.fillStyle = '#a98973';
-      hud.font = '10px ui-monospace, monospace';
-      hud.fillText(trackEffect(tr.id), x + 12, ry + rowH * 0.72);
+      hud.fillStyle = '#fff';
+      var tx = mx + mr + 8;
+      hud.font = 'bold ' + Math.max(11, Math.min(16, rowH * 0.34)) + 'px sans-serif';
+      hud.fillText(tr.name, tx, ry + rowH * 0.32);
+      hud.fillStyle = BT_BONE_DIM;
+      hud.font = Math.max(9, Math.min(11, rowH * 0.27)) + 'px sans-serif';
+      hud.fillText(trackEffect(tr.id), tx, ry + rowH * 0.61);
+      // tier dots
       for (var t = 0; t < MAXTIER; t++) {
-        hud.fillStyle = t < tier ? '#c74832' : '#3a2721';
-        hud.fillRect(x + w - 142 + t * 11, ry + rowH * 0.5 - 4, 7, 7);
+        hud.fillStyle = t < tier ? BT_CRIM_HI : '#3a2a26';
+        hud.beginPath(); hud.arc(tx + t * 11, ry + rowH * 0.82, 3.2, 0, TWO_PI); hud.fill();
       }
-      var bw = 68, bx0 = x + w - bw - 10, by0 = ry + 7, bh = rowH - 14;
-      hud.fillStyle = cost == null ? '#292424' : (totalBank >= cost ? '#8a2d25' : '#35231f');
-      hud.fillRect(bx0, by0, bw, bh);
+      var bw = 66, bx0 = x + w - bw - 8, by0 = ry + rowH * 0.19, bh = rowH * 0.62;
+      var afford = cost != null && totalBank >= cost;
+      hud.fillStyle = cost == null ? '#2a2a2a' : (afford ? BT_CRIM : '#33231f');
+      hudRR(bx0, by0, bw, bh, bh * 0.5);
+      hud.fill();
       hud.textAlign = 'center';
-      hud.fillStyle = cost == null ? '#8d817a' : '#ffe4bd';
-      hud.font = '700 11px ui-monospace, monospace';
+      hud.fillStyle = cost == null ? BT_BONE_DIM : (afford ? '#fff' : '#7a6a64');
+      hud.font = 'bold ' + Math.max(10, Math.min(13, bh * 0.50)) + 'px sans-serif';
       hud.fillText(cost == null ? 'MAX' : String(cost), bx0 + bw * 0.5, by0 + bh * 0.5);
       rShop.push({ x: x, y: ry, w: w, h: rowH, id: tr.id, bx: bx0, by: by0, bw: bw, bh: bh });
     }
-    rShopBack = drawButton(x, Math.min(cssH - 54, top + TRACKS.length * (rowH + 5) + 10), w, 42, 'BACK', false);
+    rShopBack = drawButton(x, Math.min(cssH - 52, top + TRACKS.length * (rowH + 4) + 8), w, 42, 'BACK', false);
     hud.textAlign = 'start';
   }
 
   function drawCheat() {
-    drawPanel(0.92);
+    drawPanel(0.97);
     var w = Math.min(520, cssW - 32);
     var x = (cssW - w) * 0.5;
-    var y = Math.max(34, cssH * 0.09);
+    var y = Math.max(28, cssH * 0.07);
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
-    hud.fillStyle = '#ffbc74';
-    hud.font = '900 25px ui-monospace, monospace';
+    hud.shadowColor = BT_CRIM;
+    hud.shadowBlur = 14;
+    hud.fillStyle = BT_CRIM_HI;
+    hud.font = '900 ' + Math.max(20, Math.min(28, cssH * 0.04)) + 'px sans-serif';
     hud.fillText('CHEATS', cssW * 0.5, y);
-    hud.fillStyle = '#d0ac8f';
-    hud.font = '12px ui-monospace, monospace';
+    hud.shadowBlur = 0;
+    hud.fillStyle = BT_BONE_DIM;
+    hud.font = Math.max(10, Math.min(13, cssH * 0.018)) + 'px sans-serif';
     var lines = [
       '9: jump to minute 9 extreme horde',
-      '0/R: restart current run',
-      'P: pause   M: menu   N: mute',
-      'F2 or Ctrl+D: debug overlay',
-      '1/2/3: choose mutation card'
+      '0/R: restart   P: pause   M: menu   N: mute',
+      'F2 or Ctrl+D: debug overlay   1/2/3: mutation card'
     ];
-    for (var i = 0; i < lines.length; i++) hud.fillText(lines[i], cssW * 0.5, y + 42 + i * 22);
-    var by = y + 168;
-    rCheatMoney = drawButton(x, by, w, 42, 'ADD 50000 BLOOD', true);
-    rCheatMax = drawButton(x, by + 52, w, 42, 'MAX ALL TRACKS + WEAPONS', false);
-    rCheatMin9 = drawButton(x, by + 104, w, 42, 'START MINUTE 9 HORDE', false);
-    rCheatReset = drawButton(x, by + 156, w, 42, 'WIPE REBUILD SAVE', false);
-    rCheatBack = drawButton(x, by + 208, w, 42, 'BACK', false);
+    for (var i = 0; i < lines.length; i++) hud.fillText(lines[i], cssW * 0.5, y + 36 + i * 20);
+    var btnH = Math.max(40, Math.min(48, cssH * 0.065));
+    var by = y + 106;
+    rCheatMoney = drawButton(x, by, w, btnH, 'ADD 50000 BLOOD', true);
+    rCheatMax   = drawButton(x, by + btnH + 10, w, btnH, 'MAX ALL TRACKS + WEAPONS', false);
+    rCheatMin9  = drawButton(x, by + (btnH + 10) * 2, w, btnH, 'START MINUTE 9 HORDE', false);
+    rCheatReset = drawButton(x, by + (btnH + 10) * 3, w, btnH, 'WIPE REBUILD SAVE', false);
+    rCheatBack  = drawButton(x, by + (btnH + 10) * 4, w, btnH, 'BACK', false);
   }
 
   function drawGameOver() {
-    drawPanel(0.88);
-    var w = Math.min(430, cssW - 36);
+    drawPanel(0.92);
+    var w = Math.min(440, cssW - 36);
     var x = (cssW - w) * 0.5;
-    var y = Math.max(70, cssH * 0.18);
+    var y = Math.max(52, cssH * 0.20);
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
-    hud.fillStyle = '#ffbc74';
-    hud.font = '900 28px ui-monospace, monospace';
+    hud.shadowColor = BT_CRIM;
+    hud.shadowBlur = 20;
+    hud.fillStyle = BT_CRIM_HI;
+    hud.font = '900 ' + Math.max(22, Math.min(38, cssH * 0.054)) + 'px sans-serif';
     hud.fillText('ENGINE STALLS', cssW * 0.5, y);
-    hud.fillStyle = '#f4d9bc';
-    hud.font = '14px ui-monospace, monospace';
-    hud.fillText('SURVIVED ' + fmtTime(state.t) + '  BLOOD +' + Math.floor(state.blood), cssW * 0.5, y + 38);
-    hud.fillText('BANK ' + Math.floor(totalBank) + '  BEST ' + fmtTime(bestTime), cssW * 0.5, y + 62);
-    rRetry = drawButton(x, y + 102, w, 46, 'RUN AGAIN', true);
-    rForge = drawButton(x, y + 160, w, 44, 'BLOODFORGE', false);
-    rMenu = drawButton(x, y + 214, w, 42, 'MENU', false);
+    hud.shadowBlur = 0;
+    var timeSize = Math.max(30, Math.min(50, cssH * 0.07));
+    hud.fillStyle = '#fff';
+    hud.font = '700 ' + timeSize + 'px sans-serif';
+    hud.fillText(fmtTime(state.t), cssW * 0.5, y + timeSize + 16);
+    hud.fillStyle = BT_BONE_DIM;
+    hud.font = Math.max(11, Math.min(14, cssH * 0.018)) + 'px sans-serif';
+    hud.fillText('SURVIVED', cssW * 0.5, y + timeSize + 36);
+    hud.fillStyle = BT_BONE;
+    hud.font = Math.max(11, Math.min(14, cssH * 0.018)) + 'px sans-serif';
+    hud.fillText('LV ' + player.level + '   BLOOD +' + Math.floor(state.blood) + '   KILLS ' + state.kills, cssW * 0.5, y + timeSize + 56);
+    if (bestTime > 0) hud.fillText('BEST ' + fmtTime(bestTime), cssW * 0.5, y + timeSize + 74);
+    var btnH = Math.max(42, Math.min(50, cssH * 0.068));
+    var gob = btnH + 10;
+    var by0 = Math.min(cssH - gob * 3 - 20, y + timeSize + 106);
+    rRetry = drawButton(x, by0, w, btnH, 'RUN AGAIN', true);
+    rForge = drawButton(x, by0 + gob, w, btnH - 2, 'BLOODFORGE', false);
+    rMenu  = drawButton(x, by0 + gob * 2, w, btnH - 4, 'MENU', false);
   }
 
   function drawPause() {
-    drawPanel(0.74);
-    var w = Math.min(390, cssW - 36);
+    drawPanel(0.78);
+    var w = Math.min(400, cssW - 36);
     var x = (cssW - w) * 0.5;
-    var y = cssH * 0.34;
+    var y = cssH * 0.32;
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
-    hud.fillStyle = '#fff0d2';
-    hud.font = '900 28px ui-monospace, monospace';
+    hud.fillStyle = '#fff';
+    hud.font = '900 ' + Math.max(24, Math.min(36, cssH * 0.05)) + 'px sans-serif';
     hud.fillText('PAUSED', cssW * 0.5, y);
-    rResume = drawButton(x, y + 48, w, 46, 'RESUME', true);
-    rPauseForge = drawButton(x, y + 106, w, 42, 'BANK BLOOD + FORGE', false);
-    rQuit = drawButton(x, y + 158, w, 42, 'BANK BLOOD + MENU', false);
+    var btnH = Math.max(42, Math.min(50, cssH * 0.068));
+    var gob = btnH + 10;
+    rResume    = drawButton(x, y + 48, w, btnH, 'RESUME', true);
+    rPauseForge = drawButton(x, y + 48 + gob, w, btnH - 2, 'BANK BLOOD + FORGE', false);
+    rQuit      = drawButton(x, y + 48 + gob * 2, w, btnH - 4, 'BANK BLOOD + MENU', false);
   }
 
   function renderHud() {
@@ -3829,32 +3951,76 @@
       perf.hudMs = performance.now() - t0;
       return;
     }
-    hud.fillStyle = 'rgba(0,0,0,0.35)';
-    hud.fillRect(14, 14, 214, 56);
-    hud.fillStyle = '#2b1512';
-    hud.fillRect(24, 26, 176, 10);
-    hud.fillStyle = player.hp > player.maxHp * 0.28 ? '#d74c32' : '#ffb34a';
-    hud.fillRect(24, 26, 176 * clamp(player.hp / player.maxHp, 0, 1), 10);
-    hud.fillStyle = '#21170f';
-    hud.fillRect(24, 44, 176, 8);
-    hud.fillStyle = '#cf1830';
-    hud.fillRect(24, 44, 176 * clamp(player.xp / player.xpNext, 0, 1), 8);
-    hud.fillStyle = '#f4d9bc';
-    hud.font = '12px ui-monospace, monospace';
-    hud.fillText(fmtTime(state.t) + '  L' + player.level + '  K' + state.kills, 24, 67);
+    // top-right buttons are reserved first so bars never run underneath them.
+    var hbtnW = Math.max(54, Math.min(74, cssW * 0.14));
+    var hbtnH = Math.max(28, Math.min(34, cssH * 0.044));
+    var hbtnX = cssW - hbtnW - 10;
+    var hbtnY = 10;
 
-    var bw = cssW < 520 ? 62 : 76;
-    rHudPause = drawHudButton(cssW - bw - 12, 14, bw, 34, 'PAUSE');
-    rHudMenu = drawHudButton(cssW - bw - 12, 54, bw, 34, 'MENU');
+    // pill HP bar
+    var hpad = 14, hbH = Math.max(10, Math.min(14, cssH * 0.017));
+    var hbW = Math.max(150, hbtnX - hpad - 12);
+    hud.fillStyle = 'rgba(0,0,0,0.55)';
+    hudRR(hpad, hpad, hbW, hbH, hbH * 0.5); hud.fill();
+    var hpf = clamp(player.hp / player.maxHp, 0, 1);
+    var hpCrit = player.hp < player.maxHp * 0.28;
+    var hpG = hud.createLinearGradient(hpad, 0, hpad + hbW, 0);
+    if (hpCrit) { hpG.addColorStop(0, '#a03a00'); hpG.addColorStop(1, '#ffd050'); }
+    else        { hpG.addColorStop(0, BT_BLOOD);  hpG.addColorStop(1, BT_CRIM_HI); }
+    hud.fillStyle = hpG;
+    hudRR(hpad, hpad, Math.max(0, hbW * hpf), hbH, hbH * 0.5); hud.fill();
+    // HP text centred in bar
+    hud.fillStyle = '#fff';
+    hud.font = '700 ' + Math.max(8, Math.min(10, hbH * 0.75)) + 'px sans-serif';
+    hud.textAlign = 'center'; hud.textBaseline = 'middle';
+    hud.fillText(Math.ceil(player.hp) + ' / ' + Math.round(player.maxHp), hpad + hbW * 0.5, hpad + hbH * 0.5);
+    // XP (blood) bar below
+    var xbY = hpad + hbH + 4, xbH = Math.max(5, Math.min(8, cssH * 0.010));
+    hud.fillStyle = 'rgba(0,0,0,0.5)';
+    hudRR(hpad, xbY, hbW, xbH, xbH * 0.5); hud.fill();
+    var xf = clamp(player.xp / player.xpNext, 0, 1);
+    hud.fillStyle = BT_BLOOD;
+    hudRR(hpad, xbY, Math.max(0, hbW * xf), xbH, xbH * 0.5); hud.fill();
+    // level / timer / kills row
+    var txtY = xbY + xbH + 14;
+    hud.font = 'bold ' + Math.max(11, Math.min(14, cssH * 0.018)) + 'px sans-serif';
+    hud.textBaseline = 'top';
+    hud.fillStyle = BT_BONE; hud.textAlign = 'left';
+    hud.fillText('LV ' + player.level + '  K' + state.kills, hpad, txtY);
+    hud.fillStyle = '#fff'; hud.textAlign = 'center';
+    hud.fillText(fmtTime(state.t), cssW * 0.5, txtY);
+    hud.textBaseline = 'middle';
+
+    // HUD buttons (top-right corner)
+    rHudPause = drawHudButton(hbtnX, hbtnY, hbtnW, hbtnH, 'PAUSE');
+    rHudMenu  = drawHudButton(hbtnX, hbtnY + hbtnH + 6, hbtnW, hbtnH, 'MENU');
+
+    // blast meter ring (bottom-centre, above joystick dead-zone)
+    var bmR = Math.max(18, Math.min(24, cssH * 0.032));
+    var bmX = cssW * 0.5, bmY = cssH - bmR - 16;
+    hud.lineWidth = Math.max(3, bmR * 0.22);
+    hud.lineCap = 'round';
+    hud.strokeStyle = 'rgba(255,255,255,0.10)';
+    hud.beginPath(); hud.arc(bmX, bmY, bmR, 0, TWO_PI); hud.stroke();
+    var meter = clamp((player.meter || 0) / 100, 0, 1);
+    if (meter > 0.01) {
+      hud.strokeStyle = player.unleash > 0 ? BT_CRIM_HI : BT_BLOOD;
+      hud.beginPath(); hud.arc(bmX, bmY, bmR, -Math.PI * 0.5, -Math.PI * 0.5 + TWO_PI * meter); hud.stroke();
+    }
+    hud.lineCap = 'butt'; hud.lineWidth = 1;
+
     drawJoystick();
 
     if (state.bannerT > 0 && state.banner) {
-      var a = clamp(state.bannerT, 0, 1);
-      hud.globalAlpha = a;
-      hud.font = '700 24px ui-monospace, monospace';
-      hud.textAlign = 'center';
-      hud.fillStyle = '#ffd3a3';
-      hud.fillText(state.banner, cssW * 0.5, 72);
+      var ba = clamp(state.bannerT, 0, 1);
+      hud.globalAlpha = ba;
+      hud.shadowColor = BT_CRIM;
+      hud.shadowBlur = 12;
+      hud.font = '700 ' + Math.max(18, Math.min(26, cssH * 0.034)) + 'px sans-serif';
+      hud.textAlign = 'center'; hud.textBaseline = 'middle';
+      hud.fillStyle = BT_CRIM_HI;
+      hud.fillText(state.banner, cssW * 0.5, Math.max(80, cssH * 0.18));
+      hud.shadowBlur = 0;
       hud.textAlign = 'start';
       hud.globalAlpha = 1;
     }
@@ -3900,54 +4066,75 @@
   function drawUpgradeDraft() {
     layoutUpgradeCards();
     hud.globalAlpha = 1;
-    hud.fillStyle = 'rgba(8, 4, 3, 0.68)';
+    hud.fillStyle = 'rgba(8,5,4,0.74)';
     hud.fillRect(0, 0, cssW, cssH);
     hud.textAlign = 'center';
-    hud.font = '700 24px ui-monospace, monospace';
-    hud.fillStyle = '#ffd2a2';
-    hud.fillText('BLOOD MUTATION', cssW * 0.5, Math.max(58, upgradeRect[1] - 36));
-    hud.font = '12px ui-monospace, monospace';
-    hud.fillStyle = '#c9a88f';
-    hud.fillText('Choose 1 / 2 / 3', cssW * 0.5, Math.max(78, upgradeRect[1] - 16));
+    hud.textBaseline = 'middle';
+    // title with crim glow
+    hud.shadowColor = BT_CRIM;
+    hud.shadowBlur = 14;
+    hud.fillStyle = BT_CRIM_HI;
+    hud.font = '700 ' + Math.max(18, Math.min(26, cssH * 0.036)) + 'px sans-serif';
+    hud.fillText('BLOOD MUTATION', cssW * 0.5, Math.max(52, upgradeRect[1] - 38));
+    hud.shadowBlur = 0;
+    hud.font = Math.max(10, Math.min(13, cssH * 0.018)) + 'px sans-serif';
+    hud.fillStyle = BT_BONE_DIM;
+    hud.fillText('Choose 1 / 2 / 3', cssW * 0.5, Math.max(70, upgradeRect[1] - 18));
 
     for (var i = 0; i < 3; i++) {
       var k = i * 4;
-      var x = upgradeRect[k], y = upgradeRect[k + 1], w = upgradeRect[k + 2], h = upgradeRect[k + 3];
+      var cx = upgradeRect[k], cy = upgradeRect[k + 1], cw = upgradeRect[k + 2], ch = upgradeRect[k + 3];
       var u = upgradePick[i];
       var hot = i === upgradeHover;
-      hud.fillStyle = hot ? 'rgba(79, 34, 22, 0.92)' : 'rgba(32, 18, 14, 0.92)';
-      hud.fillRect(x, y, w, h);
-      hud.strokeStyle = hot ? '#ffb35f' : '#694330';
-      hud.lineWidth = hot ? 2 : 1;
-      hud.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-      hud.fillStyle = '#8b2a20';
-      hud.fillRect(x + 12, y + 12, 34, 34);
+      // card background: gradient
+      var cg = hud.createLinearGradient(cx, cy, cx, cy + ch);
+      cg.addColorStop(0, hot ? '#2a211c' : '#1e1510');
+      cg.addColorStop(1, hot ? '#17110e' : '#120c09');
+      hud.fillStyle = cg;
+      hudRR(cx, cy, cw, ch, 12);
+      hud.fill();
+      // crim stroke (stronger when hot)
+      hud.strokeStyle = hot ? BT_CRIM_HI : BT_CRIM;
+      hud.lineWidth = hot ? 2.2 : 1.5;
+      hudRR(cx + 0.5, cy + 0.5, cw - 1, ch - 1, 11.5);
+      hud.stroke();
+      // icon medallion
+      var mr = Math.max(16, Math.min(22, ch * 0.28));
+      var mx = cx + mr + 14, my = cy + ch * 0.5;
+      hud.fillStyle = '#0d0807';
+      hud.beginPath(); hud.arc(mx, my, mr, 0, TWO_PI); hud.fill();
       var icon = hudImages['u' + u];
       if (icon && icon.complete && icon.naturalWidth) {
         hud.save();
-        hud.beginPath();
-        hud.rect(x + 12, y + 12, 34, 34);
-        hud.clip();
-        hud.drawImage(icon, x + 12, y + 12, 34, 34);
+        hud.beginPath(); hud.arc(mx, my, mr, 0, TWO_PI); hud.clip();
+        hud.drawImage(icon, mx - mr, my - mr, mr * 2, mr * 2);
         hud.restore();
       } else {
-        hud.fillStyle = '#f2c277';
-        hud.font = '700 18px ui-monospace, monospace';
-        hud.fillText(String(i + 1), x + 29, y + 35);
+        hud.fillStyle = BT_CRIM_HI;
+        hud.shadowColor = BT_CRIM; hud.shadowBlur = 8;
+        hud.beginPath(); hud.arc(mx, my, mr * 0.52, 0, TWO_PI); hud.fill();
+        hud.shadowBlur = 0;
       }
-      hud.fillStyle = '#fff1cf';
-      hud.font = '700 10px ui-monospace, monospace';
-      hud.fillText(String(i + 1), x + 19, y + 22);
-      hud.textAlign = 'left';
-      hud.font = '700 17px ui-monospace, monospace';
-      hud.fillStyle = '#ffe0bb';
-      hud.fillText(upgradeNames[u], x + 58, y + 30);
-      hud.font = '12px ui-monospace, monospace';
-      hud.fillStyle = '#d0ac8f';
-      hud.fillText(upgradeDesc[u], x + 58, y + 52);
-      hud.fillStyle = '#9f7b65';
-      hud.fillText('LV ' + player.level + ' -> ' + (player.level + 1), x + 58, y + h - 18);
-      hud.textAlign = 'center';
+      hud.strokeStyle = BT_CRIM; hud.lineWidth = 1.4;
+      hud.beginPath(); hud.arc(mx, my, mr, 0, TWO_PI); hud.stroke();
+      // key number badge
+      hud.fillStyle = '#fff';
+      hud.font = '700 ' + Math.max(8, Math.min(10, mr * 0.5)) + 'px sans-serif';
+      hud.textAlign = 'center'; hud.textBaseline = 'top';
+      hud.fillText(String(i + 1), mx, cy + 6);
+      // card text
+      hud.textAlign = 'left'; hud.textBaseline = 'middle';
+      var tx = cx + mr * 2 + 22;
+      hud.fillStyle = '#fff';
+      hud.font = '700 ' + Math.max(13, Math.min(18, ch * 0.23)) + 'px sans-serif';
+      hud.fillText(upgradeNames[u], tx, cy + ch * 0.36);
+      hud.fillStyle = BT_BONE_DIM;
+      hud.font = Math.max(10, Math.min(12, ch * 0.16)) + 'px sans-serif';
+      hud.fillText(upgradeDesc[u], tx, cy + ch * 0.62);
+      hud.fillStyle = BT_IRON;
+      hud.font = Math.max(9, Math.min(11, ch * 0.14)) + 'px sans-serif';
+      hud.fillText('LV ' + player.level + ' -> ' + (player.level + 1), tx, cy + ch - 14);
+      hud.textAlign = 'center'; hud.textBaseline = 'middle';
     }
     hud.textAlign = 'start';
     hud.lineWidth = 1;
