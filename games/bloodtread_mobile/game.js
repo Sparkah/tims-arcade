@@ -51,6 +51,7 @@
   var CORPSE_CAP = clampInt(parseInt(qs.get('corpsecap') || '82', 10), 0, 180);
   var TRACK_CAP = 260;
   var TWO_PI = Math.PI * 2;
+  var UNLEASH_TIME = 5;
   var TOUCH_DEVICE = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window;
   var ZOOM_OVERRIDE = qs.has('zoom') ? clamp(parseFloat(qs.get('zoom') || '1'), 0.55, 1.2) : 0;
   var JOYSTICK_ALLOWED = qs.get('joystick') !== '0' && qs.get('joy') !== '0';
@@ -158,6 +159,11 @@
 
   function viewWorldMax() {
     return Math.max(viewWorldW, viewWorldH);
+  }
+
+  function tankRageLevel() {
+    var sum = tankArmorTier + tankCoreTier + tankCannonTier + tankTreadsTier + tankThirstTier + tankFrenzyTier;
+    return clamp(sum / 36, 0, 1);
   }
 
   function unlockAudio() {
@@ -271,7 +277,7 @@
     r: 25, hp: 125, maxHp: 125, xp: 0, xpNext: 6, level: 1,
     speed: 255, crush: 12, crushDps: 72, dmg: 20, fireRate: 8,
     pickR: 135, thirst: 0, rangedHeal: false, barrels: 1, lashLvl: 0,
-    regen: 0, frenzyMul: 1, meter: 0, recoil: 0, hurt: 0
+    regen: 0, frenzyMul: 1, meter: 0, unleash: 0, unleashFlash: 0, recoil: 0, hurt: 0
   };
 
   var state = {
@@ -883,6 +889,47 @@
     bubbleR[i] = bubbleR[l]; bubbleT[i] = bubbleT[l]; bubbleMax[i] = bubbleMax[l];
   }
 
+  function spawnRageBubble(rage, boost) {
+    if (MAX_BUBBLES <= 0) return;
+    var ba = rnd() * TWO_PI;
+    var brd = 6 + rnd() * (18 + rage * 10);
+    var sp = boost || 1;
+    spawnBubble(
+      player.x + Math.cos(ba) * brd,
+      player.y + Math.sin(ba) * brd,
+      (Math.cos(ba) * 22 + (rnd() - 0.5) * 34) * sp,
+      (Math.sin(ba) * 17 - 38 - rnd() * 30) * sp,
+      (3.2 + rnd() * 5.8 + rage * 5.2) * sp,
+      0.52 + rnd() * 0.55
+    );
+  }
+
+  function triggerUnleash() {
+    if (player.unleash > 0) return;
+    player.unleash = UNLEASH_TIME;
+    player.unleashFlash = 1;
+    player.meter = 0;
+    player.hurt = Math.max(player.hurt, 0.5);
+    state.banner = 'BLOODLETTING';
+    state.bannerT = 1.05;
+    playSfx('crunch', 0.32, 0.06, 0.88);
+    playSfx('hitflesh', 0.42, 0.04, 0.72);
+    spawnBoom(player.x, player.y, 58 + tankRageLevel() * 28, 0);
+    for (var i = 0; i < 9; i++) {
+      spawnVeinTrail(player.x, player.y, (i / 9) * TWO_PI + (rnd() - 0.5) * 0.18);
+    }
+    spawnGoreSpray(player.x, player.y, 22, null, 0, 330, 0);
+    for (var b = 0; b < 18; b++) spawnRageBubble(Math.max(0.35, tankRageLevel()), 1.35);
+  }
+
+  function updateUnleash(dt) {
+    if (player.unleash > 0) {
+      player.unleash = Math.max(0, player.unleash - dt);
+      if (player.unleash <= 0) player.meter = Math.min(player.meter, 0);
+    }
+    if (player.unleashFlash > 0) player.unleashFlash = Math.max(0, player.unleashFlash - dt * 2.9);
+  }
+
   function isTechType(type) {
     return type === 4 || type === 5 || type === 6 || type === 7 || type === 8 || type === 9 || type === 11;
   }
@@ -1160,7 +1207,7 @@
     var range = 112 + lvl * 18 + Math.min(55, player.level * 1.4);
     var range2 = range * range;
     var drop2 = range2 * 1.62;
-    var dps = (12 + lvl * 6) * Math.max(0.25, player.dmg / 20);
+    var dps = (12 + lvl * 6) * Math.max(0.25, player.dmg / 20) * (player.unleash > 0 ? 1.35 : 1);
     var active = 0;
     var draining = 0;
     leechToken = (leechToken + 1) & 65535;
@@ -1227,7 +1274,7 @@
           var dmg = dps * dt * leechGrab[l];
           ehp[target] -= dmg;
           draining += dmg;
-          if (player.hp < player.maxHp) player.hp = Math.min(player.maxHp, player.hp + dmg * 0.035);
+          if (player.hp < player.maxHp) player.hp = Math.min(player.maxHp, player.hp + dmg * (player.unleash > 0 ? 0.085 : 0.035));
           if (((state.tick + l) & 7) === 0 && effectAllowed(ex[target], ey[target], eN > 850 ? 1 : 2)) {
             var a = Math.atan2(player.y - ey[target], player.x - ex[target]);
             spawnParticle(ex[target], ey[target], Math.cos(a) * 45, Math.sin(a) * 45, 1.5, 0.16, 0);
@@ -1288,12 +1335,14 @@
     }
     if (crushed || rnd() < 0.45) spawnDecal(x, y, rad * (1.3 + rnd() * 1.5), (type === 4 || type === 11) ? 3 : 0, 0.12 + rnd() * 0.12);
     var heal = crushed ? (3 + player.thirst) : (player.rangedHeal ? player.thirst : 0);
+    if (player.unleash > 0) heal *= 2.6;
     if (heal > 0) {
       player.hp = Math.min(player.maxHp, player.hp + heal);
       player.hurt = Math.max(player.hurt, 0.18);
     }
     if (crushed) {
       player.meter = Math.min(100, player.meter + 2.5 + pay * 0.8);
+      if (player.meter >= 100) triggerUnleash();
     }
     if ((type === 7 || type === 11) && eN < MAX_ENEMIES - 3) {
       for (var s = 0; s < 3; s++) {
@@ -1424,7 +1473,7 @@
     player.r = 25; player.hp = 42; player.maxHp = 42; player.xp = 0; player.xpNext = 6; player.level = 1;
     player.speed = 205; player.crush = 9; player.crushDps = 48; player.dmg = 11; player.fireRate = 4.8;
     player.pickR = 135; player.thirst = 0; player.rangedHeal = false; player.barrels = 1; player.lashLvl = 0;
-    player.regen = 0; player.frenzyMul = 1; player.meter = 0; player.recoil = 0; player.hurt = 0;
+    player.regen = 0; player.frenzyMul = 1; player.meter = 0; player.unleash = 0; player.unleashFlash = 0; player.recoil = 0; player.hurt = 0;
     applyMetaToPlayer();
     state.mode = startPlaying ? 'PLAYING' : 'MENU'; state.t = 0; state.tick = 1; state.kills = 0; state.blood = 0;
     state.spawnCredit = 0; state.fireCd = 0; state.banner = ''; state.bannerT = 0; state.gameOverT = 0; state.runBanked = false; state.paused = false;
@@ -1503,7 +1552,7 @@
       player.vy += iy * player.speed * 6.2 * dt;
     }
     var sp2 = player.vx * player.vx + player.vy * player.vy;
-    var max = player.speed * (player.meter >= 100 ? 1.15 : 1);
+    var max = player.speed * (player.unleash > 0 ? 1.22 : (player.meter >= 100 ? 1.12 : 1));
     if (sp2 > max * max) {
       var inv = max / Math.sqrt(sp2);
       player.vx *= inv;
@@ -1522,15 +1571,15 @@
       crushNearbyRocks(player.x, player.y, breakReach);
       collidePlayerObstacles();
     }
-    if (MAX_BUBBLES > 0 && TANK_LAYERS && (tankCoreTier + tankThirstTier + tankFrenzyTier) > 4 && rnd() < dt * (0.8 + (tankCoreTier + tankThirstTier + tankFrenzyTier) * 0.12)) {
-      var ba0 = rnd() * TWO_PI;
-      var brd = 7 + rnd() * 17;
-      spawnBubble(player.x + Math.cos(ba0) * brd, player.y + Math.sin(ba0) * brd, Math.cos(ba0) * 18 + (rnd() - 0.5) * 22, Math.sin(ba0) * 16 - 28 - rnd() * 18, 3.5 + rnd() * 5.5, 0.65 + rnd() * 0.5);
+    var rage = tankRageLevel();
+    if (MAX_BUBBLES > 0 && TANK_LAYERS && rage > 0.08 && rnd() < dt * (0.28 + rage * rage * 5.4) * (player.unleash > 0 ? 2.35 : 1)) {
+      spawnRageBubble(rage, player.unleash > 0 ? 1.18 : 1);
     }
-    if (VEIN_FX && currentLeechLevel() > 0 && sp2 > 90 * 90) {
+    if (VEIN_FX && (currentLeechLevel() > 0 || player.unleash > 0) && sp2 > 90 * 90) {
       veinAcc += Math.sqrt(sp2) * dt;
-      while (veinAcc > 22) {
-        veinAcc -= 22;
+      var veinGap = player.unleash > 0 ? 15 : 22;
+      while (veinAcc > veinGap) {
+        veinAcc -= veinGap;
         spawnVeinTrail(player.x - Math.cos(player.hull) * 18, player.y - Math.sin(player.hull) * 18, player.hull + Math.PI + (rnd() - 0.5) * 0.75);
       }
     }
@@ -1986,6 +2035,7 @@
     state.t += dt;
     perf.envContacts = 0;
     if (state.bannerT > 0) state.bannerT -= dt;
+    updateUnleash(dt);
     if (player.regen > 0 && player.hp < player.maxHp) player.hp = Math.min(player.maxHp, player.hp + player.regen * dt);
     updatePlayer(dt);
     state.spawnCredit += dt * (12 + state.t / 18);
@@ -3068,6 +3118,27 @@
     var start = n;
     var pulse = 0.5 + 0.5 * Math.sin(state.t * 8.2);
     var core = Math.max(tankCoreTier, Math.floor((tankThirstTier + tankFrenzyTier) * 0.45));
+    var unleashA = Math.max(player.unleashFlash, player.unleash > 0 ? 0.22 + 0.18 * Math.sin(state.t * 10) : 0);
+    if (unleashA > 0.01) {
+      var burst = player.unleashFlash;
+      var ring = 58 + (1 - burst) * 42 + tankRageLevel() * 26;
+      n = addInst(n, player.x, player.y, ring, ring, 0, 3, 0.80, 0.02, 0.045, 0.18 * unleashA, 0.6);
+      n = addInst(n, player.x, player.y, ring * 0.42, ring * 0.42, 0, 0, 1.0, 0.06, 0.08, 0.32 * unleashA, 0.75);
+      var rays = 9;
+      for (var u = 0; u < rays; u++) {
+        var a0 = u / rays * TWO_PI + state.t * 0.42 + Math.sin(state.t * 5 + u) * 0.08;
+        var root = 16;
+        var len = 48 + burst * 42 + tankFrenzyTier * 3;
+        var x0 = player.x + Math.cos(a0) * root;
+        var y0 = player.y + Math.sin(a0) * root;
+        var x1 = player.x + Math.cos(a0) * len;
+        var y1 = player.y + Math.sin(a0) * len;
+        var cx0 = player.x + Math.cos(a0 + 0.32) * (len * 0.56);
+        var cy0 = player.y + Math.sin(a0 + 0.32) * (len * 0.56);
+        n = addCurveInst(n, x0, y0, cx0, cy0, x1, y1, 4.2, 0.36, 0.0, 0.018, 0.55 * unleashA, 0.25, 2);
+        n = addCurveInst(n, x0, y0, cx0, cy0, x1, y1, 1.7, 1.0, 0.08, 0.12, 0.62 * unleashA, 0.72, 2);
+      }
+    }
     if (core > 0) {
       var r = 5.5 + core * 1.1 + pulse * 2.2;
       n = addInst(n, player.x, player.y + 7, r * 2.4, r * 2.4, 0, 3, 0.82, 0.035, 0.055, 0.20 + core * 0.028 + pulse * 0.10, 0.62);
@@ -4075,6 +4146,7 @@
   window.__cheatMoney = cheatMoney;
   window.__cheatMaxAll = cheatMaxAll;
   window.__toggleMute = toggleMute;
+  window.__triggerUnleash = triggerUnleash;
   window.__buyTrack = buyTrack;
   window.__equipWeapon = buyOrEquipWeapon;
   window.__chooseUpgrade = chooseUpgrade;
@@ -4122,7 +4194,8 @@
         damage: player.dmg, fireRate: player.fireRate, speed: player.speed,
         crush: player.crush, crushDps: player.crushDps, pickR: player.pickR,
         barrels: player.barrels, thirst: player.thirst, rangedHeal: player.rangedHeal,
-        lashLvl: player.lashLvl, regen: player.regen, frenzyMul: player.frenzyMul
+        lashLvl: player.lashLvl, regen: player.regen, frenzyMul: player.frenzyMul,
+        meter: player.meter, unleash: player.unleash, rage: tankRageLevel()
       },
       meta: {
         armor: META.armor, core: META.core, cannon: META.cannon,
@@ -4156,6 +4229,7 @@
       'oldenv=' + perf.envSprites + ' corpses=' + cN + '/' + perf.corpseSprites + ' tank=' + perf.tankSprites,
       'tanktiers a=' + tankArmorTier + ' c=' + tankCannonTier + ' tr=' + tankTreadsTier + ' core=' + tankCoreTier + ' th=' + tankThirstTier + ' fr=' + tankFrenzyTier,
       'economy dmg=' + player.dmg.toFixed(1) + ' fire=' + player.fireRate.toFixed(1) + ' barrels=' + player.barrels + ' thirst=' + player.thirst + ' lash=' + player.lashLvl + ' pick=' + Math.round(player.pickR),
+      'bloodletting meter=' + Math.round(player.meter) + ' unleash=' + player.unleash.toFixed(2) + ' flash=' + player.unleashFlash.toFixed(2) + ' rage=' + tankRageLevel().toFixed(2),
       'veins=' + perf.veins + '/' + perf.veinInst + ' leeches=' + perf.leeches + '/' + perf.leechInst + ' tankfx=' + perf.tankFeelInst + ' lvl=' + currentLeechLevel() + ' ms=' + perf.leechMs.toFixed(2),
       'gore=' + (GORE_FX ? 'on' : 'off') + ' pieces=' + perf.gorePieces + '/' + perf.goreInst + ' splats=' + perf.splats + '/' + perf.splatInst + ' ms=' + perf.goreMs.toFixed(2),
       'fx booms=' + perf.booms + '/' + perf.boomInst + ' bubbles=' + perf.bubbles + '/' + perf.bubbleInst + ' rocks=' + (BREAK_ENV ? 'on' : 'off') + ' visible=' + perf.envRocks + ' contact=' + perf.envContacts + ' broken=' + perf.envBroken,
