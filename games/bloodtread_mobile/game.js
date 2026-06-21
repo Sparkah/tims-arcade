@@ -14,9 +14,9 @@
   var MAX_MOTES = 720;
   var MAX_PARTS = 2400;
   var MAX_DECALS = 640;
-  var MAX_GORE = clampInt(parseInt(qs.get('gorecap') || '720', 10), 0, 1200);
-  var MAX_SPLATS = clampInt(parseInt(qs.get('splatcap') || '240', 10), 0, 360);
-  var MAX_BOOMS = clampInt(parseInt(qs.get('boomcap') || '24', 10), 0, 80);
+  var MAX_GORE = clampInt(parseInt(qs.get('gorecap') || '980', 10), 0, 1400);
+  var MAX_SPLATS = clampInt(parseInt(qs.get('splatcap') || '320', 10), 0, 480);
+  var MAX_BOOMS = clampInt(parseInt(qs.get('boomcap') || '34', 10), 0, 90);
   var MAX_BUBBLES = clampInt(parseInt(qs.get('bubblecap') || '48', 10), 0, 96);
   var MAX_VEINS = clampInt(parseInt(qs.get('veincap') || '130', 10), 0, 260);
   var MAX_LEECHES = clampInt(parseInt(qs.get('leechcap') || '9', 10), 0, 12);
@@ -32,7 +32,7 @@
   var OLD_DEATH = OLD_SPRITES && qs.get('death') !== '0';
   var TANK_LAYERS = OLD_TANK && qs.get('tanklayers') !== '0';
   var GORE_FX = qs.get('gore') !== '0';
-  var GORE_MUL = clamp(parseFloat(qs.get('goremul') || '2.1'), 0.2, 3);
+  var GORE_MUL = clamp(parseFloat(qs.get('goremul') || '2.65'), 0.2, 3.5);
   var ENEMY_SCALE = clamp(parseFloat(qs.get('enemysize') || '1.12'), 0.8, 1.5);
   var BREAK_ENV = OLD_ENV && qs.get('breakenv') !== '0';
   var ROCK_DENSITY = clampInt(parseInt(qs.get('rockdensity') || '24', 10), 0, 60);
@@ -45,12 +45,15 @@
   var COLLIDER_PAIR_LIMIT = clampInt(parseInt(qs.get('colliderlimit') || '7', 10), 0, 24);
   var COLLIDER_PLAYER_CAP = clamp(parseFloat(qs.get('colliderpush') || '8.5'), 0, 24);
   var GOD = qs.has('god') || qs.has('nohurt');
-  var SPRITE_ANIM_CAP = clampInt(parseInt(qs.get('spritecap') || '280', 10), 0, 1200);
+  var SPRITE_ANIM_CAP = clampInt(parseInt(qs.get('spritecap') || '360', 10), 0, 1200);
   var SPRITE_CELL = clampInt(parseInt(qs.get('spritecell') || '112', 10), 64, 220);
   var SPRITE_LOD = qs.get('spritelod') !== '0';
-  var CORPSE_CAP = clampInt(parseInt(qs.get('corpsecap') || '56', 10), 0, 160);
+  var CORPSE_CAP = clampInt(parseInt(qs.get('corpsecap') || '82', 10), 0, 180);
   var TRACK_CAP = 260;
   var TWO_PI = Math.PI * 2;
+  var TOUCH_DEVICE = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window;
+  var ZOOM_OVERRIDE = qs.has('zoom') ? clamp(parseFloat(qs.get('zoom') || '1'), 0.55, 1.2) : 0;
+  var JOYSTICK_ALLOWED = qs.get('joystick') !== '0' && qs.get('joy') !== '0';
 
   var glCanvas = document.getElementById('gl');
   var hudCanvas = document.getElementById('hud');
@@ -71,6 +74,7 @@
 
   var hud = hudCanvas.getContext('2d', { alpha: true });
   var cssW = 1, cssH = 1, dpr = 1;
+  var cameraZoom = 1, viewWorldW = 1, viewWorldH = 1;
   var viewW = 1, viewH = 1;
   var spriteImages = Object.create(null);
   var spriteTextures = Object.create(null);
@@ -82,6 +86,10 @@
   var keys = new Uint8Array(256);
   var pointerDown = false;
   var pointerX = 0, pointerY = 0, pointerId = -1;
+  var useJoystick = false;
+  var joyActive = false, joyId = -1;
+  var joyBaseX = 0, joyBaseY = 0, joyKnobX = 0, joyKnobY = 0, joyDX = 0, joyDY = 0;
+  var joyRadius = 66;
   var audioMuted = qs.has('mute') || qs.get('sound') === '0';
   var audioCtx = null;
   var audioLoading = false;
@@ -125,6 +133,31 @@
     var m = (t / 60) | 0;
     var s = (t - m * 60) | 0;
     return m + ':' + (s < 10 ? '0' : '') + s;
+  }
+
+  function updateCameraMetrics() {
+    var portrait = cssH >= cssW;
+    cameraZoom = ZOOM_OVERRIDE || (TOUCH_DEVICE || cssW < 760 ? (portrait ? 0.70 : 0.78) : 1);
+    viewWorldW = cssW / cameraZoom;
+    viewWorldH = cssH / cameraZoom;
+    useJoystick = JOYSTICK_ALLOWED && (TOUCH_DEVICE || cssW < 760 || qs.has('joystick') || qs.has('joy'));
+    joyRadius = clamp(Math.min(cssW, cssH) * 0.105, 52, 76);
+  }
+
+  function worldToScreenX(x) {
+    return (x - player.x) * cameraZoom + cssW * 0.5;
+  }
+
+  function worldToScreenY(y) {
+    return (y - player.y) * cameraZoom + cssH * 0.5;
+  }
+
+  function screenLen(v) {
+    return v * cameraZoom;
+  }
+
+  function viewWorldMax() {
+    return Math.max(viewWorldW, viewWorldH);
   }
 
   function unlockAudio() {
@@ -220,6 +253,8 @@
 
   function loadHudImages() {
     addHudImage('hero', 'art_refs/bloodmech_hero.png');
+    addHudImage('heart', 'art_refs/heartcore_pulse.png');
+    addHudImage('bloom', 'art_refs/bloodletting_bloom.png');
     addHudImage('u0', 'art_refs/icon_caliber.png');
     addHudImage('u1', 'art_refs/icon_boiler.png');
     addHudImage('u2', 'art_refs/icon_teeth.png');
@@ -529,7 +564,7 @@
   var selectedTrack = 'armor';
   var rPlay = null, rForge = null, rCheat = null, rRetry = null, rMenu = null;
   var rShopBack = null, rCheatBack = null, rCheatMax = null, rCheatMoney = null, rCheatReset = null, rCheatMin9 = null;
-  var rResume = null, rQuit = null;
+  var rResume = null, rQuit = null, rHudPause = null, rHudMenu = null, rPauseForge = null;
   var rShop = [];
   var rWeapons = [];
   var laserT = 0, laserX0 = 0, laserY0 = 0, laserX1 = 0, laserY1 = 0;
@@ -933,14 +968,14 @@
     if (load <= 0) return;
     var localLimit = eN > 950 ? 2 : (eN > 620 ? 3 : 5);
     if (!effectAllowed(x, y, localLimit)) {
-      spawnSplat(x, y, rad * (big ? 1.55 : 1.08), tech ? 1 : 0, tech ? 5.8 : 7.2);
-      if (gN < MAX_GORE * 0.92 && rnd() < 0.55) spawnGoreSpray(x, y, tech ? 2 : 3, null, 0, tech ? 180 : 220, tech ? 5 : 0);
+      spawnSplat(x, y, rad * (big ? 1.75 : 1.18), tech ? 1 : 0, tech ? 6.1 : 8.4);
+      if (gN < MAX_GORE * 0.92 && rnd() < 0.72) spawnGoreSpray(x, y, tech ? 3 : 5, null, 0, tech ? 190 : 245, tech ? 5 : 0);
       return;
     }
     var force = crushed ? Math.atan2(y - player.y, x - player.x) : null;
     var spread = crushed ? 1.05 : 0;
-    var bloodN = tech ? (big ? 8 : 4) : (big ? 28 : 18);
-    var chunkN = tech ? (big ? 12 : 6) : (big ? 10 : 5);
+    var bloodN = tech ? (big ? 10 : 5) : (big ? 36 : 24);
+    var chunkN = tech ? (big ? 14 : 7) : (big ? 13 : 7);
     if (!big && eN > 900) {
       bloodN = Math.max(4, (bloodN * 0.58) | 0);
       chunkN = Math.max(2, (chunkN * 0.48) | 0);
@@ -957,6 +992,14 @@
       spawnSplat(x, y, rad * (big ? 1.9 : 1.35), 1, 7.2);
     } else {
       spawnGoreSpray(x, y, bloodN, force, spread || 0, crushed ? 310 : 230, 0);
+      var deathVariant = rnd();
+      if (deathVariant < 0.26) {
+        spawnGoreSpray(x, y - rad * 0.55, big ? 14 : 8, -Math.PI * 0.5, 0.95, big ? 390 : 330, 0);
+        spawnSplat(x, y - rad * 0.22, rad * (big ? 1.75 : 1.24), 0, 9.0);
+      } else if (deathVariant < 0.56) {
+        spawnGoreSpray(x, y, big ? 18 : 11, null, 0, big ? 355 : 295, 0);
+        if (rnd() < 0.74) spawnSplat(x + (rnd() - 0.5) * rad, y + (rnd() - 0.5) * rad, rad * (big ? 1.48 : 1.08), 0, 7.6);
+      }
       for (var j = 0; j < Math.max(1, Math.round(chunkN * load)); j++) {
         var a2 = force == null ? rnd() * TWO_PI : force + (rnd() - 0.5) * 1.2;
         var sp2 = 95 + rnd() * 190;
@@ -964,7 +1007,7 @@
         spawnGorePiece(x, y, Math.cos(a2) * sp2, Math.sin(a2) * sp2, (2.5 + rnd() * 4.2) * (big ? 1.18 : 1), 0.95 + rnd() * 0.85, kind2, a2, (rnd() - 0.5) * 9);
       }
       spawnSplat(x, y, rad * (crushed ? 2.35 : (big ? 2.25 : 1.65)) * (0.9 + rnd() * 0.25), 0, 8.5);
-      if (big && rnd() < 0.86) spawnGoreSpray(x, y - rad * 0.45, 9, -Math.PI * 0.5, 1.15, 330, 0);
+      if (big && rnd() < 0.86) spawnGoreSpray(x, y - rad * 0.45, 12, -Math.PI * 0.5, 1.15, 350, 0);
     }
   }
 
@@ -1372,6 +1415,9 @@
   }
 
   function resetGame(startPlaying, startMinute) {
+    endJoystick();
+    pointerDown = false;
+    pointerId = -1;
     if (startPlaying == null) startPlaying = AUTO_START;
     if (startMinute == null) startMinute = startPlaying ? START_MIN : 0;
     player.x = 0; player.y = 0; player.vx = 0; player.vy = 0; player.hull = 0; player.turret = 0;
@@ -1437,7 +1483,10 @@
     if (keys[68] || keys[39]) ix += 1;
     if (keys[87] || keys[38]) iy -= 1;
     if (keys[83] || keys[40]) iy += 1;
-    if (pointerDown) {
+    if (joyActive) {
+      ix += joyDX;
+      iy += joyDY;
+    } else if (pointerDown) {
       var dx = pointerX - cssW * 0.5;
       var dy = pointerY - cssH * 0.5;
       var d = Math.sqrt(dx * dx + dy * dy);
@@ -1578,12 +1627,12 @@
           var spv = 100 + rnd() * 120;
           spawnParticle(x, y, Math.cos(a) * spv, Math.sin(a) * spv, 1.4 + rnd() * 2.2, 0.22 + rnd() * 0.25, (type === 4 || type === 11) ? 3 : 0);
         }
-        if (GORE_FX && playerSpeed > 70 && ((state.tick + i) & (eN > 850 ? 7 : 3)) === 0 && effectAllowed(x, y, eN > 850 ? 1 : 2)) {
+        if (GORE_FX && playerSpeed > 70 && ((state.tick + i) & (eN > 850 ? 3 : 1)) === 0 && effectAllowed(x, y, eN > 850 ? 1 : 2)) {
           var techContact = isTechType(type);
           var sprayA = Math.atan2(-uy, -ux) + (rnd() - 0.5) * 0.75;
           playSfx(techContact ? 'metal' : 'hitflesh', techContact ? 0.16 : 0.20, 0.11);
-          spawnGoreSpray(x, y, techContact ? 2 : 4, sprayA, 1.15, techContact ? 240 : 300, techContact ? 5 : 0);
-          if (!techContact && rnd() < (eN > 850 ? 0.10 : 0.22)) spawnSplat(x, y, er[i] * (0.85 + rnd() * 0.55), 0, 5.2);
+          spawnGoreSpray(x, y, techContact ? 3 : 6, sprayA, 1.15, techContact ? 250 : 320, techContact ? 5 : 0);
+          if (!techContact && rnd() < (eN > 850 ? 0.18 : 0.34)) spawnSplat(x, y, er[i] * (0.92 + rnd() * 0.68), 0, 5.8);
         }
       }
 
@@ -1975,6 +2024,7 @@
     'layout(location=3) in vec4 a_col2;',
     'uniform vec2 u_cam;',
     'uniform vec2 u_view;',
+    'uniform float u_zoom;',
     'out vec2 v_uv;',
     'out float v_shape;',
     'out vec4 v_color;',
@@ -1984,7 +2034,7 @@
     '  float s = sin(a_misc.x);',
     '  vec2 scaled = a_unit * a_posSize.zw;',
     '  vec2 rot = vec2(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);',
-    '  vec2 css = (a_posSize.xy + rot - u_cam) + u_view * 0.5;',
+    '  vec2 css = (a_posSize.xy + rot - u_cam) * u_zoom + u_view * 0.5;',
     '  vec2 clip = css / u_view * 2.0 - 1.0;',
     '  gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);',
     '  v_uv = a_unit;',
@@ -2047,6 +2097,7 @@
 
   var uCam = gl.getUniformLocation(program, 'u_cam');
   var uView = gl.getUniformLocation(program, 'u_view');
+  var uZoom = gl.getUniformLocation(program, 'u_zoom');
 
   var spriteProgram = makeProgram(gl, [
     '#version 300 es',
@@ -2302,8 +2353,8 @@
   }
 
   function spriteCellIndex(x, y) {
-    var sx = x - player.x + cssW * 0.5 + 180;
-    var sy = y - player.y + cssH * 0.5 + 180;
+    var sx = worldToScreenX(x) + 180;
+    var sy = worldToScreenY(y) + 180;
     if (sx < 0 || sy < 0) return -1;
     var cx = (sx / SPRITE_CELL) | 0;
     var cy = (sy / SPRITE_CELL) | 0;
@@ -2575,18 +2626,19 @@
   function queueOldEnvironment() {
     if (!OLD_ENV || !spriteTextures.ground) return;
     var ts = 240;
-    var ox = -(((player.x % ts) + ts) % ts);
-    var oy = -(((player.y % ts) + ts) % ts);
+    var tsS = screenLen(ts);
+    var ox = -((((player.x * cameraZoom) % tsS) + tsS) % tsS);
+    var oy = -((((player.y * cameraZoom) % tsS) + tsS) % tsS);
     var gm = spriteMeta.ground;
-    for (var gx = ox - ts; gx < cssW + ts; gx += ts) {
-      for (var gy = oy - ts; gy < cssH + ts; gy += ts) {
-        if (queueSprite('ground', 0, 0, gm.w, gm.h, gx, gy, ts, ts, 0.64, 0.58, 0.54, 0.92)) perf.envSprites++;
+    for (var gx = ox - tsS; gx < cssW + tsS; gx += tsS) {
+      for (var gy = oy - tsS; gy < cssH + tsS; gy += tsS) {
+        if (queueSprite('ground', 0, 0, gm.w, gm.h, gx, gy, tsS, tsS, 0.64, 0.58, 0.54, 0.92)) perf.envSprites++;
       }
     }
 
     var cell = 132;
-    var marginX = cssW * 0.5 + 80;
-    var marginY = cssH * 0.5 + 80;
+    var marginX = viewWorldW * 0.5 + 90;
+    var marginY = viewWorldH * 0.5 + 90;
     var c0 = Math.floor((player.x - marginX) / cell), c1 = Math.floor((player.x + marginX) / cell);
     var r0 = Math.floor((player.y - marginY) / cell), r1 = Math.floor((player.y + marginY) / cell);
     var kinds = ['blood', 'crack', 'bush', 'bones', 'flower', 'ribs', 'scorch', 'skull'];
@@ -2597,17 +2649,18 @@
         var key = 'dec_' + kind;
         var meta = spriteMeta[key];
         if (!spriteTextures[key] || !meta) continue;
-        var sx = decTmpX - player.x + cssW * 0.5 - decTmpSize * 0.5;
-        var sy = decTmpY - player.y + cssH * 0.5 - decTmpSize * 0.5;
-        if (sx < -decTmpSize || sx > cssW + decTmpSize || sy < -decTmpSize || sy > cssH + decTmpSize) continue;
-        if (queueSprite(key, 0, 0, meta.w, meta.h, sx, sy, decTmpSize, decTmpSize, 0.86, 0.82, 0.76, 0.76)) perf.envSprites++;
+        var dsize = screenLen(decTmpSize);
+        var sx = worldToScreenX(decTmpX) - dsize * 0.5;
+        var sy = worldToScreenY(decTmpY) - dsize * 0.5;
+        if (sx < -dsize || sx > cssW + dsize || sy < -dsize || sy > cssH + dsize) continue;
+        if (queueSprite(key, 0, 0, meta.w, meta.h, sx, sy, dsize, dsize, 0.86, 0.82, 0.76, 0.76)) perf.envSprites++;
       }
     }
 
     if (!BREAK_ENV) return;
     var rockCell = 250;
-    var rockMarginX = cssW * 0.5 + 150;
-    var rockMarginY = cssH * 0.5 + 150;
+    var rockMarginX = viewWorldW * 0.5 + 160;
+    var rockMarginY = viewWorldH * 0.5 + 160;
     var rc0 = Math.floor((player.x - rockMarginX) / rockCell), rc1 = Math.floor((player.x + rockMarginX) / rockCell);
     var rr0 = Math.floor((player.y - rockMarginY) / rockCell), rr1 = Math.floor((player.y + rockMarginY) / rockCell);
     for (var rx0 = rc0; rx0 <= rc1; rx0++) {
@@ -2616,9 +2669,9 @@
         var rkey = 'rock' + obTmpV;
         var rmeta = spriteMeta[rkey];
         if (!spriteTextures[rkey] || !rmeta) continue;
-        var size = obTmpR * 2.35;
-        var rsx = obTmpX - player.x + cssW * 0.5 - size * 0.5;
-        var rsy = obTmpY - player.y + cssH * 0.5 - size * 0.5;
+        var size = screenLen(obTmpR * 2.35);
+        var rsx = worldToScreenX(obTmpX) - size * 0.5;
+        var rsy = worldToScreenY(obTmpY) - size * 0.5;
         if (rsx < -size || rsx > cssW + size || rsy < -size || rsy > cssH + size) continue;
         var hurt = Math.max(0, 1 - obTmpHp / obTmpMaxHp);
         var flash = state.t - obTmpHit < 0.16 ? 0.35 : 0;
@@ -2660,9 +2713,9 @@
     var frame = animated
       ? ((ephase[i] * (contact ? 13 : 11) + type * 0.73) | 0) % frames
       : ((i * 7 + type * 3) % frames);
-    var size = er[i] * (type === 1 || type === 8 ? 2.55 : (type === 2 || type === 5 || type === 7 || type === 9 || type === 11 ? 2.95 : 2.75));
-    var sx = ex[i] - player.x + cssW * 0.5 - size * 0.5;
-    var sy = ey[i] - player.y + cssH * 0.5 - size * 0.58;
+    var size = screenLen(er[i] * (type === 1 || type === 8 ? 2.55 : (type === 2 || type === 5 || type === 7 || type === 9 || type === 11 ? 2.95 : 2.75)));
+    var sx = worldToScreenX(ex[i]) - size * 0.5;
+    var sy = worldToScreenY(ey[i]) - size * 0.58;
     var hurt = Math.max(0, Math.min(1, 1 - ehp[i] / (T_HP[type] * (1 + state.t * 0.014) + 1)));
     return queueSprite(key, frame * 160, 0, 160, 160, sx, sy, size, size, SPRITE_T_R[type] + hurt * 0.18, SPRITE_T_G[type], SPRITE_T_B[type], 0.96);
   }
@@ -2678,11 +2731,11 @@
     var frames = meta ? meta.frames : 1;
     var k = Math.min(1, ct[i] / 0.7);
     var frame = key.indexOf('_death') > 0 ? Math.min(frames - 1, Math.floor(k * frames)) : 0;
-    var size = cr[i] * (type === 1 || type === 8 ? 2.85 : (type === 2 || type === 5 || type === 7 || type === 9 || type === 11 ? 3.25 : 3.1));
+    var size = screenLen(cr[i] * (type === 1 || type === 8 ? 2.85 : (type === 2 || type === 5 || type === 7 || type === 9 || type === 11 ? 3.25 : 3.1)));
     var alpha = ct[i] > 0.5 ? Math.max(0, (0.72 - ct[i]) / 0.22) : 0.92;
     var w = cface[i] < 0 ? -size : size;
-    var sx = cx[i] - player.x + cssW * 0.5 - (cface[i] < 0 ? -size : size) * 0.5;
-    var sy = cy[i] - player.y + cssH * 0.5 - size * 0.55;
+    var sx = worldToScreenX(cx[i]) - (cface[i] < 0 ? -size : size) * 0.5;
+    var sy = worldToScreenY(cy[i]) - size * 0.55;
     if (sx < -size * 1.5 || sx > cssW + size * 1.5 || sy < -size * 1.5 || sy > cssH + size * 1.5) return true;
     perf.corpseSprites++;
     return queueSprite(key, frame * 160, 0, Math.min(160, meta.w), Math.min(160, meta.h), sx, sy, w, size, 1, 1, 1, alpha);
@@ -2695,7 +2748,7 @@
     var sy = cssH * 0.5 + bob;
     var hot = Math.max(player.hurt, player.recoil * 0.5);
     if (TANK_LAYERS && spriteTextures.lp_treads && spriteTextures.lp_armor && spriteTextures.lp_cannon) {
-      var size = 92;
+      var size = screenLen(92);
       var hullA = player.hull + Math.PI * 0.5;
       var turretA = player.turret + Math.PI * 0.5;
       var pulse = 0.5 + 0.5 * Math.sin(state.t * 8.0);
@@ -2714,12 +2767,12 @@
         queueSpriteRot('lp_core', tankCoreTier * 64, 0, 64, 64, sx, sy, size, size, hullA, 1 + pulse * 0.08, 1, 1, 0.88);
         tankLayerSprites++;
       }
-      queueSpriteRot('lp_cannon', tankCannonTier * 64, 0, 64, 64, sx + Math.cos(player.turret) * player.recoil * 3, sy + Math.sin(player.turret) * player.recoil * 3, size, size, turretA, 1 + hot * 0.22, 1, 1, 1);
+      queueSpriteRot('lp_cannon', tankCannonTier * 64, 0, 64, 64, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), size, size, turretA, 1 + hot * 0.22, 1, 1, 1);
       perf.tankSprites = tankLayerSprites;
       return true;
     }
-    queueSpriteRot('tank_body', 0, 0, spriteMeta.tank_body.w, spriteMeta.tank_body.h, sx, sy, 68, 68, player.hull + Math.PI * 0.5, 1 + hot * 0.18, 1, 1, 0.98);
-    queueSpriteRot('tank_turret', 0, 0, spriteMeta.tank_turret.w, spriteMeta.tank_turret.h, sx + Math.cos(player.turret) * player.recoil * 3, sy + Math.sin(player.turret) * player.recoil * 3, 72, 72, player.turret + Math.PI * 0.5, 1 + hot * 0.22, 1, 1, 1);
+    queueSpriteRot('tank_body', 0, 0, spriteMeta.tank_body.w, spriteMeta.tank_body.h, sx, sy, screenLen(68), screenLen(68), player.hull + Math.PI * 0.5, 1 + hot * 0.18, 1, 1, 0.98);
+    queueSpriteRot('tank_turret', 0, 0, spriteMeta.tank_turret.w, spriteMeta.tank_turret.h, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), screenLen(72), screenLen(72), player.turret + Math.PI * 0.5, 1 + hot * 0.22, 1, 1, 1);
     perf.tankSprites = 2;
     return true;
   }
@@ -2771,7 +2824,7 @@
       return n;
     }
     var start = n;
-    var margin = Math.max(cssW, cssH) * 0.65;
+    var margin = viewWorldMax() * 0.72;
     for (var i = 0; i < vN; i++) {
       var x = vx0[i], y = vy0[i];
       if (Math.abs(x - player.x) > margin || Math.abs(y - player.y) > margin) continue;
@@ -2818,7 +2871,7 @@
       return n;
     }
     var start = n;
-    var margin = Math.max(cssW, cssH) * 0.7;
+    var margin = viewWorldMax() * 0.78;
     for (var i = 0; i < sN; i++) {
       var x = sx0[i], y = sy0[i];
       if (Math.abs(x - player.x) > margin || Math.abs(y - player.y) > margin) continue;
@@ -2845,7 +2898,7 @@
       return n;
     }
     var start = n;
-    var margin = Math.max(cssW, cssH) * 0.72;
+    var margin = viewWorldMax() * 0.82;
     var cheap = eN > 900 || gN > 280 || perf.renderAvg > 10;
     for (var i = 0; i < gN; i++) {
       var x = gx0[i], y = gy0[i];
@@ -2896,7 +2949,7 @@
       return n;
     }
     var start = n;
-    var margin = Math.max(cssW, cssH) * 0.75;
+    var margin = viewWorldMax() * 0.84;
     for (var i = 0; i < boomN; i++) {
       var x = boomX[i], y = boomY[i];
       if (Math.abs(x - player.x) > margin || Math.abs(y - player.y) > margin) continue;
@@ -3045,6 +3098,7 @@
     gl.useProgram(program);
     gl.uniform2f(uCam, player.x, player.y);
     gl.uniform2f(uView, cssW, cssH);
+    gl.uniform1f(uZoom, cameraZoom);
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, instBuf);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, inst.subarray(start * INV_STRIDE, (start + count) * INV_STRIDE));
@@ -3144,16 +3198,16 @@
       perf.tankSprites = 0;
     }
     var grid = 160;
-    var left = Math.floor((player.x - cssW * 0.55) / grid) * grid;
-    var right = player.x + cssW * 0.55;
-    var top = Math.floor((player.y - cssH * 0.55) / grid) * grid;
-    var bottom = player.y + cssH * 0.55;
+    var left = Math.floor((player.x - viewWorldW * 0.55) / grid) * grid;
+    var right = player.x + viewWorldW * 0.55;
+    var top = Math.floor((player.y - viewWorldH * 0.55) / grid) * grid;
+    var bottom = player.y + viewWorldH * 0.55;
     if (!(usingOldSprites && OLD_ENV)) {
       for (var gx = left; gx < right; gx += grid) {
-        n = addInst(n, gx, player.y, 1.2, cssH * 0.62, 0, 1, 0.18, 0.11, 0.08, 0.16);
+        n = addInst(n, gx, player.y, 1.2, viewWorldH * 0.62, 0, 1, 0.18, 0.11, 0.08, 0.16);
       }
       for (var gy = top; gy < bottom; gy += grid) {
-        n = addInst(n, player.x, gy, cssW * 0.62, 1.2, 0, 1, 0.18, 0.11, 0.08, 0.16);
+        n = addInst(n, player.x, gy, viewWorldW * 0.62, 1.2, 0, 1, 0.18, 0.11, 0.08, 0.16);
       }
       for (var d = 0; d < dN; d++) {
         var dc = dcol[d];
@@ -3171,8 +3225,8 @@
 
     var detailLeft = eN > 1050 ? Math.min(DETAIL_MAX, 170) : (eN > 650 ? Math.min(DETAIL_MAX, 280) : DETAIL_MAX);
     var detailStart = detailLeft;
-    var closeX = cssW * 0.6;
-    var closeY = cssH * 0.6;
+    var closeX = viewWorldW * 0.6;
+    var closeY = viewWorldH * 0.6;
     for (var e = 0; e < eN; e++) {
       var type = etype[e];
       var pulse = Math.max(0, Math.min(1, 1 - ehp[e] / (T_HP[type] * (1 + state.t * 0.014) + 1)));
@@ -3370,6 +3424,46 @@
     return { x: x, y: y, w: w, h: h };
   }
 
+  function drawHudButton(x, y, w, h, label) {
+    hud.fillStyle = 'rgba(16,9,7,0.66)';
+    hud.strokeStyle = 'rgba(255,176,92,0.62)';
+    hud.lineWidth = 1;
+    hud.fillRect(x, y, w, h);
+    hud.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    hud.fillStyle = '#f2d5b5';
+    hud.font = '800 ' + Math.max(10, Math.min(13, h * 0.34)) + 'px ui-monospace, monospace';
+    hud.textAlign = 'center';
+    hud.textBaseline = 'middle';
+    hud.fillText(label, x + w * 0.5, y + h * 0.5);
+    return { x: x, y: y, w: w, h: h };
+  }
+
+  function drawJoystick() {
+    if (!useJoystick || state.mode !== 'PLAYING' || state.paused) return;
+    var bx = joyActive ? joyBaseX : Math.max(76, cssW * 0.18);
+    var by = joyActive ? joyBaseY : Math.max(96, cssH - 92);
+    var kx = joyActive ? joyKnobX : bx;
+    var ky = joyActive ? joyKnobY : by;
+    var a = joyActive ? 0.72 : 0.22;
+    hud.save();
+    hud.globalAlpha = a;
+    hud.lineWidth = 2;
+    hud.strokeStyle = '#ffb05c';
+    hud.fillStyle = 'rgba(20,10,8,0.28)';
+    hud.beginPath();
+    hud.arc(bx, by, joyRadius, 0, TWO_PI);
+    hud.fill();
+    hud.stroke();
+    hud.globalAlpha = joyActive ? 0.86 : 0.32;
+    hud.fillStyle = '#c41228';
+    hud.strokeStyle = '#ffe1b8';
+    hud.beginPath();
+    hud.arc(kx, ky, Math.max(18, joyRadius * 0.34), 0, TWO_PI);
+    hud.fill();
+    hud.stroke();
+    hud.restore();
+  }
+
   function drawHudTankPreview(cx, cy, size) {
     var layers = [
       ['lp_treads', tankTreadsTier],
@@ -3391,7 +3485,25 @@
       drawn = true;
     }
     hud.restore();
-    if (drawn) return;
+    if (drawn) {
+      var pulse = 0.5 + Math.sin(performance.now() * 0.006) * 0.5;
+      var bloom = hudImages.bloom;
+      var heart = hudImages.heart;
+      hud.save();
+      hud.imageSmoothingEnabled = false;
+      if (bloom && bloom.complete && bloom.naturalWidth) {
+        hud.globalAlpha = 0.22 + pulse * 0.16;
+        var bs = size * (0.98 + pulse * 0.12);
+        hud.drawImage(bloom, Math.round(cx - bs * 0.5), Math.round(cy - bs * 0.5), Math.round(bs), Math.round(bs));
+      }
+      if (heart && heart.complete && heart.naturalWidth) {
+        hud.globalAlpha = 0.76 + pulse * 0.18;
+        var hs = size * (0.27 + pulse * 0.035);
+        hud.drawImage(heart, Math.round(cx - hs * 0.5), Math.round(cy - hs * 0.5), Math.round(hs), Math.round(hs));
+      }
+      hud.restore();
+      return;
+    }
     hud.fillStyle = '#120907';
     hud.fillRect(cx - size * 0.38, cy - size * 0.26, size * 0.76, size * 0.52);
     hud.fillStyle = '#6d4c39';
@@ -3574,7 +3686,8 @@
     hud.font = '900 28px ui-monospace, monospace';
     hud.fillText('PAUSED', cssW * 0.5, y);
     rResume = drawButton(x, y + 48, w, 46, 'RESUME', true);
-    rQuit = drawButton(x, y + 106, w, 42, 'BANK BLOOD + MENU', false);
+    rPauseForge = drawButton(x, y + 106, w, 42, 'BANK BLOOD + FORGE', false);
+    rQuit = drawButton(x, y + 158, w, 42, 'BANK BLOOD + MENU', false);
   }
 
   function renderHud() {
@@ -3583,6 +3696,9 @@
     hud.setTransform(dpr, 0, 0, dpr, 0, 0);
     hud.clearRect(0, 0, cssW, cssH);
     hud.globalAlpha = 1;
+    rHudPause = null;
+    rHudMenu = null;
+    rPauseForge = null;
     if (state.mode === 'MENU') {
       drawMenu();
       perf.hudMs = performance.now() - t0;
@@ -3621,6 +3737,11 @@
     hud.fillStyle = '#f4d9bc';
     hud.font = '12px ui-monospace, monospace';
     hud.fillText(fmtTime(state.t) + '  L' + player.level + '  K' + state.kills, 24, 67);
+
+    var bw = cssW < 520 ? 62 : 76;
+    rHudPause = drawHudButton(cssW - bw - 12, 14, bw, 34, 'PAUSE');
+    rHudMenu = drawHudButton(cssW - bw - 12, 54, bw, 34, 'MENU');
+    drawJoystick();
 
     if (state.bannerT > 0 && state.banner) {
       var a = clamp(state.bannerT, 0, 1);
@@ -3730,6 +3851,7 @@
   function resize() {
     cssW = Math.max(1, window.innerWidth || 1);
     cssH = Math.max(1, window.innerHeight || 1);
+    updateCameraMetrics();
     dpr = Math.min(window.devicePixelRatio || 1, BASE_DPR);
     viewW = Math.max(1, Math.floor(cssW * dpr));
     viewH = Math.max(1, Math.floor(cssH * dpr));
@@ -3789,11 +3911,27 @@
     }
     if (state.paused) {
       if (inRect(x, y, rResume)) state.paused = false;
+      else if (inRect(x, y, rPauseForge)) {
+        bankRun();
+        resetGame(false, 0);
+        state.mode = 'SHOP';
+      }
       else if (inRect(x, y, rQuit)) {
         bankRun();
         resetGame(false, 0);
       }
       return true;
+    }
+    if (state.mode === 'PLAYING') {
+      if (inRect(x, y, rHudPause)) {
+        state.paused = true;
+        return true;
+      }
+      if (inRect(x, y, rHudMenu)) {
+        bankRun();
+        resetGame(false, 0);
+        return true;
+      }
     }
     return false;
   }
@@ -3833,11 +3971,55 @@
     var c = e.keyCode || e.which;
     if (c < 256) keys[c] = 0;
   });
+
+  function updateJoystick(e) {
+    var dx = e.clientX - joyBaseX;
+    var dy = e.clientY - joyBaseY;
+    var d = Math.sqrt(dx * dx + dy * dy);
+    var lim = joyRadius;
+    if (d > lim && d > 0.001) {
+      dx *= lim / d;
+      dy *= lim / d;
+      d = lim;
+    }
+    joyKnobX = joyBaseX + dx;
+    joyKnobY = joyBaseY + dy;
+    var dead = lim * 0.14;
+    if (d < dead) {
+      joyDX = 0;
+      joyDY = 0;
+    } else {
+      joyDX = dx / lim;
+      joyDY = dy / lim;
+    }
+  }
+
+  function beginJoystick(e) {
+    joyActive = true;
+    joyId = e.pointerId;
+    joyBaseX = e.clientX;
+    joyBaseY = e.clientY;
+    joyKnobX = e.clientX;
+    joyKnobY = e.clientY;
+    joyDX = 0;
+    joyDY = 0;
+    updateJoystick(e);
+    try { glCanvas.setPointerCapture(joyId); } catch (err) {}
+  }
+
+  function endJoystick() {
+    joyActive = false;
+    joyId = -1;
+    joyDX = 0;
+    joyDY = 0;
+  }
+
   glCanvas.addEventListener('pointerdown', function (e) {
     unlockAudio();
     if (handleUiPointer(e.clientX, e.clientY)) {
       pointerDown = false;
       pointerId = -1;
+      endJoystick();
       e.preventDefault();
       return;
     }
@@ -3847,6 +4029,13 @@
       if (chooseUpgrade(cardAt(e.clientX, e.clientY))) e.preventDefault();
       return;
     }
+    if (useJoystick && state.mode === 'PLAYING' && (e.pointerType === 'touch' || e.pointerType === 'pen' || ((e.pointerType || '') === '' && TOUCH_DEVICE))) {
+      pointerDown = false;
+      pointerId = -1;
+      beginJoystick(e);
+      e.preventDefault();
+      return;
+    }
     pointerDown = true;
     pointerId = e.pointerId;
     pointerX = e.clientX;
@@ -3854,6 +4043,11 @@
     glCanvas.setPointerCapture(pointerId);
   });
   glCanvas.addEventListener('pointermove', function (e) {
+    if (joyActive && e.pointerId === joyId) {
+      updateJoystick(e);
+      e.preventDefault();
+      return;
+    }
     if (state.mode === 'LEVELUP') {
       upgradeHover = cardAt(e.clientX, e.clientY);
       return;
@@ -3865,6 +4059,11 @@
   glCanvas.addEventListener('pointerup', endPointer);
   glCanvas.addEventListener('pointercancel', endPointer);
   function endPointer(e) {
+    if (joyActive && e.pointerId === joyId) {
+      endJoystick();
+      e.preventDefault();
+      return;
+    }
     if (e.pointerId !== pointerId) return;
     pointerDown = false;
     pointerId = -1;
@@ -3905,6 +4104,8 @@
         treads: tankTreadsTier, thirst: tankThirstTier, frenzy: tankFrenzyTier
       },
       colliders: COLLIDERS, colliderMs: perf.colliderMs,
+      cameraZoom: cameraZoom, viewWorldW: viewWorldW, viewWorldH: viewWorldH,
+      useJoystick: useJoystick, joystickActive: joyActive,
       colliderPairs: perf.colliderPairs, colliderContacts: perf.colliderContacts,
       colliderSkipped: perf.colliderSkipped, colliderPush: perf.colliderPush,
       veinsEnabled: VEIN_FX, leechesEnabled: LEECH_FX,
@@ -3936,7 +4137,7 @@
         context: audioCtx ? audioCtx.state : 'none',
         samples: Object.keys(audioBuffers).length
       },
-      mode: state.mode, diag: DIAG, level: player.level, xp: player.xp,
+      mode: state.mode, paused: state.paused, diag: DIAG, level: player.level, xp: player.xp,
       xpNext: player.xpNext, upgrades: picks
     };
   };
@@ -3944,12 +4145,13 @@
   window.render_game_to_text = function () {
     return [
       'Bloodtread ECS rebuild',
-      'mode=' + state.mode + ' time=' + fmtTime(state.t) + ' enemies=' + eN + ' bullets=' + bN + ' motes=' + mN + ' particles=' + pN,
+      'mode=' + state.mode + (state.paused ? ' paused' : '') + ' time=' + fmtTime(state.t) + ' enemies=' + eN + ' bullets=' + bN + ' motes=' + mN + ' particles=' + pN,
       'bank=' + Math.floor(totalBank) + ' best=' + fmtTime(bestTime) + ' weapon=' + weaponName(equipWeapon) + ' owned=' + Object.keys(ownedWeapons).join(','),
       'audio=' + (audioMuted ? 'muted' : (audioCtx ? audioCtx.state : 'locked')) + ' samples=' + Object.keys(audioBuffers).length,
       'meta armor=' + META.armor + ' core=' + META.core + ' cannon=' + META.cannon + ' treads=' + META.treads + ' thirst=' + META.thirst + ' frenzy=' + META.frenzy,
       state.mode === 'LEVELUP' ? 'upgrades=1:' + upgradeNames[upgradePick[0]] + ' 2:' + upgradeNames[upgradePick[1]] + ' 3:' + upgradeNames[upgradePick[2]] : 'level=' + player.level + ' xp=' + Math.floor(player.xp) + '/' + player.xpNext,
       'fps=' + perf.fps.toFixed(1) + ' frame=' + perf.frameMs.toFixed(2) + ' update=' + perf.updateMs.toFixed(2) + ' render=' + perf.renderMs.toFixed(2) + ' detail=' + perf.creatureDetails,
+      'camera zoom=' + cameraZoom.toFixed(2) + ' world=' + Math.round(viewWorldW) + 'x' + Math.round(viewWorldH) + ' joystick=' + (useJoystick ? (joyActive ? 'active' : 'ready') : 'off'),
       'sprites=' + (OLD_SPRITES ? (spriteReady ? 'old' : 'loading') : 'off') + ' draws=' + perf.spriteDraws + ' anim=' + perf.spriteAnimated + ' static=' + perf.spriteStatic,
       'oldenv=' + perf.envSprites + ' corpses=' + cN + '/' + perf.corpseSprites + ' tank=' + perf.tankSprites,
       'tanktiers a=' + tankArmorTier + ' c=' + tankCannonTier + ' tr=' + tankTreadsTier + ' core=' + tankCoreTier + ' th=' + tankThirstTier + ' fr=' + tankFrenzyTier,
