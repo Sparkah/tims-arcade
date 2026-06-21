@@ -21,7 +21,7 @@
   var MAX_VEINS = clampInt(parseInt(qs.get('veincap') || '130', 10), 0, 260);
   var MAX_LEECHES = clampInt(parseInt(qs.get('leechcap') || '9', 10), 0, 12);
   var DETAIL_MAX = clampInt(parseInt(qs.get('detail') || '360', 10), 0, 720);
-  var MAX_INST = MAX_ENEMIES * 4 + MAX_BULLETS + MAX_MOTES + MAX_PARTS + MAX_DECALS + MAX_GORE * 2 + MAX_SPLATS * 3 + MAX_BOOMS * 8 + MAX_BUBBLES * 3 + MAX_VEINS * 6 + MAX_LEECHES * 10 + 640;
+  var MAX_INST = MAX_ENEMIES * 4 + MAX_BULLETS + MAX_MOTES * 6 + MAX_PARTS + MAX_DECALS + MAX_GORE * 2 + MAX_SPLATS * 3 + MAX_BOOMS * 8 + MAX_BUBBLES * 3 + MAX_VEINS * 6 + MAX_LEECHES * 10 + 640;
   var LASER_RANGE_MULT = clamp(parseFloat(qs.get('laserrange') || '6'), 3, 20);
   var STEP = 1 / 60;
   var MAX_STEPS = 3;
@@ -342,6 +342,9 @@
   var mvx = new Float32Array(MAX_MOTES);
   var mvy = new Float32Array(MAX_MOTES);
   var mval = new Float32Array(MAX_MOTES);
+  var mage = new Float32Array(MAX_MOTES);
+  var mphase = new Float32Array(MAX_MOTES);
+  var mmerge = new Float32Array(MAX_MOTES);
   var mN = 0;
 
   var px = new Float32Array(MAX_PARTS);
@@ -892,12 +895,16 @@
     mvx[i] = (rnd() - 0.5) * 58;
     mvy[i] = (rnd() - 0.5) * 58;
     mval[i] = v;
+    mage[i] = 0;
+    mphase[i] = rnd() * TWO_PI;
+    mmerge[i] = 0;
   }
 
   function removeMote(i) {
     var l = --mN;
     if (i === l) return;
     mx[i] = mx[l]; my[i] = my[l]; mvx[i] = mvx[l]; mvy[i] = mvy[l]; mval[i] = mval[l];
+    mage[i] = mage[l]; mphase[i] = mphase[l]; mmerge[i] = mmerge[l];
   }
 
   function spawnParticle(x, y, vx, vy, r, life, col) {
@@ -2012,24 +2019,62 @@
 
   function updateMotes(dt) {
     var pr2 = player.pickR * player.pickR;
+    perf.moteMerges = 0;
     for (var i = mN - 1; i >= 0; i--) {
       var dx = player.x - mx[i], dy = player.y - my[i];
       var d2 = dx * dx + dy * dy + 0.0001;
+      mage[i] += dt;
+      if (mmerge[i] > 0) mmerge[i] = Math.max(0, mmerge[i] - dt * 4.8);
       if (d2 < pr2) {
         var inv = 1 / Math.sqrt(d2);
-        mvx[i] += dx * inv * 760 * dt;
-        mvy[i] += dy * inv * 760 * dt;
+        var pull = 1 - Math.sqrt(d2) / Math.max(1, player.pickR);
+        var force = 760 + pull * 360;
+        mvx[i] += dx * inv * force * dt;
+        mvy[i] += dy * inv * force * dt;
+        var sway = Math.sin(state.t * 15 + mphase[i]) * pull * 48 * dt;
+        mvx[i] += -dy * inv * sway;
+        mvy[i] += dx * inv * sway;
       }
       mx[i] += mvx[i] * dt;
       my[i] += mvy[i] * dt;
       mvx[i] *= 0.965;
       mvy[i] *= 0.965;
+      if (tryMergeMote(i)) continue;
       if (d2 < (player.r + 14) * (player.r + 14)) {
         gainXp(mval[i]);
         playTone(190 + Math.min(5, mval[i]) * 22, 0.035, 0.018);
         removeMote(i);
       }
     }
+  }
+
+  function tryMergeMote(i) {
+    if (mN < 2 || mval[i] >= 16 || ((state.tick + i) & 3) !== 0) return false;
+    if (perf.moteMerges >= (mN > 420 ? 6 : 12)) return false;
+    var checks = mN > 420 ? 4 : 7;
+    var radius = 18 + Math.min(14, Math.sqrt(Math.max(1, mval[i])) * 4.4);
+    var r2 = radius * radius;
+    for (var k = 1; k <= checks; k++) {
+      var j = i - k;
+      if (j < 0 || mval[j] >= 18) continue;
+      var dx = mx[j] - mx[i];
+      var dy = my[j] - my[i];
+      if (dx * dx + dy * dy > r2) continue;
+      var a = Math.max(0.001, mval[i]);
+      var b = Math.max(0.001, mval[j]);
+      var total = a + b;
+      mx[j] = (mx[j] * b + mx[i] * a) / total;
+      my[j] = (my[j] * b + my[i] * a) / total;
+      mvx[j] = (mvx[j] * b + mvx[i] * a) / total;
+      mvy[j] = (mvy[j] * b + mvy[i] * a) / total;
+      mval[j] = total;
+      mmerge[j] = 1;
+      mphase[j] = (mphase[j] + mphase[i]) * 0.5 + 0.7;
+      perf.moteMerges++;
+      removeMote(i);
+      return true;
+    }
+    return false;
   }
 
   function updateParticles(dt) {
@@ -3382,6 +3427,44 @@
     return n;
   }
 
+  function addMoteInstances(n) {
+    var start = n;
+    for (var m = 0; m < mN; m++) {
+      var vx = mvx[m];
+      var vy = mvy[m];
+      var speed = Math.sqrt(vx * vx + vy * vy);
+      var dx = player.x - mx[m];
+      var dy = player.y - my[m];
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      var pull = clamp(1 - dist / Math.max(1, player.pickR), 0, 1);
+      var invDist = dist > 0.001 ? 1 / dist : 0;
+      var pulseM = 1 + Math.sin(state.t * 8 + mphase[m]) * 0.14;
+      var birth = clamp(1 - mage[m] * 3.4, 0, 1);
+      var merge = mmerge[m];
+      var base = (3.25 + Math.sqrt(Math.min(20, Math.max(1, mval[m]))) * 1.45) * pulseM * (1 + birth * 0.22 + merge * 0.30);
+      var stretch = clamp(speed / 360 + pull * 1.65 + merge * 0.70, 0, 2.20);
+      var ang = pull > 0.04 ? Math.atan2(dy, dx) : (speed > 2 ? Math.atan2(vy, vx) : mphase[m] + state.t * 0.8);
+      var ca = Math.cos(ang);
+      var sa = Math.sin(ang);
+      if (stretch > 0.08) {
+        var tail = base * (1.65 + stretch * 3.10);
+        n = addLineInst(n, mx[m] - ca * tail * 0.68, my[m] - sa * tail * 0.68, mx[m] + ca * base * 0.40, my[m] + sa * base * 0.40, base * (0.54 + pull * 0.22), 0.50, 0.004, 0.020, (0.22 + pull * 0.22) * Math.min(1, stretch), 0.20 + merge * 0.30);
+        n = addLineInst(n, mx[m] - ca * tail * 0.42, my[m] - sa * tail * 0.42, mx[m] + ca * base * 0.52, my[m] + sa * base * 0.52, base * (0.17 + pull * 0.08), 1.0, 0.04, 0.06, (0.20 + pull * 0.20) * Math.min(1, stretch), 0.34 + merge * 0.28);
+      }
+      if (pull > 0.08 && invDist > 0) {
+        var strand = Math.min(dist * 0.30, base * (2.2 + pull * 3.8));
+        n = addLineInst(n, mx[m], my[m], mx[m] + dx * invDist * strand, my[m] + dy * invDist * strand, base * (0.08 + pull * 0.10), 1.0, 0.035, 0.055, 0.11 + pull * 0.22, 0.44 + merge * 0.18);
+      }
+      n = addInst(n, mx[m], my[m], base * (1 + stretch * 1.34), base * Math.max(0.27, 1 - stretch * 0.36), ang, 0, 0.94, 0.025 + merge * 0.05, 0.055 + merge * 0.04, 0.88, 0.38 + merge * 0.45);
+      n = addInst(n, mx[m] - ca * base * 0.30 - sa * base * 0.10, my[m] - sa * base * 0.30 + ca * base * 0.10, base * 0.34, base * 0.23, ang - 0.18, 0, 1.0, 0.18 + merge * 0.08, 0.22 + merge * 0.06, 0.50 + pull * 0.08, 0.54);
+      if (merge > 0.02 || mval[m] >= 5) {
+        n = addInst(n, mx[m], my[m], base * (1.42 + merge * 0.34), base * (1.02 + merge * 0.22), mphase[m] + state.t * 1.2, 3, 1.0, 0.055, 0.085, (0.14 + merge * 0.24) * Math.min(1, 0.45 + mval[m] * 0.08), 0.42 + merge * 0.35);
+      }
+    }
+    perf.moteInst = n - start;
+    return n;
+  }
+
   function renderWorld() {
     var n = 0;
     var usingOldSprites = OLD_SPRITES && spriteReady;
@@ -3444,12 +3527,7 @@
     }
     perf.creatureDetails = usingOldSprites ? 0 : detailStart - detailLeft;
 
-    for (var m = 0; m < mN; m++) {
-      var pulseM = 1 + Math.sin(state.t * 8 + m) * 0.16;
-      var rm = (mval[m] > 1 ? 5.4 : 3.8) * pulseM;
-      n = addInst(n, mx[m], my[m], rm, rm, 0, 0, 0.95, 0.04, 0.08, 0.95, 0.45);
-      n = addInst(n, mx[m] - rm * 0.32, my[m] - rm * 0.32, rm * 0.32, rm * 0.32, 0, 0, 1.0, 0.22, 0.25, 0.52, 0.55);
-    }
+    n = addMoteInstances(n);
 
     for (var b = 0; b < bN; b++) {
       var ba = Math.atan2(bvy[b], bvx[b]);
@@ -3522,6 +3600,7 @@
     creatureDetails: 0, spriteDraws: 0, spriteAnimated: 0, spriteStatic: 0,
     spriteCulled: 0, envSprites: 0, corpseSprites: 0, tankSprites: 0,
     colliderMs: 0, colliderPairs: 0, colliderContacts: 0, colliderSkipped: 0, colliderPush: 0,
+    moteInst: 0, moteMerges: 0,
     leechMs: 0, leeches: 0, leechInst: 0, veins: 0, veinInst: 0, tankFeelInst: 0,
     goreMs: 0, gorePieces: 0, goreInst: 0, splats: 0, splatInst: 0,
     booms: 0, boomInst: 0, bubbles: 0, bubbleInst: 0,
@@ -4144,7 +4223,7 @@
       var lines = [
         'fps ' + perf.fps.toFixed(1) + ' frame ' + perf.frameMs.toFixed(2) + ' raf ' + perf.rafGap.toFixed(1) + ' worst ' + perf.worstMs.toFixed(1),
         'update ' + perf.updateAvg.toFixed(2) + ' / ' + perf.updateWorst.toFixed(1) + ' render ' + perf.renderAvg.toFixed(2) + ' / ' + perf.renderWorst.toFixed(1) + ' hud ' + perf.hudMs.toFixed(2),
-        'inst ' + perf.instances + ' detail ' + perf.creatureDetails + ' E ' + eN + ' B ' + bN + ' M ' + mN + ' P ' + pN + ' D ' + dN,
+        'inst ' + perf.instances + ' detail ' + perf.creatureDetails + ' E ' + eN + ' B ' + bN + ' M ' + mN + '/' + perf.moteInst + ' merge ' + perf.moteMerges + ' P ' + pN + ' D ' + dN,
         'sprites ' + (OLD_SPRITES ? (spriteReady ? 'old' : 'loading ' + spriteLoaded + '/' + spritePending) : 'off') + ' draws ' + perf.spriteDraws + ' anim ' + perf.spriteAnimated + ' static ' + perf.spriteStatic + ' culled ' + perf.spriteCulled,
         'old env ' + perf.envSprites + ' corpses ' + cN + '/' + perf.corpseSprites + ' tank ' + perf.tankSprites + ' tracks ' + tN,
         'colliders ' + (COLLIDERS ? 'on' : 'off') + ' ms ' + perf.colliderMs.toFixed(2) + ' pairs ' + perf.colliderPairs + ' contact ' + perf.colliderContacts + ' push ' + perf.colliderPush.toFixed(1),
@@ -4500,6 +4579,17 @@
   window.__chooseUpgrade = chooseUpgrade;
   window.__startLevelUp = startLevelUp;
   window.__addXp = gainXp;
+  window.__spawnMoteBurst = function (count, ox, oy, value) {
+    count = clampInt(count == null ? 40 : count, 1, MAX_MOTES);
+    ox = ox == null ? 220 : ox;
+    oy = oy == null ? 0 : oy;
+    value = value == null ? 2 : value;
+    for (var i = 0; i < count; i++) {
+      var a = rnd() * TWO_PI;
+      var r = Math.sqrt(rnd()) * 46;
+      spawnMote(player.x + ox + Math.cos(a) * r, player.y + oy + Math.sin(a) * r, value + (i % 5 === 0 ? 3 : 0));
+    }
+  };
   window.__perfStats = function () {
     var picks = state.mode === 'LEVELUP'
       ? [upgradeNames[upgradePick[0]], upgradeNames[upgradePick[1]], upgradeNames[upgradePick[2]]]
@@ -4510,7 +4600,8 @@
       updateAvg: perf.updateAvg, renderAvg: perf.renderAvg,
       updateWorst: perf.updateWorst, renderWorst: perf.renderWorst,
       rafGap: perf.rafGap, loafs: perf.loafs, loafWorst: perf.loafWorst,
-      enemies: eN, bullets: bN, motes: mN, particles: pN, decals: dN, instances: perf.instances,
+      enemies: eN, bullets: bN, motes: mN, moteInst: perf.moteInst, moteMerges: perf.moteMerges,
+      particles: pN, decals: dN, instances: perf.instances,
       creatureDetails: perf.creatureDetails,
       oldSprites: OLD_SPRITES, spriteReady: spriteReady, spriteLoaded: spriteLoaded,
       spritePending: spritePending, spriteDraws: perf.spriteDraws,
@@ -4577,7 +4668,7 @@
   window.render_game_to_text = function () {
     return [
       'Bloodtread ECS rebuild',
-      'mode=' + state.mode + (state.paused ? ' paused' : '') + ' time=' + fmtTime(state.t) + ' enemies=' + eN + ' bullets=' + bN + ' motes=' + mN + ' particles=' + pN,
+      'mode=' + state.mode + (state.paused ? ' paused' : '') + ' time=' + fmtTime(state.t) + ' enemies=' + eN + ' bullets=' + bN + ' motes=' + mN + '/' + perf.moteInst + ' merges=' + perf.moteMerges + ' particles=' + pN,
       'bank=' + Math.floor(totalBank) + ' best=' + fmtTime(bestTime) + ' weapon=' + weaponName(equipWeapon) + ' laserRange=' + Math.round(laserRangeWorld()) + ' laserBeam=' + Math.round(Math.sqrt((laserX1 - laserX0) * (laserX1 - laserX0) + (laserY1 - laserY0) * (laserY1 - laserY0))) + ' owned=' + Object.keys(ownedWeapons).join(','),
       'audio=' + (audioMuted ? 'muted' : (audioCtx ? audioCtx.state : 'locked')) + ' music=' + (musicEnabled ? (musicEl && !musicEl.paused ? 'playing' : 'ready') : 'off') + ' samples=' + Object.keys(audioBuffers).length,
       'meta armor=' + META.armor + ' core=' + META.core + ' cannon=' + META.cannon + ' treads=' + META.treads + ' thirst=' + META.thirst + ' frenzy=' + META.frenzy + ' weaponTiers=' + weaponMeta.cannon + '/' + weaponMeta.flak + '/' + weaponMeta.laser + '/' + weaponMeta.missile,
