@@ -416,6 +416,7 @@
   var vN = 0;
   var vCursor = 0;
   var veinAcc = 0;
+  var unleashTrailAcc = 0;
 
   var leechTarget = new Int32Array(MAX_LEECHES || 1);
   var leechGrab = new Float32Array(MAX_LEECHES || 1);
@@ -914,7 +915,6 @@
     state.bannerT = 1.05;
     playSfx('crunch', 0.32, 0.06, 0.88);
     playSfx('hitflesh', 0.42, 0.04, 0.72);
-    spawnBoom(player.x, player.y, 58 + tankRageLevel() * 28, 0);
     for (var i = 0; i < 9; i++) {
       spawnVeinTrail(player.x, player.y, (i / 9) * TWO_PI + (rnd() - 0.5) * 0.18);
     }
@@ -1478,7 +1478,7 @@
     state.mode = startPlaying ? 'PLAYING' : 'MENU'; state.t = 0; state.tick = 1; state.kills = 0; state.blood = 0;
     state.spawnCredit = 0; state.fireCd = 0; state.banner = ''; state.bannerT = 0; state.gameOverT = 0; state.runBanked = false; state.paused = false;
     eN = 0; bN = 0; mN = 0; pN = 0; dN = 0; cN = 0; tN = 0; vN = 0; gN = 0; sN = 0; boomN = 0; bubbleN = 0;
-    dCursor = 0; pCursor = 0; cCursor = 0; tCursor = 0; vCursor = 0; gCursor = 0; sCursor = 0; boomCursor = 0; bubbleCursor = 0; trackAcc = 0; veinAcc = 0;
+    dCursor = 0; pCursor = 0; cCursor = 0; tCursor = 0; vCursor = 0; gCursor = 0; sCursor = 0; boomCursor = 0; bubbleCursor = 0; trackAcc = 0; veinAcc = 0; unleashTrailAcc = 0;
     laserT = 0;
     syncTankTiersFromMeta();
     resetLeeches();
@@ -1575,9 +1575,25 @@
     if (MAX_BUBBLES > 0 && TANK_LAYERS && rage > 0.08 && rnd() < dt * (0.28 + rage * rage * 5.4) * (player.unleash > 0 ? 2.35 : 1)) {
       spawnRageBubble(rage, player.unleash > 0 ? 1.18 : 1);
     }
+    if (player.unleash > 0 && (GORE_FX || VEIN_FX)) {
+      unleashTrailAcc += (Math.sqrt(sp2) + 72) * dt;
+      var trailSteps = 0;
+      while (unleashTrailAcc > 32 && trailSteps++ < 2) {
+        unleashTrailAcc -= 32;
+        var tail = player.hull + Math.PI + (rnd() - 0.5) * 0.34;
+        var side = player.hull + Math.PI * 0.5;
+        var tx = player.x + Math.cos(tail) * (18 + rnd() * 12) + Math.cos(side) * (rnd() - 0.5) * 16;
+        var ty = player.y + Math.sin(tail) * (18 + rnd() * 12) + Math.sin(side) * (rnd() - 0.5) * 16;
+        if (VEIN_FX) spawnVeinTrail(tx, ty, tail + (rnd() - 0.5) * 0.62);
+        if (GORE_FX) {
+          if (((state.tick + trailSteps) & 1) === 0) spawnSplat(tx, ty, 9 + rnd() * 15, 0, 4.8);
+          if (rnd() < 0.26) spawnGoreSpray(tx, ty, 2, tail, 0.8, 125, 0);
+        }
+      }
+    }
     if (VEIN_FX && (currentLeechLevel() > 0 || player.unleash > 0) && sp2 > 90 * 90) {
       veinAcc += Math.sqrt(sp2) * dt;
-      var veinGap = player.unleash > 0 ? 15 : 22;
+      var veinGap = player.unleash > 0 ? 42 : 22;
       while (veinAcc > veinGap) {
         veinAcc -= veinGap;
         spawnVeinTrail(player.x - Math.cos(player.hull) * 18, player.y - Math.sin(player.hull) * 18, player.hull + Math.PI + (rnd() - 0.5) * 0.75);
@@ -2793,7 +2809,13 @@
 
   function queueOldTankSprite() {
     if (!OLD_TANK || !spriteTextures.tank_body || !spriteTextures.tank_turret) return false;
-    var bob = Math.round(Math.sin(state.t * 8.5) * 1.15);
+    var alive = tankRageLevel();
+    var breathe = Math.sin(state.t * (3.4 + alive * 1.4));
+    var breathAmp = (0.004 + alive * 0.012) + (player.unleash > 0 ? 0.008 : 0);
+    var breathW = 1 + breathe * breathAmp;
+    var breathH = 1 - breathe * breathAmp * 0.55;
+    var liveBob = Math.sin(state.t * 4.2 + alive) * screenLen(alive * 0.9 + (player.unleash > 0 ? 0.6 : 0));
+    var bob = Math.round(Math.sin(state.t * 8.5) * 1.15 + liveBob);
     var sx = cssW * 0.5;
     var sy = cssH * 0.5 + bob;
     var hot = Math.max(player.hurt, player.recoil * 0.5);
@@ -2803,25 +2825,25 @@
       var turretA = player.turret + Math.PI * 0.5;
       var pulse = 0.5 + 0.5 * Math.sin(state.t * 8.0);
       var tankLayerSprites = 3;
-      queueSpriteRot('lp_treads', tankTreadsTier * 64, 0, 64, 64, sx, sy, size, size, hullA, 1 + hot * 0.12, 1, 1, 0.98);
-      queueSpriteRot('lp_armor', tankArmorTier * 64, 0, 64, 64, sx, sy, size, size, hullA, 1 + hot * 0.18, 1, 1, 0.98);
+      queueSpriteRot('lp_treads', tankTreadsTier * 64, 0, 64, 64, sx, sy, size * (1 + hot * 0.06), size, hullA, 1 + hot * 0.12, 1, 1, 0.98);
+      queueSpriteRot('lp_armor', tankArmorTier * 64, 0, 64, 64, sx, sy, size * breathW, size * breathH, hullA, 1 + hot * 0.18, 1, 1, 0.98);
       if (spriteTextures.lp_thirst) {
-        queueSpriteRot('lp_thirst', tankThirstTier * 64, 0, 64, 64, sx, sy, size, size, hullA, 1, 1, 1, 0.96);
+        queueSpriteRot('lp_thirst', tankThirstTier * 64, 0, 64, 64, sx, sy + breathe * screenLen(0.6), size * (1 + (breathW - 1) * 1.35), size * (1 + (breathH - 1) * 1.2), hullA, 1, 1, 1, 0.96);
         tankLayerSprites++;
       }
       if (spriteTextures.lp_frenzy && tankFrenzyTier > 0) {
-        queueSpriteRot('lp_frenzy', tankFrenzyTier * 64, 0, 64, 64, sx, sy, size, size, hullA, 1, 0.88 + pulse * 0.18, 0.88 + pulse * 0.18, 0.72);
+        queueSpriteRot('lp_frenzy', tankFrenzyTier * 64, 0, 64, 64, sx, sy, size * (1 + (breathW - 1) * 1.55), size * (1 + (breathH - 1) * 1.55), hullA, 1, 0.90 + pulse * 0.12, 0.90 + pulse * 0.12, 0.74);
         tankLayerSprites++;
       }
       if (spriteTextures.lp_core && tankCoreTier > 0) {
-        queueSpriteRot('lp_core', tankCoreTier * 64, 0, 64, 64, sx, sy, size, size, hullA, 1 + pulse * 0.08, 1, 1, 0.88);
+        queueSpriteRot('lp_core', tankCoreTier * 64, 0, 64, 64, sx, sy + breathe * screenLen(0.8), size * (1 + (breathW - 1) * 1.7), size * (1 + (breathH - 1) * 1.7), hullA, 1 + pulse * 0.04, 1, 1, 0.9);
         tankLayerSprites++;
       }
       queueSpriteRot('lp_cannon', tankCannonTier * 64, 0, 64, 64, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), size, size, turretA, 1 + hot * 0.22, 1, 1, 1);
       perf.tankSprites = tankLayerSprites;
       return true;
     }
-    queueSpriteRot('tank_body', 0, 0, spriteMeta.tank_body.w, spriteMeta.tank_body.h, sx, sy, screenLen(68), screenLen(68), player.hull + Math.PI * 0.5, 1 + hot * 0.18, 1, 1, 0.98);
+    queueSpriteRot('tank_body', 0, 0, spriteMeta.tank_body.w, spriteMeta.tank_body.h, sx, sy, screenLen(68) * breathW, screenLen(68) * breathH, player.hull + Math.PI * 0.5, 1 + hot * 0.18, 1, 1, 0.98);
     queueSpriteRot('tank_turret', 0, 0, spriteMeta.tank_turret.w, spriteMeta.tank_turret.h, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), screenLen(72), screenLen(72), player.turret + Math.PI * 0.5, 1 + hot * 0.22, 1, 1, 1);
     perf.tankSprites = 2;
     return true;
@@ -3121,9 +3143,6 @@
     var unleashA = Math.max(player.unleashFlash, player.unleash > 0 ? 0.22 + 0.18 * Math.sin(state.t * 10) : 0);
     if (unleashA > 0.01) {
       var burst = player.unleashFlash;
-      var ring = 58 + (1 - burst) * 42 + tankRageLevel() * 26;
-      n = addInst(n, player.x, player.y, ring, ring, 0, 3, 0.80, 0.02, 0.045, 0.18 * unleashA, 0.6);
-      n = addInst(n, player.x, player.y, ring * 0.42, ring * 0.42, 0, 0, 1.0, 0.06, 0.08, 0.32 * unleashA, 0.75);
       var rays = 9;
       for (var u = 0; u < rays; u++) {
         var a0 = u / rays * TWO_PI + state.t * 0.42 + Math.sin(state.t * 5 + u) * 0.08;
@@ -3140,9 +3159,24 @@
       }
     }
     if (core > 0) {
-      var r = 5.5 + core * 1.1 + pulse * 2.2;
-      n = addInst(n, player.x, player.y + 7, r * 2.4, r * 2.4, 0, 3, 0.82, 0.035, 0.055, 0.20 + core * 0.028 + pulse * 0.10, 0.62);
-      n = addInst(n, player.x, player.y + 7, r * 0.72, r * 0.72, 0, 0, 1.0, 0.12, 0.14, 0.48 + pulse * 0.24, 0.72);
+      var veinCount = Math.min(6, 2 + Math.floor(core * 0.75));
+      for (var v = 0; v < veinCount; v++) {
+        var va = player.hull + (v / veinCount) * TWO_PI + Math.sin(state.t * 1.7 + v) * 0.12;
+        var rootR = 5 + (v & 1) * 4;
+        var lenV = 11 + core * 1.2 + Math.sin(state.t * 5.8 + v) * 1.8;
+        var x0v = player.x + Math.cos(va) * rootR;
+        var y0v = player.y + Math.sin(va) * rootR;
+        var x1v = player.x + Math.cos(va) * lenV;
+        var y1v = player.y + Math.sin(va) * lenV;
+        var aV = 0.30 + pulse * 0.18 + (player.unleash > 0 ? 0.18 : 0);
+        n = addLineInst(n, x0v, y0v, x1v, y1v, 2.2, 0.22, 0.004, 0.018, aV, 0.12);
+        n = addLineInst(n, x0v, y0v, x1v, y1v, 0.9, 1.0, 0.07, 0.10, aV + 0.12, 0.62);
+        var pop = Math.max(0, Math.sin(state.t * 7.2 + v * 1.9));
+        if (pop > 0.74 || player.unleash > 0) {
+          var pr = (1.4 + pop * 2.2 + (player.unleash > 0 ? 0.6 : 0)) * (0.8 + core * 0.05);
+          n = addInst(n, x1v, y1v, pr, pr, 0, 0, 1.0, 0.06, 0.09, (pop * 0.42 + (player.unleash > 0 ? 0.16 : 0)), 0.75);
+        }
+      }
     }
     if (player.recoil > 0.02) {
       var mx0 = player.x + Math.cos(player.turret) * 43;
