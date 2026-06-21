@@ -3549,17 +3549,17 @@
     var by = joyActive ? joyBaseY : Math.max(96, cssH - 92);
     var kx = joyActive ? joyKnobX : bx;
     var ky = joyActive ? joyKnobY : by;
-    var a = joyActive ? 0.72 : 0.22;
+    var a = joyActive ? 0.78 : 0.46;
     hud.save();
     hud.globalAlpha = a;
-    hud.lineWidth = 2;
+    hud.lineWidth = joyActive ? 3 : 2;
     hud.strokeStyle = '#ffb05c';
-    hud.fillStyle = 'rgba(20,10,8,0.28)';
+    hud.fillStyle = joyActive ? 'rgba(20,10,8,0.36)' : 'rgba(20,10,8,0.30)';
     hud.beginPath();
     hud.arc(bx, by, joyRadius, 0, TWO_PI);
     hud.fill();
     hud.stroke();
-    hud.globalAlpha = joyActive ? 0.86 : 0.32;
+    hud.globalAlpha = joyActive ? 0.92 : 0.58;
     hud.fillStyle = '#c41228';
     hud.strokeStyle = '#ffe1b8';
     hud.beginPath();
@@ -4100,12 +4100,13 @@
   }
 
   function beginJoystick(e) {
+    var edge = joyRadius + Math.max(8, joyRadius * 0.16);
     joyActive = true;
     joyId = e.pointerId;
-    joyBaseX = e.clientX;
-    joyBaseY = e.clientY;
-    joyKnobX = e.clientX;
-    joyKnobY = e.clientY;
+    joyBaseX = clamp(e.clientX, edge, cssW - edge);
+    joyBaseY = clamp(e.clientY, edge, cssH - edge);
+    joyKnobX = joyBaseX;
+    joyKnobY = joyBaseY;
     joyDX = 0;
     joyDY = 0;
     updateJoystick(e);
@@ -4117,6 +4118,15 @@
     joyId = -1;
     joyDX = 0;
     joyDY = 0;
+  }
+
+  function wantsJoystickPointer(e) {
+    if (!useJoystick || state.mode !== 'PLAYING') return false;
+    if (e.pointerType === 'touch' || e.pointerType === 'pen') return true;
+    if ((e.pointerType || '') === '' && TOUCH_DEVICE) return true;
+    return (TOUCH_DEVICE || cssW < 760 || qs.has('joystick') || qs.has('joy'))
+      && e.clientX < cssW * 0.62
+      && e.clientY > cssH * 0.34;
   }
 
   glCanvas.addEventListener('pointerdown', function (e) {
@@ -4134,7 +4144,7 @@
       if (chooseUpgrade(cardAt(e.clientX, e.clientY))) e.preventDefault();
       return;
     }
-    if (useJoystick && state.mode === 'PLAYING' && (e.pointerType === 'touch' || e.pointerType === 'pen' || ((e.pointerType || '') === '' && TOUCH_DEVICE))) {
+    if (wantsJoystickPointer(e)) {
       pointerDown = false;
       pointerId = -1;
       beginJoystick(e);
