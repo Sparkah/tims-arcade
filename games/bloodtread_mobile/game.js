@@ -22,6 +22,7 @@
   var MAX_LEECHES = clampInt(parseInt(qs.get('leechcap') || '9', 10), 0, 12);
   var DETAIL_MAX = clampInt(parseInt(qs.get('detail') || '360', 10), 0, 720);
   var MAX_INST = MAX_ENEMIES * 4 + MAX_BULLETS + MAX_MOTES + MAX_PARTS + MAX_DECALS + MAX_GORE * 2 + MAX_SPLATS * 3 + MAX_BOOMS * 8 + MAX_BUBBLES * 3 + MAX_VEINS * 6 + MAX_LEECHES * 10 + 640;
+  var LASER_RANGE_MULT = clamp(parseFloat(qs.get('laserrange') || '6'), 3, 20);
   var STEP = 1 / 60;
   var MAX_STEPS = 3;
   var INV_STRIDE = 12;
@@ -92,6 +93,7 @@
   var joyBaseX = 0, joyBaseY = 0, joyKnobX = 0, joyKnobY = 0, joyDX = 0, joyDY = 0;
   var joyRadius = 66;
   var audioMuted = qs.has('mute') || qs.get('sound') === '0';
+  var musicEnabled = qs.get('music') !== '0' && qs.get('bgm') !== '0';
   var audioCtx = null;
   var audioLoading = false;
   var audioBuffers = Object.create(null);
@@ -172,6 +174,10 @@
     return Math.max(viewWorldW, viewWorldH);
   }
 
+  function laserRangeWorld() {
+    return player.r * LASER_RANGE_MULT;
+  }
+
   function tankRageLevel() {
     var sum = tankArmorTier + tankCoreTier + tankCannonTier + tankTreadsTier + tankThirstTier + tankFrenzyTier;
     return clamp(sum / 36, 0, 1);
@@ -191,7 +197,7 @@
       musicEl.loop = true;
       musicEl.volume = 0.18;
     }
-    if (qs.has('music') && qs.get('music') !== '0') {
+    if (musicEnabled) {
       var p = musicEl.play();
       if (p && p.catch) p.catch(function () {});
     }
@@ -2059,7 +2065,9 @@
     player.turret += aimErr * Math.min(0.5, dt * 9.6);
     if (weapon.id === 'laser') {
       var laserTier = currentWeaponTier();
-      if (Math.abs(dx) > viewWorldW * 0.50 || Math.abs(dy) > viewWorldH * 0.50) {
+      var range = laserRangeWorld();
+      var width = 12 + laserTier * 1.3;
+      if (d > range + width + er[nearest]) {
         laserT = 0;
         laserBurstT = 0;
         laserBurstMax = 0;
@@ -2076,8 +2084,6 @@
       }
       var ca = Math.cos(player.turret);
       var sa = Math.sin(player.turret);
-      var range = 720;
-      var width = 12 + laserTier * 1.3;
       var beamPower = Math.min(1, (laserBurstMax - laserBurstT) / 0.045) * Math.min(1, laserBurstT / 0.055);
       beamPower = Math.max(0.28, beamPower) * (0.86 + 0.14 * Math.sin(state.t * 48));
       var dps = player.dmg * player.fireRate * 2.75 * beamPower;
@@ -4365,6 +4371,15 @@
     var c = e.keyCode || e.which;
     if (c < 256) keys[c] = 0;
   });
+  document.addEventListener('visibilitychange', function () {
+    if (!musicEl) return;
+    if (document.hidden) {
+      musicEl.pause();
+    } else if (!audioMuted && musicEnabled && audioCtx) {
+      var p = musicEl.play();
+      if (p && p.catch) p.catch(function () {});
+    }
+  });
 
   function updateJoystick(e) {
     var dx = e.clientX - joyBaseX;
@@ -4537,6 +4552,9 @@
       bank: totalBank,
       bestTime: bestTime,
       weapon: equipWeapon,
+      laserRange: laserRangeWorld(),
+      laserActive: laserT > 0,
+      laserBeamLength: Math.sqrt((laserX1 - laserX0) * (laserX1 - laserX0) + (laserY1 - laserY0) * (laserY1 - laserY0)),
       weaponMeta: {
         cannon: weaponMeta.cannon,
         flak: weaponMeta.flak,
@@ -4546,6 +4564,8 @@
       ownedWeapons: ownedWeapons,
       audio: {
         muted: audioMuted,
+        music: musicEnabled,
+        musicPlaying: !!(musicEl && !musicEl.paused),
         context: audioCtx ? audioCtx.state : 'none',
         samples: Object.keys(audioBuffers).length
       },
@@ -4558,8 +4578,8 @@
     return [
       'Bloodtread ECS rebuild',
       'mode=' + state.mode + (state.paused ? ' paused' : '') + ' time=' + fmtTime(state.t) + ' enemies=' + eN + ' bullets=' + bN + ' motes=' + mN + ' particles=' + pN,
-      'bank=' + Math.floor(totalBank) + ' best=' + fmtTime(bestTime) + ' weapon=' + weaponName(equipWeapon) + ' owned=' + Object.keys(ownedWeapons).join(','),
-      'audio=' + (audioMuted ? 'muted' : (audioCtx ? audioCtx.state : 'locked')) + ' samples=' + Object.keys(audioBuffers).length,
+      'bank=' + Math.floor(totalBank) + ' best=' + fmtTime(bestTime) + ' weapon=' + weaponName(equipWeapon) + ' laserRange=' + Math.round(laserRangeWorld()) + ' laserBeam=' + Math.round(Math.sqrt((laserX1 - laserX0) * (laserX1 - laserX0) + (laserY1 - laserY0) * (laserY1 - laserY0))) + ' owned=' + Object.keys(ownedWeapons).join(','),
+      'audio=' + (audioMuted ? 'muted' : (audioCtx ? audioCtx.state : 'locked')) + ' music=' + (musicEnabled ? (musicEl && !musicEl.paused ? 'playing' : 'ready') : 'off') + ' samples=' + Object.keys(audioBuffers).length,
       'meta armor=' + META.armor + ' core=' + META.core + ' cannon=' + META.cannon + ' treads=' + META.treads + ' thirst=' + META.thirst + ' frenzy=' + META.frenzy + ' weaponTiers=' + weaponMeta.cannon + '/' + weaponMeta.flak + '/' + weaponMeta.laser + '/' + weaponMeta.missile,
       state.mode === 'LEVELUP' ? 'upgrades=1:' + upgradeNames[upgradePick[0]] + ' 2:' + upgradeNames[upgradePick[1]] + ' 3:' + upgradeNames[upgradePick[2]] : 'level=' + player.level + ' xp=' + Math.floor(player.xp) + '/' + player.xpNext,
       'fps=' + perf.fps.toFixed(1) + ' frame=' + perf.frameMs.toFixed(2) + ' update=' + perf.updateMs.toFixed(2) + ' render=' + perf.renderMs.toFixed(2) + ' detail=' + perf.creatureDetails,
