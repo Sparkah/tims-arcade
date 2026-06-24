@@ -56,11 +56,11 @@ export async function onRequestPost({ request, env }) {
   catch { return jsonError('bad json', 400); }
 
   const gameId = String(body.game || '').toLowerCase();
+  if (!Object.hasOwn(PRODUCTS_BY_GAME, gameId)) return jsonError('bad game', 400);
   const products = PRODUCTS_BY_GAME[gameId];
-  if (!products) return jsonError('bad game', 400);
   const productId = String(body.productId || '');
+  if (!Object.hasOwn(products, productId)) return jsonError('bad product', 400);
   const product = products[productId];
-  if (!product) return jsonError('bad product', 400);
 
   const initData = String(body.initData || '');
   const auth = await verifyTelegramInitData(initData, env.TELEGRAM_GAMEBOT_TOKEN);
