@@ -68,6 +68,7 @@ function nukeSfx() {
   if (!playBuf('nuke', 1.0, 0.97 + Math.random() * 0.06)) nukeSound();
 }
 function collapseSfx(big) {   // rate-limited rolling crackle so a mass collapse is a ROAR, not 50 stacked clicks
+  if (GF.muted) return;
   if (_collapseClock - _lastCollapseSfx < 0.05) return; _lastCollapseSfx = _collapseClock;
   var r = Math.random();
   if (r < 0.45) playBuf('crack', 0.55, 0.82 + Math.random() * 0.3);
