@@ -6,6 +6,10 @@
 // _collapseClock (advanced in update()). SFX samples: audio/sfx/<name>.mp3;
 // background music: audio/bg_track.mp3. Add new sounds here, not in index.html.
 // ── REAL NUKE SOUND ──────────────────────────────────────────────────────────
+// Dedicated context is intentional for this game copy: gf-lib exposes tone/music
+// helpers but not its raw AudioContext or sample-decode pipeline. This module
+// handles CC0 sample playback + procedural noise, while every entrypoint checks
+// GF.muted and startMusic() still routes background music through GF.bgMusic.
 var _nctx = null;
 function nctx() { if (_nctx) return _nctx; try { _nctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { _nctx = null; } return _nctx; }
 function nNoise(c, t, dur, peak, ftype, freq, q) { var n = Math.max(1, c.sampleRate * dur | 0), buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0); for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n); var s = c.createBufferSource(); s.buffer = buf; var f = c.createBiquadFilter(); f.type = ftype; f.frequency.value = freq; if (q) f.Q.value = q; var g = c.createGain(); g.gain.setValueAtTime(peak, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); s.connect(f); f.connect(g); g.connect(c.destination); s.start(t); s.stop(t + dur + 0.03); }
