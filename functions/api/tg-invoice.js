@@ -68,6 +68,9 @@ export async function onRequestPost({ request, env }) {
 
   const userId = auth.user && auth.user.id ? String(auth.user.id) : 'unknown';
   const nonce = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
+  // Payload format is shared with @gamesfactorybot's payment recorder:
+  // <gameId>:<productId>:<userId>:<timestamp>:<nonce>. The Mini App applies
+  // delivery immediately after Telegram reports openInvoice() == 'paid'.
   const payload = [gameId, productId, userId, Date.now(), nonce].join(':');
 
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_GAMEBOT_TOKEN}/createInvoiceLink`, {
