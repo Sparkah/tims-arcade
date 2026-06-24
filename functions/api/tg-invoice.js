@@ -1,25 +1,49 @@
 import { jsonError, sameOriginOk } from '../_lib/response.js';
 
-const PRODUCTS = {
-  starter: {
-    title: 'Starfall Sprint Starter Pack',
-    description: '500 coins, 3 revives, and the mint comet trail.',
-    amount: 25,
+const PRODUCTS_BY_GAME = {
+  starfall: {
+    starter: {
+      title: 'Starfall Sprint Starter Pack',
+      description: '500 coins, 3 revives, and the mint comet trail.',
+      amount: 25,
+    },
+    doubler: {
+      title: 'Starfall Sprint Coin Doubler',
+      description: 'Permanent double coin rewards inside Starfall Sprint.',
+      amount: 75,
+    },
+    revives: {
+      title: 'Starfall Sprint Revive Bundle',
+      description: '8 revive tokens for Starfall Sprint.',
+      amount: 35,
+    },
+    nova_skin: {
+      title: 'Starfall Sprint Nova Skin Pack',
+      description: 'Two premium catcher skins and 1200 coins.',
+      amount: 99,
+    },
   },
-  doubler: {
-    title: 'Starfall Sprint Coin Doubler',
-    description: 'Permanent double coin rewards inside Starfall Sprint.',
-    amount: 75,
-  },
-  revives: {
-    title: 'Starfall Sprint Revive Bundle',
-    description: '8 revive tokens for Starfall Sprint.',
-    amount: 35,
-  },
-  nova_skin: {
-    title: 'Starfall Sprint Nova Skin Pack',
-    description: 'Two premium catcher skins and 1200 coins.',
-    amount: 99,
+  megaton: {
+    starter: {
+      title: 'Megaton Starter Cache',
+      description: '1500 caps, Yield level 2, and +1 Luck.',
+      amount: 25,
+    },
+    caps_pack: {
+      title: 'Megaton Caps Pack',
+      description: '5000 caps for the next upgrade wall.',
+      amount: 49,
+    },
+    warhead_tuning: {
+      title: 'Megaton Warhead Tuning',
+      description: '+4 Yield, +2 Luck, and 1200 caps.',
+      amount: 75,
+    },
+    mirv_kit: {
+      title: 'Megaton MIRV Kit',
+      description: '+1 MIRV, +2 Penetrator, +2 Flares, and 1800 caps.',
+      amount: 99,
+    },
   },
 };
 
@@ -31,9 +55,11 @@ export async function onRequestPost({ request, env }) {
   try { body = await request.json(); }
   catch { return jsonError('bad json', 400); }
 
-  if (String(body.game || '') !== 'starfall') return jsonError('bad game', 400);
+  const gameId = String(body.game || '').toLowerCase();
+  const products = PRODUCTS_BY_GAME[gameId];
+  if (!products) return jsonError('bad game', 400);
   const productId = String(body.productId || '');
-  const product = PRODUCTS[productId];
+  const product = products[productId];
   if (!product) return jsonError('bad product', 400);
 
   const initData = String(body.initData || '');
@@ -42,7 +68,7 @@ export async function onRequestPost({ request, env }) {
 
   const userId = auth.user && auth.user.id ? String(auth.user.id) : 'unknown';
   const nonce = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
-  const payload = ['starfall', productId, userId, Date.now(), nonce].join(':');
+  const payload = [gameId, productId, userId, Date.now(), nonce].join(':');
 
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_GAMEBOT_TOKEN}/createInvoiceLink`, {
     method: 'POST',
