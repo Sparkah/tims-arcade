@@ -233,8 +233,9 @@ export var state = {
 // continueToNextMap + the per-map palette/difficulty helpers in render/world.js, systems/shared.js, systems/enemies.js).
 export var WIN_SECONDS = 1200;
 
-// Victory-screen "Buy me a coffee" link. PLACEHOLDER - Tim fills the real URL before ship.
-export var COFFEE_URL = 'https://buymeacoffee.com/PLACEHOLDER';
+// Victory-screen outbound link. Repointed 2026-06-25 from a buymeacoffee PLACEHOLDER to Tim's arcade (a player
+// who WON gets sent to more of his games). Swap to a real buymeacoffee/support URL here if Tim wants tipping.
+export var COFFEE_URL = 'https://game-factory.tech';
 // localStorage flag set when the player taps "Register interest" on the victory screen (read by the screen
 // to render the persistent "Thanks - noted" state on a return visit).
 export var SAVE_INTEREST = 'bloodtread_rebuild_interest';

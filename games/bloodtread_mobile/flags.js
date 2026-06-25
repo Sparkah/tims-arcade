@@ -4,6 +4,12 @@ import { clamp } from './lib/math.js';
 
 export var qs = new URLSearchParams(location.search);
 
+// PUBLIC/HOSTED build marker (Tim 2026-06-25): the deployed index.html sets window.__BT_PUBLIC=1 BEFORE main.js
+// loads, so the BARE hosted URL (no query string) shows real art + drops straight into play - a shareable link
+// that Just Works. It does NOT enable cheats (CHEATS_ENABLED stays gated on ?debug/?cheats), and the dev build
+// (:8336, which never sets the flag) is unchanged. Equivalent to the old ?sprites&play, baked in for hosting.
+export var PUBLIC_BUILD = typeof window !== 'undefined' && !!window.__BT_PUBLIC;
+
 // Cheats / dev tools (the CHEATS menu, skip-to-minute, ?min boot, c/x grants) are gated behind this so the
 // SHIPPED game has NO cheat menu (Tim). IMMUTABLE boot const (unlike DEBUG, which a keybind can toggle):
 // add ?debug or ?cheats to re-enable them for testing. The window.__* test/harness hooks are separate.
@@ -17,12 +23,12 @@ export var DIAG = qs.get('diag') || '';
 export var LOGIC_ONLY = DIAG === 'logic' || DIAG === 'updateonly';
 export var RENDER_ONLY = DIAG === 'render' || DIAG === 'renderonly';
 export var START_MIN = (CHEATS_ENABLED || RENDER_ONLY) ? clamp(parseFloat(qs.get('min') || (RENDER_ONLY ? '9' : '0')), 0, 60) : 0;   // ?min is a cheat -> 0 in the shipped game unless cheats/render-diag
-export var AUTO_START = START_MIN > 0 || RENDER_ONLY || qs.has('play') || qs.has('autoplay');
+export var AUTO_START = START_MIN > 0 || RENDER_ONLY || qs.has('play') || qs.has('autoplay') || PUBLIC_BUILD;
 export var ANALYTICS_ENABLED = qs.get('analytics') !== '0';
 export var GA_GAME_KEY = '10e10fa34d16c989228a8e78031ed693';
 export var GA_SECRET_KEY = '2228ecb3e2c3fda88accf513769a75b5052e2402';
 export var BUILD_TAG = (qs.get('v') || 'local').slice(0, 48);
-export var OLD_SPRITES = qs.has('sprites') || qs.has('oldsprites');
+export var OLD_SPRITES = qs.has('sprites') || qs.has('oldsprites') || PUBLIC_BUILD;
 export var OLD_ENV = OLD_SPRITES && qs.get('oldenv') !== '0';
 export var OLD_TANK = OLD_SPRITES && qs.get('oldtank') !== '0';
 export var OLD_DEATH = OLD_SPRITES && qs.get('death') !== '0';

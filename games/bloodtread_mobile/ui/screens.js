@@ -327,7 +327,7 @@ import { CHEATS_ENABLED } from '../flags.js';
     var interested = false;
     try { interested = !!localStorage.getItem(SAVE_INTEREST); } catch (err) {}
     rects.win_interest = drawButton(x, by0 + gob, w, btnH - 2, interested ? 'THANKS - NOTED' : 'REGISTER INTEREST', false);
-    rects.win_coffee = drawButton(x, by0 + gob * 2, w, btnH - 4, 'BUY ME A COFFEE', false);
+    rects.win_coffee = drawButton(x, by0 + gob * 2, w, btnH - 4, 'MORE GAMES', false);   // -> COFFEE_URL (now the arcade; was a buymeacoffee placeholder)
     // footer note: CONTINUE advances to the next (harder, reskinned) map
     hud.fillStyle = BT_BONE_DIM;
     hud.font = Math.max(9, Math.min(12, view.cssH * 0.016)) + 'px sans-serif';

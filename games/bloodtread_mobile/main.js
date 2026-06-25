@@ -6,7 +6,7 @@
 import { fmtTime, clampInt, TWO_PI } from './lib/math.js';
 import { rnd } from './lib/rng.js';
 import {
-  DIAG, DEBUG, ANALYTICS_ENABLED, OLD_SPRITES, OLD_ENV, OLD_TANK, OLD_DEATH, TANK_LAYERS,
+  DIAG, DEBUG, CHEATS_ENABLED, ANALYTICS_ENABLED, OLD_SPRITES, OLD_ENV, OLD_TANK, OLD_DEATH, TANK_LAYERS,
   GORE_FX, BREAK_ENV, VEIN_FX, LEECH_FX, COLLIDERS, LOGIC_ONLY, START_MIN, AUTO_START,
   TUNE_MODE, TUNE_SHEET_URL, WIPE_SAVE
 } from './flags.js';
@@ -43,28 +43,34 @@ import { startLoop } from './core/loop.js';
     return;
   }
 
-  window.__skipMin = skipToMinute;
-  window.__startRun = startRun;
-  window.__openMenu = function () { resetGame(false, 0); };
-  window.__cheatMoney = cheatMoney;
-  window.__cheatMaxAll = cheatMaxAll;
-  window.__toggleMute = toggleMute;
-  window.__triggerUnleash = triggerUnleash;
-  window.__buyTrack = buyTrack;
-  window.__equipWeapon = buyOrEquipWeapon;
-  window.__chooseUpgrade = chooseUpgrade;
-  window.__startLevelUp = startLevelUp;
-  window.__addXp = gainXp;
-  // Debug: jump straight to the VICTORY screen. Ensures a live run, jams the clock just past the 20:00 win
-  // threshold, then steps the sim once so the NORMAL update() win path fires (exercising the real milestone +
-  // Run:Win analytics, not a shortcut). No-op if already on the win screen.
-  window.__win = function () {
-    if (state.mode === 'WIN') return window.__perfStats();
-    if (state.mode !== 'PLAYING' || player.dead) startRun(0);
-    state.t = WIN_SECONDS;
-    update(STEP);
-    return window.__perfStats();
-  };
+  // DEV/CHEAT + harness-control hooks, gated behind CHEATS_ENABLED (Tim 2026-06-25 public-build hardening): the
+  // PUBLIC build exposes NONE of these (no console skip-to-minute / free money / force-levelup / etc.), so a
+  // player can't trivialise the game from devtools. The read-only reporters (__perfStats, render_game_to_text)
+  // stay ungated below. Test harnesses load with ?cheats/?debug (CHEATS_ENABLED) so they keep these hooks.
+  if (CHEATS_ENABLED) {
+    window.__skipMin = skipToMinute;
+    window.__startRun = startRun;
+    window.__openMenu = function () { resetGame(false, 0); };
+    window.__cheatMoney = cheatMoney;
+    window.__cheatMaxAll = cheatMaxAll;
+    window.__toggleMute = toggleMute;
+    window.__triggerUnleash = triggerUnleash;
+    window.__buyTrack = buyTrack;
+    window.__equipWeapon = buyOrEquipWeapon;
+    window.__chooseUpgrade = chooseUpgrade;
+    window.__startLevelUp = startLevelUp;
+    window.__addXp = gainXp;
+    // Debug: jump straight to the VICTORY screen. Ensures a live run, jams the clock just past the 20:00 win
+    // threshold, then steps the sim once so the NORMAL update() win path fires (exercising the real milestone +
+    // Run:Win analytics, not a shortcut). No-op if already on the win screen.
+    window.__win = function () {
+      if (state.mode === 'WIN') return window.__perfStats();
+      if (state.mode !== 'PLAYING' || player.dead) startRun(0);
+      state.t = WIN_SECONDS;
+      update(STEP);
+      return window.__perfStats();
+    };
+  }
   if (DEBUG) {
     window.__debugDamagePlayer = function (amount) {
       if (state.mode !== 'PLAYING') return window.__perfStats();
