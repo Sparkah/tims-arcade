@@ -7,3 +7,4 @@ Original prompt: Work on Megaton Telegram infrastructure/integrations while Clau
 - Verified locally with Wrangler Pages dev and Playwright: wrapper boots the game, iframe receives `window.__tg`, shop renders all four Stars buttons on mobile, and console/page errors were empty.
 - TON remains intentionally disabled until wallet/contract/chain verification details are decided.
 - Next: configure Supabase env vars, set AdsGram block ID, restart bot, and test a real paid invoice inside Telegram.
+- Added AdsGram form values, Monetag zone wiring, `?adsgram=<blockId>` iframe forwarding, AdsGram-to-Monetag rewarded fallback, and the static TonConnect manifest. Monetag still needs the dashboard SDK tag `src` before live ads can load; TON still needs TonConnect UI plus server-side chain verification before granting items.

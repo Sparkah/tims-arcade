@@ -855,15 +855,54 @@ function showAd(type) {
     // promise resolves only when the ad is actually done, so a no-fill there is
     // rare and the resume on every exit still fires.
     try {
+      var tryMonetag = function () {
+        var monetagZone = window.MEGATON_MONETAG_ZONE_ID;
+        var monetagShow = monetagZone && window['show_' + monetagZone];
+        if (!monetagShow || typeof monetagShow !== 'function' || (type !== 'rewarded' && type !== 'midgame')) return false;
+        pauseAudio();
+        var monetagResult;
+        try {
+          if (type === 'rewarded') {
+            monetagResult = monetagShow();
+          } else {
+            monetagResult = monetagShow({
+              type: 'inApp',
+              requestVar: 'megaton_midgame',
+              inAppSettings: window.MEGATON_MONETAG_INAPP_SETTINGS || {
+                frequency: 1,
+                capping: 0.1,
+                interval: 60,
+                timeout: 5,
+                everyPage: false
+              }
+            });
+          }
+        } catch (e) {
+          ok({ shown: false, rewarded: false });
+          return true;
+        }
+        Promise.resolve(monetagResult)
+          .then(function () { ok({ shown: true, rewarded: type === 'rewarded' }); })
+          .catch(function () { ok({ shown: false, rewarded: false }); });
+        setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+        return true;
+      };
       if (type === 'rewarded' && window.MEGATON_ADSGRAM_BLOCK_ID && window.Adsgram && typeof window.Adsgram.init === 'function') {
         pauseAudio();
         var adsgram = window.__megatonAdsgram || (window.__megatonAdsgram = window.Adsgram.init({ blockId: window.MEGATON_ADSGRAM_BLOCK_ID }));
+        var adsgramDone = false;
+        var adsgramFallback = function () {
+          if (adsgramDone) return;
+          adsgramDone = true;
+          if (!tryMonetag()) ok({ shown: false, rewarded: false });
+        };
         adsgram.show()
-          .then(function () { ok({ shown: true, rewarded: true }); })
-          .catch(function () { ok({ shown: false, rewarded: false }); });
-        setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+          .then(function () { adsgramDone = true; ok({ shown: true, rewarded: true }); })
+          .catch(adsgramFallback);
+        setTimeout(adsgramFallback, 30000);
         return;
       }
+      if (tryMonetag()) return;
       // GamePush — preferred when present. Routes to whichever ad network
       // the active platform supports. showRewardedVideo resolves to bool.
       if (platform === 'gamepush' && window.gp && window.gp.ads) {
@@ -974,8 +1013,11 @@ function _adsNow() { return (typeof performance !== 'undefined' ? performance.no
 // yandex/crazygames/gamepush before the SDK's init() promise resolves, so
 // checking `platform !== 'local'` alone can be true while the ad object is still
 // missing — gate on the concrete ad API existing.
-function _adsSdkReady() {
+function _adsSdkReady(type) {
   try {
+    if (type === 'rewarded' && window.MEGATON_ADSGRAM_BLOCK_ID && window.Adsgram && typeof window.Adsgram.init === 'function') return true;
+    var monetagZone = window.MEGATON_MONETAG_ZONE_ID;
+    if (monetagZone && typeof window['show_' + monetagZone] === 'function') return true;
     if (platform === 'gamepush')   return !!(window.gp && window.gp.ads);
     if (platform === 'crazygames') return !!(window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad);
     if (platform === 'yandex')     return !!(window.ysdk && window.ysdk.adv);
@@ -995,7 +1037,7 @@ var adsApi = {
   // an ad SDK is present). Lets a game decide UI flow without firing an ad.
   canShowInterstitial: function () {
     if (_ads.inFlight) return false;
-    if (!_adsSdkReady()) return false;
+    if (!_adsSdkReady('midgame')) return false;
     var now = _adsNow();
     if (now - _ads.sessionStart < _ads.startupGraceMs) return false;
     if (_ads.lastInterstitial && now - _ads.lastInterstitial < _ads.minGapMs) return false;
@@ -1012,7 +1054,7 @@ var adsApi = {
     if (_ads.inFlight) return Promise.resolve({ shown: false });
     // force bypasses the CAP, but never the SDK-readiness / overlap guards — we
     // must not claim a shown ad (or churn audio) when no ad SDK can serve.
-    if (!_adsSdkReady()) return Promise.resolve({ shown: false });
+    if (!_adsSdkReady('midgame')) return Promise.resolve({ shown: false });
     if (!opts.force && !adsApi.canShowInterstitial()) return Promise.resolve({ shown: false });
     // Mark the timestamp at REQUEST time so a slow no-fill can't let a second
     // call slip through the gap window while the first is still open.
@@ -1039,6 +1081,10 @@ var adsApi = {
     opts = opts || {};
     var onReward = opts.onReward, onClose = opts.onClose;
     if (_ads.inFlight) {            // an ad is already open — don't overlap
+      if (typeof onClose === 'function') { try { onClose(false); } catch (e) {} }
+      return Promise.resolve({ shown: false, rewarded: false });
+    }
+    if (!_adsSdkReady('rewarded')) {
       if (typeof onClose === 'function') { try { onClose(false); } catch (e) {} }
       return Promise.resolve({ shown: false, rewarded: false });
     }
