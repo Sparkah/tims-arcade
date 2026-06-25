@@ -1,5 +1,5 @@
 import { jsonError, sameOriginOk } from '../_lib/response.js';
-import { getProduct, PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
+import { getProduct, hasStarsPrice, PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
 import {
   recordTelegramPurchase,
@@ -24,6 +24,7 @@ export async function onRequestPost({ request, env }) {
   const productId = String(body.productId || '');
   const product = getProduct(gameId, productId);
   if (!product) return jsonError('bad product', 400);
+  if (!hasStarsPrice(product)) return jsonError('bad stars product', 400);
 
   const initData = String(body.initData || '');
   const auth = await verifyTelegramInitData(initData, env.TELEGRAM_GAMEBOT_TOKEN);

@@ -25,5 +25,6 @@ window.MEGATON_TON_PRICES = {
   caps_pack: { ton: "0.40", nanotons: "400000000" },
   warhead_tuning: { ton: "0.60", nanotons: "600000000" },
   mirv_kit: { ton: "0.80", nanotons: "800000000" },
-  early_beta: { ton: "8.00", nanotons: "8000000000" }
+  early_beta: { ton: "8.00", nanotons: "8000000000" },
+  god_power: { ton: "20.00", nanotons: "20000000000" }
 };

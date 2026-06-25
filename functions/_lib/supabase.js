@@ -144,7 +144,7 @@ export async function recordTelegramPurchase(env, purchase) {
 
 export async function getTelegramPurchase(env, game, telegramUserId, payload) {
   const params = new URLSearchParams({
-    select: 'payload,game,product_id,telegram_user_id,currency,total_amount,status,paid_at,created_at',
+    select: 'payload,game,product_id,telegram_user_id,currency,total_amount,telegram_payment_charge_id,provider_payment_charge_id,status,raw,paid_at,created_at',
     game: `eq.${game}`,
     telegram_user_id: `eq.${telegramUserId}`,
     payload: `eq.${payload}`,

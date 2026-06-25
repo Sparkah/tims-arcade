@@ -25,7 +25,7 @@ create table if not exists public.telegram_purchases (
   product_id text not null,
   telegram_user_id text not null references public.telegram_players(telegram_user_id) on delete cascade,
   currency text not null default 'XTR',
-  total_amount integer not null,
+  total_amount bigint not null,
   telegram_payment_charge_id text,
   provider_payment_charge_id text,
   status text not null default 'paid',
@@ -33,6 +33,9 @@ create table if not exists public.telegram_purchases (
   created_at timestamptz not null default now(),
   paid_at timestamptz
 );
+
+alter table public.telegram_purchases
+  alter column total_amount type bigint;
 
 create index if not exists telegram_player_states_user_idx
   on public.telegram_player_states (telegram_user_id);

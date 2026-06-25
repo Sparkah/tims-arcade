@@ -15,6 +15,7 @@ window.__tg = {
 ## Methods
 
 - `buy(productId, "XTR", cb)` creates a Telegram Stars invoice through `/api/tg-invoice`, opens it with `Telegram.WebApp.openInvoice`, then applies the item after Telegram returns `paid`. The adapter also polls `/api/tg-purchase` so server-recorded receipts can become the entitlement source.
+- `buy(productId, "TON", cb)` creates a pending TON order through `/api/tg-ton-order`, opens TonConnect UI, sends a mainnet wallet transfer with a text-comment memo, then polls `/api/tg-ton-verify` until the recipient wallet transaction is indexed and matched before applying the item.
 - `showAd("rewarded" | "interstitial", cb)` forwards to `GF.ads.rewarded()` or `GF.ads.interstitial()` inside the iframe.
 - `saveState(state)` writes `megaton_v5` and syncs it to Supabase through `/api/tg-state`.
 - `loadState()` loads the Supabase state for the Telegram user and returns the local `megaton_v5` object.
@@ -22,14 +23,15 @@ window.__tg = {
 
 ## Products
 
-Current visible Megaton Stars products:
+Current visible Megaton products:
 
-| ID | Price | Delivery |
-| --- | ---: | --- |
-| `starter` | 25 XTR | 1500 caps, Yield level 2, +1 Luck |
-| `caps_pack` | 49 XTR | 5000 caps |
-| `warhead_tuning` | 75 XTR | +4 Yield, +2 Luck, 1200 caps |
-| `mirv_kit` | 99 XTR | +1 MIRV, +2 Penetrator, +2 Flares, 1800 caps |
+| ID | Stars | TON | Delivery |
+| --- | ---: | ---: | --- |
+| `starter` | 25 XTR | 0.20 | 1500 caps, Yield level 2, +1 Luck |
+| `caps_pack` | 49 XTR | 0.40 | 5000 caps |
+| `warhead_tuning` | 75 XTR | 0.60 | +4 Yield, +2 Luck, 1200 caps |
+| `mirv_kit` | 99 XTR | 0.80 | +1 MIRV, +2 Penetrator, +2 Flares, 1800 caps |
+| `god_power` | - | 20.00 | Ad-free play, maxed warhead perks, and 250,000 caps |
 
 `early_beta` is present in the backend catalog at 1000 XTR, but it is not shown in the wrapper shop until the game has a final fulfillment path for it.
 
@@ -72,16 +74,20 @@ Monetag zone `11200728` is configured in `Gallery/tg-megaton/config.js` with SDK
 
 ## TON
 
-TON is not yet granting items. The static TonConnect manifest is hosted at `https://game-factory.tech/tg-megaton/tonconnect-manifest.json`, and the recipient wallet plus provisional TON prices are in `Gallery/tg-megaton/config.js`.
+TON Connect checkout is wired in the Telegram wrapper. The static TonConnect manifest is hosted at `https://game-factory.tech/tg-megaton/tonconnect-manifest.json`, and the recipient wallet plus visible TON prices are in `Gallery/tg-megaton/config.js`.
 
-Provisional TON prices are mapped from Stars using roughly USD 0.013 per Star and TON around USD 1.56 on 2026-06-25:
+Server endpoints:
 
-| ID | Stars | TON |
-| --- | ---: | ---: |
-| `starter` | 25 | 0.20 |
-| `caps_pack` | 49 | 0.40 |
-| `warhead_tuning` | 75 | 0.60 |
-| `mirv_kit` | 99 | 0.80 |
-| `early_beta` | 1000 | 8.00 |
+- `/api/tg-ton-order`: requires Telegram initData, stores a pending Supabase purchase, and returns a TonConnect message with a text-comment payload.
+- `/api/tg-ton-verify`: requires Telegram initData, reads the pending order, queries TonAPI for inbound transactions to the recipient wallet, and marks the purchase paid only when the memo and nanotons match.
 
-The remaining TON lane still needs TonConnect UI, transaction memo format, and server-side chain verification before any item is granted.
+TON mainnet config:
+
+| Field | Value |
+| --- | --- |
+| Recipient | `UQCAFJyUz0GmYZmtiDz21WXGzOfWPQaBI6T5fPjIjhBn_i6Q` |
+| Network | `-239` |
+| Memo format | `GF:ton:<game>:<productId>:<uuid>` |
+| TonConnect UI | `@tonconnect/ui@3.0.0` |
+
+The memo is intentionally opaque and does not put the Telegram user ID on-chain. The Telegram user/order link stays in Supabase. Full end-to-end TON unlock still needs a real wallet transaction inside Telegram after deployment.
