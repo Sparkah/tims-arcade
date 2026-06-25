@@ -223,7 +223,7 @@
 </head>
 <body>
 <div id="app">
-  <iframe id="game" src="./game/index.html?tg=1" allow="autoplay; fullscreen; gamepad"></iframe>
+  <iframe id="game" data-src="./game/index.html?tg=1" allow="autoplay; fullscreen; gamepad"></iframe>
   <button class="shop-fab" type="button" id="shopBtn">SHOP</button>
 </div>
 
@@ -232,7 +232,7 @@
     <div class="head">
       <div>
         <h1>Megaton</h1>
-        <p class="lede">Use Telegram Stars for optional caps and warhead tuning. Purchases apply immediately to this device.</p>
+        <p class="lede">Use Telegram Stars for optional caps and warhead tuning. Purchases sync to your Telegram profile.</p>
       </div>
       <span class="tag">Stars</span>
     </div>
@@ -247,6 +247,8 @@
 <script>
 (function () {
   'use strict';
+  var GAME_ID = 'megaton';
+  var SAVE_KEY = 'megaton_v5';
   var tg = window.Telegram && window.Telegram.WebApp;
   var HAS_TG = Boolean(tg && tg.initData);
   var game = document.getElementById('game');
@@ -254,6 +256,8 @@
   var shopList = document.getElementById('shopList');
   var toastEl = document.getElementById('toast');
   var toastTimer = 0;
+  var saveTimer = 0;
+  var gameStarted = false;
 
   var PRODUCTS = {
     starter: {
@@ -295,22 +299,120 @@
     toastTimer = setTimeout(function () { toastEl.hidden = true; }, ms || 2600);
   }
 
-  function esc(s) {
-    return String(s || '').replace(/[&<>"']/g, function (ch) {
-      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+  function sleep(ms) {
+    return new Promise(function (resolve) { setTimeout(resolve, ms); });
+  }
+
+  async function apiPost(path, body, keepalive) {
+    var res = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      keepalive: Boolean(keepalive)
     });
+    var data = await res.json().catch(function () { return {}; });
+    if (!res.ok) {
+      var err = new Error(data.error || ('http_' + res.status));
+      err.status = res.status;
+      err.data = data;
+      throw err;
+    }
+    return data;
+  }
+
+  function readLocalState() {
+    try {
+      var raw = localStorage.getItem(SAVE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeLocalState(state) {
+    if (!state || typeof state !== 'object') return false;
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify(state));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function stateStamp(state) {
+    return state && Number(state.lastSeen || state.state_rev || 0) || 0;
+  }
+
+  async function loadRemoteState() {
+    if (!HAS_TG) return null;
+    try {
+      var data = await apiPost('/api/tg-state', {
+        action: 'load',
+        game: GAME_ID,
+        initData: tg.initData
+      });
+      if (!data || !data.state) return null;
+      var local = readLocalState();
+      if (!local || stateStamp(data.state) >= stateStamp(local)) {
+        writeLocalState(data.state);
+      } else {
+        queueSave(600);
+      }
+      return data.state;
+    } catch (e) {
+      if (e.status !== 503) console.warn('Megaton Telegram state load failed', e.message);
+      return null;
+    }
+  }
+
+  async function saveRemoteState(reason, keepalive) {
+    if (!HAS_TG) return false;
+    var state = readLocalState();
+    if (!state || typeof state !== 'object') return false;
+    try {
+      await apiPost('/api/tg-state', {
+        action: 'save',
+        game: GAME_ID,
+        initData: tg.initData,
+        reason: reason || 'autosave',
+        state: state
+      }, keepalive);
+      return true;
+    } catch (e) {
+      if (e.status !== 503) console.warn('Megaton Telegram state save failed', e.message);
+      return false;
+    }
+  }
+
+  function queueSave(ms) {
+    if (!HAS_TG) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () { saveRemoteState('queued'); }, ms || 900);
   }
 
   function renderShop() {
-    shopList.innerHTML = Object.keys(PRODUCTS).map(function (id) {
+    shopList.textContent = '';
+    Object.keys(PRODUCTS).forEach(function (id) {
       var p = PRODUCTS[id];
-      return '<div class="shop-item">' +
-        '<div><h3>' + esc(p.title) + '</h3><p>' + esc(p.desc) + '</p></div>' +
-        '<button class="buy" type="button" data-product="' + esc(id) + '">' + p.stars + ' Stars</button>' +
-      '</div>';
-    }).join('');
-    Array.prototype.forEach.call(shopList.querySelectorAll('button[data-product]'), function (btn) {
-      btn.addEventListener('click', function () { buyProduct(btn.getAttribute('data-product')); });
+      var item = document.createElement('div');
+      var copy = document.createElement('div');
+      var title = document.createElement('h3');
+      var desc = document.createElement('p');
+      var btn = document.createElement('button');
+
+      item.className = 'shop-item';
+      title.textContent = p.title;
+      desc.textContent = p.desc;
+      btn.className = 'buy';
+      btn.type = 'button';
+      btn.textContent = p.stars + ' Stars';
+      btn.addEventListener('click', function () { buyProduct(id, 'XTR'); });
+
+      copy.appendChild(title);
+      copy.appendChild(desc);
+      item.appendChild(copy);
+      item.appendChild(btn);
+      shopList.appendChild(item);
     });
   }
 
@@ -323,12 +425,23 @@
     shopScreen.hidden = true;
   }
 
-  async function buyProduct(id) {
+  async function buyProduct(id, currency, cb) {
+    if (typeof currency === 'function') {
+      cb = currency;
+      currency = 'XTR';
+    }
+    currency = currency || 'XTR';
     var product = PRODUCTS[id];
-    if (!product) return;
+    if (!product) return { ok: false, status: 'bad_product' };
+    if (currency !== 'XTR') {
+      toast('TON checkout is not enabled for this item yet.');
+      if (cb) cb('unsupported_currency');
+      return { ok: false, status: 'unsupported_currency' };
+    }
     if (!HAS_TG) {
       toast('Open Megaton in Telegram to buy with Stars.');
-      return;
+      if (cb) cb('not_telegram');
+      return { ok: false, status: 'not_telegram' };
     }
     try {
       toast('Opening Telegram Stars invoice...', 2200);
@@ -343,32 +456,65 @@
       });
       var data = await res.json().catch(function () { return {}; });
       if (!res.ok || !data.invoiceLink) throw new Error(data.error || 'invoice_failed');
-      tg.openInvoice(data.invoiceLink, function (status) {
+      return await new Promise(function (resolve) {
+        tg.openInvoice(data.invoiceLink, function (status) {
         if (status === 'paid') {
-          // Fulfillment contract: the bot records the shared
-          // megaton:<product>:... receipt payload, while this open Mini App
-          // applies the purchased item immediately on the paid callback.
-          applyProduct(id);
-          toast('Purchase applied: ' + product.title);
-          closeShop();
+          waitForPurchase(data.payload).then(function (serverPaid) {
+            if (!serverPaid) toast('Payment confirmed. Receipt sync is still catching up.', 2800);
+            applyProduct(id);
+            saveRemoteState('purchase');
+            toast('Purchase applied: ' + product.title);
+            closeShop();
+            if (cb) cb('paid');
+            resolve({ ok: true, status: 'paid', serverPaid: serverPaid });
+          });
         } else if (status === 'cancelled') {
           toast('Invoice cancelled');
+          if (cb) cb('cancelled');
+          resolve({ ok: false, status: 'cancelled' });
         } else {
           toast('Invoice status: ' + status);
+          if (cb) cb(status);
+          resolve({ ok: false, status: status });
         }
+      });
       });
     } catch (e) {
       toast('Payment setup failed: ' + e.message);
+      if (cb) cb('error');
+      return { ok: false, status: 'error', error: e.message };
     }
+  }
+
+  async function waitForPurchase(payload) {
+    if (!payload || !HAS_TG) return false;
+    for (var i = 0; i < 12; i += 1) {
+      try {
+        var data = await apiPost('/api/tg-purchase', {
+          action: 'claim',
+          game: GAME_ID,
+          initData: tg.initData,
+          payload: payload
+        });
+        if (data && data.paid) return true;
+      } catch (e) {
+        if (e.status === 503) return false;
+      }
+      await sleep(750);
+    }
+    return false;
   }
 
   function applyProduct(id) {
     var cw = game.contentWindow;
     try {
-      if (cw && typeof cw.__tgApplyMegatonProduct === 'function' && cw.__tgApplyMegatonProduct(id)) return;
+      if (cw && typeof cw.__tgApplyMegatonProduct === 'function' && cw.__tgApplyMegatonProduct(id)) {
+        queueSave(300);
+        return;
+      }
     } catch (e) {}
     try {
-      var raw = localStorage.getItem('megaton_v5');
+      var raw = localStorage.getItem(SAVE_KEY);
       var save = raw ? JSON.parse(raw) : {};
       if (id === 'starter') {
         save.money = Math.max(Number(save.money || 0) + 1500, 1500);
@@ -389,13 +535,76 @@
       save.tutDone = true;
       save.upgDone = true;
       save.tutStep = 4;
-      localStorage.setItem('megaton_v5', JSON.stringify(save));
-      game.contentWindow.location.reload();
+      localStorage.setItem(SAVE_KEY, JSON.stringify(save));
+      queueSave(120);
+      setTimeout(function () {
+        try { game.contentWindow.location.reload(); } catch (e) {}
+      }, 160);
     } catch (e) {}
+  }
+
+  function showAd(type, cb) {
+    var cw = game.contentWindow;
+    var done = function (result) {
+      var ok = Boolean(result && (result.rewarded || result.shown));
+      if (cb) cb(ok, result || {});
+      return result || { shown: false, rewarded: false };
+    };
+    try {
+      if (!cw || !cw.GF || !cw.GF.ads) return Promise.resolve(done(null));
+      if (type === 'rewarded') {
+        return cw.GF.ads.rewarded({ onReward: function () {} }).then(done);
+      }
+      return cw.GF.ads.interstitial({ force: true }).then(done);
+    } catch (e) {
+      return Promise.resolve(done(null));
+    }
+  }
+
+  window.__tg = {
+    buy: buyProduct,
+    showAd: showAd,
+    saveState: function (obj) {
+      if (obj && typeof obj === 'object') writeLocalState(obj);
+      return saveRemoteState('hook');
+    },
+    loadState: async function () {
+      await loadRemoteState();
+      return readLocalState();
+    },
+    getProducts: function () {
+      return JSON.parse(JSON.stringify(PRODUCTS));
+    }
+  };
+
+  function attachGameAdapter() {
+    try {
+      var cw = game.contentWindow;
+      if (cw) cw.__tg = window.__tg;
+    } catch (e) {}
+  }
+
+  function startGame() {
+    if (gameStarted) return;
+    gameStarted = true;
+    game.src = game.getAttribute('data-src') || './game/index.html?tg=1';
+  }
+
+  async function boot() {
+    await loadRemoteState();
+    startGame();
+    if (HAS_TG) {
+      setInterval(function () { saveRemoteState('interval'); }, 15000);
+    }
   }
 
   document.getElementById('shopBtn').addEventListener('click', openShop);
   document.getElementById('closeShopBtn').addEventListener('click', closeShop);
+  game.addEventListener('load', attachGameAdapter);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') saveRemoteState('hidden', true);
+  });
+  window.addEventListener('pagehide', function () { saveRemoteState('pagehide', true); });
 
   window.render_game_to_text = function () {
     try {
@@ -412,6 +621,8 @@
     } catch (e) {}
     return window.render_game_to_text();
   };
+
+  boot();
 })();
 </script>
 </body>
