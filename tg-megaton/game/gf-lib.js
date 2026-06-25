@@ -852,11 +852,33 @@ function showAd(type) {
     // adblock / 30s-watchdog path must never mute with no visible ad (CG: mute on
     // ad start; Yandex: pause on onOpen). GamePush's promise API has no reliable
     // "started" hook, so for GP we pause at request time (best available) — its
-    // promise resolves only when the ad is actually done, so a no-fill there is
-    // rare and the resume on every exit still fires.
-    try {
-      var tryMonetag = function () {
-        var monetagZone = window.MEGATON_MONETAG_ZONE_ID;
+	    // promise resolves only when the ad is actually done, so a no-fill there is
+	    // rare and the resume on every exit still fires.
+	    try {
+	      var tryTelegramParentAd = function () {
+	        try {
+	          if (!window.parent || window.parent === window || !window.parent.__tg || typeof window.parent.__tg.showAd !== 'function') return false;
+	          pauseAudio();
+	          var parentType = type === 'rewarded' ? 'rewarded' : 'interstitial';
+	          var parentDone = false;
+	          var finish = function (result) {
+	            if (parentDone) return;
+	            parentDone = true;
+	            ok({
+	              shown: !!(result && result.shown),
+	              rewarded: !!(result && result.rewarded)
+	            });
+	          };
+	          Promise.resolve(window.parent.__tg.showAd(parentType, function (success, result) {
+	            finish(result || { shown: !!success, rewarded: parentType === 'rewarded' && !!success });
+	          })).then(finish).catch(function () { finish({ shown: false, rewarded: false }); });
+	          setTimeout(function () { finish({ shown: false, rewarded: false }); }, 32000);
+	          return true;
+	        } catch (e) { return false; }
+	      };
+	      if (tryTelegramParentAd()) return;
+	      var tryMonetag = function () {
+	        var monetagZone = window.MEGATON_MONETAG_ZONE_ID;
         var monetagShow = monetagZone && window['show_' + monetagZone];
         if (!monetagShow || typeof monetagShow !== 'function' || (type !== 'rewarded' && type !== 'midgame')) return false;
         pauseAudio();
@@ -1013,9 +1035,10 @@ function _adsNow() { return (typeof performance !== 'undefined' ? performance.no
 // yandex/crazygames/gamepush before the SDK's init() promise resolves, so
 // checking `platform !== 'local'` alone can be true while the ad object is still
 // missing — gate on the concrete ad API existing.
-function _adsSdkReady(type) {
-  try {
-    if (type === 'rewarded' && window.MEGATON_ADSGRAM_BLOCK_ID && window.Adsgram && typeof window.Adsgram.init === 'function') return true;
+	function _adsSdkReady(type) {
+	  try {
+	    if (window.parent && window.parent !== window && window.parent.__tg && typeof window.parent.__tg.showAd === 'function') return true;
+	    if (type === 'rewarded' && window.MEGATON_ADSGRAM_BLOCK_ID && window.Adsgram && typeof window.Adsgram.init === 'function') return true;
     var monetagZone = window.MEGATON_MONETAG_ZONE_ID;
     if (monetagZone && typeof window['show_' + monetagZone] === 'function') return true;
     if (platform === 'gamepush')   return !!(window.gp && window.gp.ads);
@@ -1728,11 +1751,13 @@ function _fnHostOk() {
 function _fnSlug() {
   // Same canonical slug the heartbeat uses: the /games/<slug>/ path segment.
   // No match (game served outside the gallery tree) -> no attribution -> off.
-  try {
-    var m = (location.pathname || '').match(/\/games\/([a-zA-Z0-9_-]{1,40})(\/|$)/);
-    return m ? m[1].toLowerCase() : '';
-  } catch (e) { return ''; }
-}
+	  try {
+	    var m = (location.pathname || '').match(/\/games\/([a-zA-Z0-9_-]{1,40})(\/|$)/);
+	    if (m) return m[1].toLowerCase();
+	    m = (location.pathname || '').match(/\/tg-([a-zA-Z0-9_-]{1,40})(\/|$)/);
+	    return m ? m[1].toLowerCase() : '';
+	  } catch (e) { return ''; }
+	}
 function _fnUuid() {
   try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (e) {}
   try {

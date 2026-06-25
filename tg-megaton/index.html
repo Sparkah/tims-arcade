@@ -9,6 +9,20 @@
 <meta property="og:image" content="https://game-factory.tech/tg-megaton/cover.png">
 <script src="https://telegram.org/js/telegram-web-app.js?62"></script>
 <script src="./config.js"></script>
+<script async src="https://sad.adsgram.ai/js/sad.min.js"></script>
+<script>
+(function () {
+  var zone = window.MEGATON_MONETAG_ZONE_ID;
+  var src = window.MEGATON_MONETAG_SDK_SRC;
+  if (!zone || !src || window['show_' + zone]) return;
+  var tag = document.createElement('script');
+  tag.async = true;
+  tag.src = src;
+  tag.dataset.zone = zone;
+  tag.dataset.sdk = 'show_' + zone;
+  document.head.appendChild(tag);
+})();
+</script>
 <script src="https://unpkg.com/@tonconnect/ui@3.0.0/dist/tonconnect-ui.min.js"></script>
 <style>
   :root {
@@ -293,8 +307,9 @@
   var saveTimer = 0;
   var gameStarted = false;
   var tonConnectUI = null;
-  var pendingTonTimer = 0;
-  var PENDING_TON_KEY = 'megaton_ton_pending';
+	  var pendingTonTimer = 0;
+	  var PENDING_TON_KEY = 'megaton_ton_pending';
+	  var adBusy = false;
 
   var PRODUCTS = {
     starter: {
@@ -824,23 +839,92 @@
     } catch (e) {}
   }
 
-  function showAd(type, cb) {
-    var cw = game.contentWindow;
-    var done = function (result) {
-      var ok = Boolean(result && (result.rewarded || result.shown));
-      if (cb) cb(ok, result || {});
-      return result || { shown: false, rewarded: false };
-    };
-    try {
-      if (!cw || !cw.GF || !cw.GF.ads) return Promise.resolve(done(null));
-      if (type === 'rewarded') {
-        return cw.GF.ads.rewarded({ onReward: function () {} }).then(done);
-      }
-      return cw.GF.ads.interstitial({ force: true }).then(done);
-    } catch (e) {
-      return Promise.resolve(done(null));
-    }
-  }
+	  function waitForAdSdk(predicate, ms) {
+	    var started = Date.now();
+	    return new Promise(function (resolve) {
+	      (function tick() {
+	        var value = null;
+	        try { value = predicate(); } catch (e) { value = null; }
+	        if (value) { resolve(value); return; }
+	        if (Date.now() - started >= ms) { resolve(null); return; }
+	        setTimeout(tick, 120);
+	      })();
+	    });
+	  }
+
+	  function monetagShowFn() {
+	    var zone = window.MEGATON_MONETAG_ZONE_ID;
+	    var fn = zone && window['show_' + zone];
+	    return typeof fn === 'function' ? fn : null;
+	  }
+
+	  function showMonetagAd(type) {
+	    var fn = monetagShowFn();
+	    if (!fn) return null;
+	    if (type === 'rewarded') return fn();
+	    return fn({
+	      type: 'inApp',
+	      requestVar: 'megaton_midgame',
+	      inAppSettings: window.MEGATON_MONETAG_INAPP_SETTINGS || {
+	        frequency: 1,
+	        capping: 0.1,
+	        interval: 60,
+	        timeout: 5,
+	        everyPage: false
+	      }
+	    });
+	  }
+
+	  function showAd(type, cb) {
+	    type = type === 'rewarded' ? 'rewarded' : 'interstitial';
+	    if (adBusy) {
+	      var busy = { shown: false, rewarded: false, reason: 'busy' };
+	      if (cb) cb(false, busy);
+	      return Promise.resolve(busy);
+	    }
+	    adBusy = true;
+	    var settled = false;
+	    var done = function (result) {
+	      if (settled) return result || { shown: false, rewarded: false };
+	      settled = true;
+	      adBusy = false;
+	      result = result || { shown: false, rewarded: false };
+	      var ok = Boolean(result.rewarded || result.shown);
+	      if (!ok) toast('Ad not ready. Try again in a moment.', 1600);
+	      if (cb) cb(ok, result);
+	      return result;
+	    };
+	    var fallbackToMonetag = function () {
+	      return waitForAdSdk(monetagShowFn, 3500).then(function (fn) {
+	        if (!fn) return done({ shown: false, rewarded: false, reason: 'sdk_missing' });
+	        var res;
+	        try { res = showMonetagAd(type); } catch (e) { return done({ shown: false, rewarded: false, reason: 'monetag_throw' }); }
+	        return Promise.resolve(res)
+	          .then(function () { return done({ shown: true, rewarded: type === 'rewarded', network: 'monetag' }); })
+	          .catch(function () { return done({ shown: false, rewarded: false, network: 'monetag', reason: 'closed_or_no_fill' }); });
+	      });
+	    };
+	    var promise;
+	    if (type === 'rewarded') {
+	      promise = waitForAdSdk(function () {
+	        return window.MEGATON_ADSGRAM_BLOCK_ID && window.Adsgram && typeof window.Adsgram.init === 'function' ? window.Adsgram : null;
+	      }, 3500).then(function (adsgramApi) {
+	        if (!adsgramApi) return fallbackToMonetag();
+	        try {
+	          var adsgram = window.__megatonAdsgram || (window.__megatonAdsgram = adsgramApi.init({ blockId: window.MEGATON_ADSGRAM_BLOCK_ID }));
+	          return Promise.resolve(adsgram.show())
+	            .then(function () { return done({ shown: true, rewarded: true, network: 'adsgram' }); })
+	            .catch(fallbackToMonetag);
+	        } catch (e) {
+	          return fallbackToMonetag();
+	        }
+	      });
+	    } else {
+	      promise = fallbackToMonetag();
+	    }
+	    setTimeout(function () { done({ shown: false, rewarded: false, reason: 'timeout' }); }, 32000);
+	    return promise.then(done).catch(function () { return done({ shown: false, rewarded: false, reason: 'error' }); });
+	  }
 
   window.__tg = {
     buy: buyProduct,
