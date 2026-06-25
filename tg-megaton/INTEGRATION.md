@@ -68,7 +68,7 @@ AdsGram platform values:
 | Bot ID | `8628009479` |
 | Reward block ID / UnitID | `36240` |
 
-Monetag zone `11200728` is configured in `Gallery/tg-megaton/config.js`. Paste the dashboard SDK tag's `src` into `window.MEGATON_MONETAG_SDK_SRC`; the wrapper will create the tag with `data-zone="11200728"` and `data-sdk="show_11200728"`. The game ad adapter will call `show_11200728()` for rewarded ads and `show_11200728({ type: "inApp", ... })` for interstitials when the SDK is loaded.
+Monetag zone `11200728` is configured in `Gallery/tg-megaton/config.js` with SDK source `https://libtl.com/sdk.js`; the wrapper creates the tag with `data-zone="11200728"` and `data-sdk="show_11200728"`. Activate Rewarded Interstitial and In-app Interstitial in Monetag. The game ad adapter calls `show_11200728()` for rewarded ads and `show_11200728({ type: "inApp", ... })` for interstitials when the SDK is loaded. Rewarded Popup is not used unless the rewarded call is changed to `show_11200728("pop")`.
 
 ## TON
 

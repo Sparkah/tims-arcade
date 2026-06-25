@@ -9,7 +9,7 @@ try {
 // Monetag Telegram Mini App zone. Paste the dashboard SDK tag's src into
 // MEGATON_MONETAG_SDK_SRC when available; the zone ID alone is not a script URL.
 window.MEGATON_MONETAG_ZONE_ID = "11200728";
-window.MEGATON_MONETAG_SDK_SRC = "";
+window.MEGATON_MONETAG_SDK_SRC = "https://libtl.com/sdk.js";
 window.MEGATON_MONETAG_INAPP_SETTINGS = {
   frequency: 2,
   capping: 0.1,
