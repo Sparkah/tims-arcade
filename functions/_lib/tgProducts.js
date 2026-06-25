@@ -58,6 +58,12 @@ export const PRODUCTS_BY_GAME = Object.freeze({
       nanotons: '800000000',
       deliver: 'mirv_1_pen_2_flares_2_caps_1800',
     }),
+    welcome_x8: Object.freeze({
+      title: 'Megaton Reactor Overdrive',
+      description: 'Multiply this welcome-back reactor payout by 8.',
+      amount: 10,
+      deliver: 'welcome_reactor_x8',
+    }),
     early_beta: Object.freeze({
       title: 'Megaton Early Beta',
       description: 'Reserve the next-map early beta pass.',

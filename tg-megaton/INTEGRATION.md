@@ -33,6 +33,12 @@ Current visible Megaton products:
 | `mirv_kit` | 99 XTR | 0.80 | +1 MIRV, +2 Penetrator, +2 Flares, 1800 caps |
 | `god_power` | - | 20.00 | Ad-free play, maxed warhead perks, and 250,000 caps |
 
+Context-only Stars product:
+
+| ID | Stars | Delivery |
+| --- | ---: | --- |
+| `welcome_x8` | 10 XTR | Multiplies the current welcome-back reactor payout by 8 after the invoice returns `paid` |
+
 `early_beta` is present in the backend catalog at 1000 XTR, but it is not shown in the wrapper shop until the game has a final fulfillment path for it.
 
 ## Supabase

@@ -11,3 +11,4 @@ Original prompt: Work on Megaton Telegram infrastructure/integrations while Clau
 - Set AdsGram production reward UnitID/block ID `36240` in `config.js`; keep `?adsgram=<blockId>` as a test override for alternate blocks.
 - Set Monetag SDK source to `https://libtl.com/sdk.js`. Current game code uses Monetag Rewarded Interstitial (`show_11200728()`) and In-app Interstitial (`show_11200728({ type: "inApp", ... })`); Rewarded Popup is not active unless the call changes to `show_11200728("pop")`.
 - Added TonConnect UI checkout in the Telegram wrapper, `/api/tg-ton-order`, `/api/tg-ton-verify`, TonAPI recipient-wallet verification, TON prices beside Stars, and the 20 TON `god_power` bundle. `god_power` persists as ad-free/max-warhead state and grants 250,000 caps.
+- Added a context-only `welcome_x8` product: the welcome-back reactor modal now offers normal collect, x2 via rewarded ad/God Power, or x8 after a 10 Stars invoice returns `paid`.
