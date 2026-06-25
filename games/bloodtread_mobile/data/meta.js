@@ -1,0 +1,12 @@
+// BloodForge meta-progression tables, indexed by track tier 0..6. Pure constants.
+export var MA_HP = [0, 12, 30, 60, 110, 190, 320];
+export var MA_REGEN = [0, 0.3, 0.7, 1.2, 2, 3, 4.5];
+export var MA_DMG = [1, 1.25, 1.55, 1.9, 2.3, 2.8, 3.4];
+export var MA_FIRE = [1, 1.12, 1.25, 1.4, 1.6, 1.85, 2.2];
+export var MA_BARREL = [0, 0, 0, 1, 1, 2, 2];
+export var MA_SPD = [1, 1.08, 1.16, 1.25, 1.35, 1.46, 1.6];
+export var MA_CRUSH = [1, 1.2, 1.45, 1.75, 2.1, 2.5, 3];
+export var MA_THIRST = [0, 2, 4, 6, 9, 12, 16];
+export var MA_CORETH = [0, 0, 1, 1, 2, 2, 3];
+export var MA_LASH = [0, 1, 1, 2, 2, 3, 3];
+export var MA_FRENZY = [1, 1.1, 1.2, 1.35, 1.5, 1.7, 2];
