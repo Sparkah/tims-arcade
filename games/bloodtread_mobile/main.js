@@ -137,17 +137,21 @@ import { startLoop } from './core/loop.js';
     if (DEBUG) { try { console.log(csv); } catch (e) {} }   // DEBUG-only log (CLAUDE.md: no console output in shipped code); always RETURNS the CSV
     return csv;
   };
-  window.__spawnMoteBurst = function (count, ox, oy, value) {
-    count = clampInt(count == null ? 40 : count, 1, MAX_MOTES);
-    ox = ox == null ? 220 : ox;
-    oy = oy == null ? 0 : oy;
-    value = value == null ? 2 : value;
-    for (var i = 0; i < count; i++) {
-      var a = rnd() * TWO_PI;
-      var r = Math.sqrt(rnd()) * 46;
-      spawnMote(player.x + ox + Math.cos(a) * r, player.y + oy + Math.sin(a) * r, value + (i % 5 === 0 ? 3 : 0));
-    }
-  };
+  // Gated (Codex 2026-06-25): spawns free blood-motes (an upgrade-currency advantage), so the PUBLIC build must
+  // not expose it. The resurrect-mote test harness loads with ?cheats/?debug, so it keeps the hook.
+  if (CHEATS_ENABLED) {
+    window.__spawnMoteBurst = function (count, ox, oy, value) {
+      count = clampInt(count == null ? 40 : count, 1, MAX_MOTES);
+      ox = ox == null ? 220 : ox;
+      oy = oy == null ? 0 : oy;
+      value = value == null ? 2 : value;
+      for (var i = 0; i < count; i++) {
+        var a = rnd() * TWO_PI;
+        var r = Math.sqrt(rnd()) * 46;
+        spawnMote(player.x + ox + Math.cos(a) * r, player.y + oy + Math.sin(a) * r, value + (i % 5 === 0 ? 3 : 0));
+      }
+    };
+  }
   window.__perfStats = function () {
     var picks = state.mode === 'LEVELUP'
       ? [upgradeNames[upgradePick[0]], upgradeNames[upgradePick[1]], upgradeNames[upgradePick[2]]]

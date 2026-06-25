@@ -24,7 +24,11 @@ export var LOGIC_ONLY = DIAG === 'logic' || DIAG === 'updateonly';
 export var RENDER_ONLY = DIAG === 'render' || DIAG === 'renderonly';
 export var START_MIN = (CHEATS_ENABLED || RENDER_ONLY) ? clamp(parseFloat(qs.get('min') || (RENDER_ONLY ? '9' : '0')), 0, 60) : 0;   // ?min is a cheat -> 0 in the shipped game unless cheats/render-diag
 export var AUTO_START = START_MIN > 0 || RENDER_ONLY || qs.has('play') || qs.has('autoplay') || PUBLIC_BUILD;
-export var ANALYTICS_ENABLED = qs.get('analytics') !== '0';
+// Analytics OFF for any DEV/CHEAT session (Codex 2026-06-25): ?god/?tune/?cheats/?debug/?min/?diag let a run be
+// trivialised or rebalanced, so those sessions must NOT pollute the public funnel/retention data. A normal public
+// player (bare URL, PUBLIC_BUILD) keeps analytics ON; the test harness (which uses these flags) is excluded.
+export var ANALYTICS_ENABLED = qs.get('analytics') !== '0'
+  && !(qs.has('debug') || qs.has('cheats') || qs.has('god') || qs.has('nohurt') || qs.has('tune') || qs.has('min') || qs.get('diag'));
 export var GA_GAME_KEY = '10e10fa34d16c989228a8e78031ed693';
 export var GA_SECRET_KEY = '2228ecb3e2c3fda88accf513769a75b5052e2402';
 export var BUILD_TAG = (qs.get('v') || 'local').slice(0, 48);
