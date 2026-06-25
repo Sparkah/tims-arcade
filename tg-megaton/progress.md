@@ -8,3 +8,4 @@ Original prompt: Work on Megaton Telegram infrastructure/integrations while Clau
 - TON remains intentionally disabled until wallet/contract/chain verification details are decided.
 - Next: configure Supabase env vars, set AdsGram block ID, restart bot, and test a real paid invoice inside Telegram.
 - Added AdsGram form values, Monetag zone wiring, `?adsgram=<blockId>` iframe forwarding, AdsGram-to-Monetag rewarded fallback, and the static TonConnect manifest. Monetag still needs the dashboard SDK tag `src` before live ads can load; TON still needs TonConnect UI plus server-side chain verification before granting items.
+- Set AdsGram production reward UnitID/block ID `36240` in `config.js`; keep `?adsgram=<blockId>` as a test override for alternate blocks.

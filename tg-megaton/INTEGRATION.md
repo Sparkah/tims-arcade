@@ -66,6 +66,7 @@ AdsGram platform values:
 | Telegram direct link | `https://t.me/gamesfactorybot/megaton` |
 | Web app URL | `https://game-factory.tech/tg-megaton/` |
 | Bot ID | `8628009479` |
+| Reward block ID / UnitID | `36240` |
 
 Monetag zone `11200728` is configured in `Gallery/tg-megaton/config.js`. Paste the dashboard SDK tag's `src` into `window.MEGATON_MONETAG_SDK_SRC`; the wrapper will create the tag with `data-zone="11200728"` and `data-sdk="show_11200728"`. The game ad adapter will call `show_11200728()` for rewarded ads and `show_11200728({ type: "inApp", ... })` for interstitials when the SDK is loaded.
 

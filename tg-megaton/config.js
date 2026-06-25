@@ -1,6 +1,6 @@
 // Public, non-secret Mini App config.
-// Set this to the AdsGram rewarded block ID once the placement is approved.
-window.MEGATON_ADSGRAM_BLOCK_ID = "";
+// AdsGram rewarded block for Megaton.
+window.MEGATON_ADSGRAM_BLOCK_ID = "36240";
 try {
   var _adsgramTestBlock = (location.search.match(/[?&]adsgram=([0-9]+)/) || [])[1];
   if (_adsgramTestBlock) window.MEGATON_ADSGRAM_BLOCK_ID = _adsgramTestBlock;
