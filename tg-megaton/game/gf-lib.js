@@ -892,8 +892,8 @@ function showAd(type) {
               requestVar: 'megaton_midgame',
               inAppSettings: window.MEGATON_MONETAG_INAPP_SETTINGS || {
                 frequency: 1,
-                capping: 0.1,
-                interval: 60,
+                capping: 0.0834,
+                interval: 300,
                 timeout: 5,
                 everyPage: false
               }
@@ -1012,7 +1012,7 @@ function rewardedAd(onReward, onSkip) {
 // no-fill watchdog that resolves cleanly. GF.ads adds:
 //   - a session-aware frequency CAP for interstitials (the thing a game would
 //     otherwise get wrong and either spam ads → Yandex 4.4 / CG reject, or never
-//     monetize). Default: min 60s BETWEEN interstitials + a 45s startup grace so
+//     monetize). Default: min 5 minutes BETWEEN interstitials + a 60s startup grace so
 //     the player never eats an ad in the opening seconds of a session.
 //   - clean rewarded semantics (onReward only on a real reward; onClose always),
 //     so a no-fill / adblock / missing-SDK degrades to "continue/bonus button did
@@ -1026,8 +1026,8 @@ function rewardedAd(onReward, onSkip) {
 var _ads = {
   sessionStart: (typeof performance !== 'undefined' ? performance.now() : Date.now()),
   lastInterstitial: 0,          // timestamp (same clock) of the last SHOWN interstitial
-  minGapMs: 60000,              // min ms between interstitials (default ~60s)
-  startupGraceMs: 45000,        // no interstitial within the first ~45s of a session
+  minGapMs: 300000,             // min ms between interstitials (default ~5 min)
+  startupGraceMs: 60000,        // no interstitial within the first ~60s of a session
   inFlight: false,              // an ad (either kind) is currently open — never overlap
 };
 function _adsNow() { return (typeof performance !== 'undefined' ? performance.now() : Date.now()); }
@@ -1573,8 +1573,8 @@ function drawMuteIcon(c, x, y, r, muted) {
 //     the first playable frame never wait on it. With the network fully
 //     blocked the game plays identically on defaults - REQUIRED behavior.
 //   * AD CADENCE: route cadence numbers through GF.ads.configure() ONLY -
-//     the wrapper below bakes hard floors (minGapMs >= 60s, startupGraceMs
-//     >= 30s) so a bad config is physically unable to make ads frequent
+//     the wrapper below bakes hard floors (minGapMs >= 5min, startupGraceMs
+//     >= 60s) so a bad config is physically unable to make ads frequent
 //     enough to violate Yandex ad rules. Config can only tune WITHIN the
 //     legal bounds (or make ads rarer).
 //
@@ -1682,13 +1682,13 @@ function remoteConfig(slug, defaults, opts) {
   return Promise.resolve(merged);
 }
 // Ad-cadence HARD FLOORS: wrap GF.ads.configure so nothing (remote config, a
-// buggy game, a typo) can set interstitial cadence below the Yandex-legal
+// buggy game, a typo) can set interstitial cadence below Megaton's production
 // bound. Guarded so lib snapshots without the ads helper skip it cleanly.
 (function () {
   try {
     if (typeof adsApi === 'undefined' || !adsApi || typeof adsApi.configure !== 'function') return;
-    var RC_AD_MIN_GAP_FLOOR = 60000; // Yandex 4.4: >= 60s between interstitials
-    var RC_AD_GRACE_FLOOR = 30000;   // never an interstitial in the opening 30s
+    var RC_AD_MIN_GAP_FLOOR = 300000; // Megaton production: >= 5min between interstitials
+    var RC_AD_GRACE_FLOOR = 60000;    // never an interstitial in the opening 60s
     var rawConfigure = adsApi.configure;
     adsApi.configure = function (o) {
       o = o || {};

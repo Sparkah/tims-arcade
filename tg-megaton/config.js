@@ -11,9 +11,9 @@ try {
 window.MEGATON_MONETAG_ZONE_ID = "11200728";
 window.MEGATON_MONETAG_SDK_SRC = "https://libtl.com/sdk.js";
 window.MEGATON_MONETAG_INAPP_SETTINGS = {
-  frequency: 2,
-  capping: 0.1,
-  interval: 30,
+  frequency: 1,
+  capping: 0.0834,
+  interval: 300,
   timeout: 5,
   everyPage: false
 };
