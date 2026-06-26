@@ -3,7 +3,8 @@
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
 import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js';
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED } from './flags.js';
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE } from './flags.js';
+import { adFree } from './tg.js';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
 import { BASE_DPR } from './config.js';
 import { clamp } from './lib/math.js';
 import { glCanvas, hudCanvas } from './render/context.js';
@@ -22,6 +23,24 @@ import { trackAnalyticsVictoryButton } from './analytics.js';
   // we STUB the reward as immediately granted (this is an experiment - a stub revive is fine; the real SDK
   // wires in at ship-time). onReward fires exactly once on a granted reward; onCancel (optional) on dismiss/no-fill.
   function requestRewardedAd(onReward, onCancel) {
+    // Ad-free entitlement (Telegram 'Remove Ads' / Bloodgod): grant the revive instantly, no ad.
+    if (adFree) { onReward(); return; }
+    // Telegram Mini App: handled ENTIRELY here, OUTSIDE the standalone try/catch below, so a synchronous throw in
+    // __tg.showAd can NEVER fall through to the free stub (Codex 2026-06-25 #6). The tg-bloodtread wrapper injects
+    // window.__tg.showAd('rewarded', cb) -> AdsGram/Monetag; cb(ok, result), result.rewarded = confirmed reward.
+    if (TG_MODE) {
+      try {
+        if (window.__tg && typeof window.__tg.showAd === 'function') {
+          window.__tg.showAd('rewarded', function (ok, result) {
+            if (result && result.rewarded) onReward();
+            else if (onCancel) onCancel();
+          });
+          return;
+        }
+      } catch (e) { /* fall to the cancel below - NEVER the free stub */ }
+      if (onCancel) onCancel();   // TG mode but adapter missing or threw -> no revive, no free grant
+      return;
+    }
     try {
       // Yandex: ysdk.adv.showRewardedVideo({ callbacks: { onRewarded, onClose } })
       if (window.ysdk && window.ysdk.adv && typeof window.ysdk.adv.showRewardedVideo === 'function') {

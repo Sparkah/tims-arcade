@@ -15,6 +15,11 @@ var SAVE_STATS = 'bloodtread_rebuild_stats';
 // Loaded once at boot (loadStats) into this live object; mutated by analytics.js, flushed by saveStats().
 export var stats = { attempts: 0, maxMinute: 0, maxLevel: 0, hasWon: 0 };
 
+// Optional post-save hook (registered by tg.js in Telegram mode) so EVERY saveMeta() also syncs to the cloud.
+// A callback, not an import of tg.js, to avoid a circular import (tg.js imports saveMeta from here).
+var saveHook = null;
+export function setSaveHook(fn) { saveHook = typeof fn === 'function' ? fn : null; }
+
 export function loadStats() {
   try {
     var s = JSON.parse(localStorage.getItem(SAVE_STATS) || '{}');
@@ -51,6 +56,7 @@ export function saveMeta() {
     localStorage.setItem(SAVE_BANK, String(Math.floor(econ.totalBank)));
     localStorage.setItem(SAVE_BEST, String(Math.floor(econ.bestTime)));
   } catch (err) {}
+  if (saveHook) { try { saveHook(); } catch (e) {} }   // Telegram cloud-sync (tg.js), no-op otherwise
 }
 
 export function loadMeta() {

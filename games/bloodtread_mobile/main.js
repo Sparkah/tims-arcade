@@ -26,6 +26,7 @@ import { renderHud } from './render/hud.js';
 import { weaponName, tankRageLevel } from './game/meta.js';
 import { laserRangeWorld } from './render/camera.js';
 import { loadMeta, loadStats } from './persistence.js';
+import { tgHydrate } from './tg.js';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
 import { initAnalytics, analyticsState, makeAnalyticsRunId } from './analytics.js';
 import { currentLeechLevel } from './systems/shared.js';
 import { spawnMote } from './fx/particles.js';
@@ -302,6 +303,7 @@ import { startLoop } from './core/loop.js';
   }
   loadMeta();
   loadStats();
+  tgHydrate();   // Telegram mode only: overlay the player's cloud save (merge-max) + drain queued product grants
   initAnalytics();
 
   // resetGame seeds every player stat from BALANCE, so in ?tune mode the published-sheet overrides MUST land

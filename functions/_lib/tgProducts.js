@@ -25,6 +25,56 @@ export const PRODUCTS_BY_GAME = Object.freeze({
       deliver: 'skins_2_coins_1200',
     }),
   }),
+  bloodtread: Object.freeze({
+    starter: Object.freeze({
+      title: 'Bloodtread War Chest',
+      description: '2,000 blood plus a Tread tier to start fast.',
+      amount: 25,
+      ton: '0.20',
+      nanotons: '200000000',
+      deliver: 'blood_2000_treads_1',
+    }),
+    blood_cache: Object.freeze({
+      title: 'Blood Cache',
+      description: '6,000 blood for the next upgrade wall.',
+      amount: 49,
+      ton: '0.40',
+      nanotons: '400000000',
+      deliver: 'blood_6000',
+    }),
+    hull_kit: Object.freeze({
+      title: 'Reinforced Hull Kit',
+      description: '+2 Armor, +2 Blood-Core, and 2,000 blood.',
+      amount: 75,
+      ton: '0.60',
+      nanotons: '600000000',
+      deliver: 'armor_2_core_2_blood_2000',
+    }),
+    arsenal: Object.freeze({
+      title: 'Arsenal Overhaul',
+      description: '+2 Cannon, +1 Frenzy, and 2,500 blood.',
+      amount: 99,
+      ton: '0.80',
+      nanotons: '800000000',
+      deliver: 'cannon_2_frenzy_1_blood_2500',
+    }),
+    ad_free: Object.freeze({
+      title: 'Remove Ads',
+      description: 'Skip the rewarded-ad revive prompt - revive instantly, forever.',
+      amount: 150,
+      ton: '1.20',
+      nanotons: '1200000000',
+      deliver: 'ad_free',
+    }),
+    bloodgod: Object.freeze({
+      title: 'Bloodgod Pact',
+      description: 'Ad-free play, every tread tier maxed, and 250,000 blood.',
+      amount: null,
+      ton: '20.00',
+      nanotons: '20000000000',
+      deliver: 'god_power_ad_free_max_treads',
+    }),
+  }),
   megaton: Object.freeze({
     starter: Object.freeze({
       title: 'Megaton Starter Cache',
@@ -84,6 +134,11 @@ export const PRODUCTS_BY_GAME = Object.freeze({
 });
 
 export const TON_CONFIG_BY_GAME = Object.freeze({
+  bloodtread: Object.freeze({
+    recipient: 'UQCAFJyUz0GmYZmtiDz21WXGzOfWPQaBI6T5fPjIjhBn_i6Q',
+    network: '-239',
+    memoPrefix: 'GF',
+  }),
   megaton: Object.freeze({
     recipient: 'UQCAFJyUz0GmYZmtiDz21WXGzOfWPQaBI6T5fPjIjhBn_i6Q',
     network: '-239',

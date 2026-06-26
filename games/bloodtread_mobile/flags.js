@@ -10,6 +10,10 @@ export var qs = new URLSearchParams(location.search);
 // (:8336, which never sets the flag) is unchanged. Equivalent to the old ?sprites&play, baked in for hosting.
 export var PUBLIC_BUILD = typeof window !== 'undefined' && !!window.__BT_PUBLIC;
 
+// TELEGRAM MINI APP mode: the tg-bloodtread/ wrapper loads the game iframe with ?tg=1. Gates the Telegram
+// adapter (tg.js): cloud saves, Stars/TON product grants, ad-free. OFF everywhere else (standalone/CG/Yandex).
+export var TG_MODE = qs.has('tg');
+
 // Cheats / dev tools (the CHEATS menu, skip-to-minute, ?min boot, c/x grants) are gated behind this so the
 // SHIPPED game has NO cheat menu (Tim). IMMUTABLE boot const (unlike DEBUG, which a keybind can toggle):
 // add ?debug or ?cheats to re-enable them for testing. The window.__* test/harness hooks are separate.
