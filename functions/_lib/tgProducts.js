@@ -78,19 +78,19 @@ export const PRODUCTS_BY_GAME = Object.freeze({
   megaton: Object.freeze({
     starter: Object.freeze({
       title: 'Megaton Starter Cache',
-      description: '1,500 caps plus +2 Yield and +1 Luck.',
+      description: 'Caps for the current upgrade wall, +1 Yield, +2 Luck, and 1 Premium Payload.',
       amount: 25,
       ton: '0.20',
       nanotons: '200000000',
-      deliver: 'caps_1500_yield_2_luck_1',
+      deliver: 'starter_caps_yield_1_luck_2_premium_payload_1',
     }),
     caps_pack: Object.freeze({
       title: 'Megaton Caps Pack',
-      description: '5000 caps for the next upgrade wall.',
+      description: 'Large caps bundle for the current upgrade wall.',
       amount: 49,
       ton: '0.40',
       nanotons: '400000000',
-      deliver: 'caps_5000',
+      deliver: 'caps_pack_upgrade_wall',
     }),
     warhead_tuning: Object.freeze({
       title: 'Megaton Warhead Tuning',
@@ -114,6 +114,30 @@ export const PRODUCTS_BY_GAME = Object.freeze({
       amount: 10,
       deliver: 'welcome_reactor_x8',
     }),
+    arsenal_payload: Object.freeze({
+      title: 'Megaton Premium Payload',
+      description: 'One paid Arsenal collectible pull. Guaranteed rare+.',
+      amount: 25,
+      ton: '0.20',
+      nanotons: '200000000',
+      deliver: 'arsenal_payload_pull_1_rare_plus',
+    }),
+    arsenal_payload_10: Object.freeze({
+      title: 'Megaton Premium x10',
+      description: 'Ten paid Arsenal collectible pulls with a rare+ guarantee.',
+      amount: 199,
+      ton: '1.60',
+      nanotons: '1600000000',
+      deliver: 'arsenal_payload_pull_10',
+    }),
+    arsenal_legendary_payload: Object.freeze({
+      title: 'Megaton Legendary Payload',
+      description: 'One paid Arsenal collectible pull. Guaranteed legendary+.',
+      amount: 199,
+      ton: '1.60',
+      nanotons: '1600000000',
+      deliver: 'arsenal_payload_pull_1_legendary_plus',
+    }),
     early_beta: Object.freeze({
       title: 'Megaton Early Beta',
       description: 'Reserve the next-map early beta pass.',
@@ -124,11 +148,11 @@ export const PRODUCTS_BY_GAME = Object.freeze({
     }),
     god_power: Object.freeze({
       title: 'Megaton God Power',
-      description: 'Ad-free play, unlimited rockets, maxed warhead perks, and 250,000 caps.',
+      description: 'Ad-free play, unlimited rockets, maxed warhead perks, and a huge caps vault.',
       amount: null,
       ton: '20.00',
       nanotons: '20000000000',
-      deliver: 'god_power_ad_free_unlimited_rockets',
+      deliver: 'god_power_ad_free_unlimited_rockets_caps_vault',
     }),
   }),
 });
