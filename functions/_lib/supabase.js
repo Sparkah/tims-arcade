@@ -79,6 +79,32 @@ export async function upsertTelegramPlayer(env, user) {
   });
 }
 
+export async function listTelegramPlayers(env, telegramUserIds) {
+  const ids = Array.from(new Set((telegramUserIds || [])
+    .map((id) => String(id || '').trim())
+    .filter((id) => /^\d{2,32}$/.test(id))))
+    .slice(0, 5000);
+  if (!ids.length) return [];
+
+  async function selectPlayers(select) {
+    const params = new URLSearchParams({
+      select,
+      telegram_user_id: `in.(${ids.join(',')})`,
+      limit: String(ids.length),
+    });
+    const rows = await supabaseRequest(env, `telegram_players?${params.toString()}`, {
+      method: 'GET',
+    });
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  try {
+    return await selectPlayers('telegram_user_id,username,first_name,last_name,language_code,is_premium,source,first_source,last_start_param,source_updated_at,last_seen_at');
+  } catch (error) {
+    return selectPlayers('telegram_user_id,username,first_name,last_name,language_code,is_premium,last_seen_at');
+  }
+}
+
 export async function getTelegramState(env, game, telegramUserId) {
   const params = new URLSearchParams({
     select: 'game,telegram_user_id,state,state_rev,updated_at',
@@ -90,6 +116,18 @@ export async function getTelegramState(env, game, telegramUserId) {
     method: 'GET',
   });
   return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+export async function listTelegramStates(env, game, limit = 1000) {
+  const params = new URLSearchParams({
+    select: 'game,telegram_user_id,state,state_rev,updated_at',
+    game: `eq.${game}`,
+    limit: String(Math.max(1, Math.min(5000, Number(limit) || 1000))),
+  });
+  const rows = await supabaseRequest(env, `telegram_player_states?${params.toString()}`, {
+    method: 'GET',
+  });
+  return Array.isArray(rows) ? rows : [];
 }
 
 export async function upsertTelegramState(env, game, telegramUserId, state) {
