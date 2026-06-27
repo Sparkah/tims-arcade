@@ -121,9 +121,9 @@ window.MEGATON_ECONOMY_CONFIG = {
     {
       "id": "follow_main_channel",
       "type": "follow_link",
-      "title": "Follow Megaton updates",
-      "desc": "Open the Telegram channel, then claim the launch reward.",
-      "url": "https://t.me/gamesfactorybot",
+      "title": "Join Game Factory",
+      "desc": "Open the Game Factory channel for Megaton drops, Bloodtread news, and launch rewards.",
+      "url": "https://t.me/gamefactorytech",
       "reward": {
         "caps": 750,
         "crates": 1,
