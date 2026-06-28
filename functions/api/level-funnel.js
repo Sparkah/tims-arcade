@@ -12,6 +12,8 @@
 //       startFirst, completeFirst, failFirst
 //     }
 //   }
+// Repeated attempts in the same level/session are stored as presence, not a
+// counter, so a tester or retry loop cannot rewrite KV hundreds of times.
 //
 // Returns 200/204 silently for every malformed/rate-limited case so clients do
 // not retry noisy telemetry and probers learn nothing useful.
@@ -25,7 +27,6 @@ const EVENTS = new Set(['start', 'fail', 'complete']);
 const MAX_BYTES = 8192;
 const MAX_EVS = 64;
 const MAX_LEVELS_PER_SID_DAY = 128;
-const MAX_COUNT_PER_LEVEL_EVENT = 50;
 const T_MAX = 86400000;
 const KEY_TTL = 60 * 24 * 60 * 60;
 
@@ -61,9 +62,10 @@ function cleanEvent(input) {
 function bump(rec, name, t) {
   const countKey = name === 'start' ? 'starts' : name === 'complete' ? 'completes' : 'fails';
   const firstKey = name === 'start' ? 'startFirst' : name === 'complete' ? 'completeFirst' : 'failFirst';
-  const next = Math.min(MAX_COUNT_PER_LEVEL_EVENT, Math.max(0, Number(rec[countKey]) || 0) + 1);
-  rec[countKey] = next;
-  if (typeof rec[firstKey] !== 'number') rec[firstKey] = t;
+  if (typeof rec[firstKey] === 'number') return false;
+  rec[countKey] = 1;
+  rec[firstKey] = t;
+  return true;
 }
 
 export async function onRequestPost({ request, env }) {
@@ -103,8 +105,7 @@ export async function onRequestPost({ request, env }) {
         rec = { starts: 0, completes: 0, fails: 0 };
         cur[slot] = rec;
       }
-      bump(rec, ev.name, ev.t);
-      changed = true;
+      if (bump(rec, ev.name, ev.t)) changed = true;
     }
 
     if (changed) await env.VOTES.put(key, JSON.stringify(cur), { expirationTtl: KEY_TTL });
