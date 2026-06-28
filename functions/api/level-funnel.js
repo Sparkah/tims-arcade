@@ -68,6 +68,29 @@ function bump(rec, name, t) {
   return true;
 }
 
+function wouldChange(cur, evs) {
+  const pending = [];
+  let levelCount = Object.keys(cur).length;
+  const newSlots = new Set();
+  for (const ev of evs) {
+    const slot = `${ev.group}:${ev.level}`;
+    const firstKey = ev.name === 'start' ? 'startFirst' : ev.name === 'complete' ? 'completeFirst' : 'failFirst';
+    const rec = cur[slot];
+    if (rec && typeof rec === 'object' && !Array.isArray(rec)) {
+      if (typeof rec[firstKey] === 'number') continue;
+      pending.push(ev);
+      continue;
+    }
+    if (!newSlots.has(slot)) {
+      if (levelCount >= MAX_LEVELS_PER_SID_DAY) continue;
+      levelCount++;
+      newSlots.add(slot);
+    }
+    pending.push(ev);
+  }
+  return pending;
+}
+
 export async function onRequestPost({ request, env }) {
   try {
     const raw = await request.text();
@@ -86,18 +109,21 @@ export async function onRequestPost({ request, env }) {
       .filter(Boolean);
     if (!evs.length) return silent();
 
-    const ip = request.headers.get('cf-connecting-ip') || 'unknown';
-    const rateKey = `lfnrate:${ip}:${Math.floor(Date.now() / 3600000)}`;
-    if (!await checkRate(env, rateKey, 600, 7200)) return silent();
-
     const date = new Date().toISOString().slice(0, 10);
     const key = `lfn:${slug}:${date}:${sid}`;
     let cur = null;
     try { cur = await env.VOTES.get(key, 'json'); } catch { cur = null; }
     if (!cur || typeof cur !== 'object' || Array.isArray(cur)) cur = {};
 
+    const pending = wouldChange(cur, evs);
+    if (!pending.length) return silent();
+
+    const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+    const rateKey = `lfnrate:${ip}:${Math.floor(Date.now() / 3600000)}`;
+    if (!await checkRate(env, rateKey, 600, 7200)) return silent();
+
     let changed = false;
-    for (const ev of evs) {
+    for (const ev of pending) {
       const slot = `${ev.group}:${ev.level}`;
       let rec = cur[slot];
       if (!rec || typeof rec !== 'object' || Array.isArray(rec)) {
