@@ -63,6 +63,21 @@ def build_mission(row: dict) -> dict:
     return mission
 
 
+def build_weekly_reward(row: dict) -> dict:
+    reward = {
+        "label": row.get("rank_label", "").strip(),
+        "min": int(number(row.get("min_rank", "0")) or 0),
+        "max": int(number(row.get("max_rank", "0")) or 0),
+        "crates": int(number(row.get("reward_crates", "0")) or 0),
+    }
+    ton = str(row.get("reward_ton", "") or "").strip()
+    nanotons = str(row.get("reward_nanotons", "") or "").strip()
+    if ton and nanotons:
+        reward["ton"] = ton
+        reward["nanotons"] = nanotons
+    return reward
+
+
 def build_config(source_dir: Path) -> dict:
     chests = read_rows(source_dir / "chests.csv")
     weekly = read_rows(source_dir / "weekly_rewards.csv")
@@ -90,16 +105,7 @@ def build_config(source_dir: Path) -> dict:
         "version": 1,
         "dropTables": drop_tables,
         "boxes": boxes,
-        "weeklyRewards": [
-            {
-                "label": row.get("rank_label", "").strip(),
-                "min": int(number(row.get("min_rank", "0")) or 0),
-                "max": int(number(row.get("max_rank", "0")) or 0),
-                "crates": int(number(row.get("reward_crates", "0")) or 0),
-            }
-            for row in weekly
-            if row.get("rank_label")
-        ],
+        "weeklyRewards": [build_weekly_reward(row) for row in weekly if row.get("rank_label")],
         "duplicateSell": {
             row.get("rarity", "").strip(): number(row.get("multiplier_of_highest_upgrade_cost", "0"))
             for row in duplicates

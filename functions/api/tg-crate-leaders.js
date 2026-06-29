@@ -2,12 +2,16 @@ import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
 import {
+  creditTonBalance,
+  ensureServerBlock,
+  formatTon,
   getTelegramState,
   listTelegramPlayers,
   listTelegramStates,
+  normalizeNanotons,
   supabaseIsConfigured,
+  updateTelegramStateIfRev,
   upsertTelegramPlayer,
-  upsertTelegramState,
 } from '../_lib/supabase.js';
 
 const WEEKLY_REWARDS = [
@@ -17,6 +21,12 @@ const WEEKLY_REWARDS = [
   { min: 4, max: 10, crates: 3 },
   { min: 11, max: 20, crates: 2 },
   { min: 21, max: 100, crates: 1 },
+];
+
+const WEEKLY_TON_REWARDS = [
+  { min: 1, max: 1, ton: '7.00', nanotons: '7000000000' },
+  { min: 2, max: 2, ton: '5.00', nanotons: '5000000000' },
+  { min: 3, max: 3, ton: '3.00', nanotons: '3000000000' },
 ];
 
 async function readBody(request) {
@@ -47,6 +57,13 @@ function rewardForRank(rank) {
     if (rank >= row.min && rank <= row.max) return row.crates;
   }
   return 0;
+}
+
+function tonRewardForRank(rank) {
+  for (const row of WEEKLY_TON_REWARDS) {
+    if (rank >= row.min && rank <= row.max) return row;
+  }
+  return null;
 }
 
 function serverGacha(state) {
@@ -92,6 +109,8 @@ function buildLeaderboard(rows, week, limit = 100, playersById = new Map(), view
       profileUrl: profileUrl(playersById.get(row.telegramUserId)),
       cratesOpened: row.cratesOpened,
       rewardCrates: rewardForRank(index + 1),
+      rewardTon: tonRewardForRank(index + 1)?.ton || null,
+      rewardTonNanotons: tonRewardForRank(index + 1)?.nanotons || '0',
       updatedAt: row.updatedAt,
       isMe: row.telegramUserId === String(viewerId || ''),
     }));
@@ -117,7 +136,7 @@ export async function onRequestPost({ request, env }) {
   if (!Object.hasOwn(PRODUCTS_BY_GAME, game)) return jsonError('bad game', 400);
 
   const action = String(body.action || 'leaders');
-  const week = String(body.week || (action === 'claim_weekly' ? previousWeekId() : weekId()));
+  const week = action === 'claim_weekly' ? previousWeekId() : String(body.week || weekId());
   const auth = await authenticate(body, env);
   if (auth.error) return auth.error;
 
@@ -134,23 +153,58 @@ export async function onRequestPost({ request, env }) {
 
   const mine = leaders.find((row) => row.telegramUserId === String(auth.user.id));
   const rewardCrates = mine ? rewardForRank(mine.rank) : 0;
-  if (!rewardCrates) {
-    return json({ ok: true, configured: true, game, week, rank: mine ? mine.rank : null, rewardCrates: 0, claimed: false }, 200, { 'cache-control': 'no-store' });
+  const rewardTon = mine ? tonRewardForRank(mine.rank) : null;
+  const rewardTonNanotons = rewardTon ? rewardTon.nanotons : '0';
+  if (!rewardCrates && !normalizeNanotons(rewardTonNanotons)) {
+    return json({ ok: true, configured: true, game, week, rank: mine ? mine.rank : null, rewardCrates: 0, rewardTon: null, rewardTonNanotons: '0', claimed: false }, 200, { 'cache-control': 'no-store' });
   }
 
-  const stateRow = await getTelegramState(env, game, auth.user.id);
-  const state = stateRow && stateRow.state && typeof stateRow.state === 'object' ? stateRow.state : {};
-  const server = state.__server && typeof state.__server === 'object' ? state.__server : (state.__server = {});
-  const stats = server.gacha && typeof server.gacha === 'object' ? server.gacha : (server.gacha = {});
-  const claims = stats.weeklyClaims && typeof stats.weeklyClaims === 'object' ? stats.weeklyClaims : (stats.weeklyClaims = {});
-  if (claims[week]) {
-    return json({ ok: true, configured: true, game, week, rank: mine.rank, rewardCrates: 0, alreadyClaimed: true }, 200, { 'cache-control': 'no-store' });
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const stateRow = await getTelegramState(env, game, auth.user.id);
+    const state = stateRow && stateRow.state && typeof stateRow.state === 'object' ? JSON.parse(JSON.stringify(stateRow.state)) : {};
+    const server = ensureServerBlock(state);
+    const stats = server.gacha && typeof server.gacha === 'object' ? server.gacha : (server.gacha = {});
+    const claims = stats.weeklyClaims && typeof stats.weeklyClaims === 'object' ? stats.weeklyClaims : (stats.weeklyClaims = {});
+    if (claims[week]) {
+      return json({
+        ok: true,
+        configured: true,
+        game,
+        week,
+        rank: mine.rank,
+        rewardCrates: 0,
+        rewardTon: null,
+        rewardTonNanotons: '0',
+        creditTon: formatTon(server.tonCreditNanotons),
+        creditNanotons: String(server.tonCreditNanotons || '0'),
+        alreadyClaimed: true,
+      }, 200, { 'cache-control': 'no-store' });
+    }
+    const creditNanotons = creditTonBalance(server, rewardTonNanotons);
+    claims[week] = {
+      rank: mine.rank,
+      crates: rewardCrates,
+      ton: rewardTon ? rewardTon.ton : null,
+      tonNanotons: rewardTonNanotons,
+      claimedAt: new Date().toISOString(),
+    };
+    const updated = stateRow && await updateTelegramStateIfRev(env, game, auth.user.id, stateRow.state_rev, state);
+    if (updated) {
+      return json({
+        ok: true,
+        configured: true,
+        game,
+        week,
+        rank: mine.rank,
+        rewardCrates,
+        rewardTon: rewardTon ? rewardTon.ton : null,
+        rewardTonNanotons,
+        creditTon: formatTon(creditNanotons),
+        creditNanotons,
+        claimed: true,
+      }, 200, { 'cache-control': 'no-store' });
+    }
   }
-  claims[week] = {
-    rank: mine.rank,
-    crates: rewardCrates,
-    claimedAt: new Date().toISOString(),
-  };
-  await upsertTelegramState(env, game, auth.user.id, state);
-  return json({ ok: true, configured: true, game, week, rank: mine.rank, rewardCrates, claimed: true }, 200, { 'cache-control': 'no-store' });
+
+  return jsonError('weekly claim conflict, retry', 409);
 }

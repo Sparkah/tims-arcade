@@ -10,6 +10,35 @@ function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value || null));
 }
 
+export function normalizeNanotons(value) {
+  try {
+    const n = BigInt(String(value || '0'));
+    return n > 0n ? n : 0n;
+  } catch {
+    return 0n;
+  }
+}
+
+export function formatTon(nanotons) {
+  const n = normalizeNanotons(nanotons);
+  if (!n) return '0';
+  const whole = n / 1000000000n;
+  const frac = String(n % 1000000000n).padStart(9, '0').replace(/0+$/, '');
+  return frac ? `${whole}.${frac}` : String(whole);
+}
+
+export function ensureServerBlock(state) {
+  return state.__server && typeof state.__server === 'object' ? state.__server : (state.__server = {});
+}
+
+export function creditTonBalance(server, nanotons) {
+  const add = normalizeNanotons(nanotons);
+  const balance = normalizeNanotons(server.tonCreditNanotons) + add;
+  server.tonCreditNanotons = balance.toString();
+  server.tonCreditUpdatedAt = new Date().toISOString();
+  return server.tonCreditNanotons;
+}
+
 export function supabaseIsConfigured(env) {
   return Boolean(supabaseUrl(env) && serviceRoleKey(env));
 }
@@ -147,6 +176,26 @@ export async function upsertTelegramState(env, game, telegramUserId, state) {
     },
     body: JSON.stringify([row]),
   });
+}
+
+export async function updateTelegramStateIfRev(env, game, telegramUserId, stateRev, state) {
+  const params = new URLSearchParams({
+    game: `eq.${game}`,
+    telegram_user_id: `eq.${telegramUserId}`,
+    state_rev: `eq.${stateRev}`,
+  });
+  const rows = await supabaseRequest(env, `telegram_player_states?${params.toString()}`, {
+    method: 'PATCH',
+    headers: {
+      prefer: 'return=representation',
+    },
+    body: JSON.stringify({
+      state: jsonSafe(state),
+      state_rev: Date.now(),
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 
 export async function recordTelegramPurchase(env, purchase) {

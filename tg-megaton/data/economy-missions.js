@@ -77,19 +77,25 @@ window.MEGATON_ECONOMY_CONFIG = {
       "label": "Top 1",
       "min": 1,
       "max": 1,
-      "crates": 10
+      "crates": 10,
+      "ton": "7.00",
+      "nanotons": "7000000000"
     },
     {
       "label": "Top 2",
       "min": 2,
       "max": 2,
-      "crates": 8
+      "crates": 8,
+      "ton": "5.00",
+      "nanotons": "5000000000"
     },
     {
       "label": "Top 3",
       "min": 3,
       "max": 3,
-      "crates": 6
+      "crates": 6,
+      "ton": "3.00",
+      "nanotons": "3000000000"
     },
     {
       "label": "Top 4-10",
