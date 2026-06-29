@@ -41,11 +41,21 @@ const MAX_EVS = 24;                       // 5 auto + 16 marks + margin
 const MAX_EVENTS_PER_SID = 24;            // stored-object cap per (slug,day,sid)
 const T_MAX = 86400000;                   // 1 day in ms
 const KEY_TTL = 60 * 24 * 60 * 60;        // 60d, same as heartbeat daily keys
+const DISABLED_MARKER = 'kv-disabled-2026-06-29';
 
-const silent = () => new Response(null, { status: 200 });
+const silent = (status = 200, headers = {}) => new Response(null, { status, headers });
+
+function funnelEnabled(env = {}) {
+  const value = String((env && env.FUNNEL_ENABLED) || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
 
 export async function onRequestPost({ request, env }) {
   try {
+    if (!funnelEnabled(env)) {
+      return silent(204, { 'cache-control': 'no-store', 'x-funnel': DISABLED_MARKER });
+    }
+
     // Same-origin guard: browsers always attach Origin to cross-origin POSTs,
     // so a mismatch is some other site splashing events at us. Headerless
     // script traffic still passes - the rate limit below covers that.
