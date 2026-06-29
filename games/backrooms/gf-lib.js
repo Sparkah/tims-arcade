@@ -1252,6 +1252,37 @@ window.GF = {
   // GamePush wrappers — no-op when GP isn't loaded, so games can call these
   // unconditionally. See _gp / gpApi above for the full surface.
   gp: gpApi,
+  // Canonical cross-platform leaderboard (Yandex 12b-4): native Yandex
+  // leaderboards when the YaGames SDK is present, GamePush otherwise. On
+  // game-factory.tech / GamePush the ysdk branch is skipped, so behavior is
+  // byte-identical to the previous GF.gp.leaderboard path.
+  leaderboard: {
+    publish: function (tag, score) {
+      try {
+        var ys = window.ysdk;
+        if (ys && ys.leaderboards && typeof ys.leaderboards.setLeaderboardScore === 'function') {
+          ys.leaderboards.setLeaderboardScore(tag, Math.round(score || 0));
+        }
+      } catch (e) {}
+      try { gpApi.leaderboard.publish(tag, score); } catch (e) {}
+    },
+    fetch: function (tag, limit) {
+      var ys = window.ysdk;
+      if (ys && ys.leaderboards && typeof ys.leaderboards.getLeaderboardEntries === 'function') {
+        try {
+          return ys.leaderboards.getLeaderboardEntries(tag, { quantityTop: limit || 10, includeUser: true })
+            .then(function (res) {
+              var ents = (res && res.entries) || [];
+              return ents.map(function (e) {
+                return { name: (e.player && e.player.publicName) || 'Player', score: e.score, rank: e.rank };
+              });
+            })
+            .catch(function () { return gpApi.leaderboard.fetch(tag, limit); });
+        } catch (e) { return gpApi.leaderboard.fetch(tag, limit); }
+      }
+      return gpApi.leaderboard.fetch(tag, limit);
+    },
+  },
   // Register a state-getter for the post-build-tester gate.
   //   GF.exposeState(() => ({ gs, score, level, lives, ... }));
   // The gate calls window.__gfState() during playtest to verify the game
