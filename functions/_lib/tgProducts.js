@@ -126,7 +126,7 @@ export const PRODUCTS_BY_GAME = Object.freeze({
   megaton: Object.freeze({
     starter: Object.freeze({
       title: 'Megaton Starter Cache',
-      description: 'Caps for the current upgrade wall, +1 Yield, +2 Luck, and 1 Premium Payload.',
+      description: 'Caps for the current upgrade wall, +1 Yield, +2 Extra Income, and 1 Premium Payload.',
       amount: 25,
       ton: '0.20',
       nanotons: '200000000',
@@ -142,7 +142,7 @@ export const PRODUCTS_BY_GAME = Object.freeze({
     }),
     warhead_tuning: Object.freeze({
       title: 'Megaton Warhead Tuning',
-      description: '+4 Yield, +2 Luck, and 1200 caps.',
+      description: '+4 Yield, +2 Extra Income, and 1200 caps.',
       amount: 75,
       ton: '0.60',
       nanotons: '600000000',

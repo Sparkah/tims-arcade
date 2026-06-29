@@ -2,7 +2,7 @@
 
 Goal: add collectible payload cosmetics with visible launch/fall/trail/impact changes plus one small capped equipped stat bonus, obtained through loot boxes, without destabilizing the current Telegram production build. These are not limited to missile skins: the catalog can include missiles, bombs, drones, mascots, mutants, mobs, satellites, delivery vehicles, and explosion spirits as long as the equipped item is obvious during the core nuke loop.
 
-Current state: `Gallery/tg-megaton/index.html` already has a local `SKINS` prototype with boxes, collection, equip, local odds, duplicate shards, and `window.__gfEquipSkin()` sync into the game iframe. `Gallery/tg-megaton/game/index.html` already persists `ownedSkins`, `equippedSkin`, `skinBoosts`, and `gachaStats`, and reads boosts for caps, yield, crit, upgrade costs, nuke costs, offline reactor, daily ration, and ship payout. This is not production-safe yet: free/caps rolls are client-owned, paid boxes are preview-only, and the art/names are still "raider" character skins.
+Current state: `Gallery/tg-megaton/index.html` already has a local `SKINS` prototype with boxes, collection, equip, local odds, duplicate shards, and `window.__gfEquipSkin()` sync into the game iframe. `Gallery/tg-megaton/game/index.html` already persists `ownedSkins`, `equippedSkin`, `skinBoosts`, and `gachaStats`, and reads boosts for caps, yield, extra income, upgrade costs, nuke costs, offline reactor, daily ration, and ship payout. This is not production-safe yet: free/caps rolls are client-owned, paid boxes are preview-only, and the art/names are still "raider" character skins.
 
 Art direction: the base game is mostly monochrome Pip-Boy green, so gacha items should be deliberately colorful and juicy. Use saturated candy/toxic/fire/neon palettes that pop against the green city: orange-red fire cores, cyan plasma, magenta mutant slime, yellow hazard stripes, violet cosmic trails, cobalt EMP arcs. The collectible should feel like the reward, not just a tiny stat card.
 
@@ -68,7 +68,7 @@ Recommended boost kinds:
 
 - `caps_mult`: +0.5% to +5% caps gain.
 - `yield_mult`: +0.5% to +5% blast radius, hard-capped in `powerCells()`.
-- `crit_bonus`: +0.5pp to +5pp critical chance, hard-capped by `critChance()`.
+- `crit_bonus`: legacy key for extra caps income, now shown as Extra Income and no longer tied to destruction radius.
 - `nuke_cost_disc`: +1% to +5% discount on special warheads.
 - `offline_mult`: +1% to +5% reactor gain.
 - `daily_mult`: +1% to +5% daily ration payout.
