@@ -27,9 +27,9 @@ Current visible Megaton products:
 
 | ID | Stars | TON | Delivery |
 | --- | ---: | ---: | --- |
-| `starter` | 25 XTR | 0.20 | 1500 caps, Yield level 2, +1 Luck |
+| `starter` | 25 XTR | 0.20 | 1500 caps, Yield level 2, +1 Extra Income |
 | `caps_pack` | 49 XTR | 0.40 | 5000 caps |
-| `warhead_tuning` | 75 XTR | 0.60 | +4 Yield, +2 Luck, 1200 caps |
+| `warhead_tuning` | 75 XTR | 0.60 | +4 Yield, +2 Extra Income, 1200 caps |
 | `mirv_kit` | 99 XTR | 0.80 | +1 MIRV, +2 Penetrator, +2 Flares, 1800 caps |
 | `god_power` | - | 20.00 | Ad-free play, maxed warhead perks, and 250,000 caps |
 
