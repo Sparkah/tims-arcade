@@ -164,6 +164,7 @@ function hexColor(hex, fallback) {
   if (/^#[0-9a-f]{3}$/i.test(hex)) return '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
   return /^#[0-9a-f]{6}$/i.test(hex) ? hex : fallback;
 }
+// Keep this hex-returning helper separate from the legacy rgb() mix() used by old UI fill styles.
 function mixHex(a, b, t) {
   a = hexColor(a, '#ffffff'); b = hexColor(b, '#ffffff'); t = GF.clamp(t, 0, 1);
   var pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
@@ -308,6 +309,28 @@ var hasStation = false, hasGhetto = false, hasChinatown = false;   // which DIST
 var hasMall = false, hasMountain = false, hasRefinery = false, hasZombie = false;   // later districts: malls (glass storm), mountain base (seismic), oil refinery (inferno), quarantine zone (wandering zombies)
 var zombies = [], zombieT = 2;   // QUARANTINE: a shambling crowd that WANDERS the zone as MOVING bonus targets (same role as planes), vaporized by the blast for caps
 var fireballs = [], orbitals = [], faults = [], blastSeq = 0, lastBlastProfile = null;   // procedural profiles make each blast differ
+var EXPLOSION_ASSET_SPECS = [
+  { type: 'fire', file: 'kenney_explosion_00.png' },
+  { type: 'fire', file: 'kenney_explosion_01.png' },
+  { type: 'fire', file: 'kenney_explosion_02.png' },
+  { type: 'fire', file: 'kenney_explosion_03.png' },
+  { type: 'fire', file: 'kenney_explosion_04.png' },
+  { type: 'fire', file: 'kenney_explosion_05.png' },
+  { type: 'flash', file: 'kenney_flash_00.png' },
+  { type: 'flash', file: 'kenney_flash_01.png' },
+  { type: 'smoke', file: 'kenney_smoke_00.png' },
+  { type: 'smoke', file: 'kenney_smoke_01.png' }
+];
+var MUSHROOM_SOURCE_SPECS = [
+  { file: 'freesvg_atomic_bomb_cloud.png', weight: 4 },
+  { file: 'freesvg_mushroomcloud2.png', weight: 3 },
+  { file: 'freesvg_color_mushroom_cloud.png', weight: 3 },
+  { file: 'freesvg_mushroom_cloud_boom.png', weight: 2 },
+  { file: 'freesvg_mushroom_cloud_vector.png', weight: 2 }
+];
+var explosionAssets = [];
+var mushroomSourceAssets = [];
+var mushroomTintCanvas = null, mushroomTintCtx = null;
 function mobileFx() {
   var coarse = false;
   try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) {}
@@ -318,6 +341,231 @@ function fxCount(n, min) { return Math.max(min || 1, Math.round(n * fxScale()));
 function fxCap(desktop, mobile) { return mobileFx() ? mobile : desktop; }
 function fxLife(v) { return mobileFx() ? v * 0.72 : v; }
 function fxRand(seed) { var x = Math.sin(seed) * 43758.5453123; return x - Math.floor(x); }
+function fxNoise(seed, t) {
+  t = Math.max(0, t || 0);
+  var i = Math.floor(t), f = t - i;
+  f = f * f * (3 - 2 * f);
+  var a = fxRand(seed + i * 127.1), b = fxRand(seed + (i + 1) * 127.1);
+  return (a + (b - a) * f) * 2 - 1;
+}
+function fxChaos(seed, t) {
+  return fxNoise(seed, t) * 0.62 + fxNoise(seed + 43.7, t * 2.17 + 5.3) * 0.27 + fxNoise(seed + 91.2, t * 4.11 + 1.7) * 0.11;
+}
+function strokeBrokenEllipse(c, x, y, rx, ry, rot, seed, count, spanBase) {
+  for (var n = 0; n < count; n++) {
+    var a = fxRand(seed + n * 31.7) * Math.PI * 2;
+    var span = spanBase * (0.55 + fxRand(seed + n * 47.3 + 5) * 0.9);
+    var rr = 0.82 + fxRand(seed + n * 59.9 + 11) * 0.28;
+    c.beginPath();
+    c.ellipse(x, y, rx * rr, ry * (0.9 + fxRand(seed + n * 67.1 + 17) * 0.24), rot + (fxRand(seed + n * 71.5 + 23) - 0.5) * 0.22, a, a + span);
+    c.stroke();
+  }
+}
+function prepareExplosionAsset(img, type) {
+  var side = type === 'smoke' ? 160 : 192;
+  var cn = document.createElement('canvas'), cc = cn.getContext('2d');
+  cn.width = cn.height = side;
+  var sc = Math.min(side / img.naturalWidth, side / img.naturalHeight) * 0.94;
+  var w = img.naturalWidth * sc, h = img.naturalHeight * sc;
+  cc.drawImage(img, (side - w) / 2, (side - h) / 2, w, h);
+  return cn;
+}
+function prepareMushroomSourceAsset(img, spec) {
+  var side = 224;
+  var cn = document.createElement('canvas'), cc = cn.getContext('2d');
+  var mask = document.createElement('canvas'), mc = mask.getContext('2d');
+  cn.width = cn.height = mask.width = mask.height = side;
+  var sc = Math.min(side / img.naturalWidth, side / img.naturalHeight) * 0.96;
+  var w = img.naturalWidth * sc, h = img.naturalHeight * sc, ox = (side - w) / 2, oy = (side - h) / 2;
+  cc.drawImage(img, ox, oy, w, h);
+  var pixels = cc.getImageData(0, 0, side, side);
+  var d = pixels.data, isPhoto = spec.file.indexOf('mushroomcloud2') >= 0;
+  for (var p = 0; p < d.length; p += 4) {
+    var a = d[p + 3], lum = d[p] * 0.299 + d[p + 1] * 0.587 + d[p + 2] * 0.114;
+    var keep = a;
+    if (isPhoto) keep = a * Math.max(0, Math.min(1, (lum - 16) / 142));
+    else if (a > 245 && lum < 8) keep = 0;
+    d[p] = 255; d[p + 1] = 255; d[p + 2] = 255; d[p + 3] = Math.max(0, Math.min(255, keep));
+  }
+  mc.putImageData(pixels, 0, 0);
+  var pts = [], md = pixels.data;
+  for (var yy = 0; yy < side; yy += 3) for (var xx = 0; xx < side; xx += 3) {
+    var pi = (yy * side + xx) * 4, pa = md[pi + 3];
+    if (pa > 18) pts.push({ x: xx / side - 0.5, y: yy / side - 0.5, a: pa / 255 });
+  }
+  return { canvas: cn, mask: mask, side: side, points: pts };
+}
+function loadExplosionAssets() {
+  explosionAssets = EXPLOSION_ASSET_SPECS.map(function (spec, idx) {
+    var item = { type: spec.type, file: spec.file, ready: false, canvas: null, idx: idx };
+    var img = new Image(), done = false;
+    img.decoding = 'async';
+    function finish() { if (done || !img.naturalWidth) return; done = true; item.canvas = prepareExplosionAsset(img, spec.type); item.ready = true; }
+    img.onload = finish;
+    img.src = 'fx/free_explosion_candidates/' + spec.file;
+    if (img.decode) img.decode().then(finish).catch(function () {});
+    return item;
+  });
+  mushroomSourceAssets = MUSHROOM_SOURCE_SPECS.map(function (spec, idx) {
+    var item = { file: spec.file, weight: spec.weight || 1, ready: false, canvas: null, mask: null, side: 0, points: [], idx: idx };
+    var img = new Image(), done = false;
+    img.decoding = 'async';
+    function finish() {
+      if (done || !img.naturalWidth) return;
+      done = true;
+      var asset = prepareMushroomSourceAsset(img, spec);
+      item.canvas = asset.canvas; item.mask = asset.mask; item.side = asset.side; item.points = asset.points || []; item.ready = true;
+    }
+    img.onload = finish;
+    img.src = 'fx/nuke_mushroom_candidates/' + spec.file;
+    if (img.decode) img.decode().then(finish).catch(function () {});
+    return item;
+  });
+}
+function explosionAsset(type, offset) {
+  var found = [];
+  for (var i = 0; i < explosionAssets.length; i++) if (explosionAssets[i].ready && explosionAssets[i].type === type) found.push(explosionAssets[i]);
+  if (!found.length) return null;
+  return found[((offset || 0) % found.length + found.length) % found.length];
+}
+function mushroomSourceAsset(offset) {
+  var found = [];
+  for (var i = 0; i < mushroomSourceAssets.length; i++) if (mushroomSourceAssets[i].ready) {
+    var weight = Math.max(1, mushroomSourceAssets[i].weight || 1);
+    for (var w = 0; w < weight; w++) found.push(mushroomSourceAssets[i]);
+  }
+  if (!found.length) return null;
+  return found[((offset || 0) % found.length + found.length) % found.length];
+}
+function drawExplosionAsset(c, type, offset, x, y, w, h, rot, alpha, op) {
+  var asset = explosionAsset(type, offset);
+  if (!asset || !asset.canvas || alpha <= 0) return;
+  c.save();
+  c.globalAlpha = alpha;
+  if (op) c.globalCompositeOperation = op;
+  c.translate(x, y);
+  c.rotate(rot || 0);
+  c.drawImage(asset.canvas, -w / 2, -h / 2, w, h);
+  c.restore();
+}
+function drawMushroomSourceLayer(c, asset, x, y, w, h, progress, seed, alpha, colors, opts) {
+  if (!asset || !asset.ready || !asset.mask || alpha <= 0 || w <= 0 || h <= 0) return;
+  opts = opts || {};
+  if (!mushroomTintCanvas) { mushroomTintCanvas = document.createElement('canvas'); mushroomTintCtx = mushroomTintCanvas.getContext('2d'); }
+  var side = asset.side || 224, tc = mushroomTintCtx;
+  if (mushroomTintCanvas.width !== side) { mushroomTintCanvas.width = side; mushroomTintCanvas.height = side; }
+  tc.clearRect(0, 0, side, side);
+  var smokeCol = hexColor(colors.smoke, '#2c2926'), heat = hexColor(colors.heat, '#ff8a3b'), core = hexColor(colors.core, '#fff4b8');
+  var grad = tc.createLinearGradient(0, 0, 0, side);
+  grad.addColorStop(0, rgba(mixHex(smokeCol, core, 0.22), 0.88));
+  grad.addColorStop(0.35, rgba(mixHex(smokeCol, heat, 0.28), 0.9));
+  grad.addColorStop(0.62, rgba(mixHex(heat, smokeCol, 0.25), 0.86));
+  grad.addColorStop(1, rgba(smokeCol, 0.76));
+  tc.fillStyle = grad;
+  tc.fillRect(0, 0, side, side);
+  var flecks = opts.hot ? 18 : 26;
+  for (var f = 0; f < flecks; f++) {
+    var fr = fxRand(seed + f * 19.31 + progress * 31.7), fx = side * fxRand(seed + f * 41.7 + 3), fy = side * fxRand(seed + f * 53.9 + 11);
+    var rr = side * (0.018 + fxRand(seed + f * 67.1 + 5) * 0.04);
+    tc.globalAlpha = opts.hot ? 0.14 + fr * 0.28 : 0.06 + fr * 0.13;
+    tc.fillStyle = opts.hot ? (fr > 0.45 ? core : heat) : (fr > 0.55 ? mixHex(smokeCol, '#0d0b0a', 0.55) : mixHex(smokeCol, heat, 0.12));
+    tc.beginPath();
+    tc.ellipse(fx + fxChaos(seed + f * 81.3, progress * (2.3 + fr)) * side * 0.026, fy - progress * side * 0.04 + fxChaos(seed + f * 91.7 + 9, progress * (1.8 + fr)) * side * 0.015, rr * (1.2 + fr), rr * (0.45 + fr * 0.9), fr * Math.PI, 0, Math.PI * 2);
+    tc.fill();
+  }
+  tc.globalAlpha = 1;
+  tc.globalCompositeOperation = 'destination-in';
+  tc.drawImage(asset.mask, 0, 0);
+  tc.globalCompositeOperation = 'source-over';
+
+  var cropA = opts.cropA == null ? 0 : Math.max(0, Math.min(1, opts.cropA));
+  var cropB = opts.cropB == null ? 1 : Math.max(cropA + 0.01, Math.min(1, opts.cropB));
+  var slices = opts.slices || (mobileFx() ? 13 : 24), reveal = opts.reveal == null ? Math.max(0, Math.min(1, progress * 1.24 + 0.08)) : opts.reveal;
+  var chaos = opts.chaos || 0, chaosT = opts.chaosT == null ? progress : opts.chaosT;
+  c.save();
+  c.globalAlpha = alpha;
+  if (opts.op) c.globalCompositeOperation = opts.op;
+  c.translate(x, y);
+  c.scale(opts.flip || 1, 1);
+  if (opts.rot) c.rotate(opts.rot);
+  for (var s = 0; s < slices; s++) {
+    var local0 = s / slices, local1 = (s + 1) / slices;
+    if (local0 < 1 - reveal) continue;
+    var sv = cropA + local0 * (cropB - cropA), sh = (cropB - cropA) / slices;
+    var slop = Math.max(0, Math.min(1.4, chaosT - fxRand(seed + s * 61.2 + 8) * 0.32));
+    var wave = fxChaos(seed + s * 29.7 + sv * 101.3, progress * (1.4 + sv * 1.8)) * 0.06 + (fxRand(seed + s * 23.7) - 0.5) * 0.026;
+    var ripple = 1 + wave * (0.7 + progress * 0.8), dw = w * ripple * (1 - Math.abs(local0 - 0.38) * 0.05);
+    var dh = h / slices + 1.2, dy = -h / 2 + local0 * h - progress * h * (0.035 + local0 * 0.045);
+    var drift = fxChaos(seed + s * 37.4 + sv * 211.2, progress * (1.7 + sv)) * w * (opts.warp || 0.035) * progress + (opts.lean || 0) * w * (0.16 - sv * 0.08);
+    drift += fxChaos(seed + s * 61.6 + 19, chaosT * (1.2 + sv * 1.6)) * w * chaos * slop;
+    dy += fxChaos(seed + s * 73.9 + 41, chaosT * (0.9 + sv * 1.3)) * h * chaos * slop * 0.28;
+    c.drawImage(mushroomTintCanvas, 0, Math.floor(sv * side), side, Math.max(1, Math.ceil(sh * side)), drift - dw / 2, dy, dw, dh);
+  }
+  c.restore();
+}
+function drawMushroomSourcePuffs(c, asset, x, y, w, h, progress, seed, alpha, colors, opts) {
+  if (!asset || !asset.ready || !asset.points || !asset.points.length || alpha <= 0 || w <= 0 || h <= 0) return;
+  opts = opts || {};
+  var smokeCol = hexColor(colors.smoke, '#2c2926'), heat = hexColor(colors.heat, '#ff8a3b'), core = hexColor(colors.core, '#fff4b8');
+  var cheap = mobileFx();
+  var count = opts.count || (mobileFx() ? 58 : 128), reveal = opts.reveal == null ? Math.max(0, Math.min(1, progress * 1.2 + 0.1)) : opts.reveal;
+  var cropA = opts.cropA == null ? 0 : Math.max(0, Math.min(1, opts.cropA));
+  var cropB = opts.cropB == null ? 1 : Math.max(cropA + 0.01, Math.min(1, opts.cropB));
+  var puffChaos = opts.chaos == null ? (cheap ? 0.035 : 0.07) : opts.chaos, puffChaosT = opts.chaosT == null ? progress : opts.chaosT, steady = !!opts.steady;
+  c.save();
+  if (opts.op) c.globalCompositeOperation = opts.op;
+  for (var i = 0; i < count; i++) {
+    var n1 = fxRand(seed + i * 13.71 + 5), n2 = fxRand(seed + i * 17.91 + 9), n3 = fxRand(seed + i * 29.13 + 15), n4 = fxRand(seed + i * 31.77 + 21), n5 = fxRand(seed + i * 37.43 + 2);
+    var pt;
+    if (steady) {
+      pt = asset.points[Math.floor(fxRand(seed + i * 47.23) * asset.points.length)];
+    } else {
+      var morphT = puffChaosT * (opts.hot ? 4.6 : 3.4) + n4 * 1.7, morphI = Math.floor(morphT), morphF = morphT - morphI;
+      morphF = morphF * morphF * (3 - 2 * morphF);
+      var pt0 = asset.points[Math.floor(fxRand(seed + i * 47.23 + morphI * 193.7) * asset.points.length)];
+      var pt1 = asset.points[Math.floor(fxRand(seed + i * 47.23 + (morphI + 1) * 193.7) * asset.points.length)];
+      pt = { x: pt0.x + (pt1.x - pt0.x) * morphF, y: pt0.y + (pt1.y - pt0.y) * morphF, a: pt0.a + (pt1.a - pt0.a) * morphF };
+    }
+    var v = pt.y + 0.5;
+    if (v < cropA || v > cropB || v < 1 - reveal) continue;
+    var localT = steady ? Math.max(0, Math.min(1.2, puffChaosT * (0.62 + n4 * 0.78) - n5 * 0.18)) : Math.max(0, Math.min(1.35, puffChaosT - n4 * 0.36));
+    var localU = Math.min(1, localT), localE = localU * localU * (3 - 2 * localU);
+    var grow = steady ? (0.86 + localE * (0.19 + n3 * 0.13)) : (0.72 + progress * 0.38);
+    var wind = steady ? ((n1 - 0.5) * (opts.warp || 0.035) * 0.16) : fxChaos(seed + i * 41.9 + v * 307, puffChaosT * (1.5 + n1 * 1.2)) * (opts.warp || 0.035);
+    var px = x + pt.x * w * grow + wind * w * (0.5 + n1) + (opts.lean || 0) * w * (0.14 - v * 0.08);
+    var py = y + (pt.y + 0.02) * h * (0.82 + progress * 0.18) - progress * h * (0.025 + v * 0.04) + (n2 - 0.5) * h * 0.018;
+    var flutter = 0;
+    if (steady) {
+      px += pt.x * w * localE * (0.06 + n2 * 0.055);
+      py += (pt.y - 0.02) * h * localE * (0.032 + n1 * 0.032) - h * localE * (0.018 + v * 0.018);
+    } else {
+      var loose = puffChaos * (0.32 + n3) * (0.35 + localT);
+      flutter = fxChaos(seed + i * 53.31 + 2, localT * (1.8 + n1 * 2.6) + n4 * 8);
+      px += (flutter * loose + fxChaos(seed + i * 67.13 + 9, localT * (2.9 + n2 * 1.8) + n5 * 5) * puffChaos * 0.38) * w * (cheap ? 0.58 : 1);
+      py += (fxChaos(seed + i * 71.79 + 13, localT * (1.4 + n2 * 2.2) + n4 * 6) * loose * 0.55 - localT * puffChaos * (0.15 + v * 0.12)) * h * (cheap ? 0.64 : 1);
+    }
+    var rr = (opts.hot ? 0.018 : 0.026) * Math.max(w, h) * (0.62 + n3 * 1.25) * (0.75 + pt.a * 0.55);
+    rr *= steady ? (1 + localE * (0.16 + n2 * 0.16)) : (1 + localT * puffChaos * (0.75 + n2) + Math.abs(flutter) * puffChaos * 0.35);
+    var a = alpha * (0.28 + pt.a * 0.72) * (0.55 + n1 * 0.45);
+    if (a <= 0.003) continue;
+    var col = opts.hot ? (n2 > 0.45 ? mixHex(core, heat, 0.25) : heat) : (v < 0.45 ? mixHex(smokeCol, heat, 0.14 + n2 * 0.12) : smokeCol);
+    if (cheap) {
+      c.globalAlpha = Math.min(0.55, a * 0.9);
+      c.fillStyle = col;
+    } else {
+      var g = c.createRadialGradient(px - rr * 0.18, py - rr * 0.2, 1, px, py, rr);
+      g.addColorStop(0, rgba(opts.hot ? core : mixHex(col, core, 0.12), Math.min(0.92, a * 1.25)));
+      g.addColorStop(0.52, rgba(col, a * 0.58));
+      g.addColorStop(1, rgba(smokeCol, 0));
+      c.globalAlpha = 1;
+      c.fillStyle = g;
+    }
+    c.beginPath();
+    c.ellipse(px, py, rr * (1.15 + n1 * 0.75), rr * (0.55 + n2 * 0.65), (n1 - 0.5) * 1.2 + (opts.rot || 0), 0, Math.PI * 2);
+    c.fill();
+  }
+  c.restore();
+}
 function explosionProfile(ci, cj, effR, pal) {
   var seed = (++blastSeq * 971) + cityTier * 131 + powerLvl * 37 + Math.round((ci + 1) * 53 + (cj + 1) * 89 + effR * 41);
   var n = 0;
@@ -348,16 +596,26 @@ function explosionProfile(ci, cj, effR, pal) {
     ringSx: r(0.88, 1.18),
     ringSy: r(0.86, 1.14),
     shockLines: Math.round(r(1, mobileFx() ? 3 : 5)),
-    smokeCols: Math.round(r(mobileFx() ? 1 : 2, mobileFx() ? 3 : 5)),
+    smokeCols: 0,
     secondary: Math.round(r(mobileFx() ? 0 : 1, mobileFx() ? 2 : 4)),
     dustN: Math.round(r(mobileFx() ? 5 : 11, mobileFx() ? 9 : 18)),
     smokeFlecks: Math.round(r(mobileFx() ? 4 : 10, mobileFx() ? 7 : 18)),
-    hotFlecks: Math.round(r(mobileFx() ? 2 : 6, mobileFx() ? 4 : 12))
+    hotFlecks: 0,
+    assetFire: Math.floor(r(0, 6)) % 6,
+    assetFlash: Math.floor(r(0, 2)) % 2,
+    assetSmoke: Math.floor(r(0, 2)) % 2,
+    mushroomMask: Math.floor(r(0, 14)) % 14,
+    mushroomMask2: Math.floor(r(0, 14)) % 14,
+    maskWarp: r(0.022, 0.07),
+    maskAlpha: r(0.15, 0.31),
+    maskFlip: r(0, 1) > 0.5 ? -1 : 1,
+    maskRot: r(-0.08, 0.08),
+    maskHot: r(0.08, 0.22)
   };
 }
 function blastProfileDebug(prof) {
   if (!prof) return null;
-  return { seed: prof.seed, heat: prof.heat, smoke: prof.smoke, fireImg: prof.fireImg, fireSc: Math.round(prof.fireSc * 100) / 100, fireLife: Math.round(prof.fireLife * 100) / 100, plumeSc: Math.round(prof.plumeSc * 100) / 100, lift: Math.round(prof.lift * 100) / 100, lean: Math.round(prof.lean * 100) / 100, stem: Math.round(prof.stem * 100) / 100, cap: Math.round(prof.cap * 100) / 100, capSquash: Math.round(prof.capSquash * 100) / 100, twist: Math.round(prof.twist * 100) / 100, billows: prof.billows, stemBlobs: prof.stemBlobs, frontLines: prof.frontLines, ringSx: Math.round(prof.ringSx * 100) / 100, ringSy: Math.round(prof.ringSy * 100) / 100, shockLines: prof.shockLines, smokeCols: prof.smokeCols, secondary: prof.secondary, dustN: prof.dustN, smokeFlecks: prof.smokeFlecks, hotFlecks: prof.hotFlecks };
+  return { seed: prof.seed, heat: prof.heat, smoke: prof.smoke, fireImg: prof.fireImg, fireSc: Math.round(prof.fireSc * 100) / 100, fireLife: Math.round(prof.fireLife * 100) / 100, plumeSc: Math.round(prof.plumeSc * 100) / 100, lift: Math.round(prof.lift * 100) / 100, lean: Math.round(prof.lean * 100) / 100, stem: Math.round(prof.stem * 100) / 100, cap: Math.round(prof.cap * 100) / 100, capSquash: Math.round(prof.capSquash * 100) / 100, twist: Math.round(prof.twist * 100) / 100, billows: prof.billows, stemBlobs: prof.stemBlobs, frontLines: prof.frontLines, ringSx: Math.round(prof.ringSx * 100) / 100, ringSy: Math.round(prof.ringSy * 100) / 100, shockLines: prof.shockLines, smokeCols: prof.smokeCols, secondary: prof.secondary, dustN: prof.dustN, smokeFlecks: prof.smokeFlecks, hotFlecks: prof.hotFlecks, assetFire: prof.assetFire, assetFlash: prof.assetFlash, assetSmoke: prof.assetSmoke, mushroomMask: prof.mushroomMask, mushroomMask2: prof.mushroomMask2, maskWarp: Math.round(prof.maskWarp * 1000) / 1000, maskAlpha: Math.round(prof.maskAlpha * 100) / 100, maskFlip: prof.maskFlip, maskRot: Math.round(prof.maskRot * 100) / 100, maskHot: Math.round(prof.maskHot * 100) / 100 };
 }
 function fxBurst(x, y, opts, min) {
   opts = Object.assign({}, opts || {});
@@ -675,7 +933,7 @@ function inferno(ci, cj, effR) {   // the fuel tanks cook off: a few LARGE secon
   var n = Math.min(tanks.length, 2 + infernoLvl);
   GF.juice.floatText(isoX(ci, cj), isoY(ci, cj) - 38 * GF.S, 'INFERNO', { color: '#ff8a3b', size: 16, rise: 58 });
   for (var k = 0; k < n; k++) { var tank = tanks[k], bigR = effR * (0.9 + infernoLvl * 0.12);   // each tank cooks off as a big secondary fireball; staggered by a t-offset so they ripple, not all at once
-    if (fireballs.length < fxCap(22, 8)) fireballs.push({ x: isoX(tank.ci + 0.5, tank.cj + 0.5), y: isoY(tank.ci + 0.5, tank.cj + 0.5), t: -k * 0.12, r: bigR, img: (Math.random() * 4) | 0, seed: cityTier * 311 + k * 97 + tank.ci * 13 + tank.cj * 19, flip: Math.random() < 0.5 ? -1 : 1, rot: 0, sc: 1.2 + Math.random() * 0.4, tint: '#ff8a3b', accent: '#ffd166', smoke: '#33251f', fast: mobileFx() });
+    if (fireballs.length < fxCap(22, 8)) fireballs.push({ x: isoX(tank.ci + 0.5, tank.cj + 0.5), y: isoY(tank.ci + 0.5, tank.cj + 0.5), t: -k * 0.12, r: bigR, img: (Math.random() * 4) | 0, seed: cityTier * 311 + k * 97 + tank.ci * 13 + tank.cj * 19, assetFire: (k + cityTier) % 6, assetFlash: k % 2, assetSmoke: (k + tank.ci + tank.cj) % 2, flip: Math.random() < 0.5 ? -1 : 1, rot: 0, sc: 1.2 + Math.random() * 0.4, tint: '#ff8a3b', accent: '#ffd166', smoke: '#33251f', fast: mobileFx() });
     blastAt(tank.ci, tank.cj, bigR); }
 }
 function chainReaction() {   // each freshly-destroyed shophouse touches off its immediate neighbours, rippling out over chainLvl rings (staggered for a visible cascade)
@@ -706,18 +964,18 @@ function blastAt(ci, cj, effR) {
   lastBlastProfile = blastProfileDebug(prof);
   waves.push({ ci: ci, cj: cj, r: 0, maxR: effR, t: 0, color: prof.heat, glow: pal.blast, rot: prof.ringRot, sx: prof.ringSx, sy: prof.ringSy, seed: prof.seed, lines: prof.frontLines, dustColor: prof.smoke });
   pushImpactPulse(gx, gy, effR, pal, mushrooms.length === 0, prof);
-  if (mushrooms.length < fxCap(8, 2)) mushrooms.push({ x: gx, y: gy, t: 0, life: fxCap(2.35, 1.45), scale: (0.55 + powerLvl * 0.045) * nukeDef(activeNuke).mult * (0.85 + Math.random() * 0.45) * prof.plumeSc, tint: prof.heat, accent: pal.accent, secondary: prof.core, impact: pal.impact, prof: prof });   // selected warhead + procedural profile changes cloud size/style
+  if (mushrooms.length < fxCap(8, 2)) mushrooms.push({ x: gx, y: gy, t: 0, life: fxCap(2.35, 1.45), scale: (0.66 + powerLvl * 0.04) * nukeDef(activeNuke).mult * (0.85 + Math.random() * 0.45) * prof.plumeSc, tint: prof.heat, accent: pal.accent, secondary: prof.core, impact: pal.impact, prof: prof });   // selected warhead + procedural profile changes cloud size/style
   craters.push({ ci: ci, cj: cj, r: effR, reveal: 0 });
-  for (var scn = 0; scn < prof.smokeCols && smoke.length < fxCap(22, 6); scn++) { var sa = prof.twist + scn / Math.max(1, prof.smokeCols) * Math.PI * 2, sr = effR * TW() * (0.05 + Math.random() * 0.18);
-    smoke.push({ x: gx + Math.cos(sa) * sr, y: gy + TH() * 0.2 + Math.sin(sa) * sr * 0.28, t: -scn * 0.06, r: effR * (0.72 + Math.random() * 0.5), life: fxCap(4.8 + Math.random() * 1.8, 2.3 + Math.random()), color: prof.smoke, rise: (18 + Math.random() * 20) * GF.S, dx: Math.cos(sa) * (10 + Math.random() * 24) * GF.S }); }
+  for (var scn = 0; scn < prof.smokeCols && smoke.length < fxCap(22, 6); scn++) { var sa = Math.random() * Math.PI * 2, sr = effR * TW() * (0.04 + Math.random() * 0.2);
+    smoke.push({ x: gx + Math.cos(sa) * sr, y: gy + TH() * 0.2 + Math.sin(sa) * sr * 0.28, t: -scn * 0.06, r: effR * (0.72 + Math.random() * 0.5), life: fxCap(4.8 + Math.random() * 1.8, 2.3 + Math.random()), color: prof.smoke, rise: (18 + Math.random() * 20) * GF.S, dx: (Math.random() - 0.5) * (22 + Math.random() * 34) * GF.S, seed: prof.seed + scn * 211.7 + Math.random() * 1000 }); }
   if (fires.length < fxCap(48, 14)) fires.push({ x: gx, y: gy, t: 0, life: fxLife(4), r: effR * 0.45 });
-  fxBurst(gx, gy, { count: 34 + prof.dustN, colors: [prof.core, pal.accent, prof.heat, pal.primary], speed: 300 + prof.fireSc * 70, gravity: 230, life: 0.85 + prof.fireLife * 0.2, size: 6 + prof.fireSc * 1.4 }, 10);   // bigger debris blast, recoloured by equipped collectible
-  fxBurst(gx, gy - 8 * GF.S, { count: 16, colors: [pal.secondary, pal.accent], speed: 120, gravity: -28, life: 0.6, size: 4 }, 5);             // upward flash sparks
-  if (fireballs.length < fxCap(28, 9)) fireballs.push({ x: gx, y: gy, t: 0, r: effR, img: prof.fireImg, seed: prof.seed + 501, flip: Math.random() < 0.5 ? -1 : 1, rot: prof.fireRot, sc: prof.fireSc, tint: prof.heat, accent: pal.accent, smoke: prof.smoke, fast: mobileFx(), life: prof.fireLife });   // main blast: seeded style + flip/scale/lifetime
+  fxBurst(gx, gy, { count: 12 + Math.round(prof.dustN * 0.35), colors: [prof.core, pal.accent, prof.heat, pal.primary], speed: 250 + prof.fireSc * 50, gravity: 300, life: 0.42 + prof.fireLife * 0.1, size: 2.2 + prof.fireSc * 0.55 }, 5);   // small sparks/debris, not round smoke clouds
+  fxBurst(gx, gy - 8 * GF.S, { count: 8, colors: [pal.secondary, pal.accent], speed: 120, gravity: -28, life: 0.45, size: 2.4 }, 3);             // upward flash sparks
+  if (fireballs.length < fxCap(28, 9)) fireballs.push({ x: gx, y: gy, t: 0, r: effR, img: prof.fireImg, seed: prof.seed + 501, assetFire: prof.assetFire, assetFlash: prof.assetFlash, assetSmoke: prof.assetSmoke, flip: Math.random() < 0.5 ? -1 : 1, rot: prof.fireRot, sc: prof.fireSc, tint: prof.heat, accent: pal.accent, smoke: prof.smoke, fast: mobileFx(), life: prof.fireLife });   // main blast: seeded style + flip/scale/lifetime
   for (var sb = 0; sb < prof.secondary && fireballs.length < fxCap(34, 10); sb++) { var ba = prof.twist + sb / Math.max(1, prof.secondary) * Math.PI * 2, bd = effR * (0.2 + Math.random() * 0.35);
-    fireballs.push({ x: gx + Math.cos(ba) * bd * TW() * 0.35, y: gy + Math.sin(ba) * bd * TH() * 0.25 - (12 + sb * 4) * GF.S, t: -0.06 * sb, r: effR * (0.28 + Math.random() * 0.22), img: (prof.fireImg + sb + 1) % 4, seed: prof.seed + 701 + sb * 53, flip: sb % 2 ? -1 : 1, rot: ba * 0.35, sc: 0.78 + Math.random() * 0.45, tint: prof.heat, accent: pal.accent, smoke: prof.smoke, fast: mobileFx(), life: prof.fireLife * 0.82 }); }
+    fireballs.push({ x: gx + Math.cos(ba) * bd * TW() * 0.35, y: gy + Math.sin(ba) * bd * TH() * 0.25 - (12 + sb * 4) * GF.S, t: -0.06 * sb, r: effR * (0.28 + Math.random() * 0.22), img: (prof.fireImg + sb + 1) % 4, seed: prof.seed + 701 + sb * 53, assetFire: (prof.assetFire + sb + 1) % 6, assetFlash: (prof.assetFlash + sb) % 2, assetSmoke: (prof.assetSmoke + sb) % 2, flip: sb % 2 ? -1 : 1, rot: ba * 0.35, sc: 0.78 + Math.random() * 0.45, tint: prof.heat, accent: pal.accent, smoke: prof.smoke, fast: mobileFx(), life: prof.fireLife * 0.82 }); }
   var dustN = fxCap(prof.dustN, Math.max(5, Math.round(prof.dustN * 0.5)));
-  for (var dd = 0; dd < dustN && dust.length < fxCap(210, 72); dd++) { var da = prof.twist + dd / dustN * Math.PI * 2, wob = 0.7 + Math.random() * 0.75; dust.push({ x: gx + Math.cos(da) * 14 * GF.S * wob, y: gy + TH() / 2 + Math.sin(da) * 7 * GF.S * wob, t: 0, r0: (9 + Math.random() * 8) * GF.S, life: fxLife(0.85 + Math.random() * 0.55), color: Math.random() > 0.55 ? '#8c8578' : '#5a5048', dx: Math.cos(da) * (18 + Math.random() * 42) * GF.S, rise: (12 + Math.random() * 24) * GF.S }); }   // irregular outward dust ring
+  for (var dd = 0; dd < dustN && dust.length < fxCap(210, 72); dd++) { var da = Math.random() * Math.PI * 2, wob = 0.35 + Math.random() * 1.1; dust.push({ x: gx + Math.cos(da) * 14 * GF.S * wob, y: gy + TH() / 2 + Math.sin(da) * 7 * GF.S * wob, t: 0, r0: (9 + Math.random() * 8) * GF.S, life: fxLife(0.85 + Math.random() * 0.55), color: Math.random() > 0.55 ? '#8c8578' : '#5a5048', dx: (Math.cos(da) * 0.55 + (Math.random() - 0.5) * 0.9) * (18 + Math.random() * 42) * GF.S, rise: (12 + Math.random() * 24) * GF.S }); }   // irregular outward dust ring
   for (var zk = 0; zk < zombies.length; zk++) { var zz = zombies[zk]; if (zz.state !== 'walk') continue;   // any shambler caught in the blast is vaporized for bonus caps
     if (Math.sqrt((zz.ci - ci) * (zz.ci - ci) + (zz.cj - cj) * (zz.cj - cj)) <= effR) { zz.state = 'dead'; zz.fall = 0; var zg = Math.round((zz.big ? 22 : 12) * (1 + cityTier * 0.18) * payoutBoost()); dropEarned += zg;
       GF.juice.floatText(isoX(zz.ci, zz.cj), isoY(zz.ci, zz.cj) - 12 * GF.S, '+' + zg, { color: THEMES.quarantine.accent, size: 12, rise: 40 }); fxBurst(isoX(zz.ci, zz.cj), isoY(zz.ci, zz.cj), { count: 6, colors: [THEMES.quarantine.accent, '#9aff6a', '#6a8a3a'], speed: 90, life: 0.4 }, 2); } }
@@ -761,7 +1019,7 @@ function destroyBuilding(b, gi, gj, full) {
   }
   if (Math.random() < (mobileFx() ? 0.22 : 0.5) && dust.length < fxCap(230, 78)) dust.push({ x: bx, y: by - b.h * BH() * 0.3, t: 0, r0: (7 + b.h * 2) * GF.S, life: fxLife(0.85 + Math.random() * 0.4) });   // lighter dust so the toppling shows
   if (Math.random() < (mobileFx() ? 0.12 : 0.35) && fires.length < fxCap(60, 16)) { b.burning = true; fires.push({ x: bx, y: by, t: 0, life: fxLife(3 + Math.random() * 3), r: (10 + b.h * 2) * GF.S }); }
-  if (fireballs.length < fxCap(44, 10) && Math.random() < (mobileFx() ? 0.08 : 0.34)) fireballs.push({ x: bx, y: by - b.h * BH() * 0.35, t: -Math.random() * 0.14, r: 0.5 + b.h * 0.12, img: (Math.random() * 4) | 0, seed: cityTier * 419 + b.i * 37 + b.j * 61 + b.h * 17, flip: Math.random() < 0.5 ? -1 : 1, rot: (Math.random() - 0.5) * 1.3, sc: 0.75 + Math.random() * 0.6, tint: '#ff7a35', accent: '#ffd166', smoke: '#342820', fast: mobileFx() });   // secondary blasts cascade out, each a different procedural style
+  if (fireballs.length < fxCap(44, 10) && Math.random() < (mobileFx() ? 0.08 : 0.34)) fireballs.push({ x: bx, y: by - b.h * BH() * 0.35, t: -Math.random() * 0.14, r: 0.5 + b.h * 0.12, img: (Math.random() * 4) | 0, seed: cityTier * 419 + b.i * 37 + b.j * 61 + b.h * 17, assetFire: (b.i + b.j + cityTier) % 6, assetFlash: (b.i + b.j) % 2, assetSmoke: (b.i * 3 + b.j) % 2, flip: Math.random() < 0.5 ? -1 : 1, rot: (Math.random() - 0.5) * 1.3, sc: 0.75 + Math.random() * 0.6, tint: '#ff7a35', accent: '#ffd166', smoke: '#342820', fast: mobileFx() });   // secondary blasts cascade out, each a different procedural style
   collapseSfx(b.fw * b.fd > 1);
 }
 function damageBuilding(b, gi, gj) {
@@ -1272,7 +1530,7 @@ function drawGround(c) {
     var g = c.createRadialGradient(x2, y2, 2, x2, y2, rx);
     g.addColorStop(0, 'rgba(8,6,6,0.92)'); g.addColorStop(0.7, 'rgba(22,15,12,0.7)'); g.addColorStop(1, 'rgba(22,15,12,0)');
     c.fillStyle = g; c.beginPath(); c.ellipse(x2, y2, rx, ry, 0, 0, Math.PI * 2); c.fill();
-    c.save(); c.globalAlpha = 0.3 + 0.16 * Math.sin(bgT * 5 + k); c.strokeStyle = 'rgba(255,110,40,0.4)'; c.lineWidth = 2.5 * GF.S; c.beginPath(); c.ellipse(x2, y2, rx * 0.42, ry * 0.42, 0, 0, Math.PI * 2); c.stroke(); c.restore();
+    c.save(); c.globalAlpha = 0.16 + 0.08 * fxRand(k * 37.9 + cr.ci * 11 + cr.cj * 19); c.strokeStyle = 'rgba(255,110,40,0.35)'; c.lineWidth = 2.2 * GF.S; strokeBrokenEllipse(c, x2, y2, rx * 0.42, ry * 0.42, 0, k * 101.7 + cr.ci * 13 + cr.cj * 23, mobileFx() ? 3 : 5, 0.55); c.restore();
   }
 }
 // visible expanding shockwave ring sweeping out across the ground from ground zero
@@ -1285,9 +1543,9 @@ function drawWaves(c) {
     var a = Math.max(0, 1 - wv.t / 0.55);
     var waveCol = wv.color || '#ffa040', waveGlow = wv.glow || '#ffce9a';
     c.save();
-    c.shadowColor = waveGlow; c.shadowBlur = 14 * GF.S;
-    c.globalAlpha = a; c.strokeStyle = '#fff'; c.lineWidth = (4 + (1 - a) * 9) * GF.S; c.beginPath(); c.ellipse(gx, gy, rx, ry, wr, 0, Math.PI * 2); c.stroke();
-    c.shadowBlur = 0; c.globalAlpha = a * 0.72; c.strokeStyle = waveCol; c.lineWidth = 2.5 * GF.S; c.beginPath(); c.ellipse(gx, gy, rx * 0.85, ry * 0.85, wr * -0.7, 0, Math.PI * 2); c.stroke();
+    c.shadowColor = waveGlow; c.shadowBlur = 10 * GF.S;
+    c.globalAlpha = a * 0.5; c.strokeStyle = '#fff'; c.lineWidth = (3 + (1 - a) * 6) * GF.S; strokeBrokenEllipse(c, gx, gy, rx, ry, wr, (wv.seed || 1) + 401, mobileFx() ? 4 : 7, 0.45);
+    c.shadowBlur = 0; c.globalAlpha = a * 0.42; c.strokeStyle = waveCol; c.lineWidth = 2.1 * GF.S; strokeBrokenEllipse(c, gx, gy, rx * 0.85, ry * 0.85, wr * -0.7, (wv.seed || 1) + 503, mobileFx() ? 3 : 6, 0.55);
     c.restore();
   }
 }
@@ -1302,8 +1560,8 @@ function drawWaveFronts(c) {
     c.save();
     c.globalAlpha = a * 0.32;
     c.strokeStyle = 'rgba(210,190,150,0.42)';
-    c.lineWidth = (mobileFx() ? 8 : 13) * S;
-    c.beginPath(); c.ellipse(gx, gy, rx * 1.02, ry * 1.05, rot, 0, Math.PI * 2); c.stroke();   // dust curtain riding the pressure front
+    c.lineWidth = (mobileFx() ? 7 : 11) * S;
+    strokeBrokenEllipse(c, gx, gy, rx * 1.02, ry * 1.05, rot, seed + 701, mobileFx() ? 4 : 7, 0.5);   // dust curtain riding the pressure front
     c.globalCompositeOperation = 'lighter';
     c.shadowColor = wv.glow || wv.color || '#ffad55'; c.shadowBlur = 11 * S;
     for (var q = 0; q < lineN; q++) {
@@ -1323,20 +1581,21 @@ function drawImpactPulses(c) {
     var rx = p.r * TW() * (0.36 + k * 0.5) * (p.sx || 1), ry = p.r * TH() * (0.28 + k * 0.42) * (p.sy || 1), rot = p.rot || 0;
     c.save();
     c.globalCompositeOperation = 'lighter';
-    c.globalAlpha = a * (p.main ? 0.72 : 0.42);
+    c.globalAlpha = a * (p.main ? 0.42 : 0.26);
     var g = c.createRadialGradient(p.x, p.y, 2, p.x, p.y, Math.max(rx, 20 * S));
-    g.addColorStop(0, rgba(p.accent, 0.85));
-    g.addColorStop(0.34, rgba(p.color, 0.42));
+    g.addColorStop(0, rgba(p.accent, 0.68));
+    g.addColorStop(0.34, rgba(p.color, 0.28));
     g.addColorStop(1, rgba(p.color, 0));
     c.fillStyle = g;
     c.beginPath(); c.ellipse(p.x, p.y + TH() * 0.12, rx, ry, rot, 0, Math.PI * 2); c.fill();
-    c.globalAlpha = a * 0.7;
+    c.globalAlpha = a * 0.42;
     c.strokeStyle = rgba(p.accent, 0.75); c.lineWidth = 1.1 * S;
-    for (var ln = 0; ln < (p.lines || 1); ln++) { var scale = 0.48 + ln * 0.18 + k * 0.3; c.beginPath(); c.ellipse(p.x, p.y + TH() * 0.12, rx * scale, ry * scale, rot + ln * 0.18, 0, Math.PI * 2); c.stroke(); }
+    for (var ln = 0; ln < (p.lines || 1); ln++) { var scale = 0.48 + ln * 0.18 + k * 0.3; strokeBrokenEllipse(c, p.x, p.y + TH() * 0.12, rx * scale, ry * scale, rot + ln * 0.18, (p.x + p.y) * 0.07 + ln * 103.3 + k * 17, mobileFx() ? 2 : 3, 0.55); }
     c.strokeStyle = rgba(p.accent, 0.95); c.lineWidth = (p.main ? 3 : 2) * S;
-    c.beginPath(); c.ellipse(p.x, p.y + TH() * 0.35, rx * 0.72, ry * 0.46, 0, 0, Math.PI * 2); c.stroke();
+    c.globalAlpha = a * 0.48;
+    strokeBrokenEllipse(c, p.x, p.y + TH() * 0.35, rx * 0.72, ry * 0.46, 0, (p.x + p.y) * 0.11 + 733, mobileFx() ? 3 : 5, 0.42);
     for (var r = 0, rays = mobileFx() ? 5 : 8; r < rays; r++) {
-      var ang = r / rays * Math.PI * 2 + k * 0.8, r1 = rx * 0.22, r2 = rx * (0.62 + 0.28 * k);
+      var seedR = (p.x + p.y) * 0.13 + r * 89.1, ang = fxRand(seedR + Math.floor(k * 5) * 31.3) * Math.PI * 2, r1 = rx * (0.16 + fxRand(seedR + 7) * 0.16), r2 = rx * (0.48 + fxRand(seedR + 13) * (0.34 + 0.22 * k));
       c.beginPath();
       c.moveTo(p.x + Math.cos(ang) * r1, p.y + Math.sin(ang) * ry * 0.12);
       c.lineTo(p.x + Math.cos(ang) * r2, p.y + Math.sin(ang) * ry * 0.32);
@@ -1486,9 +1745,23 @@ function isoBox(c, b, Hh, col, lit, lx, ly) {
   }
 }
 function drawChunks(c) { for (var i = 0; i < chunks.length; i++) { var k = chunks[i], a = Math.min(1, k.life), sz = k.s * (0.7 + 0.3 * Math.sin(k.rot)); c.globalAlpha = a; c.fillStyle = k.col; c.fillRect(k.x - sz / 2, k.y - sz / 2, sz, sz); c.fillStyle = darken(k.col, -0.3); c.fillRect(k.x - sz / 2, k.y, sz, sz / 2); } c.globalAlpha = 1; }
-function drawDust(c) { var blobs = mobileFx() ? (dust.length > 45 ? 1 : 2) : 3; for (var i = 0; i < dust.length; i++) { var d = dust[i], k = d.t / d.life, r = d.r0 * (1 + k * 1.4), a = Math.max(0, 0.3 * (1 - k)), dx = (d.dx || 0) * k, rise = d.rise || (22 * GF.S); for (var p = 0; p < blobs; p++) { c.globalAlpha = a * (1 - p * 0.25); c.fillStyle = d.color || '#9a9488'; c.beginPath(); c.arc(d.x + dx + Math.cos(p * 2.1) * r * 0.4, d.y - k * rise - p * 6 * GF.S, r * (0.6 + p * 0.15), 0, Math.PI * 2); c.fill(); } } c.globalAlpha = 1; }
+function drawDust(c) {
+  var grains = mobileFx() ? (dust.length > 45 ? 2 : 3) : 5;
+  for (var i = 0; i < dust.length; i++) {
+    var d = dust[i], k = d.t / d.life, r = d.r0 * (0.45 + k * 0.9), a = Math.max(0, 0.22 * (1 - k)), dx = (d.dx || 0) * k, rise = d.rise || (22 * GF.S);
+    for (var p = 0; p < grains; p++) {
+      var seed = (d.x * 0.13 + d.y * 0.19 + i * 47.3 + p * 97.1), nx = fxRand(seed) - 0.5, ny = fxRand(seed + 11.7) - 0.5;
+      var px = d.x + dx + nx * r * 1.35, py = d.y - k * rise + ny * r * 0.48 - p * 2.2 * GF.S;
+      var sz = Math.max(1.2 * GF.S, (1.8 + fxRand(seed + 23.9) * 3.2) * GF.S * (1 - k * 0.35));
+      c.globalAlpha = a * (0.45 + fxRand(seed + 31.5) * 0.45);
+      c.fillStyle = d.color || '#8c8578';
+      c.fillRect(px - sz * 0.5, py - sz * 0.32, sz * (0.9 + fxRand(seed + 41.2) * 1.8), Math.max(1, sz * 0.42));
+    }
+  }
+  c.globalAlpha = 1;
+}
 function drawFires(c) { var tongues = mobileFx() ? (fires.length > 10 ? 1 : 2) : 4; for (var i = 0; i < fires.length; i++) { var f = fires[i], k = f.t / f.life, a = Math.max(0, 1 - k); for (var p = 0; p < tongues; p++) { var fl = 0.6 + 0.4 * Math.sin(bgT * 12 + p * 2 + i), fx = f.x + (p - (tongues - 1) / 2) * f.r * 0.4, fy = f.y - p * 2 * GF.S; var fg = c.createRadialGradient(fx, fy, 1, fx, fy, f.r * fl * 0.6); fg.addColorStop(0, 'rgba(255,240,150,' + (0.7 * a) + ')'); fg.addColorStop(0.5, 'rgba(255,130,40,' + (0.5 * a) + ')'); fg.addColorStop(1, 'rgba(120,30,10,0)'); c.fillStyle = fg; c.beginPath(); c.ellipse(fx, fy, f.r * 0.4 * fl, f.r * 0.7 * fl, 0, 0, Math.PI * 2); c.fill(); } } }
-function drawSmoke(c) { var blobs = mobileFx() ? (smoke.length > 4 ? 1 : 2) : 3; for (var i = 0; i < smoke.length; i++) { var s = smoke[i]; if (s.t < 0) continue; var life = s.life || 6, rise = s.t * (s.rise || (26 * GF.S)), alpha = Math.max(0, 0.45 - s.t / life * 0.45), drift = (s.dx || 0) * Math.min(1, s.t / life); for (var p = 0; p < blobs; p++) { c.globalAlpha = alpha * (1 - p * 0.25); c.fillStyle = s.color || '#2a2622'; c.beginPath(); c.arc(s.x + drift + Math.sin(s.t * 0.7 + p * 2) * s.r * TW() * 0.18, s.y - rise - p * 16 * GF.S, (12 + s.t * 10 + p * 6) * GF.S, 0, Math.PI * 2); c.fill(); } } c.globalAlpha = 1; }
+function drawSmoke(c) { var blobs = mobileFx() ? (smoke.length > 4 ? 1 : 2) : 3; for (var i = 0; i < smoke.length; i++) { var s = smoke[i]; if (s.t < 0) continue; var life = s.life || 6, rise = s.t * (s.rise || (26 * GF.S)), alpha = Math.max(0, 0.45 - s.t / life * 0.45), drift = (s.dx || 0) * Math.min(1, s.t / life), ss = s.seed || (s.x * 0.17 + s.y * 0.31 + i * 19.7); for (var p = 0; p < blobs; p++) { var jx = fxChaos(ss + p * 53.1, s.t * (0.65 + p * 0.19)) * s.r * TW() * 0.24, jy = fxChaos(ss + p * 71.9 + 11, s.t * (0.52 + p * 0.17)) * s.r * TH() * 0.06; c.globalAlpha = alpha * (1 - p * 0.25); c.fillStyle = s.color || '#2a2622'; c.beginPath(); c.arc(s.x + drift + jx, s.y - rise - p * 16 * GF.S + jy, (12 + s.t * 10 + p * 6) * GF.S, 0, Math.PI * 2); c.fill(); } } c.globalAlpha = 1; }
 function drawFireballs(c) {
   var density = fireballs.length > 1 ? Math.max(0.45, 1 / Math.sqrt(fireballs.length * 0.45)) : 1;
   var cheap = mobileFx() || fireballs.length > 5;
@@ -1501,6 +1774,8 @@ function drawFireballs(c) {
     if (fb.rot) c.rotate(fb.rot * (1 + k * 0.4));
     c.scale(fb.flip || 1, 0.78 + k * 0.34);
     c.globalCompositeOperation = 'lighter';
+    drawExplosionAsset(c, 'fire', fb.assetFire || fb.img || 0, 0, 0, sz * 0.72, sz * 0.6, br(23, 1) * Math.PI * 2, (cheap ? 0.16 : 0.24) * fade, 'lighter');
+    if (!cheap || i < 3) drawExplosionAsset(c, 'flash', fb.assetFlash || 0, 0, 0, sz * 0.42, sz * 0.34, br(24, 1) * Math.PI * 2, 0.15 * fade, 'lighter');
     var shell = c.createRadialGradient(0, 0, 2, 0, 0, sz * 0.48);
     shell.addColorStop(0, rgba(core, 0.78 * fade));
     shell.addColorStop(0.28, rgba(accent, 0.68 * fade));
@@ -1524,6 +1799,7 @@ function drawFireballs(c) {
     c.globalCompositeOperation = 'source-over';
     c.globalAlpha = 0.22 * fade;
     c.fillStyle = fb.smoke || 'rgba(40,34,29,1)';
+    drawExplosionAsset(c, 'smoke', fb.assetSmoke || 0, 0, 0, sz * 0.52, sz * 0.36, br(25, 1) * Math.PI * 2, 0.09 * fade, null);
     for (var s = 0, sm = Math.max(cheap ? 1 : 2, Math.round((cheap ? 2 : 5) * density)); s < sm; s++) {
       var sa = s / sm * Math.PI * 2 + br(s, 8), sd = sz * (0.18 + br(s, 9) * 0.24);
       c.beginPath(); c.ellipse(Math.cos(sa) * sd, Math.sin(sa) * sd * 0.62, sz * (0.12 + br(s, 10) * 0.12), sz * (0.07 + br(s, 11) * 0.08), sa, 0, Math.PI * 2); c.fill();
@@ -1576,41 +1852,45 @@ function drawMushroom(c, m) {
   if (t < 0.7) { var fk = 1 - t / 0.7, fr = (50 + 80 * (1 - fk)) * S * sc; var fg = c.createRadialGradient(x, y, 2, x, y, fr);   // white-hot core -> collectible-coloured fireball
     fg.addColorStop(0, rgba(secondary, fk)); fg.addColorStop(0.32, rgba(accent, fk * 0.92)); fg.addColorStop(0.68, rgba(blast, fk * 0.65)); fg.addColorStop(1, rgba(blast, 0));
     c.fillStyle = fg; c.beginPath(); c.arc(x, y, fr, 0, Math.PI * 2); c.fill(); }
-  var lean = pf.lean || 0, topX = x + lean * (42 + 95 * rise) * S * sc, topY = y - (40 + 240 * rise * (pf.lift || 1)) * S * sc, stemW = (18 + 16 * rise) * S * sc * (pf.stem || 1);                                                // tall glowing column
-  var capR = (42 + 120 * rise) * S * sc * (pf.cap || 1), capSX = pf.capSquash || 1, capSY = 1.05 + (1 - capSX) * 0.35, billows = pf.billows || (cheap ? 13 : 24), cloudA = alpha * GF.clamp((cloudT - 0.16) / 0.54, 0, 1);
-  var sg = c.createLinearGradient(x, topY, x, y); sg.addColorStop(0, rgba(secondary, 0.44 * cloudA)); sg.addColorStop(0.5, rgba(blast, 0.38 * cloudA)); sg.addColorStop(1, 'rgba(62,56,52,' + (0.26 * cloudA) + ')');
-  c.fillStyle = sg; c.beginPath(); c.moveTo(x - stemW * 0.4, y); c.lineTo(topX - stemW * 0.62, topY); c.lineTo(topX + stemW * 0.62, topY); c.lineTo(x + stemW * 0.4, y); c.closePath(); c.fill();
-  for (var sb = 0, stemN = pf.stemBlobs || (cheap ? 5 : 9); sb < stemN; sb++) {
-    var sv = (sb + 0.45) / stemN, side = rnd(sb, 9) - 0.5, sx0 = GF.lerp(x, topX, sv) + side * stemW * (0.75 + sv), sy0 = GF.lerp(y - 4 * S, topY + capR * 0.08, sv) + Math.sin(cloudT * 2.4 + sb) * 3 * S, sr = (10 + sv * 28) * S * sc * (0.82 + rnd(sb, 10) * 0.42);
-    blob(sx0, sy0, sr * (0.8 + sv * 0.45), sr * (0.95 + rnd(sb, 11) * 0.55), lean * 0.18, mixHex(secondary, blast, 0.25), mixHex(blast, smokeCol, 0.34), smokeCol, cloudA * (0.38 + sv * 0.22), null);
+  var plumeK = 0.9 + 0.12 * rise, liftK = 0.88 + 0.14 * rise;
+  var lean = pf.lean || 0, topX = x + lean * (122 + 18 * rise) * S * sc, topY = y - (248 * liftK * (0.94 + (pf.lift || 1) * 0.06)) * S * sc, stemW = (30 + 5 * rise) * S * sc * (pf.stem || 1);                                                // tall glowing column
+  var capR = (146 * plumeK) * S * sc * (pf.cap || 1), capSX = pf.capSquash || 1, capSY = 1.05 + (1 - capSX) * 0.35, billows = pf.billows || (cheap ? 13 : 24), cloudA = alpha * GF.clamp((cloudT - 0.16) / 0.54, 0, 1);
+  var freeT = GF.clamp((cloudT - 0.18) / (cheap ? 1.0 : 1.35), 0, 1.25), freeU = Math.min(1, freeT), freeE = freeU * freeU * (3 - 2 * freeU);
+  var sg = c.createLinearGradient(x, topY, x, y); sg.addColorStop(0, rgba(secondary, 0.22 * cloudA)); sg.addColorStop(0.5, rgba(blast, 0.2 * cloudA)); sg.addColorStop(1, 'rgba(62,56,52,' + (0.1 * cloudA) + ')');
+  c.fillStyle = sg; c.beginPath(); c.moveTo(x - stemW * 0.24, y); c.lineTo(topX - stemW * 0.42, topY); c.lineTo(topX + stemW * 0.42, topY); c.lineTo(x + stemW * 0.24, y); c.closePath(); c.fill();
+  var sourceProgress = GF.clamp((cloudT - 0.08) / (cheap ? 1.18 : 1.58), 0, 1);
+  var sourceAsset2 = mushroomSourceAsset(pf.mushroomMask2 || 0);
+  if (sourceAsset2) {
+    var capMaskW = capR * (1.26 + rnd(72, 1) * 0.36) * capSX, capMaskH = capR * (0.92 + rnd(73, 1) * 0.24) * capSY, capMaskX = topX + lean * capR * 0.18, capMaskY = topY - capR * 0.12;
+    drawMushroomSourcePuffs(c, sourceAsset2, capMaskX, capMaskY, capMaskW, capMaskH, sourceProgress, seed + 1300, cloudA * (cheap ? 0.24 : 0.32), { smoke: smokeCol, heat: blast, core: secondary }, { cropA: 0, cropB: 0.68, hot: false, lean: lean * 0.35, warp: (pf.maskWarp || 0.04) * 0.22, rot: (pf.maskRot || 0) * -0.7, count: cheap ? 14 : 46, reveal: 1, chaos: 0, chaosT: sourceProgress, steady: true });
+    if (!cheap) drawMushroomSourceLayer(c, sourceAsset2, capMaskX, capMaskY, capMaskW, capMaskH, sourceProgress, seed + 1350, cloudA * 0.008, { smoke: smokeCol, heat: blast, core: secondary }, { cropA: 0, cropB: 0.68, hot: false, lean: lean * 0.35, warp: (pf.maskWarp || 0.04) * 0.18, flip: pf.maskFlip || 1, rot: (pf.maskRot || 0) * -0.7, reveal: 1, chaos: 0, chaosT: sourceProgress });
   }
-  blob(topX, topY - capR * 0.18, capR * capSX * 0.9, capR * capSY * 0.38, lean * 0.16, mixHex(smokeCol, blast, 0.16), smokeCol, '#171412', cloudA * 0.34, null);
+  blob(topX, topY - capR * 0.18, capR * capSX * 1.08, capR * capSY * 0.43, lean * 0.16, mixHex(smokeCol, blast, 0.18), smokeCol, '#171412', cloudA * 0.43, null);
+  for (var looseCap = 0, looseCapN = cheap ? 3 : 7; looseCap < looseCapN; looseCap++) {
+    var lc1 = rnd(looseCap, 81), lc2 = rnd(looseCap, 82), lc3 = rnd(looseCap, 83), lc4 = rnd(looseCap, 84);
+    var looseMove = freeE * (0.35 + lc2 * 0.9);
+    var lx0 = (lc1 - 0.5) * capR * capSX * (1.35 + lc2 * 0.4), ly0 = -capR * (0.08 + lc3 * 0.52) + (lc4 - 0.5) * capR * capSY * 0.42;
+    var lx = topX + lx0 * (1 + looseMove * (0.05 + lc3 * 0.08));
+    var ly = topY + ly0 * (1 + looseMove * (0.035 + lc2 * 0.06)) - capR * (0.045 + lc4 * 0.035) * looseMove;
+    var lr = capR * (0.13 + lc4 * 0.18);
+    blob(lx, ly, lr * (1.15 + lc2 * 0.9) * capSX, lr * (0.62 + lc3 * 0.72) * capSY, lean * 0.14 + (lc1 - 0.5) * 1.1, mixHex(smokeCol, blast, 0.1), smokeCol, '#11100f', cloudA * (0.13 + lc3 * 0.13) * (0.45 + freeE * 0.55), null);
+  }
+  var capJx = (rnd(0, 91) - 0.5) * capR * capSX * 0.08 * freeE, capJy = ((rnd(0, 92) - 0.5) * capR * 0.04 - capR * 0.018) * freeE;
+  drawExplosionAsset(c, 'smoke', pf.assetSmoke || 0, topX + capJx, topY - capR * 0.19 + capJy, capR * capSX * 0.74, capR * capSY * 0.34, lean * 0.2 + (pf.twist || 0) * 0.08 + freeE * 0.08, cloudA * 0.12, null);
+  drawExplosionAsset(c, 'fire', pf.assetFire || 0, topX - capJx * 0.55, topY - capR * 0.12 - capJy * 0.35, capR * capSX * 0.44, capR * capSY * 0.23, lean * 0.18 - freeE * 0.07, cloudA * 0.055, 'lighter');
   for (var sf = 0, smokeF = Math.min(pf.smokeFlecks || (cheap ? 7 : 14), cheap ? 10 : 20); sf < smokeF; sf++) {
-    var sr1 = rnd(sf, 41), sr2 = rnd(sf, 42), sr3 = rnd(sf, 43), sa1 = sf / Math.max(1, smokeF) * Math.PI * 2 + (pf.twist || 0) + sr1 * 0.95 + cloudT * 0.03;
-    var sx1 = topX + Math.cos(sa1) * capR * capSX * (0.08 + sr2 * 0.72), sy1 = topY - capR * (0.15 + sr3 * 0.36) + Math.sin(sa1 * 1.28 + sr2) * capR * capSY * 0.22;
+    var sr1 = rnd(sf, 41), sr2 = rnd(sf, 42), sr3 = rnd(sf, 43), smokeLoose = freeE * (0.25 + sr1 * 0.75);
+    var sx10 = (sr2 - 0.5) * capR * capSX * (1.15 + sr1 * 0.45), sy10 = -capR * (0.08 + sr3 * 0.5) + (sr1 - 0.5) * capR * capSY * 0.38;
+    var sx1 = topX + sx10 * (1 + smokeLoose * (0.045 + sr3 * 0.06)), sy1 = topY + sy10 * (1 + smokeLoose * (0.035 + sr2 * 0.055)) - capR * 0.035 * smokeLoose;
     var sw1 = capR * (0.035 + sr1 * 0.075), sh1 = sw1 * (0.45 + sr2 * 0.75);
     c.save(); c.globalAlpha = cloudA * (0.09 + sr3 * 0.09); c.fillStyle = sr2 > 0.48 ? mixHex(smokeCol, '#0e0d0c', 0.42) : mixHex(smokeCol, blast, 0.12); c.beginPath(); c.ellipse(sx1, sy1, sw1, sh1, lean * 0.18 + (sr1 - 0.5) * 1.1, 0, Math.PI * 2); c.fill(); c.restore();
   }
-  for (var hf = 0, hotF = Math.min(pf.hotFlecks || (cheap ? 4 : 9), cheap ? 7 : 13); hf < hotF; hf++) {
-    var hr1 = rnd(hf, 51), hr2 = rnd(hf, 52), ha1 = hf / Math.max(1, hotF) * Math.PI * 2 + (pf.twist || 0) * 0.6 + hr1 * 0.8;
-    var hx1 = topX + Math.cos(ha1) * capR * capSX * (0.05 + hr2 * 0.38), hy1 = topY - capR * (0.12 + rnd(hf, 53) * 0.24) + Math.sin(ha1 * 1.35) * capR * capSY * 0.15;
-    blob(hx1, hy1, capR * (0.035 + hr2 * 0.055), capR * (0.02 + hr1 * 0.045), lean * 0.14 + (hr1 - 0.5) * 0.6, secondary, accent, blast, cloudA * (0.09 + hr2 * 0.1), 'lighter');
-  }
   for (var p = 0; p < billows; p++) {
-    var n1 = rnd(p, 1), n2 = rnd(p, 2), n3 = rnd(p, 3), n4 = rnd(p, 4), ang = p / billows * Math.PI * 2 + (pf.twist || 0) + n1 * 0.85 + cloudT * 0.05;
-    var ring = 0.18 + n2 * 0.94, px = topX + Math.cos(ang) * capR * capSX * (0.18 + ring * 0.72), py = topY - capR * (0.26 + n3 * 0.22) + Math.sin(ang * 1.45 + n4) * capR * 0.26 * capSY, pr = capR * (0.16 + n4 * 0.28) * (0.95 + ((pf.plumeSc || 1) - 1) * 0.35);
+    var n1 = rnd(p, 1), n2 = rnd(p, 2), n3 = rnd(p, 3), n4 = rnd(p, 4), billowLoose = freeE * (0.22 + n1 * 0.78);
+    var px0 = (n1 - 0.5) * capR * capSX * (1.55 + n2 * 0.5), py0 = -capR * (0.12 + n3 * 0.48) + (n4 - 0.5) * capR * capSY * 0.5, pr = capR * (0.16 + n4 * 0.28) * (0.95 + ((pf.plumeSc || 1) - 1) * 0.35);
+    var px = topX + px0 * (1 + billowLoose * (0.06 + n4 * 0.08)), py = topY + py0 * (1 + billowLoose * (0.04 + n2 * 0.055)) - capR * (0.05 + n3 * 0.04) * billowLoose;
     blob(px, py, pr * (0.9 + n2 * 0.75) * capSX, pr * (0.72 + n3 * 0.52) * capSY, lean * 0.18 + (n1 - 0.5) * 0.5, mixHex(smokeCol, blast, 0.16), smokeCol, '#151210', cloudA * (0.28 + n2 * 0.25), null);
   }
-  for (var hp = 0, hotN = Math.max(cheap ? 3 : 5, Math.round(billows * 0.25)); hp < hotN; hp++) {
-    var h1 = rnd(hp, 21), h2 = rnd(hp, 22), h3 = rnd(hp, 23), ha = hp / hotN * Math.PI * 2 + (pf.twist || 0) * 0.65 + h1 * 0.7;
-    var hx = topX + Math.cos(ha) * capR * capSX * (0.06 + h2 * 0.3), hy = topY - capR * (0.12 + h3 * 0.18) + Math.sin(ha * 1.3) * capR * 0.14 * capSY, hr = capR * (0.07 + h1 * 0.13);
-    blob(hx, hy, hr * (1.1 + h2 * 0.45), hr * (0.8 + h3 * 0.38), lean * 0.16, secondary, accent, blast, cloudA * (0.16 + h2 * 0.14), 'lighter');
-  }
-  for (var gb = 0, groundN = cheap ? 4 : 7; gb < groundN; gb++) {
-    var ga0 = gb / groundN * Math.PI * 2 + (pf.twist || 0), gr = capR * (0.32 + rnd(gb, 31) * 0.36), gx0 = x + Math.cos(ga0) * gr * capSX, gy0 = y + TH() * 0.28 + Math.sin(ga0) * gr * 0.14;
-    blob(gx0, gy0, capR * (0.16 + rnd(gb, 32) * 0.14), capR * (0.055 + rnd(gb, 33) * 0.055), ga0, mixHex(smokeCol, blast, 0.18), smokeCol, '#11100f', cloudA * 0.38, null);
-  }
-  for (var e = 0, embers = cheap ? 3 : 5; e < embers; e++) { var ey = y - rise * (70 + e * 42) * S * sc, ea = alpha * (0.55 - e * 0.09); if (ea <= 0) continue; c.fillStyle = rgba(accent, ea); c.beginPath(); c.arc(topX + Math.sin(cloudT * 3 + e * 1.6 + (pf.twist || 0)) * stemW * 0.55, ey, 2.6 * S, 0, Math.PI * 2); c.fill(); }   // embers rising up the column
   if (impact === 'cool_ring' || impact === 'glass_comet' || impact === 'blackbox_rod') {
     c.globalAlpha = alpha * 0.72; c.strokeStyle = rgba(accent, 0.9); c.shadowColor = accent; c.shadowBlur = (cheap ? 6 : 12) * S; c.lineWidth = 3 * S;
     c.beginPath(); c.ellipse(topX, topY + capR * 0.02, capR * 0.78 * capSX, capR * 0.24 * capSY, lean * 0.12, 0, Math.PI * 2); c.stroke(); c.shadowBlur = 0;
@@ -2377,7 +2657,7 @@ window.__gfEquipSkin = function (skin, state) { applySkinState(skin, state); sav
 window.__gfSkinState = function () { return { equippedSkin: equippedSkin, ownedSkins: ownedSkins.slice(), skinCopies: Object.assign({}, skinCopies), skinBoosts: Object.assign({}, skinBoosts), gachaStats: Object.assign({}, gachaStats) }; };
 window.__tgApplyMegatonProduct = function (id) { return grantTelegramProduct(String(id || '')); };
 window.__gfNuke = function (id, n) { if (id) { grantNuke(id, n == null ? 3 : n); activeNuke = nukeDef(id).id; saveMeta(); } return { activeNuke: activeNuke, ammo: nukeAmmo, owned: Object.keys(nukeOwned), mult: nukeDef(activeNuke).mult, chips: (R.nuke || []).length }; };
-window.__gfDbg = function () { return { loadoutOpen: loadoutOpen, dev: devOpen, power: powerLvl, powerLvl: powerLvl, yieldCells: Math.round(powerCells() * 100) / 100, flares: flareLvl, pen: penLvl, mirvLvl: mirvLvl, luckLvl: luckLvl, extraIncome: Math.round(extraIncomeBonus() * 100), critPayoutChance: Math.round(criticalPayoutChance() * 100), lastCritBonus: lastCritBonus, money: Math.round(money), tier: cityTier, gs: gs, restartConfirm: restartConfirm, destroyedPct: Math.round(destroyedW / Math.max(1, totalW) * 100), perks: (R.perk || []).length, detonate: !!R.detonate, shock: shockLvl, emp: empLvl, orbital: orbitalLvl, cluster: clusterLvl, firestorm: firestormLvl, chain: chainLvl, glass: glassLvl, seismic: seismicLvl, inferno: infernoLvl, godPower: godPower, equippedSkin: equippedSkin && equippedSkin.id || '', skinBoosts: Object.assign({}, skinBoosts), ownedSkins: ownedSkins.length, boxesOpened: Number(gachaStats.boxesOpened || 0), theme: cityTheme, hasStation: hasStation, hasAirport: hasAirport, hasGhetto: hasGhetto, hasChinatown: hasChinatown, hasMall: hasMall, hasMountain: hasMountain, hasRefinery: hasRefinery, hasZombie: hasZombie, zombies: zombies.length, GRID: GRID, ships: ships.length, zone: zoneName, zoom: Math.round(zoom * 100) / 100, cityView: cityView, infoOpen: infoOpen, infoBadges: (R.info || []).length, starterGiven: starterGiven, upgDone: upgDone, perkIds: atkList().join(','), welcomeOpen: welcomeOpen, welcomeCaps: welcomeCaps, welcomeBuying: welcomeBuying, dailyOpen: dailyOpen, settingsOpen: settingsOpen, lang: GF.lang, muted: GF.muted, dailyClaimable: dailyClaimable(), dailyStreak: dailyStreak, activeNuke: activeNuke, nukeMult: nukeDef(activeNuke).mult, nukeAmmoWide: nukeAmmo.wide || 0, nukeAmmoTsar: nukeAmmo.tsar || 0, nukeChips: (R.nuke || []).length, actionCx: Math.round(R.actionCx || 0), actionCy: Math.round(R.actionCy || 0), aimX: Math.round(isoX(aim.ci, aim.cj)), aimY: Math.round(isoY(aim.ci, aim.cj) + TH() / 2), fxMobile: mobileFx(), fx: { waves: waves.length, chunks: chunks.length, dust: dust.length, fires: fires.length, smoke: smoke.length, fireballs: fireballs.length, mushrooms: mushrooms.length, pulses: impactPulses.length, juice: GF.juice.counts() }, lastBlastProfile: lastBlastProfile, tutStep: tutStep, tutTarget: (tutTarget() || {}).id || null }; };
+window.__gfDbg = function () { return { loadoutOpen: loadoutOpen, dev: devOpen, power: powerLvl, powerLvl: powerLvl, yieldCells: Math.round(powerCells() * 100) / 100, flares: flareLvl, pen: penLvl, mirvLvl: mirvLvl, luckLvl: luckLvl, extraIncome: Math.round(extraIncomeBonus() * 100), critPayoutChance: Math.round(criticalPayoutChance() * 100), lastCritBonus: lastCritBonus, money: Math.round(money), tier: cityTier, gs: gs, restartConfirm: restartConfirm, destroyedPct: Math.round(destroyedW / Math.max(1, totalW) * 100), perks: (R.perk || []).length, detonate: !!R.detonate, shock: shockLvl, emp: empLvl, orbital: orbitalLvl, cluster: clusterLvl, firestorm: firestormLvl, chain: chainLvl, glass: glassLvl, seismic: seismicLvl, inferno: infernoLvl, godPower: godPower, equippedSkin: equippedSkin && equippedSkin.id || '', skinBoosts: Object.assign({}, skinBoosts), ownedSkins: ownedSkins.length, boxesOpened: Number(gachaStats.boxesOpened || 0), theme: cityTheme, hasStation: hasStation, hasAirport: hasAirport, hasGhetto: hasGhetto, hasChinatown: hasChinatown, hasMall: hasMall, hasMountain: hasMountain, hasRefinery: hasRefinery, hasZombie: hasZombie, zombies: zombies.length, GRID: GRID, ships: ships.length, zone: zoneName, zoom: Math.round(zoom * 100) / 100, cityView: cityView, infoOpen: infoOpen, infoBadges: (R.info || []).length, starterGiven: starterGiven, upgDone: upgDone, perkIds: atkList().join(','), welcomeOpen: welcomeOpen, welcomeCaps: welcomeCaps, welcomeBuying: welcomeBuying, dailyOpen: dailyOpen, settingsOpen: settingsOpen, lang: GF.lang, muted: GF.muted, dailyClaimable: dailyClaimable(), dailyStreak: dailyStreak, activeNuke: activeNuke, nukeMult: nukeDef(activeNuke).mult, nukeAmmoWide: nukeAmmo.wide || 0, nukeAmmoTsar: nukeAmmo.tsar || 0, nukeChips: (R.nuke || []).length, actionCx: Math.round(R.actionCx || 0), actionCy: Math.round(R.actionCy || 0), aimX: Math.round(isoX(aim.ci, aim.cj)), aimY: Math.round(isoY(aim.ci, aim.cj) + TH() / 2), fxMobile: mobileFx(), fx: { waves: waves.length, chunks: chunks.length, dust: dust.length, fires: fires.length, smoke: smoke.length, fireballs: fireballs.length, mushrooms: mushrooms.length, pulses: impactPulses.length, juice: GF.juice.counts() }, mushroomSources: mushroomSourceAssets.filter(function (a) { return a.ready; }).length, lastBlastProfile: lastBlastProfile, tutStep: tutStep, tutTarget: (tutTarget() || {}).id || null }; };
 window.render_game_to_text = function () { return JSON.stringify(window.__gfDbg()); };
 window.advanceTime = function (ms) { if (window.__gfStep) window.__gfStep(Math.max(1, Math.round((ms || 16) / (1000 / 60))), 1 / 60); return window.render_game_to_text(); };
 window.__gfTutReset = function () { tutStep = 0; tutDone = false; upgDone = false; tutAutoT = 0; tutDailyPending = false; powerLvl = 0; money = 0; cityTier = 0; starterGiven = false; lastClaimDay = -1; dailyStreak = 0; newCity(0); saveMeta(); return tutStep; };   // restart the guided tutorial from scratch (daily undiscovered)
@@ -2391,7 +2671,7 @@ window.__gfOpenStats = function () { statsOpen = true; statsScroll = 0; return w
 GF.init({
   designW: 390, designH: 780, strings: STRINGS, sprites: SPRITE_NAMES, saveKey: 'megaton',
   onReady: function () {
-    initLanguage(); loadMeta(); if (godPower) applyGodPower(false); layout(); checkReturn();
+    initLanguage(); loadMeta(); if (godPower) applyGodPower(false); layout(); checkReturn(); loadExplosionAssets();
     try { document.addEventListener('visibilitychange', function () { if (document.hidden) saveMeta(); }); } catch (e) {}   // stamp activity time so offline accrual is accurate on return
 	    fetch('levels.json').then(function (r) { return r.ok ? r.json() : null; }).then(function (j) { if (j) BUILTIN = j; }).catch(function () {}).then(function () {
 	      newCity(cityTier);
