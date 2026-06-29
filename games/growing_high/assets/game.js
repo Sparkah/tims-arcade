@@ -340,6 +340,8 @@
 
   function startMusic() {
     if (audio.musicTimer || !audio.ctx || !audio.master) return;
+    // Guard before the first background music note so playTone() cannot re-enter startup.
+    audio.musicTimer = -1;
     const notes = [196, 247, 294, 330, 247, 220, 262, 330];
     const scheduleMusic = () => {
       if (!audio.ctx || audio.ctx.state !== "running") return;
@@ -347,7 +349,7 @@
       audio.musicStep += 1;
       playTone(note, 0.22, "sine", 0.018);
     };
-    audio.musicTimer = window.setInterval(scheduleMusic, 1500);
+    audio.musicTimer = window.setInterval(scheduleMusic, 1500) || -1;
     scheduleMusic();
   }
 
