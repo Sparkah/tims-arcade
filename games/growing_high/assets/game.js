@@ -13,17 +13,19 @@
   const PEOPLE_LOAD = 44;
   const TOOL_LOAD = 18;
   const DAY_MINUTES = 1440;
+  const VOLUNTEER_ACTION_SECONDS = 0.85;
+  const WEED_SPAWN_CHANCE = 0.22;
 
   const cropDefs = {
     carrot: {
       key: "carrot",
       name: "Carrot",
       short: "Carrot",
-      growDays: 21,
+      growDays: 18,
       seedCost: 8,
       saleBase: 35,
       saplingLoad: 4,
-      harvestLoad: 16,
+      harvestLoad: 15,
       shelfLife: 14,
       seasons: ["Spring", "Autumn"],
       color: "#e26d3f",
@@ -33,11 +35,11 @@
       key: "bokChoy",
       name: "Bok Choy",
       short: "Bok",
-      growDays: 14,
+      growDays: 12,
       seedCost: 12,
       saleBase: 80,
-      saplingLoad: 7,
-      harvestLoad: 26,
+      saplingLoad: 20,
+      harvestLoad: 40,
       shelfLife: 7,
       seasons: ["Spring", "Autumn"],
       color: "#f2f7d8",
@@ -47,11 +49,11 @@
       key: "cilantro",
       name: "Cilantro",
       short: "Cilantro",
-      growDays: 14,
+      growDays: 12,
       seedCost: 6,
       saleBase: 30,
-      saplingLoad: 3,
-      harvestLoad: 9,
+      saplingLoad: 4,
+      harvestLoad: 8,
       shelfLife: 7,
       seasons: ["Spring", "Autumn"],
       color: "#6fbf5f",
@@ -61,15 +63,195 @@
       key: "parsnip",
       name: "Parsnip",
       short: "Parsnip",
-      growDays: 35,
+      growDays: 30,
       seedCost: 8,
       saleBase: 35,
-      saplingLoad: 5,
-      harvestLoad: 25,
+      saplingLoad: 6,
+      harvestLoad: 30,
       shelfLife: 14,
       seasons: ["Spring", "Summer", "Autumn", "Winter"],
       color: "#ead9a8",
       leaf: "#4c9d46",
+    },
+    onion: {
+      key: "onion",
+      name: "Onion",
+      short: "Onion",
+      growDays: 30,
+      seedCost: 20,
+      saleBase: 100,
+      saplingLoad: 7,
+      harvestLoad: 20,
+      shelfLife: 28,
+      seasons: ["Spring", "Autumn"],
+      color: "#d4b47a",
+      leaf: "#5d9d55",
+    },
+    redCabbage: {
+      key: "redCabbage",
+      name: "Red Cabbage",
+      short: "Cabbage",
+      growDays: 24,
+      seedCost: 24,
+      saleBase: 90,
+      saplingLoad: 75,
+      harvestLoad: 150,
+      shelfLife: 14,
+      seasons: ["Spring", "Autumn"],
+      color: "#9b4f9e",
+      leaf: "#6b9b5a",
+    },
+    potato: {
+      key: "potato",
+      name: "Potato",
+      short: "Potato",
+      growDays: 24,
+      seedCost: 18,
+      saleBase: 80,
+      saplingLoad: 30,
+      harvestLoad: 150,
+      shelfLife: 84,
+      seasons: ["Spring", "Summer"],
+      color: "#b98e58",
+      leaf: "#4f8b49",
+    },
+    lettuce: {
+      key: "lettuce",
+      name: "Lettuce",
+      short: "Lettuce",
+      growDays: 18,
+      seedCost: 16,
+      saleBase: 70,
+      saplingLoad: 15,
+      harvestLoad: 30,
+      shelfLife: 7,
+      seasons: ["Spring", "Autumn"],
+      color: "#9ed66a",
+      leaf: "#65a84d",
+    },
+    tomato: {
+      key: "tomato",
+      name: "Tomato",
+      short: "Tomato",
+      growDays: 18,
+      seedCost: 20,
+      saleBase: 60,
+      saplingLoad: 70,
+      harvestLoad: 230,
+      fruitLoad: 20,
+      fruitInterval: 5,
+      shelfLife: 7,
+      seasons: ["Summer"],
+      color: "#d95346",
+      leaf: "#3f8b4a",
+    },
+    pumpkin: {
+      key: "pumpkin",
+      name: "Pumpkin",
+      short: "Pumpkin",
+      growDays: 24,
+      seedCost: 60,
+      saleBase: 320,
+      saplingLoad: 300,
+      harvestLoad: 800,
+      fruitLoad: 600,
+      fruitInterval: 10,
+      shelfLife: 28,
+      seasons: ["Summer", "Autumn"],
+      color: "#dc8a2c",
+      leaf: "#4f8d3d",
+    },
+    leek: {
+      key: "leek",
+      name: "Leek",
+      short: "Leek",
+      growDays: 24,
+      seedCost: 22,
+      saleBase: 110,
+      saplingLoad: 13,
+      harvestLoad: 30,
+      shelfLife: 7,
+      seasons: ["Autumn", "Winter"],
+      color: "#d7e6ce",
+      leaf: "#4b9551",
+    },
+    garlic: {
+      key: "garlic",
+      name: "Garlic",
+      short: "Garlic",
+      growDays: 54,
+      seedCost: 14,
+      saleBase: 60,
+      saplingLoad: 5,
+      harvestLoad: 13,
+      shelfLife: 56,
+      seasons: ["Autumn", "Winter", "Spring"],
+      color: "#efe6d3",
+      leaf: "#6f9b5f",
+    },
+    vigna: {
+      key: "vigna",
+      name: "Vigna",
+      short: "Vigna",
+      growDays: 18,
+      seedCost: 16,
+      saleBase: 40,
+      saplingLoad: 40,
+      harvestLoad: 120,
+      fruitLoad: 10,
+      fruitInterval: 4,
+      shelfLife: 7,
+      seasons: ["Summer"],
+      color: "#6c9b4e",
+      leaf: "#3f8d43",
+    },
+    cucumber: {
+      key: "cucumber",
+      name: "Cucumber",
+      short: "Cuke",
+      growDays: 18,
+      seedCost: 18,
+      saleBase: 50,
+      saplingLoad: 50,
+      harvestLoad: 130,
+      fruitLoad: 50,
+      fruitInterval: 5,
+      shelfLife: 7,
+      seasons: ["Summer"],
+      color: "#5da35f",
+      leaf: "#3e8545",
+    },
+    pepper: {
+      key: "pepper",
+      name: "Pepper",
+      short: "Pepper",
+      growDays: 24,
+      seedCost: 18,
+      saleBase: 40,
+      saplingLoad: 30,
+      harvestLoad: 70,
+      fruitLoad: 10,
+      fruitInterval: 5,
+      shelfLife: 14,
+      seasons: ["Summer"],
+      color: "#c84036",
+      leaf: "#3f8b4a",
+    },
+    eggplant: {
+      key: "eggplant",
+      name: "Eggplant",
+      short: "Eggplant",
+      growDays: 30,
+      seedCost: 24,
+      saleBase: 60,
+      saplingLoad: 60,
+      harvestLoad: 160,
+      fruitLoad: 40,
+      fruitInterval: 6,
+      shelfLife: 7,
+      seasons: ["Summer"],
+      color: "#5a3f8f",
+      leaf: "#477f45",
     },
   };
 
@@ -108,6 +290,106 @@
 
   let lastFrame = performance.now();
   let saveTimer = 0;
+  const audio = {
+    ctx: null,
+    master: null,
+    musicTimer: 0,
+    musicStep: 0,
+    muted: false,
+  };
+
+  function ensureAudio() {
+    if (audio.muted) return null;
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    if (!audio.ctx) {
+      audio.ctx = new AudioContextClass();
+      audio.master = audio.ctx.createGain();
+      audio.master.gain.value = 0.18;
+      audio.master.connect(audio.ctx.destination);
+    }
+    if (audio.ctx.state === "suspended") {
+      audio.ctx.resume().catch(() => {});
+    }
+    startMusic();
+    return audio.ctx;
+  }
+
+  function playTone(freq, duration = 0.12, type = "sine", gain = 0.04) {
+    const actx = ensureAudio();
+    if (!actx || !audio.master) return;
+    const osc = actx.createOscillator();
+    const amp = actx.createGain();
+    const now = actx.currentTime;
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, now);
+    amp.gain.setValueAtTime(0.0001, now);
+    amp.gain.exponentialRampToValueAtTime(gain, now + 0.015);
+    amp.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.connect(amp).connect(audio.master);
+    osc.start(now);
+    osc.stop(now + duration + 0.03);
+  }
+
+  function playUiSound(kind = "tap") {
+    if (kind === "plant") playTone(440, 0.11, "triangle", 0.05);
+    else if (kind === "water") playTone(660, 0.08, "sine", 0.035);
+    else if (kind === "market") playTone(520, 0.18, "triangle", 0.045);
+    else playTone(330, 0.08, "square", 0.025);
+  }
+
+  function startMusic() {
+    if (audio.musicTimer || !audio.ctx || !audio.master) return;
+    const notes = [196, 247, 294, 330, 247, 220, 262, 330];
+    const scheduleMusic = () => {
+      if (!audio.ctx || audio.ctx.state !== "running") return;
+      const note = notes[audio.musicStep % notes.length];
+      audio.musicStep += 1;
+      playTone(note, 0.22, "sine", 0.018);
+    };
+    scheduleMusic();
+    audio.musicTimer = window.setInterval(scheduleMusic, 1500);
+  }
+
+  function pauseAudio() {
+    if (audio.ctx && audio.ctx.state === "running") {
+      audio.ctx.suspend().catch(() => {});
+    }
+  }
+
+  function resumeAudio() {
+    if (!document.hidden && audio.ctx && audio.ctx.state === "suspended") {
+      audio.ctx.resume().catch(() => {});
+    }
+  }
+
+  function registerPlatformAudioPause() {
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) pauseAudio();
+      else resumeAudio();
+    });
+    try {
+      window.ysdk?.on?.("game_api_pause", pauseAudio);
+      window.ysdk?.on?.("game_api_resume", resumeAudio);
+    } catch (_) {
+      // Platform SDK events are optional outside Yandex.
+    }
+  }
+
+  function signalPlatformReady() {
+    try {
+      const loadingApi = window.ysdk?.features?.LoadingAPI || window.LoadingAPI;
+      if (loadingApi && typeof loadingApi.ready === "function") loadingApi.ready();
+    } catch (_) {
+      // LoadingAPI is absent on the gallery site.
+    }
+  }
+
+  function maybeAutostart() {
+    if (window.__GF_AUTOSTART && !window._silent && state.mode === "title") {
+      startNewGame();
+    }
+  }
 
   function createInitialState() {
     const grid = [];
@@ -139,29 +421,46 @@
       message: "Paint soil, plant seeds, add irrigation, then pass the week.",
       grid,
       plants: [],
+      weeds: [],
       inventory: [],
       compost: 0,
+      toolDiscount: 0,
+      pollinatorBonus: 0,
+      soilBonus: 0,
+      mulchBonus: 0,
+      hubReputation: 0,
       favour: {
         restaurant: 0,
         carpenter: 0,
         social: 0,
+        engineer: 0,
+        mushroom: 0,
+        beekeeper: 0,
       },
       volunteers: [
-        { name: "Maya", task: "idle", x: 0.35, y: 0.44, bob: 0 },
-        { name: "Jun", task: "idle", x: 0.68, y: 0.58, bob: 1.5 },
+        { name: "Maya", task: "idle", x: 0.35, y: 0.44, bob: 0, actionTimer: 0 },
+        { name: "Jun", task: "idle", x: 0.68, y: 0.58, bob: 1.5, actionTimer: 0 },
       ],
       prices: {},
+      priceMemory: {},
       rng: 12891,
       stats: {
         harvested: 0,
         sold: 0,
         collapses: 0,
         donated: 0,
+        watered: 0,
+        weeded: 0,
+        volunteerHarvested: 0,
+        npcGifts: 0,
+        stallSales: 0,
+        consultedFarms: 0,
       },
     };
   }
 
   function startNewGame() {
+    playUiSound("plant");
     const fresh = createInitialState();
     for (const key of Object.keys(state)) {
       delete state[key];
@@ -194,8 +493,27 @@
       state.prices = generatePrices();
     }
     if (!Array.isArray(state.plants)) state.plants = [];
+    if (!Array.isArray(state.weeds)) state.weeds = [];
     if (!Array.isArray(state.inventory)) state.inventory = [];
     if (!Array.isArray(state.volunteers)) state.volunteers = createInitialState().volunteers;
+    const defaults = createInitialState();
+    state.favour = { ...defaults.favour, ...(state.favour || {}) };
+    state.stats = { ...defaults.stats, ...(state.stats || {}) };
+    state.toolDiscount = state.toolDiscount || 0;
+    state.pollinatorBonus = state.pollinatorBonus || 0;
+    state.soilBonus = state.soilBonus || 0;
+    state.mulchBonus = state.mulchBonus || 0;
+    state.hubReputation = state.hubReputation || 0;
+    state.priceMemory = state.priceMemory || {};
+    for (let i = 0; i < state.volunteers.length; i += 1) {
+      const fallback = defaults.volunteers[i % defaults.volunteers.length];
+      state.volunteers[i] = {
+        ...fallback,
+        ...state.volunteers[i],
+        actionTimer: state.volunteers[i].actionTimer || 0,
+      };
+    }
+    normalizeSelectedSeed();
     state.message = state.message || "Keep the rooftop productive without overloading the roof.";
   }
 
@@ -244,13 +562,34 @@
   function generatePrices() {
     const season = currentSeason();
     const prices = {};
+    const nextMemory = {};
     for (const def of Object.values(cropDefs)) {
       const inSeason = def.seasons.includes(season);
       const min = inSeason ? 0.9 : 0.5;
       const max = inSeason ? 1.5 : 1.2;
-      prices[def.key] = Math.max(1, Math.round(def.saleBase * randomBetween(min, max)));
+      const rawMultiplier = randomBetween(min, max);
+      const previous = state.priceMemory?.[def.key] || 1;
+      const multiplier = previous * 0.62 + rawMultiplier * 0.38;
+      nextMemory[def.key] = multiplier;
+      prices[def.key] = Math.max(1, Math.round(def.saleBase * multiplier));
     }
+    state.priceMemory = nextMemory;
     return prices;
+  }
+
+  function availableCropKeys() {
+    const keys = ["carrot", "bokChoy", "cilantro", "parsnip"];
+    if (state.absoluteWeek >= 4) keys.push("onion", "redCabbage", "potato", "lettuce");
+    if (state.absoluteWeek >= 12) keys.push("pumpkin", "vigna", "tomato", "cucumber", "pepper", "eggplant");
+    if (state.absoluteWeek >= 16) keys.push("leek", "garlic");
+    return keys.filter((key) => cropDefs[key]);
+  }
+
+  function normalizeSelectedSeed() {
+    const keys = availableCropKeys();
+    if (!keys.includes(state.selectedSeed)) {
+      state.selectedSeed = keys[0] || "carrot";
+    }
   }
 
   function resize() {
@@ -295,7 +634,7 @@
     for (let r = row; r < row + 2; r += 1) {
       for (let c = col; c < col + 2; c += 1) {
         const cell = cellAt(c, r);
-        if (!cell.soil || cell.sprinkler || plantAt(c, r)) return false;
+        if (!cell.soil || cell.sprinkler || plantAt(c, r) || hasWeed(c, r)) return false;
       }
     }
     return true;
@@ -316,17 +655,44 @@
     return rootCells(plant).every((cell) => isCellIrrigated(cell.col, cell.row));
   }
 
+  function weedAt(col, row) {
+    return state.weeds.find((weed) => weed.col === col && weed.row === row) || null;
+  }
+
+  function hasWeed(col, row) {
+    return Boolean(weedAt(col, row));
+  }
+
+  function removeWeedAt(col, row, source = "player") {
+    const before = state.weeds.length;
+    state.weeds = state.weeds.filter((weed) => weed.col !== col || weed.row !== row);
+    if (state.weeds.length === before) return false;
+    state.stats.weeded += 1;
+    state.compost += source === "volunteer" ? 1 : 0;
+    state.message = source === "volunteer" ? "Volunteer cleared weeds before they slowed growth." : "Weeds cleared from the bed.";
+    saveGame();
+    return true;
+  }
+
+  function plantHasWeeds(plant) {
+    return rootCells(plant).some((cell) => hasWeed(cell.col, cell.row));
+  }
+
   function plantLoad(plant) {
     const def = cropDefs[plant.crop];
     if (!def) return 0;
     const t = Math.max(0, Math.min(1, plant.growthDays / def.growDays));
-    if (t < 0.35) return 2 + def.saplingLoad * t;
-    return def.saplingLoad + (def.harvestLoad - def.saplingLoad) * t;
+    let load = t < 0.35 ? 2 + def.saplingLoad * t : def.saplingLoad + (def.harvestLoad - def.saplingLoad) * t;
+    if (def.fruitLoad && plant.fruitReady) load += def.fruitLoad;
+    return load;
   }
 
   function plantStage(plant) {
     const def = cropDefs[plant.crop];
     if (!def) return "unknown";
+    if (def.fruitLoad && plant.growthDays >= def.growDays) {
+      return plant.fruitReady ? "harvestable" : "mature";
+    }
     const t = plant.growthDays / def.growDays;
     if (t >= 1) return "harvestable";
     if (t >= 0.35) return "sprout";
@@ -355,8 +721,24 @@
     return state.grid.filter((cell) => cell.sprinkler).length;
   }
 
+  function hasAdjacentSprinkler(col, row) {
+    const neighbours = [
+      { col: col + 1, row },
+      { col: col - 1, row },
+      { col, row: row + 1 },
+      { col, row: row - 1 },
+    ];
+    return neighbours.some((cell) => inBounds(cell.col, cell.row) && cellAt(cell.col, cell.row).sprinkler);
+  }
+
   function wateredCount() {
-    return state.grid.filter((cell) => cell.watered || cell.sprinkler).length;
+    let count = 0;
+    for (let row = 0; row < ROWS; row += 1) {
+      for (let col = 0; col < COLS; col += 1) {
+        if (cellAt(col, row).soil && isCellIrrigated(col, row)) count += 1;
+      }
+    }
+    return count;
   }
 
   function formatMoney(value) {
@@ -373,13 +755,14 @@
   function phaseLabel() {
     if (state.phase === "planning") return "Planning";
     if (state.phase === "midweek") return `Day ${state.day}`;
-    if (state.phase === "market") return "Market Day";
+    if (state.phase === "market") return `Market Day ${state.day}`;
     if (state.phase === "repair") return "Roof Repair";
     return state.phase;
   }
 
   function passPlanning() {
     if (state.phase !== "planning") return;
+    playUiSound("water");
     state.phase = "midweek";
     state.day = 1;
     state.minutes = 7 * 60;
@@ -391,11 +774,12 @@
   }
 
   function enterMarket() {
+    playUiSound("market");
     state.phase = "market";
-    state.day = 7;
+    state.day = 6;
     state.minutes = 9 * 60;
     state.fast = false;
-    state.message = "Market day. Sell produce for cash or gift a box to build useful favour.";
+    state.message = "Market days. Sell produce, gift samples, or assign a volunteer to man the stall.";
     state.prices = generatePrices();
     saveGame();
   }
@@ -412,6 +796,7 @@
     state.weather = generateWeather();
     state.marketMood = generateMarketMood();
     state.prices = generatePrices();
+    normalizeSelectedSeed();
     state.message = "New planning phase. Check prices, expand carefully, and keep the roof load safe.";
     saveGame();
   }
@@ -479,40 +864,61 @@
 
   function applyVolunteerTasks() {
     for (const volunteer of state.volunteers) {
-      if (volunteer.task === "water") {
-        for (const plant of state.plants) {
-          for (const cell of rootCells(plant)) {
-            cellAt(cell.col, cell.row).watered = true;
-          }
-        }
-      }
-      if (volunteer.task === "harvest") {
-        const ready = state.plants.filter((plant) => plantStage(plant) === "harvestable");
-        for (const plant of ready) {
-          harvestPlant(plant, "volunteer");
-        }
-      }
+      performVolunteerTask(volunteer, false);
     }
   }
 
   function growPlants() {
+    growPlantsByMinutes(DAY_MINUTES);
+  }
+
+  function growPlantsByMinutes(minutes) {
+    if (minutes <= 0) return;
+    const days = minutes / DAY_MINUTES;
     for (const plant of state.plants) {
       if (isPlantWatered(plant)) {
         const bonus = rootCells(plant).reduce((sum, cell) => sum + cellAt(cell.col, cell.row).compost, 0);
-        plant.growthDays += 1 + Math.min(0.5, bonus * 0.08);
+        const compostBonus = Math.min(0.5, bonus * 0.08);
+        const serviceBonus = Math.min(0.35, (state.pollinatorBonus || 0) + (state.soilBonus || 0));
+        const weedPenalty = plantHasWeeds(plant) ? 0.55 : 1;
+        const oldGrowth = plant.growthDays;
+        plant.growthDays += days * (1 + compostBonus + serviceBonus) * weedPenalty;
+        const def = cropDefs[plant.crop];
+        if (def?.fruitLoad && plant.growthDays >= def.growDays) {
+          const fruitDays = oldGrowth < def.growDays ? Math.max(0, plant.growthDays - def.growDays) : days;
+          plant.fruitDays = (plant.fruitDays || 0) + fruitDays * (1 + serviceBonus) * weedPenalty;
+          if (plant.fruitDays >= def.fruitInterval) {
+            plant.fruitReady = true;
+          }
+        }
         plant.thirst = 0;
-        absorbSoil(plant, 0.08);
+        absorbSoil(plant, 0.08 * days);
       } else {
-        plant.thirst = (plant.thirst || 0) + 1;
+        plant.thirst = (plant.thirst || 0) + days;
+      }
+    }
+  }
+
+  function advanceMidweekMinutes(totalMinutes) {
+    let remaining = totalMinutes;
+    while (remaining > 0 && state.phase === "midweek") {
+      const untilEnd = DAY_MINUTES - state.minutes;
+      const step = Math.min(remaining, untilEnd);
+      state.minutes += step;
+      growPlantsByMinutes(step);
+      remaining -= step;
+      if (state.minutes >= DAY_MINUTES && state.phase === "midweek") {
+        endDay();
       }
     }
   }
 
   function absorbSoil(plant, amount) {
+    const adjusted = amount * Math.max(0.45, 1 - (state.mulchBonus || 0));
     for (const cell of rootCells(plant)) {
       const target = cellAt(cell.col, cell.row);
       if (target.soil > 0) {
-        target.soil = Math.max(0.35, target.soil - amount);
+        target.soil = Math.max(0.35, target.soil - adjusted);
       }
     }
   }
@@ -531,9 +937,42 @@
     clearWater();
     applySprinklers();
     applyVolunteerTasks();
-    growPlants();
+    spawnWeeds();
     checkRoofLoad();
     saveTimer = 0;
+  }
+
+  function spawnWeeds() {
+    if (!Array.isArray(state.weeds)) state.weeds = [];
+    for (const weed of state.weeds) {
+      weed.age = (weed.age || 0) + 1;
+    }
+    if (state.weeds.length >= 14) return;
+    const candidates = [];
+    for (let row = 0; row < ROWS; row += 1) {
+      for (let col = 0; col < COLS; col += 1) {
+        const cell = cellAt(col, row);
+        if (cell.soil && !hasWeed(col, row) && !cell.sprinkler) {
+          candidates.push({ col, row, planted: Boolean(plantAt(col, row)) });
+        }
+      }
+    }
+    if (!candidates.length) return;
+    const attempts = Math.max(1, Math.floor(candidates.length / 18));
+    let spawned = 0;
+    for (let i = 0; i < attempts && state.weeds.length < 14; i += 1) {
+      const chance = WEED_SPAWN_CHANCE + (state.weather.includes("Humid") ? 0.1 : 0);
+      if (rand() > chance) continue;
+      const planted = candidates.filter((candidate) => candidate.planted);
+      const pool = planted.length && rand() < 0.65 ? planted : candidates;
+      const target = pool[Math.floor(randomBetween(0, pool.length)) % pool.length];
+      if (!target || hasWeed(target.col, target.row)) continue;
+      state.weeds.push({ col: target.col, row: target.row, age: 0 });
+      spawned += 1;
+    }
+    if (spawned > 0) {
+      state.message = `${spawned} weed patch${spawned === 1 ? "" : "es"} appeared. Assign a volunteer to weed before growth slows.`;
+    }
   }
 
   function checkRoofLoad() {
@@ -566,7 +1005,7 @@
     state.minutes = 7 * 60;
     state.repairDaysLeft = 7;
     state.overloadDays = 0;
-    state.message = `Roof collapse. ${lost} crop${lost === 1 ? "" : "s"} withered while the construction crew repairs the building.`;
+    state.message = `Crew leader scolds you at 07:00 after a roof collapse. ${lost} crop${lost === 1 ? "" : "s"} withered while scaffolding goes up for repairs.`;
     saveGame();
   }
 
@@ -583,6 +1022,23 @@
         state.minutes = 7 * 60;
         state.message = "Repairs are complete. The crew warns you to respect the roof gauge.";
         saveGame();
+        break;
+      }
+    }
+  }
+
+  function updateMarket(dt) {
+    const night = state.minutes < 6 * 60 || state.minutes > 20 * 60;
+    const speed = state.fast ? 960 : 240;
+    state.minutes += dt * speed * (night ? 1.55 : 1);
+    while (state.minutes >= DAY_MINUTES && state.phase === "market") {
+      state.minutes -= DAY_MINUTES;
+      state.day += 1;
+      ageInventory(1);
+      if (state.day > 7) {
+        state.day = 7;
+        state.minutes = 20 * 60;
+        state.message = "The market weekend is ending. Press End Week when you are done with contacts.";
         break;
       }
     }
@@ -610,7 +1066,7 @@
   function ageInventory(days) {
     for (const item of state.inventory) {
       item.age += days;
-      if (item.age > item.shelfLife) {
+      if (item.age >= item.shelfLife) {
         item.spoiled = true;
       }
     }
@@ -634,6 +1090,8 @@
       col,
       row,
       growthDays: 0,
+      fruitDays: 0,
+      fruitReady: false,
       thirst: 0,
     });
     state.message = `${def.name} planted. Keep every root tile irrigated so it grows.`;
@@ -648,16 +1106,25 @@
       state.message = "Sprinklers need an empty grid tile.";
       return false;
     }
-    if (state.money < 25) {
-      state.message = "Need 25p to add another sprinkler.";
+    if (sprinklerCount() > 0 && !hasAdjacentSprinkler(col, row)) {
+      state.message = "New sprinklers must snap beside the existing pipe network.";
       return false;
     }
-    state.money -= 25;
+    const cost = sprinklerCost();
+    if (state.money < cost) {
+      state.message = `Need ${formatMoney(cost)} to add another sprinkler.`;
+      return false;
+    }
+    state.money -= cost;
     cell.sprinkler = true;
     waterRadius(col, row, 1);
-    state.message = "Sprinkler added. It waters nearby soil at the start of each day.";
+    state.message = `Sprinkler added for ${formatMoney(cost)}. It waters nearby soil at the start of each day.`;
     saveGame();
     return true;
+  }
+
+  function sprinklerCost() {
+    return Math.max(12, 25 - Math.floor(state.toolDiscount || 0));
   }
 
   function harvestPlant(plant, source) {
@@ -670,11 +1137,16 @@
       shelfLife: def.shelfLife,
       spoiled: false,
     });
-    state.plants = state.plants.filter((item) => item.id !== plant.id);
+    if (def.fruitLoad) {
+      plant.fruitDays = 0;
+      plant.fruitReady = false;
+    } else {
+      state.plants = state.plants.filter((item) => item.id !== plant.id);
+    }
     state.stats.harvested += 1;
     state.message = source === "volunteer"
-      ? `${def.name} harvested by a volunteer and moved to storage.`
-      : `${def.name} harvested into storage.`;
+      ? `${def.name} ${def.fruitLoad ? "fruit" : ""} harvested by a volunteer and moved to storage.`
+      : `${def.name} ${def.fruitLoad ? "fruit" : ""} harvested into storage.`;
     return true;
   }
 
@@ -689,19 +1161,45 @@
     let earned = 0;
     let sold = 0;
     const keep = [];
+    const stallHelpers = stallVolunteerCount();
+    const stallMultiplier = 1 + stallHelpers * 0.08;
     for (const item of state.inventory) {
       if (item.spoiled) {
         keep.push(item);
         continue;
       }
       const price = state.prices[item.crop] || cropDefs[item.crop].saleBase;
-      earned += price * item.qty;
+      earned += Math.round(price * stallMultiplier) * item.qty;
       sold += item.qty;
     }
     state.inventory = keep;
     state.money += earned;
     state.stats.sold += sold;
-    state.message = sold > 0 ? `Sold ${sold} box${sold === 1 ? "" : "es"} for ${formatMoney(earned)}.` : "No fresh produce ready to sell.";
+    state.stats.stallSales += stallHelpers && sold ? sold : 0;
+    state.message = sold > 0
+      ? `Sold ${sold} box${sold === 1 ? "" : "es"} for ${formatMoney(earned)}${stallHelpers ? " with volunteer stall help" : ""}.`
+      : "No fresh produce ready to sell.";
+    saveGame();
+  }
+
+  function stallVolunteerCount() {
+    return state.volunteers.filter((volunteer) => volunteer.task === "stall").length;
+  }
+
+  function assignStallVolunteer() {
+    if (state.phase !== "market") {
+      state.message = "Stall duty is only useful during market days.";
+      return;
+    }
+    const volunteer = state.volunteers.find((item) => item.task === "idle") || state.volunteers[0];
+    if (!volunteer) {
+      state.message = "No volunteers are available for stall duty.";
+      return;
+    }
+    volunteer.task = "stall";
+    volunteer.targetX = 0.5;
+    volunteer.targetY = 0.5;
+    state.message = `${volunteer.name} is manning the stall so you can work the market crowd.`;
     saveGame();
   }
 
@@ -731,19 +1229,31 @@
     const [item] = state.inventory.splice(index, 1);
     state.favour[npc] = (state.favour[npc] || 0) + 1;
     state.stats.donated += 1;
+    state.stats.npcGifts += 1;
     const def = cropDefs[item.crop];
     if (npc === "restaurant") {
       state.compost += 5 + state.favour[npc] * 2;
       state.message = `Restaurant owner liked the ${def.name}. Food scraps added compost.`;
     } else if (npc === "carpenter") {
-      state.roofLimit += 24;
-      state.message = "Carpenter strengthened the roof edge. Weight limit improved.";
-    } else {
+      state.compost += 3;
+      state.mulchBonus = Math.min(0.35, (state.mulchBonus || 0) + 0.06);
+      state.message = "Carpenter delivered wood shavings for mulch. Soil mass depletes more slowly.";
+    } else if (npc === "social") {
       const volunteerName = state.favour.social > 2 ? "Sam" : "Ari";
       if (state.volunteers.length < 3) {
-        state.volunteers.push({ name: volunteerName, task: "idle", x: 0.5, y: 0.5, bob: 0.4 });
+        state.volunteers.push({ name: volunteerName, task: "idle", x: 0.5, y: 0.5, bob: 0.4, actionTimer: 0 });
       }
       state.message = "Social worker referred another volunteer for future weeks.";
+    } else if (npc === "engineer") {
+      state.toolDiscount = Math.min(13, (state.toolDiscount || 0) + 3);
+      state.message = `Engineer tuned your irrigation kit. Sprinklers now cost ${formatMoney(sprinklerCost())}.`;
+    } else if (npc === "mushroom") {
+      state.compost += 8;
+      state.soilBonus = Math.min(0.18, (state.soilBonus || 0) + 0.04);
+      state.message = "Mushroom grower traded rich soil and compost for your produce.";
+    } else if (npc === "beekeeper") {
+      state.pollinatorBonus = Math.min(0.18, (state.pollinatorBonus || 0) + 0.05);
+      state.message = "Beekeeper placed pollinator boxes. Watered crops grow faster.";
     }
     saveGame();
   }
@@ -757,6 +1267,24 @@
     state.money -= cost;
     state.roofLimit += 120;
     state.message = "Construction crew strengthened the roof before the next expansion.";
+    saveGame();
+  }
+
+  function canConsultOtherFarm() {
+    const favourTotal = Object.values(state.favour).reduce((sum, value) => sum + value, 0);
+    return currentSeason() === "Winter" && state.absoluteWeek >= 16 && favourTotal >= 3 && state.roofLimit >= 900;
+  }
+
+  function consultOtherFarm() {
+    if (!canConsultOtherFarm()) {
+      state.message = "Winter consulting unlocks after week 16 with stronger roof work and at least 3 total NPC favour.";
+      return;
+    }
+    const fee = 90 + Math.min(160, state.hubReputation * 20);
+    state.money += fee;
+    state.hubReputation += 1;
+    state.stats.consultedFarms += 1;
+    state.message = `You consulted on another winter rooftop farm for ${formatMoney(fee)}. The community hub reputation grew.`;
     saveGame();
   }
 
@@ -779,24 +1307,104 @@
     return true;
   }
 
+  function aimVolunteerAtCell(volunteer, col, row) {
+    volunteer.targetX = Math.max(0.08, Math.min(0.92, (col + 0.5) / COLS));
+    volunteer.targetY = Math.max(0.12, Math.min(0.9, (row + 0.5) / ROWS));
+  }
+
+  function performVolunteerWater(volunteer, announceNoWork) {
+    const targetPlant = state.plants.find((plant) => {
+      return rootCells(plant).some((cell) => cellAt(cell.col, cell.row).soil && !isCellIrrigated(cell.col, cell.row));
+    });
+    if (!targetPlant) {
+      if (announceNoWork) state.message = "No dry crop roots need watering right now.";
+      return false;
+    }
+    let newlyWatered = 0;
+    for (const cell of rootCells(targetPlant)) {
+      const target = cellAt(cell.col, cell.row);
+      if (target.soil && !target.watered) {
+        newlyWatered += 1;
+        target.watered = true;
+      }
+    }
+    aimVolunteerAtCell(volunteer, targetPlant.col + 1, targetPlant.row + 1);
+    state.stats.watered += newlyWatered;
+    state.message = `${volunteer.name} watered ${cropDefs[targetPlant.crop]?.name || "crop"} root space.`;
+    saveGame();
+    return true;
+  }
+
+  function performVolunteerWeed(volunteer, announceNoWork) {
+    const weed = state.weeds[0];
+    if (!weed) {
+      if (announceNoWork) state.message = "No weeds need clearing right now.";
+      return false;
+    }
+    aimVolunteerAtCell(volunteer, weed.col, weed.row);
+    removeWeedAt(weed.col, weed.row, "volunteer");
+    state.message = `${volunteer.name} weeded a bed and added scraps to compost.`;
+    return true;
+  }
+
+  function performVolunteerHarvest(volunteer, announceNoWork) {
+    const ready = state.plants.find((plant) => plantStage(plant) === "harvestable");
+    if (!ready) {
+      if (announceNoWork) state.message = "No harvest-ready crops yet.";
+      return false;
+    }
+    aimVolunteerAtCell(volunteer, ready.col + 1, ready.row + 1);
+    if (harvestPlant(ready, "volunteer")) {
+      state.stats.volunteerHarvested += 1;
+      saveGame();
+      return true;
+    }
+    return false;
+  }
+
+  function performVolunteerTask(volunteer, announceNoWork) {
+    if (!volunteer || volunteer.task === "idle") return false;
+    if (volunteer.task === "water") return performVolunteerWater(volunteer, announceNoWork);
+    if (volunteer.task === "weed") return performVolunteerWeed(volunteer, announceNoWork);
+    if (volunteer.task === "harvest") return performVolunteerHarvest(volunteer, announceNoWork);
+    return false;
+  }
+
+  function updateVolunteerActions(dt) {
+    if (state.phase !== "midweek") return;
+    for (const volunteer of state.volunteers) {
+      if (volunteer.task === "idle") continue;
+      volunteer.actionTimer = Math.max(0, (volunteer.actionTimer || 0) - dt);
+      if (volunteer.actionTimer <= 0) {
+        const acted = performVolunteerTask(volunteer, false);
+        volunteer.actionTimer = acted ? VOLUNTEER_ACTION_SECONDS : VOLUNTEER_ACTION_SECONDS * 3;
+      }
+    }
+  }
+
   function setVolunteerTask(index, task) {
     const volunteer = state.volunteers[index];
     if (!volunteer) return;
     volunteer.task = task;
+    volunteer.actionTimer = 0;
     state.message = `${volunteer.name} assigned to ${task === "idle" ? "wander" : task}.`;
+    if (state.phase === "midweek" && task !== "idle") {
+      performVolunteerTask(volunteer, true);
+      volunteer.actionTimer = VOLUNTEER_ACTION_SECONDS;
+    }
     saveGame();
   }
 
   function cycleVolunteerTask(index) {
     const volunteer = state.volunteers[index];
     if (!volunteer) return;
-    const order = ["idle", "water", "harvest"];
+    const order = ["idle", "water", "weed", "harvest"];
     const next = order[(order.indexOf(volunteer.task) + 1) % order.length] || "idle";
     setVolunteerTask(index, next);
   }
 
   function cycleSelectedSeed() {
-    const keys = Object.keys(cropDefs);
+    const keys = availableCropKeys();
     const next = keys[(keys.indexOf(state.selectedSeed) + 1) % keys.length] || keys[0];
     state.selectedSeed = next;
     state.selectedTool = "seed";
@@ -810,12 +1418,12 @@
     if (state.phase === "midweek") {
       const night = state.minutes < 6 * 60 || state.minutes > 20 * 60;
       const speed = state.fast ? 960 : 240;
-      state.minutes += dt * speed * (night ? 1.55 : 1);
-      while (state.minutes >= DAY_MINUTES && state.phase === "midweek") {
-        endDay();
-      }
+      updateVolunteerActions(dt);
+      advanceMidweekMinutes(dt * speed * (night ? 1.55 : 1));
     } else if (state.phase === "repair") {
       updateRepair(dt);
+    } else if (state.phase === "market") {
+      updateMarket(dt);
     }
 
     for (let i = 0; i < state.volunteers.length; i += 1) {
@@ -824,12 +1432,11 @@
       if (volunteer.task === "idle") {
         volunteer.x += Math.sin(volunteer.bob * 0.8 + i) * dt * 0.015;
         volunteer.y += Math.cos(volunteer.bob * 0.7 + i) * dt * 0.012;
-      } else if (volunteer.task === "water") {
-        volunteer.x += (0.28 + i * 0.12 - volunteer.x) * dt * 0.8;
-        volunteer.y += (0.52 - volunteer.y) * dt * 0.8;
-      } else if (volunteer.task === "harvest") {
-        volunteer.x += (0.64 - i * 0.1 - volunteer.x) * dt * 0.8;
-        volunteer.y += (0.48 - volunteer.y) * dt * 0.8;
+      } else {
+        const targetX = volunteer.targetX ?? (volunteer.task === "water" ? 0.28 + i * 0.12 : 0.64 - i * 0.1);
+        const targetY = volunteer.targetY ?? (volunteer.task === "weed" ? 0.58 : 0.5);
+        volunteer.x += (targetX - volunteer.x) * dt * 1.4;
+        volunteer.y += (targetY - volunteer.y) * dt * 1.4;
       }
       volunteer.x = Math.max(0.08, Math.min(0.92, volunteer.x));
       volunteer.y = Math.max(0.12, Math.min(0.9, volunteer.y));
@@ -1063,6 +1670,7 @@
       }
     }
     drawPlants();
+    drawWeeds();
     drawSprinklers();
     drawVolunteers();
     drawRoofDetails();
@@ -1114,7 +1722,7 @@
       const y = roof.y + (plant.row + 1) * roof.cell;
       const stage = plantStage(plant);
       const watered = isPlantWatered(plant);
-      const radius = stage === "harvestable" ? roof.cell * 0.52 : stage === "sprout" ? roof.cell * 0.38 : roof.cell * 0.22;
+      const radius = stage === "harvestable" ? roof.cell * 0.52 : stage === "mature" ? roof.cell * 0.46 : stage === "sprout" ? roof.cell * 0.38 : roof.cell * 0.22;
       ctx.save();
       ctx.translate(x, y);
       ctx.fillStyle = watered ? def.leaf : "#7a8a5a";
@@ -1126,7 +1734,7 @@
         ctx.fill();
         ctx.stroke();
       }
-      if (stage === "harvestable") {
+      if (stage === "harvestable" || stage === "mature") {
         ctx.fillStyle = def.color;
         ctx.beginPath();
         ctx.ellipse(0, radius * 0.36, radius * 0.38, radius * 0.3, 0, 0, Math.PI * 2);
@@ -1152,6 +1760,31 @@
         ctx.arc(radius * 0.72, -radius * 0.72, 6, 0, Math.PI * 2);
         ctx.fill();
       }
+      ctx.restore();
+    }
+  }
+
+  function drawWeeds() {
+    const roof = view.roof;
+    for (const weed of state.weeds) {
+      if (!inBounds(weed.col, weed.row)) continue;
+      const x = roof.x + (weed.col + 0.5) * roof.cell;
+      const y = roof.y + (weed.row + 0.66) * roof.cell;
+      ctx.save();
+      ctx.strokeStyle = "#315f35";
+      ctx.lineWidth = Math.max(2, roof.cell * 0.08);
+      ctx.lineCap = "round";
+      for (let i = -2; i <= 2; i += 1) {
+        ctx.beginPath();
+        ctx.moveTo(x + i * roof.cell * 0.08, y);
+        ctx.lineTo(x + i * roof.cell * 0.08 + Math.sin(i) * roof.cell * 0.12, y - roof.cell * (0.26 + Math.abs(i) * 0.03));
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#79a54a";
+      ctx.beginPath();
+      ctx.ellipse(x + roof.cell * 0.12, y - roof.cell * 0.22, roof.cell * 0.09, roof.cell * 0.05, -0.6, 0, Math.PI * 2);
+      ctx.ellipse(x - roof.cell * 0.1, y - roof.cell * 0.18, roof.cell * 0.08, roof.cell * 0.05, 0.5, 0, Math.PI * 2);
+      ctx.fill();
       ctx.restore();
     }
   }
@@ -1221,6 +1854,27 @@
         ctx.strokeStyle = "#3f612f";
         ctx.lineWidth = 3;
         ctx.strokeRect(10, 4, 14, 12);
+      } else if (volunteer.task === "weed") {
+        ctx.strokeStyle = "#315f35";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(11, 5);
+        ctx.lineTo(22, -8);
+        ctx.lineTo(27, -4);
+        ctx.stroke();
+      }
+      if (volunteer.task !== "idle") {
+        ctx.fillStyle = "rgba(251, 248, 238, 0.92)";
+        ctx.strokeStyle = "rgba(35, 49, 46, 0.28)";
+        ctx.lineWidth = 1;
+        roundRect(-24, -44, 48, 16, 5);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#253331";
+        ctx.font = "10px ui-sans-serif, system-ui";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(volunteer.task, 0, -36);
       }
       ctx.restore();
     }
@@ -1301,21 +1955,25 @@
     ctx.fillStyle = "#253331";
     ctx.fillText("Seeds and prices", p.x + 16, y);
     y += 20;
-    const buttonW = (p.w - 42) / 2;
-    const seedKeys = Object.keys(cropDefs);
+    const seedKeys = availableCropKeys();
+    const seedCols = seedKeys.length > 6 ? 3 : 2;
+    const seedGap = 8;
+    const seedButtonW = (p.w - 32 - seedGap * (seedCols - 1)) / seedCols;
+    const seedButtonH = 36;
+    const seedRowH = 42;
     for (let i = 0; i < seedKeys.length; i += 1) {
       const key = seedKeys[i];
       const def = cropDefs[key];
-      const bx = p.x + 16 + (i % 2) * (buttonW + 10);
-      const by = y + Math.floor(i / 2) * 46;
+      const bx = p.x + 16 + (i % seedCols) * (seedButtonW + seedGap);
+      const by = y + Math.floor(i / seedCols) * seedRowH;
       const price = state.prices[key] || def.saleBase;
-      addButton(`seed-${key}`, bx, by, buttonW, 38, `${def.short} ${price}p`, () => {
+      addButton(`seed-${key}`, bx, by, seedButtonW, seedButtonH, `${def.short} ${price}p`, () => {
         state.selectedSeed = key;
         state.selectedTool = "seed";
         state.message = `${def.name} selected. Click a 2 by 2 soil patch to plant.`;
       }, { selected: state.selectedSeed === key });
     }
-    y += 100;
+    y += Math.ceil(seedKeys.length / seedCols) * seedRowH + 12;
 
     ctx.font = "700 13px ui-sans-serif, system-ui";
     ctx.fillStyle = "#253331";
@@ -1326,9 +1984,13 @@
       ctx.font = "12px ui-sans-serif, system-ui";
       ctx.fillStyle = "#53625d";
       ctx.fillText(`${volunteer.name}: ${volunteer.task}`, p.x + 16, y + 4);
-      addButton(`vol-${i}-water`, p.x + 112, y, 54, 30, "Water", () => setVolunteerTask(i, "water"), { selected: volunteer.task === "water", enabled: state.phase !== "market" });
-      addButton(`vol-${i}-harvest`, p.x + 172, y, 62, 30, "Harvest", () => setVolunteerTask(i, "harvest"), { selected: volunteer.task === "harvest", enabled: state.phase !== "market" });
-      addButton(`vol-${i}-idle`, p.x + 240, y, 48, 30, "Idle", () => setVolunteerTask(i, "idle"), { selected: volunteer.task === "idle", enabled: state.phase !== "market" });
+      const taskX = p.x + 104;
+      const taskGap = 6;
+      const taskW = Math.max(38, (p.w - 120 - taskGap * 3) / 4);
+      addButton(`vol-${i}-water`, taskX, y, taskW, 30, "Water", () => setVolunteerTask(i, "water"), { selected: volunteer.task === "water", enabled: state.phase !== "market" });
+      addButton(`vol-${i}-weed`, taskX + (taskW + taskGap), y, taskW, 30, "Weed", () => setVolunteerTask(i, "weed"), { selected: volunteer.task === "weed", enabled: state.phase !== "market" });
+      addButton(`vol-${i}-harvest`, taskX + (taskW + taskGap) * 2, y, taskW, 30, "Pick", () => setVolunteerTask(i, "harvest"), { selected: volunteer.task === "harvest", enabled: state.phase !== "market" });
+      addButton(`vol-${i}-idle`, taskX + (taskW + taskGap) * 3, y, taskW, 30, "Idle", () => setVolunteerTask(i, "idle"), { selected: volunteer.task === "idle", enabled: state.phase !== "market" });
       y += 40;
     }
 
@@ -1346,14 +2008,22 @@
     const fresh = state.inventory.filter((item) => !item.spoiled).length;
     const spoiled = state.inventory.filter((item) => item.spoiled).length;
     drawWrappedText(`Fresh boxes: ${fresh}  Spoiled: ${spoiled}  Compost: ${state.compost}`, x, y, w, 16);
-    y += 38;
+    y += 20;
+    const expiring = state.inventory
+      .slice()
+      .sort((a, b) => (a.shelfLife - a.age) - (b.shelfLife - b.age))
+      .slice(0, 3)
+      .map((item) => `${cropDefs[item.crop]?.short || item.crop} ${item.spoiled ? "spoiled" : `${Math.max(0, item.shelfLife - item.age)}d`}`);
+    ctx.fillStyle = "#53625d";
+    drawWrappedText(expiring.length ? `Shelf life: ${expiring.join(", ")}` : "Shelf life: storage empty", x, y, w, 16);
+    y += 34;
     ctx.font = "700 13px ui-sans-serif, system-ui";
     ctx.fillStyle = "#253331";
     ctx.fillText("Rooftop", x, y);
     y += 20;
     ctx.font = "12px ui-sans-serif, system-ui";
     ctx.fillStyle = "#53625d";
-    drawWrappedText(`Soil cells ${soilCount()}, sprinklers ${sprinklerCount()}, plants ${state.plants.length}, watered cells ${wateredCount()}.`, x, y, w, 16);
+    drawWrappedText(`Soil ${soilCount()}, water ${wateredCount()}, weeds ${state.weeds.length}, sprinklers ${sprinklerCount()} (${formatMoney(sprinklerCost())}), plants ${state.plants.length}.`, x, y, w, 16);
   }
 
   function drawBottomToolbar() {
@@ -1463,7 +2133,7 @@
     if (tool === "soil") return "Drag across the rooftop to paint soil mass.";
     if (tool === "erase") return "Drag to remove soil, sprinklers, or crops. Removed crops become compost.";
     if (tool === "seed") return "Click a clear 2 by 2 soil patch to plant the selected seed.";
-    if (tool === "irrigation") return "Click an empty tile to add a sprinkler for 25p.";
+    if (tool === "irrigation") return `Click an empty tile to add a sprinkler for ${formatMoney(sprinklerCost())}; after the first, place beside the pipe network.`;
     if (tool === "harvest") return "Click harvestable crops, or assign a volunteer to harvest.";
     return "Select a tool and work the rooftop.";
   }
@@ -1514,6 +2184,7 @@
     ctx.fillRect(0, tableY, view.width, 14);
 
     drawTopHud();
+    drawNeighbourhoodContacts(compact);
 
     const stallX = compact ? 18 : view.width * 0.08;
     const stallY = compact ? 92 : view.height * 0.28;
@@ -1547,18 +2218,43 @@
     drawWrappedText("Sell for cash or gift one fresh box to a useful contact. Favour unlocks compost, roof work, and volunteers.", stallX + 24, stallY + 58, stallW - 48, compact ? 15 : 18);
 
     const cardX = compact ? 18 : view.width * 0.55;
-    const cardY = compact ? 282 : view.height * 0.25;
+    const cardY = compact ? 258 : view.height * 0.25;
     const cardW = compact ? view.width - 36 : Math.min(420, view.width * 0.37);
     drawMarketCard(cardX, cardY, cardW);
     drawBottomMarketControls();
     drawWeightGauge();
   }
 
+  function drawNeighbourhoodContacts(compact) {
+    const labels = [
+      ["restaurant", "Chef"],
+      ["carpenter", "Carp"],
+      ["engineer", "Eng"],
+      ["social", "Social"],
+      ["mushroom", "Mush"],
+      ["beekeeper", "Bee"],
+    ];
+    const startX = compact ? 18 : view.width * 0.08;
+    const y = compact ? 198 : 104;
+    const w = compact ? Math.max(48, (view.width - 48) / 3) : 78;
+    const h = compact ? 24 : 26;
+    for (let i = 0; i < labels.length; i += 1) {
+      const [key, label] = labels[i];
+      const col = compact ? i % 3 : i;
+      const row = compact ? Math.floor(i / 3) : 0;
+      const x = startX + col * (w + 8);
+      addButton(`street-${key}`, x, y + row * (h + 7), w, h, label, () => {
+        state.message = `${label} spotted in the neighbourhood. Use a fresh produce gift to build favour.`;
+        if (state.inventory.some((item) => !item.spoiled)) giftToNpc(key);
+      }, { subtle: true });
+    }
+  }
+
   function drawMarketCard(x, y, w) {
     ctx.fillStyle = "rgba(251, 248, 238, 0.94)";
     ctx.strokeStyle = "rgba(35, 49, 46, 0.35)";
     ctx.lineWidth = 1.5;
-    roundRect(x, y, w, 300, 8);
+    roundRect(x, y, w, 360, 8);
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "#1e2b29";
@@ -1570,12 +2266,28 @@
     ctx.fillStyle = "#53625d";
     ctx.fillText(`Fresh produce boxes: ${state.inventory.filter((item) => !item.spoiled).length}`, x + 16, y + 40);
 
-    addButton("sell-all", x + 16, y + 66, w - 32, 42, "Sell all fresh produce", () => sellAll(), { selected: true });
-    addButton("gift-restaurant", x + 16, y + 122, w - 32, 38, `Gift restaurant - favour ${state.favour.restaurant}`, () => giftToNpc("restaurant"));
-    addButton("gift-carpenter", x + 16, y + 168, w - 32, 38, `Gift carpenter - favour ${state.favour.carpenter}`, () => giftToNpc("carpenter"));
-    addButton("gift-social", x + 16, y + 214, w - 32, 38, `Gift social worker - favour ${state.favour.social}`, () => giftToNpc("social"));
-    addButton("compost-spoiled", x + 16, y + 260, (w - 42) / 2, 32, "Compost spoiled", () => compostSpoiled(), { subtle: true });
-    addButton("strengthen-roof", x + 26 + (w - 42) / 2, y + 260, (w - 42) / 2, 32, "Strengthen roof", () => strengthenRoof(), { subtle: true });
+    addButton("sell-all", x + 16, y + 62, w - 32, 36, "Sell all fresh produce", () => sellAll(), { selected: true });
+    addButton("stall-volunteer", x + 16, y + 106, w - 32, 32, `Assign stall helper (${stallVolunteerCount()})`, () => assignStallVolunteer(), { subtle: true });
+
+    const contacts = [
+      ["restaurant", "Restaurant"],
+      ["carpenter", "Carpenter"],
+      ["social", "Social worker"],
+      ["engineer", "Engineer"],
+      ["mushroom", "Mushroom grower"],
+      ["beekeeper", "Beekeeper"],
+    ];
+    const contactW = (w - 42) / 2;
+    for (let i = 0; i < contacts.length; i += 1) {
+      const [key, label] = contacts[i];
+      const bx = x + 16 + (i % 2) * (contactW + 10);
+      const by = y + 150 + Math.floor(i / 2) * 40;
+      addButton(`gift-${key}`, bx, by, contactW, 34, `${label} ${state.favour[key] || 0}`, () => giftToNpc(key));
+    }
+
+    addButton("compost-spoiled", x + 16, y + 278, contactW, 30, "Compost spoiled", () => compostSpoiled(), { subtle: true });
+    addButton("strengthen-roof", x + 26 + contactW, y + 278, contactW, 30, "Crew roof work", () => strengthenRoof(), { subtle: true });
+    addButton("consult-farms", x + 16, y + 318, w - 32, 28, "Winter farm consult", () => consultOtherFarm(), { subtle: !canConsultOtherFarm(), selected: canConsultOtherFarm() });
   }
 
   function drawBottomMarketControls() {
@@ -1694,6 +2406,7 @@
         target.watered = false;
         target.sprinkler = false;
         target.compost = 0;
+        state.weeds = state.weeds.filter((weed) => weed.col !== cell.col || weed.row !== cell.row);
         state.message = "Tile cleared.";
       }
     } else if (state.selectedTool === "seed" && !dragging) {
@@ -1716,6 +2429,8 @@
 
   function handlePointerDown(event) {
     const point = eventPoint(event);
+    ensureAudio();
+    playUiSound("tap");
     input.pointerDown = true;
     input.x = point.x;
     input.y = point.y;
@@ -1819,6 +2534,143 @@
     requestAnimationFrame(loop);
   }
 
+  function gameTextPayload() {
+    const visiblePlants = state.plants.map((plant) => {
+      const def = cropDefs[plant.crop];
+      return {
+        crop: def ? def.name : plant.crop,
+        key: plant.crop,
+        col: plant.col,
+        row: plant.row,
+        rootCells: rootCells(plant),
+        stage: plantStage(plant),
+        watered: isPlantWatered(plant),
+        weeded: !plantHasWeeds(plant),
+        growthDays: Math.round(plant.growthDays * 10) / 10,
+        growDays: def ? def.growDays : 0,
+        recurrent: Boolean(def?.fruitLoad),
+        fruitReady: Boolean(plant.fruitReady),
+        fruitDays: Math.round((plant.fruitDays || 0) * 10) / 10,
+        fruitInterval: def?.fruitInterval || 0,
+        thirst: Math.round((plant.thirst || 0) * 10) / 10,
+      };
+    });
+    const inventory = {};
+    for (const item of state.inventory) {
+      const key = `${item.spoiled ? "spoiled " : "fresh "}${cropDefs[item.crop]?.name || item.crop}`;
+      inventory[key] = (inventory[key] || 0) + item.qty;
+    }
+    return {
+      coordinateSystem: "grid origin top-left, col increases right, row increases down",
+      mode: state.mode,
+      phase: state.phase,
+      year: state.year,
+      month: state.month,
+      week: state.absoluteWeek,
+      weekInMonth: state.weekInMonth,
+      day: state.day,
+      time: formatTime(state.minutes),
+      season: currentSeason(),
+      money: Math.round(state.money),
+      selectedTool: state.selectedTool,
+      selectedSeed: cropDefs[state.selectedSeed]?.name || state.selectedSeed,
+      unlockedSeeds: availableCropKeys().map((key) => cropDefs[key].name),
+      roof: {
+        load: Math.round(roofLoad()),
+        limit: Math.round(state.roofLimit),
+        loadPercent: Math.round((roofLoad() / state.roofLimit) * 100),
+        overloadDays: state.overloadDays,
+      },
+      rooftop: {
+        soilCells: soilCount(),
+        wateredCells: wateredCount(),
+        sprinklers: sprinklerCount(),
+        sprinklerCost: sprinklerCost(),
+        compost: state.compost,
+        weeds: state.weeds.length,
+        stallHelpers: stallVolunteerCount(),
+      },
+      services: {
+        toolDiscount: state.toolDiscount || 0,
+        pollinatorBonus: state.pollinatorBonus || 0,
+        soilBonus: state.soilBonus || 0,
+        mulchBonus: state.mulchBonus || 0,
+        hubReputation: state.hubReputation || 0,
+      },
+      repairDaysLeft: state.repairDaysLeft,
+      collapseCount: state.collapseCount,
+      favour: { ...state.favour },
+      plants: visiblePlants,
+      weeds: state.weeds.map((weed) => ({ col: weed.col, row: weed.row, age: weed.age || 0 })),
+      inventory,
+      inventoryDetails: state.inventory.map((item) => ({
+        crop: cropDefs[item.crop]?.name || item.crop,
+        age: item.age,
+        shelfLife: item.shelfLife,
+        remainingShelfLife: Math.max(0, item.shelfLife - item.age),
+        spoiled: item.spoiled,
+      })),
+      volunteers: state.volunteers.map((volunteer) => ({
+        name: volunteer.name,
+        task: volunteer.task,
+        x: Math.round(volunteer.x * 100) / 100,
+        y: Math.round(volunteer.y * 100) / 100,
+        actionTimer: Math.round((volunteer.actionTimer || 0) * 10) / 10,
+      })),
+      stats: { ...state.stats },
+      message: state.message,
+    };
+  }
+
+  function reachPayload() {
+    layout();
+    const items = view.buttons
+      .filter((button) => button.enabled)
+      .map((button) => ({
+        id: button.id,
+        label: button.label,
+        x: Math.round(button.x),
+        y: Math.round(button.y),
+        w: Math.round(button.w),
+        h: Math.round(button.h),
+      }));
+    if (state.mode !== "title") {
+      items.push({
+        id: "roof-grid",
+        x: Math.round(view.roof.x),
+        y: Math.round(view.roof.y),
+        w: Math.round(view.roof.w),
+        h: Math.round(view.roof.h),
+      });
+      for (const plant of state.plants.slice(0, 12)) {
+        items.push({
+          id: `plant-${plant.col}-${plant.row}`,
+          x: Math.round(view.roof.x + plant.col * view.roof.cell),
+          y: Math.round(view.roof.y + plant.row * view.roof.cell),
+          w: Math.round(view.roof.cell * 2),
+          h: Math.round(view.roof.cell * 2),
+        });
+      }
+    }
+    return {
+      screen: state.mode === "title" ? "title" : state.phase,
+      viewportH: view.height,
+      screenH: view.height,
+      items,
+    };
+  }
+
+  window.render_game_to_text = () => JSON.stringify(gameTextPayload());
+  window.__growingHighReach = reachPayload;
+  window.advanceTime = (ms) => {
+    const steps = Math.max(1, Math.ceil(ms / (1000 / 30)));
+    const dt = ms / steps / 1000;
+    for (let i = 0; i < steps; i += 1) {
+      update(dt);
+    }
+    draw();
+  };
+
   window.addEventListener("resize", resize);
   window.addEventListener("keydown", handleKey);
   canvas.addEventListener("pointerdown", handlePointerDown);
@@ -1827,9 +2679,12 @@
   canvas.addEventListener("pointercancel", handlePointerUp);
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
+  registerPlatformAudioPause();
   hydrateState();
   state.prices = generatePrices();
+  maybeAutostart();
   resize();
+  signalPlatformReady();
   requestAnimationFrame((now) => {
     lastFrame = now;
     requestAnimationFrame(loop);
