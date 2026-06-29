@@ -13,6 +13,7 @@ import {
   updateTelegramStateIfRev,
   upsertTelegramPlayer,
 } from '../_lib/supabase.js';
+import { crateWeekId as weekId, legacyEligibleFloor } from '../_lib/tgCrateEligibility.js';
 
 const WEEKLY_REWARDS = [
   { min: 1, max: 1, crates: 10 },
@@ -35,15 +36,6 @@ async function readBody(request) {
   } catch {
     return null;
   }
-}
-
-function weekId(date = new Date()) {
-  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-  const day = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - day);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
 
 function previousWeekId() {
@@ -74,8 +66,27 @@ function serverGacha(state) {
 
 function crateCountForWeek(state, week) {
   const stats = serverGacha(state);
-  if (stats.weeklyCrateWeek === week) return Number(stats.weeklyCratesOpened || 0);
+  if (stats.weeklyCrateWeek === week) {
+    let count = Number(stats.weeklyCratesOpened || 0);
+    // Pre-eligible_v2 accounts stored daily/ad/caps cooldowns but 0 rank count; credit a floor until report migration bakes it in.
+    count += legacyEligibleFloor(stats, week);
+    return count;
+  }
   if (stats.previousWeeklyCrateWeek === week) return Number(stats.previousWeeklyCratesOpened || 0);
+  return 0;
+}
+
+function paidCrateCountForWeek(state, week) {
+  const stats = serverGacha(state);
+  if (stats.weeklyCrateWeek === week) {
+    if (stats.weeklyPaidCratesOpened !== undefined) return Number(stats.weeklyPaidCratesOpened || 0);
+    // Pre-eligible_v2 weeklyCratesOpened only advanced from real paid receipts.
+    return Number(stats.weeklyCratesOpened || 0);
+  }
+  if (stats.previousWeeklyCrateWeek === week) {
+    if (stats.previousWeeklyPaidCratesOpened !== undefined) return Number(stats.previousWeeklyPaidCratesOpened || 0);
+    return Number(stats.previousWeeklyCratesOpened || 0);
+  }
   return 0;
 }
 
@@ -92,7 +103,18 @@ function profileUrl(player) {
   return /^[A-Za-z0-9_]{5,32}$/.test(username) ? `https://t.me/${username}` : null;
 }
 
-function buildLeaderboard(rows, week, limit = 100, playersById = new Map(), viewerId = '') {
+function buildPaidRankMap(rows, week) {
+  return new Map(rows
+    .map((row) => ({
+      telegramUserId: String(row.telegram_user_id || ''),
+      paidCratesOpened: Math.max(0, Math.floor(paidCrateCountForWeek(row.state, week))),
+    }))
+    .filter((row) => row.telegramUserId && row.paidCratesOpened > 0)
+    .sort((a, b) => (b.paidCratesOpened - a.paidCratesOpened) || String(a.telegramUserId).localeCompare(String(b.telegramUserId)))
+    .map((row, index) => [row.telegramUserId, { rank: index + 1, paidCratesOpened: row.paidCratesOpened }]));
+}
+
+function buildLeaderboard(rows, week, limit = 100, playersById = new Map(), viewerId = '', paidRankById = new Map()) {
   return rows
     .map((row) => ({
       telegramUserId: String(row.telegram_user_id || ''),
@@ -102,18 +124,24 @@ function buildLeaderboard(rows, week, limit = 100, playersById = new Map(), view
     .filter((row) => row.telegramUserId && row.cratesOpened > 0)
     .sort((a, b) => (b.cratesOpened - a.cratesOpened) || String(a.telegramUserId).localeCompare(String(b.telegramUserId)))
     .slice(0, Math.max(1, Math.min(100, Number(limit) || 100)))
-    .map((row, index) => ({
-      rank: index + 1,
-      telegramUserId: row.telegramUserId,
-      displayName: publicName(playersById.get(row.telegramUserId), row.telegramUserId),
-      profileUrl: profileUrl(playersById.get(row.telegramUserId)),
-      cratesOpened: row.cratesOpened,
-      rewardCrates: rewardForRank(index + 1),
-      rewardTon: tonRewardForRank(index + 1)?.ton || null,
-      rewardTonNanotons: tonRewardForRank(index + 1)?.nanotons || '0',
-      updatedAt: row.updatedAt,
-      isMe: row.telegramUserId === String(viewerId || ''),
-    }));
+    .map((row, index) => {
+      const paidRank = paidRankById.get(row.telegramUserId) || null;
+      const paidTon = paidRank ? tonRewardForRank(paidRank.rank) : null;
+      return {
+        rank: index + 1,
+        telegramUserId: row.telegramUserId,
+        displayName: publicName(playersById.get(row.telegramUserId), row.telegramUserId),
+        profileUrl: profileUrl(playersById.get(row.telegramUserId)),
+        cratesOpened: row.cratesOpened,
+        paidCratesOpened: paidRank ? paidRank.paidCratesOpened : 0,
+        paidRank: paidRank ? paidRank.rank : null,
+        rewardCrates: rewardForRank(index + 1),
+        rewardTon: paidTon ? paidTon.ton : null,
+        rewardTonNanotons: paidTon ? paidTon.nanotons : '0',
+        updatedAt: row.updatedAt,
+        isMe: row.telegramUserId === String(viewerId || ''),
+      };
+    });
 }
 
 async function authenticate(body, env) {
@@ -143,7 +171,8 @@ export async function onRequestPost({ request, env }) {
   const rows = await listTelegramStates(env, game, 5000);
   const playerRows = await listTelegramPlayers(env, rows.map((row) => row.telegram_user_id));
   const playersById = new Map(playerRows.map((player) => [String(player.telegram_user_id), player]));
-  const leaders = buildLeaderboard(rows, week, body.limit || 100, playersById, auth.user.id);
+  const paidRankById = buildPaidRankMap(rows, week);
+  const leaders = buildLeaderboard(rows, week, body.limit || 100, playersById, auth.user.id, paidRankById);
 
   if (action === 'leaders') {
     return json({ ok: true, configured: true, game, week, leaders }, 200, { 'cache-control': 'no-store' });
@@ -152,8 +181,9 @@ export async function onRequestPost({ request, env }) {
   if (action !== 'claim_weekly') return jsonError('Unknown action', 400);
 
   const mine = leaders.find((row) => row.telegramUserId === String(auth.user.id));
+  const paidMine = paidRankById.get(String(auth.user.id)) || null;
   const rewardCrates = mine ? rewardForRank(mine.rank) : 0;
-  const rewardTon = mine ? tonRewardForRank(mine.rank) : null;
+  const rewardTon = paidMine ? tonRewardForRank(paidMine.rank) : null;
   const rewardTonNanotons = rewardTon ? rewardTon.nanotons : '0';
   if (!rewardCrates && !normalizeNanotons(rewardTonNanotons)) {
     return json({ ok: true, configured: true, game, week, rank: mine ? mine.rank : null, rewardCrates: 0, rewardTon: null, rewardTonNanotons: '0', claimed: false }, 200, { 'cache-control': 'no-store' });
@@ -171,7 +201,8 @@ export async function onRequestPost({ request, env }) {
         configured: true,
         game,
         week,
-        rank: mine.rank,
+        rank: mine ? mine.rank : null,
+        paidRank: paidMine ? paidMine.rank : null,
         rewardCrates: 0,
         rewardTon: null,
         rewardTonNanotons: '0',
@@ -182,7 +213,8 @@ export async function onRequestPost({ request, env }) {
     }
     const creditNanotons = creditTonBalance(server, rewardTonNanotons);
     claims[week] = {
-      rank: mine.rank,
+      rank: mine ? mine.rank : null,
+      paidRank: paidMine ? paidMine.rank : null,
       crates: rewardCrates,
       ton: rewardTon ? rewardTon.ton : null,
       tonNanotons: rewardTonNanotons,
@@ -195,7 +227,8 @@ export async function onRequestPost({ request, env }) {
         configured: true,
         game,
         week,
-        rank: mine.rank,
+        rank: mine ? mine.rank : null,
+        paidRank: paidMine ? paidMine.rank : null,
         rewardCrates,
         rewardTon: rewardTon ? rewardTon.ton : null,
         rewardTonNanotons,

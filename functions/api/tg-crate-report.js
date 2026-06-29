@@ -9,6 +9,7 @@ import {
   upsertTelegramPlayer,
   upsertTelegramState,
 } from '../_lib/supabase.js';
+import { crateWeekId as weekId, migrateLegacyEligibleCount } from '../_lib/tgCrateEligibility.js';
 
 async function readBody(request) {
   try {
@@ -16,15 +17,6 @@ async function readBody(request) {
   } catch {
     return null;
   }
-}
-
-function weekId(date = new Date()) {
-  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-  const day = d.getUTCDay() || 7;
-  d.setUTCDate(d.getUTCDate() + 4 - day);
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
-  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
 
 function dayId(date = new Date()) {
@@ -42,10 +34,20 @@ function serverGachaFor(state) {
 
 function rotateWeek(gacha, week) {
   if (gacha.weeklyCrateWeek === week) return;
+  const paidSnapshot = gacha.weeklyPaidCratesOpened !== undefined ? gacha.weeklyPaidCratesOpened : gacha.weeklyCratesOpened;
   gacha.previousWeeklyCrateWeek = gacha.weeklyCrateWeek || '';
   gacha.previousWeeklyCratesOpened = Math.max(0, Math.floor(Number(gacha.weeklyCratesOpened || 0)));
+  gacha.previousWeeklyPaidCratesOpened = Math.max(0, Math.floor(Number(paidSnapshot || 0)));
   gacha.weeklyCrateWeek = week;
   gacha.weeklyCratesOpened = 0;
+  gacha.weeklyPaidCratesOpened = 0;
+  gacha.weeklyCountVersion = 'eligible_v2';
+}
+
+function migratePaidReceiptCount(gacha) {
+  if (gacha.weeklyPaidCratesOpened !== undefined) return;
+  // Before eligible_v2, weeklyCratesOpened only advanced from real paid receipts.
+  gacha.weeklyPaidCratesOpened = Math.max(0, Math.floor(Number(gacha.weeklyCratesOpened || 0)));
 }
 
 function reportKey(body) {
@@ -84,27 +86,35 @@ async function validateReport(body, env, auth, state, gacha) {
   const source = String(body.source || '').toLowerCase();
   const now = Date.now();
 
-  // Only server-verified paid/TON-credit receipts can move the reward leaderboard.
-  // Free/caps/ad reports still update cooldown state, but cannot mint weekly TON credit.
+  // Only server-bounded crate opens can move the reward leaderboard. Reward TON-credit spends
+  // apply items but never recycle into the next weekly payout rank.
   if (source === 'daily') {
     const today = dayId();
     if (gacha.dailyCrateDay === today) return { error: jsonError('daily crate already reported', 409) };
     gacha.dailyCrateDay = today;
-    return { count: 0 };
+    return { count: 1 };
   }
 
   if (source === 'ad') {
     const last = Number(gacha.adCrateLastAt || 0);
     if (last && now - last < 60 * 60 * 1000) return { error: jsonError('ad crate cooldown', 429) };
     gacha.adCrateLastAt = now;
-    return { count: 0 };
+    return { count: 1 };
   }
 
   if (source === 'caps') {
     const last = Number(gacha.capsCrateLastAt || 0);
     if (last && now - last < 2500) return { error: jsonError('crate report cooldown', 429) };
+    const today = dayId();
+    if (gacha.capsCrateDay !== today) {
+      gacha.capsCrateDay = today;
+      gacha.capsCrateDayCount = 0;
+    }
+    const todayCount = Math.max(0, Math.floor(Number(gacha.capsCrateDayCount || 0)));
     gacha.capsCrateLastAt = now;
-    return { count: 0 };
+    if (todayCount >= 3) return { count: 0 };
+    gacha.capsCrateDayCount = todayCount + 1;
+    return { count: 1 };
   }
 
   if (source === 'paid') {
@@ -128,7 +138,8 @@ async function validateReport(body, env, auth, state, gacha) {
       keys.slice(0, keys.length - 160).forEach((oldKey) => { delete counted[oldKey]; });
     }
     // TON-credit spends apply the item, but cannot recycle weekly reward credit into the next payout rank.
-    return { count: paidReceipt ? paidCrateCount(productId) : 0 };
+    const count = paidReceipt ? paidCrateCount(productId) : 0;
+    return { count, paidCount: count };
   }
 
   return { error: jsonError('unsupported crate report', 400) };
@@ -156,12 +167,16 @@ export async function onRequestPost({ request, env }) {
     const gacha = serverGachaFor(state);
     const week = weekId();
     rotateWeek(gacha, week);
+    migratePaidReceiptCount(gacha);
+    migrateLegacyEligibleCount(gacha, week);
 
     const validated = await validateReport(body, env, auth, state, gacha);
     if (validated.error) return validated.error;
 
     const count = Math.max(0, Math.min(10, Math.floor(Number(validated.count || 0))));
+    const paidCount = Math.max(0, Math.min(10, Math.floor(Number(validated.paidCount || 0))));
     gacha.weeklyCratesOpened = Math.max(0, Math.floor(Number(gacha.weeklyCratesOpened || 0))) + count;
+    gacha.weeklyPaidCratesOpened = Math.max(0, Math.floor(Number(gacha.weeklyPaidCratesOpened || 0))) + paidCount;
     gacha.boxesOpened = Math.max(0, Math.floor(Number(gacha.boxesOpened || 0))) + count;
     gacha.updatedAt = new Date().toISOString();
 
