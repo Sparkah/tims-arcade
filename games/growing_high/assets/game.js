@@ -347,8 +347,8 @@
       audio.musicStep += 1;
       playTone(note, 0.22, "sine", 0.018);
     };
-    scheduleMusic();
     audio.musicTimer = window.setInterval(scheduleMusic, 1500);
+    scheduleMusic();
   }
 
   function pauseAudio() {
