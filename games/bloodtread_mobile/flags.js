@@ -10,6 +10,11 @@ export var qs = new URLSearchParams(location.search);
 // (:8336, which never sets the flag) is unchanged. Equivalent to the old ?sprites&play, baked in for hosting.
 export var PUBLIC_BUILD = typeof window !== 'undefined' && !!window.__BT_PUBLIC;
 
+// LOCAL preview only: localhost / 127.0.0.1 / file://. ALL dev+cheat URL params (cheats, debug, storetest,
+// unlockall, god, diag/min) are gated behind this so they work in Tim's local preview but are INERT on every
+// public host (game-factory.tech, the Telegram wrapper, CrazyGames, Yandex) - no player can self-grant/cheat live.
+export var LOCAL_BUILD = typeof location !== 'undefined' && (location.hostname === 'localhost' || location.hostname === '127.0.0.1' || location.hostname === '0.0.0.0' || location.hostname === '');
+
 // TELEGRAM MINI APP mode: the tg-bloodtread/ wrapper loads the game iframe with ?tg=1. Gates the Telegram
 // adapter (tg.js): cloud saves, Stars/TON product grants, ad-free. OFF everywhere else (standalone/CG/Yandex).
 export var TG_MODE = qs.has('tg');
@@ -17,13 +22,19 @@ export var TG_MODE = qs.has('tg');
 // Cheats / dev tools (the CHEATS menu, skip-to-minute, ?min boot, c/x grants) are gated behind this so the
 // SHIPPED game has NO cheat menu (Tim). IMMUTABLE boot const (unlike DEBUG, which a keybind can toggle):
 // add ?debug or ?cheats to re-enable them for testing. The window.__* test/harness hooks are separate.
-export var CHEATS_ENABLED = qs.has('debug') || qs.has('cheats');
+export var CHEATS_ENABLED = (qs.has('debug') || qs.has('cheats')) && LOCAL_BUILD;
+export var STORE_TEST = (qs.has('storetest') || qs.has('debug') || qs.has('cheats')) && !TG_MODE && LOCAL_BUILD;   // ?storetest grants STORE items LOCALLY for preview - LOCAL_BUILD only, so a player can NEVER append it to the live app and self-grant; real builds buy through window.__tg
 
-export var DEBUG = qs.has('debug');
+export var DEBUG = qs.has('debug') && LOCAL_BUILD;   // dev perf overlay - LOCAL only (no debug panel on production)
+
+// ?unlockall - Tim's "cheated all unlocked" convenience: unlocks the WHOLE game at boot (max forge + every
+// weapon + every Gore Cache skin/relic + a stack of caches/shards). Local save only (no money, no server grant);
+// handy for reviewing the full collection. Applied in main.js boot; also window.__unlockAll() in the console.
+export var UNLOCK_ALL = qs.has('unlockall') && LOCAL_BUILD;
 // DEBUG is toggled live by a keybind; importers can't reassign a binding, so mutate it here.
 export function setDebug(v) { DEBUG = v; }
 export var NO_HUD = qs.has('noui');
-export var DIAG = qs.get('diag') || '';
+export var DIAG = LOCAL_BUILD ? (qs.get('diag') || '') : '';   // render/logic diag modes (+ the ?min jump they enable) are LOCAL-only
 export var LOGIC_ONLY = DIAG === 'logic' || DIAG === 'updateonly';
 export var RENDER_ONLY = DIAG === 'render' || DIAG === 'renderonly';
 export var START_MIN = (CHEATS_ENABLED || RENDER_ONLY) ? clamp(parseFloat(qs.get('min') || (RENDER_ONLY ? '9' : '0')), 0, 60) : 0;   // ?min is a cheat -> 0 in the shipped game unless cheats/render-diag
@@ -45,8 +56,8 @@ export var GORE_FX = qs.get('gore') !== '0';
 export var BREAK_ENV = OLD_ENV && qs.get('breakenv') !== '0';
 export var VEIN_FX = qs.get('veins') !== '0';
 export var LEECH_FX = qs.get('leeches') !== '0';
-export var COLLIDERS = qs.has('colliders') && qs.get('colliders') !== '0';
-export var GOD = qs.has('god') || qs.has('nohurt');
+export var COLLIDERS = qs.get('colliders') !== '0';   // default ON (opt-out ?colliders=0): enemy<->enemy spatial-hash separation so a horde spreads into a crowd instead of stacking on one point (Tim 2026-06-28)
+export var GOD = (qs.has('god') || qs.has('nohurt')) && LOCAL_BUILD;
 export var SPRITE_LOD = qs.get('spritelod') !== '0';
 export var TOUCH_DEVICE = (navigator.maxTouchPoints || 0) > 0 || 'ontouchstart' in window;
 export var ZOOM_OVERRIDE = qs.has('zoom') ? clamp(parseFloat(qs.get('zoom') || '1'), 0.55, 1.2) : 0;

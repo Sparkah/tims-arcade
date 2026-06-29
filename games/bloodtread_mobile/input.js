@@ -3,17 +3,20 @@
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
 import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js';
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE } from './flags.js';
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js';
 import { adFree } from './tg.js';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
 import { BASE_DPR } from './config.js';
 import { clamp } from './lib/math.js';
 import { glCanvas, hudCanvas } from './render/context.js';
 import { updateCameraMetrics } from './render/camera.js';
 import { inRect } from './render/hud.js';
-import { unlockAudio, toggleMute, handleVisibility } from './audio.js';
+import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js';
 import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js';
 import { spawnEnemyWave } from './systems/enemies.js';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
 import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js';
+import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js';   // GORE VAULT (gacha) + GEAR + STORE actions
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js';   // REVEAL overlay + GEAR merge animation
+import { GEAR_MERGE } from './data/loot.js';   // gear merge size (5 -> 1)
 import { beginResurrect } from './update.js';
 import { trackAnalyticsVictoryButton } from './analytics.js';
 
@@ -93,6 +96,7 @@ import { trackAnalyticsVictoryButton } from './analytics.js';
     if (state.mode === 'MENU') {
       if (inRect(x, y, rects.play)) startRun(0);
       else if (inRect(x, y, rects.forge)) state.mode = 'SHOP';
+      else if (inRect(x, y, rects.vault)) state.mode = 'VAULT';
       else if (CHEATS_ENABLED && inRect(x, y, rects.cheat)) state.mode = 'CHEAT';
       else return false;
       return true;
@@ -164,6 +168,66 @@ import { trackAnalyticsVictoryButton } from './analytics.js';
         trackAnalyticsVictoryButton('buy_coffee');
         try { window.open(COFFEE_URL, '_blank', 'noopener'); } catch (err) {}
       }
+      return true;
+    }
+    if (state.mode === 'VAULT') {
+      if (mergeAnimBusy()) return true;   // swallow taps while a gear merge animates
+      if (inRect(x, y, rects.vaultOpen)) {
+        if (econ.caches > 0) {
+          var card = openCache();   // ATOMIC: consumes + grants + saves BEFORE the reveal (no reroll-by-reload)
+          if (card) { setReveal(card); state.mode = 'REVEAL'; playTone(card.rarity >= 2 ? 660 : 430, 0.13, 0.05); }
+        }
+        return true;
+      }
+      if (rects.vaultShard && inRect(x, y, rects.vaultShard)) {
+        if (rects.vaultShard.afford) { if (forgeRelicFromShards()) playTone(560, 0.1, 0.045); }
+        return true;
+      }
+      if (rects.vaultStore && inRect(x, y, rects.vaultStore)) { state.mode = 'STORE'; playTone(440, 0.06, 0.035); return true; }
+      if (inRect(x, y, rects.vaultBack)) { state.mode = 'MENU'; return true; }
+      for (var vsi = 0; vsi < rects.vaultSkins.length; vsi++) {
+        if (inRect(x, y, rects.vaultSkins[vsi])) {
+          if (rects.vaultSkins[vsi].owned) { setSkin(rects.vaultSkins[vsi].id); playTone(320, 0.05, 0.03); }
+          return true;
+        }
+      }
+      for (var gri = 0; gri < rects.vaultGear.length; gri++) {
+        var gr = rects.vaultGear[gri];
+        if (inRect(x, y, gr.merge)) {
+          var garr = econ.gear[gr.slot]; var gfrom = -1;
+          for (var gft = 0; gft < garr.length - 1; gft++) { if (garr[gft] >= GEAR_MERGE) { gfrom = gft; break; } }
+          if (gfrom >= 0) { setMergeAnim(gr.slot, gfrom, gfrom + 1); mergeUpSlot(gr.slot); playTone(560, 0.09, 0.045); }   // animate 5 -> blood burst -> the new tier
+          return true;
+        }
+        if (inRect(x, y, gr)) { if (STORE_TEST) { dropGear(gr.slot, 5); playTone(360, 0.05, 0.03); } return true; }   // ?storetest: tap a row to drop +5 commons (preview the loop)
+      }
+      return true;   // swallow taps on the vault backdrop
+    }
+    if (state.mode === 'STORE') {
+      if (rects.storeBack && inRect(x, y, rects.storeBack)) { state.mode = 'VAULT'; return true; }
+      for (var sti = 0; sti < rects.store.length; sti++) {
+        if (!inRect(x, y, rects.store[sti])) continue;
+        if (rects.store[sti].owned) { playTone(160, 0.05, 0.03); return true; }   // one-time item already owned
+        var sit = rects.store[sti].item;
+        var stg = (typeof window !== 'undefined') ? window.__tg : null;
+        var stCanBuy = stg && typeof stg.buy === 'function';
+        if (STORE_TEST) {
+          // ?storetest ONLY (never the bare web build): grant immediately so the box/mythic result is see-able
+          if (sit.once) econ.boughtOnce[sit.id] = 1;   // mark BEFORE the grant so the grant's saveMeta persists it
+          var stCard = sit.kind === 'mythic' ? grantMythic(sit.mythic) : (sit.kind === 'bounty' ? openBountyBox() : openPaidBox(sit.floor || 0));
+          if (stCard) { setReveal(stCard); state.mode = 'REVEAL'; playTone((stCard.rarity || 0) >= 3 ? 720 : 600, 0.14, 0.06); }
+        } else if (stCanBuy) {
+          // production: the Telegram wrapper handles the Stars/ad + grants via __tgApplyBloodtreadProduct -> tg.js grant()
+          if (sit.kind === 'daily') { if (typeof stg.showAd === 'function') stg.showAd('rewarded', function (ok) { if (ok) { var dc = openPaidBox(0); if (dc) { setReveal(dc); state.mode = 'REVEAL'; } } }); }
+          else stg.buy(sit.id, 'XTR', function () {});
+        }
+        // else (no __tg + no storetest, e.g. the web gallery build): browse-only, no grant
+        return true;
+      }
+      return true;   // swallow taps on the store backdrop
+    }
+    if (state.mode === 'REVEAL') {
+      if (inRect(x, y, rects.vaultClaim)) state.mode = 'VAULT';
       return true;
     }
     if (state.paused) {

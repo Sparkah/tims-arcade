@@ -27,10 +27,11 @@ export var GORE_MUL = clamp(parseFloat(qs.get('goremul') || '2.65'), 0.2, 3.5);
 export var ENEMY_SCALE = clamp(parseFloat(qs.get('enemysize') || '1.12'), 0.8, 1.5);
 export var ROCK_DENSITY = clampInt(parseInt(qs.get('rockdensity') || '24', 10), 0, 60);
 export var DECAL_DENSITY = clampInt(parseInt(qs.get('decaldensity') || '48', 10), 0, 80);
-export var COLLIDER_CELL = clampInt(parseInt(qs.get('collidercell') || '42', 10), 24, 72);
-export var COLLIDER_PAIR_CAP = clampInt(parseInt(qs.get('colliderpairs') || '9000', 10), 0, 30000);
-export var COLLIDER_PAIR_LIMIT = clampInt(parseInt(qs.get('colliderlimit') || '7', 10), 0, 24);
+export var COLLIDER_CELL = clampInt(parseInt(qs.get('collidercell') || '58', 10), 24, 96);   // wider so the 3x3 grid search catches contacts at the bigger VISIBLE-body block radius
+export var COLLIDER_PAIR_CAP = clampInt(parseInt(qs.get('colliderpairs') || '14000', 10), 0, 30000);
+export var COLLIDER_PAIR_LIMIT = clampInt(parseInt(qs.get('colliderlimit') || '12', 10), 0, 24);
 export var COLLIDER_PLAYER_CAP = clamp(parseFloat(qs.get('colliderpush') || '8.5'), 0, 24);
+export var COLLIDER_BODY_K = clamp(parseFloat(qs.get('blockk') || '0.75'), 0.4, 1.3);   // enemy<->enemy block radius as a fraction of the summed VISIBLE bodies; <1 lets sprites slightly overlap (0.75 = a little stacking, no full pile-up, and tight enough that the front row still reaches the tank to attack). Tune live with ?blockk=
 export var SPRITE_ANIM_CAP = clampInt(parseInt(qs.get('spritecap') || '360', 10), 0, 1200);
 export var SPRITE_CELL = clampInt(parseInt(qs.get('spritecell') || '112', 10), 64, 220);
 // TANK<->ENEMY visual-body collision radii. SINGLE SOURCE shared by the body-push/contact logic in

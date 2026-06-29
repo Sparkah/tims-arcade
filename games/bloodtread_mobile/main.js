@@ -8,7 +8,7 @@ import { rnd } from './lib/rng.js';
 import {
   DIAG, DEBUG, CHEATS_ENABLED, ANALYTICS_ENABLED, OLD_SPRITES, OLD_ENV, OLD_TANK, OLD_DEATH, TANK_LAYERS,
   GORE_FX, BREAK_ENV, VEIN_FX, LEECH_FX, COLLIDERS, LOGIC_ONLY, START_MIN, AUTO_START,
-  TUNE_MODE, TUNE_SHEET_URL, WIPE_SAVE
+  TUNE_MODE, TUNE_SHEET_URL, WIPE_SAVE, UNLOCK_ALL
 } from './flags.js';
 import { BALANCE_SHEET_URL, loadBalanceFromSheet, exportBalanceCSV, tuneStatus } from './balance.js';
 import { STEP, MAX_MOTES } from './config.js';
@@ -29,10 +29,11 @@ import { loadMeta, loadStats } from './persistence.js';
 import { tgHydrate } from './tg.js';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
 import { initAnalytics, analyticsState, makeAnalyticsRunId } from './analytics.js';
 import { currentLeechLevel } from './systems/shared.js';
+import { grantDailyCache } from './systems/loot.js';
 import { spawnMote } from './fx/particles.js';
 import { triggerUnleash } from './systems/combat.js';
 import { gainXp, startLevelUp, chooseUpgrade, buyTrack, buyOrEquipWeapon } from './systems/progress.js';
-import { resetGame, startRun, skipToMinute, cheatMoney, cheatMaxAll } from './game/session.js';
+import { resetGame, startRun, skipToMinute, cheatMoney, cheatMaxAll, cheatUnlockAll } from './game/session.js';
 import { update } from './update.js';
 import { resize, initInput } from './input.js';
 import { startLoop } from './core/loop.js';
@@ -304,6 +305,9 @@ import { startLoop } from './core/loop.js';
   loadMeta();
   loadStats();
   tgHydrate();   // Telegram mode only: overlay the player's cloud save (merge-max) + drain queued product grants
+  grantDailyCache();   // GORE CACHE: once-per-day free cache + login streak (after the cloud save is hydrated so it acts on merged state)
+  if (UNLOCK_ALL) cheatUnlockAll();   // ?unlockall - Tim's "cheated all unlocked" review build (local save only)
+  window.__unlockAll = function () { cheatUnlockAll(); return 'ALL UNLOCKED - open the vault / forge'; };   // console convenience (ungated)
   initAnalytics();
 
   // resetGame seeds every player stat from BALANCE, so in ?tune mode the published-sheet overrides MUST land

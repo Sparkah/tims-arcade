@@ -4,6 +4,7 @@ import { META, econ } from './state.js';
 import { clampInt } from './lib/math.js';
 import { MAXTIER } from './data/upgrades.js';
 import { WEAPONS, WEAPON_BY_ID } from './data/weapons.js';
+import { RELIC_SLOTS } from './data/loot.js';
 import { currentWeaponTier, syncLegacyCannonMeta } from './game/meta.js';
 
 var SAVE_META = 'bloodtread_rebuild_meta';
@@ -50,6 +51,13 @@ export function saveMeta() {
         flak: econ.weaponMeta.flak,
         laser: econ.weaponMeta.laser,
         missile: econ.weaponMeta.missile
+      },
+      // GORE CACHE (gacha) layer - rides the same save blob, so it cloud-syncs in TG mode for free.
+      loot: {
+        caches: econ.caches, pity: econ.pity, shards: econ.shards,
+        ownedSkins: econ.ownedSkins, equipSkin: econ.equipSkin,
+        ownedRelics: econ.ownedRelics, equipRelics: econ.equipRelics,
+        consumables: econ.consumables, gear: econ.gear, boughtOnce: econ.boughtOnce, lastDaily: econ.lastDaily, streak: econ.streak
       }
     };
     localStorage.setItem(SAVE_META, JSON.stringify(m));
@@ -76,6 +84,40 @@ export function loadMeta() {
     if (m.owned && typeof m.owned === 'object') econ.ownedWeapons = m.owned;
     econ.ownedWeapons.cannon = 1;
     if (typeof m.weapon === 'string' && econ.ownedWeapons[m.weapon] && WEAPON_BY_ID[m.weapon]) econ.equipWeapon = m.weapon;
+    // GORE CACHE (gacha) layer restore - defensive: adopt only well-typed values, else keep econ defaults.
+    var L = m.loot;
+    if (L && typeof L === 'object') {
+      if (typeof L.caches === 'number' && L.caches >= 0) econ.caches = Math.min(9999, Math.floor(L.caches));
+      if (typeof L.pity === 'number' && L.pity >= 0) econ.pity = Math.min(999, Math.floor(L.pity));
+      if (typeof L.shards === 'number' && L.shards >= 0) econ.shards = Math.min(999999, Math.floor(L.shards));
+      if (L.ownedSkins && typeof L.ownedSkins === 'object') econ.ownedSkins = L.ownedSkins;
+      econ.ownedSkins.default = 1;
+      if (typeof L.equipSkin === 'string' && econ.ownedSkins[L.equipSkin]) econ.equipSkin = L.equipSkin;
+      if (L.ownedRelics && typeof L.ownedRelics === 'object') econ.ownedRelics = L.ownedRelics;
+      if (Array.isArray(L.equipRelics)) {
+        var eq = [];
+        for (var ei = 0; ei < L.equipRelics.length && eq.length < RELIC_SLOTS; ei++) {
+          var rid = L.equipRelics[ei];
+          if (typeof rid === 'string' && econ.ownedRelics[rid] && eq.indexOf(rid) < 0) eq.push(rid);
+        }
+        econ.equipRelics = eq;
+      }
+      if (L.boughtOnce && typeof L.boughtOnce === 'object') econ.boughtOnce = L.boughtOnce;   // STORE one-time-purchase flags
+      if (L.gear && typeof L.gear === 'object') {   // GEAR merge-collection restore: adopt per-slot tier counts (clamped), keep defaults otherwise
+        for (var gslot in econ.gear) {
+          var ga = L.gear[gslot];
+          if (Array.isArray(ga)) {
+            for (var gt = 0; gt < econ.gear[gslot].length; gt++) {
+              var gv = ga[gt];
+              econ.gear[gslot][gt] = (typeof gv === 'number' && gv >= 0) ? Math.min(99999, Math.floor(gv)) : 0;
+            }
+          }
+        }
+      }
+      if (L.consumables && typeof L.consumables === 'object') econ.consumables = L.consumables;
+      if (typeof L.lastDaily === 'string') econ.lastDaily = L.lastDaily;
+      if (typeof L.streak === 'number' && L.streak >= 0) econ.streak = Math.min(99999, Math.floor(L.streak));
+    }
     syncLegacyCannonMeta();
     econ.totalBank = parseInt(localStorage.getItem(SAVE_BANK) || '0', 10) || 0;
     econ.bestTime = parseInt(localStorage.getItem(SAVE_BEST) || '0', 10) || 0;

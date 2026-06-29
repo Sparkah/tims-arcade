@@ -16,6 +16,8 @@ import { stats, saveMeta, setSaveHook } from './persistence.js';
 import { TG_MODE } from './flags.js';
 import { clampInt } from './lib/math.js';
 import { MAXTIER } from './data/upgrades.js';
+import { RELIC_SLOTS } from './data/loot.js';
+import { openPaidBox, openBountyBox, grantMythic } from './systems/loot.js';   // STORE: server-verified box/bounty/mythic grants (post-payment)
 
 var WRAP_KEY = 'bloodtread_v5';
 var PEND_KEY = 'bloodtread_pending_grants';
@@ -53,7 +55,15 @@ function buildState() {
     },
     owned: econ.ownedWeapons,
     weapon: econ.equipWeapon,
-    stats: { attempts: stats.attempts, maxMinute: stats.maxMinute, maxLevel: stats.maxLevel, hasWon: stats.hasWon }
+    stats: { attempts: stats.attempts, maxMinute: stats.maxMinute, maxLevel: stats.maxLevel, hasWon: stats.hasWon },
+    // GORE CACHE (gacha) layer - synced so the vault (caches/skins/relics) survives across devices. Small:
+    // a few ints + id-keyed maps, well under the 32KB cap. Merged by applyState (union owned, cloud-wins spendable).
+    loot: {
+      caches: econ.caches | 0, pity: econ.pity | 0, shards: econ.shards | 0,
+      ownedSkins: econ.ownedSkins, equipSkin: econ.equipSkin,
+      ownedRelics: econ.ownedRelics, equipRelics: econ.equipRelics,
+      consumables: econ.consumables, lastDaily: econ.lastDaily, streak: econ.streak | 0
+    }
   };
 }
 
@@ -86,6 +96,29 @@ function applyState(o) {
     stats.maxLevel = Math.max(stats.maxLevel | 0, o.stats.maxLevel | 0);
     stats.hasWon = (stats.hasWon || o.stats.hasWon) ? 1 : 0;
   }
+  // GORE CACHE (gacha): UNION the owned collections (owning is monotonic - never lose a skin/relic), and
+  // CLOUD-WINS the spendable/counter fields (caches/shards/pity/streak/consumables) - same model as bank: the
+  // wrapper resolves the latest state_rev into the mirror before this runs, so the cloud value is the freshest.
+  if (o.loot && typeof o.loot === 'object') {
+    var L = o.loot;
+    if (typeof L.caches === 'number') econ.caches = Math.max(0, L.caches | 0);
+    if (typeof L.shards === 'number') econ.shards = Math.max(0, L.shards | 0);
+    if (typeof L.pity === 'number') econ.pity = Math.max(0, L.pity | 0);
+    if (typeof L.streak === 'number') econ.streak = Math.max(0, L.streak | 0);
+    if (typeof L.lastDaily === 'string') econ.lastDaily = L.lastDaily;
+    if (L.ownedSkins && typeof L.ownedSkins === 'object') { for (var sk in L.ownedSkins) econ.ownedSkins[sk] = 1; }
+    if (L.ownedRelics && typeof L.ownedRelics === 'object') { for (var rl in L.ownedRelics) econ.ownedRelics[rl] = 1; }
+    if (L.consumables && typeof L.consumables === 'object') econ.consumables = L.consumables;
+    if (typeof L.equipSkin === 'string' && econ.ownedSkins[L.equipSkin]) econ.equipSkin = L.equipSkin;
+    if (Array.isArray(L.equipRelics)) {
+      var eqr = [];
+      for (var ei = 0; ei < L.equipRelics.length && eqr.length < RELIC_SLOTS; ei++) {
+        var rid = L.equipRelics[ei];
+        if (typeof rid === 'string' && econ.ownedRelics[rid] && eqr.indexOf(rid) < 0) eqr.push(rid);
+      }
+      econ.equipRelics = eqr;
+    }
+  }
 }
 
 // Grant a purchased product by its catalog id (Gallery/functions/_lib/tgProducts.js bloodtread + the wrapper
@@ -98,6 +131,12 @@ function grant(id) {
     case 'blood_cache': addBank = 6000; break;
     case 'hull_kit':    addBank = 2000; META.armor += 2; META.core += 2; break;
     case 'arsenal':     addBank = 2500; META.cannon += 2; META.frenzy += 1; break;
+    case 'box_single':      openPaidBox(1); break;   // STORE box: guaranteed VEIN+ (server-verified post-payment)
+    case 'box_legendary':   openPaidBox(3); break;   // STORE box: guaranteed a RELIC
+    case 'box_bounty':      openBountyBox(); econ.boughtOnce['box_bounty'] = 1; break;   // STORE: a piece in every slot + extras + a skin (one-time)
+    case 'mythic_skin':     grantMythic('m_skin'); break;
+    case 'mythic_relic':    grantMythic('m_relic'); break;
+    case 'mythic_ultimate': grantMythic('m_all'); econ.boughtOnce['mythic_ultimate'] = 1; break;   // one-time
     case 'ad_free':     setAdFree(); break;
     case 'bloodgod':
       setAdFree(); addBank = 250000;

@@ -5,6 +5,7 @@
 import { player, state, econ, META, upgradeCounts, upgradePick, upgradeRollPool, upgradeRect } from '../state.js';
 import { upgradeNames } from '../data/upgrades.js';
 import { MAXTIER } from '../data/upgrades.js';
+import { playPrestige } from '../audio.js';
 import { rnd } from '../lib/rng.js';
 import { WEAPON_BY_ID } from '../data/weapons.js';
 import { view } from '../state.js';
@@ -140,6 +141,8 @@ import { gainHeal } from '../fx/heal.js';
     state.mode = 'LEVELUP';
     state.banner = '';
     state.bannerT = 0;
+    state.levelupOpenMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;   // wall-clock open time for the prestige entrance (state.t is frozen during LEVELUP)
+    playPrestige();   // prestige sting so the upgrade draft feels EARNED, not snapped open
     rollUpgradeDraft();
   }
 

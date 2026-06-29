@@ -3,7 +3,8 @@
 // buildColliderGrid. resolveEnemyColliders pushes overlapping pairs apart (capped) + shoves the player.
 // rule-#4: enemies.x/.r etc are read directly per the original (loops never realloc the pool).
 import { enemies, player, state } from '../state.js';
-import { MAX_ENEMIES, COLLIDER_CELL, COLLIDER_PAIR_CAP, COLLIDER_PAIR_LIMIT, COLLIDER_PLAYER_CAP } from '../config.js';
+import { MAX_ENEMIES, COLLIDER_CELL, COLLIDER_PAIR_CAP, COLLIDER_PAIR_LIMIT, COLLIDER_PLAYER_CAP, COLLIDER_BODY_K } from '../config.js';
+import { SPRITE_VIS_MULT, SPRITE_BODY_FILL } from '../data/enemies.js';   // per-type VISIBLE-body footprint (r*VIS_MULT*BODY_FILL), shared with the tank<->enemy body collision
 import { COLLIDERS } from '../flags.js';
 import { TWO_PI } from '../lib/math.js';
 import { perf } from '../core/time.js';
@@ -50,6 +51,7 @@ var colliderOriginY = 0;
     var contacts = 0;
     var skipped = 0;
     var pushed = 0;
+    var maxStep = 22 * dt * 60;   // per-tick displacement cap (anti-explosion + keeps the front row from being ejected out of the tank's attack-contact range)
 
     if (COLLIDER_PAIR_CAP > 0 && COLLIDER_PAIR_LIMIT > 0) {
       outer:
@@ -75,29 +77,47 @@ var colliderOriginY = 0;
                 }
                 var dx = enemies.x[i] - enemies.x[j];
                 var dy = enemies.y[i] - enemies.y[j];
-                var minD = (enemies.r[i] + enemies.r[j]) * 0.72;
+                // block at the VISIBLE body footprint (r*VIS_MULT*BODY_FILL), not the tiny gameplay radius -
+                // otherwise the sprites (drawn ~3.5x the gameplay radius) slide through each other.
+                var bi = enemies.r[i] * SPRITE_VIS_MULT[enemies.type[i]] * SPRITE_BODY_FILL[enemies.type[i]];
+                var bj = enemies.r[j] * SPRITE_VIS_MULT[enemies.type[j]] * SPRITE_BODY_FILL[enemies.type[j]];
+                var minD = (bi + bj) * COLLIDER_BODY_K;
                 var d2 = dx * dx + dy * dy;
                 if (d2 < minD * minD) {
-                  var d = Math.sqrt(d2);
-                  var nx, ny;
-                  if (d > 0.001) {
+                  var d, nx, ny;
+                  if (d2 > 0.0001) {
+                    d = Math.sqrt(d2);
                     nx = dx / d;
                     ny = dy / d;
                   } else {
                     var a = (((i * 16807 + j * 48271) & 1023) / 1024) * TWO_PI;
                     nx = Math.cos(a);
                     ny = Math.sin(a);
-                    d = 0.001;
+                    d = 0.0001;
                   }
-                  var push = Math.min(9.5 * dt * 60, (minD - d) * 0.42);
-                  var sum = enemies.r[i] + enemies.r[j] + 0.001;
-                  var wi = enemies.r[j] / sum;
-                  var wj = enemies.r[i] / sum;
-                  enemies.x[i] += nx * push * wi;
-                  enemies.y[i] += ny * push * wi;
-                  enemies.x[j] -= nx * push * wj;
-                  enemies.y[j] -= ny * push * wj;
-                  pushed += push;
+                  // FULL penetration resolve = HARD block (mirrors the rock solver collideEnemyObstacles),
+                  // mass-weighted by body size, capped per tick so a coincident spawn-stack can't explode.
+                  var step = minD - d;
+                  if (step > maxStep) step = maxStep;
+                  var sum = bi + bj + 0.001;
+                  var wi = bj / sum;
+                  var wj = bi / sum;
+                  enemies.x[i] += nx * step * wi;
+                  enemies.y[i] += ny * step * wi;
+                  enemies.x[j] -= nx * step * wj;
+                  enemies.y[j] -= ny * step * wj;
+                  // kill the closing velocity (mirrors the tank body-collision inV clamp) so they don't keep
+                  // ramming back through - this is what makes them feel SOLID instead of springy.
+                  // PARTIAL closing-velocity kill (not full): solid enough to block, but enemies keep some inward
+                  // push so the front row still presses into the tank's contact range and keeps swinging its attack.
+                  var into = ((enemies.vx[i] - enemies.vx[j]) * nx + (enemies.vy[i] - enemies.vy[j]) * ny) * 0.55;
+                  if (into < 0) {
+                    enemies.vx[i] -= nx * into * wi;
+                    enemies.vy[i] -= ny * into * wi;
+                    enemies.vx[j] += nx * into * wj;
+                    enemies.vy[j] += ny * into * wj;
+                  }
+                  pushed += step;
                 }
                 localPairs++;
                 if (localPairs >= COLLIDER_PAIR_LIMIT) break;

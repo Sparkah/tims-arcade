@@ -16,6 +16,7 @@ export function loadHudImages() {
   addHudImage('hero', 'art_refs/bloodmech_hero.png');
   addHudImage('heart', 'art_refs/heartcore_pulse.png');
   addHudImage('bloom', 'art_refs/bloodletting_bloom.png');
+  addHudImage('goreblood', 'assets/gore_blood.png');   // 4x4 of 512px = 16-frame blood-splatter sheet, drawn on the HUD for the level-up BLOOD WIPE
   addHudImage('u0', 'art_refs/icon_caliber.png');
   addHudImage('u1', 'art_refs/icon_boiler.png');
   addHudImage('u2', 'art_refs/icon_teeth.png');
@@ -25,6 +26,22 @@ export function loadHudImages() {
   addHudImage('u6', 'art_refs/icon_plate.png');
   addHudImage('u7', 'art_refs/icon_growth.png');
   addHudImage('u8', 'art_refs/icon_lash.png');
+  // GORE CACHE bespoke art (Gemini gemini-3-pro-image): relic icons, skin previews, cache crate, rarity frames.
+  var _relics = ['ironheart', 'oilveins', 'sharptread', 'heavybore', 'wildblood', 'gluttony', 'twinmaw', 'berserker', 'leechlord'];
+  for (var _ri = 0; _ri < _relics.length; _ri++) addHudImage('relic_' + _relics[_ri], 'art_refs/ui/relic_' + _relics[_ri] + '.png');
+  var _skins = ['default', 'rust', 'venom', 'cobalt', 'ember', 'bone', 'void'];
+  for (var _si = 0; _si < _skins.length; _si++) addHudImage('skin_' + _skins[_si], 'art_refs/ui/skin_' + _skins[_si] + '.png');
+  addHudImage('cache', 'art_refs/ui/cache.png');
+  var _gear = ['hull', 'cannon', 'treads', 'core', 'nerves'];   // GEAR part icons (local SDXL, biomech) - drawGearPiece blits these, rarity glow/ring per tier
+  for (var _gi = 0; _gi < _gear.length; _gi++) addHudImage('gear_' + _gear[_gi], 'art_refs/ui/gear_' + _gear[_gi] + '.png');
+  var _frames = ['scrap', 'vein', 'core', 'relic'];
+  for (var _fi = 0; _fi < _frames.length; _fi++) addHudImage('frame_' + _frames[_fi], 'art_refs/ui/frame_' + _frames[_fi] + '.png');
+  // Animated menu/vault background: grab the off-screen <video> + start it (muted autoplay). drawMenu/vaultBackdrop
+  // sample its current frame each render; falls back to the static hero image until it's decoding.
+  if (typeof document !== 'undefined') {
+    var _mv = document.getElementById('bt_menu_vid');
+    if (_mv) { hudImages.menuvid = _mv; try { var _pr = _mv.play(); if (_pr && _pr.catch) _pr.catch(function () {}); } catch (e) {} }
+  }
 }
 
 export function loadOldSpriteAssets() {

@@ -9,6 +9,7 @@ import { AUTO_START, START_MIN } from '../flags.js';
 import { MAX_ENEMIES } from '../config.js';
 import { MAXTIER, upgradeNames } from '../data/upgrades.js';
 import { WEAPONS } from '../data/weapons.js';
+import { SKINS, RELICS, CONSUMABLES, RELIC_SLOTS } from '../data/loot.js';
 import { T_UNLOCK } from '../data/enemies.js';
 import { playTone } from '../audio.js';
 import { saveMeta } from '../persistence.js';
@@ -16,6 +17,7 @@ import { resetPerfTiming } from '../core/time.js';
 import { makeAnalyticsRunId, trackAnalyticsRunStart, trackAnalyticsMapReached } from '../analytics.js';
 import { applyMetaToPlayer, syncTankTiersFromMeta, recomputeWeaponStats } from '../systems/player.js';
 import { applyUpgradeId, nextXpForLevel } from '../systems/progress.js';
+import { consumeRunStartItems } from '../systems/loot.js';
 import { spawnEnemy } from '../systems/enemies.js';
 import { resetLeeches } from '../systems/leech.js';
 import { resetEnvironmentState } from '../systems/environment.js';
@@ -37,6 +39,26 @@ import { endJoystick } from '../input.js';
     saveMeta();
     syncTankTiersFromMeta();
     playTone(760, 0.12, 0.045);
+  }
+
+  // ALL UNLOCKED (Tim's "cheated all unlocked"): max forge + every weapon + the WHOLE Gore Cache collection
+  // (every skin + every relic owned, a stack of caches/shards/consumables). Reachable via `?unlockall` at boot
+  // (game/main.js) or window.__unlockAll() in the console. Local save only - no real money, no server grant.
+  export function cheatUnlockAll() {
+    cheatMaxAll();
+    econ.caches = 50;
+    econ.shards = 9999;
+    econ.pity = 0;
+    for (var s = 0; s < SKINS.length; s++) econ.ownedSkins[SKINS[s].id] = 1;
+    for (var r = 0; r < RELICS.length; r++) econ.ownedRelics[RELICS[r].id] = 1;
+    // equip a relic loadout + a non-default skin so the unlocked state is visible immediately
+    econ.equipRelics = RELICS.slice(0, RELIC_SLOTS).map(function (rl) { return rl.id; });
+    if (SKINS.length > 1) econ.equipSkin = SKINS[SKINS.length - 1].id;
+    if (!econ.consumables) econ.consumables = {};
+    for (var c = 0; c < CONSUMABLES.length; c++) econ.consumables[CONSUMABLES[c].id] = 9;
+    saveMeta();
+    syncTankTiersFromMeta();
+    playTone(940, 0.16, 0.05);
   }
 
   export function cheatReset() {
@@ -73,6 +95,7 @@ import { endJoystick } from '../input.js';
     player.regen = 0; player.frenzyMul = 1; player.meter = 0; player.unleash = 0; player.unleashFlash = 0; player.recoil = 0; player.hurt = 0;
     player.healGlow = 0; player.dead = false;
     applyMetaToPlayer();
+    if (startPlaying) consumeRunStartItems(player);   // GORE CACHE one-shot consumables (overcharge/platelayer) apply ONLY when a real run starts
     player.xpNext = nextXpForLevel(player.level);   // XP to L2 from the BALANCE curve (= startXpNext); applyMetaToPlayer doesn't set xpNext
     state.mode = startPlaying ? 'PLAYING' : 'MENU'; state.t = 0; state.tick = 1; state.tankBeat = 0; state.tankBeatRate = 2.4; state.kills = 0; state.blood = 0;
     state.spawnCredit = 0; state.fireCd = 0; state.banner = ''; state.bannerT = 0; state.gameOverT = 0; state.deathT = 0; state.runBanked = false; state.paused = false;

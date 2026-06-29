@@ -18,6 +18,7 @@ import { spawnRageBubble, spawnVeinTrail, spawnTrack, spawnBoom } from '../fx/wo
 import { spawnSplat, spawnGoreSpray } from '../fx/gore.js';
 import { spawnParticle } from '../fx/particles.js';
 import { addTrauma } from '../render/camera.js';
+import { applyEquippedGear } from './loot.js';   // GEAR merge-collection (replaces relics) - equipped best-tier per slot
 
   export function syncTankTiersFromMeta() {
     syncLegacyCannonMeta();
@@ -70,6 +71,11 @@ import { addTrauma } from '../render/camera.js';
     player.asBonus = G.metaAsBonusPerTier * cannonTier;            // meta fire-rate tiers -> asBonus (picks add on top)
     player.barrels = 1 + Math.floor(cannonTier / Math.max(1, G.metaBarrelEveryTiers));
     player.lashLvl = Math.floor(META.frenzy / Math.max(1, G.metaLashEveryTiers));
+
+    // GORE CACHE relics: layer the equipped relics on top of the meta (additive into the same pools), then
+    // re-derive HP + fire stats so maxHp / dmg / fire-rate relics take effect for this run.
+    applyEquippedGear(player);
+    player.hp = player.maxHp;
     recomputeWeaponStats();
 
     syncTankTiersFromMeta();

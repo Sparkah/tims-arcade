@@ -18,7 +18,7 @@ import { perf, ring, ringState } from '../core/time.js';
 import { weaponAtlasTier, weaponRow } from '../game/meta.js';
 import { desiredEnemies, currentLeechLevel } from '../systems/shared.js';
 import { layoutUpgradeCards } from '../systems/progress.js';
-import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin } from '../ui/screens.js';
+import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js';
 
 // colour palette - mirrors the original Bloodtread COL object (shared with ui/screens.js)
 export var BT_CRIM    = '#c41228';
@@ -201,6 +201,78 @@ export var BT_IRON_LO = '#241f1a';
     hud.fillRect(cx + size * 0.02, cy - size * 0.035, size * 0.44, size * 0.07);
   }
 
+  // Blit ONE square cell of a loaded sprite sheet onto the HUD, centred at (cx,cy) at `size` CSS px - real
+  // game art on the 2D overlay (same path drawHudTankPreview uses). false if the sheet hasn't loaded yet.
+  export function blitSheetCell(key, sx, sy, sw, sh, cx, cy, size) {
+    var img = sprites.images[key];
+    if (!img || !img.complete || !img.naturalWidth) return false;
+    hud.imageSmoothingEnabled = false;
+    hud.drawImage(img, sx, sy, sw, sh, Math.round(cx - size * 0.5), Math.round(cy - size * 0.5), Math.round(size), Math.round(size));
+    return true;
+  }
+
+  // The player's REAL layered tank, tinted by a skin's multiplier, drawn on an offscreen canvas (multiply +
+  // alpha-mask) then blitted. Tint is hue-normalised (max channel -> 1) so the 2D preview keeps the skin's hue
+  // + saturation even though canvas multiply can't brighten like the GL shader. false if sprites aren't loaded.
+  var _skinScratch = null, _skinScratchCtx = null;
+  export function drawTintedTankPreview(cx, cy, size, tint) {
+    var treads = sprites.images.lp_treads;
+    if (!treads || !treads.complete || !treads.naturalWidth) return false;   // sprites not up yet -> caller draws a fallback
+    var dpr = view.dpr || 1;
+    var px = Math.max(16, Math.round(size * dpr));
+    if (!_skinScratch) { _skinScratch = document.createElement('canvas'); _skinScratchCtx = _skinScratch.getContext('2d'); }
+    if (_skinScratch.width !== px || _skinScratch.height !== px) { _skinScratch.width = px; _skinScratch.height = px; }
+    var o = _skinScratchCtx;
+    o.setTransform(1, 0, 0, 1, 0, 0);
+    o.clearRect(0, 0, px, px);
+    o.imageSmoothingEnabled = false;
+    var layers = [['lp_treads', econ.tankTreads], ['lp_armor', econ.tankArmor], ['lp_thirst', econ.tankThirst], ['lp_core', econ.tankCore]];
+    function paint(ctx) {
+      for (var i = 0; i < layers.length; i++) {
+        var im = sprites.images[layers[i][0]];
+        if (!im || !im.complete || !im.naturalWidth) continue;
+        var cell = Math.max(1, Math.floor(im.naturalHeight || 64));
+        ctx.drawImage(im, clampInt(layers[i][1], 0, 6) * cell, 0, cell, cell, 0, 0, px, px);
+      }
+      var w = sprites.images.weapon_turrets;
+      if (w && w.complete && w.naturalWidth) {
+        var wt = weaponAtlasTier(econ.equipWeapon), ws = Math.round(px * (1.05 - wt * 0.04));
+        ctx.drawImage(w, wt * WEAPON_TURRET_CELL, weaponRow(econ.equipWeapon) * WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, (px - ws) / 2, (px - ws) / 2, ws, ws);
+      }
+    }
+    paint(o);   // the tank = the UNION silhouette (source-over)
+    var m = Math.max(tint[0], tint[1], tint[2]) || 1;
+    var nr = tint[0] / m, ng = tint[1] / m, nb = tint[2] / m;   // hue-normalise
+    if (Math.max(nr, ng, nb) - Math.min(nr, ng, nb) > 0.05) {   // skip for a near-neutral (default) skin
+      // Tint ONLY the tank pixels with 'source-atop' (it masks to the silhouette already painted - so NO
+      // transparent-area fill, and NO multi-layer alpha INTERSECTION, which an earlier destination-in mask hit:
+      // re-painting 4 layers under destination-in AND-ed their alphas and collapsed the tank to nothing). The
+      // tint is lightened toward white so the intrinsically-dark hull lifts into a vivid, readable livery (the
+      // GL build brightens via a >1 tint multiply the 2D canvas can't do).
+      o.globalCompositeOperation = 'source-atop';
+      o.globalAlpha = 0.66;
+      o.fillStyle = 'rgb(' + Math.round((nr + (1 - nr) * 0.3) * 255) + ',' + Math.round((ng + (1 - ng) * 0.3) * 255) + ',' + Math.round((nb + (1 - nb) * 0.3) * 255) + ')';
+      o.fillRect(0, 0, px, px);
+      o.globalAlpha = 1;
+      o.globalCompositeOperation = 'source-over';
+    }
+    hud.imageSmoothingEnabled = false;
+    hud.drawImage(_skinScratch, 0, 0, px, px, Math.round(cx - size * 0.5), Math.round(cy - size * 0.5), Math.round(size), Math.round(size));
+    return true;
+  }
+
+  // A relic's icon = a REAL game sprite (a relic reads as a trophy cut from a war-machine / creature). Maps the
+  // relic's `icon` tag to a sheet cell. false if the sheet isn't loaded (caller draws a procedural fallback).
+  export function drawRelicIcon(icon, cx, cy, size) {
+    var k = icon || '', img, cell;
+    if (k === 'heart') { img = sprites.images.heart_core; return img && img.complete && img.naturalWidth ? blitSheetCell('heart_core', 0, 0, img.naturalWidth, img.naturalHeight, cx, cy, size) : false; }
+    if (k.indexOf('gun') === 0) return blitSheetCell('weapon_turrets', 0, (parseInt(k.slice(3), 10) || 0) * WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, WEAPON_TURRET_CELL, cx, cy, size);
+    if (k === 'fang_husk' || k === 'fang_brute') { var ck = k === 'fang_husk' ? 'husk_base' : 'brute_base'; img = sprites.images[ck]; if (!img || !img.complete || !img.naturalWidth) return false; cell = Math.max(1, img.naturalHeight | 0); return blitSheetCell(ck, 0, 0, cell, cell, cx, cy, size * 1.12); }
+    var lk = k === 'armor' ? 'lp_armor' : k === 'tread' ? 'lp_treads' : k === 'core' ? 'lp_core' : null;
+    if (lk) { img = sprites.images[lk]; if (!img || !img.complete || !img.naturalWidth) return false; cell = Math.max(1, img.naturalHeight | 0); return blitSheetCell(lk, (lk === 'lp_core' ? 4 : 3) * cell, 0, cell, cell, cx, cy, size); }
+    return false;
+  }
+
   // Blood vignette: the original's "alive/gory" atmosphere - a cached radial blood-vignette + an HP-driven
   // red darkening that swells as HP drops + a hurt edge flash + a madness red tint that pulses with the swarm.
   // One cached-gradient fillRect per frame on the HUD canvas - negligible, no per-entity cost. Ported from
@@ -325,6 +397,21 @@ export var BT_IRON_LO = '#241f1a';
     }
     if (state.mode === 'WIN') {
       drawWin();
+      perf.hudMs = performance.now() - t0;
+      return;
+    }
+    if (state.mode === 'VAULT') {
+      drawVault();
+      perf.hudMs = performance.now() - t0;
+      return;
+    }
+    if (state.mode === 'STORE') {
+      drawStore();
+      perf.hudMs = performance.now() - t0;
+      return;
+    }
+    if (state.mode === 'REVEAL') {
+      drawReveal();
       perf.hudMs = performance.now() - t0;
       return;
     }
@@ -470,29 +557,65 @@ export var BT_IRON_LO = '#241f1a';
     perf.hudMs = performance.now() - t0;
   }
 
+  // BLOOD-WIPE splatter layout for the level-up entrance: [xFrac, yFrac, sizeFrac, alphaMul, rot] across the screen.
+  var _bloodSplats = [
+    [0.50, 0.46, 1.55, 0.95, 0.0],
+    [0.22, 0.30, 1.05, 0.80, 1.3],
+    [0.78, 0.62, 1.15, 0.80, 2.7],
+    [0.34, 0.74, 0.90, 0.70, 4.1],
+    [0.70, 0.26, 0.95, 0.70, 5.4]
+  ];
+
   export function drawUpgradeDraft() {
     layoutUpgradeCards();
+    // PRESTIGE entrance: state.t is frozen during LEVELUP, so animate on the WALL CLOCK (stamped in startLevelUp).
+    // Resurrect-style SLAM - red impact flash, screen shake, cards slam in, then a BLOOD WIPE (drawn last) clears.
+    var nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+    var el = (nowMs - (state.levelupOpenMs || 0)) / 1000;
+    var ce = function (t) { return t < 0 ? 0 : t > 1 ? 1 : t; };
+    var easeOut = function (t) { return 1 - Math.pow(1 - t, 3); };
+    var scrimP = ce(el / 0.10);
+    var titleP = easeOut(ce((el - 0.06) / 0.18));
+    var titleRise = (1 - titleP) * 10;
+    var shakeAmt = Math.max(0, 1 - el / 0.22);
+    var shx = shakeAmt * Math.sin(el * 120) * 7;
+    var shy = shakeAmt * Math.cos(el * 95) * 6;
     hud.globalAlpha = 1;
-    hud.fillStyle = 'rgba(8,5,4,0.74)';
+    hud.fillStyle = 'rgba(8,5,4,' + (0.74 * scrimP).toFixed(3) + ')';
     hud.fillRect(0, 0, view.cssW, view.cssH);
+    // red impact flash
+    var flashA = (1 - ce(el / 0.16)) * 0.55;
+    if (flashA > 0.002) { hud.fillStyle = 'rgba(150,8,6,' + flashA.toFixed(3) + ')'; hud.fillRect(0, 0, view.cssW, view.cssH); }
     hud.textAlign = 'center';
     hud.textBaseline = 'middle';
-    // title with crim glow
+    // title (fades + lifts in, rides the shake)
+    hud.globalAlpha = titleP;
     hud.shadowColor = BT_CRIM;
     hud.shadowBlur = 14;
     hud.fillStyle = BT_CRIM_HI;
     hud.font = '700 ' + Math.max(18, Math.min(26, view.cssH * 0.036)) + 'px sans-serif';
-    hud.fillText('BLOOD MUTATION', view.cssW * 0.5, Math.max(52, upgradeRect[1] - 38));
+    hud.fillText('BLOOD MUTATION', view.cssW * 0.5 + shx, Math.max(52, upgradeRect[1] - 38) + titleRise + shy);
     hud.shadowBlur = 0;
     hud.font = Math.max(10, Math.min(13, view.cssH * 0.018)) + 'px sans-serif';
     hud.fillStyle = BT_BONE_DIM;
-    hud.fillText('Choose 1 / 2 / 3', view.cssW * 0.5, Math.max(70, upgradeRect[1] - 18));
+    hud.fillText('Choose 1 / 2 / 3', view.cssW * 0.5 + shx, Math.max(70, upgradeRect[1] - 18) + titleRise + shy);
+    hud.globalAlpha = 1;
 
     for (var i = 0; i < 3; i++) {
       var k = i * 4;
       var cx = upgradeRect[k], cy = upgradeRect[k + 1], cw = upgradeRect[k + 2], ch = upgradeRect[k + 3];
       var u = upgradePick[i];
       var hot = i === ui.upgradeHover;
+      // staggered SLAM: each card drops in from slightly oversized/above + fades, riding the impact shake.
+      var ct = ce((el - 0.06 - i * 0.05) / 0.18);
+      var cprog = easeOut(ct);
+      var csc = 1.16 - 0.16 * cprog;            // slams DOWN from oversized, settling to 1.0
+      var cslide = (1 - cprog) * -14;           // drops in from just above
+      hud.save();
+      hud.globalAlpha = cprog;
+      hud.translate(cx + cw * 0.5 + shx * 0.6, cy + ch * 0.5 + cslide + shy * 0.6);
+      hud.scale(csc, csc);
+      hud.translate(-(cx + cw * 0.5), -(cy + ch * 0.5));
       // card background: gradient
       var cg = hud.createLinearGradient(cx, cy, cx, cy + ch);
       cg.addColorStop(0, hot ? '#2a211c' : '#1e1510');
@@ -542,7 +665,30 @@ export var BT_IRON_LO = '#241f1a';
       hud.font = Math.max(9, Math.min(11, ch * 0.14)) + 'px sans-serif';
       hud.fillText('LV ' + player.level + ' -> ' + (player.level + 1), tx, cy + ch - 14);
       hud.textAlign = 'center'; hud.textBaseline = 'middle';
+      hud.restore();   // end the per-card prestige transform
     }
+    hud.globalAlpha = 1;
     hud.textAlign = 'start';
     hud.lineWidth = 1;
+    // BLOOD WIPE: the gore_blood splatter sheet blooms across the screen as the draft slams in, drawn LAST
+    // (over the cards) and fading fast so it clears to reveal them - the "blood from the screen" reveal.
+    var gb = hudImages.goreblood;
+    if (gb && gb.complete && gb.naturalWidth) {
+      var bloodA = ce(el / 0.05) * (1 - ce((el - 0.32) / 0.34));   // snap in, fade out by ~0.66s
+      if (bloodA > 0.004) {
+        var bf = Math.min(15, (ce(el / 0.5) * 16) | 0);            // play the 16-frame bloom -> splatter -> fade
+        var bcol = bf % 4, brow = (bf / 4) | 0;
+        for (var b = 0; b < _bloodSplats.length; b++) {
+          var sp = _bloodSplats[b];
+          var bsz = Math.max(view.cssW, view.cssH) * sp[2];
+          hud.save();
+          hud.globalAlpha = bloodA * sp[3];
+          hud.translate(view.cssW * sp[0], view.cssH * sp[1]);
+          hud.rotate(sp[4]);
+          hud.drawImage(gb, bcol * 512, brow * 512, 512, 512, -bsz * 0.5, -bsz * 0.5, bsz, bsz);
+          hud.restore();
+        }
+        hud.globalAlpha = 1;
+      }
+    }
   }

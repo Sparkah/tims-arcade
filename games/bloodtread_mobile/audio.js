@@ -158,6 +158,30 @@ export function playTone(freq, dur, vol) {
   osc.stop(now + (dur || 0.06) + 0.02);
 }
 
+// PRESTIGE hit for the level-up upgrade draft: a RESURRECT-style visceral slam (mirrors beginResurrect's
+// reverse-suck whump), NOT a melodic chime. A synth WHIP-CRACK + the game's own wet explosion whump + a blood
+// squelch + a low sub for weight. One-shot. (playSfx/playSfxOneOf are hoisted function decls below.)
+export function playPrestige() {
+  if (audioMuted || !audioCtx) return;
+  var t0 = audioCtx.currentTime;
+  // WHIP-CRACK: a fast high->low pitch snap
+  var wo = audioCtx.createOscillator(), wg = audioCtx.createGain();
+  wo.type = 'sawtooth';
+  wo.frequency.setValueAtTime(1900, t0);
+  wo.frequency.exponentialRampToValueAtTime(170, t0 + 0.09);
+  wg.gain.setValueAtTime(0.0001, t0);
+  wg.gain.exponentialRampToValueAtTime(0.16, t0 + 0.006);
+  wg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.13);
+  wo.connect(wg); wg.connect(audioCtx.destination);
+  wo.start(t0); wo.stop(t0 + 0.15);
+  // low sub for body/weight
+  playTone(54, 0.5, 0.06);
+  // the game's own gore/impact samples, pitched like the resurrect whump (reverse-suck) + wet blood + metal shear
+  playSfxOneOf(['rep_explosion1', 'rep_explosion2', 'rep_explosion3'], 0.5, 0, 1.05);
+  playSfx('flesh1', 0.55, 0, 0.85);
+  playSfx('metal', 0.4, 0, 1.3);
+}
+
 export function playSfx(name, vol, minGap, rate) {
   if (audioMuted || !audioCtx) return;
   var now = audioCtx.currentTime;

@@ -263,7 +263,27 @@ export var META = { armor: 0, core: 0, cannon: 0, treads: 0, thirst: 0, frenzy: 
 export var econ = {
   totalBank: 0, bestTime: 0, equipWeapon: 'cannon', ownedWeapons: { cannon: 1 }, selectedTrack: 'armor',
   weaponMeta: { cannon: 0, flak: 0, laser: 0, missile: 0 },
-  tankArmor: 0, tankCore: 0, tankCannon: 0, tankTreads: 0, tankThirst: 0, tankFrenzy: 0
+  tankArmor: 0, tankCore: 0, tankCannon: 0, tankTreads: 0, tankThirst: 0, tankFrenzy: 0,
+  // -- GORE CACHE (gacha) layer: all soft/earned, persisted by persistence.js + cloud-synced in TG mode.
+  // Mutated by systems/loot.js (rolls/grants/equip), read by ui/screens.js (vault) + render/world.js (skin).
+  caches: 0,                       // unopened Gore Caches
+  pity: 0,                         // opens since the last CORE+ (forces a CORE+ at PITY_HARD)
+  shards: 0,                       // dupe-refund currency (deterministic shard shop)
+  ownedSkins: { default: 1 },      // id -> 1 for owned cosmetic hull skins ('default' free)
+  equipSkin: 'default',            // currently worn skin id (render tint)
+  ownedRelics: {},                 // id -> 1 for owned relics (dupes refund shards, never stack)
+  equipRelics: [],                 // equipped relic ids (<= RELIC_SLOTS); applied to the player at run start
+  consumables: {},                 // id -> count of owned one-shot next-run buffs
+  gear: {                          // GEAR merge-collection (replaces relics): slotId -> counts by tier [common..primordial]
+    hull:   [0, 0, 0, 0, 0, 0, 0],
+    cannon: [0, 0, 0, 0, 0, 0, 0],
+    treads: [0, 0, 0, 0, 0, 0, 0],
+    core:   [0, 0, 0, 0, 0, 0, 0],
+    nerves: [0, 0, 0, 0, 0, 0, 0]
+  },
+  boughtOnce: {},                  // STORE one-time-purchase ids already bought (apex predator, bounty crate)
+  lastDaily: '',                   // YYYY-MM-DD of the last daily-cache claim
+  streak: 0                        // consecutive daily-claim days (a 2nd cache every 7th)
 };
 
 // -- run-progression / level-up draft (in-place typed arrays + the reassigned hover index) --
@@ -281,5 +301,8 @@ export var rects = {
   resume: null, quit: null, hudPause: null, hudMenu: null, pauseForge: null,
   win_continue: null, win_interest: null, win_coffee: null,
   revive: null,
+  // GORE VAULT (gacha) hit-rects: the menu/gameover entry button + the vault screen + the reveal CLAIM.
+  vault: null, vaultOpen: null, vaultBack: null, vaultClaim: null, vaultShard: null, vaultStore: null,
+  vaultSkins: [], vaultRelics: [], vaultGear: [], store: [], storeBack: null,
   shop: [], weapons: []
 };

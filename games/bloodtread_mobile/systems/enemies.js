@@ -12,6 +12,7 @@ import { playSfx, playSfxOneOf } from '../audio.js';
 import { T_NAME, T_SPD, T_R, T_PAY, T_UNLOCK, T_WEIGHT, T_CAN_FIRE_BOLT, CONTACT_RANK, SPRITE_VIS_MULT, SPRITE_BODY_FILL } from '../data/enemies.js';
 import { seenType } from '../state.js';
 import { retargetLeechesAfterRemove } from './leech.js';
+import { maybeDropEliteCache } from './loot.js';
 import { triggerUnleash, spawnEnemyProj } from './combat.js';
 import { collideEnemyObstacles, enemyObstacle, collidePlayerObstacles } from './collision.js';
 import { addTrauma } from '../render/camera.js';
@@ -110,6 +111,8 @@ import { gainHeal } from '../fx/heal.js';
     state.kills++;
     state.blood += pay;
     if (big) addTrauma(0.25);   // a BIG creature dying thumps the camera; gated on `big` so a horde of mites can't constantly rattle the screen (addTrauma clamps, so a big multi-kill just pins briefly)
+    if (big && maybeDropEliteCache()) { state.banner = 'GORE CACHE'; state.bannerT = 1.6; playSfx('metal', 0.55, 0, 1.5); }   // GORE CACHE in-run drop: an elite death has a chance to spit out a cache (banner + bright metal ping); persisted at run end by bankRun
+
     if (big && !tech) playSfxOneOf(['cand_fall1', 'cand_fall2', 'cand_fall3'], 0.42, 0.06);   // BIG BODY THUD (Tim 2026-06-24): a heavy body-collapse layered on a big organic death (not the mechanical foes)
     playSfx(tech ? 'metal' : 'squish', big ? 0.50 : 0.38, 0.045);
     // CRUSH KILL = Tim's CHOSEN organic-mush pool (2026-06-24, kept candidates from audio/sfx_candidates/). A big

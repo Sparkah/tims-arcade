@@ -29,6 +29,7 @@ import {
 import { worldToScreenX, worldToScreenY, screenLen, viewWorldMax } from './camera.js';
 import { tankRageLevel, weaponAtlasTier, weaponRow } from '../game/meta.js';
 import { currentLeechLevel } from '../systems/shared.js';
+import { skinTint } from '../systems/loot.js';   // GORE VAULT equipped hull skin (default = [1,1,1], byte-identical baseline)
 import { obS, decS, obstacleAtCell, decalAtCell } from '../systems/environment.js';
 import { isTechType } from '../fx/gore.js';   // pure type predicate (TECH/biomech vs organic) - routes the corpse death sheet (metal_gore vs flesh_gore). fx/gore does NOT import world, so no cycle.
 
@@ -170,7 +171,11 @@ import { isTechType } from '../fx/gore.js';   // pure type predicate (TECH/biome
     // Reuse bodyR exactly so a creature touching the tank body plays its `_attack` swing (which loops on its own
     // frame cadence ~0.9s/swing -> a repeating beat). (The Spitter's aim/fire trigger below is separate and unchanged.)
     var bodyR = TANK_VIS_R + enemies.r[i] * SPRITE_VIS_MULT[type] * SPRITE_BODY_FILL[type];   // per-creature body fill (not global VIS_FILL) - the attack trigger matches the body-push radius exactly
-    var contactR = bodyR + 1;   // +1px tolerance, non-strict: the collision parks enemies at EXACTLY bodyR (then may nudge the tank away), so a strict < would flicker the attack off for rim-held creatures = the "rarely attack" Tim saw (Codex)
+    // ATTACK-TRIGGER zone. bodyR+1 alone is too small for THIN creatures (husk_white fill 0.18): the enemy-enemy
+    // colliders nudge them back out past it after the damage pass, so by render time they read as not-in-contact and
+    // never select the attack (green fill 0.35 survives the nudge, white doesn't = "green attacks, white doesn't").
+    // Floor the trigger at a green-sized 0.34-fill zone + 6px so thin damaging creatures still register the attack.
+    var contactR = Math.max(bodyR + 1, TANK_VIS_R + enemies.r[i] * SPRITE_VIS_MULT[type] * 0.34 + 6);
     var contact = dxp * dxp + dyp * dyp <= contactR * contactR;
     var dir = spriteDir(enemies.face[i]);
     var firing = T_CAN_FIRE_BOLT[type] && enemies.aim[i] > -90;   // ranged Spitter: play the spit anim during its aim/fire window, not just melee contact
@@ -237,6 +242,11 @@ import { isTechType } from '../fx/gore.js';   // pure type predicate (TECH/biome
       var sway = 0;
       var cx = sxScreen;
       var cy = syScreen - size * 0.08 + bob;                // keep the ~0.58 top-bias as a center offset (0.5-0.08)
+      if (contact && base === 'husk_white') {   // the white crawler's attack sheet is a weak placeholder - add a clear forward LUNGE toward the tank so the attack reads
+        var ltx = view.cssW * 0.5 - sxScreen, lty = view.cssH * 0.5 - syScreen, ll = Math.sqrt(ltx * ltx + lty * lty) || 1;
+        var lunge = Math.max(0, Math.sin(enemies.phase[i] * 12)) * size * 0.2;
+        cx += (ltx / ll) * lunge; cy += (lty / ll) * lunge;
+      }
       // FACING: our single-sheet engine creatures (Spitter + Husk + Brute) are a RIGHT-facing profile, so to face a
       // player on the LEFT we mirror horizontally (negative width flips the quad's left/right corners via
       // queueSpriteRot); a player on the RIGHT needs no flip (art already faces right). The remaining directional
@@ -416,6 +426,10 @@ import { isTechType } from '../fx/gore.js';   // pure type predicate (TECH/biome
     var sx = view.cssW * 0.5;
     var sy = view.cssH * 0.5 + bob;
     var hot = dead ? 0 : Math.max(player.hurt, player.recoil * 0.5);
+    // GORE VAULT hull skin: multiply the HULL layers by the equipped skin tint. LIVE tank only (the dead wreck
+    // keeps its scorched tint). Default skin = [1,1,1] so an unskinned tank renders byte-identical to baseline.
+    var sr = 1, sg = 1, sb = 1;
+    if (!dead) { var stn = skinTint(); sr = stn[0]; sg = stn[1]; sb = stn[2]; }
     if (TANK_LAYERS && sprites.textures.lp_treads && sprites.textures.lp_armor && (sprites.textures.weapon_turrets || sprites.textures.lp_cannon)) {
       var size = screenLen(92);
       var hullA = player.hull + Math.PI * 0.5;
@@ -426,10 +440,10 @@ import { isTechType } from '../fx/gore.js';   // pure type predicate (TECH/biome
       var wr = dead ? 0.40 : 1, wg = dead ? 0.345 : 1, wb = dead ? 0.32 : 1;   // scorched gunmetal multiplier
       var deadSquash = dead ? 0.90 : 1;                                          // settle the hull a touch flatter
       var tankLayerSprites = 3;
-      queueSpriteRot('lp_treads', econ.tankTreads * 64, 0, 64, 64, sx, sy, size * (1 + hot * 0.06), size * deadSquash, hullA, wr * (1 + hot * 0.12), wg, wb, 0.98);
-      queueSpriteRot('lp_armor', econ.tankArmor * 64, 0, 64, 64, sx, sy, size * breathW, size * breathH * deadSquash, hullA, wr * (1 + hot * 0.18), wg, wb, 0.98);
+      queueSpriteRot('lp_treads', econ.tankTreads * 64, 0, 64, 64, sx, sy, size * (1 + hot * 0.06), size * deadSquash, hullA, wr * (1 + hot * 0.12) * sr, wg * sg, wb * sb, 0.98);
+      queueSpriteRot('lp_armor', econ.tankArmor * 64, 0, 64, 64, sx, sy, size * breathW, size * breathH * deadSquash, hullA, wr * (1 + hot * 0.18) * sr, wg * sg, wb * sb, 0.98);
       if (sprites.textures.lp_thirst) {
-        queueSpriteRot('lp_thirst', econ.tankThirst * 64, 0, 64, 64, sx, sy + breathe * screenLen(0.6), size * (1 + (breathW - 1) * 1.35), size * (1 + (breathH - 1) * 1.2) * deadSquash, hullA, wr, wg, wb, 0.96);
+        queueSpriteRot('lp_thirst', econ.tankThirst * 64, 0, 64, 64, sx, sy + breathe * screenLen(0.6), size * (1 + (breathW - 1) * 1.35), size * (1 + (breathH - 1) * 1.2) * deadSquash, hullA, wr * sr, wg * sg, wb * sb, 0.96);
         tankLayerSprites++;
       }
       // CORE layer (the heart-glow): LIVE tank only - the dead base has no beating core (heart removed Tim 2026-06-24).
@@ -465,7 +479,7 @@ import { isTechType } from '../fx/gore.js';   // pure type predicate (TECH/biome
     // 160x160 biomech body swap, the 96px hull size, and the weapon_turrets-atlas turret. Restores the
     // original 32x32 tank_body + generic tank_turret at the baseline screenLen(68/72).
     var hullSize = screenLen(68);
-    queueSpriteRot('tank_body', 0, 0, sprites.meta.tank_body.w, sprites.meta.tank_body.h, sx, sy, hullSize * breathW, hullSize * breathH, player.hull + Math.PI * 0.5, 1 + hot * 0.18, 1, 1, 0.98);
+    queueSpriteRot('tank_body', 0, 0, sprites.meta.tank_body.w, sprites.meta.tank_body.h, sx, sy, hullSize * breathW, hullSize * breathH, player.hull + Math.PI * 0.5, (1 + hot * 0.18) * sr, sg, sb, 0.98);
     queueSpriteRot('tank_turret', 0, 0, sprites.meta.tank_turret.w, sprites.meta.tank_turret.h, sx + Math.cos(player.turret) * screenLen(player.recoil * 3), sy + Math.sin(player.turret) * screenLen(player.recoil * 3), screenLen(72), screenLen(72), player.turret + Math.PI * 0.5, 1 + hot * 0.22, 1, 1, 1);
     perf.tankSprites = 2;
     return true;
