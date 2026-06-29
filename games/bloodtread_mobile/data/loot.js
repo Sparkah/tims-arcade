@@ -1,11 +1,11 @@
-// GORE CACHE (gacha) data tables - rarities, drop pool, tank skins, relics, consumables, odds + pity.
+// GORE CACHE / BLOOD MARKET data tables - rarities, drop pool, tank skins, GEAR slots/tiers, consumables, odds + pity.
 // PURE CONSTANTS + small pure lookups (no state, no RNG - the engine in systems/loot.js rolls/grants).
 //
-// SHIPPABLE-NOW gacha = FREE / soft-currency / earned ONLY. Every outcome here is cosmetic, soft-currency
-// (blood/shards), a small earnable passive, or a forge voucher - NONE grants a paid entitlement, so this
-// layer does NOT touch the client-authoritative Telegram payment blocker (tg.js PAYMENTS_ENABLED=false).
-// No paid-random boxes (Telegram Stars-only + FTC/Genshin loot-box hazard) - if monetised later, sell the
-// EXACT item for Stars, server-verified, never a random pull. Keep all UI casino-free (no spin/slot/gamble).
+// Monetisation layer: the STORE (below) defines a FREE daily box plus PAID boxes (Telegram Stars random-pull
+// cases - box_single / box_legendary / box_bounty) and direct Stars purchases of specific mythic items. All paid
+// grants stay gated behind tg.js PAYMENTS_ENABLED=false until server-verified receipts ship, so on the live build
+// the paid rows are browse-only and grant NO client-authoritative entitlement. When enabled, every paid outcome
+// must be delivered server-side AFTER receipt verification - never a client-trusted pull.
 //
 // GIT TRAP: this file lives under data/, which ~/Agents/.gitignore greedily ignores - commit with
 // `git add -f data/loot.js` or it is silently skipped. (Same trap as data/enemies.js - see CODEMAP.md.)

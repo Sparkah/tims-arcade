@@ -8,7 +8,7 @@ import { rnd } from './lib/rng.js';
 import {
   DIAG, DEBUG, CHEATS_ENABLED, ANALYTICS_ENABLED, OLD_SPRITES, OLD_ENV, OLD_TANK, OLD_DEATH, TANK_LAYERS,
   GORE_FX, BREAK_ENV, VEIN_FX, LEECH_FX, COLLIDERS, LOGIC_ONLY, START_MIN, AUTO_START,
-  TUNE_MODE, TUNE_SHEET_URL, WIPE_SAVE, UNLOCK_ALL
+  TUNE_MODE, TUNE_SHEET_URL, WIPE_SAVE, UNLOCK_ALL, LOCAL_BUILD
 } from './flags.js';
 import { BALANCE_SHEET_URL, loadBalanceFromSheet, exportBalanceCSV, tuneStatus } from './balance.js';
 import { STEP, MAX_MOTES } from './config.js';
@@ -307,7 +307,7 @@ import { startLoop } from './core/loop.js';
   tgHydrate();   // Telegram mode only: overlay the player's cloud save (merge-max) + drain queued product grants
   grantDailyCache();   // GORE CACHE: once-per-day free cache + login streak (after the cloud save is hydrated so it acts on merged state)
   if (UNLOCK_ALL) cheatUnlockAll();   // ?unlockall - Tim's "cheated all unlocked" review build (local save only)
-  window.__unlockAll = function () { cheatUnlockAll(); return 'ALL UNLOCKED - open the vault / forge'; };   // console convenience (ungated)
+  if (LOCAL_BUILD) window.__unlockAll = function () { cheatUnlockAll(); return 'ALL UNLOCKED - open the vault / forge'; };   // console convenience - LOCAL_BUILD only, never exposed on production
   initAnalytics();
 
   // resetGame seeds every player stat from BALANCE, so in ?tune mode the published-sheet overrides MUST land
