@@ -30,6 +30,9 @@ const WEEKLY_TON_REWARDS = [
   { min: 3, max: 3, ton: '3.00', nanotons: '3000000000' },
 ];
 
+const CONTEST_EXCLUDED_USER_IDS = new Set([]);
+const CONTEST_EXCLUDED_USERNAMES = new Set(['totorotort']);
+
 async function readBody(request) {
   try {
     return await request.json();
@@ -103,25 +106,43 @@ function profileUrl(player) {
   return /^[A-Za-z0-9_]{5,32}$/.test(username) ? `https://t.me/${username}` : null;
 }
 
-function buildPaidRankMap(rows, week) {
+function normalizedUsername(player) {
+  return String(player && player.username || '').trim().replace(/^@/, '').toLowerCase();
+}
+
+function isContestExcludedPlayer(player, telegramUserId) {
+  const id = String(telegramUserId || (player && player.telegram_user_id) || '').trim();
+  if (CONTEST_EXCLUDED_USER_IDS.has(id)) return true;
+  return CONTEST_EXCLUDED_USERNAMES.has(normalizedUsername(player));
+}
+
+function buildPaidRankMap(rows, week, playersById = new Map()) {
   return new Map(rows
-    .map((row) => ({
-      telegramUserId: String(row.telegram_user_id || ''),
-      paidCratesOpened: Math.max(0, Math.floor(paidCrateCountForWeek(row.state, week))),
-    }))
-    .filter((row) => row.telegramUserId && row.paidCratesOpened > 0)
+    .map((row) => {
+      const telegramUserId = String(row.telegram_user_id || '');
+      return {
+        telegramUserId,
+        paidCratesOpened: Math.max(0, Math.floor(paidCrateCountForWeek(row.state, week))),
+        player: playersById.get(telegramUserId),
+      };
+    })
+    .filter((row) => row.telegramUserId && row.paidCratesOpened > 0 && !isContestExcludedPlayer(row.player, row.telegramUserId))
     .sort((a, b) => (b.paidCratesOpened - a.paidCratesOpened) || String(a.telegramUserId).localeCompare(String(b.telegramUserId)))
     .map((row, index) => [row.telegramUserId, { rank: index + 1, paidCratesOpened: row.paidCratesOpened }]));
 }
 
 function buildLeaderboard(rows, week, limit = 100, playersById = new Map(), viewerId = '', paidRankById = new Map()) {
   return rows
-    .map((row) => ({
-      telegramUserId: String(row.telegram_user_id || ''),
-      cratesOpened: Math.max(0, Math.floor(crateCountForWeek(row.state, week))),
-      updatedAt: row.updated_at || null,
-    }))
-    .filter((row) => row.telegramUserId && row.cratesOpened > 0)
+    .map((row) => {
+      const telegramUserId = String(row.telegram_user_id || '');
+      return {
+        telegramUserId,
+        cratesOpened: Math.max(0, Math.floor(crateCountForWeek(row.state, week))),
+        updatedAt: row.updated_at || null,
+        player: playersById.get(telegramUserId),
+      };
+    })
+    .filter((row) => row.telegramUserId && row.cratesOpened > 0 && !isContestExcludedPlayer(row.player, row.telegramUserId))
     .sort((a, b) => (b.cratesOpened - a.cratesOpened) || String(a.telegramUserId).localeCompare(String(b.telegramUserId)))
     .slice(0, Math.max(1, Math.min(100, Number(limit) || 100)))
     .map((row, index) => {
@@ -130,8 +151,8 @@ function buildLeaderboard(rows, week, limit = 100, playersById = new Map(), view
       return {
         rank: index + 1,
         telegramUserId: row.telegramUserId,
-        displayName: publicName(playersById.get(row.telegramUserId), row.telegramUserId),
-        profileUrl: profileUrl(playersById.get(row.telegramUserId)),
+        displayName: publicName(row.player, row.telegramUserId),
+        profileUrl: profileUrl(row.player),
         cratesOpened: row.cratesOpened,
         paidCratesOpened: paidRank ? paidRank.paidCratesOpened : 0,
         paidRank: paidRank ? paidRank.rank : null,
@@ -171,7 +192,7 @@ export async function onRequestPost({ request, env }) {
   const rows = await listTelegramStates(env, game, 5000);
   const playerRows = await listTelegramPlayers(env, rows.map((row) => row.telegram_user_id));
   const playersById = new Map(playerRows.map((player) => [String(player.telegram_user_id), player]));
-  const paidRankById = buildPaidRankMap(rows, week);
+  const paidRankById = buildPaidRankMap(rows, week, playersById);
   const leaders = buildLeaderboard(rows, week, body.limit || 100, playersById, auth.user.id, paidRankById);
 
   if (action === 'leaders') {
