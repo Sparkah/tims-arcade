@@ -29,6 +29,7 @@ const MAX_EVS = 64;
 const MAX_LEVELS_PER_SID_DAY = 128;
 const T_MAX = 86400000;
 const KEY_TTL = 60 * 24 * 60 * 60;
+const DISABLED_MARKER = 'kv-disabled-2026-06-29';
 
 const CORS = {
   'access-control-allow-origin': '*',
@@ -38,7 +39,12 @@ const CORS = {
   'cache-control': 'no-store',
 };
 
-const silent = (status = 200) => new Response(null, { status, headers: CORS });
+const silent = (status = 200, headers = {}) => new Response(null, { status, headers: { ...CORS, ...headers } });
+
+function levelFunnelEnabled(env = {}) {
+  const value = String((env && env.LEVEL_FUNNEL_ENABLED) || '').trim().toLowerCase();
+  return value === '1' || value === 'true' || value === 'yes';
+}
 
 export function onRequestOptions() {
   return silent(204);
@@ -93,6 +99,10 @@ function wouldChange(cur, evs) {
 
 export async function onRequestPost({ request, env }) {
   try {
+    if (!levelFunnelEnabled(env)) {
+      return silent(204, { 'x-level-funnel': DISABLED_MARKER });
+    }
+
     const raw = await request.text();
     if (!raw || raw.length > MAX_BYTES) return silent();
 
