@@ -1,8 +1,11 @@
+import * as THREE from "./three.module.js";
+
 (() => {
   "use strict";
 
   const canvas = document.getElementById("game");
-  const ctx = canvas.getContext("2d", { alpha: false });
+  const sceneCanvas = document.getElementById("scene3d");
+  const ctx = canvas.getContext("2d");
 
   const STORAGE_KEY = "growing-high-v1";
   const COLS = 14;
@@ -290,6 +293,18 @@
 
   let lastFrame = performance.now();
   let saveTimer = 0;
+  const CELL_3D = 0.58;
+  const three = {
+    initialized: false,
+    renderer: null,
+    scene: null,
+    camera: null,
+    world: null,
+    mat: {},
+    geo: {},
+    colorMats: new Map(),
+    yAxis: new THREE.Vector3(0, 1, 0),
+  };
   const audio = {
     ctx: null,
     master: null,
@@ -391,6 +406,152 @@
     if (window.__GF_AUTOSTART && !window._silent && state.mode === "title") {
       startNewGame();
     }
+  }
+
+  function initThree() {
+    if (three.initialized || !sceneCanvas) return;
+    three.renderer = new THREE.WebGLRenderer({
+      canvas: sceneCanvas,
+      antialias: true,
+      alpha: false,
+      powerPreference: "high-performance",
+    });
+    three.renderer.shadowMap.enabled = true;
+    three.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    three.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    three.scene = new THREE.Scene();
+    three.scene.background = new THREE.Color(0xb9e6f4);
+    three.scene.fog = new THREE.Fog(0xb9e6f4, 10, 28);
+    three.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 60);
+    three.world = new THREE.Group();
+    three.scene.add(three.world);
+
+    three.geo.box = new THREE.BoxGeometry(1, 1, 1);
+    three.geo.cylinder = new THREE.CylinderGeometry(1, 1, 1, 18);
+    three.geo.sphere = new THREE.SphereGeometry(1, 18, 12);
+    three.geo.cone = new THREE.ConeGeometry(1, 1, 18);
+    three.geo.torus = new THREE.TorusGeometry(1, 0.035, 8, 42);
+    three.geo.plane = new THREE.PlaneGeometry(1, 1);
+
+    three.mat.roof = standardMat(0xd8d0bc, 0.76, 0.02);
+    three.mat.roofEdge = standardMat(0xa88b63, 0.82, 0.03);
+    three.mat.tile = standardMat(0xcfc9b8, 0.9, 0.01);
+    three.mat.soil = standardMat(0x694427, 0.96, 0.0);
+    three.mat.soilWet = standardMat(0x4e3826, 0.92, 0.0);
+    three.mat.water = transparentMat(0x3da7bd, 0.3, 0.18);
+    three.mat.compost = transparentMat(0x609142, 0.62, 0.18);
+    three.mat.gridLine = standardMat(0x45524e, 0.75, 0.0);
+    three.mat.pipe = standardMat(0xcfd9db, 0.32, 0.55);
+    three.mat.pipeDark = standardMat(0x71898d, 0.38, 0.45);
+    three.mat.pipeWater = transparentMat(0x48c9e2, 0.58, 0.1);
+    three.mat.rootGood = transparentMat(0x69c674, 0.34, 0.0);
+    three.mat.rootBad = transparentMat(0xd95f4d, 0.36, 0.0);
+    three.mat.weed = standardMat(0x3c783d, 0.88, 0.0);
+    three.mat.harvest = standardMat(0xf6c75f, 0.42, 0.15);
+    three.mat.shadow = transparentMat(0x24302e, 0.2, 0.0);
+    three.mat.glass = transparentMat(0xeaf8ff, 0.4, 0.12);
+    three.mat.volunteerA = standardMat(0x4f7ecb, 0.68, 0.08);
+    three.mat.volunteerB = standardMat(0xd98845, 0.7, 0.08);
+    three.mat.volunteerC = standardMat(0x6f9f59, 0.7, 0.08);
+
+    const hemi = new THREE.HemisphereLight(0xeaf7ff, 0x82684f, 2.4);
+    three.scene.add(hemi);
+    const sun = new THREE.DirectionalLight(0xfff1bf, 2.8);
+    sun.position.set(-4.5, 9.5, 6.5);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.near = 0.5;
+    sun.shadow.camera.far = 24;
+    sun.shadow.camera.left = -8;
+    sun.shadow.camera.right = 8;
+    sun.shadow.camera.top = 8;
+    sun.shadow.camera.bottom = -8;
+    three.scene.add(sun);
+    three.initialized = true;
+  }
+
+  function standardMat(color, roughness = 0.74, metalness = 0.02) {
+    return new THREE.MeshStandardMaterial({ color, roughness, metalness });
+  }
+
+  function transparentMat(color, opacity, metalness = 0.0) {
+    return new THREE.MeshStandardMaterial({
+      color,
+      opacity,
+      transparent: true,
+      depthWrite: false,
+      roughness: 0.48,
+      metalness,
+    });
+  }
+
+  function colorMat(color, roughness = 0.74) {
+    const key = `${color}:${roughness}`;
+    if (!three.colorMats.has(key)) {
+      three.colorMats.set(key, standardMat(new THREE.Color(color), roughness, 0.02));
+    }
+    return three.colorMats.get(key);
+  }
+
+  function boardX(col) {
+    return (col - (COLS - 1) / 2) * CELL_3D;
+  }
+
+  function boardZ(row) {
+    return (row - (ROWS - 1) / 2) * CELL_3D;
+  }
+
+  function clearThreeGroup(group) {
+    while (group.children.length) {
+      group.remove(group.children[group.children.length - 1]);
+    }
+  }
+
+  function meshBox(group, x, y, z, sx, sy, sz, material, cast = false, receive = true) {
+    const mesh = new THREE.Mesh(three.geo.box, material);
+    mesh.position.set(x, y, z);
+    mesh.scale.set(sx, sy, sz);
+    mesh.castShadow = cast;
+    mesh.receiveShadow = receive;
+    group.add(mesh);
+    return mesh;
+  }
+
+  function meshSphere(group, x, y, z, scale, material, cast = true) {
+    const mesh = new THREE.Mesh(three.geo.sphere, material);
+    mesh.position.set(x, y, z);
+    mesh.scale.set(scale, scale, scale);
+    mesh.castShadow = cast;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    return mesh;
+  }
+
+  function meshCylinder(group, x, y, z, radius, height, material, cast = true) {
+    const mesh = new THREE.Mesh(three.geo.cylinder, material);
+    mesh.position.set(x, y, z);
+    mesh.scale.set(radius, height, radius);
+    mesh.castShadow = cast;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    return mesh;
+  }
+
+  function cylinderBetween(group, from, to, radius, material) {
+    const start = new THREE.Vector3(from.x, from.y, from.z);
+    const end = new THREE.Vector3(to.x, to.y, to.z);
+    const mid = start.clone().add(end).multiplyScalar(0.5);
+    const dir = end.clone().sub(start);
+    const length = dir.length();
+    if (length <= 0.001) return null;
+    const mesh = new THREE.Mesh(three.geo.cylinder, material);
+    mesh.position.copy(mid);
+    mesh.scale.set(radius, length, radius);
+    mesh.quaternion.setFromUnitVectors(three.yAxis, dir.normalize());
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+    return mesh;
   }
 
   function createInitialState() {
@@ -636,7 +797,7 @@
     for (let r = row; r < row + 2; r += 1) {
       for (let c = col; c < col + 2; c += 1) {
         const cell = cellAt(c, r);
-        if (!cell.soil || cell.sprinkler || plantAt(c, r) || hasWeed(c, r)) return false;
+        if (!cell.soil || plantAt(c, r) || hasWeed(c, r)) return false;
       }
     }
     return true;
@@ -705,7 +866,7 @@
     let load = PEOPLE_LOAD + TOOL_LOAD;
     for (const cell of state.grid) {
       if (cell.soil) load += CELL_SOIL_LOAD;
-      if (cell.watered || cell.sprinkler) load += CELL_WATER_LOAD;
+      if (cell.watered) load += CELL_WATER_LOAD;
       if (cell.sprinkler) load += SPRINKLER_LOAD;
       if (cell.compost) load += 1.5;
     }
@@ -954,7 +1115,7 @@
     for (let row = 0; row < ROWS; row += 1) {
       for (let col = 0; col < COLS; col += 1) {
         const cell = cellAt(col, row);
-        if (cell.soil && !hasWeed(col, row) && !cell.sprinkler) {
+        if (cell.soil && !hasWeed(col, row)) {
           candidates.push({ col, row, planted: Boolean(plantAt(col, row)) });
         }
       }
@@ -1104,8 +1265,8 @@
   function placeSprinkler(col, row) {
     if (!inBounds(col, row)) return false;
     const cell = cellAt(col, row);
-    if (cell.sprinkler || plantAt(col, row)) {
-      state.message = "Sprinklers need an empty grid tile.";
+    if (cell.sprinkler) {
+      state.message = "A pipe nozzle already hangs above this grid point.";
       return false;
     }
     if (sprinklerCount() > 0 && !hasAdjacentSprinkler(col, row)) {
@@ -1120,7 +1281,7 @@
     state.money -= cost;
     cell.sprinkler = true;
     waterRadius(col, row, 1);
-    state.message = `Sprinkler added for ${formatMoney(cost)}. It waters nearby soil at the start of each day.`;
+    state.message = `Overhead pipe nozzle added for ${formatMoney(cost)}. It waters nearby soil without taking root space.`;
     saveGame();
     return true;
   }
@@ -1451,21 +1612,217 @@
     }
   }
 
+  function rootPreview() {
+    if (state.mode !== "game" || state.phase !== "planning" || state.selectedTool !== "seed") return null;
+    const cell = gridFromPoint(input.x, input.y);
+    if (!cell) return null;
+    const cells = [];
+    for (let r = cell.row; r < cell.row + 2; r += 1) {
+      for (let c = cell.col; c < cell.col + 2; c += 1) {
+        cells.push({ col: c, row: r, inBounds: inBounds(c, r) });
+      }
+    }
+    return {
+      col: cell.col,
+      row: cell.row,
+      valid: canPlantAt(cell.col, cell.row),
+      cells,
+    };
+  }
+
+  function render3DScene() {
+    initThree();
+    if (!three.initialized) return;
+    sceneCanvas.style.visibility = state.mode === "game" && state.phase !== "market" ? "visible" : "hidden";
+    if (sceneCanvas.style.visibility === "hidden") return;
+
+    three.renderer.setPixelRatio(view.dpr);
+    const compact = view.width < 820;
+    three.renderer.setSize(view.width, view.height, false);
+    three.camera.aspect = view.width / view.height;
+    three.camera.fov = compact ? 52 : 42;
+    three.camera.updateProjectionMatrix();
+
+    const shiftX = compact ? 0 : -1.25;
+    three.world.position.set(shiftX, 0, compact ? 0.15 : 0);
+    three.camera.position.set(shiftX + (compact ? 0.08 : 0.45), compact ? 8.3 : 6.9, compact ? 9.6 : 7.4);
+    three.camera.lookAt(shiftX, 0.05, 0);
+
+    clearThreeGroup(three.world);
+    draw3DEnvironment(three.world);
+    draw3DRooftop(three.world);
+    draw3DCells(three.world);
+    draw3DRootPreview(three.world);
+    draw3DPlants(three.world);
+    draw3DWeeds(three.world);
+    draw3DSprinklerNetwork(three.world);
+    draw3DVolunteers(three.world);
+    draw3DStorage(three.world);
+    three.renderer.render(three.scene, three.camera);
+  }
+
+  function draw3DEnvironment(group) {
+    meshBox(group, 0, -0.34, 0, COLS * CELL_3D + 1.35, 0.18, ROWS * CELL_3D + 1.15, three.mat.roofEdge, false, true);
+    meshBox(group, 0, -0.18, 0, COLS * CELL_3D + 0.92, 0.26, ROWS * CELL_3D + 0.72, three.mat.roof, false, true);
+    meshBox(group, -5.6, -1.05, -4.5, 1.1, 2.2, 1.0, colorMat("#8eb1b5"), false, false);
+    meshBox(group, -3.8, -1.15, -5.2, 1.25, 2.7, 1.0, colorMat("#739598"), false, false);
+    meshBox(group, 4.7, -1.2, -4.6, 1.4, 2.5, 1.0, colorMat("#d5a85f"), false, false);
+    meshBox(group, 6.0, -1.1, -5.4, 1.0, 2.1, 1.0, colorMat("#b78062"), false, false);
+  }
+
+  function draw3DRooftop(group) {
+    const frameW = COLS * CELL_3D;
+    const frameD = ROWS * CELL_3D;
+    meshBox(group, 0, 0.02, -frameD / 2 - 0.15, frameW + 0.08, 0.08, 0.08, three.mat.roofEdge, false, true);
+    meshBox(group, 0, 0.02, frameD / 2 + 0.15, frameW + 0.08, 0.08, 0.08, three.mat.roofEdge, false, true);
+    meshBox(group, -frameW / 2 - 0.15, 0.02, 0, 0.08, 0.08, frameD + 0.38, three.mat.roofEdge, false, true);
+    meshBox(group, frameW / 2 + 0.15, 0.02, 0, 0.08, 0.08, frameD + 0.38, three.mat.roofEdge, false, true);
+  }
+
+  function draw3DCells(group) {
+    for (let row = 0; row < ROWS; row += 1) {
+      for (let col = 0; col < COLS; col += 1) {
+        const cell = cellAt(col, row);
+        const x = boardX(col);
+        const z = boardZ(row);
+        meshBox(group, x, 0.04, z, CELL_3D * 0.93, 0.035, CELL_3D * 0.93, three.mat.tile, false, true);
+        if (cell.soil) {
+          const mat = isCellIrrigated(col, row) ? three.mat.soilWet : three.mat.soil;
+          const h = 0.07 + Math.min(0.05, cell.soil * 0.014);
+          meshBox(group, x, 0.08 + h * 0.5, z, CELL_3D * 0.78, h, CELL_3D * 0.78, mat, false, true);
+          if (isCellIrrigated(col, row)) {
+            meshBox(group, x, 0.17 + h, z, CELL_3D * 0.68, 0.012, CELL_3D * 0.68, three.mat.water, false, false);
+          }
+          if (cell.compost > 0) {
+            meshBox(group, x, 0.19 + h, z, CELL_3D * 0.48, 0.018, CELL_3D * 0.48, three.mat.compost, false, false);
+          }
+        }
+      }
+    }
+  }
+
+  function draw3DRootPreview(group) {
+    const preview = rootPreview();
+    if (!preview) return;
+    const mat = preview.valid ? three.mat.rootGood : three.mat.rootBad;
+    for (const cell of preview.cells) {
+      if (!cell.inBounds) continue;
+      meshBox(group, boardX(cell.col), 0.32, boardZ(cell.row), CELL_3D * 0.86, 0.032, CELL_3D * 0.86, mat, false, false);
+    }
+  }
+
+  function draw3DPlants(group) {
+    for (const plant of state.plants) {
+      const def = cropDefs[plant.crop];
+      if (!def) continue;
+      const stage = plantStage(plant);
+      const centerX = boardX(plant.col + 0.5);
+      const centerZ = boardZ(plant.row + 0.5);
+      const watered = isPlantWatered(plant);
+      const leafMat = colorMat(watered ? def.leaf : "#7b895a", 0.84);
+      const cropMat = colorMat(def.color, 0.68);
+      const stemHeight = stage === "seed" ? 0.16 : stage === "sprout" ? 0.34 : 0.54;
+      meshCylinder(group, centerX, 0.31 + stemHeight / 2, centerZ, 0.035, stemHeight, leafMat, true);
+      const leafY = 0.34 + stemHeight;
+      for (let i = 0; i < 4; i += 1) {
+        const angle = i * Math.PI * 0.5 + plant.col * 0.17;
+        const leaf = meshSphere(group, centerX + Math.cos(angle) * 0.13, leafY, centerZ + Math.sin(angle) * 0.13, stage === "seed" ? 0.07 : 0.13, leafMat, true);
+        leaf.scale.y *= 0.42;
+      }
+      if (stage === "mature" || stage === "harvestable") {
+        meshSphere(group, centerX, leafY + 0.1, centerZ, stage === "harvestable" ? 0.2 : 0.16, cropMat, true);
+      }
+      if (stage === "harvestable") {
+        meshSphere(group, centerX + 0.21, leafY + 0.18, centerZ - 0.16, 0.055, three.mat.harvest, true);
+      }
+    }
+  }
+
+  function draw3DWeeds(group) {
+    for (const weed of state.weeds) {
+      if (!inBounds(weed.col, weed.row)) continue;
+      const x = boardX(weed.col);
+      const z = boardZ(weed.row);
+      for (let i = -2; i <= 2; i += 1) {
+        const stem = meshCylinder(group, x + i * 0.045, 0.28, z + Math.abs(i) * 0.025, 0.018, 0.34 + Math.abs(i) * 0.035, three.mat.weed, true);
+        stem.rotation.z = i * 0.18;
+      }
+    }
+  }
+
+  function draw3DSprinklerNetwork(group) {
+    const pipeY = 1.18;
+    for (let row = 0; row < ROWS; row += 1) {
+      for (let col = 0; col < COLS; col += 1) {
+        if (!cellAt(col, row).sprinkler) continue;
+        const x = boardX(col);
+        const z = boardZ(row);
+        meshSphere(group, x, pipeY, z, 0.085, three.mat.pipe, true);
+        cylinderBetween(group, { x, y: pipeY, z }, { x, y: 0.73, z }, 0.022, three.mat.pipeDark);
+        meshCylinder(group, x, 0.69, z, 0.1, 0.07, three.mat.pipe, true);
+        const ring = new THREE.Mesh(three.geo.torus, three.mat.pipeWater);
+        ring.position.set(x, 0.46, z);
+        ring.rotation.x = Math.PI / 2;
+        ring.scale.set(0.46, 0.46, 0.46);
+        group.add(ring);
+        for (let i = 0; i < 6; i += 1) {
+          const angle = i * Math.PI / 3;
+          meshSphere(group, x + Math.cos(angle) * 0.26, 0.48 + Math.sin(i + state.minutes * 0.02) * 0.025, z + Math.sin(angle) * 0.26, 0.025, three.mat.pipeWater, false);
+        }
+        if (inBounds(col + 1, row) && cellAt(col + 1, row).sprinkler) {
+          cylinderBetween(group, { x, y: pipeY, z }, { x: boardX(col + 1), y: pipeY, z }, 0.035, three.mat.pipe);
+        }
+        if (inBounds(col, row + 1) && cellAt(col, row + 1).sprinkler) {
+          cylinderBetween(group, { x, y: pipeY, z }, { x, y: pipeY, z: boardZ(row + 1) }, 0.035, three.mat.pipe);
+        }
+      }
+    }
+  }
+
+  function draw3DVolunteers(group) {
+    for (let i = 0; i < state.volunteers.length; i += 1) {
+      const volunteer = state.volunteers[i];
+      const mat = i === 0 ? three.mat.volunteerA : i === 1 ? three.mat.volunteerB : three.mat.volunteerC;
+      const x = (volunteer.x - 0.5) * COLS * CELL_3D;
+      const z = (volunteer.y - 0.5) * ROWS * CELL_3D;
+      meshSphere(group, x, 0.19, z, 0.17, three.mat.shadow, false);
+      meshCylinder(group, x, 0.43, z, 0.11, 0.34, mat, true);
+      meshSphere(group, x, 0.7 + Math.sin(volunteer.bob * 4) * 0.025, z, 0.12, colorMat("#f2d1aa", 0.7), true);
+      if (volunteer.task === "water") {
+        cylinderBetween(group, { x: x + 0.1, y: 0.5, z }, { x: x + 0.36, y: 0.66, z: z - 0.08 }, 0.025, three.mat.pipeWater);
+      } else if (volunteer.task === "weed") {
+        cylinderBetween(group, { x: x + 0.1, y: 0.45, z }, { x: x + 0.32, y: 0.36, z: z - 0.16 }, 0.025, three.mat.weed);
+      } else if (volunteer.task === "harvest") {
+        meshBox(group, x + 0.26, 0.38, z - 0.05, 0.22, 0.12, 0.18, three.mat.roofEdge, true, true);
+      }
+    }
+  }
+
+  function draw3DStorage(group) {
+    const x = boardX(COLS - 1.2);
+    const z = boardZ(0.8);
+    meshBox(group, x, 0.32, z, 0.8, 0.5, 0.55, colorMat("#b9b4a4"), true, true);
+    meshBox(group, x, 0.62, z - 0.03, 0.72, 0.08, 0.5, three.mat.roofEdge, true, true);
+    meshBox(group, x - 0.18, 0.35, z - 0.28, 0.12, 0.2, 0.04, three.mat.glass, false, false);
+    meshBox(group, x + 0.18, 0.35, z - 0.28, 0.12, 0.2, 0.04, three.mat.glass, false, false);
+  }
+
   function draw() {
     layout();
     view.buttons = [];
     ctx.clearRect(0, 0, view.width, view.height);
 
     if (state.mode === "title") {
+      if (sceneCanvas) sceneCanvas.style.visibility = "hidden";
       drawTitle();
       return;
     }
 
     if (state.phase === "market") {
+      if (sceneCanvas) sceneCanvas.style.visibility = "hidden";
       drawMarket();
     } else {
-      drawCity();
-      drawRooftop();
+      render3DScene();
       drawTopHud();
       drawPanel();
       drawBottomToolbar();
@@ -2134,8 +2491,8 @@
   function toolMessage(tool) {
     if (tool === "soil") return "Drag across the rooftop to paint soil mass.";
     if (tool === "erase") return "Drag to remove soil, sprinklers, or crops. Removed crops become compost.";
-    if (tool === "seed") return "Click a clear 2 by 2 soil patch to plant the selected seed.";
-    if (tool === "irrigation") return `Click an empty tile to add a sprinkler for ${formatMoney(sprinklerCost())}; after the first, place beside the pipe network.`;
+    if (tool === "seed") return "Move over the rooftop to preview the 2 by 2 root filter; click green space to plant.";
+    if (tool === "irrigation") return `Click a grid point to hang an overhead pipe nozzle for ${formatMoney(sprinklerCost())}; after the first, place beside the network.`;
     if (tool === "harvest") return "Click harvestable crops, or assign a volunteer to harvest.";
     return "Select a tool and work the rooftop.";
   }
@@ -2392,7 +2749,7 @@
     if (state.selectedTool === "soil") {
       if (state.phase !== "planning") return;
       const target = cellAt(cell.col, cell.row);
-      if (!plantAt(cell.col, cell.row) && !target.sprinkler) {
+      if (!plantAt(cell.col, cell.row)) {
         target.soil = Math.max(target.soil, 1);
         target.watered = false;
         state.message = "Soil painted. Each tile adds mass to the roof.";
@@ -2564,6 +2921,7 @@
     }
     return {
       coordinateSystem: "grid origin top-left, col increases right, row increases down",
+      visualMode: "3d rooftop scene with 2d HUD overlay",
       mode: state.mode,
       phase: state.phase,
       year: state.year,
@@ -2587,11 +2945,13 @@
         soilCells: soilCount(),
         wateredCells: wateredCount(),
         sprinklers: sprinklerCount(),
+        irrigationModel: "overhead pipe network; nozzles do not consume root grid cells",
         sprinklerCost: sprinklerCost(),
         compost: state.compost,
         weeds: state.weeds.length,
         stallHelpers: stallVolunteerCount(),
       },
+      rootPreview: rootPreview(),
       services: {
         toolDiscount: state.toolDiscount || 0,
         pollinatorBonus: state.pollinatorBonus || 0,
