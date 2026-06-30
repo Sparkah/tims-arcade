@@ -1,10 +1,8 @@
 // Public, non-secret Mini App config for the Bloodtread Telegram Mini App.
 
-// SHOP GATED OFF (Tim 2026-06-26, "ship core now, payments later"): the Stars/TON grant model is
-// client-authoritative (Codex hard blocker). Until grant application is server-owned, the shop button + buy
-// flows are disabled so no real money can flow. Cloud saves + the game itself are unaffected. Flip to true only
-// once the server-side claim endpoint ships (and the game's tg.js PAYMENTS_ENABLED is flipped in lockstep).
-window.BLOODTREAD_SHOP_ENABLED = false;
+// Shop enabled only with server-authoritative grants. Stars/TON receipts are verified by Cloudflare/Supabase
+// and applied to telegram_player_states before the wrapper refreshes the game state.
+window.BLOODTREAD_SHOP_ENABLED = true;
 
 // AdsGram rewarded block for Bloodtread (LIVE, production, Tim 2026-06-30). Rewarded-only: powers the
 // revive prompt + the daily-crate rewarded prompt (input.js -> window.__tg.showAd('rewarded')). Its own
