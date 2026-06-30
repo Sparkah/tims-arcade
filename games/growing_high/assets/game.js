@@ -1,4 +1,5 @@
 import * as THREE from "./three.module.js";
+import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-data.js";
 
 (() => {
   "use strict";
@@ -19,244 +20,10 @@ import * as THREE from "./three.module.js";
   const VOLUNTEER_ACTION_SECONDS = 0.85;
   const WEED_SPAWN_CHANCE = 0.22;
 
-  const cropDefs = {
-    carrot: {
-      key: "carrot",
-      name: "Carrot",
-      short: "Carrot",
-      growDays: 18,
-      seedCost: 8,
-      saleBase: 35,
-      saplingLoad: 4,
-      harvestLoad: 15,
-      shelfLife: 14,
-      seasons: ["Spring", "Autumn"],
-      color: "#e26d3f",
-      leaf: "#3e8f42",
-    },
-    bokChoy: {
-      key: "bokChoy",
-      name: "Bok Choy",
-      short: "Bok",
-      growDays: 12,
-      seedCost: 12,
-      saleBase: 80,
-      saplingLoad: 20,
-      harvestLoad: 40,
-      shelfLife: 7,
-      seasons: ["Spring", "Autumn"],
-      color: "#f2f7d8",
-      leaf: "#55a95d",
-    },
-    cilantro: {
-      key: "cilantro",
-      name: "Cilantro",
-      short: "Cilantro",
-      growDays: 12,
-      seedCost: 6,
-      saleBase: 30,
-      saplingLoad: 4,
-      harvestLoad: 8,
-      shelfLife: 7,
-      seasons: ["Spring", "Autumn"],
-      color: "#6fbf5f",
-      leaf: "#2e8740",
-    },
-    parsnip: {
-      key: "parsnip",
-      name: "Parsnip",
-      short: "Parsnip",
-      growDays: 30,
-      seedCost: 8,
-      saleBase: 35,
-      saplingLoad: 6,
-      harvestLoad: 30,
-      shelfLife: 14,
-      seasons: ["Spring", "Summer", "Autumn", "Winter"],
-      color: "#ead9a8",
-      leaf: "#4c9d46",
-    },
-    onion: {
-      key: "onion",
-      name: "Onion",
-      short: "Onion",
-      growDays: 30,
-      seedCost: 20,
-      saleBase: 100,
-      saplingLoad: 7,
-      harvestLoad: 20,
-      shelfLife: 28,
-      seasons: ["Spring", "Autumn"],
-      color: "#d4b47a",
-      leaf: "#5d9d55",
-    },
-    redCabbage: {
-      key: "redCabbage",
-      name: "Red Cabbage",
-      short: "Cabbage",
-      growDays: 24,
-      seedCost: 24,
-      saleBase: 90,
-      saplingLoad: 75,
-      harvestLoad: 150,
-      shelfLife: 14,
-      seasons: ["Spring", "Autumn"],
-      color: "#9b4f9e",
-      leaf: "#6b9b5a",
-    },
-    potato: {
-      key: "potato",
-      name: "Potato",
-      short: "Potato",
-      growDays: 24,
-      seedCost: 18,
-      saleBase: 80,
-      saplingLoad: 30,
-      harvestLoad: 150,
-      shelfLife: 84,
-      seasons: ["Spring", "Summer"],
-      color: "#b98e58",
-      leaf: "#4f8b49",
-    },
-    lettuce: {
-      key: "lettuce",
-      name: "Lettuce",
-      short: "Lettuce",
-      growDays: 18,
-      seedCost: 16,
-      saleBase: 70,
-      saplingLoad: 15,
-      harvestLoad: 30,
-      shelfLife: 7,
-      seasons: ["Spring", "Autumn"],
-      color: "#9ed66a",
-      leaf: "#65a84d",
-    },
-    tomato: {
-      key: "tomato",
-      name: "Tomato",
-      short: "Tomato",
-      growDays: 18,
-      seedCost: 20,
-      saleBase: 60,
-      saplingLoad: 70,
-      harvestLoad: 230,
-      fruitLoad: 20,
-      fruitInterval: 5,
-      shelfLife: 7,
-      seasons: ["Summer"],
-      color: "#d95346",
-      leaf: "#3f8b4a",
-    },
-    pumpkin: {
-      key: "pumpkin",
-      name: "Pumpkin",
-      short: "Pumpkin",
-      growDays: 24,
-      seedCost: 60,
-      saleBase: 320,
-      saplingLoad: 300,
-      harvestLoad: 800,
-      fruitLoad: 600,
-      fruitInterval: 10,
-      shelfLife: 28,
-      seasons: ["Summer", "Autumn"],
-      color: "#dc8a2c",
-      leaf: "#4f8d3d",
-    },
-    leek: {
-      key: "leek",
-      name: "Leek",
-      short: "Leek",
-      growDays: 24,
-      seedCost: 22,
-      saleBase: 110,
-      saplingLoad: 13,
-      harvestLoad: 30,
-      shelfLife: 7,
-      seasons: ["Autumn", "Winter"],
-      color: "#d7e6ce",
-      leaf: "#4b9551",
-    },
-    garlic: {
-      key: "garlic",
-      name: "Garlic",
-      short: "Garlic",
-      growDays: 54,
-      seedCost: 14,
-      saleBase: 60,
-      saplingLoad: 5,
-      harvestLoad: 13,
-      shelfLife: 56,
-      seasons: ["Autumn", "Winter", "Spring"],
-      color: "#efe6d3",
-      leaf: "#6f9b5f",
-    },
-    vigna: {
-      key: "vigna",
-      name: "Vigna",
-      short: "Vigna",
-      growDays: 18,
-      seedCost: 16,
-      saleBase: 40,
-      saplingLoad: 40,
-      harvestLoad: 120,
-      fruitLoad: 10,
-      fruitInterval: 4,
-      shelfLife: 7,
-      seasons: ["Summer"],
-      color: "#6c9b4e",
-      leaf: "#3f8d43",
-    },
-    cucumber: {
-      key: "cucumber",
-      name: "Cucumber",
-      short: "Cuke",
-      growDays: 18,
-      seedCost: 18,
-      saleBase: 50,
-      saplingLoad: 50,
-      harvestLoad: 130,
-      fruitLoad: 50,
-      fruitInterval: 5,
-      shelfLife: 7,
-      seasons: ["Summer"],
-      color: "#5da35f",
-      leaf: "#3e8545",
-    },
-    pepper: {
-      key: "pepper",
-      name: "Pepper",
-      short: "Pepper",
-      growDays: 24,
-      seedCost: 18,
-      saleBase: 40,
-      saplingLoad: 30,
-      harvestLoad: 70,
-      fruitLoad: 10,
-      fruitInterval: 5,
-      shelfLife: 14,
-      seasons: ["Summer"],
-      color: "#c84036",
-      leaf: "#3f8b4a",
-    },
-    eggplant: {
-      key: "eggplant",
-      name: "Eggplant",
-      short: "Eggplant",
-      growDays: 30,
-      seedCost: 24,
-      saleBase: 60,
-      saplingLoad: 60,
-      harvestLoad: 160,
-      fruitLoad: 40,
-      fruitInterval: 6,
-      shelfLife: 7,
-      seasons: ["Summer"],
-      color: "#5a3f8f",
-      leaf: "#477f45",
-    },
-  };
+  const cropDefs = cloneBalance(DEFAULT_CROP_DEFS);
+  let balanceSource = "defaults";
+  let balanceLabel = "Default Section 3 table";
+  applyBalanceOverrides();
 
   const toolDefs = [
     { id: "soil", label: "Soil", key: "S" },
@@ -409,7 +176,9 @@ import * as THREE from "./three.module.js";
   }
 
   function maybeAutostart() {
-    if (window.__GF_AUTOSTART && !window._silent && state.mode === "title") {
+    const params = new URLSearchParams(window.location.search);
+    const previewAutostart = params.has("adminPreview");
+    if ((window.__GF_AUTOSTART || previewAutostart) && !window._silent && state.mode === "title") {
       startNewGame();
     }
   }
@@ -600,6 +369,9 @@ import * as THREE from "./three.module.js";
       repairDaysLeft: 0,
       selectedTool: "soil",
       selectedSeed: "carrot",
+      showForecast: false,
+      balanceSource,
+      balanceLabel,
       fast: false,
       weather: "Bright start, light rain later",
       marketMood: "Local demand favours quick greens",
@@ -690,6 +462,13 @@ import * as THREE from "./three.module.js";
     state.mulchBonus = state.mulchBonus || 0;
     state.hubReputation = state.hubReputation || 0;
     state.priceMemory = state.priceMemory || {};
+    state.showForecast = Boolean(state.showForecast);
+    if (state.balanceSource !== balanceSource) {
+      state.priceMemory = {};
+      state.prices = generatePrices();
+    }
+    state.balanceSource = balanceSource;
+    state.balanceLabel = balanceLabel;
     for (let i = 0; i < state.volunteers.length; i += 1) {
       const fallback = defaults.volunteers[i % defaults.volunteers.length];
       state.volunteers[i] = {
@@ -728,6 +507,72 @@ import * as THREE from "./three.module.js";
     }
   }
 
+  function applyBalanceOverrides() {
+    const urlPayload = readBalanceUrlPayload();
+    const storedPayload = readStoredBalancePayload();
+    if (urlPayload && applyBalancePayload(urlPayload, "url")) return;
+    if (storedPayload) applyBalancePayload(storedPayload, "localStorage");
+  }
+
+  function readStoredBalancePayload() {
+    try {
+      const raw = localStorage.getItem(BALANCE_STORAGE_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function readBalanceUrlPayload() {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const encoded = params.get("balance");
+      if (!encoded) return null;
+      const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(encoded.length / 4) * 4, "=");
+      const binary = atob(base64);
+      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function applyBalancePayload(payload, source) {
+    if (!payload || typeof payload !== "object" || !payload.crops || typeof payload.crops !== "object") return false;
+    let applied = 0;
+    for (const [key, override] of Object.entries(payload.crops)) {
+      if (!cropDefs[key] || !override || typeof override !== "object") continue;
+      const target = cropDefs[key];
+      for (const field of ["growDays", "seedCost", "saleBase", "saplingLoad", "harvestLoad", "fruitLoad", "fruitInterval", "shelfLife"]) {
+        if (override[field] === undefined || override[field] === "") continue;
+        const value = Number(override[field]);
+        if (!Number.isFinite(value) || value < 0) continue;
+        if (field === "fruitLoad" && value === 0) {
+          delete target.fruitLoad;
+          continue;
+        }
+        if (field === "fruitInterval" && value === 0) {
+          delete target.fruitInterval;
+          continue;
+        }
+        target[field] = Math.max(field === "seedCost" ? 0 : 1, Math.round(value));
+      }
+      if (Array.isArray(override.seasons)) {
+        const cleanSeasons = override.seasons.filter((season) => ["Spring", "Summer", "Autumn", "Winter"].includes(season));
+        if (cleanSeasons.length) target.seasons = cleanSeasons;
+      }
+      if (typeof override.name === "string" && override.name.trim()) target.name = override.name.trim().slice(0, 32);
+      if (typeof override.short === "string" && override.short.trim()) target.short = override.short.trim().slice(0, 16);
+      applied += 1;
+    }
+    if (!applied) return false;
+    balanceSource = source;
+    balanceLabel = typeof payload.label === "string" && payload.label.trim()
+      ? payload.label.trim().slice(0, 60)
+      : source === "url" ? "Shared balance draft" : "Browser balance draft";
+    return true;
+  }
+
   function rand() {
     state.rng = (state.rng * 1664525 + 1013904223) >>> 0;
     return state.rng / 4294967296;
@@ -760,6 +605,42 @@ import * as THREE from "./three.module.js";
     }
     state.priceMemory = nextMemory;
     return prices;
+  }
+
+  function priceBandFor(def, season = currentSeason()) {
+    const inSeason = def.seasons.includes(season);
+    return {
+      inSeason,
+      min: inSeason ? 0.9 : 0.5,
+      max: inSeason ? 1.5 : 1.2,
+    };
+  }
+
+  function priceForecastRows(keys = availableCropKeys()) {
+    return keys
+      .filter((key) => cropDefs[key])
+      .map((key) => {
+        const def = cropDefs[key];
+        const price = state.prices[key] || def.saleBase;
+        const band = priceBandFor(def);
+        const percent = def.saleBase > 0 ? price / def.saleBase : 1;
+        return {
+          key,
+          name: def.name,
+          short: def.short,
+          price,
+          basePrice: def.saleBase,
+          percent,
+          percentLabel: `${Math.round(percent * 100)}%`,
+          rangeLabel: `${Math.round(band.min * 100)}-${Math.round(band.max * 100)}%`,
+          seasonLabel: band.inSeason ? "in season" : "off season",
+          seasons: def.seasons.join("/"),
+          growDays: def.growDays,
+          growWeeks: Math.round((def.growDays / 6) * 10) / 10,
+          shelfDays: def.shelfLife,
+          shelfWeeks: Math.round((def.shelfLife / 7) * 10) / 10,
+        };
+      });
   }
 
   function availableCropKeys() {
@@ -1842,6 +1723,7 @@ import * as THREE from "./three.module.js";
       drawBottomToolbar();
       drawWeightGauge();
       if (state.phase === "repair") drawRepairOverlay();
+      if (state.showForecast) drawForecastOverlay();
     }
   }
 
@@ -2322,7 +2204,10 @@ import * as THREE from "./three.module.js";
     drawWrappedText(state.weather, p.x + 16, y, p.w - 32, 16);
     y += 38;
     drawWrappedText(state.marketMood, p.x + 16, y, p.w - 32, 16);
-    y += 42;
+    y += 34;
+
+    y = drawForecastPreview(p.x + 16, y, p.w - 32);
+    y += 12;
 
     ctx.font = "700 13px ui-sans-serif, system-ui";
     ctx.fillStyle = "#253331";
@@ -2371,6 +2256,105 @@ import * as THREE from "./three.module.js";
     drawInventorySummary(p.x + 16, y, p.w - 32);
   }
 
+  function drawForecastPreview(x, y, w) {
+    const rows = priceForecastRows();
+    ctx.font = "700 13px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#253331";
+    ctx.fillText("Weekly price forecast", x, y);
+    addButton("forecast-open", x + w - 92, y - 6, 92, 26, "Open table", () => {
+      state.showForecast = true;
+      state.message = "Forecast table shows every unlocked crop price for this planning week.";
+    }, { selected: state.showForecast });
+    y += 24;
+
+    ctx.font = "11px ui-sans-serif, system-ui";
+    const previewRows = rows.slice(0, Math.min(4, rows.length));
+    for (const row of previewRows) {
+      const high = row.percent >= 1.15;
+      const low = row.percent <= 0.85;
+      ctx.fillStyle = high ? "#24663f" : low ? "#9b4638" : "#53625d";
+      ctx.fillText(row.short, x, y);
+      ctx.textAlign = "right";
+      ctx.fillText(`${row.price}p`, x + w * 0.48, y);
+      ctx.fillText(row.percentLabel, x + w * 0.72, y);
+      ctx.fillText(row.seasonLabel, x + w, y);
+      ctx.textAlign = "left";
+      y += 15;
+    }
+    if (rows.length > previewRows.length) {
+      ctx.fillStyle = "#53625d";
+      ctx.fillText(`+${rows.length - previewRows.length} more crops in table`, x, y);
+      y += 15;
+    }
+    return y;
+  }
+
+  function drawForecastOverlay() {
+    const rows = priceForecastRows();
+    const compact = view.width < 820;
+    const w = Math.min(view.width - 28, compact ? 370 : 760);
+    const h = Math.min(view.height - 86, 94 + rows.length * (compact ? 28 : 30));
+    const x = (view.width - w) / 2;
+    const y = Math.max(76, (view.height - h) / 2);
+
+    ctx.save();
+    ctx.fillStyle = "rgba(20, 31, 29, 0.42)";
+    ctx.fillRect(0, 0, view.width, view.height);
+    ctx.fillStyle = "rgba(251, 248, 238, 0.98)";
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.38)";
+    ctx.lineWidth = 1.5;
+    roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "#1e2b29";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = compact ? "700 17px ui-sans-serif, system-ui" : "700 20px ui-sans-serif, system-ui";
+    ctx.fillText("Weekly Price Forecast", x + 18, y + 16);
+    ctx.font = "12px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#53625d";
+    ctx.fillText(`${currentSeason()} - ${rows.length} available crops - ${balanceLabel}`, x + 18, y + 42);
+    addButton("forecast-close", x + w - 86, y + 14, 66, 30, "Close", () => {
+      state.showForecast = false;
+    });
+
+    const tableX = x + 18;
+    let rowY = y + 76;
+    const cols = compact
+      ? { crop: tableX, price: x + w * 0.42, trend: x + w * 0.62, grow: x + w * 0.81 }
+      : { crop: tableX, price: x + w * 0.30, trend: x + w * 0.43, season: x + w * 0.56, grow: x + w * 0.72, shelf: x + w * 0.86 };
+
+    ctx.font = "700 11px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#253331";
+    ctx.fillText("Crop", cols.crop, rowY);
+    ctx.fillText("Price", cols.price, rowY);
+    ctx.fillText("Vs base", cols.trend, rowY);
+    if (!compact) ctx.fillText("Season", cols.season, rowY);
+    ctx.fillText("Grow", cols.grow, rowY);
+    if (!compact) ctx.fillText("Shelf", cols.shelf, rowY);
+    rowY += 18;
+
+    for (const row of rows) {
+      const bandFill = row.percent >= 1.15 ? "rgba(70, 145, 92, 0.12)" : row.percent <= 0.85 ? "rgba(210, 92, 72, 0.12)" : "rgba(96, 112, 106, 0.08)";
+      ctx.fillStyle = bandFill;
+      roundRect(tableX - 8, rowY - 7, w - 36, compact ? 24 : 26, 5);
+      ctx.fill();
+      ctx.font = "12px ui-sans-serif, system-ui";
+      ctx.fillStyle = "#1e2b29";
+      ctx.fillText(compact ? row.short : row.name, cols.crop, rowY);
+      ctx.fillText(`${row.price}p`, cols.price, rowY);
+      ctx.fillStyle = row.percent >= 1.15 ? "#24663f" : row.percent <= 0.85 ? "#9b4638" : "#53625d";
+      ctx.fillText(row.percentLabel, cols.trend, rowY);
+      ctx.fillStyle = "#53625d";
+      if (!compact) ctx.fillText(`${row.seasonLabel} ${row.rangeLabel}`, cols.season, rowY);
+      ctx.fillText(`${row.growWeeks}w`, cols.grow, rowY);
+      if (!compact) ctx.fillText(`${row.shelfWeeks}w`, cols.shelf, rowY);
+      rowY += compact ? 28 : 30;
+    }
+    ctx.restore();
+  }
+
   function drawInventorySummary(x, y, w) {
     ctx.font = "700 13px ui-sans-serif, system-ui";
     ctx.fillStyle = "#253331";
@@ -2405,7 +2389,7 @@ import * as THREE from "./three.module.js";
     const pad = compact ? 10 : 24;
     const h = compact ? 38 : 54;
     const gap = compact ? 6 : 10;
-    const maxButtons = toolDefs.length + 3;
+    const maxButtons = toolDefs.length + 4;
     const columns = compact ? 4 : maxButtons;
     const bw = compact
       ? (view.width - pad * 2 - gap * (columns - 1)) / columns
@@ -2474,6 +2458,17 @@ import * as THREE from "./three.module.js";
       action: () => {
         state.selectedTool = "compost";
         state.message = "Click a planted crop to add compost to its root space.";
+      },
+    });
+
+    buttonItems.push({
+      id: "forecast",
+      label: compact ? "Prices" : "Forecast",
+      enabled: state.phase === "planning",
+      selected: state.showForecast,
+      action: () => {
+        state.showForecast = true;
+        state.message = "Forecast table shows every unlocked crop price for this planning week.";
       },
     });
 
@@ -2863,6 +2858,12 @@ import * as THREE from "./three.module.js";
       }
     }
 
+    if (state.showForecast) {
+      state.showForecast = false;
+      event.preventDefault();
+      return;
+    }
+
     handleCanvasAction(point.x, point.y, false);
     event.preventDefault();
   }
@@ -2991,6 +2992,13 @@ import * as THREE from "./three.module.js";
       selectedTool: state.selectedTool,
       selectedSeed: cropDefs[state.selectedSeed]?.name || state.selectedSeed,
       unlockedSeeds: availableCropKeys().map((key) => cropDefs[key].name),
+      forecastOpen: state.showForecast,
+      balance: {
+        source: balanceSource,
+        label: balanceLabel,
+        adminUrl: "./balance-admin.html",
+      },
+      priceForecast: priceForecastRows(),
       roof: {
         load: Math.round(roofLoad()),
         limit: Math.round(state.roofLimit),
