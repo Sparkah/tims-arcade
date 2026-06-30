@@ -487,10 +487,21 @@ function testPublicDomSinksAvoidCatalogHtml() {
   const play = fs.readFileSync(path.join(GALLERY, 'play.html'), 'utf8');
   assert(!/row\.innerHTML\s*=\s*picks\.map/.test(play), 'play more-games rail builds catalog HTML with innerHTML');
   assert(!/background-image:\s*url\(['"]\/thumbs\/\$\{g\.slug\}/.test(play), 'play more-games rail interpolates slug into inline style HTML');
+  assert(!/commentsList\.innerHTML\s*=\s*list\.map/.test(play), 'play comments render user comments with innerHTML');
+  assert(!/commentsList\.insertAdjacentHTML\('afterbegin'/.test(play), 'play comments prepend user comments with insertAdjacentHTML');
+  assert(!/frame-wrap'\)\.innerHTML/.test(play), 'play error renderer writes HTML strings into frame-wrap');
+  assert(!/javascript:location\.reload/.test(play), 'play error retry uses a javascript: URL');
 
   const login = fs.readFileSync(path.join(GALLERY, 'login.html'), 'utf8');
   assert(!/innerHTML\s*\+?=.*devMagicLink/.test(login), 'login dev magic-link uses innerHTML');
   assert(/u\.origin\s*===\s*location\.origin/.test(login), 'login dev magic-link does not enforce same-origin URL');
+
+  const app = fs.readFileSync(path.join(GALLERY, 'app.js'), 'utf8');
+  assert(!/list\.innerHTML\s*=\s*cs\.map/.test(app), 'gallery comment modal renders user comments with innerHTML');
+  assert(!/list\.insertAdjacentHTML\('afterbegin'/.test(app), 'gallery comment modal prepends user comments with insertAdjacentHTML');
+
+  const chat = fs.readFileSync(path.join(GALLERY, 'chat.js'), 'utf8');
+  assert(!/row\.innerHTML\s*=/.test(chat), 'chat messages render user content with innerHTML');
 }
 
 function testNoCommittedPostHogToken() {
@@ -528,6 +539,15 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
       url: 'javascript:alert(1)',
       label: 'Unsafe Builder',
     },
+  }, {
+    slug: 'builder_game',
+    title: 'Builder Game',
+    hook: 'A safe builder link test game.',
+    addedDate: '2026-06-30',
+    builtWith: {
+      url: 'https://example.com/builder',
+      label: 'Example Builder',
+    },
   }];
   const gamesResponse = () => new Response(JSON.stringify(games), {
     headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -560,6 +580,15 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
     assert(html.includes('https://game-factory.tech/p/safe_game'), 'share page used untrusted request host in metadata');
     assert(!html.includes('javascript:alert'), 'share page emitted unsafe builtWith URL');
     assert(res.headers.get('vary') === 'Accept-Language', 'share page does not vary language-switched response by Accept-Language');
+
+    res = await mod.onRequest({
+      params: { slug: 'builder_game' },
+      env: assetEnv,
+      request: req('https://game-factory.test/p/builder_game'),
+    });
+    assert(res.status === 200, `share page rejected safe builtWith URL: ${res.status}`);
+    html = await res.text();
+    assert(html.includes('https://example.com/builder'), 'share page dropped valid https builtWith URL');
 
     let fetchedUrl = '';
     globalThis.fetch = async (url) => {

@@ -52,7 +52,6 @@
   nameInp.addEventListener('change', function () { nameInp.value = nameInp.value.trim().slice(0, MAX_NAME); saveName(nameInp.value); });
 
   // ---- render ----
-  function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   function fmtTime(ts) {
     if (!ts) return '';
     var d = Math.floor((Date.now() - ts) / 1000);
@@ -63,14 +62,21 @@
   }
   function nearBottom() { return list.scrollHeight - list.scrollTop - list.clientHeight < 80; }
   function toBottom() { list.scrollTop = list.scrollHeight; }
+  function chatEmpty(text) {
+    var el = document.createElement('div');
+    el.className = 'chat-empty';
+    el.textContent = text;
+    return el;
+  }
   function gameCard(g) {
+    var slug = encodeURIComponent(String(g.slug || ''));
     var a = document.createElement('a');
     a.className = 'chat-game-card';
-    a.href = '/play.html?slug=' + encodeURIComponent(g.slug);
+    a.href = '/play.html?slug=' + slug;
     var img = document.createElement('img');
     img.className = 'chat-game-thumb'; img.alt = ''; img.loading = 'lazy';
-    img.src = '/thumbs/' + g.slug + '.webp';
-    img.onerror = function () { this.onerror = null; this.src = '/thumbs/' + g.slug + '.png'; };
+    img.src = '/thumbs/' + slug + '.webp';
+    img.onerror = function () { this.onerror = null; this.src = '/thumbs/' + slug + '.png'; };
     var meta = document.createElement('span'); meta.className = 'chat-game-meta';
     var t = document.createElement('span'); t.className = 'chat-game-title'; t.textContent = g.title || g.slug;
     var pl = document.createElement('span'); pl.className = 'chat-game-play'; pl.textContent = 'Play ->';
@@ -85,9 +91,23 @@
     var ph = list.querySelector('.chat-empty'); if (ph) ph.remove();
     var row = document.createElement('div');
     row.className = 'chat-msg';
-    row.innerHTML = '<div class="chat-msg-head"><span class="chat-msg-name">' + esc(m.name || 'Player') +
-      '</span><span class="chat-msg-time">' + fmtTime(m.ts) + '</span></div>' +
-      (m.text ? '<div class="chat-msg-text">' + esc(m.text) + '</div>' : '');
+    var head = document.createElement('div');
+    head.className = 'chat-msg-head';
+    var name = document.createElement('span');
+    name.className = 'chat-msg-name';
+    name.textContent = m.name || 'Player';
+    var time = document.createElement('span');
+    time.className = 'chat-msg-time';
+    time.textContent = fmtTime(m.ts);
+    head.appendChild(name);
+    head.appendChild(time);
+    row.appendChild(head);
+    if (m.text) {
+      var text = document.createElement('div');
+      text.className = 'chat-msg-text';
+      text.textContent = m.text;
+      row.appendChild(text);
+    }
     if (m.game && m.game.slug) row.appendChild(gameCard(m.game));
     list.appendChild(row);
     while (list.children.length > 120) list.removeChild(list.firstChild);
@@ -103,7 +123,7 @@
         var stick = initial || nearBottom();
         var wasEmpty = list.children.length === 0;
         d.messages.forEach(function (m) { addMessage(m, false); });
-        if (wasEmpty && list.children.length === 0) list.innerHTML = '<div class="chat-empty">No messages yet. Say hi, or share a game.</div>';
+        if (wasEmpty && list.children.length === 0) list.replaceChildren(chatEmpty('No messages yet. Say hi, or share a game.'));
         if (stick) toBottom();
       })
       .catch(function () {});
@@ -186,13 +206,14 @@
   function renderPicker(q) {
     q = (q || '').toLowerCase();
     var items = (games || []).filter(function (g) { return g.slug && (!q || gTitle(g).toLowerCase().indexOf(q) >= 0 || g.slug.indexOf(q) >= 0); }).slice(0, 40);
-    pickerList.innerHTML = '';
-    if (!items.length) { pickerList.innerHTML = '<div class="chat-empty">No games found.</div>'; return; }
+    pickerList.replaceChildren();
+    if (!items.length) { pickerList.appendChild(chatEmpty('No games found.')); return; }
     items.forEach(function (g) {
       var b = document.createElement('button'); b.type = 'button'; b.className = 'chat-picker-item';
+      var slug = encodeURIComponent(String(g.slug || ''));
       var img = document.createElement('img'); img.alt = ''; img.loading = 'lazy';
-      img.src = '/thumbs/' + g.slug + '.webp';
-      img.onerror = function () { this.onerror = null; this.src = '/thumbs/' + g.slug + '.png'; };
+      img.src = '/thumbs/' + slug + '.webp';
+      img.onerror = function () { this.onerror = null; this.src = '/thumbs/' + slug + '.png'; };
       var s = document.createElement('span'); s.textContent = gTitle(g);
       b.appendChild(img); b.appendChild(s);
       b.addEventListener('click', function () { closePicker(); sendMessage('', { slug: g.slug, title: gTitle(g) }); });

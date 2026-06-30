@@ -1354,8 +1354,7 @@ function openCommentModal(g) {
   document.getElementById('comment-modal-input').value = '';
   document.getElementById('comment-modal-counter').textContent = '0 / 500';
   document.getElementById('comment-modal-submit').disabled = true;
-  document.getElementById('comment-modal-list').innerHTML =
-    '<div class="comment-modal-empty">Loading…</div>';
+  document.getElementById('comment-modal-list').replaceChildren(commentModalEmpty('Loading…'));
   if (!m.open) m.showModal();
   loadModalComments(g.slug);
   if (window.posthog) posthog.capture('comments_modal_opened', { slug: g.slug });
@@ -1385,10 +1384,30 @@ function relTimeShort(ts) {
   return d + 'd ago';
 }
 
-function escapeText(s) {
-  const d = document.createElement('div');
-  d.textContent = String(s == null ? '' : s);
-  return d.innerHTML;
+function commentModalEmpty(text) {
+  const el = document.createElement('div');
+  el.className = 'comment-modal-empty';
+  el.textContent = text;
+  return el;
+}
+
+function commentModalRow(comment, whenText, emoji) {
+  const row = document.createElement('div');
+  row.className = 'comment-modal-row';
+  const vote = document.createElement('div');
+  vote.className = 'vote-emoji';
+  vote.textContent = emoji || (comment.vote === 'like' ? '👍' : comment.vote === 'dislike' ? '👎' : '💬');
+  const body = document.createElement('div');
+  const text = document.createElement('div');
+  text.textContent = comment.comment || '';
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = whenText || relTimeShort(comment.ts);
+  body.appendChild(text);
+  body.appendChild(meta);
+  row.appendChild(vote);
+  row.appendChild(body);
+  return row;
 }
 
 async function loadModalComments(slug) {
@@ -1399,21 +1418,12 @@ async function loadModalComments(slug) {
     const d = await r.json();
     const cs = (d && d.comments) || [];
     if (!cs.length) {
-      list.innerHTML = '<div class="comment-modal-empty">No comments yet — leave the first one above.</div>';
+      list.replaceChildren(commentModalEmpty('No comments yet — leave the first one above.'));
       return;
     }
-    list.innerHTML = cs.map(cm => {
-      const emoji = cm.vote === 'like' ? '👍' : cm.vote === 'dislike' ? '👎' : '💬';
-      return `<div class="comment-modal-row">
-        <div class="vote-emoji">${emoji}</div>
-        <div>
-          <div>${escapeText(cm.comment)}</div>
-          <div class="meta">${escapeText(relTimeShort(cm.ts))}</div>
-        </div>
-      </div>`;
-    }).join('');
+    list.replaceChildren(...cs.map(cm => commentModalRow(cm)));
   } catch (e) {
-    list.innerHTML = '<div class="comment-modal-empty">Couldn\'t load comments. Try again.</div>';
+    list.replaceChildren(commentModalEmpty('Couldn\'t load comments. Try again.'));
   }
 }
 
@@ -1458,15 +1468,9 @@ const commentModal = window.wireModal && window.wireModal({
     const list = document.getElementById('comment-modal-list');
     if (!list) return;
     const empty = list.querySelector('.comment-modal-empty');
-    if (empty) list.innerHTML = '';
-    list.insertAdjacentHTML('afterbegin',
-      `<div class="comment-modal-row">
-        <div class="vote-emoji">💬</div>
-        <div>
-          <div>${escapeText(text)}</div>
-          <div class="meta">just now · you</div>
-        </div>
-      </div>`);
+    const row = commentModalRow({ comment: text, vote: 'neutral' }, 'just now · you', '💬');
+    if (empty) list.replaceChildren(row);
+    else list.prepend(row);
   },
 });
 
