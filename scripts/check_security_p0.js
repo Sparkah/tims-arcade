@@ -604,6 +604,11 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(/els\.levelSelect\.replaceChildren\(fragment\)/.test(creatorAdmin), 'Creator admin level select does not render via DOM replacement');
 
   const admin = fs.readFileSync(path.join(GALLERY, 'admin.html'), 'utf8');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(admin), 'admin console still uses dangerous HTML sinks');
+  assert(!/function\s+escapeHtml\s*\(/.test(admin), 'admin console still keeps a dead HTML escaping helper');
+  assert(/document\.getElementById\('content'\)\.replaceChildren\(fragment\)/.test(admin), 'admin dashboard does not render via DOM replacement');
+  assert(/function\s+safeAdminHref/.test(admin), 'admin dashboard links do not route through href sanitizer');
+  assert(/const\s+statsBySlug\s*=\s*Object\.create\(null\)/.test(admin), 'admin stats merge map is prototype-pollutable');
   const adminSection = (start, end, label) => {
     const startIndex = admin.indexOf(start);
     assert(startIndex !== -1, `admin.html missing ${label} start marker`);
