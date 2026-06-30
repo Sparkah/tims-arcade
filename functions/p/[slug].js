@@ -71,6 +71,7 @@ export async function onRequest({ params, env, request }) {
   // param-free so shared links don't fragment SEO.
   const bandCode = String(new URL(request.url).searchParams.get('band') || '').replace(/[^0-9a-zA-Z-]/g, '').slice(0, 80);
   const playUrl = `/play.html?slug=${encodeURIComponent(slug)}${bandCode ? `&band=${bandCode}` : ''}`;
+  const builtWithUrl = safeHttpUrl(game.builtWith && game.builtWith.url);
 
   const genre = (game.genre || '').trim();
   const genreLabel = genre ? genre.charAt(0).toUpperCase() + genre.slice(1) : '';
@@ -209,7 +210,7 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
     lang === 'ru' ? 'Играй в браузере, без установки' : 'Play in-browser, no install',
   ].filter(Boolean).join(' · ')}</p>` : ''}
   <a class="btn" href="${playUrl}">${lang === 'ru' ? '▶ Играть' : '▶ Play now'}</a>
-  ${game.builtWith && game.builtWith.url ? `<p class="alt"><a href="${escapeHtml(game.builtWith.url)}" style="color:#8a8aa0">${escapeHtml((lang === 'ru' && game.builtWith.label_ru) || game.builtWith.label || 'Built with our engine')} →</a></p>` : ''}
+  ${builtWithUrl ? `<p class="alt"><a href="${escapeHtml(builtWithUrl)}" style="color:#8a8aa0">${escapeHtml((lang === 'ru' && game.builtWith.label_ru) || game.builtWith.label || 'Built with our engine')} →</a></p>` : ''}
   <small><a href="/" style="color:#8a8aa0">${lang === 'ru' ? '← все игры' : '← browse all games'}</a></small>
   ${related.length ? `<nav class="related" aria-label="${lang === 'ru' ? 'Похожие игры' : 'Related games'}">
     <h2>${lang === 'ru' ? 'Похожие игры' : 'More games'}</h2>
@@ -288,6 +289,7 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
     headers: {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'public, max-age=300',
+      'vary': 'Accept-Language',
     },
   });
 }
@@ -319,6 +321,17 @@ function trustedStaticOrigin(request) {
     return url.origin;
   }
   return 'https://game-factory.tech';
+}
+
+function safeHttpUrl(value) {
+  try {
+    const u = new URL(String(value || ''));
+    // Drop non-http(s) schemes so catalogue-supplied builtWith URLs cannot
+    // inject script via javascript:/data: hrefs.
+    return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : '';
+  } catch (_) {
+    return '';
+  }
 }
 
 function escapeHtml(s) {

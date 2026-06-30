@@ -524,6 +524,10 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
     title: 'Safe Game',
     hook: 'A safe test game.',
     addedDate: '2026-06-30',
+    builtWith: {
+      url: 'javascript:alert(1)',
+      label: 'Unsafe Builder',
+    },
   }];
   const gamesResponse = () => new Response(JSON.stringify(games), {
     headers: { 'content-type': 'application/json; charset=utf-8' },
@@ -534,7 +538,11 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
     let networkCalled = false;
     const assetEnv = {
       ASSETS: {
-        fetch: async () => gamesResponse(),
+        fetch: async (request) => {
+          const url = new URL(request.url);
+          assert(url.pathname === '/games.json', `share page requested unexpected ASSETS path: ${url.pathname}`);
+          return gamesResponse();
+        },
       },
     };
     globalThis.fetch = async () => {
@@ -550,6 +558,8 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
     assert(!networkCalled, 'share page fetched network catalogue while ASSETS binding was available');
     let html = await res.text();
     assert(html.includes('https://game-factory.tech/p/safe_game'), 'share page used untrusted request host in metadata');
+    assert(!html.includes('javascript:alert'), 'share page emitted unsafe builtWith URL');
+    assert(res.headers.get('vary') === 'Accept-Language', 'share page does not vary language-switched response by Accept-Language');
 
     let fetchedUrl = '';
     globalThis.fetch = async (url) => {
