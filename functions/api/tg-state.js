@@ -92,6 +92,14 @@ export async function onRequestPost({ request, env }) {
     delete cleanState.__server;
     const existingServer = serverBlock(existing && existing.state);
     if (existingServer) cleanState.__server = existingServer;
+    // Purchase-exclusive permanent entitlement: a client may NEVER set bloodtread ad-free itself. It is derived
+    // solely from the verified-grant ledger in __server.entitlements (written only by server payment endpoints). This
+    // closes the self-spoof where a client saved adFree:1 without paying. Consumables (blood/tiers) stay
+    // client-writable (they are earnable in-game); the purchase grant for those is applied server-side at claim.
+    if (game === 'bloodtread') {
+      const ent = existingServer && existingServer.entitlements;
+      cleanState.adFree = ent && ent.adFree ? 1 : 0;
+    }
 
     const stateBytes = new TextEncoder().encode(JSON.stringify(cleanState)).length;
     if (stateBytes > MAX_STATE_BYTES) {

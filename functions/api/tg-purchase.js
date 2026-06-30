@@ -1,5 +1,6 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { getProduct, parsePaymentPayload } from '../_lib/tgProducts.js';
+import { applyPurchaseGrant } from '../_lib/tgGrants.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
 import {
   getTelegramPurchase,
@@ -80,7 +81,12 @@ async function recordFromBot(request, env, body) {
     raw: purchase.raw || purchase,
   });
 
-  return json({ ok: true });
+  const status = purchase.status || 'paid';
+  const grant = status === 'paid'
+    ? await applyPurchaseGrant(env, parsed.game, parsed.telegramUserId, parsed.productId, purchase.payload)
+    : null;
+
+  return json({ ok: true, grant });
 }
 
 async function claimFromClient(body, env) {
@@ -95,11 +101,23 @@ async function claimFromClient(body, env) {
   await upsertTelegramPlayer(env, auth.user);
 
   const purchase = await getTelegramPurchase(env, parsed.game, auth.user.id, body.payload);
+  const paid = Boolean(purchase && purchase.status === 'paid');
+
+  const grant = paid
+    ? await applyPurchaseGrant(env, parsed.game, auth.user.id, parsed.productId, body.payload)
+    : null;
+
   return json(
     {
       ok: true,
-      paid: Boolean(purchase && purchase.status === 'paid'),
+      paid,
+      granted: Boolean(grant && grant.granted),
+      productId: parsed.productId,
       purchase: publicPurchase(purchase),
+      grant,
+      state: grant && grant.state || null,
+      stateRev: grant && grant.stateRev || null,
+      updatedAt: grant && grant.updatedAt || null,
     },
     200,
     { 'cache-control': 'no-store' },

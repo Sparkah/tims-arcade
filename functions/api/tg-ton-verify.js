@@ -1,4 +1,5 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
+import { applyPurchaseGrant } from '../_lib/tgGrants.js';
 import { findTonPayment, expectedTonMemo, productForTonOrder, publicTonPurchase } from '../_lib/tonPayments.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
 import {
@@ -48,8 +49,19 @@ export async function onRequestPost({ request, env }) {
   if (!product) return jsonError('unknown ton product', 400);
 
   if (purchase.status === 'paid') {
+    const grant = await applyPurchaseGrant(env, game, auth.user.id, purchase.product_id, payload);
     return json(
-      { ok: true, paid: true, productId: purchase.product_id, purchase: publicTonPurchase(purchase) },
+      {
+        ok: true,
+        paid: true,
+        granted: Boolean(grant && grant.granted),
+        productId: purchase.product_id,
+        purchase: publicTonPurchase(purchase),
+        grant,
+        state: grant && grant.state || null,
+        stateRev: grant && grant.stateRev || null,
+        updatedAt: grant && grant.updatedAt || null,
+      },
       200,
       { 'cache-control': 'no-store' },
     );
@@ -112,14 +124,20 @@ export async function onRequestPost({ request, env }) {
     },
   });
   const saved = Array.isArray(rows) && rows.length ? rows[0] : null;
+  const grant = await applyPurchaseGrant(env, game, auth.user.id, purchase.product_id, payload);
 
   return json(
     {
       ok: true,
       paid: true,
+      granted: Boolean(grant && grant.granted),
       productId: purchase.product_id,
       txHash: payment.hash || null,
       purchase: publicTonPurchase(saved || purchase),
+      grant,
+      state: grant && grant.state || null,
+      stateRev: grant && grant.stateRev || null,
+      updatedAt: grant && grant.updatedAt || null,
     },
     200,
     { 'cache-control': 'no-store' },
