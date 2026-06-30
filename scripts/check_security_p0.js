@@ -565,6 +565,8 @@ function testPublicDomSinksAvoidCatalogHtml() {
 
   const tgStarfall = fs.readFileSync(path.join(GALLERY, 'tg-starfall/index.html'), 'utf8');
   assert(!/innerHTML/.test(tgStarfall), 'Starfall Telegram shop still uses innerHTML');
+  assert(!/outerHTML/.test(tgStarfall), 'Starfall Telegram app still uses outerHTML');
+  assert(!/insertAdjacentHTML/.test(tgStarfall), 'Starfall Telegram app still uses insertAdjacentHTML');
   assert(!/document\.write/.test(tgStarfall), 'Starfall Telegram app still uses document.write');
   assert(!/\son[a-z]+\s*=/.test(tgStarfall), 'Starfall Telegram app still uses inline event handler HTML');
   assert(!/function\s+esc\s*\(/.test(tgStarfall), 'Starfall Telegram app still keeps an HTML escaping helper');
@@ -573,6 +575,8 @@ function testPublicDomSinksAvoidCatalogHtml() {
 
   const hallmark = fs.readFileSync(path.join(GALLERY, 'proto-hallmark.html'), 'utf8');
   assert(!/innerHTML/.test(hallmark), 'Hallmark prototype still uses innerHTML');
+  assert(!/outerHTML/.test(hallmark), 'Hallmark prototype still uses outerHTML');
+  assert(!/insertAdjacentHTML/.test(hallmark), 'Hallmark prototype still uses insertAdjacentHTML');
   assert(!/document\.write/.test(hallmark), 'Hallmark prototype still uses document.write');
   assert(/function\s+safeSlug/.test(hallmark), 'Hallmark prototype does not validate manifest slugs');
   assert(/thumb\.href\s*=\s*'\/play\.html\?slug='\s*\+\s*encodeURIComponent\(slug\)/.test(hallmark), 'Hallmark prototype play link does not encode slug');
@@ -581,10 +585,23 @@ function testPublicDomSinksAvoidCatalogHtml() {
 
   const vibe = fs.readFileSync(path.join(GALLERY, 'vibe.js'), 'utf8');
   assert(!/innerHTML/.test(vibe), 'Vibe creator page still uses innerHTML');
+  assert(!/outerHTML/.test(vibe), 'Vibe creator page still uses outerHTML');
+  assert(!/insertAdjacentHTML/.test(vibe), 'Vibe creator page still uses insertAdjacentHTML');
   assert(!/document\.write/.test(vibe), 'Vibe creator page still uses document.write');
   assert(/els\.statsGrid\.replaceChildren\(fragment\)/.test(vibe), 'Vibe creator stats do not render via DOM replacement');
   assert(/els\.frameWrap\.replaceChildren\(\)/.test(vibe), 'Vibe creator frame wrapper does not clear via DOM replacement');
   assert(/els\.list\.replaceChildren\(\)/.test(vibe), 'Vibe creator list does not clear via DOM replacement');
+
+  const creatorAdmin = fs.readFileSync(path.join(GALLERY, 'creator-admin.html'), 'utf8');
+  assert(!/innerHTML/.test(creatorAdmin), 'Creator admin still uses innerHTML');
+  assert(!/outerHTML/.test(creatorAdmin), 'Creator admin still uses outerHTML');
+  assert(!/insertAdjacentHTML/.test(creatorAdmin), 'Creator admin still uses insertAdjacentHTML');
+  assert(!/document\.write/.test(creatorAdmin), 'Creator admin still uses document.write');
+  assert(!/function\s+esc\s*\(/.test(creatorAdmin), 'Creator admin still keeps an HTML escaping helper');
+  assert(/<template\s+id="adminShellTemplate"/.test(creatorAdmin), 'Creator admin shell is not static template based');
+  assert(/app\.replaceChildren\(template\.content\.cloneNode\(true\)\)/.test(creatorAdmin), 'Creator admin shell does not render via DOM replacement');
+  assert(/els\.history\.replaceChildren\(fragment\)/.test(creatorAdmin), 'Creator admin history does not render via DOM replacement');
+  assert(/els\.levelSelect\.replaceChildren\(fragment\)/.test(creatorAdmin), 'Creator admin level select does not render via DOM replacement');
 }
 
 function testNoCommittedPostHogToken() {
