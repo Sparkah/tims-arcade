@@ -6,17 +6,19 @@
 // once the server-side claim endpoint ships (and the game's tg.js PAYMENTS_ENABLED is flipped in lockstep).
 window.BLOODTREAD_SHOP_ENABLED = false;
 
-// AdsGram rewarded block for Bloodtread. PLACEHOLDER: ad blocks are per-app, so create a NEW AdsGram block
-// for the Bloodtread Mini App and paste its id here (Megaton's block is a different app). Blank = ads no-op
-// (the revive falls back to an instant revive) until set.
-window.BLOODTREAD_ADSGRAM_BLOCK_ID = "";
+// AdsGram rewarded block for Bloodtread (LIVE, production, Tim 2026-06-30). Rewarded-only: powers the
+// revive prompt + the daily-crate rewarded prompt (input.js -> window.__tg.showAd('rewarded')). Its own
+// block, separate from Megaton's 36240. Test override still works via ?adsgram=<blockId>.
+window.BLOODTREAD_ADSGRAM_BLOCK_ID = "36740";
 try {
   var _adsgramTestBlock = (location.search.match(/[?&]adsgram=([0-9]+)/) || [])[1];
   if (_adsgramTestBlock) window.BLOODTREAD_ADSGRAM_BLOCK_ID = _adsgramTestBlock;
 } catch (e) {}
 
-// Monetag Telegram Mini App zone. PLACEHOLDER: create a separate Monetag zone for the Bloodtread Mini App
-// (separate app = separate zone for clean fill/reporting/payouts) and paste the zone id + SDK src here.
+// Monetag INTENTIONALLY OFF (Tim 2026-06-30: "no interstitial ads for now"). Blank zone => the Monetag SDK
+// never loads (loader is gated on zone+src) and the interstitial path no-ops; the game never requests
+// interstitials anyway, and rewarded ads run through AdsGram above. To enable later, paste a NEW Bloodtread
+// zone id here (do NOT reuse Megaton's 11200728).
 window.BLOODTREAD_MONETAG_ZONE_ID = "";
 window.BLOODTREAD_MONETAG_SDK_SRC = "https://libtl.com/sdk.js";
 window.BLOODTREAD_MONETAG_INAPP_SETTINGS = {
