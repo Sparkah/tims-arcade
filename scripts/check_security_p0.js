@@ -548,6 +548,20 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(/const\s+href\s*=\s*safeExternalHref\(source\s*&&\s*source\.url\)/.test(lab), 'lab source cards do not route source.url through sanitizer');
   assert(/card\.href\s*=\s*href/.test(lab), 'lab source cards do not assign sanitized href');
   assert(/replaceChildren/.test(lab), 'lab genesis page does not render via DOM replacement');
+
+  const tgIndex = fs.readFileSync(path.join(GALLERY, 'tg/index.html'), 'utf8');
+  assert(!/innerHTML/.test(tgIndex), 'Telegram game picker still uses innerHTML');
+  assert(!/document\.write/.test(tgIndex), 'Telegram game picker still uses document.write');
+  assert(!/\son[a-z]+\s*=/.test(tgIndex), 'Telegram game picker still uses inline event handler HTML');
+  assert(/function\s+safeSlug/.test(tgIndex), 'Telegram game picker does not validate manifest slugs');
+  assert(/\^\[a-z0-9_-\]\{1,80\}\$/.test(tgIndex), 'Telegram game picker slug validation does not preserve a length cap');
+  assert(/var\s+bySlug\s*=\s*Object\.create\(null\)/.test(tgIndex), 'Telegram game picker slug index is prototype-pollutable');
+  assert(/hasOwnProperty\.call\(bySlug,\s*slug\)/.test(tgIndex), 'Telegram game picker does not own-check slug lookup');
+  assert(/hasOwnProperty\.call\(tr,\s*slug\)/.test(tgIndex), 'Telegram game picker does not own-check trending lookup');
+  assert(/slug\s*=\s*safeSlug\(slug\)[\s\S]{0,140}var\s+g\s*=\s*gameForSlug\(slug\)/.test(tgIndex), 'Telegram openGame does not validate slugs at the sink');
+  assert(/iframe\.src\s*=\s*'\/games\/'\s*\+\s*encodeURIComponent\(slug\)\s*\+\s*'\/index\.html'/.test(tgIndex), 'Telegram game iframe path does not encode slug');
+  assert(/function\s+route\(\)\s*\{[\s\S]{0,360}slug\s*=\s*safeSlug\(slug\)[\s\S]{0,120}gameForSlug\(slug\)/.test(tgIndex), 'Telegram route does not validate slugs before lookup');
+  assert(/grid\.replaceChildren/.test(tgIndex), 'Telegram game picker does not render via DOM replacement');
 }
 
 function testNoCommittedPostHogToken() {
