@@ -11,7 +11,7 @@ const fs = require('fs');
 const childProcess = require('child_process');
 const { pathToFileURL } = require('url');
 
-const GALLERY = path.resolve(__dirname, '..');
+const GALLERY = path.resolve(process.env.GALLERY_ROOT || path.resolve(__dirname, '..'));
 
 function makeKv(initial = {}) {
   const store = new Map(Object.entries(initial));
@@ -539,6 +539,15 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(!/function\s+esc\s*\(/.test(creator), 'creator dashboard still uses an HTML escaping helper');
   assert(!/el\.innerHTML\s*=\s*d\.games\.map\(card\)\.join/.test(creator), 'creator dashboard renders creator games with innerHTML');
   assert(!/innerHTML/.test(creator), 'creator dashboard still uses innerHTML');
+
+  const lab = fs.readFileSync(path.join(GALLERY, 'lab.html'), 'utf8');
+  assert(!/innerHTML/.test(lab), 'lab genesis page still uses innerHTML');
+  assert(/function\s+safeExternalHref/.test(lab), 'lab genesis page does not validate external source link schemes');
+  assert(/url\.protocol\s*===\s*'http:'/.test(lab), 'lab source href sanitizer does not allowlist http protocol');
+  assert(/url\.protocol\s*===\s*'https:'/.test(lab), 'lab source href sanitizer does not allowlist https protocol');
+  assert(/const\s+href\s*=\s*safeExternalHref\(source\s*&&\s*source\.url\)/.test(lab), 'lab source cards do not route source.url through sanitizer');
+  assert(/card\.href\s*=\s*href/.test(lab), 'lab source cards do not assign sanitized href');
+  assert(/replaceChildren/.test(lab), 'lab genesis page does not render via DOM replacement');
 }
 
 function testNoCommittedPostHogToken() {
