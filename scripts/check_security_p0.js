@@ -621,6 +621,13 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(/sel\.replaceChildren\(\)/.test(retentionPanel), 'admin disabled level funnel select does not clear via DOM replacement');
   assert(/el\.replaceChildren\(fragment\)/.test(retentionPanel), 'admin retention panel does not render via DOM replacement');
 
+  const adminShell = adminSection('function showLogin', 'async function loadRetention', 'admin login/load/meta shell');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(adminShell), 'admin login/load/meta shell still uses dangerous HTML sinks');
+  assert(/err\.textContent\s*=\s*String\(message\)/.test(adminShell), 'admin login error does not render with textContent');
+  assert(/content\.replaceChildren\(wrap\)/.test(adminShell), 'admin login form does not render via DOM replacement');
+  assert(/content\.replaceChildren\(node\)/.test(adminShell), 'admin content messages do not render via DOM replacement');
+  assert(/meta\.replaceChildren\(/.test(adminShell), 'admin meta does not render via DOM replacement');
+
   const leastAttentionPanel = adminSection('async function loadLeastAttention', 'async function loadUserDigests', 'admin least-attention panel');
   assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(leastAttentionPanel), 'admin least-attention panel still uses dangerous HTML sinks');
   assert(/title\.textContent\s*=/.test(leastAttentionPanel), 'admin least-attention titles do not render with textContent');
