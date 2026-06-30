@@ -1,7 +1,7 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { getProduct, parsePaymentPayload } from '../_lib/tgProducts.js';
 import { applyPurchaseGrant } from '../_lib/tgGrants.js';
-import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
+import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
 import {
   getTelegramPurchase,
   recordTelegramPurchase,
@@ -90,7 +90,9 @@ async function recordFromBot(request, env, body) {
 }
 
 async function claimFromClient(body, env) {
-  const auth = await verifyTelegramInitData(body.initData, env.TELEGRAM_GAMEBOT_TOKEN);
+  // Accept BOTH bot tokens (prod + test) via verifyTelegramInitDataFromEnv so a purchase claim works whichever
+  // bot launched the mini app; the receipt row is keyed by user+payload regardless of bot.
+  const auth = await verifyTelegramInitDataFromEnv(body.initData, env);
   if (!auth.ok) return jsonError(`Telegram auth failed: ${auth.error}`, 401);
 
   const parsed = parsePaymentPayload(body.payload);

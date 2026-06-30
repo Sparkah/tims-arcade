@@ -1,6 +1,6 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
-import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
+import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
 import {
   getTelegramState,
   supabaseIsConfigured,
@@ -60,7 +60,9 @@ export async function onRequestPost({ request, env }) {
   const game = String(body.game || '');
   if (!validateGame(game)) return jsonError('Unknown game', 400);
 
-  const auth = await verifyTelegramInitData(body.initData, env.TELEGRAM_GAMEBOT_TOKEN);
+  // Accept BOTH the prod and test bot tokens (verifyTelegramInitDataFromEnv tries each): the mini app can be
+  // launched by @gamesfactorybot or @gamesfactorytestbot, and the same Supabase save/grant state is shared.
+  const auth = await verifyTelegramInitDataFromEnv(body.initData, env);
   if (!auth.ok) return jsonError(`Telegram auth failed: ${auth.error}`, 401);
 
   await upsertTelegramPlayer(env, auth.user, action === 'load' ? sourceMeta(body, auth) : {});
