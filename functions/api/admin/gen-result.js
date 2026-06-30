@@ -1,4 +1,4 @@
-// POST /api/admin/gen-result   (auth: X-Admin-Token header == env.ADMIN_TOKEN)
+// POST /api/admin/gen-result   (auth: X-Relay-Token header == env.GAME_FACTORY_RELAY_TOKEN)
 // The vibe-relay posts build outcomes here. Three actions via "status":
 //   building -> claim a pending job (so a relay restart won't double-build it)
 //   ready    -> store the generated HTML, mark ready, surface it in the creator's
@@ -10,7 +10,7 @@
 
 import { json, jsonError } from '../../_lib/response.js';
 import { refundTokens } from '../../_lib/meta.js';
-import { requireAdmin } from '../../_lib/adminAuth.js';
+import { requireRelay } from '../../_lib/adminAuth.js';
 import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
 import { extractEmbeddedLevelSeed, seedCreationLevelsFromHtml } from '../../_lib/creationLevels.js';
@@ -24,7 +24,7 @@ const QUEUE_MAX_MS = 5 * 24 * 60 * 60 * 1000;   // keep retrying for up to 5 day
 const MAX_ATTEMPTS = 30;                         // safety cap so a truly-unbuildable prompt can't loop forever
 
 export async function onRequestPost({ request, env }) {
-  const guard = await requireAdmin(request, env);
+  const guard = await requireRelay(request, env);
   if (guard) return guard;
 
   let body;

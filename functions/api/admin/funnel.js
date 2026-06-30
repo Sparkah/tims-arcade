@@ -1,7 +1,7 @@
-// GET /api/admin/funnel?token=<ADMIN_TOKEN>[&slug=<s>][&from=YYYY-MM-DD][&to=YYYY-MM-DD]
+// GET /api/admin/funnel[?slug=<s>][&from=YYYY-MM-DD][&to=YYYY-MM-DD]
 //
-// First-60-seconds funnel read side (WS-J). Token-gated against env.ADMIN_TOKEN
-// exactly like cohorts.js. Reads the fnl:<slug>:<date>:<sid> keys written by
+// First-60-seconds funnel read side (WS-J). Admin-gated exactly like cohorts.js.
+// Reads the fnl:<slug>:<date>:<sid> keys written by
 // /api/funnel and computes, at READ time (cohort.js architecture):
 //   per slug:
 //     steps - the 5 standard events in funnel order
@@ -21,6 +21,7 @@
 import { jsonError } from '../../_lib/response.js';
 import { isValidSlug } from '../../_lib/validate.js';
 import { edgeCached } from '../../_lib/edgecache.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 const STANDARD = ['boot', 'first_input', 'alive_60', 'alive_120', 'alive_300'];
 const DAY = 86400000;
@@ -45,10 +46,8 @@ export async function onRequestGet(ctx) {
 
 async function handleGet({ request, env }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  const expected = env.ADMIN_TOKEN;
-  if (!expected) return jsonError('admin_token_not_configured: set ADMIN_TOKEN in Pages env', 500);
-  if (token !== expected) return jsonError('forbidden', 403);
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
 
   const slugParam = (url.searchParams.get('slug') || '').trim();
   if (slugParam && !isValidSlug(slugParam)) return jsonError('bad slug', 400);

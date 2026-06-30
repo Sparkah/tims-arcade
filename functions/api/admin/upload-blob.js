@@ -1,13 +1,14 @@
-// GET /api/admin/upload-blob?id=<id>&token=<ADMIN_TOKEN>
+// GET /api/admin/upload-blob?id=<id>
 // Returns the raw uploaded zip bytes so the local review/publish pipeline can
 // fetch a pending bundle over HTTP (binary-safe) against local dev or prod.
-// Token-gated; the metadata listing lives in admin/uploads.js.
+// Admin-gated; the metadata listing lives in admin/uploads.js.
+
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN) return err('admin_token_not_configured', 500);
-  if (token !== env.ADMIN_TOKEN) return err('forbidden', 403);
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
 
   const id = (url.searchParams.get('id') || '').replace(/[^a-z0-9]/gi, '');
   if (!id) return err('bad_id', 400);

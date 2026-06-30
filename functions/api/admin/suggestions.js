@@ -1,5 +1,5 @@
-// GET  /api/admin/suggestions?token=<ADMIN_TOKEN>[&days=14]
-// POST /api/admin/suggestions?token=<ADMIN_TOKEN>  body: { id, status, builtSlug? }
+// GET  /api/admin/suggestions[?days=14]
+// POST /api/admin/suggestions  body: { id, status, builtSlug? }
 //
 // Admin-only view of player suggestions captured via /api/suggest. Returns
 // the most recent N days, newest first. POST marks a suggestion as
@@ -13,14 +13,14 @@
 // by the dashboard + the 09:15 leader. See Knowledge/Learnings/KV List Budget.
 
 import { edgeCached } from '../../_lib/edgecache.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 const MAX_DAYS = 30;
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
-  if (token !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
 
   const days = Math.min(parseInt(url.searchParams.get('days') || '14') || 14, MAX_DAYS);
   const statusFilter = url.searchParams.get('status') || ''; // optional: new|built|dismissed
@@ -61,10 +61,8 @@ async function buildSuggestions(env, days, statusFilter) {
 }
 
 export async function onRequestPost({ request, env }) {
-  const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
-  if (token !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
 
   let body;
   try { body = await request.json(); } catch { return jsonError('invalid_json', 400); }

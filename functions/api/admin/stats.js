@@ -1,11 +1,12 @@
-// GET /api/admin/stats?token=<ADMIN_TOKEN>
+// GET /api/admin/stats
 //
-// Returns aggregate stats for the admin dashboard. Token-gated against the
-// ADMIN_TOKEN env var (configured in CF Pages dashboard → Settings → Environment
-// variables → Production).
+// Returns aggregate stats for the admin dashboard. Human admin auth is an
+// allowed signed-in email session (ADMIN_EMAILS) or the local password-cookie
+// fallback when no allowlist is configured.
 
 import { computeEngagement } from '../../_lib/engagement.js';
 import { edgeCached } from '../../_lib/edgecache.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 //
 // Response shape:
@@ -21,23 +22,15 @@ import { edgeCached } from '../../_lib/edgecache.js';
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-
-  const expected = env.ADMIN_TOKEN;
-  if (!expected) {
-    return jsonError('admin_token_not_configured: set ADMIN_TOKEN env var in Pages dashboard', 500);
-  }
-  if (token !== expected) {
-    return jsonError('forbidden', 403);
-  }
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
 
   // Server-side cache via _lib/edgecache.js (does NOT count against KV ops).
-  // Token-keyed so a leaked token doesn't poison the cache for the real one.
   // 5-minute TTL — admin views see data ≤5 min stale; cuts KV walks by ~60x
   // when the dashboard is reloaded or hit by eligibility_check.sh.
   // Pass `?nocache=1` on the URL to force-refresh.
   const noCache = url.searchParams.get('nocache') === '1';
-  return edgeCached(`/admin-stats?t=${token}`, { bypass: noCache },
+  return edgeCached('/admin-stats', { bypass: noCache },
     () => buildStats(env));
 }
 

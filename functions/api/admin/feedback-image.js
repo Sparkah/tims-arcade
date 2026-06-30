@@ -1,16 +1,16 @@
-// GET /api/admin/feedback-image?token=<ADMIN_TOKEN>&slug=<slug>&id=<id>
+// GET /api/admin/feedback-image?slug=<slug>&id=<id>
 // Returns the binary image attached to a player comment.
 //
 // Admin-only — players see comments via /api/comments which strips
 // imageId (images aren't surfaced in the public comments panel).
 
-export async function onRequestGet({ request, env }) {
-  const url = new URL(request.url);
-  const token = url.searchParams.get('token') || '';
-  if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
-    return new Response('forbidden', { status: 403 });
-  }
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
+export async function onRequestGet({ request, env }) {
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
+
+  const url = new URL(request.url);
   const slug = url.searchParams.get('slug') || '';
   const id   = url.searchParams.get('id') || '';
   if (!/^[a-z0-9_-]{1,40}$/i.test(slug)) return new Response('bad_slug', { status: 400 });

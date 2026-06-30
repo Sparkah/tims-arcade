@@ -1,10 +1,10 @@
-// GET /api/admin/user-digests?token=<ADMIN_TOKEN>[&nocache=1]
+// GET /api/admin/user-digests[?nocache=1]
 //
 // Pulls each known PostHog Person + their recent events, then asks Claude
 // (via Workers AI) to summarize each into a short profile: who they look
 // like, what they engaged with, what to build for them.
 //
-// Auth: same ADMIN_TOKEN gate as /api/admin/stats.
+// Auth: same admin gate as /api/admin/stats.
 //
 // Cache: 1 hour (Cloudflare Cache API, doesn't hit KV). PostHog API has
 // rate limits and Claude calls have $$ — caching at 1h means the panel can
@@ -32,18 +32,19 @@
 
 const POSTHOG_HOST = "https://eu.posthog.com";
 
+import { requireAdmin } from '../../_lib/adminAuth.js';
+
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
 
-  if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
-  if (token !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
   if (!env.POSTHOG_PERSONAL_KEY) return jsonError('posthog_personal_key_not_configured', 500);
   if (!env.PUBLIC_POSTHOG_KEY) return jsonError('public_posthog_key_not_configured', 500);
 
   // ── 1-hour edge cache, token-keyed ───────────────────────────────────
   const cache = caches.default;
-  const cacheKey = new Request(`https://cache.tims-arcade/admin-user-digests?t=${token}`, { method: 'GET' });
+  const cacheKey = new Request('https://cache.tims-arcade/admin-user-digests', { method: 'GET' });
   const noCache = url.searchParams.get('nocache') === '1';
   if (!noCache) {
     const cached = await cache.match(cacheKey);

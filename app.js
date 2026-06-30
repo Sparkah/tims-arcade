@@ -525,15 +525,23 @@ function renderGenres() {
   }
   // Hide row if there's only one genre — filter is meaningless
   const distinct = Object.keys(counts).filter(k => k !== 'all');
-  if (distinct.length <= 1) { genres.innerHTML = ''; return; }
+  if (distinct.length <= 1) { genres.replaceChildren(); return; }
 
   // Order: all first, then by frequency desc
   const ordered = ['all', ...distinct.sort((a, b) => counts[b] - counts[a])];
-  genres.innerHTML = ordered.map(g => `
-    <button class="genre ${g === activeGenre ? 'active' : ''}" data-genre="${g}">
-      ${g === 'all' ? 'All genres' : g}<span class="count">${counts[g]}</span>
-    </button>
-  `).join('');
+  const frag = document.createDocumentFragment();
+  for (const g of ordered) {
+    const btn = document.createElement('button');
+    btn.className = `genre ${g === activeGenre ? 'active' : ''}`;
+    btn.dataset.genre = g;
+    btn.appendChild(document.createTextNode(g === 'all' ? 'All genres' : g));
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = counts[g];
+    btn.appendChild(count);
+    frag.appendChild(btn);
+  }
+  genres.replaceChildren(frag);
 }
 
 // ── Filtering / sorting ───────────────────────────────────────────────────
@@ -920,11 +928,6 @@ function renderFeatured() {
   const minutes = Math.round((c.seconds || 0) / 60);
   const playUrl = `/play.html?slug=${encodeURIComponent(game.slug)}`;
 
-  // image-set() lets the browser pick WebP when supported and fall back
-  // to PNG otherwise — same trick <picture> uses for the grid thumbs,
-  // but expressed as a CSS background since hero is a tinted block, not
-  // a content image.
-  const heroBg = `image-set(url('/thumbs/${game.slug}.webp?v=2') type('image/webp'), url('/thumbs/${game.slug}.png?v=2') type('image/png'))`;
   // Badge: if today's daily-featured slug (2× tokens) matches the hero
   // pick, surface the FEATURED TODAY marker right here instead of running
   // a duplicate banner up top. Otherwise fall back to the generic
@@ -934,24 +937,52 @@ function renderFeatured() {
     ? '⭐ FEATURED TODAY · 2× TOKENS'
     : (topScore > 0 ? '🔥 Trending' : '✨ Featured');
   const badgeClass = isFeaturedToday ? 'hero-badge hero-badge-featured' : 'hero-badge';
-  featured.innerHTML = `
-    <article class="hero">
-      <div class="hero-thumb" style="background-image: -webkit-${heroBg}; background-image: ${heroBg};"></div>
-      <div class="hero-content">
-        <div class="${badgeClass}">${badgeText}</div>
-        <h2 class="hero-title"></h2>
-        <p class="hero-hook"></p>
-        <div class="hero-stats">
-          <span>👍 ${c.likes || 0}</span>
-          <span>▶ ${c.plays || 0}</span>
-          ${minutes > 0 ? `<span>⏱ ${minutes}m total play</span>` : ''}
-        </div>
-        <a class="hero-cta" href="${playUrl}">▶ Play featured game</a>
-      </div>
-    </article>
-  `;
-  featured.querySelector('.hero-title').textContent = gameTitle(game);
-  featured.querySelector('.hero-hook').textContent  = gameHook(game);
+  featured.textContent = '';
+
+  const hero = document.createElement('article');
+  hero.className = 'hero';
+  const thumb = document.createElement('div');
+  thumb.className = 'hero-thumb';
+  const heroBg = imageSetBackground(game.slug);
+  thumb.style.backgroundImage = `-webkit-${heroBg}`;
+  thumb.style.backgroundImage = heroBg;
+
+  const content = document.createElement('div');
+  content.className = 'hero-content';
+  const badge = document.createElement('div');
+  badge.className = badgeClass;
+  badge.textContent = badgeText;
+  const title = document.createElement('h2');
+  title.className = 'hero-title';
+  title.textContent = gameTitle(game);
+  const hook = document.createElement('p');
+  hook.className = 'hero-hook';
+  hook.textContent = gameHook(game);
+  const stats = document.createElement('div');
+  stats.className = 'hero-stats';
+  for (const label of [`👍 ${c.likes || 0}`, `▶ ${c.plays || 0}`]) {
+    const span = document.createElement('span');
+    span.textContent = label;
+    stats.appendChild(span);
+  }
+  if (minutes > 0) {
+    const span = document.createElement('span');
+    span.textContent = `⏱ ${minutes}m total play`;
+    stats.appendChild(span);
+  }
+  const cta = document.createElement('a');
+  cta.className = 'hero-cta';
+  cta.href = playUrl;
+  cta.textContent = '▶ Play featured game';
+
+  content.appendChild(badge);
+  content.appendChild(title);
+  content.appendChild(hook);
+  content.appendChild(stats);
+  content.appendChild(cta);
+  hero.appendChild(thumb);
+  hero.appendChild(content);
+  featured.appendChild(hero);
   featured.classList.remove('hidden');
   return game.slug;
 }
@@ -1040,18 +1071,83 @@ function pickVariant(slug, thumbCount) {
 }
 
 function thumbUrl(slug, variant) {
+  const safeSlug = encodeURIComponent(String(slug || ''));
   return variant > 1
-    ? `/thumbs/${slug}__v${variant}.png?v=2`
-    : `/thumbs/${slug}.png?v=2`;
+    ? `/thumbs/${safeSlug}__v${variant}.png?v=2`
+    : `/thumbs/${safeSlug}.png?v=2`;
 }
 
 // Sibling WebP path. build_webp_thumbs.sh emits one .webp per .png in
 // Gallery/thumbs/, served via <picture><source type="image/webp"> with the
 // PNG as fallback for the ~3% of browsers that don't support WebP.
 function thumbWebpUrl(slug, variant) {
+  const safeSlug = encodeURIComponent(String(slug || ''));
   return variant > 1
-    ? `/thumbs/${slug}__v${variant}.webp?v=2`
-    : `/thumbs/${slug}.webp?v=2`;
+    ? `/thumbs/${safeSlug}__v${variant}.webp?v=2`
+    : `/thumbs/${safeSlug}.webp?v=2`;
+}
+
+function encodedThumbUrl(slug, ext) {
+  return `/thumbs/${encodeURIComponent(String(slug || ''))}.${ext}?v=2`;
+}
+
+function imageSetBackground(slug) {
+  const webp = encodedThumbUrl(slug, 'webp');
+  const png = encodedThumbUrl(slug, 'png');
+  return `image-set(url("${webp}") type("image/webp"), url("${png}") type("image/png"))`;
+}
+
+function safeExternalHref(raw) {
+  if (!raw) return '';
+  const value = String(raw).trim();
+  if (!/^https:\/\//i.test(value)) return '';
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' ? url.href : '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function platformEntries(platforms) {
+  if (!platforms) return [];
+  const specs = [
+    { key: 'yandex', label: 'Yandex', badge: 'Yandex' },
+    { key: 'crazygames', label: 'CrazyGames', badge: 'CG' },
+  ];
+  const out = [];
+  for (const spec of specs) {
+    const href = safeExternalHref(platforms[spec.key]);
+    if (href) out.push(Object.assign({ href }, spec));
+  }
+  return out;
+}
+
+function appendPlatformLinks(parent, entries) {
+  for (const entry of entries) {
+    const link = document.createElement('a');
+    link.className = 'play-link ext';
+    link.href = entry.href;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.dataset.plat = entry.key;
+    link.textContent = `▶ ${entry.label}`;
+    parent.appendChild(link);
+  }
+}
+
+function makeVoteButton(kind, active, icon, label, value) {
+  const btn = document.createElement('button');
+  btn.className = `vote ${kind}${active ? ' active' : ''}`;
+  btn.dataset.action = kind;
+  btn.type = 'button';
+  btn.setAttribute('aria-label', label);
+  btn.appendChild(document.createTextNode(`${icon} `));
+  const num = document.createElement('span');
+  num.className = 'num';
+  num.textContent = value || 0;
+  btn.appendChild(num);
+  return btn;
 }
 
 function card(g, opts) {
@@ -1068,51 +1164,12 @@ function card(g, opts) {
   // Yandex + CrazyGames) aren't hosted locally — the card links straight out.
   // `platforms` may also decorate a normal local game as "also on …" chips.
   const platforms = g.platforms || null;
+  const platformsSafe = platformEntries(platforms);
   const isExternal = !!g.external;
-  const platChips = (() => {
-    if (!platforms) return '';
-    let s = '';
-    if (platforms.yandex)     s += `<a class="play-link ext" href="${platforms.yandex}" target="_blank" rel="noopener" data-plat="yandex">▶ Yandex</a>`;
-    if (platforms.crazygames) s += `<a class="play-link ext" href="${platforms.crazygames}" target="_blank" rel="noopener" data-plat="crazygames">▶ CrazyGames</a>`;
-    return s;
-  })();
-  const primaryExtUrl = platforms ? (platforms.yandex || platforms.crazygames || null) : null;
+  const primaryExtUrl = platformsSafe.length ? platformsSafe[0].href : null;
   // Badge text reflects the ACTUAL platforms this game links to — never hardcode
   // "Yandex / CG" (a Yandex-only game must not claim CG, and vice versa).
-  const platLabel = platforms
-    ? Object.keys(platforms).map(k => k === 'crazygames' ? 'CG' : (k.charAt(0).toUpperCase() + k.slice(1))).join(' / ')
-    : '';
-  const footHtml = isExternal
-    ? `<div class="card-foot ext-foot"><span class="ext-label">Play on</span>${platChips}</div>`
-    : `<div class="card-foot">
-        <button class="vote like ${myVote === 'like' ? 'active' : ''}" data-action="like" aria-label="Like">
-          👍 <span class="num">${c.likes || 0}</span>
-        </button>
-        <button class="vote dislike ${myVote === 'dislike' ? 'active' : ''}" data-action="dislike" aria-label="Dislike">
-          👎 <span class="num">${c.dislikes || 0}</span>
-        </button>
-        <button class="vote comments-open" data-action="comments" aria-label="Read & leave comments">
-          💬 <span class="num">${c.comments || 0}</span>
-        </button>
-        <a class="play-link" href="${playUrl}">▶ Play</a>${platChips}
-      </div>`;
-
-  // Eager (above-the-fold) cards get the inline autoplay video right away.
-  // Lazy cards get a slot div the IntersectionObserver upgrades to a real
-  // <video> when the card scrolls into view — keeps initial bandwidth small.
-  // opts.noVideo skips previews entirely (gems shelf: static thumbs only,
-  // its cards live outside #grid so the observer never hydrates them).
-  let mediaInner = '';
-  if (g.hasPreview && !opts.noVideo) {
-    if (opts.eager) {
-      mediaInner = `<video class="card-video" src="/previews/${g.slug}.webm" poster="${thumb}"
-                          autoplay loop muted playsinline preload="metadata" aria-hidden="true"></video>`;
-    } else {
-      mediaInner = `<div class="card-video-slot"
-                         data-src="/previews/${g.slug}.webm"
-                         data-poster="${thumb}"></div>`;
-    }
-  }
+  const platLabel = platformsSafe.map(p => p.badge).join(' / ');
 
   // Native lazy-loading + fetchpriority lets the browser sequence requests:
   // first 2 cards = high priority + eager fetch; next 2 = eager but normal;
@@ -1122,39 +1179,132 @@ function card(g, opts) {
   const imgLoading  = opts.eager ? 'eager' : 'lazy';
   const imgPriority = opts.priority ? 'high' : (opts.eager ? 'auto' : 'low');
   const imgDecoding = opts.eager ? 'sync' : 'async';
-  const imgTag = `<picture>
-                    <source srcset="${thumbWebp}" type="image/webp">
-                    <img class="card-thumb-img" src="${thumb}" alt=""
-                         loading="${imgLoading}" fetchpriority="${imgPriority}"
-                         decoding="${imgDecoding}">
-                  </picture>`;
 
   const el = document.createElement('article');
   el.className = 'card';
   el.dataset.variant = variant;
   if (!opts.eager) el.dataset.lazy = '1';
-  el.innerHTML = `
-    <div class="card-thumb" data-num="${specimenNum(g)}">
-      ${imgTag}
-      ${mediaInner}
-      ${isExternal ? `<span class="flagship-badge">★ ${platLabel}</span>` : (isRecent ? '<span class="recent-badge">NEW</span>' : '')}
-      ${(!isExternal && c.plays) ? `<span class="play-count">▶ ${c.plays}</span>` : ''}
-      ${(!isExternal && c.comments) ? `<span class="comment-count">💬 ${c.comments}</span>` : ''}
-      ${isExternal ? '' : `<a class="lab-link" href="/lab.html?slug=${encodeURIComponent(g.slug)}" title="Build journal" aria-label="Open build journal">📓</a>`}
-    </div>
-    <div class="card-body">
-      <div class="card-title"></div>
-      <div class="card-hook"></div>
-      ${footHtml}
-    </div>
-  `;
-  el.querySelector('.card-title').textContent = gameTitle(g);
-  el.querySelector('.card-hook').textContent  = gameHook(g);
+
+  const thumbEl = document.createElement('div');
+  thumbEl.className = 'card-thumb';
+  thumbEl.dataset.num = specimenNum(g);
+
+  const picture = document.createElement('picture');
+  const source = document.createElement('source');
+  source.srcset = thumbWebp;
+  source.type = 'image/webp';
+  const img = document.createElement('img');
+  img.className = 'card-thumb-img';
+  img.src = thumb;
+  img.alt = '';
+  img.loading = imgLoading;
+  img.setAttribute('fetchpriority', imgPriority);
+  img.decoding = imgDecoding;
+  picture.appendChild(source);
+  picture.appendChild(img);
+  thumbEl.appendChild(picture);
+
+  // Eager (above-the-fold) cards get the inline autoplay video right away.
+  // Lazy cards get a slot div the IntersectionObserver upgrades to a real
+  // <video> when the card scrolls into view — keeps initial bandwidth small.
+  // opts.noVideo skips previews entirely (gems shelf: static thumbs only,
+  // its cards live outside #grid so the observer never hydrates them).
+  if (g.hasPreview && !opts.noVideo) {
+    const previewSrc = `/previews/${encodeURIComponent(g.slug)}.webm`;
+    if (opts.eager) {
+      const video = document.createElement('video');
+      video.className = 'card-video';
+      video.src = previewSrc;
+      video.poster = thumb;
+      video.autoplay = true;
+      video.loop = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'metadata';
+      video.setAttribute('aria-hidden', 'true');
+      thumbEl.appendChild(video);
+    } else {
+      const slot = document.createElement('div');
+      slot.className = 'card-video-slot';
+      slot.dataset.src = previewSrc;
+      slot.dataset.poster = thumb;
+      thumbEl.appendChild(slot);
+    }
+  }
+
+  if (isExternal && platLabel) {
+    const badge = document.createElement('span');
+    badge.className = 'flagship-badge';
+    badge.textContent = `★ ${platLabel}`;
+    thumbEl.appendChild(badge);
+  } else if (isRecent) {
+    const badge = document.createElement('span');
+    badge.className = 'recent-badge';
+    badge.textContent = 'NEW';
+    thumbEl.appendChild(badge);
+  }
+
+  if (!isExternal && c.plays) {
+    const plays = document.createElement('span');
+    plays.className = 'play-count';
+    plays.textContent = `▶ ${c.plays}`;
+    thumbEl.appendChild(plays);
+  }
+  if (!isExternal && c.comments) {
+    const comments = document.createElement('span');
+    comments.className = 'comment-count';
+    comments.textContent = `💬 ${c.comments}`;
+    thumbEl.appendChild(comments);
+  }
+  if (!isExternal) {
+    const lab = document.createElement('a');
+    lab.className = 'lab-link';
+    lab.href = `/lab.html?slug=${encodeURIComponent(g.slug)}`;
+    lab.title = 'Build journal';
+    lab.setAttribute('aria-label', 'Open build journal');
+    lab.textContent = '📓';
+    thumbEl.appendChild(lab);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'card-body';
+  const title = document.createElement('div');
+  title.className = 'card-title';
+  title.textContent = gameTitle(g);
+  const hook = document.createElement('div');
+  hook.className = 'card-hook';
+  hook.textContent = gameHook(g);
+  const foot = document.createElement('div');
+  foot.className = isExternal ? 'card-foot ext-foot' : 'card-foot';
+  if (isExternal) {
+    const extLabel = document.createElement('span');
+    extLabel.className = 'ext-label';
+    extLabel.textContent = 'Play on';
+    foot.appendChild(extLabel);
+    appendPlatformLinks(foot, platformsSafe);
+  } else {
+    foot.appendChild(makeVoteButton('like', myVote === 'like', '👍', 'Like', c.likes));
+    foot.appendChild(makeVoteButton('dislike', myVote === 'dislike', '👎', 'Dislike', c.dislikes));
+    const commentBtn = makeVoteButton('comments', false, '💬', 'Read & leave comments', c.comments);
+    commentBtn.classList.add('comments-open');
+    foot.appendChild(commentBtn);
+    const play = document.createElement('a');
+    play.className = 'play-link';
+    play.href = playUrl;
+    play.textContent = '▶ Play';
+    foot.appendChild(play);
+    appendPlatformLinks(foot, platformsSafe);
+  }
+  body.appendChild(title);
+  body.appendChild(hook);
+  body.appendChild(foot);
+  el.appendChild(thumbEl);
+  el.appendChild(body);
 
   function goPlay() {
     if ((g.thumbCount || 1) > 1) logVariantClick(g.slug, variant);
     if (isExternal && primaryExtUrl) {
-      const plat = platforms.yandex ? 'yandex' : 'crazygames';
+      const plat = platformsSafe[0] ? platformsSafe[0].key : null;
       if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'thumbnail_external', platform: plat });
       window.open(primaryExtUrl, '_blank', 'noopener');
       return;

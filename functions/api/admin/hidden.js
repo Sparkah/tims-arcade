@@ -1,8 +1,8 @@
 // Admin: hide / unhide games from the public gallery grid.
-// Token-gated (mirrors functions/api/admin/publish-status.js + stats.js auth).
+// Admin-gated (mirrors functions/api/admin/publish-status.js + stats.js auth).
 //
-//   GET  /api/admin/hidden?token=...                 -> { hidden: [slug,...], count }
-//   POST /api/admin/hidden?token=...  {slug, hide}    -> { hidden:[...], slug, hidden_now, count }
+//   GET  /api/admin/hidden                 -> { hidden: [slug,...], count }
+//   POST /api/admin/hidden  {slug, hide}    -> { hidden:[...], slug, hidden_now, count }
 //        hide defaults to true; pass {hide:false} to unhide.
 //
 // Source of truth = KV key `hidden:set` in the VOTES namespace (same store the
@@ -11,22 +11,13 @@
 
 const KEY = 'hidden:set';
 
+import { requireAdmin } from '../../_lib/adminAuth.js';
+
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { 'content-type': 'application/json', 'cache-control': 'no-store' },
   });
-}
-
-function authFail(request, env) {
-  const url = new URL(request.url);
-  const token =
-    url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN) {
-    return json({ error: 'admin_token_not_configured: set ADMIN_TOKEN in the Pages dashboard' }, 500);
-  }
-  if (token !== env.ADMIN_TOKEN) return json({ error: 'forbidden' }, 403);
-  return null; // authorized
 }
 
 async function readSet(env) {
@@ -36,14 +27,14 @@ async function readSet(env) {
 }
 
 export async function onRequestGet({ request, env }) {
-  const fail = authFail(request, env);
+  const fail = await requireAdmin(request, env);
   if (fail) return fail;
   const hidden = await readSet(env);
   return json({ hidden, count: hidden.length });
 }
 
 export async function onRequestPost({ request, env }) {
-  const fail = authFail(request, env);
+  const fail = await requireAdmin(request, env);
   if (fail) return fail;
 
   let body;

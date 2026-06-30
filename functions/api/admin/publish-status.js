@@ -7,6 +7,7 @@
 // assets, so this internal pipeline state is only reachable WITH the admin
 // token (unlike a public /publish-status.json, which robots.txt can't gate).
 import publishData from "../../_data/publish-status.js";
+import { requireAdmin } from "../../_lib/adminAuth.js";
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -16,14 +17,7 @@ function json(body, status = 200) {
 }
 
 export async function onRequestGet({ request, env }) {
-  const url = new URL(request.url);
-  const token =
-    url.searchParams.get("token") || request.headers.get("x-admin-token") || "";
-  if (!env.ADMIN_TOKEN) {
-    return json({ error: "admin_token_not_configured: set ADMIN_TOKEN in the Pages dashboard" }, 500);
-  }
-  if (token !== env.ADMIN_TOKEN) {
-    return json({ error: "forbidden" }, 403);
-  }
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
   return json(publishData);
 }

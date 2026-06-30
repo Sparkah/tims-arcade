@@ -13,6 +13,7 @@
 // alive past the 24h window by repeated moderation.
 
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 const TAIL = 'chat:lounge:lounge:tail';
 const RETENTION = 24 * 60 * 60;   // match chat.js: 24h rolling window (Tim 2026-06-15)
@@ -26,13 +27,13 @@ async function readPruned(env) {
 }
 
 export async function onRequestGet({ request, env }) {
-  const a = auth(request, env); if (a !== true) return a;
+  const guard = await requireAdmin(request, env); if (guard) return guard;
   const rows = (await readPruned(env)).sort((x, y) => String(x.id).localeCompare(String(y.id)));
   return ns(json({ ok: true, messages: rows }));
 }
 
 export async function onRequestPost({ request, env }) {
-  const a = auth(request, env); if (a !== true) return a;
+  const guard = await requireAdmin(request, env); if (guard) return guard;
   if (!sameOriginOk(request)) return jsonError('forbidden', 403);
 
   let body;
@@ -61,12 +62,5 @@ export async function onRequestPost({ request, env }) {
     return ns(json({ ok: true, [action === 'ban' ? 'banned' : 'unbanned']: ip }));
   }
   return jsonError('bad_action', 400);
-}
-
-function auth(request, env) {
-  const tok = request.headers.get('x-admin-token') || '';   // header-only
-  if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
-  if (tok !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
-  return true;
 }
 function ns(r) { r.headers.set('cache-control', 'no-store'); return r; }

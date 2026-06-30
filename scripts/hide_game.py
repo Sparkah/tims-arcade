@@ -2,7 +2,7 @@
 """Hide / unhide a game from the public gallery grid.
 
 This is the CLI path for "hide game X": it POSTs to the LIVE admin API
-(/api/admin/hidden, token from Gallery/.dev.vars) so the game drops off the
+(/api/admin/hidden, admin token from Gallery/.dev.vars) so the game drops off the
 homepage INSTANTLY (KV-backed, no redeploy), then mirrors the current hidden
 list to Shared/data/hidden-games.json so the factory + digest can treat hidden
 games as a low-quality signal.
@@ -22,7 +22,6 @@ import datetime as dt
 import json
 import os
 import sys
-import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -62,7 +61,7 @@ def read_token() -> str:
 
 
 def call(method: str, token: str, body: dict | None = None) -> dict:
-    url = f"{BASE}/api/admin/hidden?token={urllib.parse.quote(token)}"
+    url = f"{BASE}/api/admin/hidden"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         url, data=data, method=method,

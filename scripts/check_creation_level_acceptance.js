@@ -14,7 +14,7 @@ const GALLERY = path.resolve(__dirname, '..');
 function makeEnv(initial) {
   const store = new Map(Object.entries(initial || {}));
   return {
-    ADMIN_TOKEN: 'test-token',
+    GAME_FACTORY_RELAY_TOKEN: 'test-token',
     store,
     VOTES: {
       async get(key, type) {
@@ -48,7 +48,7 @@ function readyRequest(id, html) {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
-      'x-admin-token': 'test-token',
+      'x-relay-token': 'test-token',
     },
     body: JSON.stringify({ id, status: 'ready', html, title: 'Seeded Game', quality: 'ok' }),
   });

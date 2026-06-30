@@ -1,6 +1,6 @@
-// GET  /api/admin/uploads?token=<ADMIN_TOKEN>[&status=pending|approved|rejected|live]
+// GET  /api/admin/uploads[?status=pending|approved|rejected|live]
 //      -> { uploads[], failures[], counts }
-// POST /api/admin/uploads?token=<ADMIN_TOKEN>  body: { id, action, ... }
+// POST /api/admin/uploads  body: { id, action, ... }
 //      actions: approve | reject(reason) | reset | review(scan/verdict) |
 //               live(sandboxUrl) | reassign(email) | request-review | worker
 //
@@ -18,12 +18,13 @@
 
 import { emailToUid } from '../../_lib/uid.js';
 import { edgeCached } from '../../_lib/edgecache.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 const STATUSES = ['pending', 'approved', 'rejected', 'live'];
 const RECORD_TTL = 60 * 60 * 24 * 45;
 
 export async function onRequestGet({ request, env }) {
-  const guard = auth(request, env);
+  const guard = await requireAdmin(request, env);
   if (guard) return guard;
 
   const url = new URL(request.url);
@@ -83,7 +84,7 @@ async function buildUploads(env, statusFilter) {
 }
 
 export async function onRequestPost({ request, env }) {
-  const guard = auth(request, env);
+  const guard = await requireAdmin(request, env);
   if (guard) return guard;
 
   let body; try { body = await request.json(); } catch { return jsonError('invalid_json', 400); }
@@ -155,13 +156,6 @@ export async function onRequestPost({ request, env }) {
 
   await env.VOTES.put(id, JSON.stringify(row), { expirationTtl: RECORD_TTL });
   return json({ ok: true, status: row.status });
-}
-
-function auth(request, env) {
-  const token = new URL(request.url).searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN) return jsonError('admin_token_not_configured', 500);
-  if (token !== env.ADMIN_TOKEN) return jsonError('forbidden', 403);
-  return null;
 }
 
 async function sendRejectEmail(env, row, reason) {

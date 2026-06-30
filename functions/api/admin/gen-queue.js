@@ -1,18 +1,19 @@
-// GET /api/admin/gen-queue?token=<ADMIN_TOKEN>[&limit=5]
+// GET /api/admin/gen-queue[?limit=5]
 // The vibe-relay (Shared/tools/vibe-relay) polls this to find generation jobs to
 // build. Returns PENDING jobs, plus any stuck in BUILDING longer than STUCK_MS
 // (a relay that crashed mid-build) so they get retried rather than stranded.
-// Oldest-first. Token-gated (mirrors admin/stats.js auth). Read-only. Tim 2026-06-15.
+// Oldest-first. Auth is X-Relay-Token against GAME_FACTORY_RELAY_TOKEN; browser
+// admin sessions do not unlock the build queue. Read-only. Tim 2026-06-15.
 
 import { json } from '../../_lib/response.js';
+import { requireRelay } from '../../_lib/adminAuth.js';
 
 const STUCK_MS = 10 * 60 * 1000;   // a "building" job older than this is presumed dropped
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
-  const token = request.headers.get('x-admin-token') || '';   // header-only (no querystring leak)
-  if (!env.ADMIN_TOKEN) return json({ error: 'admin_token_not_configured' }, 500);
-  if (token !== env.ADMIN_TOKEN) return json({ error: 'forbidden' }, 403);
+  const guard = await requireRelay(request, env);
+  if (guard) return guard;
 
   // Cheap poll path for the vibe-relay (every 15s): return the single
   // genjob:signal value — 1 READ, 0 LIST. The relay only does the full list

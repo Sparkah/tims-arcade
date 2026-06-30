@@ -1,7 +1,7 @@
-// GET /api/admin/cohorts?token=<ADMIN_TOKEN>[&horizons=1,3,7,14,30][&nocache=1]
+// GET /api/admin/cohorts[?horizons=1,3,7,14,30][&nocache=1]
 //
-// Anonymous-cohort D1/D7/... retention for the admin dashboard. Token-gated against
-// env.ADMIN_TOKEN (same as stats.js). Reads the `cohort:<uid>` keys written by the
+// Anonymous-cohort D1/D7/... retention for the admin dashboard. Admin-gated
+// like stats.js. Reads the `cohort:<uid>` keys written by the
 // heartbeat capture (see _lib/cohort.js) and computes Dn per first-seen cohort at
 // read time. READ-ONLY — no KV writes, so no write-budget impact.
 //
@@ -21,22 +21,19 @@
 import { jsonError } from '../../_lib/response.js';
 import { computeCohorts, dateUtc } from '../../_lib/cohort.js';
 import { edgeCached } from '../../_lib/edgecache.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
-  const token = url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  const expected = env.ADMIN_TOKEN;
-  if (!expected) return jsonError('admin_token_not_configured: set ADMIN_TOKEN in Pages env', 500);
-  if (token !== expected) return jsonError('forbidden', 403);
+  const guard = await requireAdmin(request, env);
+  if (guard) return guard;
 
   const horizons = normalizeHorizons(url.searchParams.get('horizons'));
   const bypass = url.searchParams.get('nocache') === '1';
 
   // Auth is verified ABOVE, so the cache is only ever reached by an authorized
-  // caller; with a single ADMIN_TOKEN all callers legitimately share one entry,
-  // so the token is deliberately NOT bound into the key (binding it risks leaking
-  // the secret via logs/error output; Codex review 2026-06-15). Key by the
-  // normalized horizons only.
+  // caller. Do not bind any credential into the key; key by normalized horizons
+  // only.
   return edgeCached(
     `/api-admin-cohorts?z=${horizons.join('.')}`,
     { bypass },

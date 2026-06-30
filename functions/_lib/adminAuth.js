@@ -1,6 +1,7 @@
 import { parseCookie } from './cookie.js';
 import { hmacSha256 } from './crypto.js';
 import { jsonError } from './response.js';
+import { readSession } from '../api/_session.js';
 
 const COOKIE_NAME = 'gf_admin_session';
 const SESSION_SECONDS = 7 * 24 * 60 * 60;
@@ -15,7 +16,6 @@ export function getSessionSecret(env = {}) {
   return env.GAME_FACTORY_ADMIN_SESSION_SECRET
     || env.ADMIN_SESSION_SECRET
     || env.SESSION_SECRET
-    || env.ADMIN_TOKEN
     || '';
 }
 
@@ -31,6 +31,10 @@ export function safeEqual(a, b) {
 export async function passwordMatches(password, env) {
   const configured = getAdminPassword(env);
   return !!configured && safeEqual(String(password || ''), configured);
+}
+
+export function getAdminToken(env = {}) {
+  return env.ADMIN_TOKEN || '';
 }
 
 export async function createAdminCookie(request, env) {
@@ -49,9 +53,53 @@ export function clearAdminCookie(request) {
   return `${COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure}`;
 }
 
+export function adminUrlTokenRejected(request) {
+  const url = new URL(request.url);
+  return url.searchParams.has('token') || url.searchParams.has('admin_token');
+}
+
+export function getAdminEmails(env = {}) {
+  return String(env.ADMIN_EMAILS || env.GAME_FACTORY_ADMIN_EMAILS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export function hasAdminEmailAllowlist(env = {}) {
+  return getAdminEmails(env).length > 0;
+}
+
+export async function isAllowedAdminSession(request, env) {
+  const allowed = getAdminEmails(env);
+  if (!allowed.length) return false;
+  let session;
+  try { session = await readSession(request, env); } catch (_) { return false; }
+  const email = String(session && session.email || '').trim().toLowerCase();
+  if (!email) return false;
+  for (const entry of allowed) {
+    if (safeEqual(email, entry)) return true;
+  }
+  return false;
+}
+
+export function isAdminTokenRequest(request, env) {
+  if (adminUrlTokenRejected(request)) return false;
+  const configured = getAdminToken(env);
+  const supplied = request.headers.get('x-admin-token') || '';
+  return !!configured && !!supplied && safeEqual(supplied, configured);
+}
+
 export async function isAdminRequest(request, env) {
-  const legacyToken = request.headers.get('x-admin-token') || '';
-  if (legacyToken && env.ADMIN_TOKEN && safeEqual(legacyToken, env.ADMIN_TOKEN)) return true;
+  if (adminUrlTokenRejected(request)) return false;
+
+  if (await isAllowedAdminSession(request, env)) return true;
+  if (isAdminTokenRequest(request, env)) return true;
+
+  // Password-issued admin cookies are a local/transitional fallback only. Once
+  // ADMIN_EMAILS is configured, the signed-in email allowlist is the human-admin
+  // gate. Header bearer tokens remain supported for legacy admin pages, but
+  // they are timing-safe and never accepted from URLs.
+  if (hasAdminEmailAllowlist(env)) return false;
 
   const value = parseCookie(request.headers.get('Cookie') || '', COOKIE_NAME);
   if (!value) return false;
@@ -67,6 +115,28 @@ export async function isAdminRequest(request, env) {
 }
 
 export async function requireAdmin(request, env) {
+  if (adminUrlTokenRejected(request)) return jsonError('url_admin_token_rejected', 400);
   if (await isAdminRequest(request, env)) return null;
+  return jsonError('forbidden', 403);
+}
+
+export function getRelayToken(env = {}) {
+  return env.GAME_FACTORY_RELAY_TOKEN || env.RELAY_TOKEN || '';
+}
+
+export async function isRelayRequest(request, env) {
+  if (adminUrlTokenRejected(request)) return false;
+  const configured = getRelayToken(env);
+  const supplied = request.headers.get('x-relay-token') || '';
+  if (configured && supplied && safeEqual(supplied, configured)) return true;
+  return false;
+}
+
+export async function requireRelay(request, env) {
+  if (adminUrlTokenRejected(request)) return jsonError('url_admin_token_rejected', 400);
+  const configured = getRelayToken(env);
+  if (!configured) return jsonError('relay_token_not_configured', 500);
+  const supplied = request.headers.get('x-relay-token') || '';
+  if (supplied && safeEqual(supplied, configured)) return null;
   return jsonError('forbidden', 403);
 }

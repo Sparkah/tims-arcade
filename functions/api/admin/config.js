@@ -1,10 +1,10 @@
 // Admin: write / read / delete per-game remote-config payloads.
-// Token-gated (mirrors functions/api/admin/hidden.js auth).
+// Admin-gated (mirrors functions/api/admin/hidden.js auth).
 //
-//   GET  /api/admin/config?token=...             -> { slugs: [...], count }
-//   GET  /api/admin/config?token=...&slug=<s>    -> { slug, config|null }
-//   POST /api/admin/config?token=... {slug, config}       -> validate + store
-//   POST /api/admin/config?token=... {slug, config: null} -> delete
+//   GET  /api/admin/config             -> { slugs: [...], count }
+//   GET  /api/admin/config?slug=<s>    -> { slug, config|null }
+//   POST /api/admin/config {slug, config}       -> validate + store
+//   POST /api/admin/config {slug, config: null} -> delete
 //
 // Storage: KV key `config:<slug>` in the VOTES namespace; served publicly by
 // GET /api/config?slug=<s> (CORS *) to gf-lib's GF.remoteConfig.
@@ -25,6 +25,7 @@
 // free-tier 1000 writes/day.
 
 import { edgeCached } from '../../_lib/edgecache.js';
+import { requireAdmin } from '../../_lib/adminAuth.js';
 
 const MAX_BYTES = 8192;
 
@@ -65,17 +66,6 @@ function json(body, status = 200) {
   });
 }
 
-function authFail(request, env) {
-  const url = new URL(request.url);
-  const token =
-    url.searchParams.get('token') || request.headers.get('x-admin-token') || '';
-  if (!env.ADMIN_TOKEN) {
-    return json({ error: 'admin_token_not_configured: set ADMIN_TOKEN in the Pages dashboard' }, 500);
-  }
-  if (token !== env.ADMIN_TOKEN) return json({ error: 'forbidden' }, 403);
-  return null; // authorized
-}
-
 function parseSlug(raw) {
   const slug = (typeof raw === 'string') ? raw.trim().toLowerCase() : '';
   return /^[a-z0-9_-]{1,64}$/.test(slug) ? slug : null;
@@ -95,7 +85,7 @@ async function buildConfigSlugs(env) {
 }
 
 export async function onRequestGet({ request, env }) {
-  const fail = authFail(request, env);
+  const fail = await requireAdmin(request, env);
   if (fail) return fail;
   const url = new URL(request.url);
   const rawSlug = url.searchParams.get('slug');
@@ -112,7 +102,7 @@ export async function onRequestGet({ request, env }) {
 }
 
 export async function onRequestPost({ request, env }) {
-  const fail = authFail(request, env);
+  const fail = await requireAdmin(request, env);
   if (fail) return fail;
 
   let body;

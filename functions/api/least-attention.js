@@ -33,15 +33,15 @@
 //
 // Cost: one games.json fetch + the same votes:/plays:/comment: KV walk
 // counts.js does, behind a 5-minute edge cache (_lib/edgecache.js, same
-// pattern as counts/trending/admin-stats). ?nocache=1 forces a recompute but
-// only with a valid ADMIN_TOKEN (?token= or x-admin-token header) - public
-// callers always get the cached path.
+// pattern as counts/trending/admin-stats). ?nocache=1 forces a recompute only
+// for a valid admin request - public callers always get the cached path.
 
 import { edgeCached } from '../_lib/edgecache.js';
+import { isAdminRequest } from '../_lib/adminAuth.js';
 
 const NEW_WINDOW_MS = 48 * 60 * 60 * 1000;
 
-export function onRequestGet({ request, env }) {
+export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit')) || 12));
   // ?nocache=1 forces a full recompute (the expensive KV walk), so it is
@@ -49,8 +49,7 @@ export function onRequestGet({ request, env }) {
   // A wrong/missing token silently falls back to the cached response; the
   // recompute also refreshes the shared cache entry for everyone.
   const noCache = url.searchParams.get('nocache') === '1'
-    && !!env.ADMIN_TOKEN
-    && (url.searchParams.get('token') || request.headers.get('x-admin-token') || '') === env.ADMIN_TOKEN;
+    && await isAdminRequest(request, env);
 
   return edgeCached(`/least-attention?limit=${limit}`, { bypass: noCache },
     () => buildLeastAttention(url, env, limit));
