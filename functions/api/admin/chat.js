@@ -1,14 +1,13 @@
-// Chat moderation (token-gated). Tim 2026-06-15.
-//   GET  /api/admin/chat   (header X-Admin-Token)     -> recent lounge messages WITH poster IPs
-//   POST /api/admin/chat   (header X-Admin-Token, same-origin) {action}:
+// Chat moderation (admin-session gated). Tim 2026-06-15.
+//   GET  /api/admin/chat   -> recent lounge messages WITH poster IPs
+//   POST /api/admin/chat   (same-origin) {action}:
 //      clear            -> wipe all messages
 //      delete  {id}     -> remove one message
 //      ban     {ip}     -> block an IP from posting (90-day TTL)
 //      unban   {ip}     -> lift a ban
 // UI: /chat-mod (chat-mod.html).
 //
-// Auth is HEADER-ONLY (no ?token= -> no querystring leak to logs/history) and POST
-// is same-origin only (Codex review 2026-06-15). Reads/deletes PRUNE rows older
+// Auth rejects querystring bearer tokens and POST is same-origin only. Reads/deletes PRUNE rows older
 // than RETENTION and never extend a non-edit's TTL, so poster IPs can't be kept
 // alive past the 24h window by repeated moderation.
 

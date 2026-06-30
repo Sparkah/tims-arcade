@@ -106,15 +106,39 @@ function testNoDirectAdminTokenComparisons() {
   }
 }
 
+function testAdminRoutesUseCentralGuard() {
+  const adminDir = path.join(GALLERY, 'functions/api/admin');
+  const files = fs.readdirSync(adminDir, { recursive: true })
+    .filter(name => name.endsWith('.js'))
+    .map(name => path.join('functions/api/admin', name));
+  for (const rel of files) {
+    const text = fs.readFileSync(path.join(GALLERY, rel), 'utf8');
+    if (!/export\s+async\s+function\s+onRequest/.test(text)) continue;
+    assert(/require(Admin|Relay)\s*\(/.test(text), `${rel} has an admin route without requireAdmin/requireRelay`);
+  }
+}
+
+function testAdminPiiResponsesAreNotPublicCacheable() {
+  const text = fs.readFileSync(path.join(GALLERY, 'functions/api/admin/creations.js'), 'utf8');
+  assert(!/cache-control['"],\s*['"]public/i.test(text), 'admin creations PII response is public-cacheable');
+  assert(!/s-maxage/i.test(text), 'admin creations PII response uses shared-cache TTL');
+}
+
 function testAdminPageDoesNotAcceptUrlToken() {
-  const text = fs.readFileSync(path.join(GALLERY, 'admin.html'), 'utf8');
+  const pages = ['admin.html', 'chat-mod.html'];
   const banned = [
     /URLSearchParams\(location\.search\)/,
     /\.get\(['"]token['"]\)/,
     /[?&]token=/,
+    /sessionStorage\.(getItem|setItem)\(['"]adminToken['"]\)/,
+    /x-admin-token/i,
+    /ADMIN_TOKEN/,
   ];
-  for (const pattern of banned) {
-    assert(!pattern.test(text), `admin.html still accepts or emits URL token auth: ${pattern}`);
+  for (const page of pages) {
+    const text = fs.readFileSync(path.join(GALLERY, page), 'utf8');
+    for (const pattern of banned) {
+      assert(!pattern.test(text), `${page} still accepts or emits browser admin token auth: ${pattern}`);
+    }
   }
 }
 
@@ -150,9 +174,17 @@ async function testAdminAuth() {
     headers: { cookie: passwordCookie },
   }), env), 'password admin cookie was accepted while ADMIN_EMAILS allowlist is configured');
 
+  assert(!await mod.isAdminRequest(req('https://game-factory.test/api/admin/stats', {
+    headers: { 'x-admin-token': 'old-admin-token', 'sec-fetch-site': 'same-origin' },
+  }), env), 'browser-like admin header was accepted while ADMIN_EMAILS allowlist is configured');
+
   assert(await mod.isAdminRequest(req('https://game-factory.test/api/admin/stats', {
     headers: { 'x-admin-token': 'old-admin-token' },
-  }), env), 'timing-safe admin header was rejected for legacy admin page');
+  }), env), 'timing-safe admin header was rejected for legacy non-browser CLI path');
+
+  assert(await mod.isAdminRequest(req('https://game-factory.test/api/admin/stats', {
+    headers: { 'x-admin-token': 'old-admin-token', 'sec-fetch-site': 'same-origin' },
+  }), { ...env, ALLOW_BROWSER_ADMIN_TOKEN: '1' }), 'explicit legacy browser-token override did not work');
 
   assert(!await mod.isAdminRequest(req('https://game-factory.test/api/admin/stats', {
     headers: { 'x-admin-token': 'wrong-admin-token' },
@@ -162,6 +194,20 @@ async function testAdminAuth() {
     headers: { cookie: adminCookie },
   }), env);
   assert(urlToken && urlToken.status === 400, 'URL admin token was not rejected before auth');
+
+  const badOriginPost = await mod.requireAdmin(req('https://game-factory.test/api/admin/hidden', {
+    method: 'POST',
+    headers: { cookie: adminCookie, origin: 'https://evil.test' },
+    body: '{}',
+  }), env);
+  assert(badOriginPost && badOriginPost.status === 403, 'cross-origin admin mutation was not rejected');
+
+  const sameOriginPost = await mod.requireAdmin(req('https://game-factory.test/api/admin/hidden', {
+    method: 'POST',
+    headers: { cookie: adminCookie, origin: 'https://game-factory.test' },
+    body: '{}',
+  }), env);
+  assert(sameOriginPost === null, 'same-origin admin mutation was rejected');
 
   assert(await mod.isRelayRequest(req('https://game-factory.test/api/admin/gen-queue', {
     headers: { 'x-relay-token': 'relay-secret' },
@@ -184,6 +230,50 @@ async function testAdminAuth() {
     headers: { 'x-relay-token': 'relay-secret' },
   }), { ...env, GAME_FACTORY_RELAY_TOKEN: '', RELAY_TOKEN: '' });
   assert(missingRelay && missingRelay.status === 500, 'missing relay token config did not fail loud');
+}
+
+async function testLogoutReturnSanitization() {
+  const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/api/auth/logout.js')).href);
+  const external = await mod.onRequestGet({
+    request: req('https://game-factory.test/api/auth/logout?return=https://evil.test/x'),
+  });
+  assert(external.headers.get('location') === 'https://game-factory.test/', 'logout accepted external return URL');
+
+  const sameOrigin = await mod.onRequestGet({
+    request: req('https://game-factory.test/api/auth/logout?return=/admin.html'),
+  });
+  assert(sameOrigin.headers.get('location') === 'https://game-factory.test/admin.html', 'logout rejected safe local return URL');
+}
+
+async function testAuthDevModeDoesNotLeakProductionMagicLinks() {
+  const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/api/auth/request.js')).href);
+  const env = {
+    AUTH_DEV_MODE: '1',
+    RESEND_API_KEY: '',
+    VOTES: makeKv(),
+  };
+  const prod = await mod.onRequestPost({
+    request: req('https://game-factory.test/api/auth/request', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'tim@example.com', next: '/admin.html' }),
+    }),
+    env,
+  });
+  const prodText = await prod.text();
+  assert(prod.status === 502, `production-like AUTH_DEV_MODE request should not return a link, got ${prod.status}`);
+  assert(!prodText.includes('devMagicLink') && !prodText.includes('/api/auth/verify?token='), 'production-like AUTH_DEV_MODE leaked magic link');
+
+  const local = await mod.onRequestPost({
+    request: req('http://localhost:8788/api/auth/request', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'tim@example.com', next: '/admin.html' }),
+    }),
+    env,
+  });
+  const localText = await local.text();
+  assert(local.status === 200 && localText.includes('devMagicLink'), 'localhost AUTH_DEV_MODE did not return dev magic link');
 }
 
 async function testRelayEndpoints() {
@@ -214,9 +304,13 @@ async function testRelayEndpoints() {
 async function main() {
   await testTimingSafeCompare();
   testNoDirectAdminTokenComparisons();
+  testAdminRoutesUseCentralGuard();
+  testAdminPiiResponsesAreNotPublicCacheable();
   testAdminPageDoesNotAcceptUrlToken();
   await testHstsMiddleware();
   await testAdminAuth();
+  await testLogoutReturnSanitization();
+  await testAuthDevModeDoesNotLeakProductionMagicLinks();
   await testRelayEndpoints();
   console.log('PASS security P0 regressions');
 }

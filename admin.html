@@ -197,61 +197,78 @@
 </div>
 
 <script>
-let token = sessionStorage.getItem('adminToken') || '';
 let lastLoadAt = 0;
+let adminSignedIn = false;
 const MIN_REFRESH_MS = 30 * 1000;   // don't refetch more than once per 30s
 
-if (!token) {
-  showLogin();
-} else {
-  load();
-}
+load();
 
 // Auto-refresh when the tab comes back into focus, but only if data
 // has been on screen for >30s. Server-side cache is 5 min anyway, so
 // frequent tab-switches don't actually re-walk KV.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (!token) return;
+  if (!adminSignedIn) return;
   if (Date.now() - lastLoadAt < MIN_REFRESH_MS) return;
   load();
 });
 
-function showLogin() {
+function showLogin(message = '') {
+  adminSignedIn = false;
   document.getElementById('content').innerHTML = `
     <div class="login-form">
-      <p style="color:#8a8aa0;margin-bottom:10px;font-size:13px">Enter admin token:</p>
-      <input id="tk" type="password" placeholder="ADMIN_TOKEN">
-      <button id="go">Open</button>
+      ${message ? `<div class="err" style="margin-bottom:12px">${escapeHtml(message)}</div>` : ''}
+      <form id="admin-login-form" action="/api/auth/request" method="POST">
+        <label for="admin-email" style="display:block;color:#8a8aa0;margin-bottom:8px;font-size:13px">Admin email</label>
+        <input id="admin-email" name="email" type="email" autocomplete="username" required enterkeyhint="done" placeholder="you@example.com">
+        <button id="go" type="submit">Send sign-in link</button>
+      </form>
+      <p id="login-note" style="color:#8a8aa0;margin-top:10px;font-size:12px;line-height:1.4">Use an email listed in ADMIN_EMAILS.</p>
     </div>
   `;
-  document.getElementById('go').addEventListener('click', () => {
-    token = document.getElementById('tk').value.trim();
-    if (token) {
-      sessionStorage.setItem('adminToken', token);
-      load();
+  document.getElementById('admin-login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = document.getElementById('admin-email');
+    const btn = document.getElementById('go');
+    const note = document.getElementById('login-note');
+    const email = input.value.trim();
+    if (!email) return;
+    btn.disabled = true;
+    btn.textContent = 'Sending...';
+    note.textContent = 'Sending sign-in link...';
+    try {
+      const r = await fetch('/api/auth/request', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, next: '/admin.html' }),
+      });
+      if (r.ok || r.status === 204) {
+        note.textContent = 'Check your inbox. The link expires in 15 minutes.';
+        document.getElementById('admin-login-form').style.display = 'none';
+        return;
+      }
+      if (r.status === 429) note.textContent = 'Too many sign-in requests. Wait a few minutes.';
+      else if (r.status === 502) note.textContent = 'Sign-in email failed to send.';
+      else note.textContent = 'Could not send sign-in link.';
+    } catch (err) {
+      note.textContent = 'Network error. Try again.';
     }
+    btn.disabled = false;
+    btn.textContent = 'Send sign-in link';
   });
-  document.getElementById('tk').addEventListener('keydown', e => {
-    if (e.key === 'Enter') document.getElementById('go').click();
-  });
-}
-
-function adminHeaders(extra = {}) {
-  const headers = { ...extra };
-  if (token) headers['x-admin-token'] = token;
-  return headers;
 }
 
 function adminFetch(url, options = {}) {
   return fetch(url, {
     ...options,
-    headers: adminHeaders(options.headers || {}),
+    headers: { ...(options.headers || {}) },
+    credentials: 'same-origin',
   });
 }
 
 async function load() {
-  document.getElementById('content').innerHTML = '<p style="color:#8a8aa0">Loading…</p>';
+  document.getElementById('content').innerHTML = '<p style="color:#8a8aa0">Loading...</p>';
   lastLoadAt = Date.now();
   try {
     const [statsRes, gamesRes, publishRes] = await Promise.all([
@@ -260,16 +277,15 @@ async function load() {
       adminFetch('/api/admin/publish-status', { cache: 'no-store' }),
     ]);
     if (statsRes.status === 403) {
-      sessionStorage.removeItem('adminToken');
-      showLogin();
-      document.getElementById('content').insertAdjacentHTML('afterbegin', '<div class="err">Wrong token.</div>');
+      showLogin('Sign in with an allowed admin email.');
       return;
     }
     if (!statsRes.ok) {
       const err = await statsRes.json().catch(() => ({error: 'http ' + statsRes.status}));
-      document.getElementById('content').innerHTML = `<div class="err">Error: ${err.error || statsRes.status}</div>`;
+      document.getElementById('content').innerHTML = `<div class="err">Error: ${escapeHtml(err.error || statsRes.status)}</div>`;
       return;
     }
+    adminSignedIn = true;
     const stats = await statsRes.json();
     const games = gamesRes.ok ? await gamesRes.json() : [];
     adminTitleBySlug = {};
@@ -823,7 +839,7 @@ function render(d) {
   const dayValues = dates.map(date => d.perDay[date].totalSeconds);
   const maxDay = Math.max(1, ...dayValues);
 
-  document.getElementById('meta').textContent = `Refreshed ${new Date().toLocaleTimeString()} · ${d.perGame.length} games tracked`;
+  document.getElementById('meta').innerHTML = `Refreshed ${new Date().toLocaleTimeString()} · ${d.perGame.length} games tracked · <a href="/api/auth/logout?return=/admin.html" style="color:var(--ink-muted);text-decoration:none">Sign out</a>`;
 
   // ── Daily highlights panel — morning scan ──────────────────────────────
   const h = d.highlights || {};

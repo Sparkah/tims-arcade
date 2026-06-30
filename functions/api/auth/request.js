@@ -8,10 +8,12 @@
 // On success: 204 No Content (don't leak whether email exists).
 // Anti-abuse: 5 requests / IP / 10 min.
 
-import { jsonError } from '../../_lib/response.js';
+import { jsonError, sameOriginOk } from '../../_lib/response.js';
 import { checkRate } from '../../_lib/rateLimit.js';
 
 export async function onRequestPost({ request, env }) {
+  if (!sameOriginOk(request)) return jsonError('forbidden', 403);
+
   let body;
   try { body = await request.json(); }
   catch { return jsonError('invalid_json', 400); }
@@ -46,8 +48,8 @@ export async function onRequestPost({ request, env }) {
   const origin = new URL(request.url).origin;
   const magicLink = `${origin}/api/auth/verify?token=${encodeURIComponent(token)}`;
 
-  // Send email via Resend if configured. Otherwise log the link
-  // server-side (visible in CF dashboard) — Tim can copy it manually.
+  // Send email via Resend if configured. Local dev can still retrieve the link
+  // from the response when AUTH_DEV_MODE=1 and the request host is localhost.
   let delivery = 'logged-server-side';
   if (env.RESEND_API_KEY) {
     try {
@@ -68,15 +70,14 @@ export async function onRequestPost({ request, env }) {
       delivery = r.ok ? 'resend-ok' : `resend-${r.status}`;
     } catch (e) { delivery = 'resend-error'; }
   }
-  // Log the FULL link only when it couldn't be emailed (no Resend / dev) -- the one
-  // case the owner needs it from logs. Otherwise the link is a live login credential
-  // and must not sit in logs (Codex 2026-06-16); log just the email + delivery.
-  if (delivery === 'resend-ok') console.log(`auth/request: ${email} (delivery=resend-ok)`);
-  else console.log(`auth/request: ${email} (delivery=${delivery}) link=${magicLink}`);
+  // Never log the live magic link in production: it is a bearer login credential.
+  // AUTH_DEV_MODE returns it in the response for local/manual testing instead.
+  console.log(`auth/request: ${email} (delivery=${delivery})`);
 
-  // Dev mode: return the magic link in the response so Tim doesn't have
-  // to dig through CF logs while building/testing.
-  if (env.AUTH_DEV_MODE === '1') {
+  // Local dev only: return the magic link in the response so Tim doesn't have
+  // to dig through logs while building/testing. Never return live bearer links
+  // from production/preview hosts even if AUTH_DEV_MODE is accidentally set.
+  if (env.AUTH_DEV_MODE === '1' && isLocalDevRequest(request)) {
     return new Response(JSON.stringify({ ok: true, devMagicLink: magicLink, delivery }), {
       headers: { 'content-type': 'application/json' },
     });
@@ -102,6 +103,13 @@ function sanitizeNext(v) {
 
 function isValidEmail(s) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(s) && s.length <= 200;
+}
+
+function isLocalDevRequest(request) {
+  try {
+    const host = new URL(request.url).hostname;
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  } catch { return false; }
 }
 
 function emailBody(link) {

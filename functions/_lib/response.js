@@ -30,6 +30,8 @@ export function sameOriginOk(request) {
   if (!origin) return true;
   try {
     const o = new URL(origin), u = new URL(request.url);
-    return o.host === u.host || o.hostname === 'localhost' || o.hostname === '127.0.0.1';
+    if (o.host === u.host) return true;
+    const devHost = h => h === 'localhost' || h === '127.0.0.1';
+    return devHost(o.hostname) && devHost(u.hostname);
   } catch { return false; }
 }

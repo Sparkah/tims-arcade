@@ -1,6 +1,6 @@
 import { parseCookie } from './cookie.js';
 import { hmacSha256 } from './crypto.js';
-import { jsonError } from './response.js';
+import { jsonError, sameOriginOk } from './response.js';
 import { readSession } from '../api/_session.js';
 
 const COOKIE_NAME = 'gf_admin_session';
@@ -86,7 +86,25 @@ export function isAdminTokenRequest(request, env) {
   if (adminUrlTokenRejected(request)) return false;
   const configured = getAdminToken(env);
   const supplied = request.headers.get('x-admin-token') || '';
+  if (isBrowserLikeRequest(request) && !browserAdminTokensAllowed(env)) return false;
   return !!configured && !!supplied && safeEqual(supplied, configured);
+}
+
+export function isAdminMutation(request) {
+  const method = String(request.method || 'GET').toUpperCase();
+  return !['GET', 'HEAD', 'OPTIONS'].includes(method);
+}
+
+export function isBrowserLikeRequest(request) {
+  return request.headers.has('Origin')
+    || request.headers.has('Sec-Fetch-Site')
+    || request.headers.has('Sec-Fetch-Mode')
+    || request.headers.has('Sec-Fetch-Dest');
+}
+
+export function browserAdminTokensAllowed(env = {}) {
+  if (!hasAdminEmailAllowlist(env)) return true;
+  return String(env.ALLOW_BROWSER_ADMIN_TOKEN || '').trim() === '1';
 }
 
 export async function isAdminRequest(request, env) {
@@ -96,9 +114,9 @@ export async function isAdminRequest(request, env) {
   if (isAdminTokenRequest(request, env)) return true;
 
   // Password-issued admin cookies are a local/transitional fallback only. Once
-  // ADMIN_EMAILS is configured, the signed-in email allowlist is the human-admin
-  // gate. Header bearer tokens remain supported for legacy admin pages, but
-  // they are timing-safe and never accepted from URLs.
+  // ADMIN_EMAILS is configured, signed-in email sessions are the browser-admin
+  // gate. Header bearer tokens remain timing-safe and URL-rejected, but browser
+  // requests cannot use them unless ALLOW_BROWSER_ADMIN_TOKEN=1 is set.
   if (hasAdminEmailAllowlist(env)) return false;
 
   const value = parseCookie(request.headers.get('Cookie') || '', COOKIE_NAME);
@@ -116,6 +134,7 @@ export async function isAdminRequest(request, env) {
 
 export async function requireAdmin(request, env) {
   if (adminUrlTokenRejected(request)) return jsonError('url_admin_token_rejected', 400);
+  if (isAdminMutation(request) && !sameOriginOk(request)) return jsonError('forbidden', 403);
   if (await isAdminRequest(request, env)) return null;
   return jsonError('forbidden', 403);
 }

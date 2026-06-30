@@ -2,7 +2,7 @@
 """Hide / unhide a game from the public gallery grid.
 
 This is the CLI path for "hide game X": it POSTs to the LIVE admin API
-(/api/admin/hidden, admin token from Gallery/.dev.vars) so the game drops off the
+(/api/admin/hidden, CLI-only legacy ADMIN_TOKEN) so the game drops off the
 homepage INSTANTLY (KV-backed, no redeploy), then mirrors the current hidden
 list to Shared/data/hidden-games.json so the factory + digest can treat hidden
 games as a low-quality signal.
@@ -37,8 +37,8 @@ def read_token() -> str:
     if env_tok:
         return env_tok.strip()
     # 2) dedicated PROD-token file (gitignored). This is the production ADMIN_TOKEN
-    #    from the Cloudflare Pages dashboard — the SAME token pasted into admin.html.
-    #    Prefer it: Gallery/.dev.vars holds the LOCAL wrangler dev token, which does
+    #    from the Cloudflare Pages dashboard. Prefer it: Gallery/.dev.vars holds
+    #    the LOCAL wrangler dev token, which does
     #    NOT match prod, so a .dev.vars token gets a 403 against the live site.
     prod = GALLERY / ".admin_token"
     if prod.exists():
@@ -55,8 +55,8 @@ def read_token() -> str:
             if line.startswith("ADMIN_TOKEN"):
                 return line.split("=", 1)[1].strip().strip('"').strip("'")
     raise SystemExit(
-        "No admin token. Put the PROD token (the one you paste into admin.html) "
-        "in Gallery/.admin_token, or run with ADMIN_TOKEN=<token> in the env."
+        "No admin token. Put the PROD CLI token in Gallery/.admin_token, "
+        "or run with ADMIN_TOKEN=<token> in the env."
     )
 
 

@@ -1,11 +1,10 @@
-// Player-creation moderation (token-gated, header-only). Tim 2026-06-15.
+// Player-creation moderation (admin-session gated). Tim 2026-06-15.
 //   GET  /api/admin/creations               -> all vibe creations (with email + flags)
 //   POST /api/admin/creations {id, action}:  delete | unpublish
 // UI: /chat-mod (shared moderation page).
 //
-// The GET walks upload:* (a KV LIST), so it is edge-cached (auth verified
-// first) — the free tier caps LIST at 1000/day. POST mutations are uncached.
-// See Knowledge/Learnings/KV List Budget.
+// The GET walks upload:* (a KV LIST). It returns submitter emails, so the
+// response is no-store; keep it manual/button-triggered rather than polling.
 
 import { json, jsonError } from '../../_lib/response.js';
 import { edgeCached } from '../../_lib/edgecache.js';
@@ -35,7 +34,7 @@ async function buildCreations(env) {
   } while (cursor);
   out.sort((x, y) => (y.ts || 0) - (x.ts || 0));
   const r = json({ ok: true, creations: out });
-  r.headers.set('cache-control', 'public, max-age=0, s-maxage=300');  // edge-cache 5min; auth gates access
+  r.headers.set('cache-control', 'no-store');  // PII; synthetic edgeCached() entry still handles KV-list budget.
   return r;
 }
 
