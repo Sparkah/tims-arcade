@@ -23,14 +23,21 @@
   const shopList = document.getElementById('shopList');
   const workshopDetails = document.getElementById('workshopDetails');
   const toolButtons = Array.from(document.querySelectorAll('[data-tool]'));
+  const tutorialOverlay = document.getElementById('tutorialOverlay');
+  const tutorialTitle = document.getElementById('tutorialTitle');
+  const tutorialText = document.getElementById('tutorialText');
+  const tutorialProgress = document.getElementById('tutorialProgress');
 
   const TAU = Math.PI * 2;
   const TOOL_KEYS = ['ram', 'charge', 'cut', 'quake', 'wreck', 'missile'];
   const MAX_DEBRIS = 360;
   const MAX_PARTICLES = 520;
   const SAVE_KEY = 'city-destruction-meta-v1';
+  const TUTORIAL_KEY = 'city-destruction-tutorial-v2';
   const DAY_MS = 86400000;
   const LOCAL_BUILD = ['localhost', '127.0.0.1', '[::1]', ''].includes(window.location.hostname) || window.location.protocol === 'file:';
+  const TOOL_UNLOCK_LEVEL = { ram: 1, charge: 2, cut: 3, quake: 4, wreck: 5, missile: 6 };
+  const MAX_PLAYER_LEVEL = 6;
   let ysdk = null;
   let loadingReadySent = false;
   let gameplayActive = false;
@@ -185,6 +192,28 @@
     { wall: '#424c66', dark: '#293246', trim: '#6e7da4', window: '#a5e7ff' },
     { wall: '#5d504a', dark: '#332d2b', trim: '#8b756a', window: '#ffe0a0' },
   ];
+  const TRAINING_MAP = {
+    id: 'training',
+    name: 'Training Lot',
+    seed: 22000,
+    spacing: 9999,
+    minCount: 1,
+    maxCount: 1,
+    rows: [4, 4],
+    cols: [3, 3],
+    gasChance: 0,
+    coreHp: [32, 40],
+    wallHp: [22, 30],
+    groundRatio: 0.78,
+    skyline: 'training',
+    sky: ['#182434', '#425261', '#17181a'],
+    sun: ['rgba(255, 211, 132, 0.46)', 'rgba(255, 143, 91, 0.14)', 'rgba(255, 143, 91, 0)'],
+    ground: '#171719',
+    road: '#2d2b2b',
+    palette: [
+      { wall: '#596a74', dark: '#333f46', trim: '#8aa0a8', window: '#ffdc88' },
+    ],
+  };
   const MAPS = [
     {
       id: 'downtown',
@@ -371,32 +400,74 @@
 
   function defaultProfile() {
     return {
-      version: 1,
+      // Save v2 moves early tools behind level progression; pre-v2 players replay training by design.
+      version: 2,
+      level: 1,
+      tutorialDone: false,
       cash: 0,
       scrap: 0,
       rep: 0,
       blueprints: 0,
       streak: 0,
       lastDaily: '',
-      unlocked: { ram: true, charge: true, cut: true, quake: true, wreck: false, missile: false },
+      unlocked: { ram: true, charge: false, cut: false, quake: false, wreck: false, missile: false },
       upgrades: { ram: 0, charge: 0, cut: 0, quake: 0, energy: 0 },
     };
+  }
+
+  function defaultTutorial() {
+    return { version: 2, done: false, step: 'ram_hit', count: 0 };
+  }
+
+  function loadTutorial() {
+    try {
+      const raw = localStorage.getItem(TUTORIAL_KEY);
+      if (!raw) return defaultTutorial();
+      return { ...defaultTutorial(), ...JSON.parse(raw) };
+    } catch (_) {
+      return defaultTutorial();
+    }
+  }
+
+  function saveTutorial() {
+    try {
+      localStorage.setItem(TUTORIAL_KEY, JSON.stringify(tutorial));
+    } catch (_) {}
+  }
+
+  function syncLevelUnlocks() {
+    profile.level = clamp(Math.floor(profile.level || 1), 1, MAX_PLAYER_LEVEL);
+    for (const tool of TOOL_KEYS) {
+      if (profile.level >= TOOL_UNLOCK_LEVEL[tool]) profile.unlocked[tool] = true;
+    }
+    profile.unlocked.ram = true;
   }
 
   function loadProfile() {
     try {
       const raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return defaultProfile();
+      if (!raw) {
+        const fresh = defaultProfile();
+        profile = fresh;
+        syncLevelUnlocks();
+        return fresh;
+      }
       const parsed = JSON.parse(raw);
       const base = defaultProfile();
-      return {
+      const merged = {
         ...base,
         ...parsed,
         unlocked: { ...base.unlocked, ...(parsed.unlocked || {}) },
         upgrades: { ...base.upgrades, ...(parsed.upgrades || {}) },
       };
+      profile = merged;
+      syncLevelUnlocks();
+      return merged;
     } catch (_) {
-      return defaultProfile();
+      const fallback = defaultProfile();
+      profile = fallback;
+      syncLevelUnlocks();
+      return fallback;
     }
   }
 
@@ -406,8 +477,138 @@
     } catch (_) {}
   }
 
-  let profile = loadProfile();
+  let profile;
+  let tutorial = loadTutorial();
+  profile = loadProfile();
+  if (profile.tutorialDone) tutorial.done = true;
   let shopDirty = true;
+
+  const TUTORIAL_STEPS = [
+    {
+      id: 'ram_hit',
+      title: 'Ram the Block',
+      text: 'Level 1 starts small. Drag Ram through the highlighted building.',
+      action: 'ram_damage',
+      target: 'building',
+    },
+    {
+      id: 'clear_block',
+      title: 'Finish Level 1',
+      text: 'Keep breaking the same building until the training contract is paid.',
+      action: 'contract_paid',
+      target: 'building',
+    },
+    {
+      id: 'select_charge',
+      title: 'Charge Unlocked',
+      text: 'Level 2 opens Charge. Select it to start the next city.',
+      action: 'select_charge',
+      target: 'charge_button',
+    },
+  ];
+
+  function tutorialActive() {
+    return !tutorial.done;
+  }
+
+  function currentTutorialStep() {
+    if (!tutorialActive()) return null;
+    return TUTORIAL_STEPS.find((step) => step.id === tutorial.step) || TUTORIAL_STEPS[0];
+  }
+
+  function setTutorialStep(id) {
+    tutorial.step = id;
+    tutorial.count = 0;
+    saveTutorial();
+    updateTutorialOverlay();
+    applyTutorialUiLocks();
+  }
+
+  function finishTutorial() {
+    tutorial.done = true;
+    tutorial.step = 'done';
+    profile.tutorialDone = true;
+    profile.level = Math.max(profile.level || 1, 2);
+    syncLevelUnlocks();
+    saveTutorial();
+    saveProfile();
+    shopDirty = true;
+    if (state.mapId === 'training') state.mapId = 'downtown';
+    if (mapSelect) mapSelect.value = state.mapId;
+    newCity();
+    state.message = 'LEVEL 2 OPEN';
+    state.messageTime = 1.6;
+    updateTutorialOverlay();
+  }
+
+  function tutorialAllowedAction(action) {
+    const step = currentTutorialStep();
+    if (!step) return true;
+    if (action === 'fullscreen') return true;
+    if ((step.id === 'ram_hit' || step.id === 'clear_block') && (action === 'ram_damage' || action === 'select_ram')) return true;
+    if (step.id === 'select_charge' && (action === 'select_charge' || action === 'select_ram')) return true;
+    return false;
+  }
+
+  function tutorialTargetRect() {
+    const step = currentTutorialStep();
+    if (!step) return null;
+    if (step.target === 'charge_button') {
+      const button = toolButtons.find((btn) => btn.dataset.tool === 'charge');
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      return { x: rect.left, y: rect.top, w: rect.width, h: rect.height, kind: 'charge_button' };
+    }
+    const b = state.buildings[0];
+    if (!b) return null;
+    const top = buildingTop(b);
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = rect.width / Math.max(1, state.w);
+    const scaleY = rect.height / Math.max(1, state.h);
+    return {
+      x: rect.left + (b.x - 18) * scaleX,
+      y: rect.top + (top - 18) * scaleY,
+      w: (b.w + 36) * scaleX,
+      h: (state.groundY - top + 24) * scaleY,
+      kind: 'building',
+    };
+  }
+
+  function pointInTutorialTarget(x, y) {
+    const target = tutorialTargetRect();
+    if (!target || target.kind !== 'building') return true;
+    const rect = canvas.getBoundingClientRect();
+    const px = rect.left + x * (rect.width / Math.max(1, state.w));
+    const py = rect.top + y * (rect.height / Math.max(1, state.h));
+    return px >= target.x && px <= target.x + target.w && py >= target.y && py <= target.y + target.h;
+  }
+
+  function tutorialGate(action, x, y) {
+    if (!tutorialActive()) return true;
+    if (!tutorialAllowedAction(action)) {
+      state.message = 'FOLLOW TRAINING';
+      state.messageTime = 0.75;
+      return false;
+    }
+    if ((action === 'ram_damage') && !pointInTutorialTarget(x, y)) {
+      state.message = 'HIT THE BLOCK';
+      state.messageTime = 0.75;
+      return false;
+    }
+    return true;
+  }
+
+  function tutorialRecord(action) {
+    const step = currentTutorialStep();
+    if (!step || step.action !== action) return;
+    if (step.id === 'ram_hit') {
+      setTutorialStep('clear_block');
+    } else if (step.id === 'clear_block') {
+      setTutorialStep('select_charge');
+    } else if (step.id === 'select_charge') {
+      finishTutorial();
+    }
+  }
 
   const SHOP_ITEMS = [
     {
@@ -453,24 +654,6 @@
       },
       level: () => profile.upgrades.energy,
     },
-    {
-      id: 'wreck',
-      title: 'Wreck Ball',
-      unlock: 'wreck',
-      cost: () => ({ cash: 520, scrap: 80, rep: 1 }),
-      buy: () => { profile.unlocked.wreck = true; },
-      level: () => profile.unlocked.wreck ? 1 : 0,
-    },
-    {
-      id: 'missile',
-      title: 'Missile License',
-      unlock: 'missile',
-      cost: () => ({ cash: 900, scrap: 130, rep: 3, blueprints: 7 }),
-      buy: () => {
-        profile.unlocked.missile = true;
-      },
-      level: () => profile.unlocked.missile ? 1 : 0,
-    },
   ];
 
   function todayKey() {
@@ -491,7 +674,9 @@
   }
 
   function isToolUnlocked(tool) {
-    return Boolean(profile.unlocked[tool]);
+    if (tutorialActive() && tool !== 'ram' && currentTutorialStep()?.id !== 'select_charge') return false;
+    const level = TOOL_UNLOCK_LEVEL[tool] || 1;
+    return Boolean(profile.unlocked[tool]) && (profile.level || 1) >= level;
   }
 
   function canAfford(cost) {
@@ -517,11 +702,25 @@
     return parts.join(' / ');
   }
 
+  function toolForLevel(level) {
+    return Object.entries(TOOL_UNLOCK_LEVEL).find(([, needed]) => needed === level)?.[0] || null;
+  }
+
+  function levelUpAfterContract() {
+    const before = profile.level || 1;
+    if (before >= MAX_PLAYER_LEVEL) return null;
+    profile.level = before + 1;
+    syncLevelUnlocks();
+    return toolForLevel(profile.level);
+  }
+
   function mapById(id) {
+    if (id === 'training') return TRAINING_MAP;
     return MAPS.find((m) => m.id === id) || MAPS[0];
   }
 
   function currentMap() {
+    if (tutorialActive()) return TRAINING_MAP;
     return mapById(state.mapId);
   }
 
@@ -534,17 +733,24 @@
       const doneToday = profile.lastDaily === todayKey();
       dailyStat.textContent = doneToday ? `Daily done ${profile.streak}d` : `Daily ${Math.min(7, profile.blueprints)}/7`;
     }
-    if (licenseStat) licenseStat.textContent = `License ${format(profile.rep)}`;
+    if (licenseStat) licenseStat.textContent = `Level ${format(profile.level || 1)}`;
   }
 
   function updateToolButtons() {
     for (const btn of toolButtons) {
       const tool = btn.dataset.tool;
+      const requiredLevel = TOOL_UNLOCK_LEVEL[tool] || 1;
       const unlocked = isToolUnlocked(tool);
       const active = state.tool === tool;
       btn.dataset.active = String(active);
-      btn.textContent = unlocked ? (btn.dataset.label || tool) : 'Locked';
+      btn.textContent = unlocked ? (btn.dataset.label || tool) : `Lv ${requiredLevel}`;
       btn.disabled = !unlocked;
+      if (tutorialActive()) {
+        const stepId = currentTutorialStep()?.id;
+        const allowed = tool === 'ram' || (stepId === 'select_charge' && tool === 'charge');
+        btn.disabled = !allowed || !unlocked;
+        if (!allowed && unlocked) btn.textContent = `Lv ${requiredLevel}`;
+      }
       if (tool === 'quake' && unlocked) {
         btn.disabled = state.quakeCooldown > 0 || state.energy < quakeCost();
         btn.textContent = state.quakeCooldown > 0 ? `${Math.ceil(state.quakeCooldown)}s` : 'Quake';
@@ -556,6 +762,7 @@
         btn.disabled = !active && state.energy < wreckCost();
       }
     }
+    applyTutorialUiLocks();
   }
 
   function renderWorkshop(force) {
@@ -579,7 +786,18 @@
     updateToolButtons();
   }
 
+  function applyTutorialUiLocks() {
+    const active = tutorialActive();
+    if (mapSelect) mapSelect.disabled = active;
+    if (resetBtn) resetBtn.disabled = active;
+    if (workshopDetails) {
+      workshopDetails.inert = active;
+      if (active) workshopDetails.open = false;
+    }
+  }
+
   function buyShopItem(id) {
+    if (!tutorialGate('shop')) return;
     const item = SHOP_ITEMS.find((candidate) => candidate.id === id);
     if (!item) return;
     const level = item.level();
@@ -665,6 +883,15 @@
     const span = maxX - minX;
     const count = state.buildings.length;
     const skylineTop = clamp(state.h * (state.w < 740 ? 0.26 : 0.31), 170, state.h * 0.42);
+    if (map.id === 'training') {
+      const b = state.buildings[0];
+      if (!b) return;
+      b.w = clamp(state.w * 0.16, 74, 118);
+      b.x = state.w / 2 - b.w / 2;
+      b.cellW = b.w / b.cols;
+      b.cellH = clamp((state.groundY - skylineTop) / Math.max(5, b.rows + 1), 18, 28);
+      return;
+    }
     let x = minX;
     for (let i = 0; i < count; i++) {
       const b = state.buildings[i];
@@ -746,6 +973,7 @@
     const rng = makeRng(map.seed + Math.round(state.w) * 31 + Math.round(state.h) * 23 + 9001);
     state.scenery = { back: [], front: [], vehicles: [], lamps: [] };
     if (!state.buildings.length) return;
+    if (map.id === 'training') return;
 
     const roadY = state.groundY + 14;
     const vehicleCount = clamp(Math.round(state.w / 270), 2, 6);
@@ -814,6 +1042,17 @@
 
   function buildContract() {
     const map = currentMap();
+    if (map.id === 'training') {
+      return {
+        name: 'Level 1 Training',
+        objective: 'Clear 80% of the small building.',
+        kind: 'clear',
+        target: 80,
+        reward: { cash: 140, scrap: 18, rep: 0 },
+        progress: 0,
+        done: false,
+      };
+    }
     if (map.id === 'gasworks') {
       return {
         name: 'Hazmat Contract',
@@ -924,6 +1163,7 @@
     contract.done = true;
     state.contractDone = true;
     const daily = grantDailyBlueprint();
+    const unlockedTool = levelUpAfterContract();
     profile.cash += contract.reward.cash;
     profile.scrap += contract.reward.scrap;
     profile.rep += contract.reward.rep;
@@ -931,10 +1171,11 @@
     saveProfile();
     shopDirty = true;
     renderWorkshop(true);
-    state.message = daily ? 'DAILY BLUEPRINT' : 'CONTRACT PAID';
+    state.message = unlockedTool ? `${toolLabel(unlockedTool)} OPEN` : daily ? 'DAILY BLUEPRINT' : 'CONTRACT PAID';
     state.messageTime = 1.6;
     spawnSpark(state.w / 2, state.h * 0.22, daily ? '#9cecff' : '#a9ff9f', daily ? 54 : 34);
     AudioManager.reward(daily);
+    tutorialRecord('contract_paid');
   }
 
   function updateContract() {
@@ -945,6 +1186,12 @@
   }
 
   function newCity() {
+    if (tutorialActive()) {
+      state.mapId = 'training';
+      state.tool = 'ram';
+    } else if (state.mapId === 'training') {
+      state.mapId = 'downtown';
+    }
     const map = currentMap();
     const rng = makeRng(map.seed + Math.round(state.w) * 13 + Math.round(state.h) * 17);
     state.time = 0;
@@ -1466,6 +1713,8 @@
 
   function setTool(tool) {
     if (!TOOL_KEYS.includes(tool)) return;
+    const tutorialAction = tool === 'charge' ? 'select_charge' : `select_${tool}`;
+    if (!tutorialGate(tutorialAction)) return;
     if (!isToolUnlocked(tool)) {
       state.message = 'BUY TOOL';
       state.messageTime = 0.8;
@@ -1474,6 +1723,7 @@
     state.tool = tool;
     AudioManager.ui();
     updateToolButtons();
+    if (tool === 'charge') tutorialRecord('select_charge');
     if (tool === 'quake') quake();
   }
 
@@ -1688,18 +1938,22 @@
     const p = state.pointer;
     if (state.tool === 'ram') {
       if (state.time - p.lastHit > 0.045 && state.energy >= 2) {
+        if (!tutorialGate('ram_damage', p.x, p.y)) return;
         const dx = p.x - p.lastX;
         const dy = p.y - p.lastY;
         const speed = Math.sqrt(dx * dx + dy * dy);
-        damageAt(
+        const hits = damageAt(
           p.x,
           p.y,
           48 + profile.upgrades.ram * 7 + Math.min(34, speed * 0.22),
           28 + profile.upgrades.ram * 5 + Math.min(30, speed * 0.25),
           'ram'
         );
-        state.energy = Math.max(0, state.energy - Math.max(1.25, 2.2 - profile.upgrades.ram * 0.18));
-        p.lastHit = state.time;
+        if (hits > 0) {
+          state.energy = Math.max(0, state.energy - Math.max(1.25, 2.2 - profile.upgrades.ram * 0.18));
+          p.lastHit = state.time;
+          tutorialRecord('ram_damage');
+        }
       }
     } else if (state.tool === 'wreck') {
       if (state.time - p.lastHit > 0.07 && state.energy >= wreckCost()) {
@@ -2385,6 +2639,44 @@
     ctx.restore();
   }
 
+  function updateTutorialOverlay() {
+    if (!tutorialOverlay) return;
+    const step = currentTutorialStep();
+    if (!step) {
+      tutorialOverlay.dataset.active = 'false';
+      return;
+    }
+    const target = tutorialTargetRect();
+    if (!target) {
+      tutorialOverlay.dataset.active = 'false';
+      return;
+    }
+    tutorialOverlay.dataset.active = 'true';
+    tutorialOverlay.style.setProperty('--tutorial-x', `${Math.round(target.x)}px`);
+    tutorialOverlay.style.setProperty('--tutorial-y', `${Math.round(target.y)}px`);
+    tutorialOverlay.style.setProperty('--tutorial-w', `${Math.round(target.w)}px`);
+    tutorialOverlay.style.setProperty('--tutorial-h', `${Math.round(target.h)}px`);
+
+    const cardW = Math.min(300, Math.max(220, state.w - 32));
+    let cardX = target.x + target.w + 16;
+    if (cardX + cardW > window.innerWidth - 12) cardX = target.x - cardW - 16;
+    if (cardX < 12) cardX = clamp(target.x + target.w / 2 - cardW / 2, 12, Math.max(12, window.innerWidth - cardW - 12));
+    let cardY = target.y;
+    if (target.kind === 'charge_button') cardY = target.y + target.h + 12;
+    if (cardY + 132 > window.innerHeight - 12) cardY = target.y - 146;
+    cardY = clamp(cardY, 12, Math.max(12, window.innerHeight - 148));
+    tutorialOverlay.style.setProperty('--tutorial-card-x', `${Math.round(cardX)}px`);
+    tutorialOverlay.style.setProperty('--tutorial-card-y', `${Math.round(cardY)}px`);
+
+    if (tutorialTitle) tutorialTitle.textContent = step.title;
+    if (tutorialText) tutorialText.textContent = step.text;
+    if (tutorialProgress) {
+      const contract = state.contract;
+      const progress = step.id === 'clear_block' && contract ? ` - ${contractProgressLabel(contract)}` : '';
+      tutorialProgress.textContent = `Level ${profile.level || 1}${progress}`;
+    }
+  }
+
   function render() {
     ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
     ctx.clearRect(0, 0, state.w, state.h);
@@ -2409,6 +2701,7 @@
       ctx.fillRect(0, 0, state.w, state.h);
     }
     drawMessage();
+    updateTutorialOverlay();
   }
 
   function step(dt) {
@@ -2520,6 +2813,10 @@
     e.preventDefault();
     AudioManager.ensure();
     const p = pointerPosition(e);
+    if (state.tool === 'ram' && !tutorialGate('ram_damage', p.x, p.y)) return;
+    if (state.tool === 'charge' && !tutorialGate('charge_place', p.x, p.y)) return;
+    if (state.tool === 'missile' && !tutorialGate('missile_launch', p.x, p.y)) return;
+    if (state.tool === 'wreck' && !tutorialGate('wreck_damage', p.x, p.y)) return;
     state.pointer.active = true;
     state.pointer.x = p.x;
     state.pointer.y = p.y;
@@ -2529,7 +2826,10 @@
     canvas.setPointerCapture(e.pointerId);
     if (state.tool === 'charge') placeCharge(p.x, p.y);
     if (state.tool === 'missile') launchMissile(p.x, p.y);
-    if (state.tool === 'ram') damageAt(p.x, p.y, 56 + profile.upgrades.ram * 8, 42 + profile.upgrades.ram * 6, 'ram');
+    if (state.tool === 'ram') {
+      const hits = damageAt(p.x, p.y, 56 + profile.upgrades.ram * 8, 42 + profile.upgrades.ram * 6, 'ram');
+      if (hits > 0) tutorialRecord('ram_damage');
+    }
     if (state.tool === 'wreck') damageAt(p.x, p.y, 86 + profile.upgrades.ram * 9, 66 + profile.upgrades.ram * 7, 'wreck');
   });
 
@@ -2569,6 +2869,10 @@
     mapSelect.addEventListener('change', () => {
       AudioManager.ensure();
       AudioManager.ui();
+      if (!tutorialGate('map')) {
+        mapSelect.value = state.mapId;
+        return;
+      }
       state.mapId = mapSelect.value;
       newCity();
     });
@@ -2577,6 +2881,7 @@
   resetBtn.addEventListener('click', () => {
     AudioManager.ensure();
     AudioManager.ui();
+    if (!tutorialGate('reset')) return;
     newCity();
   });
 
@@ -2588,7 +2893,9 @@
     if (e.code === 'Digit4') setTool('quake');
     if (e.code === 'Digit5') setTool('wreck');
     if (e.code === 'Digit6') setTool('missile');
-    if (e.code === 'KeyR') newCity();
+    if (e.code === 'KeyR') {
+      if (tutorialGate('reset')) newCity();
+    }
     if (e.code === 'KeyF') {
       if (!document.fullscreenElement && document.documentElement.requestFullscreen) {
         document.documentElement.requestFullscreen().catch(() => {});
@@ -2660,6 +2967,19 @@
     maxEnergy: maxEnergy(),
     quakeCooldown: Number(state.quakeCooldown.toFixed(1)),
     contractDone: state.contractDone,
+    tutorial: {
+      active: tutorialActive(),
+      done: tutorial.done,
+      step: tutorial.step,
+      allowedActions: currentTutorialStep() ? (currentTutorialStep().id === 'select_charge' ? ['select_charge'] : ['ram_damage']) : [],
+      target: tutorialTargetRect() ? {
+        kind: tutorialTargetRect().kind,
+        x: Math.round(tutorialTargetRect().x),
+        y: Math.round(tutorialTargetRect().y),
+        w: Math.round(tutorialTargetRect().w),
+        h: Math.round(tutorialTargetRect().h),
+      } : null,
+    },
     contract: state.contract ? {
       name: state.contract.name,
       kind: state.contract.kind,
@@ -2675,6 +2995,8 @@
       blueprints: profile.blueprints,
       streak: profile.streak,
       lastDaily: profile.lastDaily,
+      level: profile.level,
+      tutorialDone: profile.tutorialDone,
       unlocked: profile.unlocked,
       upgrades: profile.upgrades,
     },
@@ -2764,6 +3086,36 @@
       updateHud();
       return window.render_game_to_text();
     };
+
+    window.__tutorialReset = () => {
+      tutorial = defaultTutorial();
+      profile = defaultProfile();
+      syncLevelUnlocks();
+      saveTutorial();
+      saveProfile();
+      shopDirty = true;
+      newCity();
+      updateHud();
+      return window.render_game_to_text();
+    };
+
+    window.__tutorialSkip = () => {
+      tutorial.done = true;
+      tutorial.step = 'done';
+      profile.tutorialDone = true;
+      profile.level = Math.max(profile.level || 1, 2);
+      syncLevelUnlocks();
+      saveTutorial();
+      saveProfile();
+      shopDirty = true;
+      state.mapId = 'downtown';
+      state.tool = 'charge';
+      newCity();
+      updateHud();
+      return window.render_game_to_text();
+    };
+
+    window.__tutorialInfo = () => window.render_game_to_text();
   }
 
   initPlatform();
