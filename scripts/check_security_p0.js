@@ -482,6 +482,16 @@ function testClientsUseVoteStateShape() {
   }
 }
 
+function testPublicDomSinksAvoidCatalogHtml() {
+  const play = fs.readFileSync(path.join(GALLERY, 'play.html'), 'utf8');
+  assert(!/row\.innerHTML\s*=\s*picks\.map/.test(play), 'play more-games rail builds catalog HTML with innerHTML');
+  assert(!/background-image:\s*url\(['"]\/thumbs\/\$\{g\.slug\}/.test(play), 'play more-games rail interpolates slug into inline style HTML');
+
+  const login = fs.readFileSync(path.join(GALLERY, 'login.html'), 'utf8');
+  assert(!/innerHTML\s*\+?=.*devMagicLink/.test(login), 'login dev magic-link uses innerHTML');
+  assert(/u\.origin\s*===\s*location\.origin/.test(login), 'login dev magic-link does not enforce same-origin URL');
+}
+
 async function main() {
   await testTimingSafeCompare();
   testNoDirectAdminTokenComparisons();
@@ -498,6 +508,7 @@ async function main() {
   await testAnonymousVoteDedupe();
   await testFeedbackVoteDedupe();
   testClientsUseVoteStateShape();
+  testPublicDomSinksAvoidCatalogHtml();
   console.log('PASS security P0 regressions');
 }
 
