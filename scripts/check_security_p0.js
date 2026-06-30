@@ -179,7 +179,8 @@ async function testAppCspMiddleware() {
   });
   const csp = html.headers.get('content-security-policy') || '';
   assert(csp.includes("default-src 'self'"), 'app CSP is missing default-src fallback');
-  assert(csp.includes("script-src 'self' 'unsafe-inline' 'report-sample'"), 'app CSP is missing script-src');
+  assert(csp.includes("script-src 'self' 'unsafe-inline' 'report-sample' https://static.cloudflareinsights.com"), 'app CSP is missing script-src');
+  assert(csp.includes("connect-src 'self' https://cloudflareinsights.com"), 'app CSP is missing Cloudflare analytics connect-src');
   assert(!csp.includes('unsafe-eval'), 'app CSP still allows unsafe-eval');
 
   const json = await mod.onRequest({
