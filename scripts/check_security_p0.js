@@ -492,6 +492,12 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(/u\.origin\s*===\s*location\.origin/.test(login), 'login dev magic-link does not enforce same-origin URL');
 }
 
+function testNoCommittedPostHogToken() {
+  const restore = fs.readFileSync(path.join(GALLERY, 'scripts/restore_secrets.sh'), 'utf8');
+  assert(!/phc_[A-Za-z0-9]+/.test(restore), 'restore_secrets.sh contains a committed PostHog project token');
+  assert(/PUBLIC_POSTHOG_KEY must be provided/.test(restore), 'restore_secrets.sh does not require runtime PUBLIC_POSTHOG_KEY');
+}
+
 async function main() {
   await testTimingSafeCompare();
   testNoDirectAdminTokenComparisons();
@@ -509,6 +515,7 @@ async function main() {
   await testFeedbackVoteDedupe();
   testClientsUseVoteStateShape();
   testPublicDomSinksAvoidCatalogHtml();
+  testNoCommittedPostHogToken();
   console.log('PASS security P0 regressions');
 }
 

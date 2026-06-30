@@ -107,7 +107,7 @@ else
       fail "/posthog-init → still stub after restore (CF may still be propagating; re-check in a minute)"
     fi
   else
-    fail "restore_secrets.sh itself failed — check wrangler auth"
+    fail "restore_secrets.sh itself failed — check wrangler auth and PUBLIC_POSTHOG_KEY env"
   fi
 fi
 
