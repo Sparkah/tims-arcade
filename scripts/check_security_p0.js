@@ -633,6 +633,14 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(/action\.dataset\.slug\s*=\s*slug/.test(hiddenPanel), 'admin hidden actions do not assign data-slug through dataset');
   assert(/appendAdminCell\(row,\s*slug,\s*\{\s*className:\s*'slug'\s*\}\)/.test(hiddenPanel), 'admin hidden slugs do not render through a DOM text cell');
   assert(/el\.replaceChildren\(summary,\s*table\)/.test(hiddenPanel), 'admin hidden panel does not render via DOM replacement');
+
+  const uploadsPanel = adminSection('async function loadUploads()', "document.addEventListener('click', async (e) =>", 'admin uploads panel');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(uploadsPanel), 'admin uploads panel still uses dangerous HTML sinks');
+  assert(/title\.textContent\s*=/.test(uploadsPanel), 'admin upload titles do not render with textContent');
+  assert(/button\.dataset\.id\s*=/.test(uploadsPanel), 'admin upload actions do not assign data-id through dataset');
+  assert(/detail\.textContent\s*=/.test(uploadsPanel), 'admin failed-upload details do not render with textContent');
+  assert(/list\.append\(String\(file\)\)/.test(uploadsPanel), 'admin failed-upload file names do not render as text nodes');
+  assert(/el\.replaceChildren\(fragment\)/.test(uploadsPanel), 'admin uploads panel does not render via DOM replacement');
 }
 
 function testNoCommittedPostHogToken() {
