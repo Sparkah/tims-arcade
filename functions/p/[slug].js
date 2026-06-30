@@ -20,11 +20,9 @@ export async function onRequest({ params, env, request }) {
 
   // Fetch games.json from the same deployment via ASSETS binding (works
   // regardless of which preview/production we're on).
-  const gamesUrl = new URL('/games.json', request.url);
   let games = [];
   try {
-    const r = await fetch(gamesUrl);
-    if (r.ok) games = await r.json();
+    games = await readGamesJson(env, request);
   } catch (e) { /* fall through to 404 */ }
 
   const game = games.find(g => g.slug === slug);
@@ -55,7 +53,7 @@ export async function onRequest({ params, env, request }) {
   const acceptLang = (request.headers.get('Accept-Language') || '').toLowerCase();
   const lang = acceptLang.split(',')[0].startsWith('ru') ? 'ru' : 'en';
 
-  const site  = new URL('/', request.url).origin;
+  const site = trustedStaticOrigin(request);
   const titleEn = game.title;
   const titleRu = game.title_ru || game.title;
   const hookEn  = game.hook || 'A small browser game from Tim\'s Game Lab.';
@@ -292,6 +290,35 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
       'cache-control': 'public, max-age=300',
     },
   });
+}
+
+async function readGamesJson(env, request) {
+  if (env && env.ASSETS && typeof env.ASSETS.fetch === 'function') {
+    const r = await env.ASSETS.fetch(new Request('https://assets.local/games.json'));
+    if (r.ok) return await r.json();
+  }
+
+  const r = await fetch(`${trustedStaticOrigin(request)}/games.json`, { cf: { cacheTtl: 60 } });
+  return r.ok ? await r.json() : [];
+}
+
+function trustedStaticOrigin(request) {
+  const url = new URL(request.url);
+  const host = url.hostname.toLowerCase();
+  // Trust boundary: never use an arbitrary request Host for outbound fetches
+  // or emitted metadata; keep both on known origins to prevent Host-header
+  // injection and SSRF-style catalogue fetches.
+  if (
+    host === 'game-factory.tech'
+    || host === 'www.game-factory.tech'
+    || host.endsWith('.tims-arcade.pages.dev')
+  ) {
+    return `https://${url.host}`;
+  }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0') {
+    return url.origin;
+  }
+  return 'https://game-factory.tech';
 }
 
 function escapeHtml(s) {

@@ -498,17 +498,88 @@ function testNoCommittedPostHogToken() {
   assert(!/phc_[A-Za-z0-9]+/.test(restore), 'restore_secrets.sh contains a committed PostHog project token');
   assert(/PUBLIC_POSTHOG_KEY must be provided/.test(restore), 'restore_secrets.sh does not require runtime PUBLIC_POSTHOG_KEY');
 
-  const missingWrangler = childProcess.spawnSync('bash', ['scripts/restore_secrets.sh'], {
-    cwd: GALLERY,
-    env: {
-      PATH: '/usr/bin:/bin',
-      PUBLIC_POSTHOG_KEY: 'phc_test',
-      PUBLIC_POSTHOG_HOST: 'https://eu.i.posthog.com',
-    },
-    encoding: 'utf8',
+  const tmpPath = fs.mkdtempSync(path.join(require('os').tmpdir(), 'gf-no-wrangler-'));
+  try {
+    const missingWrangler = childProcess.spawnSync('/bin/bash', ['scripts/restore_secrets.sh'], {
+      cwd: GALLERY,
+      env: {
+        PATH: tmpPath,
+        PROJECT: 'security-regression-test',
+        PUBLIC_POSTHOG_KEY: 'test-posthog-key',
+        PUBLIC_POSTHOG_HOST: 'https://eu.i.posthog.com',
+      },
+      encoding: 'utf8',
+    });
+    assert(missingWrangler.status !== 0, 'restore_secrets.sh swallowed wrangler failures');
+    assert(/wrangler CLI is not available/.test(missingWrangler.stderr), 'restore_secrets.sh missing-wrangler failure is not explicit');
+  } finally {
+    fs.rmSync(tmpPath, { recursive: true, force: true });
+  }
+}
+
+async function testSharePageCatalogueFetchIsHostAllowlisted() {
+  const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/p/[slug].js')).href);
+  const games = [{
+    slug: 'safe_game',
+    title: 'Safe Game',
+    hook: 'A safe test game.',
+    addedDate: '2026-06-30',
+  }];
+  const gamesResponse = () => new Response(JSON.stringify(games), {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
   });
-  assert(missingWrangler.status !== 0, 'restore_secrets.sh swallowed wrangler failures');
-  assert(/wrangler CLI is not available/.test(missingWrangler.stderr), 'restore_secrets.sh missing-wrangler failure is not explicit');
+
+  const oldFetch = globalThis.fetch;
+  try {
+    let networkCalled = false;
+    const assetEnv = {
+      ASSETS: {
+        fetch: async () => gamesResponse(),
+      },
+    };
+    globalThis.fetch = async () => {
+      networkCalled = true;
+      return new Response('unexpected network fetch', { status: 500 });
+    };
+    let res = await mod.onRequest({
+      params: { slug: 'safe_game' },
+      env: assetEnv,
+      request: req('https://attacker.invalid/p/safe_game'),
+    });
+    assert(res.status === 200, `share page rejected ASSETS catalogue: ${res.status}`);
+    assert(!networkCalled, 'share page fetched network catalogue while ASSETS binding was available');
+    let html = await res.text();
+    assert(html.includes('https://game-factory.tech/p/safe_game'), 'share page used untrusted request host in metadata');
+
+    let fetchedUrl = '';
+    globalThis.fetch = async (url) => {
+      fetchedUrl = String(url);
+      return gamesResponse();
+    };
+    res = await mod.onRequest({
+      params: { slug: 'safe_game' },
+      env: {},
+      request: req('https://attacker.invalid/p/safe_game'),
+    });
+    assert(res.status === 200, `share page rejected allowlisted fallback catalogue: ${res.status}`);
+    assert(fetchedUrl === 'https://game-factory.tech/games.json', `share page fetched untrusted catalogue URL: ${fetchedUrl}`);
+    html = await res.text();
+    assert(html.includes('https://game-factory.tech/p/safe_game'), 'share page fallback metadata used untrusted host');
+
+    globalThis.fetch = async (url) => {
+      fetchedUrl = String(url);
+      return gamesResponse();
+    };
+    res = await mod.onRequest({
+      params: { slug: 'safe_game' },
+      env: {},
+      request: req('https://aa716bef.tims-arcade.pages.dev/p/safe_game'),
+    });
+    assert(res.status === 200, `share page rejected Pages preview catalogue: ${res.status}`);
+    assert(fetchedUrl === 'https://aa716bef.tims-arcade.pages.dev/games.json', `share page did not preserve trusted Pages preview URL: ${fetchedUrl}`);
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
 }
 
 async function main() {
@@ -529,6 +600,7 @@ async function main() {
   testClientsUseVoteStateShape();
   testPublicDomSinksAvoidCatalogHtml();
   testNoCommittedPostHogToken();
+  await testSharePageCatalogueFetchIsHostAllowlisted();
   console.log('PASS security P0 regressions');
 }
 
