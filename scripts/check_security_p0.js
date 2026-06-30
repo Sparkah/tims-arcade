@@ -169,6 +169,55 @@ async function testHstsMiddleware() {
   assert(res.headers.get('strict-transport-security') === 'max-age=31536000', 'middleware did not add HSTS');
 }
 
+async function testAppCspMiddleware() {
+  const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/_middleware.js')).href);
+  const html = await mod.onRequest({
+    request: req('https://game-factory.test/'),
+    next: async () => new Response('<!doctype html>', {
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    }),
+  });
+  const csp = html.headers.get('content-security-policy') || '';
+  assert(csp.includes("default-src 'self'"), 'app CSP is missing default-src fallback');
+  assert(csp.includes("script-src 'self' 'unsafe-inline' 'report-sample'"), 'app CSP is missing script-src');
+  assert(!csp.includes('unsafe-eval'), 'app CSP still allows unsafe-eval');
+
+  const json = await mod.onRequest({
+    request: req('https://game-factory.test/api/boot'),
+    next: async () => new Response('{}', {
+      headers: { 'content-type': 'application/json; charset=utf-8' },
+    }),
+  });
+  assert(!json.headers.has('content-security-policy'), 'middleware added CSP to non-HTML response');
+
+  const game = await mod.onRequest({
+    request: req('https://game-factory.test/games/example/'),
+    next: async () => new Response('<!doctype html>', {
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    }),
+  });
+  assert(!game.headers.has('content-security-policy'), 'middleware added app CSP to game runtime path');
+
+  const telegram = await mod.onRequest({
+    request: req('https://game-factory.test/tg-megaton/'),
+    next: async () => new Response('<!doctype html>', {
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    }),
+  });
+  assert(!telegram.headers.has('content-security-policy'), 'middleware added app CSP to Telegram app path');
+
+  const existing = await mod.onRequest({
+    request: req('https://game-factory.test/g/abc123def'),
+    next: async () => new Response('<!doctype html>', {
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        'content-security-policy': "default-src 'none'",
+      },
+    }),
+  });
+  assert(existing.headers.get('content-security-policy') === "default-src 'none'", 'middleware overwrote route-specific CSP');
+}
+
 async function testAdminAuth() {
   const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/_lib/adminAuth.js')).href);
   const env = makeEnv();
@@ -439,6 +488,7 @@ async function main() {
   testAdminPiiResponsesAreNotPublicCacheable();
   testAdminPageDoesNotAcceptUrlToken();
   await testHstsMiddleware();
+  await testAppCspMiddleware();
   await testAdminAuth();
   await testLogoutReturnSanitization();
   await testSessionCookieMigration();
