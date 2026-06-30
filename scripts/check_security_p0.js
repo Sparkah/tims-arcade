@@ -611,6 +611,15 @@ function testPublicDomSinksAvoidCatalogHtml() {
     assert(endIndex !== -1, `admin.html missing ${label} end marker`);
     return admin.slice(startIndex, endIndex);
   };
+  assert(/adminTitleBySlug\s*=\s*Object\.create\(null\)/.test(admin), 'admin title index is prototype-pollutable');
+
+  const leastAttentionPanel = adminSection('async function loadLeastAttention', 'async function loadUserDigests', 'admin least-attention panel');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(leastAttentionPanel), 'admin least-attention panel still uses dangerous HTML sinks');
+  assert(/title\.textContent\s*=/.test(leastAttentionPanel), 'admin least-attention titles do not render with textContent');
+  assert(/slugLine\.textContent\s*=\s*slug/.test(leastAttentionPanel), 'admin least-attention slugs do not render with textContent');
+  assert(/hasOwnProperty\.call\(adminTitleBySlug,\s*slug\)/.test(leastAttentionPanel), 'admin least-attention title lookup does not own-check slug keys');
+  assert(/el\.replaceChildren\(summary,\s*table\)/.test(leastAttentionPanel), 'admin least-attention panel does not render via DOM replacement');
+
   const userDigestsPanel = adminSection('async function loadUserDigests', "document.addEventListener('click', (e) =>", 'admin user digests panel');
   assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(userDigestsPanel), 'admin user digests panel still uses dangerous HTML sinks');
   assert(/digest\.textContent\s*=/.test(userDigestsPanel), 'admin user digests text does not render with textContent');
