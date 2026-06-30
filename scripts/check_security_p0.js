@@ -534,6 +534,11 @@ function testPublicDomSinksAvoidCatalogHtml() {
 
   const chat = fs.readFileSync(path.join(GALLERY, 'chat.js'), 'utf8');
   assert(!/row\.innerHTML\s*=/.test(chat), 'chat messages render user content with innerHTML');
+
+  const creator = fs.readFileSync(path.join(GALLERY, 'creator.html'), 'utf8');
+  assert(!/function\s+esc\s*\(/.test(creator), 'creator dashboard still uses an HTML escaping helper');
+  assert(!/el\.innerHTML\s*=\s*d\.games\.map\(card\)\.join/.test(creator), 'creator dashboard renders creator games with innerHTML');
+  assert(!/innerHTML/.test(creator), 'creator dashboard still uses innerHTML');
 }
 
 function testNoCommittedPostHogToken() {
