@@ -8,6 +8,9 @@
 #
 # Configurable env vars (override per-push):
 #   REVIEW_THRESHOLD   default "5.0"   — avg score required to pass
+#   REVIEW_TIMEOUT_SECONDS default "180" — max seconds to wait for the
+#                                        AI review command before treating
+#                                        it as an AI error
 #   REVIEW_FAIL_OPEN   default "0"     — set 1 to keep pushing when the
 #                                        AI itself errors (no scorecard)
 #
@@ -27,6 +30,7 @@ TS="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOG_DIR/review-$(basename "$REPO_ROOT")-$TS.log"
 
 THRESHOLD="${REVIEW_THRESHOLD:-5.0}"
+TIMEOUT_SECONDS="${REVIEW_TIMEOUT_SECONDS:-180}"
 
 # Pre-flight checks. Skip the gate (no-op) if the toolchain isn't available
 # rather than breaking pushes — but log loudly so Tim notices.
@@ -107,8 +111,51 @@ echo "🔍 pre-push: 6-axis AI scorecard on diff (${DIFF_SIZE} chars)..." >&2
 echo "   threshold: avg ≥ ${THRESHOLD} to pass" >&2
 echo "   log: $LOG" >&2
 
-RAW="$("$CLAUDE_BIN" --print --dangerously-skip-permissions "$PROMPT" 2>&1)"
+if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || (( TIMEOUT_SECONDS <= 0 )); then
+  echo "pre-push-review: invalid REVIEW_TIMEOUT_SECONDS=$TIMEOUT_SECONDS" >&2
+  exit 1
+fi
+
+RAW="$(CLAUDE_BIN="$CLAUDE_BIN" REVIEW_PROMPT="$PROMPT" REVIEW_TIMEOUT_SECONDS="$TIMEOUT_SECONDS" python3 - <<'PY' 2>&1
+import os
+import subprocess
+import sys
+
+claude_bin = os.environ["CLAUDE_BIN"]
+prompt = os.environ["REVIEW_PROMPT"]
+timeout = int(os.environ["REVIEW_TIMEOUT_SECONDS"])
+
+try:
+    result = subprocess.run(
+        [claude_bin, "--print", "--dangerously-skip-permissions", prompt],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+    )
+except subprocess.TimeoutExpired as exc:
+    if exc.stdout:
+        sys.stdout.write(exc.stdout if isinstance(exc.stdout, str) else exc.stdout.decode("utf-8", "replace"))
+    print(f"pre-push-review: AI review timed out after {timeout}s", file=sys.stderr)
+    sys.exit(124)
+
+sys.stdout.write(result.stdout or "")
+sys.exit(result.returncode)
+PY
+)"
+CLAUDE_STATUS=$?
 echo "$RAW" > "$LOG"
+
+if (( CLAUDE_STATUS != 0 )); then
+  echo "" >&2
+  echo "pre-push-review: AI review command failed with status $CLAUDE_STATUS — see $LOG" >&2
+  if [[ "${REVIEW_FAIL_OPEN:-0}" == "1" ]]; then
+    echo "(REVIEW_FAIL_OPEN=1 so push continues anyway)" >&2
+    exit 0
+  fi
+  echo "🚫 push aborted. Set REVIEW_FAIL_OPEN=1 to bypass when the AI errors." >&2
+  exit 1
+fi
 
 # Extract the first JSON object from raw output. Claude sometimes wraps
 # in ```json fences or adds preamble — be tolerant.

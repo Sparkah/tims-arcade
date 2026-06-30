@@ -1,5 +1,24 @@
 const WEBAPP_AUTH_MAX_AGE_SECONDS = 2 * 24 * 60 * 60;
 
+export function telegramBotProfile(value) {
+  return String(value || '').trim().toLowerCase() === 'test' ? 'test' : 'prod';
+}
+
+export function telegramBotToken(env, profile = 'prod') {
+  if (!env) return '';
+  if (telegramBotProfile(profile) === 'test') {
+    return String(env.TELEGRAM_GAMEBOT_TEST_TOKEN || env.TELEGRAM_TEST_BOT_TOKEN || '').trim();
+  }
+  return String(env.TELEGRAM_GAMEBOT_TOKEN || env.TELEGRAM_BOT_TOKEN || '').trim();
+}
+
+export function configuredTelegramBotProfiles(env) {
+  return {
+    prod: Boolean(telegramBotToken(env, 'prod')),
+    test: Boolean(telegramBotToken(env, 'test')),
+  };
+}
+
 function bytesToHex(bytes) {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
@@ -86,4 +105,25 @@ export async function verifyTelegramInitData(initData, botToken) {
     queryId: params.get('query_id') || null,
     raw: Object.fromEntries(params.entries()),
   };
+}
+
+export async function verifyTelegramInitDataFromEnv(initData, env) {
+  const candidates = [
+    ['prod', telegramBotToken(env, 'prod')],
+    ['test', telegramBotToken(env, 'test')],
+  ].filter(([, token]) => token);
+
+  if (!candidates.length) return { ok: false, error: 'missing_bot_token' };
+
+  let firstFailure = null;
+  let badSignature = null;
+  for (const [profile, token] of candidates) {
+    const auth = await verifyTelegramInitData(initData, token);
+    if (auth.ok) return { ...auth, botProfile: profile, botToken: token };
+    if (!firstFailure) firstFailure = auth;
+    if (auth.error === 'bad_signature') badSignature = auth;
+  }
+
+  const failure = badSignature || firstFailure || { error: 'bad_signature' };
+  return { ok: false, error: failure.error || 'bad_signature' };
 }

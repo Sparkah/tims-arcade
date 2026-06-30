@@ -40,6 +40,28 @@
   header h1 { font-size: 20px; letter-spacing: -0.02em; }
   header .count { font-size: 12px; color: var(--muted); }
   .sub { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 12px;
+  }
+  .tabs[hidden] { display: none; }
+  .tabs button {
+    flex: 1;
+    min-height: 36px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--bg-card);
+    color: var(--muted);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 700;
+  }
+  .tabs button.active {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #fff;
+  }
   #grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -69,7 +91,7 @@
     font-size: 11px; color: var(--muted); line-height: 1.35; margin-top: 3px;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   }
-  #loading, #error {
+  #loading, #error, #empty {
     padding: 48px 20px; text-align: center; color: var(--muted); font-size: 14px;
   }
   /* ---------- game mode ---------- */
@@ -94,13 +116,18 @@
 </head>
 <body>
 
-<div id="picker">
+<main id="picker">
   <header><h1>🎮 Game Factory</h1><span class="count" id="count"></span></header>
   <div class="sub" id="sub">New games built daily. Tap one to play.</div>
+  <div class="tabs" id="tabs" hidden>
+    <button type="button" id="allTab" class="active" aria-pressed="true">All games</button>
+    <button type="button" id="myTab" aria-pressed="false">My games</button>
+  </div>
   <div id="loading">Loading games…</div>
   <div id="error" style="display:none">Couldn't load the game list.</div>
+  <div id="empty" style="display:none"></div>
   <div id="grid"></div>
-</div>
+</main>
 
 <div id="player">
   <button id="backpill">‹ Games</button>
@@ -128,29 +155,124 @@
   var grid = document.getElementById('grid');
   var player = document.getElementById('player');
   var backpill = document.getElementById('backpill');
-  var games = [];          // playable manifest entries
-  var bySlug = {};
+  var games = [];          // playable manifest entries after Telegram library curation
+  var allPlayableGames = [];
+  var bySlug = {};         // all playable, non-hidden manifest entries for direct links/history
   var iframe = null;
+  var tgConfig = null;
+  var hasTelegramIdentity = Boolean(tg && tg.initData);
+  var playedGames = [];
+  var playedBySlug = {};
+  var viewMode = 'all';
 
   if (RU) {
     document.getElementById('sub').textContent = 'Новые игры каждый день. Нажмите, чтобы играть.';
+    document.getElementById('allTab').textContent = 'Все игры';
+    document.getElementById('myTab').textContent = 'Мои игры';
     backpill.textContent = '‹ Игры';
   }
 
   function T(g, f) { return (RU && g[f + '_ru']) || g[f] || ''; }
+  function E(s) {
+    return String(s || '').replace(/[&<>"']/g, function (ch) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
+    });
+  }
+  function slugSet(list) {
+    var out = {};
+    (Array.isArray(list) ? list : []).forEach(function (slug) {
+      if (/^[a-z0-9_-]{1,80}$/.test(String(slug || ''))) out[slug] = true;
+    });
+    return out;
+  }
+  function rankMap(list) {
+    var out = {};
+    (Array.isArray(list) ? list : []).forEach(function (slug, i) {
+      if (/^[a-z0-9_-]{1,80}$/.test(String(slug || '')) && out[slug] === undefined) out[slug] = i;
+    });
+    return out;
+  }
+  function normalizeConfig(data) {
+    data = data && typeof data === 'object' ? data : {};
+    data.library = data.library && typeof data.library === 'object' ? data.library : {};
+    data.library.mode = data.library.mode === 'selected' ? 'selected' : 'all';
+    data.library.includeSlugs = Array.isArray(data.library.includeSlugs) ? data.library.includeSlugs : [];
+    data.library.excludeSlugs = Array.isArray(data.library.excludeSlugs) ? data.library.excludeSlugs : [];
+    data.library.pinnedSlugs = Array.isArray(data.library.pinnedSlugs) ? data.library.pinnedSlugs : [];
+    data.library.maxGames = Math.max(1, Math.min(Number(data.library.maxGames) || 180, 240));
+    data.library.hotLabel = data.library.hotLabel || 'Hot today';
+    data.library.pinnedLabel = data.library.pinnedLabel || 'Featured';
+    return data;
+  }
+  function curateLibrary(all, config, hidden) {
+    config = normalizeConfig(config);
+    var lib = config.library;
+    var allBySlug = {};
+    all.forEach(function (g) { allBySlug[g.slug] = g; });
+
+    var visible = all.filter(function (g) { return !hidden[g.slug]; });
+    if (lib.mode === 'selected' && lib.includeSlugs.length) {
+      visible = lib.includeSlugs.map(function (slug) { return allBySlug[slug]; }).filter(function (g) {
+        return g && !hidden[g.slug];
+      });
+    } else {
+      var excluded = slugSet(lib.excludeSlugs);
+      visible = visible.filter(function (g) { return !excluded[g.slug]; });
+    }
+
+    var pinned = rankMap(lib.pinnedSlugs);
+    visible.sort(function (a, b) {
+      var ap = pinned[a.slug], bp = pinned[b.slug];
+      if (ap !== undefined || bp !== undefined) return (ap === undefined ? 9999 : ap) - (bp === undefined ? 9999 : bp);
+      return (b._score - a._score) || ((b.num || 0) - (a.num || 0));
+    });
+    return visible.slice(0, lib.maxGames);
+  }
+  function setPlayedGames(list) {
+    playedGames = (Array.isArray(list) ? list : []).filter(function (row) {
+      return row && /^[a-z0-9_-]{1,80}$/.test(String(row.slug || ''));
+    });
+    playedBySlug = {};
+    playedGames.forEach(function (row) { playedBySlug[row.slug] = row; });
+  }
+  function gamesForView() {
+    if (viewMode !== 'mine') return games;
+    return playedGames.map(function (row) {
+      var g = bySlug[row.slug];
+      if (!g) return null;
+      return Object.assign({ _played: row }, g);
+    }).filter(Boolean);
+  }
+  function loadPlayedGames() {
+    if (!hasTelegramIdentity) return Promise.resolve(null);
+    return fetch(ORIGIN + '/api/tg-player-games', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ initData: tg.initData })
+    }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+  }
 
   // --- data ---
   function load() {
     var manifest = fetch(ORIGIN + '/games.json').then(function (r) { return r.json(); });
     var trending = fetch(ORIGIN + '/api/trending').then(function (r) { return r.json(); }).catch(function () { return null; });
-    Promise.all([manifest, trending]).then(function (res) {
+    var hidden = fetch(ORIGIN + '/api/hidden').then(function (r) { return r.json(); }).catch(function () { return null; });
+    var config = fetch(ORIGIN + '/api/tg-bot-config').then(function (r) { return r.json(); }).catch(function () { return null; });
+    var mine = loadPlayedGames();
+    Promise.all([manifest, trending, hidden, config, mine]).then(function (res) {
       var all = res[0], tr = (res[1] && res[1].games) || {};
-      games = all.filter(function (g) { return !g.external && g.published !== false && g.slug; });
-      games.forEach(function (g) {
-        bySlug[g.slug] = g;
+      var hiddenSet = slugSet((res[2] && res[2].hidden) || []);
+      tgConfig = normalizeConfig(res[3]);
+      setPlayedGames(res[4] && res[4].played);
+      var playable = all.filter(function (g) { return !g.external && g.published !== false && g.slug; });
+      playable.forEach(function (g) {
         g._score = (tr[g.slug] && tr[g.slug].score) || 0;
       });
-      games.sort(function (a, b) { return (b._score - a._score) || ((b.num || 0) - (a.num || 0)); });
+      playable.sort(function (a, b) { return (b._score - a._score) || ((b.num || 0) - (a.num || 0)); });
+      allPlayableGames = playable.filter(function (g) { return !hiddenSet[g.slug]; });
+      games = curateLibrary(playable, tgConfig, hiddenSet);
+      bySlug = {};
+      allPlayableGames.forEach(function (g) { bySlug[g.slug] = g; });
       render();
       route();
     }).catch(function () {
@@ -161,12 +283,33 @@
 
   function render() {
     document.getElementById('loading').style.display = 'none';
-    document.getElementById('count').textContent = games.length + (RU ? ' игр' : ' games');
-    var hot = RU ? '🔥 Сегодня в топе' : '🔥 Hot today';
-    var html = games.map(function (g, i) {
+    var visibleGames = gamesForView();
+    document.getElementById('tabs').hidden = !hasTelegramIdentity;
+    document.getElementById('allTab').classList.toggle('active', viewMode === 'all');
+    document.getElementById('myTab').classList.toggle('active', viewMode === 'mine');
+    document.getElementById('allTab').setAttribute('aria-pressed', viewMode === 'all' ? 'true' : 'false');
+    document.getElementById('myTab').setAttribute('aria-pressed', viewMode === 'mine' ? 'true' : 'false');
+    document.getElementById('myTab').textContent = (RU ? 'Мои игры' : 'My games') + (playedGames.length ? ' · ' + playedGames.length : '');
+    document.getElementById('count').textContent = visibleGames.length + (RU ? ' игр' : ' games');
+    if (tgConfig && tgConfig.library && tgConfig.library.subtitle) {
+      document.getElementById('sub').textContent = tgConfig.library.subtitle;
+    }
+    var empty = document.getElementById('empty');
+    empty.style.display = visibleGames.length ? 'none' : 'block';
+    empty.textContent = viewMode === 'mine'
+      ? (RU ? 'История пуста. Откройте любую игру, и она появится здесь.' : 'No play history yet. Open any game and it will appear here.')
+      : '';
+    var pinned = rankMap(tgConfig && tgConfig.library && tgConfig.library.pinnedSlugs);
+    var hot = RU ? '🔥 Сегодня в топе' : (tgConfig && tgConfig.library && tgConfig.library.hotLabel) || 'Hot today';
+    var pinnedLabel = (tgConfig && tgConfig.library && tgConfig.library.pinnedLabel) || 'Featured';
+    var html = visibleGames.map(function (g, i) {
+      var badge = '';
+      if (viewMode === 'mine' && g._played) badge = '<span class="badge">' + E((RU ? 'Играли' : 'Played') + ' · ' + (g._played.plays || 1)) + '</span>';
+      else if (pinned[g.slug] !== undefined) badge = '<span class="badge">' + E(pinnedLabel) + '</span>';
+      else if (g._score > 0 && i < 6) badge = '<span class="badge">' + E(hot) + '</span>';
       return '<div class="card" data-slug="' + g.slug + '">' +
         '<div class="thumbwrap">' +
-          (g._score > 0 && i < 6 ? '<span class="badge">' + hot + '</span>' : '') +
+          badge +
           '<img loading="lazy" src="/thumbs/' + g.slug + '.webp" onerror="this.onerror=null;this.src=\'/thumbs/' + g.slug + '.png\'" alt="">' +
         '</div>' +
         '<div class="meta"><div class="title"></div><div class="hook"></div></div>' +
@@ -176,14 +319,14 @@
     // text via textContent (manifest strings stay data, not markup)
     var cards = grid.children;
     for (var i = 0; i < cards.length; i++) {
-      var g = games[i];
+      var g = visibleGames[i];
       cards[i].querySelector('.title').textContent = T(g, 'title');
       cards[i].querySelector('.hook').textContent = T(g, 'hook');
     }
-    grid.addEventListener('click', function (ev) {
+    grid.onclick = function (ev) {
       var card = ev.target.closest('.card');
       if (card) openGame(card.getAttribute('data-slug'), true);
-    });
+    };
   }
 
   // --- game mode ---
@@ -194,6 +337,7 @@
     if (iframe) iframe.remove();
     iframe = document.createElement('iframe');
     iframe.allow = 'autoplay; fullscreen; gamepad';
+    iframe.title = T(g, 'title') || 'Game';
     iframe.src = '/games/' + slug + '/index.html';
     player.appendChild(iframe);
     player.classList.add('on');
@@ -206,6 +350,21 @@
         keepalive: true
       }).catch(function () {});
     } catch (e) {}
+    if (hasTelegramIdentity) {
+      try {
+        fetch(ORIGIN + '/api/tg-play', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ slug: slug, initData: tg.initData }),
+          keepalive: true
+        }).then(function (r) { return r.ok ? r.json() : null; }).then(function (data) {
+          if (data && data.played) {
+            setPlayedGames(data.played);
+            render();
+          }
+        }).catch(function () {});
+      } catch (e) {}
+    }
     if (tg) {
       try {
         tg.BackButton.onClick(goBack);
@@ -228,6 +387,14 @@
 
   function goBack() { history.back(); }
   backpill.addEventListener('click', goBack);
+  document.getElementById('allTab').addEventListener('click', function () {
+    viewMode = 'all';
+    render();
+  });
+  document.getElementById('myTab').addEventListener('click', function () {
+    viewMode = 'mine';
+    render();
+  });
   window.addEventListener('popstate', function (ev) {
     if (ev.state && ev.state.g) openGame(ev.state.g, false);
     else closeGame();
