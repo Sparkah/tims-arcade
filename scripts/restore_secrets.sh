@@ -34,6 +34,14 @@ if [[ "$PUBLIC_POSTHOG_HOST" != https://* ]]; then
   echo "restore_secrets: PUBLIC_POSTHOG_HOST must be an https:// URL" >&2
   exit 2
 fi
+if ! command -v wrangler >/dev/null 2>&1; then
+  echo "restore_secrets: wrangler CLI is not available on PATH" >&2
+  exit 1
+fi
+if ! command -v node >/dev/null 2>&1; then
+  echo "restore_secrets: node is not available on PATH" >&2
+  exit 1
+fi
 
 PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({
   PUBLIC_POSTHOG_KEY: process.env.PUBLIC_POSTHOG_KEY,
@@ -41,6 +49,12 @@ PAYLOAD="$(node -e 'process.stdout.write(JSON.stringify({
 }, null, 2))')"
 
 echo "▶ restoring CF Pages public secrets for $PROJECT..."
-echo "$PAYLOAD" | wrangler pages secret bulk --project-name="$PROJECT" 2>&1 \
-  | grep -E "✨|Creating|secrets successfully|error" || true
+RESTORE_LOG="$(mktemp)"
+if ! echo "$PAYLOAD" | wrangler pages secret bulk --project-name="$PROJECT" >"$RESTORE_LOG" 2>&1; then
+  cat "$RESTORE_LOG" >&2
+  rm -f "$RESTORE_LOG"
+  exit 1
+fi
+grep -E "✨|Creating|secrets successfully|error" "$RESTORE_LOG" || true
+rm -f "$RESTORE_LOG"
 echo "✓ restore_secrets done"

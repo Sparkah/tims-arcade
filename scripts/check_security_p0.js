@@ -8,6 +8,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const childProcess = require('child_process');
 const { pathToFileURL } = require('url');
 
 const GALLERY = path.resolve(__dirname, '..');
@@ -496,6 +497,18 @@ function testNoCommittedPostHogToken() {
   const restore = fs.readFileSync(path.join(GALLERY, 'scripts/restore_secrets.sh'), 'utf8');
   assert(!/phc_[A-Za-z0-9]+/.test(restore), 'restore_secrets.sh contains a committed PostHog project token');
   assert(/PUBLIC_POSTHOG_KEY must be provided/.test(restore), 'restore_secrets.sh does not require runtime PUBLIC_POSTHOG_KEY');
+
+  const missingWrangler = childProcess.spawnSync('bash', ['scripts/restore_secrets.sh'], {
+    cwd: GALLERY,
+    env: {
+      PATH: '/usr/bin:/bin',
+      PUBLIC_POSTHOG_KEY: 'phc_test',
+      PUBLIC_POSTHOG_HOST: 'https://eu.i.posthog.com',
+    },
+    encoding: 'utf8',
+  });
+  assert(missingWrangler.status !== 0, 'restore_secrets.sh swallowed wrangler failures');
+  assert(/wrangler CLI is not available/.test(missingWrangler.stderr), 'restore_secrets.sh missing-wrangler failure is not explicit');
 }
 
 async function main() {
