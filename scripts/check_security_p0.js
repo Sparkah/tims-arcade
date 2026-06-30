@@ -562,6 +562,29 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(/iframe\.src\s*=\s*'\/games\/'\s*\+\s*encodeURIComponent\(slug\)\s*\+\s*'\/index\.html'/.test(tgIndex), 'Telegram game iframe path does not encode slug');
   assert(/function\s+route\(\)\s*\{[\s\S]{0,360}slug\s*=\s*safeSlug\(slug\)[\s\S]{0,120}gameForSlug\(slug\)/.test(tgIndex), 'Telegram route does not validate slugs before lookup');
   assert(/grid\.replaceChildren/.test(tgIndex), 'Telegram game picker does not render via DOM replacement');
+
+  const tgStarfall = fs.readFileSync(path.join(GALLERY, 'tg-starfall/index.html'), 'utf8');
+  assert(!/innerHTML/.test(tgStarfall), 'Starfall Telegram shop still uses innerHTML');
+  assert(!/document\.write/.test(tgStarfall), 'Starfall Telegram app still uses document.write');
+  assert(!/\son[a-z]+\s*=/.test(tgStarfall), 'Starfall Telegram app still uses inline event handler HTML');
+  assert(!/function\s+esc\s*\(/.test(tgStarfall), 'Starfall Telegram app still keeps an HTML escaping helper');
+  assert(/list\.replaceChildren\(fragment\)/.test(tgStarfall), 'Starfall Telegram shop does not render via DOM replacement');
+  assert(/k\s*===\s*'__proto__'[\s\S]{0,80}k\s*===\s*'prototype'[\s\S]{0,80}k\s*===\s*'constructor'/.test(tgStarfall), 'Starfall Telegram save merge does not reject prototype keys');
+
+  const hallmark = fs.readFileSync(path.join(GALLERY, 'proto-hallmark.html'), 'utf8');
+  assert(!/innerHTML/.test(hallmark), 'Hallmark prototype still uses innerHTML');
+  assert(!/document\.write/.test(hallmark), 'Hallmark prototype still uses document.write');
+  assert(/function\s+safeSlug/.test(hallmark), 'Hallmark prototype does not validate manifest slugs');
+  assert(/thumb\.href\s*=\s*'\/play\.html\?slug='\s*\+\s*encodeURIComponent\(slug\)/.test(hallmark), 'Hallmark prototype play link does not encode slug');
+  assert(/thumb\.style\.backgroundImage[\s\S]{0,140}encodeURIComponent\(slug\)/.test(hallmark), 'Hallmark prototype thumbnail URL does not encode slug');
+  assert(/bento\.replaceChildren/.test(hallmark), 'Hallmark prototype does not render via DOM replacement');
+
+  const vibe = fs.readFileSync(path.join(GALLERY, 'vibe.js'), 'utf8');
+  assert(!/innerHTML/.test(vibe), 'Vibe creator page still uses innerHTML');
+  assert(!/document\.write/.test(vibe), 'Vibe creator page still uses document.write');
+  assert(/els\.statsGrid\.replaceChildren\(fragment\)/.test(vibe), 'Vibe creator stats do not render via DOM replacement');
+  assert(/els\.frameWrap\.replaceChildren\(\)/.test(vibe), 'Vibe creator frame wrapper does not clear via DOM replacement');
+  assert(/els\.list\.replaceChildren\(\)/.test(vibe), 'Vibe creator list does not clear via DOM replacement');
 }
 
 function testNoCommittedPostHogToken() {

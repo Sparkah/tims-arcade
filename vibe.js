@@ -137,9 +137,21 @@
       [lifetime, 'earned all-time'],
       [streak + 'd', 'login streak' + (best > streak ? ' (best ' + best + 'd)' : '')],
     ];
-    els.statsGrid.innerHTML = tiles.map(function (t) {
-      return '<div class="create-stat"><div class="n">' + t[0] + '</div><div class="l">' + t[1] + '</div></div>';
-    }).join('');
+    var fragment = document.createDocumentFragment();
+    tiles.forEach(function (t) {
+      var tile = document.createElement('div');
+      tile.className = 'create-stat';
+      var num = document.createElement('div');
+      num.className = 'n';
+      num.textContent = t[0];
+      var label = document.createElement('div');
+      label.className = 'l';
+      label.textContent = t[1];
+      tile.appendChild(num);
+      tile.appendChild(label);
+      fragment.appendChild(tile);
+    });
+    els.statsGrid.replaceChildren(fragment);
     if (els.statsEarn) els.statsEarn.textContent = 'Earn tokens by playing (+1/min), rating a game (+5, after 5 min on it), and logging in daily (+10, with bonuses at 3/7/14/30/60-day streaks). Each new game or improvement costs ' + cost + ' tokens.';
     show(els.stats, true);
   }
@@ -266,7 +278,7 @@
       els.open.href = s.playUrl || '#';
       if (els.admin) els.admin.href = '/creator';
     }
-    els.frameWrap.innerHTML = '';
+    els.frameWrap.replaceChildren();
     var iframe = document.createElement('iframe');
     iframe.className = 'create-frame';
     iframe.setAttribute('sandbox', 'allow-scripts allow-pointer-lock');
@@ -295,7 +307,7 @@
         var mine = d.games.filter(function (g) { return g.source === 'vibe' || g.genre === 'vibe'; });
         if (!mine.length) { show(els.mine, false); return; }
         show(els.mine, true);
-        els.list.innerHTML = '';
+        els.list.replaceChildren();
         mine.forEach(function (g) { els.list.appendChild(creationCard(g)); });
       })
       .catch(function () {});
