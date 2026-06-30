@@ -1625,165 +1625,14 @@ function remoteConfig(slug, defaults, opts) {
   } catch (e) {}
 })();
 
-// ---- FIRST-60s FUNNEL (GF.funnel) - gallery-only boot analytics (WS-J) -----
-// Measures WHERE players quit in the first minutes so iterations target the
-// MEASURED early drop-off, not vibes. Server side: POST /api/funnel (KV
-// aggregation) + token-gated GET /api/admin/funnel + the admin Funnel panel.
-//
-// HARD COMPLIANCE RULE - GALLERY-ONLY TRANSPORT: events beacon ONLY when
-// location.hostname is the gallery (game-factory.tech / www.game-factory.tech)
-// or localhost dev (localhost / 127.0.0.1). On Yandex / CrazyGames / GamePush /
-// any other platform origin EVERY call is a silent no-op - platform-side
-// funnels come from their consoles, and an arbitrary external beacon from a
-// platform build risks moderation. Defense in depth: the endpoint URL is
-// RELATIVE ('/api/funnel'), so even a bypassed gate could only ever reach the
-// origin actually serving the game, never ours.
-//
-// AUTO EVENTS (zero game code - fire on their own):
-//   boot         - lib initialised on a gallery host
-//   first_input  - first pointerdown/keydown, once
-//   alive_60 / alive_120 / alive_300 - cumulative VISIBLE seconds; the counter
-//                  pauses while document.hidden (the play.html heartbeat's
-//                  visibility rule, mirrored)
-// GAME MARKS (one line in game code): GF.funnel.mark(name)
-//   FACTORY CONVENTION - every NEW game wires the 3 standard marks:
-//     GF.funnel.mark('tutorial_done')  when the tutorial completes OR is skipped
-//     GF.funnel.mark('first_death')    on the first lose / game-over
-//     GF.funnel.mark('first_upgrade')  on the first meta purchase/upgrade
-//   Names: [a-z0-9_]{1,24}; max 16 distinct marks/session; each name sends
-//   once per session (client-deduped; the server dedups per sid anyway).
-//
-// IDENTITY: sid = the SAME anonymous `uid` cookie that identity.js mints on
-// gallery pages and the heartbeat reads server-side - ONE identity, never a
-// second one. If the cookie is missing (direct /games/<slug>/ load before any
-// gallery page view) it is minted EXACTLY like identity.js (UUID v4, 2 years,
-// path=/, SameSite=Lax) so the heartbeat/meta layer later reuses the same id.
-// No PII, no cookies beyond the one that already exists.
-//
-// TRANSPORT: batched - a queued event schedules a flush in 5s (so flushes
-// happen at most every ~5s); also flushes on tab-hide (fetch keepalive) and
-// pagehide (navigator.sendBeacon) - the play.html heartbeat idiom. Payload:
-// { slug, sid, evs: [{ n, t }] } where t = ms since boot. Screenshot/test
-// harnesses (window._silent) never beacon.
-var _fn = { on: false, slug: '', sid: '', t0: 0, seen: {}, marks: 0, q: [], timer: null, aliveSec: 0, aliveTimer: null };
-var _FN_RESERVED = { boot: 1, first_input: 1, alive_60: 1, alive_120: 1, alive_300: 1 };
-function _fnHostOk() {
-  try {
-    var h = location.hostname;
-    return h === 'game-factory.tech' || h === 'www.game-factory.tech' || h === 'localhost' || h === '127.0.0.1';
-  } catch (e) { return false; }
-}
-function _fnSlug() {
-  // Same canonical slug the heartbeat uses: the /games/<slug>/ path segment.
-  // No match (game served outside the gallery tree) -> no attribution -> off.
-  try {
-    var m = (location.pathname || '').match(/\/games\/([a-zA-Z0-9_-]{1,40})(\/|$)/);
-    return m ? m[1].toLowerCase() : '';
-  } catch (e) { return ''; }
-}
-function _fnUuid() {
-  try { if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID(); } catch (e) {}
-  try {
-    return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, function (c) {
-      return (c ^ (window.crypto.getRandomValues(new Uint8Array(1))[0] & 15) >> (c / 4)).toString(16);
-    });
-  } catch (e) { return ''; }
-}
-function _fnSid() {
-  // Read the existing anon uid cookie (identity.js); mint it identically when
-  // absent so heartbeat + funnel share ONE visitor identity.
-  try {
-    var parts = document.cookie.split(';');
-    for (var i = 0; i < parts.length; i++) {
-      var c = parts[i].replace(/^\s+/, '');
-      if (c.indexOf('uid=') === 0) { var v = c.slice(4); if (v) return v; }
-    }
-  } catch (e) {}
-  var id = _fnUuid();
-  if (!id) return '';
-  try {
-    var exp = new Date();
-    exp.setTime(exp.getTime() + 730 * 24 * 60 * 60 * 1000);
-    document.cookie = 'uid=' + id + '; expires=' + exp.toUTCString() + '; path=/; SameSite=Lax';
-  } catch (e) {}
-  return id;
-}
-function _fnNow() { return (typeof performance !== 'undefined' ? performance.now() : Date.now()); }
-function _fnFlush(useBeacon) {
-  if (!_fn.on || !_fn.q.length) return;
-  if (_fn.timer) { clearTimeout(_fn.timer); _fn.timer = null; }
-  var body = JSON.stringify({ slug: _fn.slug, sid: _fn.sid, evs: _fn.q.splice(0, _fn.q.length) });
-  try {
-    if (useBeacon && navigator.sendBeacon) {
-      navigator.sendBeacon('/api/funnel', new Blob([body], { type: 'application/json' }));
-      return;
-    }
-  } catch (e) {}
-  try {
-    fetch('/api/funnel', { method: 'POST', headers: { 'content-type': 'application/json' }, body: body, keepalive: true }).catch(function () {});
-  } catch (e) {}
-}
-function _fnEmit(name) {
-  if (!_fn.on || _fn.seen[name]) return;
-  _fn.seen[name] = true;
-  var t = Math.round(_fnNow() - _fn.t0);
-  _fn.q.push({ n: name, t: t < 0 ? 0 : t > 21600000 ? 21600000 : t });
-  if (!_fn.timer) _fn.timer = setTimeout(function () { _fn.timer = null; _fnFlush(false); }, 5000);
-}
+// ---- GAME FUNNEL (disabled) -----------------------------------------------
+// Game-level analytics belong in GameAnalytics. Keep GF.funnel as a no-op so
+// older game code can call the compatibility API without producing Cloudflare KV writes.
 var funnelApi = {
-  // True only on a gallery/localhost host with a resolvable slug + sid.
-  get active() { return _fn.on; },
-  // GF.funnel.mark('tutorial_done') - record a game-specific funnel step.
-  // Silent no-op off-gallery, on bad names, past the 16-distinct-marks cap,
-  // or on a repeat of an already-sent name.
-  mark: function (name) {
-    if (!_fn.on) return;
-    name = String(name == null ? '' : name);
-    if (!/^[a-z0-9_]{1,24}$/.test(name)) return;
-    if (_FN_RESERVED[name]) return;            // auto events own these names
-    if (!_fn.seen[name]) {
-      if (_fn.marks >= 16) return;
-      _fn.marks++;
-    }
-    _fnEmit(name);
-  },
-  // Force-send anything queued (tests / explicit session boundaries).
-  flush: function () { _fnFlush(false); },
+  get active() { return false; },
+  mark: function () {},
+  flush: function () {},
 };
-(function () {
-  try {
-    if (!_fnHostOk()) return;                  // platform/foreign origin: dead module
-    if (window._silent) return;                // screenshot/test harness: no data
-    _fn.slug = _fnSlug();
-    if (!_fn.slug) return;
-    _fn.sid = _fnSid();
-    if (!_fn.sid) return;
-    _fn.t0 = _fnNow();
-    _fn.on = true;
-    _fnEmit('boot');
-    var first = function () {
-      document.removeEventListener('pointerdown', first, true);
-      document.removeEventListener('keydown', first, true);
-      _fnEmit('first_input');
-    };
-    document.addEventListener('pointerdown', first, true);
-    document.addEventListener('keydown', first, true);
-    _fn.aliveTimer = setInterval(function () {
-      try {
-        if (document.hidden) return;           // visible time only
-        _fn.aliveSec++;
-        if (_fn.aliveSec === 60) _fnEmit('alive_60');
-        else if (_fn.aliveSec === 120) _fnEmit('alive_120');
-        else if (_fn.aliveSec >= 300) {
-          _fnEmit('alive_300');
-          clearInterval(_fn.aliveTimer); _fn.aliveTimer = null;
-        }
-      } catch (e) {}
-    }, 1000);
-    document.addEventListener('visibilitychange', function () { if (document.hidden) _fnFlush(false); });
-    window.addEventListener('pagehide', function () { _fnFlush(true); });
-  } catch (e) {}
-})();
 
 // ---- IN-APP PURCHASES (GF.payments) - Yandex Payments wrapper --------------
 // Yandex's catalog ML rewards revenue, so every game ships IAP-ready. This is
@@ -2344,10 +2193,8 @@ window.GF = {
   // Remote config (live-ops DATA channel - see the REMOTE CONFIG block
   // above for the contract: never code, never blocks boot, offline = defaults).
   remoteConfig: remoteConfig,
-  // First-60s funnel (GALLERY-ONLY - hard no-op on platform origins; see the
-  // FIRST-60s FUNNEL block above). Auto events boot/first_input/alive_* need
-  // zero game code; games add the 3 standard marks:
-  //   GF.funnel.mark('tutorial_done' | 'first_death' | 'first_upgrade')
+  // Game funnel compatibility hook. Game analytics belongs in GameAnalytics;
+  // GF.funnel is a no-op and must not send Cloudflare/Workers KV telemetry.
   funnel: funnelApi,
   // In-app purchases (Yandex Payments - see the IN-APP PURCHASES block above).
   // GF.initPayments() in onReady -> GF.payments.available / .catalog() ->
