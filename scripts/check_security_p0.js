@@ -613,6 +613,14 @@ function testPublicDomSinksAvoidCatalogHtml() {
   };
   assert(/adminTitleBySlug\s*=\s*Object\.create\(null\)/.test(admin), 'admin title index is prototype-pollutable');
 
+  const retentionPanel = adminSection('async function loadRetention', '// Titles for panels', 'admin retention/funnel panels');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(retentionPanel), 'admin retention/funnel panels still use dangerous HTML sinks');
+  assert(/td\.textContent\s*=\s*String\(text\)/.test(retentionPanel), 'admin retention cells do not render with textContent');
+  assert(/caveat\.textContent\s*=/.test(retentionPanel), 'admin retention caveat does not render with textContent');
+  assert(/panel\.replaceChildren\(adminPanelMessage\(msg\)\)/.test(retentionPanel), 'admin disabled funnel panels do not render via DOM replacement');
+  assert(/sel\.replaceChildren\(\)/.test(retentionPanel), 'admin disabled level funnel select does not clear via DOM replacement');
+  assert(/el\.replaceChildren\(fragment\)/.test(retentionPanel), 'admin retention panel does not render via DOM replacement');
+
   const leastAttentionPanel = adminSection('async function loadLeastAttention', 'async function loadUserDigests', 'admin least-attention panel');
   assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(leastAttentionPanel), 'admin least-attention panel still uses dangerous HTML sinks');
   assert(/title\.textContent\s*=/.test(leastAttentionPanel), 'admin least-attention titles do not render with textContent');
