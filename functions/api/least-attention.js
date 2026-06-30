@@ -38,6 +38,7 @@
 
 import { edgeCached } from '../_lib/edgecache.js';
 import { isAdminRequest } from '../_lib/adminAuth.js';
+import { readGamesCatalogue } from '../_lib/staticOrigin.js';
 
 const NEW_WINDOW_MS = 48 * 60 * 60 * 1000;
 
@@ -52,19 +53,16 @@ export async function onRequestGet({ request, env }) {
     && await isAdminRequest(request, env);
 
   return edgeCached(`/least-attention?limit=${limit}`, { bypass: noCache },
-    () => buildLeastAttention(url, env, limit));
+    () => buildLeastAttention(request, env, limit));
 }
 
-async function buildLeastAttention(url, env, limit) {
-  // Catalogue - games.json from this deployment's origin (url.origin works on
-  // both prod and `wrangler pages dev`, unlike a hardcoded https://hostname).
+async function buildLeastAttention(request, env, limit) {
+  // Catalogue - prefer this deployment's ASSETS binding, then allowlisted
+  // production / Pages-preview / local origins. Never use arbitrary Host as a
+  // server-side fetch target.
   let catalogue = [];
   try {
-    const r = await fetch(`${url.origin}/games.json`, { cf: { cacheTtl: 60 } });
-    if (r.ok) {
-      const j = await r.json();
-      catalogue = Array.isArray(j) ? j : (j.games || []);
-    }
+    catalogue = await readGamesCatalogue(request, env, { cacheTtl: 60 });
   } catch (e) { /* origin hiccup - fall through to empty list */ }
 
   // Admin-hidden slugs - same source /api/hidden reads.

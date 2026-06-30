@@ -25,6 +25,7 @@ import { json } from '../_lib/response.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { edgeCached } from '../_lib/edgecache.js';
 import { readPublicCommentIndex, writePublicCommentIndex } from '../_lib/commentIndex.js';
+import { readGamesCatalogue } from '../_lib/staticOrigin.js';
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
@@ -115,10 +116,7 @@ async function isKnownCommentSlug(request, env, slug) {
     if (await env.VOTES.get(`creationslug:${slug}`)) return true;
   } catch (e) { /* fall through */ }
   try {
-    const url = new URL(request.url);
-    const r = await fetch(`${url.origin}/games.json`, { cf: { cacheTtl: 300 } });
-    if (!r.ok) return false;
-    const games = await r.json();
+    const games = await readGamesCatalogue(request, env, { cacheTtl: 300 });
     return Array.isArray(games) && games.some(g => g && g.slug === slug);
   } catch (e) {
     return false;

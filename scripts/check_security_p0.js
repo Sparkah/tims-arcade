@@ -28,6 +28,17 @@ function makeKv(initial = {}) {
     async delete(key) {
       store.delete(key);
     },
+    async list({ prefix = '', cursor, limit = 1000 } = {}) {
+      const keys = [...store.keys()].filter(key => key.startsWith(prefix)).sort();
+      const start = cursor ? parseInt(cursor, 10) || 0 : 0;
+      const slice = keys.slice(start, start + limit);
+      const next = start + limit;
+      return {
+        keys: slice.map(name => ({ name })),
+        list_complete: next >= keys.length,
+        cursor: next >= keys.length ? undefined : String(next),
+      };
+    },
   };
 }
 
@@ -46,6 +57,27 @@ function makeEnv(extra = {}) {
 
 function req(url, { headers = {}, method = 'GET', body = null } = {}) {
   return new Request(url, { method, headers, body });
+}
+
+async function withMemoryCaches(fn) {
+  const oldCaches = globalThis.caches;
+  const store = new Map();
+  globalThis.caches = {
+    default: {
+      async match(request) {
+        const response = store.get(request.url);
+        return response ? response.clone() : undefined;
+      },
+      async put(request, response) {
+        store.set(request.url, response.clone());
+      },
+    },
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.caches = oldCaches;
+  }
 }
 
 async function signedSessionCookie(email, uid = 'session-uid', name = 'tgl_session') {
@@ -621,6 +653,134 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
   }
 }
 
+async function testPublicFunctionFetchesUseTrustedOrigins() {
+  const games = [
+    { slug: 'safe_game', title: 'Safe Game', addedDate: '2026-01-01' },
+    { slug: 'other_game', title: 'Other Game', addedDate: '2026-01-02' },
+  ];
+  const gamesResponse = () => new Response(JSON.stringify(games), {
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+  });
+  const oldFetch = globalThis.fetch;
+  try {
+    const staticOrigin = await import(pathToFileURL(path.join(GALLERY, 'functions/_lib/staticOrigin.js')).href);
+    assert(
+      staticOrigin.trustedStaticOrigin(req('https://attacker.invalid/api/test')) === 'https://game-factory.tech',
+      'trusted static origin did not reject an untrusted host',
+    );
+    assert(
+      staticOrigin.trustedStaticOrigin(req('https://aa716bef.tims-arcade.pages.dev/api/test')) === 'https://aa716bef.tims-arcade.pages.dev',
+      'trusted static origin did not preserve Pages preview host',
+    );
+    assert(
+      staticOrigin.trustedStaticOrigin(req('https://game-factory.tech:8443/api/test')) === 'https://game-factory.tech',
+      'trusted static origin preserved an attacker-supplied production port',
+    );
+    assert(
+      staticOrigin.trustedStaticOrigin(req('https://aa716bef.tims-arcade.pages.dev:8443/api/test')) === 'https://aa716bef.tims-arcade.pages.dev',
+      'trusted static origin preserved an attacker-supplied Pages preview port',
+    );
+    assert(
+      staticOrigin.trustedStaticOrigin(req('http://127.0.0.1:8788/api/test')) === 'https://game-factory.tech',
+      'trusted static origin trusted a loopback Host header',
+    );
+
+    const featured = await import(pathToFileURL(path.join(GALLERY, 'functions/api/featured.js')).href);
+    let fetched = [];
+    globalThis.fetch = async (url) => {
+      fetched.push(String(url));
+      return new Response(JSON.stringify({ games: { safe_game: { score: 9 } } }), {
+        headers: { 'content-type': 'application/json; charset=utf-8' },
+      });
+    };
+    let res = await featured.onRequestGet({
+      request: req('https://attacker.invalid/api/featured'),
+      env: makeEnv({ VOTES: makeKv() }),
+    });
+    assert(res.status === 200, `featured rejected hostile-host request: ${res.status}`);
+    assert(fetched[0] === 'https://game-factory.tech/api/trending', `featured fetched untrusted trending URL: ${fetched[0]}`);
+
+    let assetFetched = [];
+    fetched = [];
+    globalThis.fetch = async (url) => {
+      fetched.push(String(url));
+      if (String(url).endsWith('/api/trending')) {
+        return new Response(JSON.stringify({ games: {} }), {
+          headers: { 'content-type': 'application/json; charset=utf-8' },
+        });
+      }
+      throw new Error(`featured unexpectedly network-fetched ${url}`);
+    };
+    res = await featured.onRequestGet({
+      request: req('https://attacker.invalid/api/featured'),
+      env: makeEnv({
+        VOTES: makeKv(),
+        ASSETS: {
+          fetch: async (request) => {
+            assetFetched.push(String(request.url));
+            return gamesResponse();
+          },
+        },
+      }),
+    });
+    assert(res.status === 200, `featured fallback rejected hostile-host request: ${res.status}`);
+    assert(fetched.join(',') === 'https://game-factory.tech/api/trending', `featured fetched unexpected network URL: ${fetched.join(', ')}`);
+    assert(assetFetched[0] === 'https://assets.local/games.json', `featured did not read games.json through ASSETS: ${assetFetched[0]}`);
+
+    await withMemoryCaches(async () => {
+      const comments = await import(pathToFileURL(path.join(GALLERY, 'functions/api/comments.js')).href);
+      assetFetched = [];
+      fetched = [];
+      globalThis.fetch = async (url) => {
+        fetched.push(String(url));
+        throw new Error(`comments unexpectedly network-fetched ${url}`);
+      };
+      res = await comments.onRequestGet({
+        request: req('https://attacker.invalid/api/comments?slug=safe_game&limit=10'),
+        env: makeEnv({
+          VOTES: makeKv(),
+          ASSETS: {
+            fetch: async (request) => {
+              assetFetched.push(String(request.url));
+              return gamesResponse();
+            },
+          },
+        }),
+      });
+      assert(res.status === 200, `comments rejected hostile-host request: ${res.status}`);
+      assert(fetched.length === 0, `comments network-fetched despite ASSETS: ${fetched.join(', ')}`);
+      assert(assetFetched[0] === 'https://assets.local/games.json', `comments did not read games.json through ASSETS: ${assetFetched[0]}`);
+    });
+
+    await withMemoryCaches(async () => {
+      const leastAttention = await import(pathToFileURL(path.join(GALLERY, 'functions/api/least-attention.js')).href);
+      assetFetched = [];
+      fetched = [];
+      globalThis.fetch = async (url) => {
+        fetched.push(String(url));
+        throw new Error(`least-attention unexpectedly network-fetched ${url}`);
+      };
+      res = await leastAttention.onRequestGet({
+        request: req('https://attacker.invalid/api/least-attention?limit=2'),
+        env: makeEnv({
+          VOTES: makeKv(),
+          ASSETS: {
+            fetch: async (request) => {
+              assetFetched.push(String(request.url));
+              return gamesResponse();
+            },
+          },
+        }),
+      });
+      assert(res.status === 200, `least-attention rejected hostile-host request: ${res.status}`);
+      assert(fetched.length === 0, `least-attention network-fetched despite ASSETS: ${fetched.join(', ')}`);
+      assert(assetFetched[0] === 'https://assets.local/games.json', `least-attention did not read games.json through ASSETS: ${assetFetched[0]}`);
+    });
+  } finally {
+    globalThis.fetch = oldFetch;
+  }
+}
+
 async function main() {
   await testTimingSafeCompare();
   testNoDirectAdminTokenComparisons();
@@ -640,6 +800,7 @@ async function main() {
   testPublicDomSinksAvoidCatalogHtml();
   testNoCommittedPostHogToken();
   await testSharePageCatalogueFetchIsHostAllowlisted();
+  await testPublicFunctionFetchesUseTrustedOrigins();
   console.log('PASS security P0 regressions');
 }
 

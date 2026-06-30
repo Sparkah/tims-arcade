@@ -14,6 +14,8 @@
 // Caches the picked slug to `featured:<date>` so heartbeat.js can honor
 // the 2× rate without redoing the scan each tick.
 
+import { fetchSameSite, readGamesCatalogue } from '../_lib/staticOrigin.js';
+
 export async function onRequestGet({ request, env }) {
   const today = new Date().toISOString().slice(0, 10);
 
@@ -29,10 +31,9 @@ export async function onRequestGet({ request, env }) {
   // Cold path: reuse the engagement aggregate /api/trending already builds
   // (same daily:* + comment:* scan, edge-cached 30s) instead of duplicating
   // the KV scan here. One fetch, pick top by score.
-  const hostname = new URL(request.url).hostname;
   let best = null;
   try {
-    const r = await fetch(`https://${hostname}/api/trending`, { cf: { cacheTtl: 30 } });
+    const r = await fetchSameSite(request, '/api/trending', { cacheTtl: 30 });
     if (r.ok) {
       const j = await r.json();
       const slugs = j && j.games ? Object.keys(j.games) : [];
@@ -54,7 +55,7 @@ export async function onRequestGet({ request, env }) {
   // after real heartbeats land (the fast path above would keep serving it).
   const fromEngagement = !!best;
   if (!best) {
-    best = await pickFallbackSlug(request, today);
+    best = await pickFallbackSlug(request, env, today);
   }
 
   if (best) {
@@ -70,13 +71,9 @@ export async function onRequestGet({ request, env }) {
   });
 }
 
-async function pickFallbackSlug(request, today) {
+async function pickFallbackSlug(request, env, today) {
   try {
-    const hostname = new URL(request.url).hostname;
-    const r = await fetch(`https://${hostname}/games.json`, { cf: { cacheTtl: 60 } });
-    if (!r.ok) return null;
-    const j = await r.json();
-    const games = Array.isArray(j) ? j : (j.games || []);
+    const games = await readGamesCatalogue(request, env, { cacheTtl: 60 });
     const slugs = games
       .filter(g => g && g.published !== false && typeof g.slug === 'string')
       .map(g => g.slug);
