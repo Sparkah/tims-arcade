@@ -15,13 +15,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GALLERY_DIR="$(dirname "$SCRIPT_DIR")"
-HOOKS_DIR="$GALLERY_DIR/.git/hooks"
+HOOKS_DIR="$(git -C "$GALLERY_DIR" rev-parse --path-format=absolute --git-path hooks 2>/dev/null || true)"
 SRC="$SCRIPT_DIR/hooks/pre-push"
 
-if [[ ! -d "$HOOKS_DIR" ]]; then
-  echo "✕ $HOOKS_DIR not found - is this a git repo?" >&2
+if [[ -z "$HOOKS_DIR" ]]; then
+  echo "✕ could not resolve git hooks dir - is $GALLERY_DIR a git repo?" >&2
   exit 1
 fi
+mkdir -p "$HOOKS_DIR"
 if [[ ! -f "$SRC" ]]; then
   echo "✕ tracked hook source missing: $SRC" >&2
   exit 1
@@ -34,8 +35,11 @@ echo "✓ Installed Gallery pre-push hook -> $HOOKS_DIR/pre-push (from tracked s
 echo "  Stage -1:  Gallery push lock        (serialises concurrent pushes)"
 echo "  Stage 0:   cover-art gate           (BLOCKING)"
 echo "  Stage 0.5: thumb .webp gate         (BLOCKING)"
+echo "  Stage 0.7: play-button visibility   (BLOCKING)"
 echo "  Stage 0.8: KV list-op guard         (BLOCKING - new unguarded VOTES.list())"
-echo "  Stage 1:   mechanical Yandex gate   (BLOCKING)"
+echo "  Stage 0.9: Yandex golden regression (BLOCKING on template/gate changes)"
+echo "  Stage 1:   mechanical Yandex gate   (BLOCKING for changed games; full-gallery report-only)"
+echo "             Scope: YANDEX_STAGE1_SCOPE=auto|report|full, YANDEX_STAGE1_REPORT=summary|full|0"
 echo "  Stage 2:   6-axis AI scorecard      (BLOCKING - avg >= ${REVIEW_THRESHOLD:-5.0})"
 echo "  Bypass: git push --no-verify        (use sparingly)"
 echo "  Relax:  REVIEW_THRESHOLD=4.5 git push"

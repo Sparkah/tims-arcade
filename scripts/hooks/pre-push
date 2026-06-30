@@ -3,11 +3,455 @@
 #   Stage 0:   cover-art gate           (Gallery/scripts/check_art.sh)
 #   Stage 0.5: webp-sibling gate        (inline below)
 #   Stage 0.7: play-button visibility   (Gallery/scripts/check_play_visible.js)
-#   Stage 1:   mechanical Yandex check  (Shared/skills/yandex-presubmit/check.sh --gallery)
+#   Stage 0.9: Yandex golden regressions (template/presubmit changes only)
+#   Stage 1:   mechanical Yandex check  (blocking for changed games; full-gallery report-only)
 #   Stage 2:   6-axis AI scorecard      (Gallery/scripts/pre_push_review.sh)
 # Bypass entirely: `git push --no-verify`.
 # Tune stage 2: REVIEW_THRESHOLD=4.5 git push   (default 5.0 — strict)
 set -uo pipefail
+
+ZERO_OID="0000000000000000000000000000000000000000"
+GALLERY_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+GIT_COMMON_DIR="$(git -C "$GALLERY_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [[ -n "$GIT_COMMON_DIR" ]]; then
+  CANONICAL_GALLERY_ROOT="$(cd "$GIT_COMMON_DIR/.." 2>/dev/null && pwd)"
+else
+  CANONICAL_GALLERY_ROOT="$GALLERY_ROOT"
+fi
+AGENTS_ROOT="${AGENTS_ROOT:-$(cd "$CANONICAL_GALLERY_ROOT/.." 2>/dev/null && pwd)}"
+REMOTE_NAME="${1:-origin}"
+PUSH_REFS=()
+while read -r local_ref local_oid remote_ref remote_oid; do
+  [[ -n "${local_ref:-}" ]] || continue
+  PUSH_REFS+=("$local_ref $local_oid $remote_ref $remote_oid")
+done
+
+is_zero_oid() {
+  [[ -z "${1:-}" || "$1" == "$ZERO_OID" ]]
+}
+
+remote_ref_base() {
+  local local_oid="$1" remote_ref="$2" branch ref base
+  branch="${remote_ref#refs/heads/}"
+  for ref in "refs/remotes/$REMOTE_NAME/$branch" \
+             "refs/remotes/$REMOTE_NAME/main" \
+             "refs/remotes/$REMOTE_NAME/master" \
+             "refs/remotes/origin/main" \
+             "refs/remotes/origin/master"; do
+    if git -C "$GALLERY_ROOT" show-ref --verify --quiet "$ref"; then
+      base="$(git -C "$GALLERY_ROOT" merge-base "$local_oid" "$ref" 2>/dev/null || true)"
+      if [[ -n "$base" ]]; then
+        printf '%s\n' "$base"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+changed_files_for_ref() {
+  local local_oid="$1" remote_ref="$2" remote_oid="$3" base
+  is_zero_oid "$local_oid" && return 0
+  if ! is_zero_oid "$remote_oid"; then
+    if ! git -C "$GALLERY_ROOT" diff --name-only "$remote_oid" "$local_oid"; then
+      echo "pre-push: could not enumerate changed files for ${local_oid:0:12} against remote ${remote_oid:0:12} ($remote_ref)." >&2
+      return 2
+    fi
+    return 0
+  fi
+
+  base="$(remote_ref_base "$local_oid" "$remote_ref" 2>/dev/null || true)"
+  if [[ -n "$base" ]]; then
+    if ! git -C "$GALLERY_ROOT" diff --name-only "$base" "$local_oid"; then
+      echo "pre-push: could not enumerate changed files for ${local_oid:0:12} against base ${base:0:12} ($remote_ref)." >&2
+      return 2
+    fi
+  else
+    if ! git -C "$GALLERY_ROOT" ls-tree -r --name-only "$local_oid"; then
+      echo "pre-push: could not enumerate tree files for new ref ${local_oid:0:12} ($remote_ref)." >&2
+      return 2
+    fi
+  fi
+}
+
+pushed_changed_files() {
+  local line local_ref local_oid remote_ref remote_oid tmp status
+  if (( ${#PUSH_REFS[@]} == 0 )); then
+    return 0
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-files.XXXXXX")" || return 2
+  status=0
+  for line in "${PUSH_REFS[@]}"; do
+    IFS=' ' read -r local_ref local_oid remote_ref remote_oid <<< "$line"
+    if ! changed_files_for_ref "$local_oid" "$remote_ref" "$remote_oid" >> "$tmp"; then
+      status=2
+    fi
+  done
+  if (( status != 0 )); then
+    rm -f "$tmp"
+    return "$status"
+  fi
+  sort -u "$tmp"
+  rm -f "$tmp"
+}
+
+pushed_path_changed() {
+  local wanted="$1" files rc f
+  files="$(pushed_changed_files)"
+  rc=$?
+  if (( rc != 0 )); then
+    return "$rc"
+  fi
+  while IFS= read -r f; do
+    [[ "$f" == "$wanted" ]] && return 0
+  done <<< "$files"
+  return 1
+}
+
+hook_helper_path() {
+  local rel="$1" rc
+  if pushed_path_changed "$rel"; then
+    printf '%s/%s\n' "$GALLERY_ROOT" "$rel"
+  else
+    rc=$?
+    if (( rc != 1 )); then
+      echo "pre-push: could not determine whether $rel changed; using canonical helper and later gates will fail closed if needed." >&2
+    fi
+    printf '%s/%s\n' "$CANONICAL_GALLERY_ROOT" "$rel"
+  fi
+}
+
+changed_game_pairs() {
+  local line local_ref local_oid remote_ref remote_oid tmp status
+  if (( ${#PUSH_REFS[@]} == 0 )); then
+    return 0
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-games.XXXXXX")" || return 2
+  status=0
+  for line in "${PUSH_REFS[@]}"; do
+    IFS=' ' read -r local_ref local_oid remote_ref remote_oid <<< "$line"
+    if ! changed_files_for_ref "$local_oid" "$remote_ref" "$remote_oid" \
+        | awk -v oid="$local_oid" -F/ '$1 == "games" && $2 != "" { print oid "\tgames/" $2 }' >> "$tmp"; then
+      status=2
+    fi
+  done
+  if (( status != 0 )); then
+    rm -f "$tmp"
+    return "$status"
+  fi
+  sort -u "$tmp"
+  rm -f "$tmp"
+}
+
+game_tree_exists_at_oid() {
+  local oid="$1" rel="$2"
+  git -C "$GALLERY_ROOT" cat-file -e "$oid:$rel" 2>/dev/null
+}
+
+game_index_exists_at_oid() {
+  local oid="$1" rel="$2"
+  git -C "$GALLERY_ROOT" cat-file -e "$oid:$rel/index.html" 2>/dev/null
+}
+
+game_slug_from_rel() {
+  local rel="$1" rest
+  rest="${rel#games/}"
+  printf '%s\n' "${rest%%/*}"
+}
+
+safe_relative_path() {
+  local path="$1"
+  [[ -n "$path" ]] || return 1
+  case "$path" in
+    /*|..|../*|*/..|*/../*) return 1 ;;
+  esac
+  return 0
+}
+
+source_game_dir_at_oid() {
+  local oid="$1" rel="$2" slug source_rel
+  slug="$(game_slug_from_rel "$rel")"
+  source_rel="$(git -C "$GALLERY_ROOT" show "$oid:games.source.json" 2>/dev/null \
+    | python3 -c 'import json, sys
+slug = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for item in data if isinstance(data, list) else []:
+    if item.get("slug") == slug:
+        print(item.get("gameDir") or "")
+        break
+' "$slug" 2>/dev/null || true)"
+  if safe_relative_path "$source_rel"; then
+    printf '%s\n' "$source_rel"
+  else
+    printf 'Gallery/%s\n' "$rel"
+  fi
+}
+
+game_manifest_status_at_oid() {
+  local oid="$1" rel="$2" slug status
+  slug="$(game_slug_from_rel "$rel")"
+  status="$(git -C "$GALLERY_ROOT" show "$oid:games.json" 2>/dev/null \
+    | python3 -c 'import json, sys
+slug = sys.argv[1]
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(2)
+for item in data if isinstance(data, list) else []:
+    if item.get("slug") == slug:
+        print("unpublished" if item.get("published") is False else "published")
+        sys.exit(0)
+print("absent")
+' "$slug" 2>/dev/null)"
+  case "$status" in
+    published|unpublished|absent)
+      printf '%s\n' "$status"
+      return 0
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+extract_game_tree_for_oid() {
+  local oid="$1" rel="$2" tmp_root tmp_extract status_rel dir
+  if ! game_tree_exists_at_oid "$oid" "$rel"; then
+    return 2
+  fi
+  if ! game_index_exists_at_oid "$oid" "$rel"; then
+    echo "stage-1 Yandex: $rel exists in pushed commit ${oid:0:12} but has no index.html." >&2
+    echo "   A published game without index.html is a HARD presubmit failure; restore it or remove/unpublish the game deliberately." >&2
+    return 1
+  fi
+
+  tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/gallery-yandex-prepush.XXXXXX")" || return 1
+  tmp_extract="$tmp_root/_archive"
+  status_rel="$(source_game_dir_at_oid "$oid" "$rel")"
+  if ! safe_relative_path "$status_rel"; then
+    rm -rf "$tmp_root"
+    echo "stage-1 Yandex: unsafe status path '$status_rel' for $rel; failing closed." >&2
+    return 1
+  fi
+  dir="$tmp_root/$status_rel"
+  if ! mkdir -p "$tmp_extract" "$(dirname "$dir")"; then
+    rm -rf "$tmp_root"
+    echo "stage-1 Yandex: could not create temp checkout for $rel." >&2
+    return 1
+  fi
+
+  if ! git -C "$GALLERY_ROOT" archive "$oid" "$rel" | tar -x -C "$tmp_extract"; then
+    rm -rf "$tmp_root"
+    echo "stage-1 Yandex: could not materialize $rel from pushed commit ${oid:0:12}; failing closed." >&2
+    return 1
+  fi
+  if [[ ! -d "$tmp_extract/$rel" ]]; then
+    rm -rf "$tmp_root"
+    echo "stage-1 Yandex: extracted $rel from ${oid:0:12}, but the game directory is missing; failing closed." >&2
+    return 1
+  fi
+  if ! mv "$tmp_extract/$rel" "$dir"; then
+    rm -rf "$tmp_root"
+    echo "stage-1 Yandex: could not move $rel into status path $status_rel; failing closed." >&2
+    return 1
+  fi
+  rm -rf "$tmp_extract"
+
+  printf '%s\t%s\n' "$tmp_root" "$dir"
+}
+
+run_stage0_regression_if_needed() {
+  local gate="$1" mode="${YANDEX_STAGE0_REGRESSION:-auto}" should_run=0 files rc f
+  case "$mode" in
+    force|1|true|yes)
+      should_run=1
+      ;;
+    0|false|off|no)
+      echo "stage0 regression gate: skipped (YANDEX_STAGE0_REGRESSION=$mode)." >&2
+      return 0
+      ;;
+    auto|"")
+      files="$(pushed_changed_files)"
+      rc=$?
+      if (( rc != 0 )); then
+        echo "stage0 regression gate: could not enumerate pushed files; failing closed." >&2
+        return "$rc"
+      fi
+      while IFS= read -r f; do
+        case "$f" in
+          scripts/hooks/pre-push|scripts/install_hooks.sh)
+            should_run=1
+            break
+            ;;
+        esac
+      done <<< "$files"
+      ;;
+    *)
+      echo "pre-push: unknown YANDEX_STAGE0_REGRESSION=$mode (expected auto, force, off)" >&2
+      return 2
+      ;;
+  esac
+
+  if (( should_run != 1 )); then
+    echo "stage0 regression gate: no pushed Yandex gate/template changes detected; skipping." >&2
+    return 0
+  fi
+  if [[ ! -x "$gate" ]]; then
+    echo "stage0 regression gate: runner missing or not executable: $gate" >&2
+    return 2
+  fi
+  "$gate" --force
+}
+
+run_yandex_gallery_report() {
+  local checker="$1" mode="${YANDEX_STAGE1_REPORT:-summary}" out rc
+  case "$mode" in
+    0|false|off|no)
+      echo "stage-1 Yandex: full-gallery sweep skipped (YANDEX_STAGE1_REPORT=$mode)." >&2
+      return 0
+      ;;
+    full)
+      echo "stage-1 Yandex: full-gallery sweep report-only (non-blocking)." >&2
+      YANDEX_PRESUBMIT_GALLERY_DIR="$GALLERY_ROOT/games" \
+      YANDEX_PRESUBMIT_GALLERY_MANIFEST="$GALLERY_ROOT/games.json" \
+        "$checker" --gallery || echo "stage-1 Yandex: full-gallery HARD findings are report-only for this push." >&2
+      return 0
+      ;;
+  esac
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "stage-1 Yandex: jq missing; falling back to noisy full-gallery report-only scan." >&2
+    YANDEX_PRESUBMIT_GALLERY_DIR="$GALLERY_ROOT/games" \
+    YANDEX_PRESUBMIT_GALLERY_MANIFEST="$GALLERY_ROOT/games.json" \
+      "$checker" --gallery || echo "stage-1 Yandex: full-gallery HARD findings are report-only for this push." >&2
+    return 0
+  fi
+
+  out="$(YANDEX_PRESUBMIT_GALLERY_DIR="$GALLERY_ROOT/games" \
+         YANDEX_PRESUBMIT_GALLERY_MANIFEST="$GALLERY_ROOT/games.json" \
+         "$checker" --json --gallery 2>/dev/null)"
+  rc=$?
+  if [[ -z "$out" ]]; then
+    echo "stage-1 Yandex: full-gallery report failed to produce JSON (rc=$rc); not blocking unrelated pushes." >&2
+    return 0
+  fi
+  printf '%s' "$out" | jq -r '
+    "stage-1 Yandex full-gallery report (non-blocking):",
+    "  games scanned: \(.games | length)",
+    "  hard-failing games: \([.games[] | select(.fails > 0)] | length)",
+    "  warning-only games: \([.games[] | select(.fails == 0 and .warns > 0)] | length)",
+    "  skipped games: \([.games[] | select(.status == "skipped")] | length)",
+    (if ([.games[] | select(.fails > 0)] | length) > 0 then
+      "  top hard failures:",
+      ([.games[]
+        | select(.fails > 0)
+        | {game, fails, checks: ([.findings[] | select(.severity == "HARD") | .check] | unique | join(","))}
+       ] | sort_by(-.fails) | .[:12][] | "    - \(.game): \(.checks)")
+    else
+      "  hard failures: none"
+    end)
+  ' >&2 || echo "stage-1 Yandex: could not summarize report JSON (rc=$rc); not blocking unrelated pushes." >&2
+  return 0
+}
+
+run_yandex_stage1() {
+  local checker="$1" scope="${YANDEX_STAGE1_SCOPE:-auto}" line oid rel dir tmp_root extracted rc manifest_status fail=0 game_pairs=() game_labels=()
+
+  case "$scope" in
+    full)
+      YANDEX_PRESUBMIT_GALLERY_DIR="$GALLERY_ROOT/games" \
+      YANDEX_PRESUBMIT_GALLERY_MANIFEST="$GALLERY_ROOT/games.json" \
+        "$checker" --gallery
+      return $?
+      ;;
+    report)
+      run_yandex_gallery_report "$checker"
+      return 0
+      ;;
+    auto|"")
+      ;;
+    *)
+      echo "pre-push: unknown YANDEX_STAGE1_SCOPE=$scope (expected auto, report, full)" >&2
+      return 2
+      ;;
+  esac
+
+  extracted="$(changed_game_pairs)"
+  rc=$?
+  if (( rc != 0 )); then
+    echo "stage-1 Yandex: could not enumerate changed games; failing closed." >&2
+    return "$rc"
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && game_pairs+=("$line")
+  done <<< "$extracted"
+
+  if (( ${#game_pairs[@]} == 0 )); then
+    echo "stage-1 Yandex: no pushed game files; skipping blocking per-game checks." >&2
+    run_yandex_gallery_report "$checker"
+    return 0
+  fi
+
+  for line in "${game_pairs[@]}"; do
+    IFS=$'\t' read -r oid rel <<< "$line"
+    game_labels+=("$rel@${oid:0:12}")
+  done
+  echo "stage-1 Yandex: blocking check for changed game(s): ${game_labels[*]}" >&2
+
+  for line in "${game_pairs[@]}"; do
+    IFS=$'\t' read -r oid rel <<< "$line"
+    extracted="$(extract_game_tree_for_oid "$oid" "$rel")"
+    rc=$?
+    case "$rc" in
+      0) ;;
+      2)
+        manifest_status="$(game_manifest_status_at_oid "$oid" "$rel")"
+        rc=$?
+        if (( rc != 0 )); then
+          echo "stage-1 Yandex: $rel is deleted in ${oid:0:12}, but games.json could not be checked; failing closed." >&2
+          fail=1
+          continue
+        fi
+        case "$manifest_status" in
+          absent|unpublished)
+            echo "stage-1 Yandex: $rel is deleted and games.json marks it $manifest_status; skipping per-game check." >&2
+            continue
+            ;;
+          *)
+            echo "stage-1 Yandex: $rel is deleted in ${oid:0:12} but still published in games.json; failing closed." >&2
+            fail=1
+            continue
+            ;;
+        esac
+        ;;
+      *)
+        fail=1
+        continue
+        ;;
+    esac
+    tmp_root="${extracted%%$'\t'*}"
+    dir="${extracted#*$'\t'}"
+    if ! YANDEX_PRESUBMIT_STATUS_ROOT="$tmp_root" \
+         YANDEX_PRESUBMIT_STATUS_FILE="$AGENTS_ROOT/Shared/data/submissions/status.json" \
+         "$checker" "$dir"; then
+      fail=1
+    fi
+    rm -rf "$tmp_root"
+  done
+
+  if (( fail != 0 )); then
+    echo "" >&2
+    echo "🚫 Push aborted by stage-1 Yandex changed-game gate." >&2
+    echo "   Fix the changed game(s), or use YANDEX_STAGE1_SCOPE=report only after explicit risk acceptance." >&2
+    return 1
+  fi
+
+  run_yandex_gallery_report "$checker"
+  return 0
+}
 
 # Stage -1: Gallery push lock - serialise concurrent pushes (scripts + agents) so
 # they stop racing on the working tree / the main ref (the 2026-05-30/31 collisions:
@@ -15,7 +459,7 @@ set -uo pipefail
 # If the invoking script already holds the lock (GF_PUSH_LOCK_TOKEN == holder token)
 # we proceed and let IT release; otherwise acquire for the gate + release on exit.
 # If ANOTHER agent holds it, DEFER cleanly (abort - retry once they finish), no race.
-PUSH_LOCK="/Users/timmarkin/Agents/Gallery/scripts/push_lock.sh"
+PUSH_LOCK="$GALLERY_ROOT/scripts/push_lock.sh"
 if [[ -x "$PUSH_LOCK" ]]; then
   _held="$(bash "$PUSH_LOCK" holder 2>/dev/null | sed -n 's/^token=//p')"
   if [[ -n "${GF_PUSH_LOCK_TOKEN:-}" && "$GF_PUSH_LOCK_TOKEN" == "$_held" ]]; then
@@ -32,9 +476,9 @@ if [[ -x "$PUSH_LOCK" ]]; then
   fi
 fi
 
-ART_CHECK="/Users/timmarkin/Desktop/Agents/Gallery/scripts/check_art.sh"
+ART_CHECK="$(hook_helper_path scripts/check_art.sh)"
 if [[ -x "$ART_CHECK" ]]; then
-  if ! "$ART_CHECK" --quiet; then
+  if ! AGENTS_ROOT="$AGENTS_ROOT" GALLERY_ROOT="$GALLERY_ROOT" "$ART_CHECK" --quiet; then
     echo "" >&2
     echo "🚫 Push aborted by stage-0 cover-art gate." >&2
     echo "   Generate the missing covers OR re-push with --no-verify." >&2
@@ -48,7 +492,7 @@ fi
 # <picture> picks WebP first; missing webp → CF serves SPA index.html with
 # HTTP 200 → broken-image cards. (Third strike: 2026-05-13, 2026-05-15,
 # 2026-05-19.)
-THUMBS_DIR="/Users/timmarkin/Desktop/Agents/Gallery/thumbs"
+THUMBS_DIR="$GALLERY_ROOT/thumbs"
 if [[ -d "$THUMBS_DIR" ]]; then
   shopt -s nullglob
   missing=()
@@ -72,9 +516,9 @@ fi
 # every desktop window (crash_buggy + 18 others) — desktop visitors saw a
 # giant phone screenshot and no button. Tim's hard rule: a game whose play
 # button is invisible at desktop resolution must NOT ship.
-PLAY_GATE="/Users/timmarkin/Agents/Gallery/scripts/check_play_visible.js"
+PLAY_GATE="$(hook_helper_path scripts/check_play_visible.js)"
 if [[ -f "$PLAY_GATE" ]] && command -v node >/dev/null 2>&1; then
-  node "$PLAY_GATE" --quiet
+  AGENTS_ROOT="$AGENTS_ROOT" GALLERY_ROOT="$GALLERY_ROOT" node "$PLAY_GATE" --quiet
   _play_rc=$?
   if (( _play_rc != 0 )); then
     echo "" >&2
@@ -97,7 +541,7 @@ fi
 # unguarded functions/ path. The free Cloudflare KV tier caps LIST at 1000/day
 # and we exhausted it twice in 24h (2026-06-15 vibe-relay poll; 2026-06-16
 # counts walk). Detail + fix patterns: Knowledge/Learnings/KV List Budget.md.
-KV_GUARD="/Users/timmarkin/Agents/Gallery/scripts/check_kv_list.sh"
+KV_GUARD="$GALLERY_ROOT/scripts/check_kv_list.sh"
 if [[ -x "$KV_GUARD" ]]; then
   if ! "$KV_GUARD"; then
     echo "🚫 Push aborted by stage-0.8 KV list-op guard (see above)." >&2
@@ -106,19 +550,31 @@ if [[ -x "$KV_GUARD" ]]; then
   fi
 fi
 
-CHECKER="/Users/timmarkin/Desktop/Agents/Shared/skills/yandex-presubmit/check.sh"
+REGRESSION_GATE="$AGENTS_ROOT/Shared/skills/yandex-testing/tools/stage0_regression_gate.sh"
+if ! run_stage0_regression_if_needed "$REGRESSION_GATE"; then
+  echo "" >&2
+  echo "🚫 Push aborted by stage-0.9 Yandex golden regression gate." >&2
+  echo "   Fix the regression above OR re-push with --no-verify only after explicit risk acceptance." >&2
+  exit 1
+fi
+
+CHECKER="$AGENTS_ROOT/Shared/skills/yandex-presubmit/check.sh"
 if [[ -x "$CHECKER" ]]; then
-  if ! "$CHECKER" --gallery; then
+  if ! run_yandex_stage1 "$CHECKER"; then
     echo "" >&2
     echo "🚫 Push aborted by stage-1 Yandex pre-submit gate." >&2
-    echo "   Fix violations above OR re-push with --no-verify." >&2
+    echo "   Scope controls: YANDEX_STAGE1_SCOPE=report for non-blocking report, full for old full-gallery blocking." >&2
     exit 1
   fi
 else
-  echo "pre-push: $CHECKER missing — skipping stage 1" >&2
+  if [[ -n "$(changed_game_pairs)" ]]; then
+    echo "pre-push: $CHECKER missing — cannot run changed-game Yandex gate." >&2
+    exit 1
+  fi
+  echo "pre-push: $CHECKER missing — skipping stage 1 (no pushed game files)." >&2
 fi
 
-REVIEW_SCRIPT="/Users/timmarkin/Desktop/Agents/Gallery/scripts/pre_push_review.sh"
+REVIEW_SCRIPT="$GALLERY_ROOT/scripts/pre_push_review.sh"
 if [[ -x "$REVIEW_SCRIPT" ]]; then
   if ! bash "$REVIEW_SCRIPT"; then
     echo "" >&2

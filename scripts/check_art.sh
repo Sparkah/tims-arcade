@@ -19,9 +19,10 @@
 
 set -uo pipefail
 
-ROOT="/Users/timmarkin/Agents"
-SOURCE_JSON="$ROOT/Gallery/games.source.json"
-THUMBS_DIR="$ROOT/Gallery/thumbs"
+ROOT="${AGENTS_ROOT:-/Users/timmarkin/Agents}"
+GALLERY_DIR="${GALLERY_ROOT:-$ROOT/Gallery}"
+SOURCE_JSON="$GALLERY_DIR/games.source.json"
+THUMBS_DIR="$GALLERY_DIR/thumbs"
 
 QUIET=0
 FILTER_SLUG=""

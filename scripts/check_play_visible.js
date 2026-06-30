@@ -36,9 +36,20 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const GALLERY = path.resolve(__dirname, '..');
+const GALLERY = path.resolve(process.env.GALLERY_ROOT || path.resolve(__dirname, '..'));
+function findAgentsRoot() {
+  if (process.env.AGENTS_ROOT) return process.env.AGENTS_ROOT;
+  let dir = GALLERY;
+  for (let i = 0; i < 5; i++) {
+    const candidate = path.join(dir, 'Shared', 'skills', 'game-factory', 'tools', 'node_modules', 'puppeteer');
+    if (fs.existsSync(candidate)) return dir;
+    dir = path.dirname(dir);
+  }
+  return path.resolve(GALLERY, '..');
+}
+const AGENTS_ROOT = findAgentsRoot();
 const puppeteer = require(path.join(
-  GALLERY, '..', 'Shared', 'skills', 'game-factory', 'tools', 'node_modules', 'puppeteer'
+  AGENTS_ROOT, 'Shared', 'skills', 'game-factory', 'tools', 'node_modules', 'puppeteer'
 ));
 
 const VIEWPORTS = [
