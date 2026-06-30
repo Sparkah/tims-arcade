@@ -602,6 +602,31 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(/app\.replaceChildren\(template\.content\.cloneNode\(true\)\)/.test(creatorAdmin), 'Creator admin shell does not render via DOM replacement');
   assert(/els\.history\.replaceChildren\(fragment\)/.test(creatorAdmin), 'Creator admin history does not render via DOM replacement');
   assert(/els\.levelSelect\.replaceChildren\(fragment\)/.test(creatorAdmin), 'Creator admin level select does not render via DOM replacement');
+
+  const admin = fs.readFileSync(path.join(GALLERY, 'admin.html'), 'utf8');
+  const adminSection = (start, end, label) => {
+    const startIndex = admin.indexOf(start);
+    assert(startIndex !== -1, `admin.html missing ${label} start marker`);
+    const endIndex = admin.indexOf(end, startIndex + start.length);
+    assert(endIndex !== -1, `admin.html missing ${label} end marker`);
+    return admin.slice(startIndex, endIndex);
+  };
+  const adminPanelHelpers = adminSection('function adminPanelMessage', 'async function loadSuggestions()', 'admin panel DOM helpers');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(adminPanelHelpers), 'admin panel DOM helpers still use dangerous HTML sinks');
+  assert(/div\.textContent\s*=/.test(adminPanelHelpers), 'admin panel messages do not render text with textContent');
+  assert(/el\.replaceChildren\(adminPanelMessage/.test(adminPanelHelpers), 'admin panel messages do not render via replaceChildren');
+
+  const suggestionsPanel = adminSection('async function loadSuggestions()', '// Hidden games', 'admin suggestions panel');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(suggestionsPanel), 'admin suggestions panel still uses dangerous HTML sinks');
+  assert(/appendAdminCell\(row,\s*\(s\s*&&\s*s\.text\)/.test(suggestionsPanel), 'admin suggestions text does not render through a DOM text cell');
+  assert(/button\.dataset\.key\s*=/.test(suggestionsPanel), 'admin suggestions actions do not assign data-key through dataset');
+  assert(/el\.replaceChildren\(summary,\s*table\)/.test(suggestionsPanel), 'admin suggestions panel does not render via DOM replacement');
+
+  const hiddenPanel = adminSection('async function loadHidden()', 'async function loadUploads()', 'admin hidden panel');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(hiddenPanel), 'admin hidden panel still uses dangerous HTML sinks');
+  assert(/action\.dataset\.slug\s*=\s*slug/.test(hiddenPanel), 'admin hidden actions do not assign data-slug through dataset');
+  assert(/appendAdminCell\(row,\s*slug,\s*\{\s*className:\s*'slug'\s*\}\)/.test(hiddenPanel), 'admin hidden slugs do not render through a DOM text cell');
+  assert(/el\.replaceChildren\(summary,\s*table\)/.test(hiddenPanel), 'admin hidden panel does not render via DOM replacement');
 }
 
 function testNoCommittedPostHogToken() {
