@@ -43,6 +43,26 @@ export function supabaseIsConfigured(env) {
   return Boolean(supabaseUrl(env) && serviceRoleKey(env));
 }
 
+function cleanSourceTag(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+}
+
+function telegramPlayerPath(telegramUserId, filters = {}) {
+  const params = new URLSearchParams({
+    telegram_user_id: `eq.${String(telegramUserId)}`,
+  });
+  Object.entries(filters).forEach(([key, value]) => {
+    params.set(key, value);
+  });
+  return `telegram_players?${params.toString()}`;
+}
+
+function missingAttributionColumn(error) {
+  const text = JSON.stringify(error && error.body || {});
+  return /source|first_source|last_start_param|source_updated_at/i.test(text)
+    && /column|schema cache|PGRST204/i.test(text);
+}
+
 export async function supabaseRequest(env, path, options = {}) {
   const base = supabaseUrl(env);
   const key = serviceRoleKey(env);
@@ -85,7 +105,7 @@ export async function supabaseRequest(env, path, options = {}) {
   return data;
 }
 
-export async function upsertTelegramPlayer(env, user) {
+export async function upsertTelegramPlayer(env, user, meta = {}) {
   if (!user || !user.id) return null;
 
   const now = new Date().toISOString();
@@ -99,13 +119,53 @@ export async function upsertTelegramPlayer(env, user) {
     last_seen_at: now,
   };
 
-  return supabaseRequest(env, 'telegram_players?on_conflict=telegram_user_id', {
+  const rows = await supabaseRequest(env, 'telegram_players?on_conflict=telegram_user_id', {
     method: 'POST',
     headers: {
       prefer: 'resolution=merge-duplicates,return=representation',
     },
     body: JSON.stringify([row]),
   });
+
+  const source = cleanSourceTag(meta.source);
+  const startParam = cleanSourceTag(meta.startParam || meta.start_param);
+  const taggedSource = startParam || (source && source !== 'telegram' && source !== 'web' ? source : '');
+  const fallbackSource = taggedSource ? '' : source;
+  const attributionSource = taggedSource || fallbackSource;
+
+  if (attributionSource) {
+    try {
+      if (taggedSource) {
+        await supabaseRequest(env, telegramPlayerPath(user.id), {
+          method: 'PATCH',
+          headers: { prefer: 'return=minimal' },
+          body: JSON.stringify({
+            source: taggedSource,
+            last_start_param: startParam || taggedSource,
+            source_updated_at: now,
+          }),
+        });
+      } else {
+        await supabaseRequest(env, telegramPlayerPath(user.id, { source: 'is.null' }), {
+          method: 'PATCH',
+          headers: { prefer: 'return=minimal' },
+          body: JSON.stringify({
+            source: fallbackSource,
+            source_updated_at: now,
+          }),
+        });
+      }
+      await supabaseRequest(env, telegramPlayerPath(user.id, { first_source: 'is.null' }), {
+        method: 'PATCH',
+        headers: { prefer: 'return=minimal' },
+        body: JSON.stringify({ first_source: attributionSource }),
+      });
+    } catch (error) {
+      if (!missingAttributionColumn(error)) console.warn('Telegram player attribution update failed', error.message);
+    }
+  }
+
+  return rows;
 }
 
 export async function listTelegramPlayers(env, telegramUserIds) {

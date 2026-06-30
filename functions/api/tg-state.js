@@ -32,6 +32,20 @@ function serverBlock(state) {
     : null;
 }
 
+function cleanSourceTag(value) {
+  return String(value || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+}
+
+function sourceMeta(body, auth) {
+  const signedStartParam = cleanSourceTag(auth && auth.raw && auth.raw.start_param);
+  const bodyStartParam = cleanSourceTag(body && (body.startParam || body.start_param));
+  const startParam = signedStartParam || bodyStartParam;
+  return {
+    source: cleanSourceTag(body && body.source) || startParam,
+    startParam,
+  };
+}
+
 export async function onRequestPost({ request, env }) {
   if (!sameOriginOk(request)) return jsonError('Forbidden', 403);
 
@@ -49,7 +63,7 @@ export async function onRequestPost({ request, env }) {
   const auth = await verifyTelegramInitData(body.initData, env.TELEGRAM_GAMEBOT_TOKEN);
   if (!auth.ok) return jsonError(`Telegram auth failed: ${auth.error}`, 401);
 
-  await upsertTelegramPlayer(env, auth.user);
+  await upsertTelegramPlayer(env, auth.user, action === 'load' ? sourceMeta(body, auth) : {});
 
   if (action === 'load') {
     const row = await getTelegramState(env, game, auth.user.id);
