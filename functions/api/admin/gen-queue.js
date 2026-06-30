@@ -7,6 +7,7 @@
 
 import { json } from '../../_lib/response.js';
 import { requireRelay } from '../../_lib/adminAuth.js';
+import { queueCandidateIds, removeJobFromQueue } from '../../_lib/genQueue.js';
 
 const STUCK_MS = 10 * 60 * 1000;   // a "building" job older than this is presumed dropped
 
@@ -31,22 +32,28 @@ export async function onRequestGet({ request, env }) {
   if (!Number.isFinite(limit) || limit < 1) limit = 5;
   limit = Math.min(limit, 20);
 
+  // No KV LIST here: this endpoint is polled by the Mac relay. Submit/result
+  // maintain bounded pending/inflight indexes, then we read only candidate ids.
   const now = Date.now();
   const jobs = [];
-  let cursor;
-  do {
-    const page = await env.VOTES.list({ prefix: 'genjob:', cursor });
-    for (const k of page.keys) {
-      const jobRec = await env.VOTES.get(k.name, 'json');
-      if (!jobRec) continue;
-      const readyPending = jobRec.status === 'pending' && (!jobRec.retryAfter || jobRec.retryAfter <= now);
-      const stuck = jobRec.status === 'building' && (now - (jobRec.updatedTs || 0)) > STUCK_MS;
-      if (readyPending || stuck) {
-        jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts, baseId: jobRec.baseId || null });
-      }
+  const ids = await queueCandidateIds(env, { limit, stuckMs: STUCK_MS, now });
+  for (const id of ids) {
+    const jobRec = await env.VOTES.get(`genjob:${id}`, 'json');
+    if (!jobRec) {
+      await removeJobFromQueue(env, id);
+      continue;
     }
-    cursor = page.list_complete ? null : page.cursor;
-  } while (cursor && jobs.length < 200);
+    if (!jobRec.id) jobRec.id = id;
+    const readyPending = jobRec.status === 'pending' && (!jobRec.retryAfter || jobRec.retryAfter <= now);
+    const stuck = jobRec.status === 'building' && (now - (jobRec.updatedTs || 0)) > STUCK_MS;
+    if (readyPending || stuck) {
+      jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts, baseId: jobRec.baseId || null });
+      continue;
+    }
+    if (jobRec.status === 'ready' || jobRec.status === 'failed') {
+      await removeJobFromQueue(env, jobRec);
+    }
+  }
 
   jobs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
   const out = jobs.slice(0, limit);

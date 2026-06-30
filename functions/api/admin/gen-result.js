@@ -15,6 +15,7 @@ import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
 import { extractEmbeddedLevelSeed, seedCreationLevelsFromHtml } from '../../_lib/creationLevels.js';
 import { appendCreationHistoryEvent, buildFailureSummary, buildResultSummary, makeVersionName } from '../../_lib/creationHistory.js';
+import { markJobBuilding, requeueJob, removeJobFromQueue } from '../../_lib/genQueue.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
@@ -49,6 +50,7 @@ export async function onRequestPost({ request, env }) {
     jobRec.status = 'building';
     jobRec.updatedTs = Date.now();
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+    try { await markJobBuilding(env, jobRec); } catch (e) { /* stale pending index is cleaned by gen-queue */ }
     return json({ ok: true, status: 'building' });
   }
 
@@ -68,6 +70,7 @@ export async function onRequestPost({ request, env }) {
       jobRec.attempts = attempts;
       jobRec.updatedTs = now;
       await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+      try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
       try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
       try { await clearIterLock(env, jobRec); } catch (e) { /* best effort */ }
       try { await appendFailedHistory(env, jobRec, jobRec.error, now); } catch (e) { /* best effort */ }
@@ -81,6 +84,7 @@ export async function onRequestPost({ request, env }) {
     // Expire ~5 days after the ORIGINAL submit, not after the last retry.
     const remainingTtl = Math.max(3600, Math.floor((QUEUE_MAX_MS - ageMs) / 1000));
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: remainingTtl });
+    await requeueJob(env, jobRec);
     return json({ ok: true, status: 'pending', attempts, retryAfter: jobRec.retryAfter });
   }
 
@@ -90,6 +94,7 @@ export async function onRequestPost({ request, env }) {
     jobRec.error = String(body.error || 'generation_failed').slice(0, 200);
     jobRec.updatedTs = Date.now();
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+    try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
     try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
     try { await clearIterLock(env, jobRec); } catch (e) { /* best effort */ }
     try { await appendFailedHistory(env, jobRec, jobRec.error, jobRec.updatedTs); } catch (e) { /* best effort */ }
@@ -119,6 +124,7 @@ export async function onRequestPost({ request, env }) {
         // Base deleted/expired mid-build: don't orphan the result -- fail + refund once.
         jobRec.status = 'failed'; jobRec.error = 'base_gone'; jobRec.updatedTs = now;
         await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+        try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
         try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }
         await clearIterLock(env, jobRec);
         try { await appendFailedHistory(env, jobRec, jobRec.error, now); } catch (e) { /* best effort */ }
@@ -129,6 +135,7 @@ export async function onRequestPost({ request, env }) {
         // NOT a 403: a 403 is not an accepted ack, so the relay would retry it forever.
         jobRec.status = 'failed'; jobRec.error = 'ownership_mismatch'; jobRec.updatedTs = now;
         await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+        try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
         try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }
         await clearIterLock(env, jobRec);
         try { await appendFailedHistory(env, jobRec, jobRec.error, now); } catch (e) { /* best effort */ }
@@ -166,6 +173,7 @@ export async function onRequestPost({ request, env }) {
       jobRec.status = 'ready'; jobRec.title = base.title; jobRec.slug = base.slug; jobRec.quality = quality; jobRec.updatedTs = now; jobRec.levelSeed = levelSeed;
       jobRec.targetCreationId = baseId; jobRec.versionNumber = versionNumber; jobRec.versionName = versionName; jobRec.summary = summary;
       await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
+      try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
       await clearIterLock(env, jobRec);
       try { await appendRequestHistory(env, baseId, jobRec); } catch (e) { /* best effort */ }
       try { await appendReadyHistory(env, baseId, jobRec, now); } catch (e) { /* best effort */ }
@@ -202,6 +210,7 @@ export async function onRequestPost({ request, env }) {
     jobRec.versionName = versionName;
     jobRec.summary = summary;
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
+    try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
 
     // Surface in the creator's "My games" via the existing upload: schema. Private
     // by default (published:false) -- the creator opts in to the public gallery.

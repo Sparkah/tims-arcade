@@ -24,6 +24,7 @@ import { parseCookie } from '../_lib/cookie.js';
 import { readMeta, VOTE_GATE_MIN } from '../_lib/meta.js';
 import { readSession } from './_session.js';
 import { applyVoteState } from '../_lib/voteState.js';
+import { addPublicComment } from '../_lib/commentIndex.js';
 
 const MAX_IMAGES = 5;
 
@@ -78,6 +79,7 @@ export async function onRequestPost({ request, env }) {
   // Comment storage (skipped if empty AND no images)
   if (comment || imageIds.length > 0) {
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const ts = Date.now();
     const ckey = `comment:${slug}:${id}`;
     // Mirror the first id into the legacy `imageId` field so existing
     // admin/stats consumers (which read `c.imageId`) keep showing the
@@ -85,10 +87,13 @@ export async function onRequestPost({ request, env }) {
     const payload = JSON.stringify({
       vote,
       comment,
-      ts: Date.now(),
+      ts,
       ...(imageIds.length > 0 ? { imageIds, imageId: imageIds[0] } : {}),
     });
     await env.VOTES.put(ckey, payload);
+    if (comment) {
+      try { await addPublicComment(env, slug, { id, vote, comment, ts }); } catch (e) { /* index is best-effort */ }
+    }
   }
 
   return new Response(null, { status: 204 });

@@ -15,10 +15,16 @@
 // op per view. That is a top consumer of the 1k/day free KV list cap. Wrap it
 // in the caches.default put/match dance, keyed per (slug, limit), 60s TTL
 // (matches the prior stale-while-revalidate intent).
+//
+// 2026-06-30 hardening: new comments also maintain `commentidx:<slug>`, so the
+// hot path is one KV read. The old prefix list remains only as a cold backfill
+// for known slugs that predate the index; random valid-looking slugs return
+// empty without a LIST.
 
 import { json } from '../_lib/response.js';
 import { isValidSlug } from '../_lib/validate.js';
 import { edgeCached } from '../_lib/edgecache.js';
+import { readPublicCommentIndex, writePublicCommentIndex } from '../_lib/commentIndex.js';
 
 export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
@@ -33,10 +39,23 @@ export async function onRequestGet({ request, env }) {
 
   // encodeURIComponent the slug into the synthetic cache key so the key can't be
   // split/collided even if SLUG_RE ever widens; `limit` is already a clamped int.
-  return edgeCached(`/api-comments/${encodeURIComponent(slug)}?l=${limit}`, {}, () => buildComments(env, slug, limit));
+  return edgeCached(`/api-comments/${encodeURIComponent(slug)}?l=${limit}`, {}, () => buildComments(request, env, slug, limit));
 }
 
-async function buildComments(env, slug, limit) {
+async function buildComments(request, env, slug, limit) {
+  const indexed = await readPublicCommentIndex(env, slug);
+  if (indexed) return commentsResponse(slug, indexed.slice(0, limit));
+
+  if (!await isKnownCommentSlug(request, env, slug)) {
+    return commentsResponse(slug, []);
+  }
+
+  const legacy = await buildLegacyCommentsByList(env, slug, limit);
+  try { await writePublicCommentIndex(env, slug, legacy); } catch (e) { /* best effort */ }
+  return commentsResponse(slug, legacy.slice(0, limit));
+}
+
+async function buildLegacyCommentsByList(env, slug, limit) {
   const prefix = `comment:${slug}:`;
   let cursor;
   const names = [];
@@ -61,19 +80,26 @@ async function buildComments(env, slug, limit) {
       return raw ? { ...raw, _key: k } : null;
     })
   );
-  const valid = fetched
+  return fetched
     .filter(Boolean)
     .filter(c => c.comment && c.comment.length > 0)
     .sort((a, b) => (b.ts || 0) - (a.ts || 0))
     .slice(0, limit)
     .map(c => ({
+      id:      String(c._key || '').slice(prefix.length),
       vote:    c.vote || null,
       comment: String(c.comment || '').slice(0, 500),
       ts:      c.ts || null,
     }));
+}
 
+function commentsResponse(slug, rows) {
   return new Response(
-    JSON.stringify({ slug, count: valid.length, comments: valid }),
+    JSON.stringify({ slug, count: rows.length, comments: rows.map(c => ({
+      vote:    c.vote || null,
+      comment: String(c.comment || '').slice(0, 500),
+      ts:      c.ts || null,
+    })) }),
     {
       status: 200,
       headers: {
@@ -82,4 +108,19 @@ async function buildComments(env, slug, limit) {
       },
     }
   );
+}
+
+async function isKnownCommentSlug(request, env, slug) {
+  try {
+    if (await env.VOTES.get(`creationslug:${slug}`)) return true;
+  } catch (e) { /* fall through */ }
+  try {
+    const url = new URL(request.url);
+    const r = await fetch(`${url.origin}/games.json`, { cf: { cacheTtl: 300 } });
+    if (!r.ok) return false;
+    const games = await r.json();
+    return Array.isArray(games) && games.some(g => g && g.slug === slug);
+  } catch (e) {
+    return false;
+  }
 }

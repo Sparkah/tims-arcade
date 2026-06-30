@@ -13,6 +13,7 @@ import { filterText } from '../../_lib/chatmod.js';
 import { parseCookie } from '../../_lib/cookie.js';
 import { spendTokens, refundTokens, readMeta, grantSignupBonus, GENERATION_COST } from '../../_lib/meta.js';
 import { appendCreationHistoryEvent, makeVersionName } from '../../_lib/creationHistory.js';
+import { addPendingJob } from '../../_lib/genQueue.js';
 
 const MIN_PROMPT = 3;
 const MAX_PROMPT = 500;
@@ -134,11 +135,14 @@ export async function onRequestPost({ request, env }) {
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('enqueue_failed', 500);
   }
-  // Signal new work so the vibe-relay detects it with a cheap GET (gen-queue
-  // ?signal=1, 1 read) instead of a per-poll KV LIST. Without this the relay's
-  // 15s poll did a genjob: LIST every time = ~5760 list ops/day, over the free
-  // 1000/day cap by itself (2026-06-16). Best-effort; relay also stuck-sweeps.
-  try { await env.VOTES.put('genjob:signal', String(ts)); } catch (e) { /* non-fatal */ }
+  try {
+    await addPendingJob(env, jobRec);
+  } catch (e) {
+    try { await env.VOTES.delete(`genjob:${id}`); } catch (_) { /* best effort */ }
+    if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);
+    if (lockHeld) await releaseIterLock(env, baseId, id);
+    return jsonError('enqueue_failed', 500);
+  }
   try {
     await appendCreationHistoryEvent(env, targetCreationId, {
       id: `request:${id}`,
