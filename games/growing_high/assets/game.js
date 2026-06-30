@@ -294,6 +294,7 @@ import * as THREE from "./three.module.js";
   let lastFrame = performance.now();
   let saveTimer = 0;
   const CELL_3D = 0.58;
+  const PICK_PLANE_Y = 0.08;
   const three = {
     initialized: false,
     renderer: null,
@@ -304,6 +305,11 @@ import * as THREE from "./three.module.js";
     geo: {},
     colorMats: new Map(),
     yAxis: new THREE.Vector3(0, 1, 0),
+    raycaster: new THREE.Raycaster(),
+    pointer: new THREE.Vector2(),
+    pickPlane: new THREE.Plane(new THREE.Vector3(0, 1, 0), -PICK_PLANE_Y),
+    pickHit: new THREE.Vector3(),
+    screenPoint: new THREE.Vector3(),
   };
   const audio = {
     ctx: null,
@@ -499,6 +505,22 @@ import * as THREE from "./three.module.js";
 
   function boardZ(row) {
     return (row - (ROWS - 1) / 2) * CELL_3D;
+  }
+
+  function sync3DCamera() {
+    if (!three.initialized) return;
+    const compact = view.width < 820;
+    three.camera.aspect = view.width / Math.max(1, view.height);
+    three.camera.fov = compact ? 78 : 46;
+    three.camera.updateProjectionMatrix();
+
+    const worldX = compact ? 0 : -1.25;
+    const lookX = compact ? 0 : 0;
+    three.world.position.set(worldX, 0, compact ? 0.15 : 0);
+    three.camera.position.set(lookX + (compact ? 0.08 : 0.45), compact ? 8.7 : 6.9, compact ? 10.2 : 7.4);
+    three.camera.lookAt(lookX, 0.05, 0);
+    three.camera.updateMatrixWorld(true);
+    three.world.updateMatrixWorld(true);
   }
 
   function clearThreeGroup(group) {
@@ -1637,16 +1659,8 @@ import * as THREE from "./three.module.js";
     if (sceneCanvas.style.visibility === "hidden") return;
 
     three.renderer.setPixelRatio(view.dpr);
-    const compact = view.width < 820;
     three.renderer.setSize(view.width, view.height, false);
-    three.camera.aspect = view.width / view.height;
-    three.camera.fov = compact ? 52 : 42;
-    three.camera.updateProjectionMatrix();
-
-    const shiftX = compact ? 0 : -1.25;
-    three.world.position.set(shiftX, 0, compact ? 0.15 : 0);
-    three.camera.position.set(shiftX + (compact ? 0.08 : 0.45), compact ? 8.3 : 6.9, compact ? 9.6 : 7.4);
-    three.camera.lookAt(shiftX, 0.05, 0);
+    sync3DCamera();
 
     clearThreeGroup(three.world);
     draw3DEnvironment(three.world);
@@ -2727,12 +2741,54 @@ import * as THREE from "./three.module.js";
     }
   }
 
-  function gridFromPoint(x, y) {
+  function gridFromPoint2D(x, y) {
     const roof = view.roof;
     const col = Math.floor((x - roof.x) / roof.cell);
     const row = Math.floor((y - roof.y) / roof.cell);
     if (!inBounds(col, row)) return null;
     return { col, row };
+  }
+
+  function pick3DCellFromPoint(x, y) {
+    if (!sceneCanvas || state.mode !== "game" || state.phase === "market") return null;
+    initThree();
+    if (!three.initialized) return null;
+    sync3DCamera();
+    const rect = sceneCanvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+
+    three.pointer.set((x / rect.width) * 2 - 1, -((y / rect.height) * 2 - 1));
+    three.raycaster.setFromCamera(three.pointer, three.camera);
+    const hit = three.raycaster.ray.intersectPlane(three.pickPlane, three.pickHit);
+    if (!hit) return null;
+
+    const localX = hit.x - three.world.position.x;
+    const localZ = hit.z - three.world.position.z;
+    const col = Math.floor(localX / CELL_3D + COLS / 2);
+    const row = Math.floor(localZ / CELL_3D + ROWS / 2);
+    if (!inBounds(col, row)) return null;
+    return { col, row };
+  }
+
+  function gridFromPoint(x, y) {
+    return pick3DCellFromPoint(x, y) || gridFromPoint2D(x, y);
+  }
+
+  function cellScreenPoint(col, row) {
+    if (!sceneCanvas || !inBounds(col, row)) return null;
+    initThree();
+    if (!three.initialized) return null;
+    sync3DCamera();
+    const rect = sceneCanvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    three.screenPoint
+      .set(boardX(col), PICK_PLANE_Y, boardZ(row))
+      .add(three.world.position)
+      .project(three.camera);
+    return {
+      x: rect.left + (three.screenPoint.x + 1) * 0.5 * rect.width,
+      y: rect.top + (1 - (three.screenPoint.y + 1) * 0.5) * rect.height,
+    };
   }
 
   function handleCanvasAction(x, y, dragging) {
@@ -3024,6 +3080,8 @@ import * as THREE from "./three.module.js";
 
   window.render_game_to_text = () => JSON.stringify(gameTextPayload());
   window.__growingHighReach = reachPayload;
+  window.__growingHighCellToScreen = cellScreenPoint;
+  window.__growingHighPickCell = gridFromPoint;
   window.advanceTime = (ms) => {
     const steps = Math.max(1, Math.ceil(ms / (1000 / 30)));
     const dt = ms / steps / 1000;
