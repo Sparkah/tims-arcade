@@ -1,14 +1,16 @@
 // POST /api/auth/logout
-// Clears the session cookie. Returns 204.
+// Clears the session cookie. Returns 302.
 
 export async function onRequestPost({ request }) {
   const url = new URL(request.url);
+  const headers = new Headers({
+    'Location': sanitizeReturn(url.searchParams.get('return'), url.origin),
+  });
+  headers.append('Set-Cookie', `__Host-tgl_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax`);
+  headers.append('Set-Cookie', `tgl_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax`);
   return new Response(null, {
     status: 302,
-    headers: {
-      'Location': sanitizeReturn(url.searchParams.get('return'), url.origin),
-      'Set-Cookie': `tgl_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax`,
-    },
+    headers,
   });
 }
 // GET works too — easier from a plain anchor link

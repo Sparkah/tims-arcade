@@ -1,7 +1,7 @@
 // GET /api/auth/verify?token=<magic-link-token>
 //
 // Consumes a magic-link token from KV. On success, sets an HMAC-signed
-// HTTP-only session cookie (`tgl_session`) and redirects to "/".
+// HTTP-only session cookie (`__Host-tgl_session`) and redirects to "/".
 // On failure, redirects to "/login?err=expired".
 //
 // Cookie format: <base64url(payload)>.<base64url(hmac-sha256(payload, AUTH_SECRET))>
@@ -47,12 +47,15 @@ export async function onRequestGet({ request, env }) {
   const payload = { email, uid, exp_ts: expTs };
   const cookie = await signSessionCookie(payload, env.AUTH_SECRET);
 
+  const headers = new Headers({
+    'Location': `${url.origin}${next}`,
+  });
+  headers.append('Set-Cookie', `__Host-tgl_session=${cookie}; Path=/; Expires=${new Date(expTs).toUTCString()}; HttpOnly; Secure; SameSite=Lax`);
+  headers.append('Set-Cookie', `tgl_session=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Lax`);
+
   return new Response(null, {
     status: 302,
-    headers: {
-      'Location': `${url.origin}${next}`,
-      'Set-Cookie': `tgl_session=${cookie}; Path=/; Expires=${new Date(expTs).toUTCString()}; HttpOnly; Secure; SameSite=Lax`,
-    },
+    headers,
   });
 }
 

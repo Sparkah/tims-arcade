@@ -47,14 +47,28 @@ function req(url, { headers = {}, method = 'GET', body = null } = {}) {
   return new Request(url, { method, headers, body });
 }
 
-async function signedSessionCookie(email, uid = 'session-uid') {
+async function signedSessionCookie(email, uid = 'session-uid', name = 'tgl_session') {
   const body = b64url(new TextEncoder().encode(JSON.stringify({
     email,
     uid,
     exp_ts: Date.now() + 60_000,
   })));
   const sig = await hmacSign(body, 'auth-secret');
-  return `tgl_session=${body}.${sig}`;
+  return `${name}=${body}.${sig}`;
+}
+
+function getSetCookieText(headers) {
+  if (typeof headers.getSetCookie === 'function') return headers.getSetCookie().join('\n');
+  return headers.get('set-cookie') || '';
+}
+
+function cookiePairFromSetCookie(headers, name) {
+  const text = getSetCookieText(headers);
+  const start = text.indexOf(`${name}=`);
+  if (start < 0) return null;
+  const rest = text.slice(start);
+  const semi = rest.indexOf(';');
+  return semi >= 0 ? rest.slice(0, semi) : rest;
 }
 
 async function hmacSign(message, secret) {
@@ -238,11 +252,48 @@ async function testLogoutReturnSanitization() {
     request: req('https://game-factory.test/api/auth/logout?return=https://evil.test/x'),
   });
   assert(external.headers.get('location') === 'https://game-factory.test/', 'logout accepted external return URL');
+  const externalCookies = getSetCookieText(external.headers);
+  assert(externalCookies.includes('__Host-tgl_session=;'), 'logout did not clear __Host session cookie');
+  assert(externalCookies.includes('tgl_session=;'), 'logout did not clear legacy session cookie');
 
   const sameOrigin = await mod.onRequestGet({
     request: req('https://game-factory.test/api/auth/logout?return=/admin.html'),
   });
   assert(sameOrigin.headers.get('location') === 'https://game-factory.test/admin.html', 'logout rejected safe local return URL');
+}
+
+async function testSessionCookieMigration() {
+  const verify = await import(pathToFileURL(path.join(GALLERY, 'functions/api/auth/verify.js')).href);
+  const sessionMod = await import(pathToFileURL(path.join(GALLERY, 'functions/api/_session.js')).href);
+  const token = 'abcdefghijklmnop';
+  const env = makeEnv({
+    VOTES: makeKv({
+      [`magiclink:${token}`]: JSON.stringify({ email: 'tim@example.com', next: '/admin.html' }),
+    }),
+  });
+
+  const verified = await verify.onRequestGet({
+    request: req(`https://game-factory.test/api/auth/verify?token=${token}`),
+    env,
+  });
+  assert(verified.status === 302, `auth verify did not redirect on success: ${verified.status}`);
+  assert(verified.headers.get('location') === 'https://game-factory.test/admin.html', 'auth verify lost safe next path');
+  const setCookies = getSetCookieText(verified.headers);
+  assert(setCookies.includes('__Host-tgl_session='), 'auth verify did not set __Host session cookie');
+  assert(setCookies.includes('tgl_session=;'), 'auth verify did not expire legacy session cookie');
+
+  const hostPair = cookiePairFromSetCookie(verified.headers, '__Host-tgl_session');
+  assert(hostPair, 'could not extract __Host session cookie');
+  const hostSession = await sessionMod.readSession(req('https://game-factory.test/api/me', {
+    headers: { cookie: hostPair },
+  }), env);
+  assert(hostSession && hostSession.email === 'tim@example.com', 'readSession rejected __Host session cookie');
+
+  const legacyPair = await signedSessionCookie('ops@example.com', 'ops-uid');
+  const legacySession = await sessionMod.readSession(req('https://game-factory.test/api/me', {
+    headers: { cookie: legacyPair },
+  }), env);
+  assert(legacySession && legacySession.email === 'ops@example.com', 'readSession rejected legacy session cookie fallback');
 }
 
 async function testAuthDevModeDoesNotLeakProductionMagicLinks() {
@@ -301,6 +352,86 @@ async function testRelayEndpoints() {
   assert(denied.status === 403, `admin token should not complete relay jobs, got ${denied.status}`);
 }
 
+async function postJson(mod, url, body, env, headers = {}) {
+  return mod.onRequestPost({
+    request: req(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    }),
+    env,
+  });
+}
+
+async function testAnonymousVoteDedupe() {
+  const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/api/vote.js')).href);
+  const env = makeEnv({
+    VOTES: makeKv({
+      'meta:anon1': JSON.stringify({ played: { vote_slug: 300 } }),
+      'meta:anon2': JSON.stringify({ played: { legacy_slug: 300 } }),
+    }),
+  });
+
+  const headers = { cookie: 'uid=anon1', 'cf-connecting-ip': '203.0.113.10' };
+  let res = await postJson(mod, 'https://game-factory.test/api/vote', { slug: 'vote_slug', vote: 'like' }, env, headers);
+  assert(res.status === 200, `anonymous like was rejected: ${res.status}`);
+  let body = await res.json();
+  assert(body.likes === 1 && body.dislikes === 0 && body.myVote === 'like', 'first anonymous like did not count once');
+
+  res = await postJson(mod, 'https://game-factory.test/api/vote', { slug: 'vote_slug', vote: 'like' }, env, headers);
+  body = await res.json();
+  assert(body.likes === 1 && body.dislikes === 0 && body.myVote === 'like', 'replayed anonymous like inflated count');
+
+  res = await postJson(mod, 'https://game-factory.test/api/vote', { slug: 'vote_slug', vote: 'dislike' }, env, headers);
+  body = await res.json();
+  assert(body.likes === 0 && body.dislikes === 1 && body.myVote === 'dislike', 'anonymous vote switch did not reverse prior vote');
+
+  const legacyHeaders = { cookie: 'uid=anon2', 'cf-connecting-ip': '203.0.113.11' };
+  res = await postJson(mod, 'https://game-factory.test/api/vote', { slug: 'legacy_slug', deltaLike: 1, deltaDislike: 0 }, env, legacyHeaders);
+  assert(res.status === 200, `legacy delta like was rejected: ${res.status}`);
+  body = await res.json();
+  assert(body.likes === 1 && body.dislikes === 0 && body.myVote === 'like', 'legacy delta was not mapped to vote state');
+
+  res = await postJson(mod, 'https://game-factory.test/api/vote', { slug: 'legacy_slug', deltaLike: 1, deltaDislike: 0 }, env, legacyHeaders);
+  body = await res.json();
+  assert(body.likes === 1 && body.dislikes === 0, 'replayed legacy delta inflated count');
+}
+
+async function testFeedbackVoteDedupe() {
+  const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/api/feedback.js')).href);
+  const env = makeEnv({
+    VOTES: makeKv({
+      'meta:anon3': JSON.stringify({ played: { feedback_slug: 300 } }),
+      'meta:anon4': JSON.stringify({ played: { gated_slug: 30 } }),
+    }),
+  });
+
+  const headers = { cookie: 'uid=anon3', 'cf-connecting-ip': '203.0.113.12' };
+  let res = await postJson(mod, 'https://game-factory.test/api/feedback', { slug: 'feedback_slug', vote: 'like' }, env, headers);
+  assert(res.status === 204, `feedback like failed: ${res.status}`);
+  res = await postJson(mod, 'https://game-factory.test/api/feedback', { slug: 'feedback_slug', vote: 'like' }, env, headers);
+  assert(res.status === 204, `replayed feedback like failed: ${res.status}`);
+  let votes = JSON.parse(env.VOTES.store.get('votes:feedback_slug'));
+  assert(votes.likes === 1 && votes.dislikes === 0, 'replayed feedback like inflated count');
+
+  res = await postJson(mod, 'https://game-factory.test/api/feedback', { slug: 'feedback_slug', vote: 'dislike' }, env, headers);
+  assert(res.status === 204, `feedback dislike failed: ${res.status}`);
+  votes = JSON.parse(env.VOTES.store.get('votes:feedback_slug'));
+  assert(votes.likes === 0 && votes.dislikes === 1, 'feedback vote switch did not reverse prior vote');
+
+  const gatedHeaders = { cookie: 'uid=anon4', 'cf-connecting-ip': '203.0.113.13' };
+  res = await postJson(mod, 'https://game-factory.test/api/feedback', { slug: 'gated_slug', vote: 'like' }, env, gatedHeaders);
+  assert(res.status === 204, `below-gate feedback should still store non-vote payload path: ${res.status}`);
+  assert(!env.VOTES.store.has('votes:gated_slug'), 'below-gate feedback vote was tallied');
+}
+
+function testClientsUseVoteStateShape() {
+  for (const file of ['app.js', 'play.html']) {
+    const text = fs.readFileSync(path.join(GALLERY, file), 'utf8');
+    assert(!/deltaLike|deltaDislike/.test(text), `${file} still sends raw vote deltas`);
+  }
+}
+
 async function main() {
   await testTimingSafeCompare();
   testNoDirectAdminTokenComparisons();
@@ -310,8 +441,12 @@ async function main() {
   await testHstsMiddleware();
   await testAdminAuth();
   await testLogoutReturnSanitization();
+  await testSessionCookieMigration();
   await testAuthDevModeDoesNotLeakProductionMagicLinks();
   await testRelayEndpoints();
+  await testAnonymousVoteDedupe();
+  await testFeedbackVoteDedupe();
+  testClientsUseVoteStateShape();
   console.log('PASS security P0 regressions');
 }
 

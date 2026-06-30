@@ -1538,18 +1538,14 @@ async function vote(slug, action, cardEl) {
   counts[slug].dislikes = Math.max(0, (counts[slug].dislikes || 0) + dd);
   refreshCard(cardEl, slug);
 
-  // Server update. Two paths:
-  //   - Signed in: server enforces per-user vote map (multi-vote-proof)
-  //   - Anon: legacy delta path (client-side dedup via localStorage)
+  // Server update. The server enforces per-voter state for both signed-in and
+  // anonymous players; localStorage is only the instant UI hint.
   try {
-    const body = (me && me.signed_in)
-      ? { slug, vote: next || 'clear' }
-      : { slug, deltaLike: dl, deltaDislike: dd };
     const r = await fetch('/api/vote', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify(body),
+      body: JSON.stringify({ slug, vote: next || 'clear' }),
     });
     if (r.ok) {
       const updated = await r.json();

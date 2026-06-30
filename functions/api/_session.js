@@ -1,12 +1,14 @@
 // Shared session-cookie helper for Pages Functions.
 // Imported by /api/me, /api/vote (for the user-aware path), /api/feedback, etc.
 //
-// Verifies the `tgl_session` cookie's HMAC signature against AUTH_SECRET,
-// returns the parsed payload { email, uid, exp_ts } when valid, or null.
+// Verifies the `__Host-tgl_session` cookie's HMAC signature against AUTH_SECRET,
+// with a fallback for the pre-migration `tgl_session` cookie. Returns the parsed
+// payload { email, uid, exp_ts } when valid, or null.
 
 export async function readSession(request, env) {
   if (!env.AUTH_SECRET) return null;
-  const cookie = parseCookie(request.headers.get('Cookie') || '', 'tgl_session');
+  const header = request.headers.get('Cookie') || '';
+  const cookie = parseCookie(header, '__Host-tgl_session') || parseCookie(header, 'tgl_session');
   if (!cookie) return null;
 
   const dotIdx = cookie.lastIndexOf('.');

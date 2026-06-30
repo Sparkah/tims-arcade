@@ -5,7 +5,7 @@
 //         imageId?:  string }    // legacy shape (single id) — still honoured
 //
 // Logs both:
-//   - vote count (votes:<slug> like+1 / dislike+1) — same as /api/vote
+//   - vote count (votes:<slug>) via the same per-voter state as /api/vote
 //   - free-text comment (comments:<slug>:<id>) — capped 500 chars; payload
 //     stores imageIds[] when any are attached, plus a single imageId
 //     mirroring the first one for back-compat with admin/stats readers
@@ -22,6 +22,8 @@ import { isValidSlug } from '../_lib/validate.js';
 import { checkRate } from '../_lib/rateLimit.js';
 import { parseCookie } from '../_lib/cookie.js';
 import { readMeta, VOTE_GATE_MIN } from '../_lib/meta.js';
+import { readSession } from './_session.js';
+import { applyVoteState } from '../_lib/voteState.js';
 
 const MAX_IMAGES = 5;
 
@@ -54,21 +56,17 @@ export async function onRequestPost({ request, env }) {
   const rateKey = `fbrate:${ip}:${Math.floor(Date.now() / 60000)}`;
   if (!await checkRate(env, rateKey, 30, 120)) return jsonError('rate_limit', 429);
 
-  // Tally vote (skipped if neutral). Gated identically to /api/vote: only count a
-  // like/dislike once the player has ~5 min of active play on this slug
-  // (meta.played[slug] on the cookie uid, checked against VOTE_GATE_MIN, the
-  // drift-grace floor), so this overlay path cannot bypass the rating gate. The
-  // comment/images below are NOT gated. (Codex review 2026-06-16)
+  // Tally vote (skipped if neutral). Gated identically to /api/vote, then applied
+  // through the same per-voter state map so repeated overlay submissions cannot
+  // inflate raw counts. The comment/images below are NOT gated. (Codex review
+  // 2026-06-16; hardened 2026-06-30)
   if (vote === 'like' || vote === 'dislike') {
     const cookieUid = parseCookie(request.headers.get('Cookie') || '', 'uid');
     const gateMeta = cookieUid ? await readMeta(env, cookieUid) : null;
     const playedSec = (gateMeta && gateMeta.played && gateMeta.played[slug]) || 0;
     if (playedSec >= VOTE_GATE_MIN) {
-      const key = `votes:${slug}`;
-      const cur = (await env.VOTES.get(key, 'json')) || { likes: 0, dislikes: 0 };
-      if (vote === 'like')    cur.likes    = (cur.likes    || 0) + 1;
-      if (vote === 'dislike') cur.dislikes = (cur.dislikes || 0) + 1;
-      await env.VOTES.put(key, JSON.stringify(cur));
+      const session = await readSession(request, env);
+      await applyVoteState(env, { slug, wantedVote: vote, session, anonUid: cookieUid });
     }
     // else: below the play gate -- skip the tally (comment/images still stored below)
   }
