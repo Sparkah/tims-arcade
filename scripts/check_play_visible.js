@@ -35,15 +35,30 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const childProcess = require('child_process');
 
 const GALLERY = path.resolve(process.env.GALLERY_ROOT || path.resolve(__dirname, '..'));
+function hasPuppeteer(root) {
+  return fs.existsSync(path.join(root, 'Shared', 'skills', 'game-factory', 'tools', 'node_modules', 'puppeteer'));
+}
+
 function findAgentsRoot() {
   if (process.env.AGENTS_ROOT) return process.env.AGENTS_ROOT;
   let dir = GALLERY;
   for (let i = 0; i < 5; i++) {
-    const candidate = path.join(dir, 'Shared', 'skills', 'game-factory', 'tools', 'node_modules', 'puppeteer');
-    if (fs.existsSync(candidate)) return dir;
+    if (hasPuppeteer(dir)) return dir;
     dir = path.dirname(dir);
+  }
+  try {
+    const commonDir = childProcess.execFileSync('git', ['-C', GALLERY, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const canonicalGallery = path.resolve(commonDir, '..');
+    const agentsRoot = path.resolve(canonicalGallery, '..');
+    if (hasPuppeteer(agentsRoot)) return agentsRoot;
+  } catch (_) {
+    // Fall through to the historical default below.
   }
   return path.resolve(GALLERY, '..');
 }

@@ -25,6 +25,15 @@ while read -r local_ref local_oid remote_ref remote_oid; do
   [[ -n "${local_ref:-}" ]] || continue
   PUSH_REFS+=("$local_ref $local_oid $remote_ref $remote_oid")
 done
+YANDEX_TMP_ROOTS=()
+cleanup_yandex_tmp_roots() {
+  local d
+  (( ${#YANDEX_TMP_ROOTS[@]} == 0 )) && return 0
+  for d in "${YANDEX_TMP_ROOTS[@]}"; do
+    [[ -n "$d" ]] && rm -rf "$d"
+  done
+}
+trap cleanup_yandex_tmp_roots EXIT
 
 is_zero_oid() {
   [[ -z "${1:-}" || "$1" == "$ZERO_OID" ]]
@@ -143,6 +152,85 @@ changed_game_pairs() {
   rm -f "$tmp"
 }
 
+manifest_publish_pairs_for_ref() {
+  local local_oid="$1" remote_oid="$2" remote_ref="$3" base old_manifest new_manifest rc
+  is_zero_oid "$local_oid" && return 0
+  if ! is_zero_oid "$remote_oid"; then
+    base="$remote_oid"
+  else
+    base="$(remote_ref_base "$local_oid" "$remote_ref" 2>/dev/null || true)"
+  fi
+  [[ -n "$base" ]] || return 0
+  old_manifest="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-old-manifest.XXXXXX")" || return 2
+  new_manifest="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-new-manifest.XXXXXX")" || {
+    rm -f "$old_manifest"
+    return 2
+  }
+  git -C "$GALLERY_ROOT" show "$base:games.json" > "$old_manifest" 2>/dev/null || :
+  if ! git -C "$GALLERY_ROOT" show "$local_oid:games.json" > "$new_manifest" 2>/dev/null; then
+    rm -f "$old_manifest" "$new_manifest"
+    return 0
+  fi
+  python3 -c 'import json, sys
+oid, old_path, new_path = sys.argv[1:4]
+try:
+    old = json.load(open(old_path)) if old_path else []
+    new = json.load(open(new_path)) if new_path else []
+except Exception:
+    sys.exit(2)
+old_pub = {item.get("slug"): item.get("published") is not False for item in old if isinstance(item, dict) and item.get("slug")}
+for item in new if isinstance(new, list) else []:
+    if not isinstance(item, dict):
+        continue
+    slug = item.get("slug")
+    if not slug or item.get("published") is False:
+        continue
+    if old_pub.get(slug) is not True:
+        print(f"{oid}\tgames/{slug}")
+' "$local_oid" "$old_manifest" "$new_manifest"
+  rc=$?
+  rm -f "$old_manifest" "$new_manifest"
+  return "$rc"
+}
+
+manifest_publish_pairs() {
+  local line local_ref local_oid remote_ref remote_oid tmp status
+  if (( ${#PUSH_REFS[@]} == 0 )); then
+    return 0
+  fi
+  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-publish.XXXXXX")" || return 2
+  status=0
+  for line in "${PUSH_REFS[@]}"; do
+    IFS=' ' read -r local_ref local_oid remote_ref remote_oid <<< "$line"
+    if ! manifest_publish_pairs_for_ref "$local_oid" "$remote_oid" "$remote_ref" >> "$tmp"; then
+      status=2
+    fi
+  done
+  if (( status != 0 )); then
+    rm -f "$tmp"
+    return "$status"
+  fi
+  sort -u "$tmp"
+  rm -f "$tmp"
+}
+
+stage1_game_pairs() {
+  local tmp rc
+  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-stage1.XXXXXX")" || return 2
+  if ! changed_game_pairs >> "$tmp"; then
+    rm -f "$tmp"
+    return 2
+  fi
+  if ! manifest_publish_pairs >> "$tmp"; then
+    rm -f "$tmp"
+    return 2
+  fi
+  sort -u "$tmp"
+  rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
 game_tree_exists_at_oid() {
   local oid="$1" rel="$2"
   git -C "$GALLERY_ROOT" cat-file -e "$oid:$rel" 2>/dev/null
@@ -229,6 +317,7 @@ extract_game_tree_for_oid() {
   fi
 
   tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/gallery-yandex-prepush.XXXXXX")" || return 1
+  YANDEX_TMP_ROOTS+=("$tmp_root")
   tmp_extract="$tmp_root/_archive"
   status_rel="$(source_game_dir_at_oid "$oid" "$rel")"
   if ! safe_relative_path "$status_rel"; then
@@ -379,7 +468,7 @@ run_yandex_stage1() {
       ;;
   esac
 
-  extracted="$(changed_game_pairs)"
+  extracted="$(stage1_game_pairs)"
   rc=$?
   if (( rc != 0 )); then
     echo "stage-1 Yandex: could not enumerate changed games; failing closed." >&2
@@ -472,7 +561,7 @@ if [[ -x "$PUSH_LOCK" ]]; then
       echo "   Retry shortly; the holder releases when its push finishes." >&2
       exit 1
     }
-    trap 'bash "$PUSH_LOCK" release "$_hooktok" 2>/dev/null' EXIT
+    trap 'bash "$PUSH_LOCK" release "$_hooktok" 2>/dev/null; cleanup_yandex_tmp_roots' EXIT
   fi
 fi
 
@@ -567,7 +656,13 @@ if [[ -x "$CHECKER" ]]; then
     exit 1
   fi
 else
-  if [[ -n "$(changed_game_pairs)" ]]; then
+  _stage1_pairs="$(stage1_game_pairs)"
+  _stage1_pairs_rc=$?
+  if (( _stage1_pairs_rc != 0 )); then
+    echo "pre-push: $CHECKER missing and changed-game enumeration failed — failing closed." >&2
+    exit 1
+  fi
+  if [[ -n "$_stage1_pairs" ]]; then
     echo "pre-push: $CHECKER missing — cannot run changed-game Yandex gate." >&2
     exit 1
   fi
