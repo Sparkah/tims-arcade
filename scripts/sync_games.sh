@@ -148,7 +148,9 @@ for ((i = 0; i < COUNT; i++)); do
   # CDN weight that fails the pre-push scorecard (2026-06-19).
   rm -rf "$OUT_GAMES/$SLUG/assets/"*_raw 2>/dev/null || true
 
-  # Copy optional sibling files used by the game-factory framework.
+  # Copy optional sibling files used by the game-factory framework and hand-built
+  # canvas games. Keep this list explicit so sync does not sweep development
+  # helpers or source maps into the public CDN.
   # gf-lib.js is a hard runtime dependency (defines GF.*), so a half-written
   # copy breaks the game just like a truncated index.html ("GF is not defined").
   # Same guard: the lib is an IIFE that closes with "})();", which a truncated
@@ -163,6 +165,11 @@ for ((i = 0; i < COUNT; i++)); do
     else
       echo "  ⚠ skip $SLUG $sibling — source incomplete (mid-write?) and no prior copy"
     fi
+  done
+
+  for sibling in game.js tokens.css; do
+    [[ -f "$GAME_DIR/$sibling" ]] || continue
+    publish_atomic "$OUT_GAMES/$SLUG/$sibling" < "$GAME_DIR/$sibling"
   done
 
   # ── Lab page artefacts (genesis + iteration log) ─────────────────────────
