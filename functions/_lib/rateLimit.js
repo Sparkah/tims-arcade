@@ -22,3 +22,27 @@ export async function checkRate(env, key, limit, ttlSeconds) {
   await env.VOTES.put(key, String(n + 1), { expirationTtl: ttlSeconds });
   return true;
 }
+
+// Two-window guard for the authenticated Telegram payment/state endpoints
+// (tg-invoice / tg-purchase / tg-ton-order / tg-ton-verify / tg-state). Each of
+// those does real work per call — a Telegram/TONAPI fetch or a Supabase write —
+// so a spammed client can burn API quota or hammer the DB. This caps BOTH a
+// short burst (perSec) and a sustained rate (perMin), keyed by a caller-built
+// identity string (the verified Telegram user id, falling back to IP).
+//
+// Buckets live in the same VOTES KV as checkRate. Each window is its own
+// rotating key (…:s<second> / …:m<minute>), so the window itself comes from the
+// key, not the TTL — which matters because Cloudflare KV enforces a 60s minimum
+// expirationTtl (a 1-second TTL would be rejected). The TTL is therefore only
+// there to reap stale keys.
+//
+// Returns true when within budget (both windows recorded), false when either is
+// exceeded — the caller renders its own 429, same contract as checkRate.
+export async function checkUserRate(env, scope, identity, { perSec = 3, perMin = 30 } = {}) {
+  const now = Date.now();
+  const secKey = `rl:${scope}:${identity}:s${Math.floor(now / 1000)}`;
+  const minKey = `rl:${scope}:${identity}:m${Math.floor(now / 60000)}`;
+  if (!await checkRate(env, secKey, perSec, 60)) return false;
+  if (!await checkRate(env, minKey, perMin, 120)) return false;
+  return true;
+}

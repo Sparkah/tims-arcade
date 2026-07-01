@@ -5,10 +5,10 @@
 import {
   MAX_ENEMIES, MAX_BULLETS, MAX_EBULLETS, MAX_FLOATS, MAX_MOTES, MAX_PARTS, MAX_DECALS, MAX_GORE,
   MAX_SPLATS, MAX_BOOMS, MAX_BUBBLES, MAX_VEINS, MAX_LEECHES, CORPSE_CAP, TRACK_CAP
-} from './config.js?v=bm5';
-import { OLD_SPRITES } from './flags.js?v=bm5';
-import { T_NAME } from './data/enemies.js?v=bm5';
-import { upgradeNames } from './data/upgrades.js?v=bm5';
+} from './config.js?v=bm6';
+import { OLD_SPRITES } from './flags.js?v=bm6';
+import { T_NAME } from './data/enemies.js?v=bm6';
+import { upgradeNames } from './data/upgrades.js?v=bm6';
 
 // -- enemies --
 export var enemies = {
@@ -282,6 +282,7 @@ export var econ = {
     nerves: [0, 0, 0, 0, 0, 0, 0]
   },
   boughtOnce: {},                  // STORE one-time-purchase ids already bought (apex predator, bounty crate)
+  redeemedPulls: [],               // payloads of gacha pulls already redeemed (cross-device double-roll guard; capped 80, cloud-synced)
   lastDaily: '',                   // YYYY-MM-DD of the last daily-cache claim
   streak: 0                        // consecutive daily-claim days (a 2nd cache every 7th)
 };

@@ -1,6 +1,6 @@
 // Enemy archetype tables (index 0..11) + per-color-slot palette + sprite-sheet mapping.
 // Pure constants. The per-type sprite tint (SPRITE_T_*) shades each archetype off the shared sheets.
-import { ENEMY_BASE_HP } from '../balance.js?v=bm5';
+import { ENEMY_BASE_HP } from '../balance.js?v=bm6';
 // Index 12/13 = the WHITE crawlers (Tim 2026-06-24 "I like that they have green and white creatures in the
 // beginning ... don't like that we removed white creatures, both sizes"). art-port-v2 opened with WHITE (husk)
 // + GREEN (husk_rot) crawlers in two sizes; our build had re-arted Husk(0) to the dark-red biped + dropped the

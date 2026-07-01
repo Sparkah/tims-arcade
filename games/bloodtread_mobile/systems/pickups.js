@@ -1,11 +1,11 @@
 // XP-mote pickup logic: updateMotes (magnet pull toward the player + collect -> gainXp) and the
 // mote-MERGE mechanic (tryMergeMote coalesces nearby small motes into bigger ones, capped per tick).
 // Pool spawn/remove live in fx/particles; this is the per-frame system. -> progress (gainXp), audio.
-import { motes, player, state } from '../state.js?v=bm5';
-import { perf } from '../core/time.js?v=bm5';
-import { removeMote } from '../fx/particles.js?v=bm5';
-import { gainXp } from './progress.js?v=bm5';
-import { playTone } from '../audio.js?v=bm5';
+import { motes, player, state } from '../state.js?v=bm6';
+import { perf } from '../core/time.js?v=bm6';
+import { removeMote } from '../fx/particles.js?v=bm6';
+import { gainXp } from './progress.js?v=bm6';
+import { playTone } from '../audio.js?v=bm6';
 
   export function updateMotes(dt) {
     var pr2 = player.pickR * player.pickR;

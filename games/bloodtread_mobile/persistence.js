@@ -1,11 +1,11 @@
 // localStorage save/load of meta-progression: track tiers + per-weapon tiers (weaponMeta) +
 // owned/equipped weapon + bank + best time. Cannon's legacy META.cannon mirrors the equipped tier.
-import { META, econ } from './state.js?v=bm5';
-import { clampInt } from './lib/math.js?v=bm5';
-import { MAXTIER } from './data/upgrades.js?v=bm5';
-import { WEAPONS, WEAPON_BY_ID } from './data/weapons.js?v=bm5';
-import { RELIC_SLOTS } from './data/loot.js?v=bm5';
-import { currentWeaponTier, syncLegacyCannonMeta } from './game/meta.js?v=bm5';
+import { META, econ } from './state.js?v=bm6';
+import { clampInt } from './lib/math.js?v=bm6';
+import { MAXTIER } from './data/upgrades.js?v=bm6';
+import { WEAPONS, WEAPON_BY_ID } from './data/weapons.js?v=bm6';
+import { RELIC_SLOTS } from './data/loot.js?v=bm6';
+import { currentWeaponTier, syncLegacyCannonMeta } from './game/meta.js?v=bm6';
 
 var SAVE_META = 'bloodtread_rebuild_meta';
 var SAVE_BANK = 'bloodtread_rebuild_bank';

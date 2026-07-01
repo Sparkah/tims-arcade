@@ -2,6 +2,7 @@ import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { applyPurchaseGrant } from '../_lib/tgGrants.js';
 import { findTonPayment, expectedTonMemo, productForTonOrder, publicTonPurchase } from '../_lib/tonPayments.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
+import { checkUserRate } from '../_lib/rateLimit.js';
 import {
   getTelegramPurchase,
   recordTelegramPurchase,
@@ -38,6 +39,16 @@ export async function onRequestPost({ request, env }) {
 
   const auth = await verifyTelegramInitData(String(body.initData || ''), env.TELEGRAM_GAMEBOT_TOKEN);
   if (!auth.ok) return jsonError(auth.error, 401);
+
+  // Rate limit AFTER auth (verified user, IP fallback), BEFORE the TONAPI
+  // fetch(es) + Supabase writes. Slightly higher perMin since the client polls
+  // this endpoint while waiting for the on-chain payment to confirm.
+  const rlId = auth.user && auth.user.id
+    ? `u:${auth.user.id}`
+    : `ip:${request.headers.get('cf-connecting-ip') || 'unknown'}`;
+  if (!await checkUserRate(env, 'tg-ton-verify', rlId, { perSec: 3, perMin: 30 })) {
+    return jsonError('rate limit', 429);
+  }
 
   await upsertTelegramPlayer(env, auth.user);
 

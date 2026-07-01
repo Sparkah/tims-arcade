@@ -11,14 +11,14 @@
 //   - window.__tg.saveState(obj) (injected on iframe load) pushes a save to the wrapper -> mirror + backend.
 //   - Paid products are NOT granted through a client hook. The wrapper waits for the server to apply the paid
 //     receipt to telegram_player_states, writes the refreshed state to WRAP_KEY, then reloads this iframe.
-import { META, econ, state } from './state.js?v=bm5';
-import { stats, saveMeta, setSaveHook } from './persistence.js?v=bm5';
-import { TG_MODE } from './flags.js?v=bm5';
-import { clampInt } from './lib/math.js?v=bm5';
-import { MAXTIER } from './data/upgrades.js?v=bm5';
-import { RELIC_SLOTS, STORE } from './data/loot.js?v=bm5';
-import { openPaidBox, openBountyBox, grantMythic } from './systems/loot.js?v=bm5';   // paid STORE pulls (box/mythic)
-import { setReveal } from './ui/screens.js?v=bm5';   // REVEAL overlay for a redeemed pull
+import { META, econ, state } from './state.js?v=bm6';
+import { stats, saveMeta, setSaveHook } from './persistence.js?v=bm6';
+import { TG_MODE } from './flags.js?v=bm6';
+import { clampInt } from './lib/math.js?v=bm6';
+import { MAXTIER } from './data/upgrades.js?v=bm6';
+import { RELIC_SLOTS, STORE } from './data/loot.js?v=bm6';
+import { openPaidBox, openBountyBox, grantMythic } from './systems/loot.js?v=bm6';   // paid STORE pulls (box/mythic)
+import { setReveal } from './ui/screens.js?v=bm6';   // REVEAL overlay for a redeemed pull
 
 var WRAP_KEY = 'bloodtread_v5';
 var AD_FREE_KEY = 'bloodtread_rebuild_adfree';
@@ -50,13 +50,16 @@ function buildState() {
     owned: econ.ownedWeapons,
     weapon: econ.equipWeapon,
     stats: { attempts: stats.attempts, maxMinute: stats.maxMinute, maxLevel: stats.maxLevel, hasWon: stats.hasWon },
-    // GORE CACHE (gacha) layer - synced so the vault (caches/skins/relics) survives across devices. Small:
+    // GORE CACHE (gacha) layer - synced so the vault (caches/skins/relics/GEAR) survives across devices. Small:
     // a few ints + id-keyed maps, well under the 32KB cap. Merged by applyState (union owned, cloud-wins spendable).
+    // gear + boughtOnce ADDED 2026-07-01: gear is the primary paid-box/mythic payout (up to 40 TON) and MUST
+    // cloud-sync or a device switch silently drops it; boughtOnce guards one-time offers from re-charging.
     loot: {
       caches: econ.caches | 0, pity: econ.pity | 0, shards: econ.shards | 0,
       ownedSkins: econ.ownedSkins, equipSkin: econ.equipSkin,
       ownedRelics: econ.ownedRelics, equipRelics: econ.equipRelics,
-      consumables: econ.consumables, lastDaily: econ.lastDaily, streak: econ.streak | 0
+      consumables: econ.consumables, gear: econ.gear, boughtOnce: econ.boughtOnce, redeemedPulls: econ.redeemedPulls,
+      lastDaily: econ.lastDaily, streak: econ.streak | 0
     }
   };
 }
@@ -103,6 +106,19 @@ function applyState(o) {
     if (L.ownedSkins && typeof L.ownedSkins === 'object') { for (var sk in L.ownedSkins) econ.ownedSkins[sk] = 1; }
     if (L.ownedRelics && typeof L.ownedRelics === 'object') { for (var rl in L.ownedRelics) econ.ownedRelics[rl] = 1; }
     if (L.consumables && typeof L.consumables === 'object') econ.consumables = L.consumables;
+    // GEAR merge-collection (paid boxes/mythics + elite drops): adopt cloud per-slot/tier counts. Spendable
+    // (merged away), so cloud-wins - same model as bank; the wrapper resolves the freshest state_rev before this
+    // runs, so a mythic gear set bought on one device is restored on the next. Mirrors persistence.js.
+    if (L.gear && typeof L.gear === 'object' && econ.gear) {
+      for (var gslot in econ.gear) {
+        var ga = L.gear[gslot];
+        if (Array.isArray(ga)) { for (var gt = 0; gt < econ.gear[gslot].length; gt++) { var gv = ga[gt]; econ.gear[gslot][gt] = (typeof gv === 'number' && gv >= 0) ? Math.min(99999, Math.floor(gv)) : econ.gear[gslot][gt]; } }
+      }
+    }
+    // one-time STORE purchases: UNION (monotonic - owning is forever, never un-buy / re-charge across devices)
+    if (L.boughtOnce && typeof L.boughtOnce === 'object') { econ.boughtOnce = econ.boughtOnce || {}; for (var bo in L.boughtOnce) { if (L.boughtOnce[bo]) econ.boughtOnce[bo] = 1; } }
+    // redeemed gacha payloads: UNION (cross-device double-roll guard survives a device switch)
+    if (Array.isArray(L.redeemedPulls)) { econ.redeemedPulls = econ.redeemedPulls || []; for (var rp = 0; rp < L.redeemedPulls.length; rp++) { if (econ.redeemedPulls.indexOf(L.redeemedPulls[rp]) < 0) econ.redeemedPulls.push(L.redeemedPulls[rp]); } while (econ.redeemedPulls.length > 80) econ.redeemedPulls.shift(); }
     if (typeof L.equipSkin === 'string' && econ.ownedSkins[L.equipSkin]) econ.equipSkin = L.equipSkin;
     if (Array.isArray(L.equipRelics)) {
       var eqr = [];
@@ -125,10 +141,16 @@ var REDEEMED_KEY = 'bloodtread_redeemed_pulls';
 var STORE_BY_ID = {};
 for (var _si = 0; _si < STORE.length; _si++) STORE_BY_ID[STORE[_si].id] = STORE[_si];
 function redeemedLocally(payload) {
+  // CLOUD-synced set first (cross-device): a pull redeemed on another device dedups here even if that device's
+  // ack never landed (the server pending-removal is the primary guard; this closes the ack-failed race).
+  if (Array.isArray(econ.redeemedPulls) && econ.redeemedPulls.indexOf(payload) >= 0) return true;
   try { var a = JSON.parse(localStorage.getItem(REDEEMED_KEY) || '[]'); return Array.isArray(a) && a.indexOf(payload) >= 0; } catch (e) { return false; }
 }
 function markRedeemed(payload) {
   try { var a = JSON.parse(localStorage.getItem(REDEEMED_KEY) || '[]'); if (!Array.isArray(a)) a = []; if (a.indexOf(payload) < 0) a.push(payload); while (a.length > 80) a.shift(); localStorage.setItem(REDEEMED_KEY, JSON.stringify(a)); } catch (e) {}
+  if (!Array.isArray(econ.redeemedPulls)) econ.redeemedPulls = [];   // + the cloud-synced set (buildState/applyState), so the mark survives a device switch
+  if (econ.redeemedPulls.indexOf(payload) < 0) econ.redeemedPulls.push(payload);
+  while (econ.redeemedPulls.length > 80) econ.redeemedPulls.shift();
 }
 function readPending() {
   try { var raw = localStorage.getItem(WRAP_KEY); if (!raw) return []; var s = JSON.parse(raw); var p = s && s.__server && s.__server.entitlements && s.__server.entitlements.pending; return Array.isArray(p) ? p : []; } catch (e) { return []; }

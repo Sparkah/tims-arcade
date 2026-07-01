@@ -130,46 +130,74 @@ function txHash(tx) {
 }
 
 export async function findTonPayment(env, order) {
-  const url = new URL(`https://tonapi.io/v2/blockchain/accounts/${encodeURIComponent(order.recipient)}/transactions`);
-  url.searchParams.set('limit', '50');
-
-  const response = await fetch(url.toString(), {
-    headers: {
-      accept: 'application/json',
-      ...(env.TONAPI_KEY ? { authorization: `Bearer ${env.TONAPI_KEY}` } : {}),
-    },
-  });
-  const data = await response.json().catch(() => null);
-  if (!response.ok || !data) {
-    const error = new Error(`TONAPI request failed: ${response.status}`);
-    error.status = response.status;
-    error.body = data;
-    throw error;
-  }
-
-  const txs = Array.isArray(data.transactions) ? data.transactions : [];
   const expected = toBigIntAmount(order.nanotons);
   const createdMs = Number.isFinite(order.createdMs) ? order.createdMs : 0;
   const earliestUtime = createdMs ? Math.floor((createdMs - 2 * 60 * 1000) / 1000) : 0;
 
-  for (const tx of txs) {
-    if (!tx || !tx.in_msg) continue;
-    if (tx.success === false) continue;
-    if (tx.in_msg.bounced) continue;
-    if (earliestUtime && Number(tx.utime || 0) < earliestUtime) continue;
-    if (tonapiInboundValue(tx) < expected) continue;
-    if (tonapiComment(tx) !== order.memo) continue;
+  // The recipient is Tim's SHARED TON wallet across several Mini Apps, so a
+  // legit payment can be pushed past the newest 50 txs before verify runs,
+  // which would leave a buyer paid with no goods. TonAPI's blockchain
+  // transactions endpoint has no memo/comment filter, so we page backwards
+  // through history via before_lt (results come newest-first), scanning up to
+  // MAX_TXS. We stop early the moment we match, or once a page's oldest tx
+  // already predates the acceptance window — older pages cannot hold a payment
+  // that was made after the order was created. Every match condition below is
+  // unchanged from the single-page version; this only widens the search window.
+  const PAGE_LIMIT = 50;
+  const MAX_TXS = 250;
+  let beforeLt = '';
+  let scanned = 0;
 
-    return {
-      hash: txHash(tx),
-      lt: String(tx.lt || ''),
-      utime: Number(tx.utime || 0),
-      source: tx.in_msg.source || null,
-      destination: tx.in_msg.destination || null,
-      value: String(tx.in_msg.value || ''),
-      comment: tonapiComment(tx),
-      raw: tx,
-    };
+  while (scanned < MAX_TXS) {
+    const url = new URL(`https://tonapi.io/v2/blockchain/accounts/${encodeURIComponent(order.recipient)}/transactions`);
+    url.searchParams.set('limit', String(PAGE_LIMIT));
+    if (beforeLt) url.searchParams.set('before_lt', beforeLt);
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        accept: 'application/json',
+        ...(env.TONAPI_KEY ? { authorization: `Bearer ${env.TONAPI_KEY}` } : {}),
+      },
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data) {
+      const error = new Error(`TONAPI request failed: ${response.status}`);
+      error.status = response.status;
+      error.body = data;
+      throw error;
+    }
+
+    const txs = Array.isArray(data.transactions) ? data.transactions : [];
+    if (!txs.length) break;
+
+    for (const tx of txs) {
+      scanned += 1;
+      if (!tx || !tx.in_msg) continue;
+      if (tx.success === false) continue;
+      if (tx.in_msg.bounced) continue;
+      if (earliestUtime && Number(tx.utime || 0) < earliestUtime) continue;
+      if (tonapiInboundValue(tx) < expected) continue;
+      if (tonapiComment(tx) !== order.memo) continue;
+
+      return {
+        hash: txHash(tx),
+        lt: String(tx.lt || ''),
+        utime: Number(tx.utime || 0),
+        source: tx.in_msg.source || null,
+        destination: tx.in_msg.destination || null,
+        value: String(tx.in_msg.value || ''),
+        comment: tonapiComment(tx),
+        raw: tx,
+      };
+    }
+
+    // Page to the next (older) slice. Stop when history is exhausted (a short
+    // page or no lt to page from) or the oldest tx already predates the window.
+    const oldest = txs[txs.length - 1];
+    const oldestLt = oldest && oldest.lt ? String(oldest.lt) : '';
+    if (!oldestLt || oldestLt === beforeLt || txs.length < PAGE_LIMIT) break;
+    if (earliestUtime && Number(oldest.utime || 0) < earliestUtime) break;
+    beforeLt = oldestLt;
   }
 
   return null;

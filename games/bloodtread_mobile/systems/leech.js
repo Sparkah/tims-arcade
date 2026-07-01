@@ -2,15 +2,15 @@
 // Targets are enemy indices; retargetLeechesAfterRemove keeps them valid across swap-removes (called
 // synchronously from removeEnemy - CALLGRAPH hard constraint). Part of the SCC: -> enemies (killEnemy),
 // combat (angleDelta), fx/particles, systems/shared. leeches pool state lives in state.js.
-import { leeches, enemies, player, state } from '../state.js?v=bm5';
-import { MAX_LEECHES } from '../config.js?v=bm5';
-import { TWO_PI } from '../lib/math.js?v=bm5';
-import { perf } from '../core/time.js?v=bm5';
-import { killEnemy } from './enemies.js?v=bm5';
-import { angleDelta } from './combat.js?v=bm5';
-import { currentLeechLevel } from './shared.js?v=bm5';
-import { effectAllowed, spawnParticle } from '../fx/particles.js?v=bm5';
-import { gainHeal } from '../fx/heal.js?v=bm5';
+import { leeches, enemies, player, state } from '../state.js?v=bm6';
+import { MAX_LEECHES } from '../config.js?v=bm6';
+import { TWO_PI } from '../lib/math.js?v=bm6';
+import { perf } from '../core/time.js?v=bm6';
+import { killEnemy } from './enemies.js?v=bm6';
+import { angleDelta } from './combat.js?v=bm6';
+import { currentLeechLevel } from './shared.js?v=bm6';
+import { effectAllowed, spawnParticle } from '../fx/particles.js?v=bm6';
+import { gainHeal } from '../fx/heal.js?v=bm6';
 
   export function resetLeeches() {
     for (var i = 0; i < leeches.target.length; i++) {

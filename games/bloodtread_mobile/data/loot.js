@@ -147,12 +147,23 @@ export var GEAR_TIERS = [
 ];
 export var GEAR_MYTHIC_TIER = 4;   // tier paid pulls can grant directly; ascendant/primordial (5,6) are grind-only
 
+// The Blood Market listing. GACHA rows (box_*/mythic_*) roll client-side after the server queues a pending pull;
+// DETERMINISTIC rows (bundle/noads: starter/blood_cache/hull_kit/arsenal/ad_free/bloodgod) are applied to state
+// SERVER-SIDE (tgGrants.js applyGrantToState) then the wrapper reloads. Both route through window.__tg.buy in
+// input.js. Prices MUST match tgProducts.js (server) + the wrapper PRODUCTS. Order: daily, cheap bundles + remove
+// ads, gacha boxes, mythics, the bloodgod pact last. bloodgod is TON-only (no stars) - input.js defaults it to TON.
 export var STORE = [
   { id: 'daily_box',       kind: 'daily',  title: 'DAILY BLOOD BOX', sub: 'Watch an ad - one free pull a day',   floor: R_SCRAP },
+  { id: 'starter',         kind: 'bundle', title: 'STARTER KIT',     sub: '+2000 blood + a tread tier',           stars: 25,   ton: '0.20' },
+  { id: 'blood_cache',     kind: 'bundle', title: 'BLOOD CACHE',     sub: '+6000 blood to the bank',              stars: 49,   ton: '0.40' },
+  { id: 'hull_kit',        kind: 'bundle', title: 'HULL KIT',        sub: '+2000 blood + 2 armor + 2 core',       stars: 75,   ton: '0.60' },
+  { id: 'arsenal',         kind: 'bundle', title: 'ARSENAL',         sub: '+2500 blood + 2 cannon + a frenzy',    stars: 99,   ton: '0.80' },
+  { id: 'ad_free',         kind: 'noads',  title: 'REMOVE ADS',      sub: 'Skip every revive ad - permanent',     stars: 150,  ton: '1.20' },
   { id: 'box_single',      kind: 'box',    title: 'BLOOD BOX',       sub: 'One pull, guaranteed VEIN or better',  stars: 49,   ton: '0.40',  floor: R_VEIN },
   { id: 'box_legendary',   kind: 'box',    title: 'RELIC BOX',       sub: 'One pull, guaranteed a RELIC',         stars: 199,  ton: '1.60',  floor: R_RELIC },
   { id: 'box_bounty',      kind: 'bounty', title: 'BOUNTY CRATE',    sub: 'A piece in EVERY slot + extras + a skin', stars: 499, ton: '4.00', once: true },
   { id: 'mythic_skin',     kind: 'mythic', title: 'GORELORD HULL',   sub: 'Mythic hull skin - bought outright',   stars: 999,  ton: '8.00',  mythic: 'm_skin' },
   { id: 'mythic_relic',    kind: 'mythic', title: 'BLOOD CROWN',     sub: 'Mythic signature relic',               stars: 1999, ton: '16.00', mythic: 'm_relic' },
-  { id: 'mythic_ultimate', kind: 'mythic', title: 'APEX PREDATOR',   sub: 'A MYTHIC piece in every slot + skin + 250k blood', stars: 4999, ton: '40.00', mythic: 'm_all', once: true }
+  { id: 'mythic_ultimate', kind: 'mythic', title: 'APEX PREDATOR',   sub: 'A MYTHIC piece in every slot + skin + 250k blood', stars: 4999, ton: '40.00', mythic: 'm_all', once: true },
+  { id: 'bloodgod',        kind: 'mythic', title: 'BLOOD GOD PACT',  sub: 'Remove ads + 250k blood + MAX every tier', ton: '20.00', once: true }
 ];

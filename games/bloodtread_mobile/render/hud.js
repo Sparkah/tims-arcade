@@ -2,23 +2,23 @@
 // (panel/button/rounded-rect/hit-test) and the virtual JOYSTICK + tank-preview used by the screens.
 // renderHud is the per-frame 2D pass dispatcher: it routes to the ui/screens drawers for MENU/SHOP/CHEAT/
 // GAMEOVER/PAUSE/LEVELUP and otherwise paints the live HUD. The BT_* palette lives here (shared with screens).
-import { hud } from './context.js?v=bm5';
+import { hud } from './context.js?v=bm6';
 import {
   player, state, view, sprites, econ, hudImages,
   upgradePick, upgradeRect, ui, rects, input,
   enemies, bullets, motes, particles, decals, corpses, tracks, floats
-} from '../state.js?v=bm5';
-import { clamp, clampInt, fmtTime, TWO_PI } from '../lib/math.js?v=bm5';
+} from '../state.js?v=bm6';
+import { clamp, clampInt, fmtTime, TWO_PI } from '../lib/math.js?v=bm6';
 import {
   NO_HUD, DEBUG, DIAG, COLLIDERS, OLD_SPRITES, GORE_FX, BREAK_ENV
-} from '../flags.js?v=bm5';
-import { upgradeNames, upgradeDesc } from '../data/upgrades.js?v=bm5';
-import { WEAPON_TURRET_CELL } from '../data/weapons.js?v=bm5';
-import { perf, ring, ringState } from '../core/time.js?v=bm5';
-import { weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm5';
-import { desiredEnemies, currentLeechLevel } from '../systems/shared.js?v=bm5';
-import { layoutUpgradeCards } from '../systems/progress.js?v=bm5';
-import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js?v=bm5';
+} from '../flags.js?v=bm6';
+import { upgradeNames, upgradeDesc } from '../data/upgrades.js?v=bm6';
+import { WEAPON_TURRET_CELL } from '../data/weapons.js?v=bm6';
+import { perf, ring, ringState } from '../core/time.js?v=bm6';
+import { weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm6';
+import { desiredEnemies, currentLeechLevel } from '../systems/shared.js?v=bm6';
+import { layoutUpgradeCards } from '../systems/progress.js?v=bm6';
+import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js?v=bm6';
 
 // colour palette - mirrors the original Bloodtread COL object (shared with ui/screens.js)
 export var BT_CRIM    = '#c41228';

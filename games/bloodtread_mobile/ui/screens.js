@@ -1,24 +1,24 @@
 // Full-screen overlays: MENU (hero cover + title + BloodForge entry), SHOP (BloodForge: weapons + tracks),
 // CHEAT, GAMEOVER, PAUSE. Each rebuilds its hit-rects on the shared `rects` object every draw. Shares the
 // panel/button/rounded-rect/tank-preview helpers + the BT_* palette with render/hud.js (function-only cycle).
-import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm5';
-import { fmtTime } from '../lib/math.js?v=bm5';
-import { TWO_PI } from '../lib/math.js?v=bm5';
-import { WEAPONS } from '../data/weapons.js?v=bm5';
-import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm5';   // for the DEV enemy-wave grid (name + per-type tint swatch)
-import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm5';
-import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm5';
-import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm5';
-import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm5';
-import { rects } from '../state.js?v=bm5';
+import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm6';
+import { fmtTime } from '../lib/math.js?v=bm6';
+import { TWO_PI } from '../lib/math.js?v=bm6';
+import { WEAPONS } from '../data/weapons.js?v=bm6';
+import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm6';   // for the DEV enemy-wave grid (name + per-type tint swatch)
+import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm6';
+import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm6';
+import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm6';
+import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm6';
+import { rects } from '../state.js?v=bm6';
 import {
   BT_CRIM, BT_CRIM_HI, BT_BLOOD, BT_BLOOD_DK, BT_BONE, BT_BONE_DIM, BT_IRON, BT_IRON_LO,
   drawPanel, drawButton, drawHudTankPreview, hudRR, drawTintedTankPreview, drawRelicIcon, blitSheetCell
-} from '../render/hud.js?v=bm5';
-import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm5';
-import { hud } from '../render/context.js?v=bm5';
-import { CHEATS_ENABLED } from '../flags.js?v=bm5';
-import { playTone } from '../audio.js?v=bm5';   // gacha roll ticks + payoff
+} from '../render/hud.js?v=bm6';
+import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm6';
+import { hud } from '../render/context.js?v=bm6';
+import { CHEATS_ENABLED } from '../flags.js?v=bm6';
+import { playTone } from '../audio.js?v=bm6';   // gacha roll ticks + payoff
 
   export function drawMenu() {
     var bg = menuBgSource();
@@ -448,9 +448,10 @@ import { playTone } from '../audio.js?v=bm5';   // gacha roll ticks + payoff
     rects.store.length = 0;
     var avail = view.cssH - cy - 64;
     var rowH = Math.max(40, Math.min(58, avail / STORE.length - 7));
+    var isAdFree = false; try { isAdFree = localStorage.getItem('bloodtread_rebuild_adfree') === '1'; } catch (e) {}   // Remove Ads / Blood God show OWNED once the ad-free entitlement is held (server-forced, mirrored to this key)
     for (var i = 0; i < STORE.length; i++) {
       var it = STORE[i];
-      var owned = !!(it.once && econ.boughtOnce && econ.boughtOnce[it.id]);   // one-time purchase already bought
+      var owned = !!(it.once && econ.boughtOnce && econ.boughtOnce[it.id]) || ((it.id === 'ad_free' || it.id === 'bloodgod') && isAdFree);   // one-time purchase already bought; ad_free/bloodgod = the ad-free entitlement
       var ry = cy + i * (rowH + 7);
       var accent = owned ? [0.4, 0.4, 0.4]
                  : (it.kind === 'mythic' ? RARITY[R_MYTHIC].col

@@ -405,13 +405,38 @@
     return state && Number(state.lastSeen || state.state_rev || 0) || 0;
   }
 
+  // FIX 2 - acquisition-source attribution. Mirror of Megaton's startMeta(): resolve the source ONCE (memoised,
+  // i.e. computed on the first load at boot) from Telegram start_param / ?startapp / ?source, and send it on both
+  // tg-state load + save so the backend (tg-state.js sourceMeta + supabase.js upsertTelegramPlayer first_source)
+  // can attribute where the player came from. cleanSourceTag mirrors the server-side sanitiser.
+  var startMetaCache = null;
+  function cleanSourceTag(raw) {
+    return String(raw || '').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
+  }
+  function startMeta() {
+    if (startMetaCache) return startMetaCache;
+    var startParam = '';
+    try {
+      var unsafe = (tg && tg.initDataUnsafe) || {};
+      var qs = new URLSearchParams(location.search);
+      startParam = cleanSourceTag(unsafe.start_param || qs.get('startapp') || qs.get('source') || '');
+    } catch (e) {}
+    startMetaCache = {
+      source: startParam || (HAS_TG ? 'telegram' : 'web'),
+      startParam: startParam
+    };
+    return startMetaCache;
+  }
+
   async function loadRemoteState() {
     if (!HAS_TG) return null;
     try {
       var data = await apiPost('/api/tg-state', {
         action: 'load',
         game: GAME_ID,
-        initData: tg.initData
+        initData: tg.initData,
+        source: startMeta().source,
+        startParam: startMeta().startParam
       });
       if (!data || !data.state) return null;
       var local = readLocalState();
@@ -437,6 +462,8 @@
         game: GAME_ID,
         initData: tg.initData,
         reason: reason || 'autosave',
+        source: startMeta().source,
+        startParam: startMeta().startParam,
         state: state
       }, keepalive);
       return true;
@@ -728,6 +755,7 @@
       });
       var data = await res.json().catch(function () { return {}; });
       if (!res.ok || !data.invoiceLink) throw new Error(data.error || 'invoice_failed');
+      rememberStarsPending(data.payload, id);   // FIX 1: durable record BEFORE the modal - survives an app-close mid-poll
       return await new Promise(function (resolve) {
         tg.openInvoice(data.invoiceLink, function (status) {
         if (status === 'paid') {
@@ -744,6 +772,7 @@
             if (product.noAutoApply) { toast(product.title + ' paid'); await loadRemoteState(); }
             else if (await applyPaidPayload(data.payload, id, product, serverPaid)) toast('Purchase applied: ' + product.title);
             else toast(product.title + ' already applied');
+            forgetStarsPending(data.payload);   // FIX 1: receipt confirmed + applied inline, durable record no longer needed
             if (cb) cb('paid');
             resolve({ ok: true, status: 'paid', serverPaid: true });
           }).catch(function (e) {
@@ -752,6 +781,7 @@
             resolve({ ok: false, status: 'unlock_error' });
           });
         } else if (status === 'cancelled') {
+          forgetStarsPending(data.payload);   // FIX 1: user cancelled - no payment to recover, drop the durable record
           toast('Invoice cancelled');
           if (cb) cb('cancelled');
           resolve({ ok: false, status: 'cancelled' });
@@ -833,10 +863,70 @@
       if (!payload || payloadApplied(payload) || !HAS_TG) return;
       if (tries++ > 20) return;
       waitForPurchase(payload).then(async function (paid) {
-        if (paid) { await applyPaidPayload(payload, id, product, paid); toast('Purchase applied: ' + (product ? product.title : id)); }
+        if (paid) { await applyPaidPayload(payload, id, product, paid); forgetStarsPending(payload); toast('Purchase applied: ' + (product ? product.title : id)); }
         else setTimeout(again, 6000);
       });
     })();
+  }
+
+  // FIX 1 - DURABLE STARS RE-CLAIM (money-loss guard). The Stars flow is otherwise entirely in-memory: openInvoice's
+  // paid callback, the ~9s (12x750ms) waitForPurchase poll, and schedulePurchaseRetry all vanish if the Mini App
+  // closes first - so a buyer who paid Stars but closed before the receipt confirmed would never get the grant.
+  // The backend has no "list my unclaimed purchases" endpoint (tg-purchase.js only does record/claim/ack), so -
+  // exactly as the task suggests and mirroring the TON pending-resume pattern - we persist each initiated Stars
+  // payload to localStorage (durable, unlike the in-memory retry) and, on boot, re-run the SAME claim path
+  // (waitForPurchase -> applyPaidPayload). The server claim is idempotent (applied[payload] ledger), so re-claiming
+  // an already-applied purchase is a safe no-op; an unpaid/cancelled entry simply returns not-paid and expires.
+  var PENDING_STARS_KEY = 'bloodtread_stars_pending';
+  var STARS_PENDING_TTL = 48 * 3600000;
+  var starsResumeBusy = false;
+  function readPendingStars() {
+    try { var a = JSON.parse(localStorage.getItem(PENDING_STARS_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+    catch (e) { return []; }
+  }
+  function writePendingStars(list) {
+    try {
+      if (list && list.length) localStorage.setItem(PENDING_STARS_KEY, JSON.stringify(list));
+      else localStorage.removeItem(PENDING_STARS_KEY);
+    } catch (e) {}
+  }
+  function rememberStarsPending(payload, productId) {
+    if (!payload) return;
+    var list = readPendingStars().filter(function (e) { return e && e.payload !== payload; });
+    list.push({ payload: payload, productId: productId || null, createdAt: Date.now() });
+    while (list.length > 24) list.shift();
+    writePendingStars(list);
+  }
+  function forgetStarsPending(payload) {
+    if (!payload) return;
+    writePendingStars(readPendingStars().filter(function (e) { return e && e.payload !== payload; }));
+  }
+  async function resumePendingStarsPurchases() {
+    if (!HAS_TG || starsResumeBusy) return;
+    var list = readPendingStars();
+    if (!list.length) return;
+    starsResumeBusy = true;
+    try {
+      for (var i = 0; i < list.length; i += 1) {
+        var entry = list[i];
+        if (!entry || !entry.payload) continue;
+        if (payloadApplied(entry.payload) || Date.now() - Number(entry.createdAt || 0) > STARS_PENDING_TTL) {
+          forgetStarsPending(entry.payload);
+          continue;
+        }
+        try {
+          var paid = await waitForPurchase(entry.payload);   // reuses the existing claim POST to /api/tg-purchase
+          if (paid) {
+            var pid = paid.productId || entry.productId;
+            await applyPaidPayload(entry.payload, pid, PRODUCTS[pid], paid);   // idempotent (applied[payload] ledger)
+            forgetStarsPending(entry.payload);
+            toast('Purchase applied: ' + ((PRODUCTS[pid] || {}).title || pid || 'reward'));
+          }
+        } catch (e) {}
+      }
+    } finally {
+      starsResumeBusy = false;
+    }
   }
 
 	  function waitForAdSdk(predicate, ms) {
@@ -970,9 +1060,11 @@
     await loadRemoteState();
     startGame();
     resumePendingTonPurchase();
+    resumePendingStarsPurchases();   // FIX 1: re-claim any paid-but-unconfirmed Stars purchase from a prior session
     if (HAS_TG) {
       setInterval(function () { saveRemoteState('interval'); }, 15000);
       setInterval(resumePendingTonPurchase, 30000);
+      setInterval(resumePendingStarsPurchases, 30000);
     }
   }
 

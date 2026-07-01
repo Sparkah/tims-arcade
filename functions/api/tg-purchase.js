@@ -1,6 +1,7 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { getProduct, parsePaymentPayload } from '../_lib/tgProducts.js';
 import { applyPurchaseGrant, ackPendingGrant } from '../_lib/tgGrants.js';
+import { checkUserRate } from '../_lib/rateLimit.js';
 import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
 import {
   getTelegramPurchase,
@@ -100,6 +101,13 @@ async function claimFromClient(body, env) {
   if (parsed.telegramUserId !== auth.user.id) return jsonError('Payload user mismatch', 403);
   if (String(body.game || '') !== parsed.game) return jsonError('Payload game mismatch', 400);
 
+  // Rate limit AFTER auth (keyed on the verified user id — auth guarantees it,
+  // so no IP fallback is needed here) and BEFORE the Supabase reads/writes +
+  // grant below. This is the poll-after-pay path, so allow tens/min.
+  if (!await checkUserRate(env, 'tg-purchase', `u:${auth.user.id}`, { perSec: 3, perMin: 30 })) {
+    return jsonError('rate limit', 429);
+  }
+
   await upsertTelegramPlayer(env, auth.user);
 
   const purchase = await getTelegramPurchase(env, parsed.game, auth.user.id, body.payload);
@@ -134,6 +142,11 @@ async function ackFromClient(body, env) {
   const parsed = parsePaymentPayload(body.payload);
   if (!parsed) return jsonError('Invalid payment payload', 400);
   if (parsed.telegramUserId !== auth.user.id) return jsonError('Payload user mismatch', 403);
+
+  // Rate limit AFTER auth (verified user id), BEFORE the pending-grant clear.
+  if (!await checkUserRate(env, 'tg-purchase-ack', `u:${auth.user.id}`, { perSec: 3, perMin: 20 })) {
+    return jsonError('rate limit', 429);
+  }
 
   const res = await ackPendingGrant(env, parsed.game, auth.user.id, body.payload);
   return json({ ok: Boolean(res && res.ok), ack: res }, 200, { 'cache-control': 'no-store' });

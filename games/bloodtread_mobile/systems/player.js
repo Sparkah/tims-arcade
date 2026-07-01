@@ -2,23 +2,23 @@
 // decay) + applyMetaToPlayer / syncTankTiersFromMeta (push saved meta tiers onto the live player + tank
 // mirror). Reads the input singleton (keys/joystick/pointer). Part of the SCC: -> combat (angleDelta),
 // collision (crush/collide), fx/*, game/meta, systems/shared. Mutates player + tracks pool + econ tank tiers.
-import { player, state, econ, META, input, tracks, veins, view, tankDebris } from '../state.js?v=bm5';
-import { MAX_BUBBLES, TRACK_CAP } from '../config.js?v=bm5';
-import { BREAK_ENV, GORE_FX, VEIN_FX, OLD_ENV, TANK_LAYERS } from '../flags.js?v=bm5';
-import { rnd } from '../lib/rng.js?v=bm5';
-import { TWO_PI } from '../lib/math.js?v=bm5';
-import { BALANCE } from '../balance.js?v=bm5';
-import { MA_FRENZY } from '../data/meta.js?v=bm5';
-import { currentWeaponTier, syncLegacyCannonMeta, tankRageLevel, weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm5';
-import { playSfx, playSfxOneOf, playTone } from '../audio.js?v=bm5';
-import { angleDelta } from './combat.js?v=bm5';
-import { crushNearbyDecals, crushNearbyRocks, collidePlayerObstacles } from './collision.js?v=bm5';
-import { currentLeechLevel } from './shared.js?v=bm5';
-import { spawnRageBubble, spawnVeinTrail, spawnTrack, spawnBoom } from '../fx/world.js?v=bm5';
-import { spawnSplat, spawnGoreSpray } from '../fx/gore.js?v=bm5';
-import { spawnParticle } from '../fx/particles.js?v=bm5';
-import { addTrauma } from '../render/camera.js?v=bm5';
-import { applyEquippedGear } from './loot.js?v=bm5';   // GEAR merge-collection (replaces relics) - equipped best-tier per slot
+import { player, state, econ, META, input, tracks, veins, view, tankDebris } from '../state.js?v=bm6';
+import { MAX_BUBBLES, TRACK_CAP } from '../config.js?v=bm6';
+import { BREAK_ENV, GORE_FX, VEIN_FX, OLD_ENV, TANK_LAYERS } from '../flags.js?v=bm6';
+import { rnd } from '../lib/rng.js?v=bm6';
+import { TWO_PI } from '../lib/math.js?v=bm6';
+import { BALANCE } from '../balance.js?v=bm6';
+import { MA_FRENZY } from '../data/meta.js?v=bm6';
+import { currentWeaponTier, syncLegacyCannonMeta, tankRageLevel, weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm6';
+import { playSfx, playSfxOneOf, playTone } from '../audio.js?v=bm6';
+import { angleDelta } from './combat.js?v=bm6';
+import { crushNearbyDecals, crushNearbyRocks, collidePlayerObstacles } from './collision.js?v=bm6';
+import { currentLeechLevel } from './shared.js?v=bm6';
+import { spawnRageBubble, spawnVeinTrail, spawnTrack, spawnBoom } from '../fx/world.js?v=bm6';
+import { spawnSplat, spawnGoreSpray } from '../fx/gore.js?v=bm6';
+import { spawnParticle } from '../fx/particles.js?v=bm6';
+import { addTrauma } from '../render/camera.js?v=bm6';
+import { applyEquippedGear } from './loot.js?v=bm6';   // GEAR merge-collection (replaces relics) - equipped best-tier per slot
 
   export function syncTankTiersFromMeta() {
     syncLegacyCannonMeta();

@@ -2,23 +2,23 @@
 // the virtual joystick math, and resize() (canvas sizing + camera recompute). initInput() registers all
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
-import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm5';
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm5';
-import { adFree } from './tg.js?v=bm5';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
-import { BASE_DPR } from './config.js?v=bm5';
-import { clamp } from './lib/math.js?v=bm5';
-import { glCanvas, hudCanvas } from './render/context.js?v=bm5';
-import { updateCameraMetrics } from './render/camera.js?v=bm5';
-import { inRect } from './render/hud.js?v=bm5';
-import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm5';
-import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm5';
-import { spawnEnemyWave } from './systems/enemies.js?v=bm5';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
-import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm5';
-import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm5';   // GORE VAULT (gacha) + GEAR + STORE actions
-import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm5';   // REVEAL overlay + GEAR merge animation
-import { GEAR_MERGE } from './data/loot.js?v=bm5';   // gear merge size (5 -> 1)
-import { beginResurrect } from './update.js?v=bm5';
-import { trackAnalyticsVictoryButton } from './analytics.js?v=bm5';
+import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm6';
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm6';
+import { adFree } from './tg.js?v=bm6';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
+import { BASE_DPR } from './config.js?v=bm6';
+import { clamp } from './lib/math.js?v=bm6';
+import { glCanvas, hudCanvas } from './render/context.js?v=bm6';
+import { updateCameraMetrics } from './render/camera.js?v=bm6';
+import { inRect } from './render/hud.js?v=bm6';
+import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm6';
+import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm6';
+import { spawnEnemyWave } from './systems/enemies.js?v=bm6';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
+import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm6';
+import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm6';   // GORE VAULT (gacha) + GEAR + STORE actions
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm6';   // REVEAL overlay + GEAR merge animation
+import { GEAR_MERGE } from './data/loot.js?v=bm6';   // gear merge size (5 -> 1)
+import { beginResurrect } from './update.js?v=bm6';
+import { trackAnalyticsVictoryButton } from './analytics.js?v=bm6';
 
   // REWARDED-AD shim for the RESURRECT button. The _refactor build is standalone (index.html loads only
   // GameAnalytics + main.js - NO gf-lib, NO Yandex/CrazyGames ad SDK), so there is NO rewarded-ad helper
@@ -212,15 +212,19 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm5';
         var stg = (typeof window !== 'undefined') ? window.__tg : null;
         var stCanBuy = stg && typeof stg.buy === 'function';
         if (STORE_TEST) {
-          // ?storetest ONLY (never the bare web build): grant immediately so the box/mythic result is see-able
-          if (sit.once) econ.boughtOnce[sit.id] = 1;   // mark BEFORE the grant so the grant's saveMeta persists it
-          var stCard = sit.kind === 'mythic' ? grantMythic(sit.mythic) : (sit.kind === 'bounty' ? openBountyBox() : openPaidBox(sit.floor || 0));
-          if (stCard) { setReveal(stCard); state.mode = 'REVEAL'; playTone((stCard.rarity || 0) >= 3 ? 720 : 600, 0.14, 0.06); }
+          // ?storetest ONLY (never the bare web build): gacha rows grant immediately so the result is see-able;
+          // deterministic bundles / remove-ads are server-applied, so they no-op in local preview.
+          if (sit.kind === 'bundle' || sit.kind === 'noads') { playTone(300, 0.05, 0.03); }
+          else {
+            if (sit.once) econ.boughtOnce[sit.id] = 1;   // mark BEFORE the grant so the grant's saveMeta persists it
+            var stCard = sit.kind === 'mythic' ? grantMythic(sit.mythic) : (sit.kind === 'bounty' ? openBountyBox() : openPaidBox(sit.floor || 0));
+            if (stCard) { setReveal(stCard); state.mode = 'REVEAL'; playTone((stCard.rarity || 0) >= 3 ? 720 : 600, 0.14, 0.06); }
+          }
         } else if (stCanBuy) {
           // production: the Telegram wrapper buys through the backend (Stars or TON), then applies the grant.
-          if (sit.kind === 'daily') { if (typeof stg.showAd === 'function') stg.showAd('rewarded', function (ok) { if (ok) { var dc = openPaidBox(0); if (dc) { setReveal(dc); state.mode = 'REVEAL'; } } }); }
+          if (sit.kind === 'daily') { if (typeof stg.showAd === 'function') stg.showAd('rewarded', function (ok, result) { if (result && result.rewarded) { var dc = openPaidBox(0); if (dc) { setReveal(dc); state.mode = 'REVEAL'; } } }); }   // require a CONFIRMED reward, not just 'shown'
           else if (rects.store[sti].ton && inRect(x, y, rects.store[sti].ton)) { stg.buy(sit.id, 'TON', function () {}); playTone(520, 0.05, 0.03); }   // tapped the TON pill
-          else { stg.buy(sit.id, 'XTR', function () {}); playTone(520, 0.05, 0.03); }   // Stars pill or row body -> Stars
+          else { stg.buy(sit.id, sit.stars != null ? 'XTR' : 'TON', function () {}); playTone(520, 0.05, 0.03); }   // Stars pill / row body -> Stars; TON-only (bloodgod) -> TON
         }
         // else (no __tg + no storetest, e.g. the web gallery build): browse-only, no grant
         return true;
