@@ -10,9 +10,12 @@ import {
 // applyPurchaseGrant() on a verified-paid receipt, write it into telegram_player_states, and record the
 // payload in state.__server.entitlements.applied so a replayed claim cannot double-grant.
 //
-// SCOPE: only DETERMINISTIC products are server-grantable (the 6 surfaced in the bloodtread shop). Random
-// gacha boxes + specific mythics (box_*/mythic_*) need the loot tables ported server-side and are NOT in the
-// shop, so they are intentionally unsupported here (claim returns granted:false / unsupported for them).
+// SCOPE: two kinds of paid product. (1) DETERMINISTIC bundles (bank/tiers/adFree: starter/blood_cache/hull_kit/
+// arsenal/ad_free/bloodgod) are applied to state SERVER-SIDE here. (2) GACHA pulls (box_*/mythic_*, the in-game
+// Blood Market / STORE) can't be rolled server-side (the loot tables + pity live in the game), so the server
+// VERIFIES the payment and QUEUES a pending pull in __server.entitlements.pending; the game redeems it exactly
+// once (rolls the box / grants the mythic + shows the reveal) then acks to clear it. Both paths are idempotent
+// via applied[payload]; pending is additionally payload-keyed so a redeem can't double even before the ack.
 //
 // The bloodtread deltas below MUST stay in lockstep with games/bloodtread_mobile/tg.js grant() (the live
 // client-feedback path applies the SAME numbers). MAXTIER mirrors data/upgrades.js (6).
@@ -54,6 +57,27 @@ export function isServerGrantable(game, productId) {
   return Boolean(list && list.indexOf(productId) >= 0);
 }
 
+// Gacha products the game rolls/grants client-side after a verified payment (queued as a pending pull).
+export const SERVER_PENDING = Object.freeze({
+  bloodtread: Object.freeze(['box_single', 'box_legendary', 'box_bounty', 'mythic_skin', 'mythic_relic', 'mythic_ultimate']),
+});
+
+export function isStorePending(game, productId) {
+  const list = SERVER_PENDING[game];
+  return Boolean(list && list.indexOf(productId) >= 0);
+}
+
+// Queue a pending gacha pull the game redeems once. Payload-keyed so a re-claim before the ack can't double it.
+function pushPending(state, productId, payload) {
+  ensureBloodtreadShape(state);
+  const ent = state.__server.entitlements;
+  if (!Array.isArray(ent.pending)) ent.pending = [];
+  if (!ent.pending.some((p) => p && p.payload === payload)) {
+    ent.pending.push({ id: productId, payload, ts: Date.now() });
+    while (ent.pending.length > 50) ent.pending.shift();
+  }
+}
+
 // Mutate `state` IN PLACE with the product's delta. Returns true if applied, false if the product is not a
 // server-grantable deterministic product (caller must NOT grant in that case).
 export function applyGrantToState(game, productId, state) {
@@ -89,7 +113,9 @@ function appliedLedger(state) {
 }
 
 export async function applyPurchaseGrant(env, game, telegramUserId, productId, payload) {
-  if (!isServerGrantable(game, productId)) {
+  const deterministic = isServerGrantable(game, productId);
+  const pendingGacha = isStorePending(game, productId);
+  if (!deterministic && !pendingGacha) {
     return { granted: false, unsupported: true };
   }
 
@@ -111,7 +137,11 @@ export async function applyPurchaseGrant(env, game, telegramUserId, productId, p
       };
     }
 
-    if (!applyGrantToState(game, productId, state)) return { granted: false, unsupported: true };
+    if (deterministic) {
+      if (!applyGrantToState(game, productId, state)) return { granted: false, unsupported: true };
+    } else {
+      pushPending(state, productId, grantKey);   // gacha: the game redeems + reveals this pull, then acks
+    }
     applied[grantKey] = { productId, ts: Date.now() };
 
     const rows = existing
@@ -130,4 +160,26 @@ export async function applyPurchaseGrant(env, game, telegramUserId, productId, p
   }
 
   return { granted: false, conflict: true };
+}
+
+// Remove a redeemed pending pull (called by the game after it rolls the box / grants the mythic + shows the
+// reveal). Idempotent: a missing payload is a no-op success. CAS-guarded like the grant path.
+export async function ackPendingGrant(env, game, telegramUserId, payload) {
+  const userId = String(telegramUserId || '');
+  const key = String(payload || '');
+  if (game !== 'bloodtread' || !userId || !key) return { ok: false, invalid: true };
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const existing = await getTelegramState(env, game, userId);
+    if (!existing || !existing.state) return { ok: true, empty: true };
+    const ent = existing.state.__server && existing.state.__server.entitlements;
+    if (!ent || !Array.isArray(ent.pending) || !ent.pending.some((p) => p && p.payload === key)) {
+      return { ok: true, nochange: true };
+    }
+    const state = cloneJson(existing.state);
+    state.__server.entitlements.pending = state.__server.entitlements.pending.filter((p) => p && p.payload !== key);
+    const rows = [await updateTelegramStateIfRev(env, game, userId, existing.state_rev, state)].filter(Boolean);
+    if (rows.length) return { ok: true, state: rows[0].state, stateRev: rows[0].state_rev };
+  }
+  return { ok: false, conflict: true };
 }

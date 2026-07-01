@@ -217,9 +217,10 @@ import { trackAnalyticsVictoryButton } from './analytics.js';
           var stCard = sit.kind === 'mythic' ? grantMythic(sit.mythic) : (sit.kind === 'bounty' ? openBountyBox() : openPaidBox(sit.floor || 0));
           if (stCard) { setReveal(stCard); state.mode = 'REVEAL'; playTone((stCard.rarity || 0) >= 3 ? 720 : 600, 0.14, 0.06); }
         } else if (stCanBuy) {
-          // production: the Telegram wrapper buys through the backend, then reloads the server-updated cloud state.
+          // production: the Telegram wrapper buys through the backend (Stars or TON), then applies the grant.
           if (sit.kind === 'daily') { if (typeof stg.showAd === 'function') stg.showAd('rewarded', function (ok) { if (ok) { var dc = openPaidBox(0); if (dc) { setReveal(dc); state.mode = 'REVEAL'; } } }); }
-          else stg.buy(sit.id, 'XTR', function () {});
+          else if (rects.store[sti].ton && inRect(x, y, rects.store[sti].ton)) { stg.buy(sit.id, 'TON', function () {}); playTone(520, 0.05, 0.03); }   // tapped the TON pill
+          else { stg.buy(sit.id, 'XTR', function () {}); playTone(520, 0.05, 0.03); }   // Stars pill or row body -> Stars
         }
         // else (no __tg + no storetest, e.g. the web gallery build): browse-only, no grant
         return true;

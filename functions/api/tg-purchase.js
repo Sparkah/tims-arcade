@@ -1,6 +1,6 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { getProduct, parsePaymentPayload } from '../_lib/tgProducts.js';
-import { applyPurchaseGrant } from '../_lib/tgGrants.js';
+import { applyPurchaseGrant, ackPendingGrant } from '../_lib/tgGrants.js';
 import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
 import {
   getTelegramPurchase,
@@ -126,6 +126,19 @@ async function claimFromClient(body, env) {
   );
 }
 
+// Clear a pending gacha pull after the game has redeemed it (rolled the box / granted the mythic + revealed).
+async function ackFromClient(body, env) {
+  const auth = await verifyTelegramInitDataFromEnv(body.initData, env);
+  if (!auth.ok) return jsonError(`Telegram auth failed: ${auth.error}`, 401);
+
+  const parsed = parsePaymentPayload(body.payload);
+  if (!parsed) return jsonError('Invalid payment payload', 400);
+  if (parsed.telegramUserId !== auth.user.id) return jsonError('Payload user mismatch', 403);
+
+  const res = await ackPendingGrant(env, parsed.game, auth.user.id, body.payload);
+  return json({ ok: Boolean(res && res.ok), ack: res }, 200, { 'cache-control': 'no-store' });
+}
+
 export async function onRequestPost({ request, env }) {
   if (!sameOriginOk(request)) return jsonError('Forbidden', 403);
 
@@ -139,6 +152,7 @@ export async function onRequestPost({ request, env }) {
   const action = body.action || 'claim';
   if (action === 'record') return recordFromBot(request, env, body);
   if (action === 'claim') return claimFromClient(body, env);
+  if (action === 'ack') return ackFromClient(body, env);
 
   return jsonError('Unknown action', 400);
 }

@@ -11,12 +11,14 @@
 //   - window.__tg.saveState(obj) (injected on iframe load) pushes a save to the wrapper -> mirror + backend.
 //   - Paid products are NOT granted through a client hook. The wrapper waits for the server to apply the paid
 //     receipt to telegram_player_states, writes the refreshed state to WRAP_KEY, then reloads this iframe.
-import { META, econ } from './state.js';
+import { META, econ, state } from './state.js';
 import { stats, saveMeta, setSaveHook } from './persistence.js';
 import { TG_MODE } from './flags.js';
 import { clampInt } from './lib/math.js';
 import { MAXTIER } from './data/upgrades.js';
-import { RELIC_SLOTS } from './data/loot.js';
+import { RELIC_SLOTS, STORE } from './data/loot.js';
+import { openPaidBox, openBountyBox, grantMythic } from './systems/loot.js';   // paid STORE pulls (box/mythic)
+import { setReveal } from './ui/screens.js';   // REVEAL overlay for a redeemed pull
 
 var WRAP_KEY = 'bloodtread_v5';
 var AD_FREE_KEY = 'bloodtread_rebuild_adfree';
@@ -113,6 +115,55 @@ function applyState(o) {
   }
 }
 
+// -------- Paid gacha pulls (Blood Market / STORE: box_* + mythic_*) ---------------------------------------
+// A gacha pull can't be rolled server-side (pity + loot tables live here), so the server VERIFIES the payment
+// and queues a pending pull in __server.entitlements.pending (mirrored into WRAP_KEY). We roll it EXACTLY ONCE
+// per payload: the wrapper calls __tgRedeemPending() live right after the buy (shows the REVEAL); tgHydrate()
+// re-checks on boot as crash-recovery (grants silently if the live redeem never ran). A local per-device set
+// stops a double-roll; ackPending() (wrapper) clears it server-side for cross-device safety.
+var REDEEMED_KEY = 'bloodtread_redeemed_pulls';
+var STORE_BY_ID = {};
+for (var _si = 0; _si < STORE.length; _si++) STORE_BY_ID[STORE[_si].id] = STORE[_si];
+function redeemedLocally(payload) {
+  try { var a = JSON.parse(localStorage.getItem(REDEEMED_KEY) || '[]'); return Array.isArray(a) && a.indexOf(payload) >= 0; } catch (e) { return false; }
+}
+function markRedeemed(payload) {
+  try { var a = JSON.parse(localStorage.getItem(REDEEMED_KEY) || '[]'); if (!Array.isArray(a)) a = []; if (a.indexOf(payload) < 0) a.push(payload); while (a.length > 80) a.shift(); localStorage.setItem(REDEEMED_KEY, JSON.stringify(a)); } catch (e) {}
+}
+function readPending() {
+  try { var raw = localStorage.getItem(WRAP_KEY); if (!raw) return []; var s = JSON.parse(raw); var p = s && s.__server && s.__server.entitlements && s.__server.entitlements.pending; return Array.isArray(p) ? p : []; } catch (e) { return []; }
+}
+function rollPull(id) {
+  var it = STORE_BY_ID[id];
+  if (!it) return null;
+  if (it.kind === 'mythic') return grantMythic(it.mythic);
+  if (it.kind === 'bounty') { econ.boughtOnce[id] = 1; return openBountyBox(); }
+  return openPaidBox(it.floor || 0);   // box_single / box_legendary
+}
+function ackPull(payload, tries) {
+  if (window.__tg && typeof window.__tg.ackPending === 'function') { try { window.__tg.ackPending(payload); } catch (e) {} return; }
+  if ((tries || 0) > 40) return;   // wait ~20s for __tg injection (iframe load), then give up (retried next boot)
+  setTimeout(function () { ackPull(payload, (tries || 0) + 1); }, 500);
+}
+// Redeem every un-redeemed pending pull. reveal=true pops the last card as a REVEAL (only from an idle screen).
+function redeemPending(reveal) {
+  var pend = readPending(), lastCard = null, any = false;
+  for (var i = 0; i < pend.length; i++) {
+    var p = pend[i];
+    if (!p || !p.id || !p.payload || redeemedLocally(p.payload)) continue;
+    markRedeemed(p.payload);   // mark BEFORE rolling so a mid-roll crash can't double-grant
+    var card = rollPull(p.id);
+    any = true;
+    if (card) lastCard = card;
+    ackPull(p.payload, 0);
+  }
+  if (any) saveMeta();   // persist the granted loot to the cloud
+  if (reveal && lastCard && (state.mode === 'STORE' || state.mode === 'VAULT' || state.mode === 'MENU')) {
+    setReveal(lastCard); state.mode = 'REVEAL';
+  }
+  return any;
+}
+
 // Push the current save to the wrapper -> cloud. Registered as persistence.js's save-hook, so EVERY saveMeta()
 // (bank a run, buy a tier, equip a weapon) also syncs to Telegram. window.__tg is injected on iframe load; by
 // the time the player can trigger a save it exists, and the call is a no-op (not an error) if it does not.
@@ -131,11 +182,16 @@ export function tgHydrate() {
     var raw = localStorage.getItem(WRAP_KEY);
     if (raw) applyState(JSON.parse(raw));
   } catch (e) {}
+  try { redeemPending(false); } catch (e) {}   // crash-recovery: silently grant any pending pull the live redeem missed
 }
 
 if (TG_MODE) {
   setSaveHook(tgPersist);   // cloud SAVES (no money) - always on in TG mode
-  if (!PAYMENTS_ENABLED && typeof window !== 'undefined') {
-    // Kept as a feature-flag guard for emergency rollback builds. Never expose a client paid-grant hook here.
+  if (typeof window !== 'undefined') {
+    // The wrapper calls this LIVE right after a verified gacha purchase so the pull rolls + reveals in place (no
+    // reload). It only redeems pulls the BACKEND already verified + queued as pending; it grants NO money (money
+    // stays server-verified) - at worst a spoofed local mirror grants client-side gacha loot, which the player
+    // can already self-cheat, so this is not a new trust boundary. See PAYMENTS_ENABLED.
+    window.__tgRedeemPending = function () { try { return redeemPending(true); } catch (e) { return false; } };
   }
 }

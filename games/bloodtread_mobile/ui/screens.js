@@ -454,15 +454,31 @@ import { playTone } from '../audio.js';   // gacha roll ticks + payoff
       hud.fillText(it.title, x + 14, ry + rowH * 0.36);
       hud.fillStyle = BT_BONE_DIM; hud.font = Math.max(8, Math.min(11, rowH * 0.21)) + 'px sans-serif';
       hud.fillText(it.sub, x + 14, ry + rowH * 0.72);
-      var pill = owned ? 'OWNED' : (it.kind === 'daily' ? 'WATCH AD' : (it.stars + ' STARS'));
+      // Price pills, right-aligned. daily = WATCH AD; owned = OWNED; else a STARS pill and a TON pill side by side
+      // (TON rightmost). Each paid pill is its own hit-rect so the row routes to the right currency (input.js).
       hud.font = '800 ' + Math.max(11, Math.min(14, rowH * 0.28)) + 'px sans-serif';
-      var ph = Math.min(26, rowH * 0.5);
-      var pw = hud.measureText(pill).width + 22;
-      var ppx = x + w - pw - 12, ppy = ry + (rowH - ph) * 0.5;
-      hud.fillStyle = rgbStr(accent, 235); hudRR(ppx, ppy, pw, ph, ph * 0.5); hud.fill();
-      hud.fillStyle = '#160a08'; hud.textAlign = 'center';
-      hud.fillText(pill, ppx + pw * 0.5, ppy + ph * 0.5);
-      rects.store.push({ x: x, y: ry, w: w, h: rowH, item: it, owned: owned });
+      var ph = Math.min(26, rowH * 0.5), ppy = ry + (rowH - ph) * 0.5, pxR = x + w - 12;
+      var srow = { x: x, y: ry, w: w, h: rowH, item: it, owned: owned, ton: null };
+      if (owned || it.kind === 'daily') {
+        var lbl = owned ? 'OWNED' : 'WATCH AD';
+        var lpw = hud.measureText(lbl).width + 20, lpx = pxR - lpw;
+        hud.fillStyle = rgbStr(accent, 235); hudRR(lpx, ppy, lpw, ph, ph * 0.5); hud.fill();
+        hud.fillStyle = '#160a08'; hud.textAlign = 'center'; hud.fillText(lbl, lpx + lpw * 0.5, ppy + ph * 0.5);
+      } else {
+        if (it.ton != null) {
+          var tl = it.ton + ' TON', tpw = hud.measureText(tl).width + 20, tpx = pxR - tpw;
+          hud.fillStyle = 'rgba(74,150,255,0.95)'; hudRR(tpx, ppy, tpw, ph, ph * 0.5); hud.fill();
+          hud.fillStyle = '#04121f'; hud.textAlign = 'center'; hud.fillText(tl, tpx + tpw * 0.5, ppy + ph * 0.5);
+          srow.ton = { x: tpx, y: ppy, w: tpw, h: ph };
+          pxR = tpx - 8;
+        }
+        if (it.stars != null) {
+          var sl = it.stars + ' STARS', spw = hud.measureText(sl).width + 20, spx = pxR - spw;
+          hud.fillStyle = rgbStr(accent, 235); hudRR(spx, ppy, spw, ph, ph * 0.5); hud.fill();
+          hud.fillStyle = '#160a08'; hud.textAlign = 'center'; hud.fillText(sl, spx + spw * 0.5, ppy + ph * 0.5);
+        }
+      }
+      rects.store.push(srow);
     }
     cy += STORE.length * (rowH + 7) + 6;
     var bbH = Math.max(38, Math.min(46, view.cssH * 0.056));
