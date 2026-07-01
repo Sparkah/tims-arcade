@@ -1,12 +1,12 @@
 // rAF frame loop with a fixed-timestep accumulator: clamps gap spikes, steps update(STEP) up to
 // MAX_STEPS, then renders world + HUD, recording per-phase perf timing + the frame-gap ring.
 // startLoop() kicks the first requestAnimationFrame (called by main at the end of boot).
-import { STEP, MAX_STEPS } from '../config.js?v=bm6';
-import { RENDER_ONLY, LOGIC_ONLY } from '../flags.js?v=bm6';
-import { perf, ring, ringState } from './time.js?v=bm6';
-import { update } from '../update.js?v=bm6';
-import { renderWorld } from '../render/world.js?v=bm6';
-import { renderHud } from '../render/hud.js?v=bm6';
+import { STEP, MAX_STEPS } from '../config.js?v=bm7';
+import { RENDER_ONLY, LOGIC_ONLY } from '../flags.js?v=bm7';
+import { perf, ring, ringState } from './time.js?v=bm7';
+import { update } from '../update.js?v=bm7';
+import { renderWorld } from '../render/world.js?v=bm7';
+import { renderHud } from '../render/hud.js?v=bm7';
 
 var last = performance.now();
 var acc = 0;

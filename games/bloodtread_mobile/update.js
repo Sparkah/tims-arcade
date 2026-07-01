@@ -2,28 +2,28 @@
 // NOT a forEach - order is load-bearing). Runs only while PLAYING + unpaused; advances tick/time, spawns
 // to the target count, then steps enemies/colliders/leeches/bullets/motes/particles/gore/fx/fire, and
 // trips GAMEOVER on death (banks the run + logs the analytics loss).
-import { state, player, enemies, ebullets, view, tankDebris, WIN_SECONDS } from './state.js?v=bm6';
-import { GOD } from './flags.js?v=bm6';
-import { playSfx, playSfxOneOf, playTone } from './audio.js?v=bm6';
-import { spawnRateAt } from './balance.js?v=bm6';
-import { SHAKE_DECAY } from './config.js?v=bm6';
-import { rnd } from './lib/rng.js?v=bm6';
-import { perf } from './core/time.js?v=bm6';
-import { updateUnleash, updateBullets, updateEnemyBullets, autoFire } from './systems/combat.js?v=bm6';
-import { updatePlayer, destroyTank } from './systems/player.js?v=bm6';
-import { updateEnemies, spawnEnemy } from './systems/enemies.js?v=bm6';
-import { resolveEnemyColliders } from './spatial/grid.js?v=bm6';
-import { updateLeeches } from './systems/leech.js?v=bm6';
-import { updateMotes } from './systems/pickups.js?v=bm6';
-import { updateParticles, spawnParticle, spawnMote } from './fx/particles.js?v=bm6';
-import { updateGore, spawnSplat, spawnGoreSpray } from './fx/gore.js?v=bm6';
-import { updateWorldFx, updateCorpses, updateVeinTrails, spawnBoom } from './fx/world.js?v=bm6';
-import { T_PAY } from './data/enemies.js?v=bm6';
-import { updateHealFloats } from './fx/heal.js?v=bm6';
-import { addTrauma } from './render/camera.js?v=bm6';
-import { desiredEnemies } from './systems/shared.js?v=bm6';
-import { bankRun } from './systems/progress.js?v=bm6';
-import { trackAnalyticsLoss, trackAnalyticsWin, trackAnalyticsMilestones } from './analytics.js?v=bm6';
+import { state, player, enemies, ebullets, view, tankDebris, WIN_SECONDS } from './state.js?v=bm7';
+import { GOD } from './flags.js?v=bm7';
+import { playSfx, playSfxOneOf, playTone } from './audio.js?v=bm7';
+import { spawnRateAt } from './balance.js?v=bm7';
+import { SHAKE_DECAY } from './config.js?v=bm7';
+import { rnd } from './lib/rng.js?v=bm7';
+import { perf } from './core/time.js?v=bm7';
+import { updateUnleash, updateBullets, updateEnemyBullets, autoFire } from './systems/combat.js?v=bm7';
+import { updatePlayer, destroyTank } from './systems/player.js?v=bm7';
+import { updateEnemies, spawnEnemy } from './systems/enemies.js?v=bm7';
+import { resolveEnemyColliders } from './spatial/grid.js?v=bm7';
+import { updateLeeches } from './systems/leech.js?v=bm7';
+import { updateMotes } from './systems/pickups.js?v=bm7';
+import { updateParticles, spawnParticle, spawnMote } from './fx/particles.js?v=bm7';
+import { updateGore, spawnSplat, spawnGoreSpray } from './fx/gore.js?v=bm7';
+import { updateWorldFx, updateCorpses, updateVeinTrails, spawnBoom } from './fx/world.js?v=bm7';
+import { T_PAY } from './data/enemies.js?v=bm7';
+import { updateHealFloats } from './fx/heal.js?v=bm7';
+import { addTrauma } from './render/camera.js?v=bm7';
+import { desiredEnemies } from './systems/shared.js?v=bm7';
+import { bankRun } from './systems/progress.js?v=bm7';
+import { trackAnalyticsLoss, trackAnalyticsWin, trackAnalyticsMilestones } from './analytics.js?v=bm7';
 
   // Death entry: the instant HP hits 0, freeze into the dying state (the wreck plays ~1.35s) instead of
   // cutting straight to GAMEOVER. Idempotent (the !player.dead guard makes repeat calls harmless), so it is

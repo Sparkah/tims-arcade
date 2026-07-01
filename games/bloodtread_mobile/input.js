@@ -2,23 +2,24 @@
 // the virtual joystick math, and resize() (canvas sizing + camera recompute). initInput() registers all
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
-import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm6';
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm6';
-import { adFree } from './tg.js?v=bm6';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
-import { BASE_DPR } from './config.js?v=bm6';
-import { clamp } from './lib/math.js?v=bm6';
-import { glCanvas, hudCanvas } from './render/context.js?v=bm6';
-import { updateCameraMetrics } from './render/camera.js?v=bm6';
-import { inRect } from './render/hud.js?v=bm6';
-import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm6';
-import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm6';
-import { spawnEnemyWave } from './systems/enemies.js?v=bm6';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
-import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm6';
-import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm6';   // GORE VAULT (gacha) + GEAR + STORE actions
-import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm6';   // REVEAL overlay + GEAR merge animation
-import { GEAR_MERGE } from './data/loot.js?v=bm6';   // gear merge size (5 -> 1)
-import { beginResurrect } from './update.js?v=bm6';
-import { trackAnalyticsVictoryButton } from './analytics.js?v=bm6';
+import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm7';
+import { saveMeta } from './persistence.js?v=bm7';   // persist the one-time DISCOVER GAMES reward
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm7';
+import { adFree } from './tg.js?v=bm7';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
+import { BASE_DPR } from './config.js?v=bm7';
+import { clamp } from './lib/math.js?v=bm7';
+import { glCanvas, hudCanvas } from './render/context.js?v=bm7';
+import { updateCameraMetrics } from './render/camera.js?v=bm7';
+import { inRect } from './render/hud.js?v=bm7';
+import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm7';
+import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm7';
+import { spawnEnemyWave } from './systems/enemies.js?v=bm7';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
+import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm7';
+import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm7';   // GORE VAULT (gacha) + GEAR + STORE actions
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm7';   // REVEAL overlay + GEAR merge animation
+import { GEAR_MERGE } from './data/loot.js?v=bm7';   // gear merge size (5 -> 1)
+import { beginResurrect } from './update.js?v=bm7';
+import { trackAnalyticsVictoryButton } from './analytics.js?v=bm7';
 
   // REWARDED-AD shim for the RESURRECT button. The _refactor build is standalone (index.html loads only
   // GameAnalytics + main.js - NO gf-lib, NO Yandex/CrazyGames ad SDK), so there is NO rewarded-ad helper
@@ -68,6 +69,19 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm6';
     onReward();
   }
 
+  // DISCOVER GAMES (Telegram wrapper only): open the Game Factory bot - its /start enrolls the player for launch
+  // broadcasts + shows the game library - and grant a one-time gore cache the first time it is tapped.
+  function openDiscoverGames() {
+    try { if (window.__tg && typeof window.__tg.openTelegramLink === 'function') window.__tg.openTelegramLink('https://t.me/gamesfactorybot?start=discover'); } catch (e) {}
+    if (econ.boughtOnce && !econ.boughtOnce['discover_games']) {
+      econ.boughtOnce['discover_games'] = 1;
+      econ.caches = (econ.caches | 0) + 1;
+      state.banner = 'GORE CACHE'; state.bannerT = 1.6;
+      playTone(660, 0.08, 0.04);
+      try { saveMeta(); } catch (e) {}
+    }
+  }
+
   export function resize() {
     view.cssW = Math.max(1, window.innerWidth || 1);
     view.cssH = Math.max(1, window.innerHeight || 1);
@@ -97,6 +111,7 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm6';
       if (inRect(x, y, rects.play)) startRun(0);
       else if (inRect(x, y, rects.forge)) state.mode = 'SHOP';
       else if (inRect(x, y, rects.vault)) state.mode = 'VAULT';
+      else if (rects.discover && inRect(x, y, rects.discover)) openDiscoverGames();
       else if (CHEATS_ENABLED && inRect(x, y, rects.cheat)) state.mode = 'CHEAT';
       else return false;
       return true;

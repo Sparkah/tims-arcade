@@ -1,24 +1,24 @@
 // Full-screen overlays: MENU (hero cover + title + BloodForge entry), SHOP (BloodForge: weapons + tracks),
 // CHEAT, GAMEOVER, PAUSE. Each rebuilds its hit-rects on the shared `rects` object every draw. Shares the
 // panel/button/rounded-rect/tank-preview helpers + the BT_* palette with render/hud.js (function-only cycle).
-import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm6';
-import { fmtTime } from '../lib/math.js?v=bm6';
-import { TWO_PI } from '../lib/math.js?v=bm6';
-import { WEAPONS } from '../data/weapons.js?v=bm6';
-import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm6';   // for the DEV enemy-wave grid (name + per-type tint swatch)
-import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm6';
-import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm6';
-import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm6';
-import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm6';
-import { rects } from '../state.js?v=bm6';
+import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm7';
+import { fmtTime } from '../lib/math.js?v=bm7';
+import { TWO_PI } from '../lib/math.js?v=bm7';
+import { WEAPONS } from '../data/weapons.js?v=bm7';
+import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm7';   // for the DEV enemy-wave grid (name + per-type tint swatch)
+import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm7';
+import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm7';
+import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm7';
+import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm7';
+import { rects } from '../state.js?v=bm7';
 import {
   BT_CRIM, BT_CRIM_HI, BT_BLOOD, BT_BLOOD_DK, BT_BONE, BT_BONE_DIM, BT_IRON, BT_IRON_LO,
   drawPanel, drawButton, drawHudTankPreview, hudRR, drawTintedTankPreview, drawRelicIcon, blitSheetCell
-} from '../render/hud.js?v=bm6';
-import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm6';
-import { hud } from '../render/context.js?v=bm6';
-import { CHEATS_ENABLED } from '../flags.js?v=bm6';
-import { playTone } from '../audio.js?v=bm6';   // gacha roll ticks + payoff
+} from '../render/hud.js?v=bm7';
+import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm7';
+import { hud } from '../render/context.js?v=bm7';
+import { CHEATS_ENABLED } from '../flags.js?v=bm7';
+import { playTone } from '../audio.js?v=bm7';   // gacha roll ticks + payoff
 
   export function drawMenu() {
     var bg = menuBgSource();
@@ -57,17 +57,26 @@ import { playTone } from '../audio.js?v=bm6';   // gacha roll ticks + payoff
     hud.fillStyle = BT_BONE_DIM;
     hud.font = Math.max(11, Math.min(17, view.cssW * 0.032)) + 'px sans-serif';
     hud.fillText('CRUSH. BLEED. EVOLVE.', view.cssW * 0.5, titleY + Math.max(20, view.cssH * 0.038));
-    // buttons below title (START RUN / BLOODFORGE / GORE VAULT)
+    // buttons below title (START RUN / BLOODFORGE / GORE VAULT [/ DISCOVER GAMES only in the TG wrapper])
     var bgap = 10;
     var btnH = Math.max(42, Math.min(52, view.cssH * 0.068));
-    var by = Math.min(view.cssH - (btnH * 3 + bgap * 2 + 64), titleY + view.cssH * 0.13);
+    // DISCOVER GAMES shows ONLY inside the Telegram wrapper (where __tg.openTelegramLink is injected). It opens the
+    // Game Factory bot for cross-game discovery + a one-time gore-cache reward, and the /start it fires enrolls the
+    // player for launch broadcasts. Standalone / CrazyGames / Yandex builds keep the original 3-button layout.
+    var showDiscover = !!(typeof window !== 'undefined' && window.__tg && window.__tg.openTelegramLink);
+    var nBtn = showDiscover ? 4 : 3;
+    var by = Math.min(view.cssH - (btnH * nBtn + bgap * (nBtn - 1) + 64), titleY + view.cssH * 0.13);
     rects.play  = drawButton(x, by, w, btnH, 'START RUN', true);
     rects.forge = drawButton(x, by + btnH + bgap, w, btnH, 'BLOODFORGE   ' + Math.floor(econ.totalBank), false);
     rects.vault = drawVaultButton(x, by + (btnH + bgap) * 2, w, btnH);   // GORE VAULT entry; count badge when caches are waiting
+    if (showDiscover) {
+      var discClaimed = !!(econ.boughtOnce && econ.boughtOnce['discover_games']);
+      rects.discover = drawButton(x, by + (btnH + bgap) * 3, w, btnH, discClaimed ? 'DISCOVER GAMES' : 'DISCOVER GAMES   +CACHE', false);
+    } else { rects.discover = null; }
     // weapon + track info
     hud.fillStyle = BT_BONE_DIM;
     hud.font = Math.max(10, Math.min(13, view.cssH * 0.018)) + 'px sans-serif';
-    var infoY = by + (btnH + bgap) * 3 + 14;
+    var infoY = by + (btnH + bgap) * nBtn + 14;
     hud.fillText('weapon: ' + weaponName(econ.equipWeapon) + '   tracks: ' + META.armor + '-' + META.core + '-' + META.cannon + '-' + META.treads + '-' + META.thirst + '-' + META.frenzy, view.cssW * 0.5, infoY);
     if (econ.bestTime > 0) {
       hud.fillText('BEST ' + fmtTime(econ.bestTime), view.cssW * 0.5, infoY + 18);
