@@ -1,12 +1,12 @@
 // Economy / meta-progression helpers: weapon lookup + per-weapon TIER accessors + BloodForge track
 // cost/effect strings + tier bumps. Reads the shared econ/META state and the meta tables; the live tank
 // tier mirror lives on econ (tankArmor etc.). Cannon's track tracks the equipped weapon's tier.
-import { META, econ } from '../state.js?v=bm9';
-import { BALANCE } from '../balance.js?v=bm9';
-import { clamp, clampInt } from '../lib/math.js?v=bm9';
-import { WEAPON_BY_ID, WEAPON_ROW } from '../data/weapons.js?v=bm9';
-import { MAXTIER, TIER_COST } from '../data/upgrades.js?v=bm9';
-import { MA_FRENZY } from '../data/meta.js?v=bm9';
+import { META, econ } from '../state.js?v=bm10';
+import { BALANCE } from '../balance.js?v=bm10';
+import { clamp, clampInt } from '../lib/math.js?v=bm10';
+import { WEAPON_BY_ID, WEAPON_ROW } from '../data/weapons.js?v=bm10';
+import { MAXTIER, TIER_COST } from '../data/upgrades.js?v=bm10';
+import { MA_FRENZY } from '../data/meta.js?v=bm10';
 
 export function weaponName(id) {
   var w = WEAPON_BY_ID[id];

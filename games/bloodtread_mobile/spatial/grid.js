@@ -2,12 +2,12 @@
 // The grid (head/next/cell linked lists) + origin are module-private, rebuilt each tick by
 // buildColliderGrid. resolveEnemyColliders pushes overlapping pairs apart (capped) + shoves the player.
 // rule-#4: enemies.x/.r etc are read directly per the original (loops never realloc the pool).
-import { enemies, player, state } from '../state.js?v=bm9';
-import { MAX_ENEMIES, COLLIDER_CELL, COLLIDER_PAIR_CAP, COLLIDER_PAIR_LIMIT, COLLIDER_PLAYER_CAP, COLLIDER_BODY_K } from '../config.js?v=bm9';
-import { SPRITE_VIS_MULT, SPRITE_BODY_FILL } from '../data/enemies.js?v=bm9';   // per-type VISIBLE-body footprint (r*VIS_MULT*BODY_FILL), shared with the tank<->enemy body collision
-import { COLLIDERS } from '../flags.js?v=bm9';
-import { TWO_PI } from '../lib/math.js?v=bm9';
-import { perf } from '../core/time.js?v=bm9';
+import { enemies, player, state } from '../state.js?v=bm10';
+import { MAX_ENEMIES, COLLIDER_CELL, COLLIDER_PAIR_CAP, COLLIDER_PAIR_LIMIT, COLLIDER_PLAYER_CAP, COLLIDER_BODY_K } from '../config.js?v=bm10';
+import { SPRITE_VIS_MULT, SPRITE_BODY_FILL } from '../data/enemies.js?v=bm10';   // per-type VISIBLE-body footprint (r*VIS_MULT*BODY_FILL), shared with the tank<->enemy body collision
+import { COLLIDERS } from '../flags.js?v=bm10';
+import { TWO_PI } from '../lib/math.js?v=bm10';
+import { perf } from '../core/time.js?v=bm10';
 
 var COLLIDER_GRID = 80;
 var COLLIDER_HALF = COLLIDER_GRID * 0.5;

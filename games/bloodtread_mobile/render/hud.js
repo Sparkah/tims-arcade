@@ -2,24 +2,24 @@
 // (panel/button/rounded-rect/hit-test) and the virtual JOYSTICK + tank-preview used by the screens.
 // renderHud is the per-frame 2D pass dispatcher: it routes to the ui/screens drawers for MENU/SHOP/CHEAT/
 // GAMEOVER/PAUSE/LEVELUP and otherwise paints the live HUD. The BT_* palette lives here (shared with screens).
-import { hud } from './context.js?v=bm9';
+import { hud } from './context.js?v=bm10';
 import {
   player, state, view, sprites, econ, hudImages,
   upgradePick, upgradeRect, ui, rects, input,
   enemies, bullets, motes, particles, decals, corpses, tracks, floats
-} from '../state.js?v=bm9';
-import { clamp, clampInt, fmtTime, TWO_PI } from '../lib/math.js?v=bm9';
+} from '../state.js?v=bm10';
+import { clamp, clampInt, fmtTime, TWO_PI } from '../lib/math.js?v=bm10';
 import {
   NO_HUD, DEBUG, DIAG, COLLIDERS, OLD_SPRITES, GORE_FX, BREAK_ENV
-} from '../flags.js?v=bm9';
-import { upgradeNames, upgradeDesc } from '../data/upgrades.js?v=bm9';
-import { WEAPON_TURRET_CELL } from '../data/weapons.js?v=bm9';
-import { perf, ring, ringState } from '../core/time.js?v=bm9';
-import { weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm9';
-import { desiredEnemies, currentLeechLevel } from '../systems/shared.js?v=bm9';
-import { layoutUpgradeCards } from '../systems/progress.js?v=bm9';
-import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js?v=bm9';
-import { drawIntroHint } from '../tutorial.js?v=bm9';   // first-run drive/auto-fire hint (no-op once seen)
+} from '../flags.js?v=bm10';
+import { upgradeNames, upgradeDesc } from '../data/upgrades.js?v=bm10';
+import { WEAPON_TURRET_CELL } from '../data/weapons.js?v=bm10';
+import { perf, ring, ringState } from '../core/time.js?v=bm10';
+import { weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm10';
+import { desiredEnemies, currentLeechLevel } from '../systems/shared.js?v=bm10';
+import { layoutUpgradeCards } from '../systems/progress.js?v=bm10';
+import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js?v=bm10';
+import { drawIntroHint } from '../tutorial.js?v=bm10';   // first-run drive/auto-fire hint (no-op once seen)
 
 // colour palette - mirrors the original Bloodtread COL object (shared with ui/screens.js)
 export var BT_CRIM    = '#c41228';

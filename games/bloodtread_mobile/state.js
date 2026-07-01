@@ -5,10 +5,10 @@
 import {
   MAX_ENEMIES, MAX_BULLETS, MAX_EBULLETS, MAX_FLOATS, MAX_MOTES, MAX_PARTS, MAX_DECALS, MAX_GORE,
   MAX_SPLATS, MAX_BOOMS, MAX_BUBBLES, MAX_VEINS, MAX_LEECHES, CORPSE_CAP, TRACK_CAP
-} from './config.js?v=bm9';
-import { OLD_SPRITES } from './flags.js?v=bm9';
-import { T_NAME } from './data/enemies.js?v=bm9';
-import { upgradeNames } from './data/upgrades.js?v=bm9';
+} from './config.js?v=bm10';
+import { OLD_SPRITES } from './flags.js?v=bm10';
+import { T_NAME } from './data/enemies.js?v=bm10';
+import { upgradeNames } from './data/upgrades.js?v=bm10';
 
 // -- enemies --
 export var enemies = {
@@ -303,7 +303,9 @@ export var rects = {
   win_continue: null, win_interest: null, win_coffee: null,
   revive: null,
   // GORE VAULT (gacha) hit-rects: the menu/gameover entry button + the vault screen + the reveal CLAIM.
-  vault: null, vaultOpen: null, vaultBack: null, vaultClaim: null, vaultShard: null, vaultStore: null,
+  // revealClose / menuGuideClose = the explicit X close controls (Playgama #20) on the gacha reveal + the
+  // post-death tutorial menu guide.
+  vault: null, vaultOpen: null, vaultBack: null, vaultClaim: null, vaultShard: null, vaultStore: null, revealClose: null, menuGuideClose: null,
   vaultSkins: [], vaultRelics: [], vaultGear: [], store: [], storeBack: null,
   shop: [], weapons: []
 };

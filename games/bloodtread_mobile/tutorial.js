@@ -5,9 +5,9 @@
 //     do next - clears on a single tap (routed from input.js).
 // Seen-flags live in their own localStorage keys (they survive a meta-save wipe, so a returning player is not
 // re-taught). Pure overlays: the game keeps running underneath; nothing here blocks input or the render loop.
-import { hud } from './render/context.js?v=bm9';
-import { view, state, player } from './state.js?v=bm9';
-import { stats } from './persistence.js?v=bm9';
+import { hud } from './render/context.js?v=bm10';
+import { view, state, player, rects } from './state.js?v=bm10';
+import { stats } from './persistence.js?v=bm10';
 
 var INTRO_KEY = 'bloodtread_tut_intro', MENU_KEY = 'bloodtread_tut_menu';
 var introSeen = false, menuSeen = false;
@@ -80,5 +80,22 @@ export function drawMenuGuide() {
   hud.textAlign = 'center';
   hud.fillStyle = '#54ff96'; hud.font = 'bold ' + Math.max(13, Math.min(17, view.cssW * 0.036)) + 'px sans-serif';
   hud.fillText('TAP TO CONTINUE', view.cssW * 0.5, y + h - 24);
+  // #20 CLOSE CONTROL: an explicit X in the card's top-right corner so a Playgama moderator sees a close
+  // control (not just the 'TAP TO CONTINUE' hint). Drawn LAST on an opaque disc so it reads clearly even if the
+  // centred title runs near the corner on the narrowest screens. Dismissal is already routed: input.js MENU
+  // branch calls markMenuSeen() on ANY tap while the guide is up (so a tap on this X clears it too). Hit-rect
+  // stored for parity / test harnesses.
+  var cs = Math.max(28, Math.min(38, view.cssW * 0.092));
+  var cxr = x + w - cs - 8, cyr = y + 8;
+  hud.fillStyle = 'rgba(10,5,4,0.9)';
+  hud.strokeStyle = '#e0402c'; hud.lineWidth = 2;
+  hud.beginPath(); hud.arc(cxr + cs * 0.5, cyr + cs * 0.5, cs * 0.5, 0, Math.PI * 2); hud.fill(); hud.stroke();
+  hud.strokeStyle = '#fff'; hud.lineWidth = Math.max(2.5, cs * 0.12); hud.lineCap = 'round';
+  var cp = cs * 0.31;
+  hud.beginPath();
+  hud.moveTo(cxr + cp, cyr + cp); hud.lineTo(cxr + cs - cp, cyr + cs - cp);
+  hud.moveTo(cxr + cs - cp, cyr + cp); hud.lineTo(cxr + cp, cyr + cs - cp);
+  hud.stroke();
+  rects.menuGuideClose = { x: cxr, y: cyr, w: cs, h: cs };
   hud.restore();
 }

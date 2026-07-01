@@ -2,25 +2,25 @@
 // the virtual joystick math, and resize() (canvas sizing + camera recompute). initInput() registers all
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
-import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm9';
-import { saveMeta } from './persistence.js?v=bm9';   // persist the one-time DISCOVER GAMES reward
-import { tutMenuActive, markMenuSeen } from './tutorial.js?v=bm9';   // TUTORIAL: post-death menu guide dismiss
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm9';
-import { adFree } from './tg.js?v=bm9';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
-import { BASE_DPR } from './config.js?v=bm9';
-import { clamp } from './lib/math.js?v=bm9';
-import { glCanvas, hudCanvas } from './render/context.js?v=bm9';
-import { updateCameraMetrics } from './render/camera.js?v=bm9';
-import { inRect } from './render/hud.js?v=bm9';
-import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm9';
-import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm9';
-import { spawnEnemyWave } from './systems/enemies.js?v=bm9';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
-import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm9';
-import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm9';   // GORE VAULT (gacha) + GEAR + STORE actions
-import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm9';   // REVEAL overlay + GEAR merge animation
-import { GEAR_MERGE } from './data/loot.js?v=bm9';   // gear merge size (5 -> 1)
-import { beginResurrect } from './update.js?v=bm9';
-import { trackAnalyticsVictoryButton } from './analytics.js?v=bm9';
+import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm10';
+import { saveMeta } from './persistence.js?v=bm10';   // persist the one-time DISCOVER GAMES reward
+import { tutMenuActive, markMenuSeen } from './tutorial.js?v=bm10';   // TUTORIAL: post-death menu guide dismiss
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm10';
+import { adFree } from './tg.js?v=bm10';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
+import { BASE_DPR } from './config.js?v=bm10';
+import { clamp } from './lib/math.js?v=bm10';
+import { glCanvas, hudCanvas } from './render/context.js?v=bm10';
+import { updateCameraMetrics } from './render/camera.js?v=bm10';
+import { inRect } from './render/hud.js?v=bm10';
+import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm10';
+import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm10';
+import { spawnEnemyWave } from './systems/enemies.js?v=bm10';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
+import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm10';
+import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm10';   // GORE VAULT (gacha) + GEAR + STORE actions
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm10';   // REVEAL overlay + GEAR merge animation
+import { GEAR_MERGE } from './data/loot.js?v=bm10';   // gear merge size (5 -> 1)
+import { beginResurrect } from './update.js?v=bm10';
+import { trackAnalyticsVictoryButton } from './analytics.js?v=bm10';
 
   // REWARDED-AD shim for the RESURRECT button. The _refactor build is standalone (index.html loads only
   // GameAnalytics + main.js - NO gf-lib, NO Yandex/CrazyGames ad SDK), so there is NO rewarded-ad helper
@@ -66,6 +66,26 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm9';
         return;
       }
     } catch (e) { /* fall through to the stub */ }
+    // Playgama Bridge (Playgama port): advertisement.on('rewarded_state_changed', state) then showRewarded().
+    // Given its OWN fail-safe try/catch (NOT the outer one that falls to the free stub) so a malformed/throwing
+    // Bridge ad API can NEVER crash or free-grant a revive: a bad shape resolves as a CANCEL (no revive), and
+    // onReward fires ONLY on the confirmed 'rewarded' state. The listener is removed once it resolves.
+    try {
+      if (window.playgamaBridge && window.playgamaBridge.advertisement) {
+        var pgAdv = window.playgamaBridge.advertisement;
+        if (typeof pgAdv.showRewarded === 'function' && typeof pgAdv.on === 'function') {
+          var pgResolved = false;
+          var pgOnState = function (st) {
+            if (pgResolved) return;
+            if (st === 'rewarded') { pgResolved = true; try { pgAdv.off('rewarded_state_changed', pgOnState); } catch (e2) {} onReward(); }
+            else if (st === 'closed' || st === 'failed') { pgResolved = true; try { pgAdv.off('rewarded_state_changed', pgOnState); } catch (e2) {} if (onCancel) onCancel(); }
+          };
+          pgAdv.on('rewarded_state_changed', pgOnState);
+          pgAdv.showRewarded();
+          return;
+        }
+      }
+    } catch (e) { if (onCancel) onCancel(); return; }   // bad Bridge API shape -> cancel, NEVER the free stub
     // STUB (no SDK in this build): grant immediately.
     onReward();
   }
@@ -249,7 +269,8 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm9';
       return true;   // swallow taps on the store backdrop
     }
     if (state.mode === 'REVEAL') {
-      if (inRect(x, y, rects.vaultClaim)) state.mode = 'VAULT';
+      // CLAIM or the explicit X (rects.revealClose, Playgama #20 close control) both return to the vault.
+      if (inRect(x, y, rects.vaultClaim) || inRect(x, y, rects.revealClose)) state.mode = 'VAULT';
       return true;
     }
     if (state.paused) {
