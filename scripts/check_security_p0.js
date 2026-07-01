@@ -517,6 +517,7 @@ function testClientsUseVoteStateShape() {
 
 function testPublicDomSinksAvoidCatalogHtml() {
   const play = fs.readFileSync(path.join(GALLERY, 'play.html'), 'utf8');
+  assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(play), 'play page still uses dangerous HTML sinks');
   assert(!/row\.innerHTML\s*=\s*picks\.map/.test(play), 'play more-games rail builds catalog HTML with innerHTML');
   assert(!/background-image:\s*url\(['"]\/thumbs\/\$\{g\.slug\}/.test(play), 'play more-games rail interpolates slug into inline style HTML');
   assert(!/commentsList\.innerHTML\s*=\s*list\.map/.test(play), 'play comments render user comments with innerHTML');
