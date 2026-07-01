@@ -1,0 +1,3 @@
+- 2026-06-30 21:12  Phase-0 Discord Activity shell: SDK ready() handshake + standalone fallback, Client ID 1521607835513917621
+- 2026-07-01 11:02  Vendored Discord SDK v2.5.0 same-origin (CSP-safe) + wired index.html to it; local verify: module 200, reaches ready() handshake, zero errors. Deploy-ready.
+- 2026-07-01 14:20  Hub live with 26 mounted games + thumbnails. Fixed Discord-copy-only boot issues: Shipwreck Scrub now loads its built JS/CSS bundle instead of `/src/main.ts`; Merge Guns no longer references absent GameAnalytics files. Local smoke: both render canvas with zero console/page errors. Redeployed `gfa-discord` direct-upload Pages project.
