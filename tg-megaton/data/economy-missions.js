@@ -141,6 +141,22 @@ window.MEGATON_ECONOMY_CONFIG = {
       "repeatCapsFactor": 0
     },
     {
+      "id": "discover_games",
+      "type": "follow_link",
+      "title": "Discover more games",
+      "desc": "Open the Game Factory bot to browse every game and get launch updates, then claim your reward.",
+      "url": "https://t.me/gamesfactorybot?start=discover",
+      "reward": {
+        "caps": 500,
+        "crates": 1,
+        "boxId": "mission_reward"
+      },
+      "repeatable": false,
+      "cooldownMs": 0,
+      "firstShareBox": false,
+      "repeatCapsFactor": 0
+    },
+    {
       "id": "share_game_friend",
       "type": "share_game",
       "title": "Share Megaton",
