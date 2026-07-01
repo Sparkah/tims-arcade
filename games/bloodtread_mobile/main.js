@@ -26,7 +26,7 @@ import { renderHud } from './render/hud.js';
 import { weaponName, tankRageLevel } from './game/meta.js';
 import { laserRangeWorld } from './render/camera.js';
 import { loadMeta, loadStats } from './persistence.js';
-import { tgHydrate } from './tg.js';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
+import { tgHydrate } from './tg.js?v=bm1';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
 import { initAnalytics, analyticsState, makeAnalyticsRunId } from './analytics.js';
 import { currentLeechLevel } from './systems/shared.js';
 import { grantDailyCache } from './systems/loot.js';
@@ -35,7 +35,7 @@ import { triggerUnleash } from './systems/combat.js';
 import { gainXp, startLevelUp, chooseUpgrade, buyTrack, buyOrEquipWeapon } from './systems/progress.js';
 import { resetGame, startRun, skipToMinute, cheatMoney, cheatMaxAll, cheatUnlockAll } from './game/session.js';
 import { update } from './update.js';
-import { resize, initInput } from './input.js';
+import { resize, initInput } from './input.js?v=bm1';
 import { startLoop } from './core/loop.js';
 
 (function () {

@@ -4,7 +4,7 @@
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
 import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js';
 import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js';
-import { adFree } from './tg.js';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
+import { adFree } from './tg.js?v=bm1';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
 import { BASE_DPR } from './config.js';
 import { clamp } from './lib/math.js';
 import { glCanvas, hudCanvas } from './render/context.js';
@@ -15,7 +15,7 @@ import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheat
 import { spawnEnemyWave } from './systems/enemies.js';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
 import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js';
 import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js';   // GORE VAULT (gacha) + GEAR + STORE actions
-import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js';   // REVEAL overlay + GEAR merge animation
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm1';   // REVEAL overlay + GEAR merge animation
 import { GEAR_MERGE } from './data/loot.js';   // gear merge size (5 -> 1)
 import { beginResurrect } from './update.js';
 import { trackAnalyticsVictoryButton } from './analytics.js';

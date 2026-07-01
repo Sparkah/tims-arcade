@@ -22,7 +22,7 @@ import { spawnEnemy } from '../systems/enemies.js';
 import { resetLeeches } from '../systems/leech.js';
 import { resetEnvironmentState } from '../systems/environment.js';
 import { desiredEnemies } from '../systems/shared.js';
-import { endJoystick } from '../input.js';
+import { endJoystick } from '../input.js?v=bm1';
 
   export function cheatMoney() {
     econ.totalBank += 50000;

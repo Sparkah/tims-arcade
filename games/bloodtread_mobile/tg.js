@@ -18,7 +18,7 @@ import { clampInt } from './lib/math.js';
 import { MAXTIER } from './data/upgrades.js';
 import { RELIC_SLOTS, STORE } from './data/loot.js';
 import { openPaidBox, openBountyBox, grantMythic } from './systems/loot.js';   // paid STORE pulls (box/mythic)
-import { setReveal } from './ui/screens.js';   // REVEAL overlay for a redeemed pull
+import { setReveal } from './ui/screens.js?v=bm1';   // REVEAL overlay for a redeemed pull
 
 var WRAP_KEY = 'bloodtread_v5';
 var AD_FREE_KEY = 'bloodtread_rebuild_adfree';

@@ -18,7 +18,7 @@ import { perf, ring, ringState } from '../core/time.js';
 import { weaponAtlasTier, weaponRow } from '../game/meta.js';
 import { desiredEnemies, currentLeechLevel } from '../systems/shared.js';
 import { layoutUpgradeCards } from '../systems/progress.js';
-import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js';
+import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js?v=bm1';
 
 // colour palette - mirrors the original Bloodtread COL object (shared with ui/screens.js)
 export var BT_CRIM    = '#c41228';
