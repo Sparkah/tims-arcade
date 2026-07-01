@@ -2,12 +2,12 @@
 // vendor/GameAnalytics.min.js (loaded by index.html BEFORE the module graph). gaCall() buffers the
 // last 80 events onto window.__btAnalyticsEvents (harness reads them) and forwards to the SDK if present.
 // All run telemetry (start / upgrade-pick / loss) is assembled from state + econ + player here.
-import { ANALYTICS_ENABLED, GA_GAME_KEY, GA_SECRET_KEY, BUILD_TAG, DEBUG } from './flags.js?v=bm4';
-import { rnd } from './lib/rng.js?v=bm4';
-import { state, player, META, econ, enemies, upgradeCounts, WIN_SECONDS } from './state.js?v=bm4';
-import { upgradeNames } from './data/upgrades.js?v=bm4';
-import { currentWeaponTier } from './game/meta.js?v=bm4';
-import { stats, saveStats } from './persistence.js?v=bm4';
+import { ANALYTICS_ENABLED, GA_GAME_KEY, GA_SECRET_KEY, BUILD_TAG, DEBUG } from './flags.js?v=bm5';
+import { rnd } from './lib/rng.js?v=bm5';
+import { state, player, META, econ, enemies, upgradeCounts, WIN_SECONDS } from './state.js?v=bm5';
+import { upgradeNames } from './data/upgrades.js?v=bm5';
+import { currentWeaponTier } from './game/meta.js?v=bm5';
+import { stats, saveStats } from './persistence.js?v=bm5';
 
 // Minute milestones = the funnel stages. Each fires ONCE per run the first time state.t crosses it; the
 // matching bit in state.milestonesFired latches it. Minute 20 is the Complete/win stage (the WIN event

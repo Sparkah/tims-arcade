@@ -1,10 +1,10 @@
 // Image/texture asset loading: HUD/menu images (hero cover + upgrade icons) into hudImages, and the
 // old-sprite atlas (creatures/tank/weapons/ground/decals/rocks) into the sprites singleton. Each sprite
 // sheet is a horizontal strip of 160px frames; on decode it uploads a NEAREST-filtered GL texture.
-import { hudImages, sprites } from './state.js?v=bm4';
-import { DEBUG } from './flags.js?v=bm4';
-import { uploadSpriteTexture } from './render/context.js?v=bm4';
-import { resetPerfTiming } from './core/time.js?v=bm4';
+import { hudImages, sprites } from './state.js?v=bm5';
+import { DEBUG } from './flags.js?v=bm5';
+import { uploadSpriteTexture } from './render/context.js?v=bm5';
+import { resetPerfTiming } from './core/time.js?v=bm5';
 
 function addHudImage(key, src) {
   var img = new Image();

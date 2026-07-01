@@ -3,40 +3,40 @@
 // __triggerUnleash/__spawnMoteBurst/__debugDamagePlayer/__buyTrack/__equipWeapon/__chooseUpgrade/...),
 // then runs the boot tail: bail if no WebGL, init input, kick sprite load, load HUD images + meta +
 // analytics, reset to the start screen (or AUTO_START minute), and start the frame loop.
-import { fmtTime, clampInt, TWO_PI } from './lib/math.js?v=bm4';
-import { rnd } from './lib/rng.js?v=bm4';
+import { fmtTime, clampInt, TWO_PI } from './lib/math.js?v=bm5';
+import { rnd } from './lib/rng.js?v=bm5';
 import {
   DIAG, DEBUG, CHEATS_ENABLED, ANALYTICS_ENABLED, OLD_SPRITES, OLD_ENV, OLD_TANK, OLD_DEATH, TANK_LAYERS,
   GORE_FX, BREAK_ENV, VEIN_FX, LEECH_FX, COLLIDERS, LOGIC_ONLY, START_MIN, AUTO_START,
   TUNE_MODE, TUNE_SHEET_URL, WIPE_SAVE, UNLOCK_ALL, LOCAL_BUILD
-} from './flags.js?v=bm4';
-import { BALANCE_SHEET_URL, loadBalanceFromSheet, exportBalanceCSV, tuneStatus } from './balance.js?v=bm4';
-import { STEP, MAX_MOTES } from './config.js?v=bm4';
+} from './flags.js?v=bm5';
+import { BALANCE_SHEET_URL, loadBalanceFromSheet, exportBalanceCSV, tuneStatus } from './balance.js?v=bm5';
+import { STEP, MAX_MOTES } from './config.js?v=bm5';
 import {
   enemies, bullets, ebullets, floats, motes, particles, decals, corpses, tracks,
   player, state, view, sprites, econ, META, laser, input, upgradePick, WIN_SECONDS, rects, tankDebris
-} from './state.js?v=bm4';
-import { upgradeNames } from './data/upgrades.js?v=bm4';
-import { perf, loafLog } from './core/time.js?v=bm4';
-import { isMuted, audioCtxState, bufferCount, toggleMute, musicEnabledState, musicPlaying } from './audio.js?v=bm4';
-import { gl } from './render/context.js?v=bm4';
-import { loadHudImages, loadOldSpriteAssets } from './assets.js?v=bm4';
-import { renderWorld } from './render/world.js?v=bm4';
-import { renderHud } from './render/hud.js?v=bm4';
-import { weaponName, tankRageLevel } from './game/meta.js?v=bm4';
-import { laserRangeWorld } from './render/camera.js?v=bm4';
-import { loadMeta, loadStats } from './persistence.js?v=bm4';
-import { tgHydrate } from './tg.js?v=bm4';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
-import { initAnalytics, analyticsState, makeAnalyticsRunId } from './analytics.js?v=bm4';
-import { currentLeechLevel } from './systems/shared.js?v=bm4';
-import { grantDailyCache } from './systems/loot.js?v=bm4';
-import { spawnMote } from './fx/particles.js?v=bm4';
-import { triggerUnleash } from './systems/combat.js?v=bm4';
-import { gainXp, startLevelUp, chooseUpgrade, buyTrack, buyOrEquipWeapon } from './systems/progress.js?v=bm4';
-import { resetGame, startRun, skipToMinute, cheatMoney, cheatMaxAll, cheatUnlockAll } from './game/session.js?v=bm4';
-import { update } from './update.js?v=bm4';
-import { resize, initInput } from './input.js?v=bm4';
-import { startLoop } from './core/loop.js?v=bm4';
+} from './state.js?v=bm5';
+import { upgradeNames } from './data/upgrades.js?v=bm5';
+import { perf, loafLog } from './core/time.js?v=bm5';
+import { isMuted, audioCtxState, bufferCount, toggleMute, musicEnabledState, musicPlaying } from './audio.js?v=bm5';
+import { gl } from './render/context.js?v=bm5';
+import { loadHudImages, loadOldSpriteAssets } from './assets.js?v=bm5';
+import { renderWorld } from './render/world.js?v=bm5';
+import { renderHud } from './render/hud.js?v=bm5';
+import { weaponName, tankRageLevel } from './game/meta.js?v=bm5';
+import { laserRangeWorld } from './render/camera.js?v=bm5';
+import { loadMeta, loadStats } from './persistence.js?v=bm5';
+import { tgHydrate } from './tg.js?v=bm5';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
+import { initAnalytics, analyticsState, makeAnalyticsRunId } from './analytics.js?v=bm5';
+import { currentLeechLevel } from './systems/shared.js?v=bm5';
+import { grantDailyCache } from './systems/loot.js?v=bm5';
+import { spawnMote } from './fx/particles.js?v=bm5';
+import { triggerUnleash } from './systems/combat.js?v=bm5';
+import { gainXp, startLevelUp, chooseUpgrade, buyTrack, buyOrEquipWeapon } from './systems/progress.js?v=bm5';
+import { resetGame, startRun, skipToMinute, cheatMoney, cheatMaxAll, cheatUnlockAll } from './game/session.js?v=bm5';
+import { update } from './update.js?v=bm5';
+import { resize, initInput } from './input.js?v=bm5';
+import { startLoop } from './core/loop.js?v=bm5';
 
 (function () {
   'use strict';

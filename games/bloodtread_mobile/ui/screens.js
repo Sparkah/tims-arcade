@@ -1,24 +1,24 @@
 // Full-screen overlays: MENU (hero cover + title + BloodForge entry), SHOP (BloodForge: weapons + tracks),
 // CHEAT, GAMEOVER, PAUSE. Each rebuilds its hit-rects on the shared `rects` object every draw. Shares the
 // panel/button/rounded-rect/tank-preview helpers + the BT_* palette with render/hud.js (function-only cycle).
-import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm4';
-import { fmtTime } from '../lib/math.js?v=bm4';
-import { TWO_PI } from '../lib/math.js?v=bm4';
-import { WEAPONS } from '../data/weapons.js?v=bm4';
-import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm4';   // for the DEV enemy-wave grid (name + per-type tint swatch)
-import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm4';
-import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm4';
-import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm4';
-import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm4';
-import { rects } from '../state.js?v=bm4';
+import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm5';
+import { fmtTime } from '../lib/math.js?v=bm5';
+import { TWO_PI } from '../lib/math.js?v=bm5';
+import { WEAPONS } from '../data/weapons.js?v=bm5';
+import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm5';   // for the DEV enemy-wave grid (name + per-type tint swatch)
+import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm5';
+import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm5';
+import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm5';
+import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm5';
+import { rects } from '../state.js?v=bm5';
 import {
   BT_CRIM, BT_CRIM_HI, BT_BLOOD, BT_BLOOD_DK, BT_BONE, BT_BONE_DIM, BT_IRON, BT_IRON_LO,
   drawPanel, drawButton, drawHudTankPreview, hudRR, drawTintedTankPreview, drawRelicIcon, blitSheetCell
-} from '../render/hud.js?v=bm4';
-import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm4';
-import { hud } from '../render/context.js?v=bm4';
-import { CHEATS_ENABLED } from '../flags.js?v=bm4';
-import { playTone } from '../audio.js?v=bm4';   // gacha roll ticks + payoff
+} from '../render/hud.js?v=bm5';
+import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm5';
+import { hud } from '../render/context.js?v=bm5';
+import { CHEATS_ENABLED } from '../flags.js?v=bm5';
+import { playTone } from '../audio.js?v=bm5';   // gacha roll ticks + payoff
 
   export function drawMenu() {
     var bg = menuBgSource();
@@ -183,6 +183,15 @@ import { playTone } from '../audio.js?v=bm4';   // gacha roll ticks + payoff
 
   // ---- GORE VAULT (gacha) screens -----------------------------------------------------------------
   function rgbStr(c, m) { return 'rgb(' + Math.min(255, Math.round(c[0] * m)) + ',' + Math.min(255, Math.round(c[1] * m)) + ',' + Math.min(255, Math.round(c[2] * m)) + ')'; }
+  // Truncate `text` (in the CURRENT hud.font) to fit maxW, adding an ellipsis. Used to stop STORE title/sub from
+  // rendering under the price pills (the 4999 STARS + 40 TON row was overlapping its description).
+  function fitLabel(text, maxW) {
+    if (maxW <= 0 || !text) return '';
+    if (hud.measureText(text).width <= maxW) return text;
+    var t = String(text);
+    while (t.length > 1 && hud.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+    return t + '…';
+  }
   function perfNow() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0; }
   // The menu/vault background source: the animated <video> once it's decoding frames, else the static hero image.
   function menuBgSource() {
@@ -449,34 +458,37 @@ import { playTone } from '../audio.js?v=bm4';   // gacha roll ticks + payoff
                  : (it.floor != null ? RARITY[it.floor].col : [1.0, 0.66, 0.2])));   // bounty has no floor -> gold
       hud.fillStyle = '#140d0b'; hudRR(x, ry, w, rowH, 9); hud.fill();
       hud.lineWidth = it.kind === 'mythic' ? 2.0 : 1.4; hud.strokeStyle = rgbStr(accent, 210); hudRR(x, ry, w, rowH, 9); hud.stroke();
-      hud.textAlign = 'left'; hud.textBaseline = 'middle';
-      hud.fillStyle = '#fff'; hud.font = '800 ' + Math.max(12, Math.min(16, rowH * 0.32)) + 'px sans-serif';
-      hud.fillText(it.title, x + 14, ry + rowH * 0.36);
-      hud.fillStyle = BT_BONE_DIM; hud.font = Math.max(8, Math.min(11, rowH * 0.21)) + 'px sans-serif';
-      hud.fillText(it.sub, x + 14, ry + rowH * 0.72);
-      // Price pills, right-aligned. daily = WATCH AD; owned = OWNED; else a STARS pill and a TON pill side by side
-      // (TON rightmost). Each paid pill is its own hit-rect so the row routes to the right currency (input.js).
-      hud.font = '800 ' + Math.max(11, Math.min(14, rowH * 0.28)) + 'px sans-serif';
+      // -- PRICE PILLS: measure + place FIRST (right-aligned, TON rightmost) so the title/sub can be clipped to
+      //    their left edge and never render UNDER a pill (fixes the wide 4999-STARS / 40.00-TON row overlap).
+      var pillFont = '800 ' + Math.max(11, Math.min(14, rowH * 0.28)) + 'px sans-serif';
+      hud.font = pillFont;
       var ph = Math.min(26, rowH * 0.5), ppy = ry + (rowH - ph) * 0.5, pxR = x + w - 12;
       var srow = { x: x, y: ry, w: w, h: rowH, item: it, owned: owned, ton: null };
+      var pills = [];
       if (owned || it.kind === 'daily') {
-        var lbl = owned ? 'OWNED' : 'WATCH AD';
-        var lpw = hud.measureText(lbl).width + 20, lpx = pxR - lpw;
-        hud.fillStyle = rgbStr(accent, 235); hudRR(lpx, ppy, lpw, ph, ph * 0.5); hud.fill();
-        hud.fillStyle = '#160a08'; hud.textAlign = 'center'; hud.fillText(lbl, lpx + lpw * 0.5, ppy + ph * 0.5);
+        pills.push({ label: owned ? 'OWNED' : 'WATCH AD', fill: rgbStr(accent, 235), ink: '#160a08' });
       } else {
-        if (it.ton != null) {
-          var tl = it.ton + ' TON', tpw = hud.measureText(tl).width + 20, tpx = pxR - tpw;
-          hud.fillStyle = 'rgba(74,150,255,0.95)'; hudRR(tpx, ppy, tpw, ph, ph * 0.5); hud.fill();
-          hud.fillStyle = '#04121f'; hud.textAlign = 'center'; hud.fillText(tl, tpx + tpw * 0.5, ppy + ph * 0.5);
-          srow.ton = { x: tpx, y: ppy, w: tpw, h: ph };
-          pxR = tpx - 8;
-        }
-        if (it.stars != null) {
-          var sl = it.stars + ' STARS', spw = hud.measureText(sl).width + 20, spx = pxR - spw;
-          hud.fillStyle = rgbStr(accent, 235); hudRR(spx, ppy, spw, ph, ph * 0.5); hud.fill();
-          hud.fillStyle = '#160a08'; hud.textAlign = 'center'; hud.fillText(sl, spx + spw * 0.5, ppy + ph * 0.5);
-        }
+        if (it.ton != null)   pills.push({ label: it.ton + ' TON',     fill: 'rgba(74,150,255,0.95)', ink: '#04121f', ton: true });
+        if (it.stars != null) pills.push({ label: it.stars + ' STARS', fill: rgbStr(accent, 235),     ink: '#160a08' });
+      }
+      for (var pi = 0; pi < pills.length; pi++) {                 // lay out right-to-left
+        var pp = pills[pi];
+        pp.w = hud.measureText(pp.label).width + 20; pp.x = pxR - pp.w; pxR = pp.x - 8;
+        if (pp.ton) srow.ton = { x: pp.x, y: ppy, w: pp.w, h: ph };
+      }
+      var textR = (pills.length ? pills[pills.length - 1].x : x + w) - 10;   // text must end before the leftmost pill
+      // -- TITLE + SUB, truncated to fit the space left of the pills --
+      hud.textAlign = 'left'; hud.textBaseline = 'middle';
+      hud.fillStyle = '#fff'; hud.font = '800 ' + Math.max(12, Math.min(16, rowH * 0.32)) + 'px sans-serif';
+      hud.fillText(fitLabel(it.title, textR - (x + 14)), x + 14, ry + rowH * 0.36);
+      hud.fillStyle = BT_BONE_DIM; hud.font = Math.max(8, Math.min(11, rowH * 0.21)) + 'px sans-serif';
+      hud.fillText(fitLabel(it.sub, textR - (x + 14)), x + 14, ry + rowH * 0.72);
+      // -- draw the pills ON TOP (re-set the pill font; the text draws above changed it) --
+      hud.font = pillFont; hud.textAlign = 'center';
+      for (var pj = 0; pj < pills.length; pj++) {
+        var q = pills[pj];
+        hud.fillStyle = q.fill; hudRR(q.x, ppy, q.w, ph, ph * 0.5); hud.fill();
+        hud.fillStyle = q.ink; hud.fillText(q.label, q.x + q.w * 0.5, ppy + ph * 0.5);
       }
       rects.store.push(srow);
     }

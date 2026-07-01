@@ -1,9 +1,9 @@
 // Small cross-cutting sim helpers used by BOTH systems and the render/debug HUD. Leaf-like:
 // depends only on state/config/flags, never on render or other systems (no import cycle).
-import { state, player } from '../state.js?v=bm4';
-import { BALANCE, spawnCountAt } from '../balance.js?v=bm4';
-import { MAX_ENEMIES, MAX_LEECHES } from '../config.js?v=bm4';
-import { LEECH_FX, TOUCH_DEVICE } from '../flags.js?v=bm4';
+import { state, player } from '../state.js?v=bm5';
+import { BALANCE, spawnCountAt } from '../balance.js?v=bm5';
+import { MAX_ENEMIES, MAX_LEECHES } from '../config.js?v=bm5';
+import { LEECH_FX, TOUCH_DEVICE } from '../flags.js?v=bm5';
 
   // Per-map enemy-count multiplier. Map 1 = 1.0 (unchanged baseline). Each map past 1 adds 22% to the live
   // enemy target, capped at +110% (map 6) so the late-map horde stays inside MAX_ENEMIES / the perf budget

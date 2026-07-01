@@ -5,10 +5,10 @@
 import {
   MAX_ENEMIES, MAX_BULLETS, MAX_EBULLETS, MAX_FLOATS, MAX_MOTES, MAX_PARTS, MAX_DECALS, MAX_GORE,
   MAX_SPLATS, MAX_BOOMS, MAX_BUBBLES, MAX_VEINS, MAX_LEECHES, CORPSE_CAP, TRACK_CAP
-} from './config.js?v=bm4';
-import { OLD_SPRITES } from './flags.js?v=bm4';
-import { T_NAME } from './data/enemies.js?v=bm4';
-import { upgradeNames } from './data/upgrades.js?v=bm4';
+} from './config.js?v=bm5';
+import { OLD_SPRITES } from './flags.js?v=bm5';
+import { T_NAME } from './data/enemies.js?v=bm5';
+import { upgradeNames } from './data/upgrades.js?v=bm5';
 
 // -- enemies --
 export var enemies = {
