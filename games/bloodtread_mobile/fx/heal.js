@@ -3,8 +3,8 @@
 // player.healGlow + the floats pool; the heal AMOUNT to player.hp is applied by the caller (kill/upgrade).
 // updateHealFloats ticks the glow decay + float rise/fade. (Ported from sibling _art build, adapted to the
 // target's config-located MAX_FLOATS.)
-import { player, floats, state } from '../state.js?v=bm3';
-import { MAX_FLOATS } from '../config.js?v=bm3';
+import { player, floats, state } from '../state.js?v=bm4';
+import { MAX_FLOATS } from '../config.js?v=bm4';
 
 export function gainHeal(amount, dim) {
   if (amount <= 0) return;

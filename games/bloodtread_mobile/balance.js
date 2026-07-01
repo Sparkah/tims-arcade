@@ -43,6 +43,11 @@
 export var BALANCE_SHEET_URL = '';
 
 export var BALANCE = {
+  // GLOBAL MOVEMENT SCALE (Tim 2026-07-01 "small screen, everything too fast - monster approach and dead").
+  // Multiplies the TANK move speed + every ENEMY move speed + enemy BOLT speed by this (1/1.5 = 1.5x slower),
+  // on mobile AND desktop. The tank's BULLETS are intentionally NOT scaled: keeping your offense snappy against
+  // the now-slower swarm means you SURVIVE, not just die in slow-motion. Spawn/fire timers untouched. Tunable.
+  moveSpeedScale: 1 / 1.5,
   // -------------------------------------------------------------------------------------------
   // WEAPONS - the fire model. interval = baseInterval / (1 + asBonus); dmg = baseDmg * (1 + dmgBonus).
   // -------------------------------------------------------------------------------------------

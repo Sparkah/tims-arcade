@@ -2,21 +2,21 @@
 // per-weapon autoFire patterns (cannon/flak/missile + the sustained laser beam), explodeBullet AoE, and
 // triggerUnleash/updateUnleash (rage burst). angleDelta is the shared turret-aim helper. Part of the sim
 // SCC: -> enemies (killEnemy), collision (obstacleHitAt/damageCurrentObstacle), fx/*, game/meta, audio.
-import { bullets, ebullets, enemies, player, state, laser, econ, view } from '../state.js?v=bm3';
-import { BALANCE } from '../balance.js?v=bm3';
-import { MAX_BULLETS, MAX_EBULLETS, MAX_BUBBLES, UNLEASH_TIME } from '../config.js?v=bm3';
-import { TWO_PI, clampInt } from '../lib/math.js?v=bm3';
-import { rnd } from '../lib/rng.js?v=bm3';
-import { GOD } from '../flags.js?v=bm3';
-import { playSfx, playSfxOneOf } from '../audio.js?v=bm3';
-import { WEAPON_ROW } from '../data/weapons.js?v=bm3';
-import { currentWeapon, currentWeaponTier, weaponRow, tankRageLevel } from '../game/meta.js?v=bm3';
-import { laserRangeWorld, addTrauma } from '../render/camera.js?v=bm3';
-import { killEnemy } from './enemies.js?v=bm3';
-import { obstacleHitAt, damageCurrentObstacle } from './collision.js?v=bm3';
-import { effectAllowed, spawnParticle } from '../fx/particles.js?v=bm3';
-import { spawnGoreSpray } from '../fx/gore.js?v=bm3';
-import { spawnBoom, spawnVeinTrail, spawnRageBubble } from '../fx/world.js?v=bm3';
+import { bullets, ebullets, enemies, player, state, laser, econ, view } from '../state.js?v=bm4';
+import { BALANCE } from '../balance.js?v=bm4';
+import { MAX_BULLETS, MAX_EBULLETS, MAX_BUBBLES, UNLEASH_TIME } from '../config.js?v=bm4';
+import { TWO_PI, clampInt } from '../lib/math.js?v=bm4';
+import { rnd } from '../lib/rng.js?v=bm4';
+import { GOD } from '../flags.js?v=bm4';
+import { playSfx, playSfxOneOf } from '../audio.js?v=bm4';
+import { WEAPON_ROW } from '../data/weapons.js?v=bm4';
+import { currentWeapon, currentWeaponTier, weaponRow, tankRageLevel } from '../game/meta.js?v=bm4';
+import { laserRangeWorld, addTrauma } from '../render/camera.js?v=bm4';
+import { killEnemy } from './enemies.js?v=bm4';
+import { obstacleHitAt, damageCurrentObstacle } from './collision.js?v=bm4';
+import { effectAllowed, spawnParticle } from '../fx/particles.js?v=bm4';
+import { spawnGoreSpray } from '../fx/gore.js?v=bm4';
+import { spawnBoom, spawnVeinTrail, spawnRageBubble } from '../fx/world.js?v=bm4';
 
   export function projectileRowForKind(kind) {
     if (kind === 2) return WEAPON_ROW.flak;
@@ -63,8 +63,8 @@ import { spawnBoom, spawnVeinTrail, spawnRageBubble } from '../fx/world.js?v=bm3
     var hitR = player.r + 12;            // body radius (OLD prad ~24 at S=1)
     var hitR2 = hitR * hitR;
     for (var i = ebullets.count - 1; i >= 0; i--) {
-      ebullets.x[i] += ebullets.vx[i] * dt;
-      ebullets.y[i] += ebullets.vy[i] * dt;
+      ebullets.x[i] += ebullets.vx[i] * dt * BALANCE.moveSpeedScale;   // enemy bolts slowed with the swarm
+      ebullets.y[i] += ebullets.vy[i] * dt * BALANCE.moveSpeedScale;
       ebullets.life[i] -= dt;
       if (obstacleHitAt(ebullets.x[i], ebullets.y[i])) { removeEnemyBullet(i); continue; }   // rock is cover
       var dx = ebullets.x[i] - player.x, dy = ebullets.y[i] - player.y;

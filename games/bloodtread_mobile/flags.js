@@ -1,6 +1,6 @@
 // URL-param flags + the shared query object. Boolean/string/mode toggles parsed once at boot.
 // Numeric caps derived from the URL live in config.js (which imports qs from here).
-import { clamp } from './lib/math.js?v=bm3';
+import { clamp } from './lib/math.js?v=bm4';
 
 export var qs = new URLSearchParams(location.search);
 

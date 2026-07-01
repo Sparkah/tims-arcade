@@ -2,23 +2,23 @@
 // the virtual joystick math, and resize() (canvas sizing + camera recompute). initInput() registers all
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
-import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm3';
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm3';
-import { adFree } from './tg.js?v=bm3';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
-import { BASE_DPR } from './config.js?v=bm3';
-import { clamp } from './lib/math.js?v=bm3';
-import { glCanvas, hudCanvas } from './render/context.js?v=bm3';
-import { updateCameraMetrics } from './render/camera.js?v=bm3';
-import { inRect } from './render/hud.js?v=bm3';
-import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm3';
-import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm3';
-import { spawnEnemyWave } from './systems/enemies.js?v=bm3';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
-import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm3';
-import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm3';   // GORE VAULT (gacha) + GEAR + STORE actions
-import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm3';   // REVEAL overlay + GEAR merge animation
-import { GEAR_MERGE } from './data/loot.js?v=bm3';   // gear merge size (5 -> 1)
-import { beginResurrect } from './update.js?v=bm3';
-import { trackAnalyticsVictoryButton } from './analytics.js?v=bm3';
+import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm4';
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm4';
+import { adFree } from './tg.js?v=bm4';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
+import { BASE_DPR } from './config.js?v=bm4';
+import { clamp } from './lib/math.js?v=bm4';
+import { glCanvas, hudCanvas } from './render/context.js?v=bm4';
+import { updateCameraMetrics } from './render/camera.js?v=bm4';
+import { inRect } from './render/hud.js?v=bm4';
+import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm4';
+import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm4';
+import { spawnEnemyWave } from './systems/enemies.js?v=bm4';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
+import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm4';
+import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm4';   // GORE VAULT (gacha) + GEAR + STORE actions
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm4';   // REVEAL overlay + GEAR merge animation
+import { GEAR_MERGE } from './data/loot.js?v=bm4';   // gear merge size (5 -> 1)
+import { beginResurrect } from './update.js?v=bm4';
+import { trackAnalyticsVictoryButton } from './analytics.js?v=bm4';
 
   // REWARDED-AD shim for the RESURRECT button. The _refactor build is standalone (index.html loads only
   // GameAnalytics + main.js - NO gf-lib, NO Yandex/CrazyGames ad SDK), so there is NO rewarded-ad helper

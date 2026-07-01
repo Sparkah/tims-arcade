@@ -2,24 +2,24 @@
 // notifies leeches), killEnemy (payout + gore + heal + meter + splitters), updateEnemies (per-type AI +
 // player contact damage/crush). Core of the sim SCC: <-> combat (triggerUnleash + killEnemy callers),
 // <-> leech (retargetLeechesAfterRemove), -> fx/*, collision, audio. rule-#4: reads enemies.* directly.
-import { enemies, player, state, particles, view, ebullets } from '../state.js?v=bm3';
-import { BALANCE, enemyHpAt, enemyContactDmgAt } from '../balance.js?v=bm3';
-import { MAX_ENEMIES, ENEMY_SCALE, TANK_VIS_R } from '../config.js?v=bm3';
-import { TWO_PI } from '../lib/math.js?v=bm3';
-import { GORE_FX } from '../flags.js?v=bm3';
-import { rnd } from '../lib/rng.js?v=bm3';
-import { playSfx, playSfxOneOf } from '../audio.js?v=bm3';
-import { T_NAME, T_SPD, T_R, T_PAY, T_UNLOCK, T_WEIGHT, T_CAN_FIRE_BOLT, CONTACT_RANK, SPRITE_VIS_MULT, SPRITE_BODY_FILL } from '../data/enemies.js?v=bm3';
-import { seenType } from '../state.js?v=bm3';
-import { retargetLeechesAfterRemove } from './leech.js?v=bm3';
-import { maybeDropEliteCache } from './loot.js?v=bm3';
-import { triggerUnleash, spawnEnemyProj } from './combat.js?v=bm3';
-import { collideEnemyObstacles, enemyObstacle, collidePlayerObstacles } from './collision.js?v=bm3';
-import { addTrauma } from '../render/camera.js?v=bm3';
-import { effectAllowed, spawnParticle, spawnMote, spawnDecal } from '../fx/particles.js?v=bm3';
-import { isTechType, spawnSplat, spawnGoreSpray, spawnGoreBurst } from '../fx/gore.js?v=bm3';
-import { spawnBoom, spawnCorpse } from '../fx/world.js?v=bm3';
-import { gainHeal } from '../fx/heal.js?v=bm3';
+import { enemies, player, state, particles, view, ebullets } from '../state.js?v=bm4';
+import { BALANCE, enemyHpAt, enemyContactDmgAt } from '../balance.js?v=bm4';
+import { MAX_ENEMIES, ENEMY_SCALE, TANK_VIS_R } from '../config.js?v=bm4';
+import { TWO_PI } from '../lib/math.js?v=bm4';
+import { GORE_FX } from '../flags.js?v=bm4';
+import { rnd } from '../lib/rng.js?v=bm4';
+import { playSfx, playSfxOneOf } from '../audio.js?v=bm4';
+import { T_NAME, T_SPD, T_R, T_PAY, T_UNLOCK, T_WEIGHT, T_CAN_FIRE_BOLT, CONTACT_RANK, SPRITE_VIS_MULT, SPRITE_BODY_FILL } from '../data/enemies.js?v=bm4';
+import { seenType } from '../state.js?v=bm4';
+import { retargetLeechesAfterRemove } from './leech.js?v=bm4';
+import { maybeDropEliteCache } from './loot.js?v=bm4';
+import { triggerUnleash, spawnEnemyProj } from './combat.js?v=bm4';
+import { collideEnemyObstacles, enemyObstacle, collidePlayerObstacles } from './collision.js?v=bm4';
+import { addTrauma } from '../render/camera.js?v=bm4';
+import { effectAllowed, spawnParticle, spawnMote, spawnDecal } from '../fx/particles.js?v=bm4';
+import { isTechType, spawnSplat, spawnGoreSpray, spawnGoreBurst } from '../fx/gore.js?v=bm4';
+import { spawnBoom, spawnCorpse } from '../fx/world.js?v=bm4';
+import { gainHeal } from '../fx/heal.js?v=bm4';
 
   // Higher maps run a TOUGHER type mix from the start: the effective minute used for unlock + weighting is
   // shifted up by 1.5 min per map past 1 (capped +7.5 = map 6). So on map 2 the roster a player faces at 0:30
@@ -228,7 +228,7 @@ import { gainHeal } from '../fx/heal.js?v=bm3';
       var inv = 1 / Math.sqrt(d2);
       var ux = dx * inv, uy = dy * inv;
       var type = enemies.type[i];
-      var sp = enemies.spd[i] * enemySpeedRamp;   // base per-type speed * the minute-ramp (anti-kite lever 4)
+      var sp = enemies.spd[i] * enemySpeedRamp * BALANCE.moveSpeedScale;   // base speed * minute-ramp * global slow-down
       enemies.phase[i] += dt;
       enemies.face[i] = Math.atan2(uy, ux);
 
