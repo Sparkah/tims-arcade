@@ -6,32 +6,32 @@
 import {
   enemies, bullets, ebullets, motes, particles, decals, gore, splats, booms, bubbles,
   corpses, veins, leeches, player, state, view, sprites, econ, laser, tankDebris
-} from '../state.js?v=bm7';
-import { clamp, clampInt, TWO_PI } from '../lib/math.js?v=bm7';
+} from '../state.js?v=bm8';
+import { clamp, clampInt, TWO_PI } from '../lib/math.js?v=bm8';
 import {
   DETAIL_MAX, MAX_LEECHES, SPRITE_ANIM_CAP, TANK_VIS_R
-} from '../config.js?v=bm7';
+} from '../config.js?v=bm8';
 import {
   OLD_SPRITES, OLD_ENV, OLD_TANK, OLD_DEATH, TANK_LAYERS,
   GORE_FX, BREAK_ENV, VEIN_FX, LEECH_FX, SPRITE_LOD
-} from '../flags.js?v=bm7';
+} from '../flags.js?v=bm8';
 import {
   C_R, C_G, C_B, T_COL, T_CAN_FIRE_BOLT, SPRITE_BASE, SPRITE_VIS_MULT, SPRITE_BODY_FILL, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B
-} from '../data/enemies.js?v=bm7';
-import { WEAPON_ROW, WEAPON_TURRET_CELL, WEAPON_PROJECTILE_CELL } from '../data/weapons.js?v=bm7';
-import { enemyHpAt } from '../balance.js?v=bm7';   // live HP model baseHP*(1+perMin*min) - the hit hot-flash normalizes by this, not the old T_HP*(1+t*0.014)
-import { perf } from '../core/time.js?v=bm7';
+} from '../data/enemies.js?v=bm8';
+import { WEAPON_ROW, WEAPON_TURRET_CELL, WEAPON_PROJECTILE_CELL } from '../data/weapons.js?v=bm8';
+import { enemyHpAt } from '../balance.js?v=bm8';   // live HP model baseHP*(1+perMin*min) - the hit hot-flash normalizes by this, not the old T_HP*(1+t*0.014)
+import { perf } from '../core/time.js?v=bm8';
 import {
   gl, glCanvas, inst, addInst, addRot, addLineInst, addCurveInst, drawInstances,
   queueSprite, queueSpriteRot, resetSpriteBatches, flushSprites, prepareSpriteDensity,
   spriteCellIndex, spriteDir, spriteGridCountAt, spriteGridAnimAt, bumpSpriteGridAnim
-} from './context.js?v=bm7';
-import { worldToScreenX, worldToScreenY, screenLen, viewWorldMax } from './camera.js?v=bm7';
-import { tankRageLevel, weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm7';
-import { currentLeechLevel } from '../systems/shared.js?v=bm7';
-import { skinTint } from '../systems/loot.js?v=bm7';   // GORE VAULT equipped hull skin (default = [1,1,1], byte-identical baseline)
-import { obS, decS, obstacleAtCell, decalAtCell } from '../systems/environment.js?v=bm7';
-import { isTechType } from '../fx/gore.js?v=bm7';   // pure type predicate (TECH/biomech vs organic) - routes the corpse death sheet (metal_gore vs flesh_gore). fx/gore does NOT import world, so no cycle.
+} from './context.js?v=bm8';
+import { worldToScreenX, worldToScreenY, screenLen, viewWorldMax } from './camera.js?v=bm8';
+import { tankRageLevel, weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm8';
+import { currentLeechLevel } from '../systems/shared.js?v=bm8';
+import { skinTint } from '../systems/loot.js?v=bm8';   // GORE VAULT equipped hull skin (default = [1,1,1], byte-identical baseline)
+import { obS, decS, obstacleAtCell, decalAtCell } from '../systems/environment.js?v=bm8';
+import { isTechType } from '../fx/gore.js?v=bm8';   // pure type predicate (TECH/biomech vs organic) - routes the corpse death sheet (metal_gore vs flesh_gore). fx/gore does NOT import world, so no cycle.
 
   // -- PER-MAP GROUND PALETTE --------------------------------------------------------------------------------
   // Returns {r,g,b} multipliers that recolor every ground layer (GL clear base, the fallback floor grid, and the

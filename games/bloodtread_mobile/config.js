@@ -1,7 +1,7 @@
 // Numeric caps + fixed constants. URL-tunable pool sizes are clamped here once at boot.
 // Imports qs from flags.js so all URL parsing lives behind one query object.
-import { qs } from './flags.js?v=bm7';
-import { clamp, clampInt } from './lib/math.js?v=bm7';
+import { qs } from './flags.js?v=bm8';
+import { clamp, clampInt } from './lib/math.js?v=bm8';
 
 export var MAX_ENEMIES = clampInt(parseInt(qs.get('maxe') || '1400', 10), 200, 1800);
 export var MAX_BULLETS = 160;

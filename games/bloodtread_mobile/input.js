@@ -2,24 +2,25 @@
 // the virtual joystick math, and resize() (canvas sizing + camera recompute). initInput() registers all
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
-import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm7';
-import { saveMeta } from './persistence.js?v=bm7';   // persist the one-time DISCOVER GAMES reward
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm7';
-import { adFree } from './tg.js?v=bm7';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
-import { BASE_DPR } from './config.js?v=bm7';
-import { clamp } from './lib/math.js?v=bm7';
-import { glCanvas, hudCanvas } from './render/context.js?v=bm7';
-import { updateCameraMetrics } from './render/camera.js?v=bm7';
-import { inRect } from './render/hud.js?v=bm7';
-import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm7';
-import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm7';
-import { spawnEnemyWave } from './systems/enemies.js?v=bm7';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
-import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm7';
-import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm7';   // GORE VAULT (gacha) + GEAR + STORE actions
-import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm7';   // REVEAL overlay + GEAR merge animation
-import { GEAR_MERGE } from './data/loot.js?v=bm7';   // gear merge size (5 -> 1)
-import { beginResurrect } from './update.js?v=bm7';
-import { trackAnalyticsVictoryButton } from './analytics.js?v=bm7';
+import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm8';
+import { saveMeta } from './persistence.js?v=bm8';   // persist the one-time DISCOVER GAMES reward
+import { tutMenuActive, markMenuSeen } from './tutorial.js?v=bm8';   // TUTORIAL: post-death menu guide dismiss
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm8';
+import { adFree } from './tg.js?v=bm8';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
+import { BASE_DPR } from './config.js?v=bm8';
+import { clamp } from './lib/math.js?v=bm8';
+import { glCanvas, hudCanvas } from './render/context.js?v=bm8';
+import { updateCameraMetrics } from './render/camera.js?v=bm8';
+import { inRect } from './render/hud.js?v=bm8';
+import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm8';
+import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm8';
+import { spawnEnemyWave } from './systems/enemies.js?v=bm8';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
+import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm8';
+import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm8';   // GORE VAULT (gacha) + GEAR + STORE actions
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm8';   // REVEAL overlay + GEAR merge animation
+import { GEAR_MERGE } from './data/loot.js?v=bm8';   // gear merge size (5 -> 1)
+import { beginResurrect } from './update.js?v=bm8';
+import { trackAnalyticsVictoryButton } from './analytics.js?v=bm8';
 
   // REWARDED-AD shim for the RESURRECT button. The _refactor build is standalone (index.html loads only
   // GameAnalytics + main.js - NO gf-lib, NO Yandex/CrazyGames ad SDK), so there is NO rewarded-ad helper
@@ -108,6 +109,7 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm7';
     }
     if (state.revivePhase === 'assembling') return true;
     if (state.mode === 'MENU') {
+      if (tutMenuActive()) { markMenuSeen(); playTone(520, 0.05, 0.03); return true; }   // TUTORIAL: first tap clears the post-death menu guide
       if (inRect(x, y, rects.play)) startRun(0);
       else if (inRect(x, y, rects.forge)) state.mode = 'SHOP';
       else if (inRect(x, y, rects.vault)) state.mode = 'VAULT';

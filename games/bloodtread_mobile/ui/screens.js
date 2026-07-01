@@ -1,24 +1,25 @@
 // Full-screen overlays: MENU (hero cover + title + BloodForge entry), SHOP (BloodForge: weapons + tracks),
 // CHEAT, GAMEOVER, PAUSE. Each rebuilds its hit-rects on the shared `rects` object every draw. Shares the
 // panel/button/rounded-rect/tank-preview helpers + the BT_* palette with render/hud.js (function-only cycle).
-import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm7';
-import { fmtTime } from '../lib/math.js?v=bm7';
-import { TWO_PI } from '../lib/math.js?v=bm7';
-import { WEAPONS } from '../data/weapons.js?v=bm7';
-import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm7';   // for the DEV enemy-wave grid (name + per-type tint swatch)
-import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm7';
-import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm7';
-import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm7';
-import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm7';
-import { rects } from '../state.js?v=bm7';
+import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm8';
+import { fmtTime } from '../lib/math.js?v=bm8';
+import { TWO_PI } from '../lib/math.js?v=bm8';
+import { WEAPONS } from '../data/weapons.js?v=bm8';
+import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm8';   // for the DEV enemy-wave grid (name + per-type tint swatch)
+import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm8';
+import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm8';
+import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm8';
+import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm8';
+import { rects } from '../state.js?v=bm8';
 import {
   BT_CRIM, BT_CRIM_HI, BT_BLOOD, BT_BLOOD_DK, BT_BONE, BT_BONE_DIM, BT_IRON, BT_IRON_LO,
   drawPanel, drawButton, drawHudTankPreview, hudRR, drawTintedTankPreview, drawRelicIcon, blitSheetCell
-} from '../render/hud.js?v=bm7';
-import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm7';
-import { hud } from '../render/context.js?v=bm7';
-import { CHEATS_ENABLED } from '../flags.js?v=bm7';
-import { playTone } from '../audio.js?v=bm7';   // gacha roll ticks + payoff
+} from '../render/hud.js?v=bm8';
+import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm8';
+import { hud } from '../render/context.js?v=bm8';
+import { drawMenuGuide } from '../tutorial.js?v=bm8';   // one-time post-death menu guide (no-op until first death / once seen)
+import { CHEATS_ENABLED } from '../flags.js?v=bm8';
+import { playTone } from '../audio.js?v=bm8';   // gacha roll ticks + payoff
 
   export function drawMenu() {
     var bg = menuBgSource();
@@ -93,6 +94,7 @@ import { playTone } from '../audio.js?v=bm7';   // gacha roll ticks + payoff
       rects.cheat = null;
     }
     hud.textAlign = 'start';
+    drawMenuGuide();   // TUTORIAL: after the first death, a one-time overlay explaining the base (tutorial.js)
   }
 
   export function drawShop() {

@@ -8,16 +8,16 @@
 // No module cycle: this imports saveMeta (persistence) + bumpTier (game/meta) + rnd + the data + econ/META,
 // but NOT player.js. player.js imports applyEquippedRelics FROM here (one-directional). persistence.js reads
 // the econ.* loot fields directly (it does not import this file), so save/load stays self-contained.
-import { econ, META } from '../state.js?v=bm7';
-import { rnd } from '../lib/rng.js?v=bm7';
-import { saveMeta } from '../persistence.js?v=bm7';
-import { bumpTier } from '../game/meta.js?v=bm7';
-import { MAXTIER } from '../data/upgrades.js?v=bm7';
+import { econ, META } from '../state.js?v=bm8';
+import { rnd } from '../lib/rng.js?v=bm8';
+import { saveMeta } from '../persistence.js?v=bm8';
+import { bumpTier } from '../game/meta.js?v=bm8';
+import { MAXTIER } from '../data/upgrades.js?v=bm8';
 import {
   RARITY, R_SCRAP, R_VEIN, R_CORE, R_RELIC, R_MYTHIC, PITY_HARD, DUPE_SHARDS, ELITE_CACHE_CHANCE, RELIC_SLOTS,
   DEFAULT_TINT, SKINS, SKIN_BY_ID, RELIC_BY_ID, CONSUMABLE_BY_ID, POOL, VOUCHER_TRACKS,
   GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE, GEAR_MYTHIC_TIER
-} from '../data/loot.js?v=bm7';
+} from '../data/loot.js?v=bm8';
 
 // ---- GEAR (merge-collection - REPLACES relics) -------------------------------------------------
 var GEAR_SLOT_BY_ID = Object.create(null);

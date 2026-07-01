@@ -2,20 +2,20 @@
 // level-up card layout/hit-test, bankRun (cash out blood + best time), and the BloodForge buys
 // (buyTrack / buyOrEquipWeapon). Part of the SCC: -> game/meta (bumpTier/currentWeaponTier/sync),
 // player (syncTankTiersFromMeta), analytics, persistence, audio. Mutates econ/META/player + the draft state.
-import { player, state, econ, META, upgradeCounts, upgradePick, upgradeRollPool, upgradeRect } from '../state.js?v=bm7';
-import { upgradeNames } from '../data/upgrades.js?v=bm7';
-import { MAXTIER } from '../data/upgrades.js?v=bm7';
-import { playPrestige } from '../audio.js?v=bm7';
-import { rnd } from '../lib/rng.js?v=bm7';
-import { WEAPON_BY_ID } from '../data/weapons.js?v=bm7';
-import { view } from '../state.js?v=bm7';
-import { playTone } from '../audio.js?v=bm7';
-import { bumpTier, currentWeaponTier, trackCost } from '../game/meta.js?v=bm7';
-import { BALANCE } from '../balance.js?v=bm7';
-import { saveMeta } from '../persistence.js?v=bm7';
-import { syncTankTiersFromMeta, recomputeWeaponStats } from './player.js?v=bm7';
-import { trackAnalyticsUpgradePick } from '../analytics.js?v=bm7';
-import { gainHeal } from '../fx/heal.js?v=bm7';
+import { player, state, econ, META, upgradeCounts, upgradePick, upgradeRollPool, upgradeRect } from '../state.js?v=bm8';
+import { upgradeNames } from '../data/upgrades.js?v=bm8';
+import { MAXTIER } from '../data/upgrades.js?v=bm8';
+import { playPrestige } from '../audio.js?v=bm8';
+import { rnd } from '../lib/rng.js?v=bm8';
+import { WEAPON_BY_ID } from '../data/weapons.js?v=bm8';
+import { view } from '../state.js?v=bm8';
+import { playTone } from '../audio.js?v=bm8';
+import { bumpTier, currentWeaponTier, trackCost } from '../game/meta.js?v=bm8';
+import { BALANCE } from '../balance.js?v=bm8';
+import { saveMeta } from '../persistence.js?v=bm8';
+import { syncTankTiersFromMeta, recomputeWeaponStats } from './player.js?v=bm8';
+import { trackAnalyticsUpgradePick } from '../analytics.js?v=bm8';
+import { gainHeal } from '../fx/heal.js?v=bm8';
 
   export function buyTrack(id) {
     var cost = trackCost(id);

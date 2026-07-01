@@ -2,21 +2,21 @@
 // per-weapon autoFire patterns (cannon/flak/missile + the sustained laser beam), explodeBullet AoE, and
 // triggerUnleash/updateUnleash (rage burst). angleDelta is the shared turret-aim helper. Part of the sim
 // SCC: -> enemies (killEnemy), collision (obstacleHitAt/damageCurrentObstacle), fx/*, game/meta, audio.
-import { bullets, ebullets, enemies, player, state, laser, econ, view } from '../state.js?v=bm7';
-import { BALANCE } from '../balance.js?v=bm7';
-import { MAX_BULLETS, MAX_EBULLETS, MAX_BUBBLES, UNLEASH_TIME } from '../config.js?v=bm7';
-import { TWO_PI, clampInt } from '../lib/math.js?v=bm7';
-import { rnd } from '../lib/rng.js?v=bm7';
-import { GOD } from '../flags.js?v=bm7';
-import { playSfx, playSfxOneOf } from '../audio.js?v=bm7';
-import { WEAPON_ROW } from '../data/weapons.js?v=bm7';
-import { currentWeapon, currentWeaponTier, weaponRow, tankRageLevel } from '../game/meta.js?v=bm7';
-import { laserRangeWorld, addTrauma } from '../render/camera.js?v=bm7';
-import { killEnemy } from './enemies.js?v=bm7';
-import { obstacleHitAt, damageCurrentObstacle } from './collision.js?v=bm7';
-import { effectAllowed, spawnParticle } from '../fx/particles.js?v=bm7';
-import { spawnGoreSpray } from '../fx/gore.js?v=bm7';
-import { spawnBoom, spawnVeinTrail, spawnRageBubble } from '../fx/world.js?v=bm7';
+import { bullets, ebullets, enemies, player, state, laser, econ, view } from '../state.js?v=bm8';
+import { BALANCE } from '../balance.js?v=bm8';
+import { MAX_BULLETS, MAX_EBULLETS, MAX_BUBBLES, UNLEASH_TIME } from '../config.js?v=bm8';
+import { TWO_PI, clampInt } from '../lib/math.js?v=bm8';
+import { rnd } from '../lib/rng.js?v=bm8';
+import { GOD } from '../flags.js?v=bm8';
+import { playSfx, playSfxOneOf } from '../audio.js?v=bm8';
+import { WEAPON_ROW } from '../data/weapons.js?v=bm8';
+import { currentWeapon, currentWeaponTier, weaponRow, tankRageLevel } from '../game/meta.js?v=bm8';
+import { laserRangeWorld, addTrauma } from '../render/camera.js?v=bm8';
+import { killEnemy } from './enemies.js?v=bm8';
+import { obstacleHitAt, damageCurrentObstacle } from './collision.js?v=bm8';
+import { effectAllowed, spawnParticle } from '../fx/particles.js?v=bm8';
+import { spawnGoreSpray } from '../fx/gore.js?v=bm8';
+import { spawnBoom, spawnVeinTrail, spawnRageBubble } from '../fx/world.js?v=bm8';
 
   export function projectileRowForKind(kind) {
     if (kind === 2) return WEAPON_ROW.flak;
