@@ -2,25 +2,25 @@
 // the virtual joystick math, and resize() (canvas sizing + camera recompute). initInput() registers all
 // the DOM listeners (was mid-IIFE; now an explicit boot step main calls). Mutates the input singleton;
 // the player system reads it. Routes UI taps to screens/economy/level-up. -> game/session, progress, audio.
-import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm8';
-import { saveMeta } from './persistence.js?v=bm8';   // persist the one-time DISCOVER GAMES reward
-import { tutMenuActive, markMenuSeen } from './tutorial.js?v=bm8';   // TUTORIAL: post-death menu guide dismiss
-import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm8';
-import { adFree } from './tg.js?v=bm8';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
-import { BASE_DPR } from './config.js?v=bm8';
-import { clamp } from './lib/math.js?v=bm8';
-import { glCanvas, hudCanvas } from './render/context.js?v=bm8';
-import { updateCameraMetrics } from './render/camera.js?v=bm8';
-import { inRect } from './render/hud.js?v=bm8';
-import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm8';
-import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm8';
-import { spawnEnemyWave } from './systems/enemies.js?v=bm8';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
-import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm8';
-import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm8';   // GORE VAULT (gacha) + GEAR + STORE actions
-import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm8';   // REVEAL overlay + GEAR merge animation
-import { GEAR_MERGE } from './data/loot.js?v=bm8';   // gear merge size (5 -> 1)
-import { beginResurrect } from './update.js?v=bm8';
-import { trackAnalyticsVictoryButton } from './analytics.js?v=bm8';
+import { state, player, view, input, ui, econ, rects, COFFEE_URL, SAVE_INTEREST } from './state.js?v=bm9';
+import { saveMeta } from './persistence.js?v=bm9';   // persist the one-time DISCOVER GAMES reward
+import { tutMenuActive, markMenuSeen } from './tutorial.js?v=bm9';   // TUTORIAL: post-death menu guide dismiss
+import { qs, DEBUG, setDebug, START_MIN, TOUCH_DEVICE, CHEATS_ENABLED, TG_MODE, STORE_TEST } from './flags.js?v=bm9';
+import { adFree } from './tg.js?v=bm9';   // Telegram ad-free entitlement (live binding); skips the revive ad when bought
+import { BASE_DPR } from './config.js?v=bm9';
+import { clamp } from './lib/math.js?v=bm9';
+import { glCanvas, hudCanvas } from './render/context.js?v=bm9';
+import { updateCameraMetrics } from './render/camera.js?v=bm9';
+import { inRect } from './render/hud.js?v=bm9';
+import { unlockAudio, toggleMute, handleVisibility, playTone } from './audio.js?v=bm9';
+import { startRun, continueToNextMap, skipToMinute, resetGame, cheatMoney, cheatMaxAll, cheatReset } from './game/session.js?v=bm9';
+import { spawnEnemyWave } from './systems/enemies.js?v=bm9';   // DEV enemy-wave picker (CHEATS_ENABLED, cheat screen)
+import { buyTrack, buyOrEquipWeapon, chooseUpgrade, cardAt, bankRun } from './systems/progress.js?v=bm9';
+import { openCache, openPaidBox, openBountyBox, grantMythic, mergeUpSlot, dropGear, setSkin, toggleRelic, forgeRelicFromShards } from './systems/loot.js?v=bm9';   // GORE VAULT (gacha) + GEAR + STORE actions
+import { setReveal, setMergeAnim, mergeAnimBusy } from './ui/screens.js?v=bm9';   // REVEAL overlay + GEAR merge animation
+import { GEAR_MERGE } from './data/loot.js?v=bm9';   // gear merge size (5 -> 1)
+import { beginResurrect } from './update.js?v=bm9';
+import { trackAnalyticsVictoryButton } from './analytics.js?v=bm9';
 
   // REWARDED-AD shim for the RESURRECT button. The _refactor build is standalone (index.html loads only
   // GameAnalytics + main.js - NO gf-lib, NO Yandex/CrazyGames ad SDK), so there is NO rewarded-ad helper
@@ -200,7 +200,7 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm8';
         if (rects.vaultShard.afford) { if (forgeRelicFromShards()) playTone(560, 0.1, 0.045); }
         return true;
       }
-      if (rects.vaultStore && inRect(x, y, rects.vaultStore)) { state.mode = 'STORE'; playTone(440, 0.06, 0.035); return true; }
+      if (rects.vaultStore && inRect(x, y, rects.vaultStore)) { state.mode = 'STORE'; state.storeScroll = 0; playTone(440, 0.06, 0.035); return true; }
       if (inRect(x, y, rects.vaultBack)) { state.mode = 'MENU'; return true; }
       for (var vsi = 0; vsi < rects.vaultSkins.length; vsi++) {
         if (inRect(x, y, rects.vaultSkins[vsi])) {
@@ -325,6 +325,13 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm8';
   }
 
   export function endPointer(e) {
+    if (input.storeDrag && e.pointerId === input.storeDrag.id) {   // BLOOD MARKET: release the scroll-drag; if it never moved it was a TAP -> buy/back
+      var sd = input.storeDrag; input.storeDrag = null;
+      if (!sd.moved) handleUiPointer(sd.tapX, sd.tapY);
+      try { glCanvas.releasePointerCapture(e.pointerId); } catch (err) {}
+      e.preventDefault();
+      return;
+    }
     if (input.joyActive && e.pointerId === input.joyId) {
       endJoystick();
       e.preventDefault();
@@ -376,6 +383,13 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm8';
 
     glCanvas.addEventListener('pointerdown', function (e) {
       unlockAudio();
+      if (state.mode === 'STORE') {   // BLOOD MARKET scrolls: defer the tap to pointerup so a DRAG scrolls the list instead of buying
+        input.storeDrag = { id: e.pointerId, startY: e.clientY, startScroll: state.storeScroll || 0, tapX: e.clientX, tapY: e.clientY, moved: false };
+        input.pointerDown = false; input.pointerId = -1; endJoystick();
+        try { glCanvas.setPointerCapture(e.pointerId); } catch (err) {}
+        e.preventDefault();
+        return;
+      }
       if (handleUiPointer(e.clientX, e.clientY)) {
         input.pointerDown = false;
         input.pointerId = -1;
@@ -403,6 +417,13 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm8';
       glCanvas.setPointerCapture(input.pointerId);
     });
     glCanvas.addEventListener('pointermove', function (e) {
+      if (input.storeDrag && e.pointerId === input.storeDrag.id) {   // BLOOD MARKET drag-scroll
+        var sd = input.storeDrag, sdy = e.clientY - sd.startY;
+        if (Math.abs(sdy) > 6 || Math.abs(e.clientX - sd.tapX) > 8) sd.moved = true;   // any real move = a scroll, not a buy-tap
+        state.storeScroll = sd.startScroll - sdy;   // clamped in drawStore
+        e.preventDefault();
+        return;
+      }
       if (input.joyActive && e.pointerId === input.joyId) {
         updateJoystick(e);
         e.preventDefault();

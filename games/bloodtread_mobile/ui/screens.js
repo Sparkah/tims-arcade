@@ -1,25 +1,25 @@
 // Full-screen overlays: MENU (hero cover + title + BloodForge entry), SHOP (BloodForge: weapons + tracks),
 // CHEAT, GAMEOVER, PAUSE. Each rebuilds its hit-rects on the shared `rects` object every draw. Shares the
 // panel/button/rounded-rect/tank-preview helpers + the BT_* palette with render/hud.js (function-only cycle).
-import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm8';
-import { fmtTime } from '../lib/math.js?v=bm8';
-import { TWO_PI } from '../lib/math.js?v=bm8';
-import { WEAPONS } from '../data/weapons.js?v=bm8';
-import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm8';   // for the DEV enemy-wave grid (name + per-type tint swatch)
-import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm8';
-import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm8';
-import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm8';
-import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm8';
-import { rects } from '../state.js?v=bm8';
+import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm9';
+import { fmtTime } from '../lib/math.js?v=bm9';
+import { TWO_PI } from '../lib/math.js?v=bm9';
+import { WEAPONS } from '../data/weapons.js?v=bm9';
+import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm9';   // for the DEV enemy-wave grid (name + per-type tint swatch)
+import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm9';
+import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm9';
+import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm9';
+import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm9';
+import { rects } from '../state.js?v=bm9';
 import {
   BT_CRIM, BT_CRIM_HI, BT_BLOOD, BT_BLOOD_DK, BT_BONE, BT_BONE_DIM, BT_IRON, BT_IRON_LO,
   drawPanel, drawButton, drawHudTankPreview, hudRR, drawTintedTankPreview, drawRelicIcon, blitSheetCell
-} from '../render/hud.js?v=bm8';
-import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm8';
-import { hud } from '../render/context.js?v=bm8';
-import { drawMenuGuide } from '../tutorial.js?v=bm8';   // one-time post-death menu guide (no-op until first death / once seen)
-import { CHEATS_ENABLED } from '../flags.js?v=bm8';
-import { playTone } from '../audio.js?v=bm8';   // gacha roll ticks + payoff
+} from '../render/hud.js?v=bm9';
+import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm9';
+import { hud } from '../render/context.js?v=bm9';
+import { drawMenuGuide } from '../tutorial.js?v=bm9';   // one-time post-death menu guide (no-op until first death / once seen)
+import { CHEATS_ENABLED } from '../flags.js?v=bm9';
+import { playTone } from '../audio.js?v=bm9';   // gacha roll ticks + payoff
 
   export function drawMenu() {
     var bg = menuBgSource();
@@ -457,13 +457,28 @@ import { playTone } from '../audio.js?v=bm8';   // gacha roll ticks + payoff
     hud.fillText('Free daily box - paid boxes have guaranteed floors + pity - mythics bought outright', view.cssW * 0.5, cy);
     cy += 16;
     rects.store.length = 0;
-    var avail = view.cssH - cy - 64;
-    var rowH = Math.max(40, Math.min(58, avail / STORE.length - 7));
-    var isAdFree = false; try { isAdFree = localStorage.getItem('bloodtread_rebuild_adfree') === '1'; } catch (e) {}   // Remove Ads / Blood God show OWNED once the ad-free entitlement is held (server-forced, mirrored to this key)
+    // The Blood Market has enough products to overflow a phone, so the LIST SCROLLS (drag) at a fixed, readable row
+    // height. BACK is pinned at the bottom; rows are clipped to the viewport between the header and BACK. The drag
+    // offset state.storeScroll is set in input.js and clamped here; edge fades + a thin thumb hint there is more.
+    var bbH = Math.max(38, Math.min(46, view.cssH * 0.056));
+    var backY = view.cssH - bbH - 10;
+    var vpTop = cy, vpBot = backY - 8, vpH = Math.max(60, vpBot - vpTop);
+    var rowH = Math.max(46, Math.min(58, view.cssH * 0.072));
+    var rowStep = rowH + 7;
+    var contentH = STORE.length * rowStep;
+    var maxScroll = Math.max(0, contentH - vpH);
+    if (state.storeScroll == null) state.storeScroll = 0;
+    state.storeScroll = Math.max(0, Math.min(state.storeScroll, maxScroll));
+    var sc = state.storeScroll;
+    var isAdFree = false; try { isAdFree = localStorage.getItem('bloodtread_rebuild_adfree') === '1'; } catch (e) {}   // Remove Ads / Blood God show OWNED once the ad-free entitlement is held
+    hud.save();
+    hud.beginPath(); hud.rect(x - 5, vpTop, w + 10, vpH); hud.clip();
     for (var i = 0; i < STORE.length; i++) {
       var it = STORE[i];
       var owned = !!(it.once && econ.boughtOnce && econ.boughtOnce[it.id]) || ((it.id === 'ad_free' || it.id === 'bloodgod') && isAdFree);   // one-time purchase already bought; ad_free/bloodgod = the ad-free entitlement
-      var ry = cy + i * (rowH + 7);
+      var ry = vpTop + i * rowStep - sc;
+      var srow = { x: x, y: ry, w: w, h: rowH, item: it, owned: owned, ton: null };
+      if (ry + rowH < vpTop - 2 || ry > vpBot + 2) { rects.store.push(srow); continue; }   // off-screen: keep index alignment, skip the draw
       var accent = owned ? [0.4, 0.4, 0.4]
                  : (it.kind === 'mythic' ? RARITY[R_MYTHIC].col
                  : (it.kind === 'daily' ? [0.5, 0.85, 0.55]
@@ -475,7 +490,6 @@ import { playTone } from '../audio.js?v=bm8';   // gacha roll ticks + payoff
       var pillFont = '800 ' + Math.max(11, Math.min(14, rowH * 0.28)) + 'px sans-serif';
       hud.font = pillFont;
       var ph = Math.min(26, rowH * 0.5), ppy = ry + (rowH - ph) * 0.5, pxR = x + w - 12;
-      var srow = { x: x, y: ry, w: w, h: rowH, item: it, owned: owned, ton: null };
       var pills = [];
       if (owned || it.kind === 'daily') {
         pills.push({ label: owned ? 'OWNED' : 'WATCH AD', fill: rgbStr(accent, 235), ink: '#160a08' });
@@ -504,9 +518,14 @@ import { playTone } from '../audio.js?v=bm8';   // gacha roll ticks + payoff
       }
       rects.store.push(srow);
     }
-    cy += STORE.length * (rowH + 7) + 6;
-    var bbH = Math.max(38, Math.min(46, view.cssH * 0.056));
-    rects.storeBack = drawButton(x, Math.min(view.cssH - bbH - 10, cy), w, bbH, 'BACK', false);
+    hud.restore();
+    if (maxScroll > 0) {   // scroll affordances: top/bottom fades + a thin thumb in the right padding
+      if (sc > 2) { var g1 = hud.createLinearGradient(0, vpTop, 0, vpTop + 20); g1.addColorStop(0, 'rgba(6,4,3,0.8)'); g1.addColorStop(1, 'rgba(6,4,3,0)'); hud.fillStyle = g1; hud.fillRect(x - 5, vpTop, w + 10, 20); }
+      if (sc < maxScroll - 2) { var g2 = hud.createLinearGradient(0, vpBot - 20, 0, vpBot); g2.addColorStop(0, 'rgba(6,4,3,0)'); g2.addColorStop(1, 'rgba(6,4,3,0.8)'); hud.fillStyle = g2; hud.fillRect(x - 5, vpBot - 20, w + 10, 20); }
+      var thumbH = Math.max(28, vpH * (vpH / contentH)), thumbY = vpTop + (vpH - thumbH) * (sc / maxScroll);
+      hud.fillStyle = 'rgba(224,64,44,0.55)'; hudRR(x + w - 3, thumbY, 3, thumbH, 1.5); hud.fill();
+    }
+    rects.storeBack = drawButton(x, backY, w, bbH, 'BACK', false);
     hud.textAlign = 'start';
   }
 

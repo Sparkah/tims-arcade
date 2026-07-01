@@ -5,9 +5,9 @@
 //     do next - clears on a single tap (routed from input.js).
 // Seen-flags live in their own localStorage keys (they survive a meta-save wipe, so a returning player is not
 // re-taught). Pure overlays: the game keeps running underneath; nothing here blocks input or the render loop.
-import { hud } from './render/context.js?v=bm8';
-import { view, state, player } from './state.js?v=bm8';
-import { stats } from './persistence.js?v=bm8';
+import { hud } from './render/context.js?v=bm9';
+import { view, state, player } from './state.js?v=bm9';
+import { stats } from './persistence.js?v=bm9';
 
 var INTRO_KEY = 'bloodtread_tut_intro', MENU_KEY = 'bloodtread_tut_menu';
 var introSeen = false, menuSeen = false;

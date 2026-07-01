@@ -1,8 +1,8 @@
 // Audio subsystem: one WebAudio context, decoded SFX buffers, procedural tone fallback, bg music.
 // Unlocks on first user gesture. audioMuted/musicEnabled are module-private; render/debug read mute
 // via isMuted(), input flips it via toggleMute(). SFX/tone are called from many systems.
-import { qs } from './flags.js?v=bm8';
-import { rnd } from './lib/rng.js?v=bm8';
+import { qs } from './flags.js?v=bm9';
+import { rnd } from './lib/rng.js?v=bm9';
 
 var audioMuted = qs.has('mute') || qs.get('sound') === '0';
 var musicEnabled = qs.get('music') !== '0' && qs.get('bgm') !== '0';

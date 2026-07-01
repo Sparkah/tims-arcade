@@ -4,25 +4,25 @@
 import {
   enemies, bullets, ebullets, floats, motes, particles, decals, gore, splats, booms, bubbles, corpses, tracks, veins,
   player, state, econ, META, input, seenType, ui, upgradeCounts, laser, view, tankDebris
-} from '../state.js?v=bm8';
-import { AUTO_START, START_MIN } from '../flags.js?v=bm8';
-import { MAX_ENEMIES } from '../config.js?v=bm8';
-import { MAXTIER, upgradeNames } from '../data/upgrades.js?v=bm8';
-import { WEAPONS } from '../data/weapons.js?v=bm8';
-import { SKINS, RELICS, CONSUMABLES, RELIC_SLOTS } from '../data/loot.js?v=bm8';
-import { T_UNLOCK } from '../data/enemies.js?v=bm8';
-import { playTone } from '../audio.js?v=bm8';
-import { saveMeta } from '../persistence.js?v=bm8';
-import { resetPerfTiming } from '../core/time.js?v=bm8';
-import { makeAnalyticsRunId, trackAnalyticsRunStart, trackAnalyticsMapReached } from '../analytics.js?v=bm8';
-import { applyMetaToPlayer, syncTankTiersFromMeta, recomputeWeaponStats } from '../systems/player.js?v=bm8';
-import { applyUpgradeId, nextXpForLevel } from '../systems/progress.js?v=bm8';
-import { consumeRunStartItems } from '../systems/loot.js?v=bm8';
-import { spawnEnemy } from '../systems/enemies.js?v=bm8';
-import { resetLeeches } from '../systems/leech.js?v=bm8';
-import { resetEnvironmentState } from '../systems/environment.js?v=bm8';
-import { desiredEnemies } from '../systems/shared.js?v=bm8';
-import { endJoystick } from '../input.js?v=bm8';
+} from '../state.js?v=bm9';
+import { AUTO_START, START_MIN } from '../flags.js?v=bm9';
+import { MAX_ENEMIES } from '../config.js?v=bm9';
+import { MAXTIER, upgradeNames } from '../data/upgrades.js?v=bm9';
+import { WEAPONS } from '../data/weapons.js?v=bm9';
+import { SKINS, RELICS, CONSUMABLES, RELIC_SLOTS } from '../data/loot.js?v=bm9';
+import { T_UNLOCK } from '../data/enemies.js?v=bm9';
+import { playTone } from '../audio.js?v=bm9';
+import { saveMeta } from '../persistence.js?v=bm9';
+import { resetPerfTiming } from '../core/time.js?v=bm9';
+import { makeAnalyticsRunId, trackAnalyticsRunStart, trackAnalyticsMapReached } from '../analytics.js?v=bm9';
+import { applyMetaToPlayer, syncTankTiersFromMeta, recomputeWeaponStats } from '../systems/player.js?v=bm9';
+import { applyUpgradeId, nextXpForLevel } from '../systems/progress.js?v=bm9';
+import { consumeRunStartItems } from '../systems/loot.js?v=bm9';
+import { spawnEnemy } from '../systems/enemies.js?v=bm9';
+import { resetLeeches } from '../systems/leech.js?v=bm9';
+import { resetEnvironmentState } from '../systems/environment.js?v=bm9';
+import { desiredEnemies } from '../systems/shared.js?v=bm9';
+import { endJoystick } from '../input.js?v=bm9';
 
   export function cheatMoney() {
     econ.totalBank += 50000;
