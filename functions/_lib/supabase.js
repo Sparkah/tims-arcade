@@ -63,6 +63,12 @@ function missingAttributionColumn(error) {
     && /column|schema cache|PGRST204/i.test(text);
 }
 
+export function missingSupabaseRelation(error, relationPattern) {
+  const text = `${error && error.message || ''} ${JSON.stringify(error && error.body || {})}`;
+  return /relation .* does not exist|schema cache|PGRST(116|204|205)/i.test(text)
+    && (!relationPattern || relationPattern.test(text));
+}
+
 export async function supabaseRequest(env, path, options = {}) {
   const base = supabaseUrl(env);
   const key = serviceRoleKey(env);
@@ -301,4 +307,91 @@ export async function getTelegramPurchase(env, game, telegramUserId, payload) {
     method: 'GET',
   });
   return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+function discordPlayerPath(discordUserId) {
+  const params = new URLSearchParams({
+    discord_user_id: `eq.${String(discordUserId)}`,
+  });
+  return `discord_players?${params.toString()}`;
+}
+
+function cleanDiscordText(value, max = 128) {
+  return String(value || '').replace(/[\u0000-\u001f\u007f]/g, '').slice(0, max);
+}
+
+export async function upsertDiscordPlayer(env, user, context = {}) {
+  if (!user || !user.id) return null;
+
+  const now = new Date().toISOString();
+  const row = {
+    discord_user_id: String(user.id),
+    username: cleanDiscordText(user.username, 64) || null,
+    global_name: cleanDiscordText(user.globalName, 128) || null,
+    display_name: cleanDiscordText(user.displayName || user.globalName || user.username, 128) || null,
+    avatar: cleanDiscordText(user.avatar, 128) || null,
+    discriminator: cleanDiscordText(user.discriminator, 8) || null,
+    last_context: jsonSafe(context || {}),
+    last_seen_at: now,
+  };
+
+  return supabaseRequest(env, 'discord_players?on_conflict=discord_user_id', {
+    method: 'POST',
+    headers: {
+      prefer: 'resolution=merge-duplicates,return=representation',
+    },
+    body: JSON.stringify([row]),
+  });
+}
+
+export async function getDiscordScore(env, game, discordUserId) {
+  const params = new URLSearchParams({
+    select: 'game,discord_user_id,display_name,avatar,score,context,updated_at',
+    game: `eq.${game}`,
+    discord_user_id: `eq.${String(discordUserId)}`,
+    limit: '1',
+  });
+  const rows = await supabaseRequest(env, `discord_scores?${params.toString()}`, {
+    method: 'GET',
+  });
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+export async function upsertDiscordScore(env, game, user, score, context = {}) {
+  if (!user || !user.id) return null;
+  const existing = await getDiscordScore(env, game, user.id);
+  const safeScore = Math.max(0, Math.floor(Number(score) || 0));
+  if (existing && Number(existing.score || 0) >= safeScore) return existing;
+
+  const row = {
+    game,
+    discord_user_id: String(user.id),
+    display_name: cleanDiscordText(user.displayName || user.globalName || user.username, 128) || null,
+    avatar: cleanDiscordText(user.avatar, 128) || null,
+    score: safeScore,
+    context: jsonSafe(context || {}),
+    updated_at: new Date().toISOString(),
+  };
+
+  const rows = await supabaseRequest(env, 'discord_scores?on_conflict=game,discord_user_id', {
+    method: 'POST',
+    headers: {
+      prefer: 'resolution=merge-duplicates,return=representation',
+    },
+    body: JSON.stringify([row]),
+  });
+  return Array.isArray(rows) && rows.length ? rows[0] : row;
+}
+
+export async function listDiscordScores(env, game, limit = 20) {
+  const params = new URLSearchParams({
+    select: 'game,discord_user_id,display_name,avatar,score,updated_at',
+    game: `eq.${game}`,
+    order: 'score.desc,updated_at.asc',
+    limit: String(Math.max(1, Math.min(100, Number(limit) || 20))),
+  });
+  const rows = await supabaseRequest(env, `discord_scores?${params.toString()}`, {
+    method: 'GET',
+  });
+  return Array.isArray(rows) ? rows : [];
 }

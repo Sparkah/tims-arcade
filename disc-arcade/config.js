@@ -3,5 +3,6 @@
 // the OAuth client secret lives in a Cloudflare Worker env, never in client code).
 window.DISC_CONFIG = {
   DISCORD_CLIENT_ID: '1521607835513917621', // Application ID (= OAuth Client ID), created 2026-06-30
-  APP_NAME: 'Game Factory Arcade'
+  APP_NAME: 'Game Factory Arcade',
+  API_BASE: '' // same-origin by default; set to https://game-factory.tech only if URL mappings route /api there
 };
