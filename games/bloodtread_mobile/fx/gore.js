@@ -2,13 +2,13 @@
 // goreLoadScale() degrades gore volume under enemy/particle load. spawnGoreSpray/spawnGoreBurst are
 // hot at kill time; spawnGoreSpray/spawnSplat are called from updateEnemies' contact branch (per-tick).
 // Depends on effectAllowed (fx/particles) - kept a DIRECT import. Pools are ring-buffer swap-remove.
-import { gore, splats, player, enemies, particles } from '../state.js?v=bm2';
-import { MAX_GORE, MAX_SPLATS, GORE_MUL } from '../config.js?v=bm2';
-import { GORE_FX } from '../flags.js?v=bm2';
-import { TWO_PI } from '../lib/math.js?v=bm2';
-import { rnd } from '../lib/rng.js?v=bm2';
-import { perf } from '../core/time.js?v=bm2';
-import { effectAllowed } from './particles.js?v=bm2';
+import { gore, splats, player, enemies, particles } from '../state.js?v=bm3';
+import { MAX_GORE, MAX_SPLATS, GORE_MUL } from '../config.js?v=bm3';
+import { GORE_FX } from '../flags.js?v=bm3';
+import { TWO_PI } from '../lib/math.js?v=bm3';
+import { rnd } from '../lib/rng.js?v=bm3';
+import { perf } from '../core/time.js?v=bm3';
+import { effectAllowed } from './particles.js?v=bm3';
 
   export function isTechType(type) {
     return type === 4 || type === 5 || type === 6 || type === 7 || type === 8 || type === 9 || type === 11;

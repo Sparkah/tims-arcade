@@ -180,7 +180,11 @@ export var BALANCE = {
     // Steepened mid-late 2026-06-25 (Tim anti-kite lever 4 "ramp density by minute"): sparse opening kept (0-3min),
     // but 5min+ climbs harder so the late field is a genuine wall, not a manageable trickle. Pairs with speedRamp.
     countCurve: [
-      [0, 12], [1, 32], [3, 72], [5, 110], [10, 175], [15, 215], [20, 255]
+      // GENTLE OPEN (Tim 2026-07-01 "too hard from minute 0 - many spawn fast, I just lose"): start with 1
+      // monster, +~1 every 5-10s through the first minute, so minute 1 reaches what minute 0 used to be (12).
+      // Rejoins the prior ramp by minute 3 -> mid/late intensity UNCHANGED. The target rises slowly and the
+      // field just tracks it (spawnRate refills, it does not front-load), so the opening is a real warm-up.
+      [0, 1], [0.5, 5], [1, 12], [2, 38], [3, 72], [5, 110], [10, 175], [15, 215], [20, 255]
     ],
     aliveCap: 255,            // hard cap on simultaneously-alive enemies (200->255 with the steeper curve; still far inside MAX_ENEMIES 1400 + the ~1016-enemy/110fps perf budget)
     mobileAliveCap: 180,      // LOWER cap on TOUCH_DEVICE (Tim 2026-06-25 "optimise for mobile"): a phone GPU at 1.25 DPR can't hold the desktop 255 peak, so cap the perf-heavy COUNT on mobile while KEEPING all the anti-kite difficulty (speed-ramp + intercept spawning + the Ravener still apply - those are ~free). desiredEnemies (systems/shared.js) picks this when TOUCH_DEVICE. Still > the old 170; bump via the tune sheet after a real-device test.
