@@ -1,10 +1,10 @@
 // Particle/mote/decal pools + the per-cell FX rate-limiter. effectAllowed() throttles cosmetic spawns
 // to <limit> per screen cell per tick (HOT path: per-enemy-per-tick) - kept a DIRECT monomorphic import.
 // The FX grid (fxStamp/fxCount) is module-private state owned here. Pool spawn/remove are swap-remove.
-import { particles, motes, decals, player, state } from '../state.js';
-import { MAX_PARTS, MAX_MOTES, MAX_DECALS } from '../config.js';
-import { TWO_PI } from '../lib/math.js';
-import { rnd } from '../lib/rng.js';
+import { particles, motes, decals, player, state } from '../state.js?v=bm2';
+import { MAX_PARTS, MAX_MOTES, MAX_DECALS } from '../config.js?v=bm2';
+import { TWO_PI } from '../lib/math.js?v=bm2';
+import { rnd } from '../lib/rng.js?v=bm2';
 
 var FX_GRID = 25;
 var FX_HALF = (FX_GRID / 2) | 0;

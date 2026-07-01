@@ -1,24 +1,24 @@
 // Full-screen overlays: MENU (hero cover + title + BloodForge entry), SHOP (BloodForge: weapons + tracks),
 // CHEAT, GAMEOVER, PAUSE. Each rebuilds its hit-rects on the shared `rects` object every draw. Shares the
 // panel/button/rounded-rect/tank-preview helpers + the BT_* palette with render/hud.js (function-only cycle).
-import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js';
-import { fmtTime } from '../lib/math.js';
-import { TWO_PI } from '../lib/math.js';
-import { WEAPONS } from '../data/weapons.js';
-import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js';   // for the DEV enemy-wave grid (name + per-type tint swatch)
-import { MAXTIER, TRACKS } from '../data/upgrades.js';
-import { weaponName, trackCost, trackEffect } from '../game/meta.js';
-import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js';
-import { SHARD_RELIC_COST } from '../systems/loot.js';
-import { rects } from '../state.js';
+import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm2';
+import { fmtTime } from '../lib/math.js?v=bm2';
+import { TWO_PI } from '../lib/math.js?v=bm2';
+import { WEAPONS } from '../data/weapons.js?v=bm2';
+import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm2';   // for the DEV enemy-wave grid (name + per-type tint swatch)
+import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm2';
+import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm2';
+import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm2';
+import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm2';
+import { rects } from '../state.js?v=bm2';
 import {
   BT_CRIM, BT_CRIM_HI, BT_BLOOD, BT_BLOOD_DK, BT_BONE, BT_BONE_DIM, BT_IRON, BT_IRON_LO,
   drawPanel, drawButton, drawHudTankPreview, hudRR, drawTintedTankPreview, drawRelicIcon, blitSheetCell
-} from '../render/hud.js';
-import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js';
-import { hud } from '../render/context.js';
-import { CHEATS_ENABLED } from '../flags.js';
-import { playTone } from '../audio.js';   // gacha roll ticks + payoff
+} from '../render/hud.js?v=bm2';
+import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm2';
+import { hud } from '../render/context.js?v=bm2';
+import { CHEATS_ENABLED } from '../flags.js?v=bm2';
+import { playTone } from '../audio.js?v=bm2';   // gacha roll ticks + payoff
 
   export function drawMenu() {
     var bg = menuBgSource();

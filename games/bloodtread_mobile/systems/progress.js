@@ -2,20 +2,20 @@
 // level-up card layout/hit-test, bankRun (cash out blood + best time), and the BloodForge buys
 // (buyTrack / buyOrEquipWeapon). Part of the SCC: -> game/meta (bumpTier/currentWeaponTier/sync),
 // player (syncTankTiersFromMeta), analytics, persistence, audio. Mutates econ/META/player + the draft state.
-import { player, state, econ, META, upgradeCounts, upgradePick, upgradeRollPool, upgradeRect } from '../state.js';
-import { upgradeNames } from '../data/upgrades.js';
-import { MAXTIER } from '../data/upgrades.js';
-import { playPrestige } from '../audio.js';
-import { rnd } from '../lib/rng.js';
-import { WEAPON_BY_ID } from '../data/weapons.js';
-import { view } from '../state.js';
-import { playTone } from '../audio.js';
-import { bumpTier, currentWeaponTier, trackCost } from '../game/meta.js';
-import { BALANCE } from '../balance.js';
-import { saveMeta } from '../persistence.js';
-import { syncTankTiersFromMeta, recomputeWeaponStats } from './player.js';
-import { trackAnalyticsUpgradePick } from '../analytics.js';
-import { gainHeal } from '../fx/heal.js';
+import { player, state, econ, META, upgradeCounts, upgradePick, upgradeRollPool, upgradeRect } from '../state.js?v=bm2';
+import { upgradeNames } from '../data/upgrades.js?v=bm2';
+import { MAXTIER } from '../data/upgrades.js?v=bm2';
+import { playPrestige } from '../audio.js?v=bm2';
+import { rnd } from '../lib/rng.js?v=bm2';
+import { WEAPON_BY_ID } from '../data/weapons.js?v=bm2';
+import { view } from '../state.js?v=bm2';
+import { playTone } from '../audio.js?v=bm2';
+import { bumpTier, currentWeaponTier, trackCost } from '../game/meta.js?v=bm2';
+import { BALANCE } from '../balance.js?v=bm2';
+import { saveMeta } from '../persistence.js?v=bm2';
+import { syncTankTiersFromMeta, recomputeWeaponStats } from './player.js?v=bm2';
+import { trackAnalyticsUpgradePick } from '../analytics.js?v=bm2';
+import { gainHeal } from '../fx/heal.js?v=bm2';
 
   export function buyTrack(id) {
     var cost = trackCost(id);
