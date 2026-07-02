@@ -1,11 +1,11 @@
 // World-cosmetic pools: explosions (booms), blood bubbles, rage bubbles, corpses, vein trails, tread
 // tracks + updateWorldFx (laser timers + boom/bubble physics). Pure leaf pools (swap-remove / ring).
 // spawnRageBubble + the vein/track spawns are driven by the player/unleash systems at runtime.
-import { booms, bubbles, corpses, veins, tracks, player, laser } from '../state.js?v=bm10';
-import { MAX_BOOMS, MAX_BUBBLES, MAX_VEINS, CORPSE_CAP, TRACK_CAP } from '../config.js?v=bm10';
-import { OLD_DEATH, VEIN_FX } from '../flags.js?v=bm10';
-import { TWO_PI } from '../lib/math.js?v=bm10';
-import { rnd } from '../lib/rng.js?v=bm10';
+import { booms, bubbles, corpses, veins, tracks, player, laser } from '../state.js?v=bm9';
+import { MAX_BOOMS, MAX_BUBBLES, MAX_VEINS, CORPSE_CAP, TRACK_CAP } from '../config.js?v=bm9';
+import { OLD_DEATH, VEIN_FX } from '../flags.js?v=bm9';
+import { TWO_PI } from '../lib/math.js?v=bm9';
+import { rnd } from '../lib/rng.js?v=bm9';
 
   export function spawnBoom(x, y, r, kind) {
     if (MAX_BOOMS <= 0) return;

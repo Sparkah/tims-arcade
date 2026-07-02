@@ -7,11 +7,11 @@
 // This build's instance shader has a u_zoom uniform (the camera zoom); drawInstances feeds view.cameraZoom.
 import {
   MAX_INST, INV_STRIDE, SPRITE_CELL, SPRITE_ANIM_CAP
-} from '../config.js?v=bm10';
-import { SPRITE_LOD } from '../flags.js?v=bm10';
-import { player, view, sprites, enemies } from '../state.js?v=bm10';
-import { perf } from '../core/time.js?v=bm10';
-import { worldToScreenX, worldToScreenY } from './camera.js?v=bm10';
+} from '../config.js?v=bm9';
+import { SPRITE_LOD } from '../flags.js?v=bm9';
+import { player, view, sprites, enemies } from '../state.js?v=bm9';
+import { perf } from '../core/time.js?v=bm9';
+import { worldToScreenX, worldToScreenY } from './camera.js?v=bm9';
 
 export var glCanvas = document.getElementById('gl');
 export var hudCanvas = document.getElementById('hud');

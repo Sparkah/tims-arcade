@@ -3,40 +3,40 @@
 // __triggerUnleash/__spawnMoteBurst/__debugDamagePlayer/__buyTrack/__equipWeapon/__chooseUpgrade/...),
 // then runs the boot tail: bail if no WebGL, init input, kick sprite load, load HUD images + meta +
 // analytics, reset to the start screen (or AUTO_START minute), and start the frame loop.
-import { fmtTime, clampInt, TWO_PI } from './lib/math.js?v=bm10';
-import { rnd } from './lib/rng.js?v=bm10';
+import { fmtTime, clampInt, TWO_PI } from './lib/math.js?v=bm9';
+import { rnd } from './lib/rng.js?v=bm9';
 import {
   DIAG, DEBUG, CHEATS_ENABLED, ANALYTICS_ENABLED, OLD_SPRITES, OLD_ENV, OLD_TANK, OLD_DEATH, TANK_LAYERS,
   GORE_FX, BREAK_ENV, VEIN_FX, LEECH_FX, COLLIDERS, LOGIC_ONLY, START_MIN, AUTO_START,
   TUNE_MODE, TUNE_SHEET_URL, WIPE_SAVE, UNLOCK_ALL, LOCAL_BUILD
-} from './flags.js?v=bm10';
-import { BALANCE_SHEET_URL, loadBalanceFromSheet, exportBalanceCSV, tuneStatus } from './balance.js?v=bm10';
-import { STEP, MAX_MOTES } from './config.js?v=bm10';
+} from './flags.js?v=bm9';
+import { BALANCE_SHEET_URL, loadBalanceFromSheet, exportBalanceCSV, tuneStatus } from './balance.js?v=bm9';
+import { STEP, MAX_MOTES } from './config.js?v=bm9';
 import {
   enemies, bullets, ebullets, floats, motes, particles, decals, corpses, tracks,
   player, state, view, sprites, econ, META, laser, input, upgradePick, WIN_SECONDS, rects, tankDebris
-} from './state.js?v=bm10';
-import { upgradeNames } from './data/upgrades.js?v=bm10';
-import { perf, loafLog } from './core/time.js?v=bm10';
-import { isMuted, audioCtxState, bufferCount, toggleMute, musicEnabledState, musicPlaying } from './audio.js?v=bm10';
-import { gl } from './render/context.js?v=bm10';
-import { loadHudImages, loadOldSpriteAssets } from './assets.js?v=bm10';
-import { renderWorld } from './render/world.js?v=bm10';
-import { renderHud } from './render/hud.js?v=bm10';
-import { weaponName, tankRageLevel } from './game/meta.js?v=bm10';
-import { laserRangeWorld } from './render/camera.js?v=bm10';
-import { loadMeta, loadStats } from './persistence.js?v=bm10';
-import { tgHydrate } from './tg.js?v=bm10';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
-import { initAnalytics, analyticsState, makeAnalyticsRunId } from './analytics.js?v=bm10';
-import { currentLeechLevel } from './systems/shared.js?v=bm10';
-import { grantDailyCache } from './systems/loot.js?v=bm10';
-import { spawnMote } from './fx/particles.js?v=bm10';
-import { triggerUnleash } from './systems/combat.js?v=bm10';
-import { gainXp, startLevelUp, chooseUpgrade, buyTrack, buyOrEquipWeapon } from './systems/progress.js?v=bm10';
-import { resetGame, startRun, skipToMinute, cheatMoney, cheatMaxAll, cheatUnlockAll } from './game/session.js?v=bm10';
-import { update } from './update.js?v=bm10';
-import { resize, initInput } from './input.js?v=bm10';
-import { startLoop } from './core/loop.js?v=bm10';
+} from './state.js?v=bm9';
+import { upgradeNames } from './data/upgrades.js?v=bm9';
+import { perf, loafLog } from './core/time.js?v=bm9';
+import { isMuted, audioCtxState, bufferCount, toggleMute, musicEnabledState, musicPlaying } from './audio.js?v=bm9';
+import { gl } from './render/context.js?v=bm9';
+import { loadHudImages, loadOldSpriteAssets } from './assets.js?v=bm9';
+import { renderWorld } from './render/world.js?v=bm9';
+import { renderHud } from './render/hud.js?v=bm9';
+import { weaponName, tankRageLevel } from './game/meta.js?v=bm9';
+import { laserRangeWorld } from './render/camera.js?v=bm9';
+import { loadMeta, loadStats } from './persistence.js?v=bm9';
+import { tgHydrate } from './tg.js?v=bm9';   // Telegram Mini App adapter (cloud saves / Stars-TON grants / ad-free); self-gates on TG_MODE
+import { initAnalytics, analyticsState, makeAnalyticsRunId } from './analytics.js?v=bm9';
+import { currentLeechLevel } from './systems/shared.js?v=bm9';
+import { grantDailyCache } from './systems/loot.js?v=bm9';
+import { spawnMote } from './fx/particles.js?v=bm9';
+import { triggerUnleash } from './systems/combat.js?v=bm9';
+import { gainXp, startLevelUp, chooseUpgrade, buyTrack, buyOrEquipWeapon } from './systems/progress.js?v=bm9';
+import { resetGame, startRun, skipToMinute, cheatMoney, cheatMaxAll, cheatUnlockAll } from './game/session.js?v=bm9';
+import { update } from './update.js?v=bm9';
+import { resize, initInput } from './input.js?v=bm9';
+import { startLoop } from './core/loop.js?v=bm9';
 
 (function () {
   'use strict';
@@ -318,10 +318,6 @@ import { startLoop } from './core/loop.js?v=bm10';
   function finishBoot() {
     resetGame(AUTO_START, START_MIN);
     startLoop();
-    // Playgama Bridge game_ready gate: boot is complete (assets + meta + analytics loaded, the render loop is
-    // running). The playgama-sdk-snippet polls for this flag, then sends platform.sendMessage('game_ready').
-    // Harmless on every other host (nothing else reads it).
-    window.__BT_BOOTED = 1;
   }
   if (TUNE_MODE) {
     var sheetUrl = TUNE_SHEET_URL || BALANCE_SHEET_URL;

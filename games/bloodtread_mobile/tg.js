@@ -11,14 +11,14 @@
 //   - window.__tg.saveState(obj) (injected on iframe load) pushes a save to the wrapper -> mirror + backend.
 //   - Paid products are NOT granted through a client hook. The wrapper waits for the server to apply the paid
 //     receipt to telegram_player_states, writes the refreshed state to WRAP_KEY, then reloads this iframe.
-import { META, econ, state } from './state.js?v=bm10';
-import { stats, saveMeta, setSaveHook } from './persistence.js?v=bm10';
-import { TG_MODE } from './flags.js?v=bm10';
-import { clampInt } from './lib/math.js?v=bm10';
-import { MAXTIER } from './data/upgrades.js?v=bm10';
-import { RELIC_SLOTS, STORE } from './data/loot.js?v=bm10';
-import { openPaidBox, openBountyBox, grantMythic } from './systems/loot.js?v=bm10';   // paid STORE pulls (box/mythic)
-import { setReveal } from './ui/screens.js?v=bm10';   // REVEAL overlay for a redeemed pull
+import { META, econ, state } from './state.js?v=bm9';
+import { stats, saveMeta, setSaveHook } from './persistence.js?v=bm9';
+import { TG_MODE } from './flags.js?v=bm9';
+import { clampInt } from './lib/math.js?v=bm9';
+import { MAXTIER } from './data/upgrades.js?v=bm9';
+import { RELIC_SLOTS, STORE } from './data/loot.js?v=bm9';
+import { openPaidBox, openBountyBox, grantMythic } from './systems/loot.js?v=bm9';   // paid STORE pulls (box/mythic)
+import { setReveal } from './ui/screens.js?v=bm9';   // REVEAL overlay for a redeemed pull
 
 var WRAP_KEY = 'bloodtread_v5';
 var AD_FREE_KEY = 'bloodtread_rebuild_adfree';

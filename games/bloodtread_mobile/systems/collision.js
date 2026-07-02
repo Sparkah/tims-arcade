@@ -3,19 +3,19 @@
 // mutates the rock-state arrays (obHp/obHitT/obBroken) by slot - the read-after-query flow stays here.
 // damageCurrentObstacle MUST live here (CALLGRAPH hard constraint). enemyObstacle{x,y} is the exported
 // scratch collideEnemyObstacles resolves into (updateEnemies reads it back the same tick).
-import { player, state, view, enemies } from '../state.js?v=bm10';
-import { BREAK_ENV } from '../flags.js?v=bm10';
-import { ROCK_DENSITY } from '../config.js?v=bm10';
-import { TWO_PI } from '../lib/math.js?v=bm10';
-import { rnd } from '../lib/rng.js?v=bm10';
-import { perf } from '../core/time.js?v=bm10';
-import { playSfx, playSfxOneOf } from '../audio.js?v=bm10';
+import { player, state, view, enemies } from '../state.js?v=bm9';
+import { BREAK_ENV } from '../flags.js?v=bm9';
+import { ROCK_DENSITY } from '../config.js?v=bm9';
+import { TWO_PI } from '../lib/math.js?v=bm9';
+import { rnd } from '../lib/rng.js?v=bm9';
+import { perf } from '../core/time.js?v=bm9';
+import { playSfx, playSfxOneOf } from '../audio.js?v=bm9';
 import {
   obS, decS, obHp, obHitT, obBroken, stateIndexFor, decStateIndexFor, obstacleAtCell, decalAtCell
-} from './environment.js?v=bm10';
-import { spawnParticle, spawnMote, spawnDecal } from '../fx/particles.js?v=bm10';
-import { spawnSplat, spawnGoreSpray } from '../fx/gore.js?v=bm10';
-import { spawnBoom } from '../fx/world.js?v=bm10';
+} from './environment.js?v=bm9';
+import { spawnParticle, spawnMote, spawnDecal } from '../fx/particles.js?v=bm9';
+import { spawnSplat, spawnGoreSpray } from '../fx/gore.js?v=bm9';
+import { spawnBoom } from '../fx/world.js?v=bm9';
 
 // scratch the enemy-vs-rock solver resolves into; updateEnemies reads enemyObstacle.x/.y after a hit.
 export var enemyObstacle = { x: 0, y: 0 };

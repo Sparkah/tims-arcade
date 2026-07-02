@@ -1,25 +1,25 @@
 // Full-screen overlays: MENU (hero cover + title + BloodForge entry), SHOP (BloodForge: weapons + tracks),
 // CHEAT, GAMEOVER, PAUSE. Each rebuilds its hit-rects on the shared `rects` object every draw. Shares the
 // panel/button/rounded-rect/tank-preview helpers + the BT_* palette with render/hud.js (function-only cycle).
-import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm10';
-import { fmtTime } from '../lib/math.js?v=bm10';
-import { TWO_PI } from '../lib/math.js?v=bm10';
-import { WEAPONS } from '../data/weapons.js?v=bm10';
-import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm10';   // for the DEV enemy-wave grid (name + per-type tint swatch)
-import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm10';
-import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm10';
-import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm10';
-import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm10';
-import { rects } from '../state.js?v=bm10';
+import { state, player, econ, META, view, hudImages, SAVE_INTEREST } from '../state.js?v=bm9';
+import { fmtTime } from '../lib/math.js?v=bm9';
+import { TWO_PI } from '../lib/math.js?v=bm9';
+import { WEAPONS } from '../data/weapons.js?v=bm9';
+import { T_NAME, SPRITE_T_R, SPRITE_T_G, SPRITE_T_B } from '../data/enemies.js?v=bm9';   // for the DEV enemy-wave grid (name + per-type tint swatch)
+import { MAXTIER, TRACKS } from '../data/upgrades.js?v=bm9';
+import { weaponName, trackCost, trackEffect } from '../game/meta.js?v=bm9';
+import { RARITY, R_MYTHIC, PITY_HARD, RELIC_SLOTS, SKINS, RELICS, STORE, GEAR_SLOTS, GEAR_TIERS, GEAR_MERGE } from '../data/loot.js?v=bm9';
+import { SHARD_RELIC_COST } from '../systems/loot.js?v=bm9';
+import { rects } from '../state.js?v=bm9';
 import {
   BT_CRIM, BT_CRIM_HI, BT_BLOOD, BT_BLOOD_DK, BT_BONE, BT_BONE_DIM, BT_IRON, BT_IRON_LO,
   drawPanel, drawButton, drawHudTankPreview, hudRR, drawTintedTankPreview, drawRelicIcon, blitSheetCell
-} from '../render/hud.js?v=bm10';
-import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm10';
-import { hud } from '../render/context.js?v=bm10';
-import { drawMenuGuide } from '../tutorial.js?v=bm10';   // one-time post-death menu guide (no-op until first death / once seen)
-import { CHEATS_ENABLED } from '../flags.js?v=bm10';
-import { playTone } from '../audio.js?v=bm10';   // gacha roll ticks + payoff
+} from '../render/hud.js?v=bm9';
+import { SKIN_BY_ID, RELIC_BY_ID, DEFAULT_TINT } from '../data/loot.js?v=bm9';
+import { hud } from '../render/context.js?v=bm9';
+import { drawMenuGuide } from '../tutorial.js?v=bm9';   // one-time post-death menu guide (no-op until first death / once seen)
+import { CHEATS_ENABLED } from '../flags.js?v=bm9';
+import { playTone } from '../audio.js?v=bm9';   // gacha roll ticks + payoff
 
   export function drawMenu() {
     var bg = menuBgSource();
@@ -728,37 +728,15 @@ import { playTone } from '../audio.js?v=bm10';   // gacha roll ticks + payoff
     hud.textAlign = 'start';
   }
 
-  // #20 CLOSE CONTROL: an explicit X (top-right of the screen) drawn on EVERY gacha reveal variant - the single
-  // item card, the gear-case roll, and the bounty haul - so a Playgama moderator always sees a close control,
-  // even mid-roll before the CLAIM button appears. Sets rects.revealClose; routed in input.js (REVEAL branch)
-  // back to the vault. Additive: the CLAIM button + existing tap handling still work. Drawn LAST so it sits on
-  // top of the overlay art (the reveal variants each paint their own full-screen backdrop first).
-  function drawRevealClose() {
-    var s = Math.max(30, Math.min(42, view.cssW * 0.1));
-    var rx = view.cssW - s - 12, ry = Math.max(12, view.cssH * 0.055);
-    hud.save();
-    hud.fillStyle = 'rgba(10,5,4,0.85)';
-    hud.strokeStyle = BT_CRIM_HI; hud.lineWidth = 2;
-    hud.beginPath(); hud.arc(rx + s * 0.5, ry + s * 0.5, s * 0.5, 0, TWO_PI); hud.fill(); hud.stroke();
-    hud.strokeStyle = '#fff'; hud.lineWidth = Math.max(2.5, s * 0.12); hud.lineCap = 'round';
-    var p = s * 0.31;
-    hud.beginPath();
-    hud.moveTo(rx + p, ry + p); hud.lineTo(rx + s - p, ry + s - p);
-    hud.moveTo(rx + s - p, ry + p); hud.lineTo(rx + p, ry + s - p);
-    hud.stroke();
-    hud.restore();
-    rects.revealClose = { x: rx, y: ry, w: s, h: s };
-  }
-
   export function drawReveal() {
-    if (revealCard && revealCard.kind === 'gear' && revealCard.strip) { drawGearRoll(); drawRevealClose(); return; }   // box opens -> gacha case roll
-    if (revealCard && revealCard.kind === 'bounty') { drawBountyReveal(); drawRevealClose(); return; }                 // bounty box -> haul grid
+    if (revealCard && revealCard.kind === 'gear' && revealCard.strip) { drawGearRoll(); return; }   // box opens -> gacha case roll
+    if (revealCard && revealCard.kind === 'bounty') { drawBountyReveal(); return; }                 // bounty box -> haul grid
     vaultBackdrop();
     hud.fillStyle = 'rgba(6,2,2,0.5)'; hud.fillRect(0, 0, view.cssW, view.cssH);
     var c = revealCard;
     var cx = view.cssW * 0.5;
     var clW = Math.min(300, view.cssW - 64), clH = 52;
-    if (!c) { rects.vaultClaim = drawButton((view.cssW - clW) * 0.5, view.cssH * 0.62, clW, clH, 'CLAIM', true); drawRevealClose(); return; }
+    if (!c) { rects.vaultClaim = drawButton((view.cssW - clW) * 0.5, view.cssH * 0.62, clW, clH, 'CLAIM', true); return; }
     var el = Math.max(0, (perfNow() - revealStart) / 1000);
     var grow = el < 0.45 ? (el / 0.45) : 1;
     var ease = 1 - Math.pow(1 - Math.min(1, el / 0.34), 3);
@@ -820,7 +798,6 @@ import { playTone } from '../audio.js?v=bm10';   // gacha roll ticks + payoff
 
     var label = econ.caches > 0 ? ('CLAIM   -   ' + econ.caches + ' LEFT') : 'CLAIM';
     rects.vaultClaim = drawButton((view.cssW - clW) * 0.5, Math.min(view.cssH - clH - 14, byc + chh + 14), clW, clH, label, true);
-    drawRevealClose();   // #20 explicit X (top-right), on top of the card
     hud.textAlign = 'start';
   }
 

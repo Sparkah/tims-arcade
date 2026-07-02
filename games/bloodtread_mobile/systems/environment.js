@@ -2,9 +2,9 @@
 // open-addressed hash storing per-rock HP/broken state (obKeys..) and a set of "crushed" decals (decKeys).
 // decalAtCell/obstacleAtCell return TRUE + populate the EXPORTED scratch objects obS (rock) / decS (decal)
 // for the caller to read (render/world + systems/collision). resetEnvironmentState clears both tables.
-import { state } from '../state.js?v=bm10';
-import { OLD_ENV, BREAK_ENV } from '../flags.js?v=bm10';
-import { ROCK_DENSITY, DECAL_DENSITY } from '../config.js?v=bm10';
+import { state } from '../state.js?v=bm9';
+import { OLD_ENV, BREAK_ENV } from '../flags.js?v=bm9';
+import { ROCK_DENSITY, DECAL_DENSITY } from '../config.js?v=bm9';
 
 var OB_EMPTY = -2147483648;
 var OB_STATE_CAP = 1024;

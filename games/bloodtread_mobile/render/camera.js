@@ -2,10 +2,10 @@
 // updateCameraMetrics() recomputes zoom + worldspace viewport from view.cssW/cssH and the device
 // profile, and also derives the joystick-active flag + radius onto the input singleton. The projection
 // helpers are pure reads of view.cameraZoom + player.x/y; called all over render + input + combat.
-import { view, player, input, state } from '../state.js?v=bm10';
-import { JOYSTICK_ALLOWED, TOUCH_DEVICE, ZOOM_OVERRIDE, qs } from '../flags.js?v=bm10';
-import { LASER_RANGE_MULT, SHAKE_ENABLED, MAX_SHAKE_PX } from '../config.js?v=bm10';
-import { clamp } from '../lib/math.js?v=bm10';
+import { view, player, input, state } from '../state.js?v=bm9';
+import { JOYSTICK_ALLOWED, TOUCH_DEVICE, ZOOM_OVERRIDE, qs } from '../flags.js?v=bm9';
+import { LASER_RANGE_MULT, SHAKE_ENABLED, MAX_SHAKE_PX } from '../config.js?v=bm9';
+import { clamp } from '../lib/math.js?v=bm9';
 
 export function updateCameraMetrics() {
   var portrait = view.cssH >= view.cssW;
