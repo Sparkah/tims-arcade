@@ -433,8 +433,11 @@ import { playTone } from '../audio.js?v=bm10';   // gacha roll ticks + payoff
       else { rects.vaultShard.afford = true; }
       cy += bbH + 8;
     } else { rects.vaultShard = null; }
-    rects.vaultStore = drawButton(x, cy, w, bbH, 'BLOOD MARKET   -   BOXES + MYTHIC', false);
-    cy += bbH + 8;
+    // Playgama web build (Tim 2026-07-02): Telegram Stars/TON purchases don't work off-Telegram ("purchases with
+    // Stars is awful"), so the BLOOD MARKET entry is HIDDEN and STORE is left unreachable - rects.vaultStore=null
+    // and input.js guards on it (`rects.vaultStore &&`), so mode 'STORE' can no longer be entered. drawStore/STORE
+    // code stays in place but dead (minimal, reversible). The free daily-streak cases are the retention driver.
+    rects.vaultStore = null;
     rects.vaultBack = drawButton(x, Math.min(view.cssH - bbH - 10, cy), w, bbH, 'BACK', false);
     drawMergeAnim();   // GEAR merge animation overlay (5 pieces -> blood burst -> the new tier)
     hud.textAlign = 'start';
@@ -821,6 +824,66 @@ import { playTone } from '../audio.js?v=bm10';   // gacha roll ticks + payoff
     var label = econ.caches > 0 ? ('CLAIM   -   ' + econ.caches + ' LEFT') : 'CLAIM';
     rects.vaultClaim = drawButton((view.cssW - clW) * 0.5, Math.min(view.cssH - clH - 14, byc + chh + 14), clW, clH, label, true);
     drawRevealClose();   // #20 explicit X (top-right), on top of the card
+    hud.textAlign = 'start';
+  }
+
+  // DAILY REWARD (Playgama login-streak gift): a prominent overlay shown ONCE per fresh-day login (raised in
+  // main.js boot when grantDailyCache() banked a cache), surfacing the free Gore Case it already granted. Shows the
+  // D1..D7 streak track (current day lit, day 7 ringed as the bonus), the reward line, and a big CLAIM + OPEN
+  // button (rects.dailyClaim; input.js opens ONE cache into the normal gacha REVEAL). Built from the same hud
+  // primitives + crimson palette as drawReveal / drawMenuGuide so it reads as part of the vault flow.
+  export function drawDailyReward() {
+    vaultBackdrop();
+    hud.fillStyle = 'rgba(6,2,2,0.72)'; hud.fillRect(0, 0, view.cssW, view.cssH);
+    var g = state.dailyGrant || { caches: 1, streak: 1 };
+    var streak = g.streak || 1;
+    var day = ((streak - 1) % 7) + 1;         // 1..7 position on the weekly track (streak is always >= 1)
+    var bonus = (g.caches || 1) >= 2;         // 7th-consecutive-day bonus grants a 2nd cache
+    var cx = view.cssW * 0.5;
+
+    // card panel (crimson-ringed blood-metal slab, matching drawReveal)
+    var w = Math.min(420, view.cssW - 36);
+    var x = (view.cssW - w) * 0.5;
+    var h = Math.min(view.cssH * 0.64, 360);
+    var y = (view.cssH - h) * 0.5;
+    var cg = hud.createLinearGradient(x, y, x, y + h);
+    cg.addColorStop(0, '#1b0f0c'); cg.addColorStop(1, '#0c0706');
+    hud.fillStyle = cg; hudRR(x, y, w, h, 16); hud.fill();
+    hud.lineWidth = 3; hud.strokeStyle = BT_CRIM_HI; hudRR(x + 0.5, y + 0.5, w - 1, h - 1, 15.5); hud.stroke();
+
+    hud.textAlign = 'center'; hud.textBaseline = 'middle';
+    // title + streak subhead
+    hud.shadowColor = BT_CRIM; hud.shadowBlur = 16; hud.fillStyle = '#fff';
+    hud.font = '900 ' + Math.max(24, Math.min(38, w * 0.11)) + 'px sans-serif';
+    hud.fillText('DAILY CASE', cx, y + h * 0.13);
+    hud.shadowBlur = 0;
+    hud.fillStyle = BT_BONE_DIM; hud.font = 'bold ' + Math.max(11, Math.min(14, w * 0.036)) + 'px sans-serif';
+    hud.fillText('LOGIN STREAK  -  DAY ' + streak, cx, y + h * 0.225);
+
+    // D1..D7 dot track: past days filled crim, the current day a bright enlarged pip, future days dark. Day 7 is
+    // ringed gold as the bonus milestone. A thin rail connects them.
+    var n = 7, dgap = Math.min(46, (w - 44) / (n - 1)), dr = Math.max(9, Math.min(14, dgap * 0.30));
+    var trackW = dgap * (n - 1), dx0 = cx - trackW * 0.5, dy = y + h * 0.42;
+    hud.strokeStyle = '#4a2a26'; hud.lineWidth = 2;
+    hud.beginPath(); hud.moveTo(dx0, dy); hud.lineTo(dx0 + trackW, dy); hud.stroke();
+    for (var i = 0; i < n; i++) {
+      var ddx = dx0 + i * dgap, dnum = i + 1, isCur = dnum === day, isPast = dnum < day, isSeventh = dnum === 7;
+      hud.beginPath(); hud.arc(ddx, dy, dr * (isCur ? 1.3 : 1), 0, TWO_PI);
+      hud.fillStyle = isCur ? BT_CRIM_HI : (isPast ? BT_CRIM : '#241a16'); hud.fill();
+      hud.lineWidth = isSeventh ? 2.4 : 1.4; hud.strokeStyle = isSeventh ? '#ffcf6a' : (isCur ? '#fff' : '#5a3a32'); hud.stroke();
+      hud.fillStyle = (isCur || isPast) ? '#fff' : BT_BONE_DIM; hud.font = '800 ' + Math.max(9, dr * 0.86) + 'px sans-serif';
+      hud.fillText('D' + dnum, ddx, dy + dr + 13);
+    }
+
+    // reward line + return-daily nudge
+    hud.fillStyle = '#ffcf6a'; hud.font = '900 ' + Math.max(16, Math.min(24, w * 0.062)) + 'px sans-serif';
+    hud.fillText(bonus ? '2 GORE CASES!' : 'FREE GORE CASE', cx, y + h * 0.63);
+    hud.fillStyle = BT_BONE_DIM; hud.font = Math.max(10, Math.min(13, w * 0.033)) + 'px sans-serif';
+    hud.fillText(bonus ? 'day-7 bonus  -  come back daily' : 'come back daily  -  day 7 gives 2', cx, y + h * 0.72);
+
+    // big CLAIM + OPEN (primary) - opens ONE cache into the gacha reveal (input.js DAILYREWARD branch)
+    var clW = Math.min(w - 40, 300);
+    rects.dailyClaim = drawButton(cx - clW * 0.5, y + h - 66, clW, 50, 'CLAIM + OPEN', true);
     hud.textAlign = 'start';
   }
 

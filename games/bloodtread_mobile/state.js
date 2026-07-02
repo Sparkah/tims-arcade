@@ -225,7 +225,11 @@ export var state = {
                              //   20:00 run (clock reset, enemies cleared), harder + a shifted ground palette. Endless map-progression.
                              //   Reset to 1 by a genuine fresh run (resetGame); CARRIED ACROSS the Continue restart (game/session.js).
   mapReachedFired: 0,        // bitmask of map indices (2..N) whose Run:MapReached design event already fired (one-shot per session)
-  runId: ''
+  runId: '',
+  // DAILY REWARD (Playgama build): set at boot to grantDailyCache()'s {caches, streak} on a fresh-day login so the
+  // DAILYREWARD overlay can show the streak day + reward; nulled once claimed (main.js boot / input.js CLAIM). null
+  // = no gift this boot (already claimed today), so the overlay never shows / re-fires.
+  dailyGrant: null
 };
 
 // WIN target: survive 20:00 (1200s) to trigger the victory state (the run is endless until then). EACH map is
@@ -306,6 +310,7 @@ export var rects = {
   // revealClose / menuGuideClose = the explicit X close controls (Playgama #20) on the gacha reveal + the
   // post-death tutorial menu guide.
   vault: null, vaultOpen: null, vaultBack: null, vaultClaim: null, vaultShard: null, vaultStore: null, revealClose: null, menuGuideClose: null,
+  dailyClaim: null,   // DAILY REWARD overlay's CLAIM + OPEN hit-rect (Playgama login-streak gift; routed in input.js)
   vaultSkins: [], vaultRelics: [], vaultGear: [], store: [], storeBack: null,
   shop: [], weapons: []
 };

@@ -305,7 +305,11 @@ import { startLoop } from './core/loop.js?v=bm10';
   loadMeta();
   loadStats();
   tgHydrate();   // Telegram mode only: overlay the player's cloud save (merge-max) + drain queued product grants
-  grantDailyCache();   // GORE CACHE: once-per-day free cache + login streak (after the cloud save is hydrated so it acts on merged state)
+  // GORE CACHE: once-per-day free cache + login streak (after the cloud save is hydrated so it acts on merged
+  // state). CAPTURE the return (Playgama daily-reward): non-null {caches,streak} on a fresh-day login, null if
+  // already claimed today. Stashed on state so finishBoot can raise the DAILY REWARD overlay before auto-start.
+  var dailyGrant = grantDailyCache();
+  state.dailyGrant = dailyGrant || null;
   if (UNLOCK_ALL) cheatUnlockAll();   // ?unlockall - Tim's "cheated all unlocked" review build (local save only)
   if (LOCAL_BUILD) window.__unlockAll = function () { cheatUnlockAll(); return 'ALL UNLOCKED - open the vault / forge'; };   // console convenience - LOCAL_BUILD only, never exposed on production
   initAnalytics();
@@ -316,7 +320,17 @@ import { startLoop } from './core/loop.js?v=bm10';
   // the defaults intact on any failure - see balance.js), and finishBoot runs in BOTH the .then and .catch so a
   // bad sheet can't leave the game un-booted. Until the loop starts, nothing reads BALANCE, so the wait is safe.
   function finishBoot() {
-    resetGame(AUTO_START, START_MIN);
+    // Fresh-day login gift (Playgama build): if grantDailyCache() banked a cache THIS boot, interrupt the
+    // straight-to-gameplay auto-start and raise the DAILY REWARD overlay first; the menu + play stay reachable
+    // after it's claimed. Skipped for the LOCAL render/logic DIAG harnesses (DIAG is '' on every public host, so
+    // the gift always shows there). grantDailyCache already no-ops once claimed today, so this can't re-fire on a
+    // same-day reload. resetGame(false,0) boots menu-ready with NO run, so no spurious Run:Start telemetry fires.
+    if (state.dailyGrant && !DIAG) {
+      resetGame(false, 0);
+      state.mode = 'DAILYREWARD';
+    } else {
+      resetGame(AUTO_START, START_MIN);
+    }
     startLoop();
     // Playgama Bridge game_ready gate: boot is complete (assets + meta + analytics loaded, the render loop is
     // running). The playgama-sdk-snippet polls for this flag, then sends platform.sendMessage('game_ready').

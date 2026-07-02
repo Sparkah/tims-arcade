@@ -207,6 +207,19 @@ import { trackAnalyticsVictoryButton } from './analytics.js?v=bm10';
       }
       return true;
     }
+    if (state.mode === 'DAILYREWARD') {
+      // DAILY REWARD login gift (Playgama build): CLAIM + OPEN cracks ONE of the free daily caches straight into
+      // the normal gacha REVEAL (setReveal + mode 'REVEAL'); any 7th-day bonus cache stays in econ.caches for the
+      // Gore Vault. Clear state.dailyGrant so the overlay can't re-fire this session. If for any reason no cache is
+      // available (defensive), fall through to the MENU. Modal: taps elsewhere on the gift are swallowed.
+      if (inRect(x, y, rects.dailyClaim)) {
+        state.dailyGrant = null;
+        var dcard = openCache();
+        if (dcard) { setReveal(dcard); state.mode = 'REVEAL'; playTone(dcard.rarity >= 2 ? 660 : 430, 0.13, 0.05); }
+        else state.mode = 'MENU';
+      }
+      return true;
+    }
     if (state.mode === 'VAULT') {
       if (mergeAnimBusy()) return true;   // swallow taps while a gear merge animates
       if (inRect(x, y, rects.vaultOpen)) {

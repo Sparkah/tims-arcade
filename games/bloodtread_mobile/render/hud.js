@@ -18,7 +18,7 @@ import { perf, ring, ringState } from '../core/time.js?v=bm10';
 import { weaponAtlasTier, weaponRow } from '../game/meta.js?v=bm10';
 import { desiredEnemies, currentLeechLevel } from '../systems/shared.js?v=bm10';
 import { layoutUpgradeCards } from '../systems/progress.js?v=bm10';
-import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore } from '../ui/screens.js?v=bm10';
+import { drawMenu, drawShop, drawCheat, drawGameOver, drawPause, drawWin, drawVault, drawReveal, drawStore, drawDailyReward } from '../ui/screens.js?v=bm10';
 import { drawIntroHint } from '../tutorial.js?v=bm10';   // first-run drive/auto-fire hint (no-op once seen)
 
 // colour palette - mirrors the original Bloodtread COL object (shared with ui/screens.js)
@@ -398,6 +398,11 @@ export var BT_IRON_LO = '#241f1a';
     }
     if (state.mode === 'WIN') {
       drawWin();
+      perf.hudMs = performance.now() - t0;
+      return;
+    }
+    if (state.mode === 'DAILYREWARD') {
+      drawDailyReward();
       perf.hudMs = performance.now() - t0;
       return;
     }
