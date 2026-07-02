@@ -5,27 +5,24 @@
 // Returns: 204
 //
 // Client measures visible time in 5-second ticks (see play.html) and flushes
-// every 2 minutes or on pagehide. So the server receives ~1 write per 2 min
-// per active visitor but the COUNT reflects real elapsed time at ~5s accuracy.
-// This gives a 30-second bounce credit of 30 seconds (not 0 or 120).
+// every 2 minutes for the signed-in economy, plus one FINAL flush when the tab
+// is hidden / closed.
 //
-// Two writes per heartbeat:
-//   seconds:<slug>            — cumulative across all time
-//   daily:<slug>:<YYYY-MM-DD> — bucketed by day for the trend chart
-//
-// Cost math (free tier = 1k KV writes/day):
-//   200 plays/day × 5 min avg × 1 flush per 2 min × 2 writes = 1000 writes/day.
-//   Once traffic exceeds this we migrate to D1 (100k writes/day free).
-//
-// Anti-abuse: 90 heartbeats / IP / hour. A single tab produces ~30/hour, so
-// this allows for shared connections (NAT) while blocking obvious bots.
+// KV write policy (2026-07-02 rework — free tier is 1k writes/day, ONE shared
+// namespace). Game telemetry (playtime, funnels, retention) is GameAnalytics's
+// job now; these KV counters exist ONLY to rank/sort the gallery + trending:
+//   seconds:<slug> / daily:<slug>:<date>  — written ONCE per session, and only
+//     when the client sends `playSeconds` on its final flush (was 2 writes per
+//     2-min flush; that fan-out plus the rate-limiter write drained the budget).
+//   meta:<uid>  — token economy + vote-gate banking, per flush, signed-in only
+//     (self-gated to when a minute lands / the gate is crossed).
+// Removed here: the per-request rate-limiter write and the retention cohort
+// write (D1/D7 live in GameAnalytics). No console output (Yandex rule).
 
 import { parseCookie } from '../_lib/cookie.js';
 import { readSession } from './_session.js';
 import { creditPlayAndTokens } from '../_lib/meta.js';
 import { isValidSlug } from '../_lib/validate.js';
-import { recordActiveDay } from '../_lib/cohort.js';
-import { checkRate } from '../_lib/rateLimit.js';
 import { SOCIAL_SLUGS, touchPresence } from '../_lib/social.js';
 
 // Token credit and the per-game vote-gate timer share ONE meta write per flush
@@ -41,9 +38,15 @@ export async function onRequestPost({ request, env }) {
   const slug = String(body.slug || '');
   if (!isValidSlug(slug)) return new Response('bad slug', { status: 400 });
 
-  // Clamp to [0, 300] — caps anyone trying to spam huge numbers
+  // `seconds` = per-flush active delta; drives the signed-in token economy +
+  // vote-gate banking (creditPlayAndTokens). Clamp to [0, 300].
   const seconds = Math.max(0, Math.min(300, parseInt(body.seconds) || 0));
-  if (seconds === 0) return new Response(null, { status: 204 });
+  // `playSeconds` = whole-session active time, sent ONLY on the client's final
+  // flush (tab hidden / pagehide). It is the ONLY input that writes the
+  // seconds:/daily: gallery-ranking counters, so playtime now costs ~1 write
+  // PER SESSION instead of one per 2-min flush. Clamp to a sane ceiling (4h).
+  const playSeconds = Math.max(0, Math.min(4 * 3600, parseInt(body.playSeconds) || 0));
+  if (seconds === 0 && playSeconds === 0) return new Response(null, { status: 204 });
 
   // Exclude the OWNER's own traffic from ALL analytics (player counts, retention,
   // playtime) when signed in as an internal account -- his handful of devices
@@ -59,21 +62,22 @@ export async function onRequestPost({ request, env }) {
     }
   }
 
-  // rate limit by IP
-  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
-  const rateKey = `hbrate:${ip}:${Math.floor(Date.now() / 3600000)}`;
-  if (!await checkRate(env, rateKey, 90, 7200)) return new Response('rate limit', { status: 429 });
-
-  // cumulative
-  const cumKey = `seconds:${slug}`;
-  const cum = parseInt(await env.VOTES.get(cumKey)) || 0;
-  await env.VOTES.put(cumKey, String(cum + seconds));
-
-  // per-day bucket (60-day TTL so stale keys don't pile up)
+  // Playtime counters (gallery ranking + trending hero). Written ONLY when the
+  // client reports playSeconds on its final flush, so a whole session is ~2
+  // writes here rather than 2 per 2-min flush. No per-request rate-limiter write
+  // (that anti-abuse counter was itself a KV write on every heartbeat); rely on
+  // Cloudflare's platform protection + the wall-clock clamp in the economy.
   const dateUtc = new Date().toISOString().slice(0, 10);
-  const dayKey = `daily:${slug}:${dateUtc}`;
-  const day = parseInt(await env.VOTES.get(dayKey)) || 0;
-  await env.VOTES.put(dayKey, String(day + seconds), { expirationTtl: 60 * 24 * 60 * 60 });
+  if (playSeconds > 0) {
+    const cumKey = `seconds:${slug}`;
+    const cum = parseInt(await env.VOTES.get(cumKey)) || 0;
+    await env.VOTES.put(cumKey, String(cum + playSeconds));
+
+    // per-day bucket (60-day TTL so stale keys don't pile up)
+    const dayKey = `daily:${slug}:${dateUtc}`;
+    const day = parseInt(await env.VOTES.get(dayKey)) || 0;
+    await env.VOTES.put(dayKey, String(day + playSeconds), { expirationTtl: 60 * 24 * 60 * 60 });
+  }
 
   // Credit meta-layer tokens: 1 token per full minute of play. Featured
   // Challenge of the day awards 2× — we look up the featured slug from
@@ -99,10 +103,9 @@ export async function onRequestPost({ request, env }) {
       await creditPlayAndTokens(env, uid, { slug, seconds, featuredMult });
     }
 
-    // Retention cohort: log today as an active day for this uid. recordActiveDay
-    // write-gates to ~1 KV write/uid/day (no-ops once today is already recorded),
-    // and ANY visible-time heartbeat counts the return so short sessions aren't missed.
-    await recordActiveDay(env, uid, dateUtc);
+    // (Retention cohort removed 2026-07-02: D1/D7 now live in GameAnalytics, and
+    // the per-uid cohort: keys plus their list() scan were a top KV write+list
+    // drain. See admin/cohorts.js for the retired reader.)
 
     // Social presence pilot (allowlisted slugs only): refresh this uid's
     // "playing now" liveness off the SAME flush - no extra client traffic.

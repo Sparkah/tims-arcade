@@ -1,97 +1,31 @@
-// GET /api/admin/cohorts[?horizons=1,3,7,14,30][&nocache=1]
+// GET /api/admin/cohorts  — RETIRED 2026-07-02.
 //
-// Anonymous-cohort D1/D7/... retention for the admin dashboard. Admin-gated
-// like stats.js. Reads the `cohort:<uid>` keys written by the
-// heartbeat capture (see _lib/cohort.js) and computes Dn per first-seen cohort at
-// read time. READ-ONLY — no KV writes, so no write-budget impact.
+// Anonymous D1/D7 retention now lives in GameAnalytics (per-game) — the
+// decision-grade source once games are live. The old KV implementation wrote a
+// cohort:<uid> key per active user per day AND list()-scanned all of them on
+// every admin open, a top consumer of BOTH the 1k/day KV write budget and the
+// 1k/day KV LIST budget. The heartbeat capture write has been removed (see
+// functions/api/heartbeat.js); this reader no longer scans KV.
 //
-// env.INTERNAL_UIDS (comma-separated) are excluded so Tim's own plays don't skew it.
-//
-// CAVEAT (echoed in the payload): at low traffic this is directional plumbing, not
-// decision-grade. At scale the per-key fan-out gets slow -> migrate to D1.
-//
-// COST: this is the heaviest admin scan — up to 25 KV list pages of `cohort:` PLUS a
-// get per key. Opening the admin dashboard re-ran the whole fan-out every time, a top
-// consumer of the 1k/day free KV LIST cap (that is the 500 you get once it is hit:
-// list() throws inside the Worker -> CF 1101). Edge-cache the computed result 5 min so
-// repeat refreshes are free. Auth is checked ABOVE the cache, so only an authorized
-// caller ever reaches it; the key binds the normalized horizons only (NOT the token).
-// `?nocache=1` forces a fresh scan (the refresh button) and re-warms the shared entry.
+// The endpoint is kept (admin-gated) so the dashboard fetch doesn't 404; it now
+// returns an empty, clearly-labelled payload pointing at GameAnalytics.
 
-import { jsonError } from '../../_lib/response.js';
-import { computeCohorts, dateUtc } from '../../_lib/cohort.js';
-import { edgeCached } from '../../_lib/edgecache.js';
 import { requireAdmin } from '../../_lib/adminAuth.js';
 
 export async function onRequestGet({ request, env }) {
-  const url = new URL(request.url);
   const guard = await requireAdmin(request, env);
   if (guard) return guard;
 
-  const horizons = normalizeHorizons(url.searchParams.get('horizons'));
-  const bypass = url.searchParams.get('nocache') === '1';
-
-  // Auth is verified ABOVE, so the cache is only ever reached by an authorized
-  // caller. Do not bind any credential into the key; key by normalized horizons
-  // only.
-  return edgeCached(
-    `/api-admin-cohorts?z=${horizons.join('.')}`,
-    { bypass },
-    () => buildCohorts(env, horizons),
-  );
-}
-
-// Normalize horizons to a deduped, sorted list of bounded positive integers so
-// the cache key is canonical and collision-free: "1.2,3" and "1,3" both fold to
-// [1,3], and fractional inputs can't alias via join('.') ([1.2,3] vs [1,2.3]).
-function normalizeHorizons(param) {
-  const cleaned = [...new Set(
-    (param ? String(param).split(',') : [])
-      .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isInteger(n) && n > 0 && n <= 365)
-  )].sort((a, b) => a - b).slice(0, 12);
-  return cleaned.length ? cleaned : [1, 3, 7, 14, 30];
-}
-
-async function buildCohorts(env, horizons) {
-  // Collect all cohort:<uid> entries (paginate the KV list; bounded for V1).
-  const entries = [];
-  let cursor = undefined, complete = false, pages = 0;
-  while (!complete && pages < 25) {
-    const res = await env.VOTES.list({ prefix: 'cohort:', cursor, limit: 1000 });
-    for (const k of res.keys) {
-      const uid = k.name.slice(7); // 'cohort:'.length === 7
-      let v = null;
-      try { v = JSON.parse((await env.VOTES.get(k.name)) || 'null'); } catch { v = null; }
-      if (v && v.f) entries.push({ uid, f: v.f, d: Array.isArray(v.d) ? v.d : [] });
-    }
-    complete = res.list_complete;
-    cursor = res.cursor;
-    pages++;
-  }
-
-  const internal = new Set(
-    String(env.INTERNAL_UIDS || '').split(',').map((s) => s.trim()).filter(Boolean)
-  );
-
-  const result = computeCohorts(entries, {
-    today: dateUtc(Date.now()),
-    internal,
-    horizons,
-    confidentN: 10,
-  });
-
   return new Response(JSON.stringify({
-    ...result,
-    horizons,
-    internalExcluded: internal.size,
-    truncated: !complete, // true if we hit the 25-page bound (very high user count)
-    caveat: 'Directional at low traffic, not decision-grade. Real D1/D7 come from platforms once games are live.',
+    retired: true,
+    cohorts: [],
+    summary: { totalUsers: 0, byHorizon: {} },
+    horizons: [1, 3, 7, 14, 30],
+    caveat: 'Retired 2026-07-02. Retention (D1/D7) now lives in GameAnalytics; the KV cohort scan was removed to protect the free write + list budgets.',
     generatedAt: new Date().toISOString(),
   }), {
     headers: {
       'content-type': 'application/json',
-      // browser must not cache admin data locally; the shared edge entry lives 5 min.
       'cache-control': 'public, max-age=0, s-maxage=300',
     },
   });

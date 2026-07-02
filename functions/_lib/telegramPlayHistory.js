@@ -35,54 +35,62 @@ export async function recordTelegramGamePlay(env, user, slug, profile = 'prod') 
   if (!env || !userId || !slug) return [];
 
   const at = nowIso();
-  const profileRow = {
-    ...publicTelegramUser(user),
-    botProfile: profile === 'test' ? 'test' : 'prod',
-    updatedAt: at,
-  };
-  await env.VOTES.put(TG_PLAYER_PROFILE_PREFIX + userId, JSON.stringify(profileRow));
+  const today = at.slice(0, 10);
+  const pub = publicTelegramUser(user);
+  const botProfile = profile === 'test' ? 'test' : 'prod';
+
+  // Throttle 2026-07-02: this used to write 3 KV keys on EVERY mini-app open,
+  // which a Telegram broadcast turned into hundreds of writes in minutes and
+  // helped drain the 1k/day free budget. Each record now refreshes at most once
+  // per UTC day per (user, game), trading a cheap KV read for the write. Exact
+  // per-open play tallies live in GameAnalytics; this KV data only powers the
+  // admin "who played what" targeting view.
+  const profileKey = TG_PLAYER_PROFILE_PREFIX + userId;
+  const existingProfile = await env.VOTES.get(profileKey, 'json').catch(() => null);
+  if (!existingProfile || String(existingProfile.updatedAt || '').slice(0, 10) !== today) {
+    await env.VOTES.put(profileKey, JSON.stringify({ ...pub, botProfile, updatedAt: at }));
+  }
 
   const playerKey = TG_PLAYER_PLAYED_PREFIX + userId;
   const current = await env.VOTES.get(playerKey, 'json').catch(() => null);
   const list = Array.isArray(current) ? current : [];
   const existing = list.find((row) => row && row.slug === slug);
-  if (existing) {
-    existing.plays = Math.max(1, Number(existing.plays || 0) + 1);
-    existing.lastPlayedAt = at;
-    existing.botProfile = profileRow.botProfile;
-  } else {
-    list.unshift({
-      slug,
-      plays: 1,
-      firstPlayedAt: at,
-      lastPlayedAt: at,
-      botProfile: profileRow.botProfile,
-    });
+  let playerList = list.slice(0, MAX_PLAYER_GAMES);
+  if (!existing || String(existing.lastPlayedAt || '').slice(0, 10) !== today) {
+    if (existing) {
+      existing.plays = Math.max(1, Number(existing.plays || 0) + 1);
+      existing.lastPlayedAt = at;
+      existing.botProfile = botProfile;
+    } else {
+      list.unshift({ slug, plays: 1, firstPlayedAt: at, lastPlayedAt: at, botProfile });
+    }
+    list.sort((a, b) => String(b.lastPlayedAt || '').localeCompare(String(a.lastPlayedAt || '')));
+    playerList = list.slice(0, MAX_PLAYER_GAMES);
+    await env.VOTES.put(playerKey, JSON.stringify(playerList));
   }
-  list.sort((a, b) => String(b.lastPlayedAt || '').localeCompare(String(a.lastPlayedAt || '')));
-  const playerList = list.slice(0, MAX_PLAYER_GAMES);
-  await env.VOTES.put(playerKey, JSON.stringify(playerList));
 
   const gameKey = TG_GAME_PLAYERS_PREFIX + slug;
   const gameCurrent = await env.VOTES.get(gameKey, 'json').catch(() => null);
   const gameList = Array.isArray(gameCurrent) ? gameCurrent : [];
   const gameExisting = gameList.find((row) => row && String(row.telegramUserId || '') === userId);
-  if (gameExisting) {
-    gameExisting.plays = Math.max(1, Number(gameExisting.plays || 0) + 1);
-    gameExisting.lastPlayedAt = at;
-    gameExisting.botProfile = profileRow.botProfile;
-  } else {
-    gameList.unshift({
-      telegramUserId: userId,
-      username: profileRow.username,
-      plays: 1,
-      firstPlayedAt: at,
-      lastPlayedAt: at,
-      botProfile: profileRow.botProfile,
-    });
+  if (!gameExisting || String(gameExisting.lastPlayedAt || '').slice(0, 10) !== today) {
+    if (gameExisting) {
+      gameExisting.plays = Math.max(1, Number(gameExisting.plays || 0) + 1);
+      gameExisting.lastPlayedAt = at;
+      gameExisting.botProfile = botProfile;
+    } else {
+      gameList.unshift({
+        telegramUserId: userId,
+        username: pub.username,
+        plays: 1,
+        firstPlayedAt: at,
+        lastPlayedAt: at,
+        botProfile,
+      });
+    }
+    gameList.sort((a, b) => String(b.lastPlayedAt || '').localeCompare(String(a.lastPlayedAt || '')));
+    await env.VOTES.put(gameKey, JSON.stringify(gameList.slice(0, MAX_GAME_PLAYERS)));
   }
-  gameList.sort((a, b) => String(b.lastPlayedAt || '').localeCompare(String(a.lastPlayedAt || '')));
-  await env.VOTES.put(gameKey, JSON.stringify(gameList.slice(0, MAX_GAME_PLAYERS)));
 
   return playerList;
 }

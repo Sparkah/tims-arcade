@@ -8,7 +8,6 @@
 
 import { jsonError } from '../_lib/response.js';
 import { isValidSlug } from '../_lib/validate.js';
-import { checkRate } from '../_lib/rateLimit.js';
 
 export async function onRequestPost({ request, env }) {
   let body;
@@ -18,11 +17,10 @@ export async function onRequestPost({ request, env }) {
   const slug = String(body.slug || '');
   if (!isValidSlug(slug)) return jsonError('bad slug', 400);
 
-  // rate limit by IP
-  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
-  const rateKey = `playrate:${ip}:${Math.floor(Date.now() / 60000)}`;
-  if (!await checkRate(env, rateKey, 60, 120)) return jsonError('rate limit', 429);
-
+  // No KV rate-limiter here (2026-07-02): the limiter did a KV write on every
+  // call, doubling the cost of this counter and helping drain the 1k/day budget.
+  // The play count is best-effort social proof only; lean on Cloudflare's
+  // platform bot/DDoS protection instead of spending a KV write to guard it.
   const key = `plays:${slug}`;
   const cur = parseInt(await env.VOTES.get(key)) || 0;
   const next = cur + 1;

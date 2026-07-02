@@ -137,7 +137,16 @@ export async function recordTelegramBroadcastRecipient(env, input = {}) {
     active: !optOutAt,
   };
 
-  await env.VOTES.put(key, JSON.stringify(row));
+  // Throttle 2026-07-02: skip the row rewrite when this recipient was already
+  // recorded earlier today and nothing material changed (no reactivation, no new
+  // source, not previously blocked). Fires on every mini-app open; the row only
+  // loses an intra-day lastSeenAt bump. The index write below stays gated to new
+  // chatIds. Cuts the tg-open KV write cost during broadcasts.
+  const seenToday = existing && String(previous.lastSeenAt || '').slice(0, 10) === at.slice(0, 10);
+  const newSource = source && !(previous.sources || []).includes(source);
+  if (!existing || clearOptOut || newSource || previous.blockedAt || !seenToday) {
+    await env.VOTES.put(key, JSON.stringify(row));
+  }
 
   const index = await readRecipientIndex(env, profile);
   if (!index.includes(chatId)) {

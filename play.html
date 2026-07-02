@@ -880,7 +880,8 @@
       const FLUSH_MS      = 120 * 1000;
       const INACTIVE_MS   = 60 * 1000;        // 60s no input → pause
       const FLUSH_CAP_SEC = 130;              // hard cap per flush submission
-      let pending = 0;
+      let pending = 0;          // active seconds since the last flush (economy delta)
+      let playtimePending = 0;  // active seconds not yet persisted to seconds:/daily:
       let tickTimer = null;
       let flushTimer = null;
       let lastActivity = Date.now();
@@ -904,26 +905,32 @@
           if (Date.now() - lastActivity > INACTIVE_MS) {
             isActive = false;
             stopTicks();
-            flush(false);
+            flush(false, false);
             return;
           }
           pending += TICK_MS / 1000;
+          playtimePending += TICK_MS / 1000;
           // Hard safety cap on `pending` itself in case timer drift accumulates
           if (pending > FLUSH_CAP_SEC * 2) pending = FLUSH_CAP_SEC * 2;
         }, TICK_MS);
-        if (!flushTimer) flushTimer = setInterval(() => flush(false), FLUSH_MS);
+        if (!flushTimer) flushTimer = setInterval(() => flush(false, false), FLUSH_MS);
       }
       function stopTicks() {
         if (tickTimer)  { clearInterval(tickTimer);  tickTimer  = null; }
         if (flushTimer) { clearInterval(flushTimer); flushTimer = null; }
       }
-      function flush(useBeacon) {
-        if (pending <= 0) return;
+      function flush(useBeacon, isFinal) {
         // Cap per-flush reported seconds. Defends against any logic bug
         // accumulating huge pending values.
         const seconds = Math.min(FLUSH_CAP_SEC, Math.round(pending));
+        // Playtime is persisted to KV ONCE per session: only a FINAL flush (tab
+        // hidden / pagehide) carries playSeconds = the whole session's active
+        // time not yet written. Periodic flushes carry only the economy delta.
+        const playSeconds = isFinal ? Math.round(playtimePending) : 0;
+        if (seconds <= 0 && playSeconds <= 0) return;
         pending = 0;
-        const body = JSON.stringify({ slug, seconds });
+        if (isFinal) playtimePending = 0;
+        const body = JSON.stringify(playSeconds > 0 ? { slug, seconds, playSeconds } : { slug, seconds });
         if (useBeacon && navigator.sendBeacon) {
           navigator.sendBeacon('/api/heartbeat', new Blob([body], { type: 'application/json' }));
         } else {
@@ -954,10 +961,10 @@
         } else {
           isActive = false;
           stopTicks();
-          flush(false);
+          flush(false, true);   // tab hidden = session pause: persist playtime once
         }
       });
-      window.addEventListener('pagehide', () => { stopTicks(); flush(true); });
+      window.addEventListener('pagehide', () => { stopTicks(); flush(true, true); });
 
       if (document.visibilityState === 'visible') startTicks();
 
@@ -1211,11 +1218,9 @@
             buildUi();
             paint(payload);
             startPolling();
-            // Register presence fast: the first heartbeat flush normally
-            // lands at ~2 min, far too slow for "playing now". One early
-            // flush of real measured time (~10s in) costs 2-3 extra KV
-            // writes per session, on pilot games only.
-            setTimeout(() => { try { flush(false); } catch (e) {} }, 12000);
+            // (Removed the 12s early presence flush 2026-07-02: presence now
+            // registers on the first periodic flush. It cost extra KV writes
+            // per session and protecting the write budget is the priority.)
             document.addEventListener('visibilitychange', () => {
               if (dead) return;    // torn down - stay gone
               if (document.visibilityState === 'visible') { poll(); startPolling(); }
@@ -1272,7 +1277,7 @@
       }
       function applyRateGate() {
         const unlocked = totalActive() >= VOTE_GATE_SECONDS;
-        if (unlocked && !rateUnlocked) flush(false);   // push latest active time so the SERVER agrees before a vote
+        if (unlocked && !rateUnlocked) flush(false, false);   // push latest active time so the SERVER agrees before a vote
         rateUnlocked = unlocked;
         _likeBtn.classList.toggle('locked', !unlocked);
         _dislikeBtn.classList.toggle('locked', !unlocked);
