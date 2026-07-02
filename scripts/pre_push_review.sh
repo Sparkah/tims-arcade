@@ -8,7 +8,7 @@
 #
 # Configurable env vars (override per-push):
 #   REVIEW_THRESHOLD   default "5.0"   — avg score required to pass
-#   REVIEW_TIMEOUT_SECONDS default "180" — max seconds to wait for the
+#   REVIEW_TIMEOUT_SECONDS default "420" — max seconds to wait for the
 #                                        AI review command before treating
 #                                        it as an AI error
 #   REVIEW_FAIL_OPEN   default "0"     — set 1 to keep pushing when the
@@ -30,7 +30,11 @@ TS="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOG_DIR/review-$(basename "$REPO_ROOT")-$TS.log"
 
 THRESHOLD="${REVIEW_THRESHOLD:-5.0}"
-TIMEOUT_SECONDS="${REVIEW_TIMEOUT_SECONDS:-180}"
+# 420 (was 180): claude 2.1.x --print does agentic file-reading, so a real
+# review runs ~150s and intermittently crossed the old 180s ceiling, getting
+# killed mid-run and reported as a false "AI error" (2026-07-02). Output is
+# buffered, so a kill loses everything and the log is empty. Give it headroom.
+TIMEOUT_SECONDS="${REVIEW_TIMEOUT_SECONDS:-420}"
 
 # Pre-flight checks. Skip the gate (no-op) if the toolchain isn't available
 # rather than breaking pushes — but log loudly so Tim notices.
@@ -125,13 +129,28 @@ claude_bin = os.environ["CLAUDE_BIN"]
 prompt = os.environ["REVIEW_PROMPT"]
 timeout = int(os.environ["REVIEW_TIMEOUT_SECONDS"])
 
+# Run the reviewer as a FRESH, top-level claude, NOT a nested child of the
+# agent session that triggered this push. When an agent (Claude Code) runs
+# git push, the hook claude otherwise inherits CLAUDECODE / CLAUDE_CODE_*
+# plus a non-tty stdin, and claude 2.1.x intermittently hangs at startup
+# trying to attach to the parent session, so the 180s timeout fires with
+# ZERO output (root cause of the 2026-07-02 push stalls). Strip those
+# session markers and give it /dev/null stdin so it starts clean, the same
+# way a manual terminal push does.
+child_env = {
+    k: v for k, v in os.environ.items()
+    if not k.startswith("CLAUDE_CODE") and k not in ("CLAUDECODE", "AI_AGENT", "CLAUDE_EFFORT")
+}
+
 try:
     result = subprocess.run(
         [claude_bin, "--print", "--dangerously-skip-permissions", prompt],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
         text=True,
         timeout=timeout,
+        env=child_env,
     )
 except subprocess.TimeoutExpired as exc:
     if exc.stdout:
