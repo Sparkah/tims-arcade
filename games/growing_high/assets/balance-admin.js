@@ -117,6 +117,7 @@ function normaliseCrop(crop) {
   clean.seedCost = clampInt(clean.seedCost, 0, 9999);
   clean.saleBase = clampInt(clean.saleBase, 1, 99999);
   clean.saplingLoad = clampInt(clean.saplingLoad, 1, 99999);
+  clean.rootRadius = clampInt(clean.rootRadius, 4, 160);
   clean.harvestLoad = clampInt(clean.harvestLoad, 1, 99999);
   clean.shelfLife = clampInt(clean.shelfLife, 1, 3650);
   if (clean.fruitLoad !== undefined) clean.fruitLoad = clampInt(clean.fruitLoad, 0, 99999);
@@ -136,14 +137,15 @@ function renderTable() {
     row.dataset.key = key;
     row.innerHTML = `
       <td>${escapeHtml(crop.name)}</td>
-      <td>${numberInput(key, "growWeeks", crop.growDays / 6, "0.5")}</td>
+      <td>${numberInput(key, "growDays", crop.growDays, "1")}</td>
       <td>${numberInput(key, "saleBase", crop.saleBase, "1")}</td>
       <td>${numberInput(key, "seedCost", crop.seedCost || 0, "1")}</td>
-      <td>${numberInput(key, "saplingG", crop.saplingLoad * 10, "10")}</td>
-      <td>${numberInput(key, "harvestG", crop.harvestLoad * 10, "10")}</td>
-      <td>${numberInput(key, "fruitG", (crop.fruitLoad || 0) * 10, "10")}</td>
+      <td>${numberInput(key, "saplingLoad", crop.saplingLoad, "10")}</td>
+      <td>${numberInput(key, "rootRadius", crop.rootRadius || 12, "1")}</td>
+      <td>${numberInput(key, "harvestLoad", crop.harvestLoad, "10")}</td>
+      <td>${numberInput(key, "fruitLoad", crop.fruitLoad || 0, "10")}</td>
       <td>${numberInput(key, "fruitInterval", crop.fruitInterval || 0, "1")}</td>
-      <td>${numberInput(key, "shelfWeeks", crop.shelfLife / 7, "0.5")}</td>
+      <td>${numberInput(key, "shelfLife", crop.shelfLife, "1")}</td>
       <td><div class="season-set">${seasonInputs(key, crop.seasons)}</div></td>
     `;
     rowsEl.append(row);
@@ -172,12 +174,8 @@ function updateCropFromInput(input) {
   }
   const value = Number(input.value);
   if (!Number.isFinite(value)) return;
-  if (field === "growWeeks") crop.growDays = Math.max(1, Math.round(value * 6));
-  else if (field === "shelfWeeks") crop.shelfLife = Math.max(1, Math.round(value * 7));
-  else if (field === "saplingG") crop.saplingLoad = Math.max(1, Math.round(value / 10));
-  else if (field === "harvestG") crop.harvestLoad = Math.max(1, Math.round(value / 10));
-  else if (field === "fruitG") {
-    const load = Math.max(0, Math.round(value / 10));
+  if (field === "fruitLoad") {
+    const load = Math.max(0, Math.round(value));
     if (load > 0) crop.fruitLoad = load;
     else delete crop.fruitLoad;
   } else if (field === "fruitInterval") {
@@ -197,16 +195,17 @@ function renderPreview() {
   const max = inSeason ? 1.5 : 1.2;
   const minPrice = Math.max(1, Math.round(crop.saleBase * min));
   const maxPrice = Math.max(1, Math.round(crop.saleBase * max));
-  const fruitText = crop.fruitLoad ? `${crop.fruitLoad * 10}g every ${crop.fruitInterval || 1}d` : "none";
+  const fruitText = crop.fruitLoad ? `${crop.fruitLoad}g every ${crop.fruitInterval || 1}d` : "none";
   selectedTitleEl.textContent = crop.name;
   previewEl.innerHTML = "";
   for (const [label, value] of [
-    ["Grow time", `${formatInput(crop.growDays / 6)} weeks (${crop.growDays} active days)`],
+    ["Grow time", `${crop.growDays} in-game days`],
     ["Season price range", `${minPrice}-${maxPrice}p (${inSeason ? "in season" : "off season"})`],
     ["Seed cost", `${crop.seedCost || 0}p`],
-    ["Harvest weight", `${crop.harvestLoad * 10}g`],
+    ["Root space", `${crop.rootRadius || 12}px radius`],
+    ["Harvest weight", `${crop.harvestLoad}g`],
     ["Fruit cycle", fruitText],
-    ["Shelf life", `${formatInput(crop.shelfLife / 7)} weeks`],
+    ["Shelf life", `${crop.shelfLife} days`],
     ["Seasons", crop.seasons.join(", ")],
   ]) {
     const dt = document.createElement("dt");

@@ -8,15 +8,27 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   const sceneCanvas = document.getElementById("scene3d");
   const ctx = canvas.getContext("2d");
 
-  const STORAGE_KEY = "growing-high-v1";
-  const COLS = 14;
-  const ROWS = 9;
-  const CELL_SOIL_LOAD = 8;
-  const CELL_WATER_LOAD = 3;
+  const STORAGE_KEY = "growing-high-prototype-v2";
+  const COLS = 56;
+  const ROWS = 36;
+  const ROOF_PIXEL_WIDTH = 560;
+  const ROOF_PIXEL_HEIGHT = 360;
+  const ROOT_PIXEL_SCALE = ROOF_PIXEL_WIDTH / COLS;
+  const CELL_SOIL_LOAD = 0.8;
+  const CELL_WATER_LOAD = 0.25;
   const SPRINKLER_LOAD = 18;
   const PEOPLE_LOAD = 44;
   const TOOL_LOAD = 18;
   const DAY_MINUTES = 1440;
+  const CLOCK_STEP_MINUTES = 10;
+  const DAY_STEP_SECONDS = 7;
+  const NIGHT_STEP_SECONDS = 4;
+  const REPAIR_STEP_SECONDS = 2;
+  const DAY_START_MINUTES = 7 * 60;
+  const DAY_END_MINUTES = 17 * 60;
+  const SOIL_BRUSH_RADIUS = 24;
+  const ERASER_RADIUS = 26;
+  const WATER_RADIUS = 42;
   const VOLUNTEER_ACTION_SECONDS = 0.85;
   const WEED_SPAWN_CHANCE = 0.22;
 
@@ -60,7 +72,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
 
   let lastFrame = performance.now();
   let saveTimer = 0;
-  const CELL_3D = 0.58;
+  const CELL_3D = 0.145;
   const PICK_PLANE_Y = 0.08;
   const three = {
     initialized: false,
@@ -361,9 +373,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       weekInMonth: 1,
       absoluteWeek: 1,
       day: 0,
-      minutes: 7 * 60,
+      minutes: DAY_START_MINUTES,
+      clockAccumulator: 0,
       money: 260,
-      roofLimit: 840,
+      roofLimit: 980,
       overloadDays: 0,
       collapseCount: 0,
       repairDaysLeft: 0,
@@ -375,11 +388,12 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       fast: false,
       weather: "Bright start, light rain later",
       marketMood: "Local demand favours quick greens",
-      message: "Paint soil, plant seeds, add irrigation, then pass the week.",
+      message: "Paint soil in broad strokes, plant inside circular root space, then pass the week.",
       grid,
       plants: [],
       weeds: [],
       inventory: [],
+      marketOffers: [],
       compost: 0,
       toolDiscount: 0,
       pollinatorBonus: 0,
@@ -452,6 +466,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (!Array.isArray(state.plants)) state.plants = [];
     if (!Array.isArray(state.weeds)) state.weeds = [];
     if (!Array.isArray(state.inventory)) state.inventory = [];
+    if (!Array.isArray(state.marketOffers)) state.marketOffers = [];
     if (!Array.isArray(state.volunteers)) state.volunteers = createInitialState().volunteers;
     const defaults = createInitialState();
     state.favour = { ...defaults.favour, ...(state.favour || {}) };
@@ -463,6 +478,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.hubReputation = state.hubReputation || 0;
     state.priceMemory = state.priceMemory || {};
     state.showForecast = Boolean(state.showForecast);
+    state.clockAccumulator = Number.isFinite(state.clockAccumulator) ? state.clockAccumulator : 0;
     if (state.balanceSource !== balanceSource) {
       state.priceMemory = {};
       state.prices = generatePrices();
@@ -476,6 +492,12 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         ...state.volunteers[i],
         actionTimer: state.volunteers[i].actionTimer || 0,
       };
+    }
+    for (const plant of state.plants) {
+      if (!Number.isFinite(plant.col) || !Number.isFinite(plant.row)) {
+        plant.col = Math.max(0, Math.min(COLS - 1, Number(plant.col) || COLS / 2));
+        plant.row = Math.max(0, Math.min(ROWS - 1, Number(plant.row) || ROWS / 2));
+      }
     }
     normalizeSelectedSeed();
     state.message = state.message || "Keep the rooftop productive without overloading the roof.";
@@ -543,7 +565,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     for (const [key, override] of Object.entries(payload.crops)) {
       if (!cropDefs[key] || !override || typeof override !== "object") continue;
       const target = cropDefs[key];
-      for (const field of ["growDays", "seedCost", "saleBase", "saplingLoad", "harvestLoad", "fruitLoad", "fruitInterval", "shelfLife"]) {
+      for (const field of ["growDays", "seedCost", "saleBase", "saplingLoad", "rootRadius", "harvestLoad", "fruitLoad", "fruitInterval", "shelfLife"]) {
         if (override[field] === undefined || override[field] === "") continue;
         const value = Number(override[field]);
         if (!Number.isFinite(value) || value < 0) continue;
@@ -636,9 +658,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
           seasonLabel: band.inSeason ? "in season" : "off season",
           seasons: def.seasons.join("/"),
           growDays: def.growDays,
-          growWeeks: Math.round((def.growDays / 6) * 10) / 10,
+          rootRadius: def.rootRadius || 12,
           shelfDays: def.shelfLife,
-          shelfWeeks: Math.round((def.shelfLife / 7) * 10) / 10,
         };
       });
   }
@@ -679,29 +700,68 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     return col >= 0 && row >= 0 && col < COLS && row < ROWS;
   }
 
-  function rootCells(plant) {
+  function sampleKey(col, row) {
+    return `${Math.round(col)}:${Math.round(row)}`;
+  }
+
+  function clampSamplePoint(col, row) {
+    return {
+      col: Math.max(0, Math.min(COLS - 1, col)),
+      row: Math.max(0, Math.min(ROWS - 1, row)),
+    };
+  }
+
+  function sampleRadiusForPixels(px) {
+    return Math.max(1, (px || 12) / ROOT_PIXEL_SCALE);
+  }
+
+  function cropRootRadiusSamples(cropKey) {
+    return sampleRadiusForPixels(cropDefs[cropKey]?.rootRadius || 12);
+  }
+
+  function sampleDistance(aCol, aRow, bCol, bRow) {
+    return Math.hypot(aCol - bCol, aRow - bRow);
+  }
+
+  function samplesInCircle(col, row, radiusSamples) {
     const cells = [];
-    for (let r = plant.row; r < plant.row + 2; r += 1) {
-      for (let c = plant.col; c < plant.col + 2; c += 1) {
-        if (inBounds(c, r)) cells.push({ col: c, row: r });
+    const minCol = Math.floor(col - radiusSamples);
+    const maxCol = Math.ceil(col + radiusSamples);
+    const minRow = Math.floor(row - radiusSamples);
+    const maxRow = Math.ceil(row + radiusSamples);
+    for (let r = minRow; r <= maxRow; r += 1) {
+      for (let c = minCol; c <= maxCol; c += 1) {
+        if (!inBounds(c, r)) continue;
+        if (sampleDistance(c + 0.5, r + 0.5, col, row) <= radiusSamples) {
+          cells.push({ col: c, row: r });
+        }
       }
     }
     return cells;
   }
 
+  function rootCells(plant) {
+    return samplesInCircle(plant.col, plant.row, cropRootRadiusSamples(plant.crop));
+  }
+
   function plantAt(col, row) {
     return state.plants.find((plant) => {
-      return col >= plant.col && col < plant.col + 2 && row >= plant.row && row < plant.row + 2;
+      return sampleDistance(col, row, plant.col, plant.row) <= cropRootRadiusSamples(plant.crop);
     }) || null;
   }
 
   function canPlantAt(col, row) {
-    if (!inBounds(col, row) || !inBounds(col + 1, row + 1)) return false;
-    for (let r = row; r < row + 2; r += 1) {
-      for (let c = col; c < col + 2; c += 1) {
-        const cell = cellAt(c, r);
-        if (!cell.soil || plantAt(c, r) || hasWeed(c, r)) return false;
-      }
+    if (!inBounds(Math.round(col), Math.round(row))) return false;
+    const radius = cropRootRadiusSamples(state.selectedSeed);
+    const root = samplesInCircle(col, row, radius);
+    if (!root.length) return false;
+    for (const sample of root) {
+      const cell = cellAt(sample.col, sample.row);
+      if (!cell.soil || hasWeed(sample.col, sample.row)) return false;
+    }
+    for (const plant of state.plants) {
+      const otherRadius = cropRootRadiusSamples(plant.crop);
+      if (sampleDistance(col, row, plant.col, plant.row) < radius + otherRadius) return false;
     }
     return true;
   }
@@ -709,9 +769,14 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   function isCellIrrigated(col, row) {
     const cell = cellAt(col, row);
     if (cell.watered) return true;
-    for (let r = row - 1; r <= row + 1; r += 1) {
-      for (let c = col - 1; c <= col + 1; c += 1) {
-        if (inBounds(c, r) && cellAt(c, r).sprinkler) return true;
+    const radius = sampleRadiusForPixels(WATER_RADIUS);
+    const minCol = Math.floor(col - radius);
+    const maxCol = Math.ceil(col + radius);
+    const minRow = Math.floor(row - radius);
+    const maxRow = Math.ceil(row + radius);
+    for (let r = minRow; r <= maxRow; r += 1) {
+      for (let c = minCol; c <= maxCol; c += 1) {
+        if (inBounds(c, r) && cellAt(c, r).sprinkler && sampleDistance(c, r, col, row) <= radius) return true;
       }
     }
     return false;
@@ -750,7 +815,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const t = Math.max(0, Math.min(1, plant.growthDays / def.growDays));
     let load = t < 0.35 ? 2 + def.saplingLoad * t : def.saplingLoad + (def.harvestLoad - def.saplingLoad) * t;
     if (def.fruitLoad && plant.fruitReady) load += def.fruitLoad;
-    return load;
+    return load / 10;
   }
 
   function plantStage(plant) {
@@ -788,13 +853,12 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   }
 
   function hasAdjacentSprinkler(col, row) {
-    const neighbours = [
-      { col: col + 1, row },
-      { col: col - 1, row },
-      { col, row: row + 1 },
-      { col, row: row - 1 },
-    ];
-    return neighbours.some((cell) => inBounds(cell.col, cell.row) && cellAt(cell.col, cell.row).sprinkler);
+    return state.grid.some((cell, index) => {
+      if (!cell.sprinkler) return false;
+      const c = index % COLS;
+      const r = Math.floor(index / COLS);
+      return sampleDistance(c, r, col, row) <= sampleRadiusForPixels(38);
+    });
   }
 
   function wateredCount() {
@@ -818,6 +882,31 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
   }
 
+  function isDaytime(minutes = state.minutes) {
+    return minutes >= DAY_START_MINUTES && minutes <= DAY_END_MINUTES;
+  }
+
+  function clockStepSeconds(phase = state.phase) {
+    if (phase === "repair") return REPAIR_STEP_SECONDS;
+    return isDaytime() ? DAY_STEP_SECONDS : NIGHT_STEP_SECONDS;
+  }
+
+  function advanceTenMinuteClock(realSeconds, onTick) {
+    if (realSeconds <= 0) return;
+    state.clockAccumulator = (state.clockAccumulator || 0) + realSeconds;
+    let guard = 0;
+    while (state.clockAccumulator >= clockStepSeconds() && guard < 2000) {
+      state.clockAccumulator -= clockStepSeconds();
+      state.minutes += CLOCK_STEP_MINUTES;
+      onTick?.(CLOCK_STEP_MINUTES);
+      guard += 1;
+      if (state.minutes >= DAY_MINUTES) {
+        state.minutes -= DAY_MINUTES;
+        break;
+      }
+    }
+  }
+
   function phaseLabel() {
     if (state.phase === "planning") return "Planning";
     if (state.phase === "midweek") return `Day ${state.day}`;
@@ -831,9 +920,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     playUiSound("water");
     state.phase = "midweek";
     state.day = 1;
-    state.minutes = 7 * 60;
-    state.fast = true;
-    state.message = "The week has started. Assign volunteers or let irrigation handle the crops.";
+    state.minutes = DAY_START_MINUTES;
+    state.clockAccumulator = 0;
+    state.fast = false;
+    state.message = "The week has started. The clock advances in 10-minute steps.";
     clearWater();
     applySprinklers();
     saveGame();
@@ -844,9 +934,11 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.phase = "market";
     state.day = 6;
     state.minutes = 9 * 60;
+    state.clockAccumulator = 0;
     state.fast = false;
-    state.message = "Market days. Sell produce, gift samples, or assign a volunteer to man the stall.";
+    state.message = "Market days. Shoppers walk up to the produce stall with offers.";
     state.prices = generatePrices();
+    state.marketOffers = generateMarketOffers();
     saveGame();
   }
 
@@ -856,7 +948,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     spoilOutOfSeasonPlants();
     state.phase = "planning";
     state.day = 0;
-    state.minutes = 7 * 60;
+    state.minutes = DAY_START_MINUTES;
+    state.clockAccumulator = 0;
     state.fast = false;
     state.overloadDays = 0;
     state.weather = generateWeather();
@@ -912,7 +1005,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     for (let row = 0; row < ROWS; row += 1) {
       for (let col = 0; col < COLS; col += 1) {
         if (cellAt(col, row).sprinkler) {
-          waterRadius(col, row, 1);
+          waterRadius(col, row, sampleRadiusForPixels(WATER_RADIUS));
         }
       }
     }
@@ -921,8 +1014,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   function waterRadius(col, row, radius) {
     for (let r = row - radius; r <= row + radius; r += 1) {
       for (let c = col - radius; c <= col + radius; c += 1) {
-        if (inBounds(c, r) && cellAt(c, r).soil) {
-          cellAt(c, r).watered = true;
+        const sampleCol = Math.round(c);
+        const sampleRow = Math.round(r);
+        if (inBounds(sampleCol, sampleRow) && sampleDistance(sampleCol, sampleRow, col, row) <= radius && cellAt(sampleCol, sampleRow).soil) {
+          cellAt(sampleCol, sampleRow).watered = true;
         }
       }
     }
@@ -943,8 +1038,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const days = minutes / DAY_MINUTES;
     for (const plant of state.plants) {
       if (isPlantWatered(plant)) {
-        const bonus = rootCells(plant).reduce((sum, cell) => sum + cellAt(cell.col, cell.row).compost, 0);
-        const compostBonus = Math.min(0.5, bonus * 0.08);
+        const root = rootCells(plant);
+        const bonus = root.reduce((sum, cell) => sum + cellAt(cell.col, cell.row).compost, 0);
+        const compostCoverage = root.length ? bonus / root.length : 0;
+        const compostBonus = Math.min(0.5, compostCoverage * 0.65);
         const serviceBonus = Math.min(0.35, (state.pollinatorBonus || 0) + (state.soilBonus || 0));
         const weedPenalty = plantHasWeeds(plant) ? 0.55 : 1;
         const oldGrowth = plant.growthDays;
@@ -979,12 +1076,23 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     }
   }
 
+  function updateMidweekClock(dt) {
+    const previousDay = state.day;
+    advanceTenMinuteClock(dt, (minutes) => {
+      growPlantsByMinutes(minutes);
+    });
+    if (state.minutes < CLOCK_STEP_MINUTES && state.day === previousDay) {
+      endDay();
+    }
+  }
+
   function absorbSoil(plant, amount) {
     const adjusted = amount * Math.max(0.45, 1 - (state.mulchBonus || 0));
-    for (const cell of rootCells(plant)) {
+    const root = rootCells(plant);
+    for (const cell of root) {
       const target = cellAt(cell.col, cell.row);
       if (target.soil > 0) {
-        target.soil = Math.max(0.35, target.soil - adjusted);
+        target.soil = Math.max(0.35, target.soil - adjusted / Math.max(1, root.length * 0.22));
       }
     }
   }
@@ -1024,7 +1132,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       }
     }
     if (!candidates.length) return;
-    const attempts = Math.max(1, Math.floor(candidates.length / 18));
+    const attempts = Math.min(4, Math.max(1, Math.floor(candidates.length / 120)));
     let spawned = 0;
     for (let i = 0; i < attempts && state.weeds.length < 14; i += 1) {
       const chance = WEED_SPAWN_CHANCE + (state.weather.includes("Humid") ? 0.1 : 0);
@@ -1068,7 +1176,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     }
     state.phase = "repair";
     state.day = 1;
-    state.minutes = 7 * 60;
+    state.minutes = DAY_START_MINUTES;
+    state.clockAccumulator = 0;
     state.repairDaysLeft = 7;
     state.overloadDays = 0;
     state.message = `Crew leader scolds you at 07:00 after a roof collapse. ${lost} crop${lost === 1 ? "" : "s"} withered while scaffolding goes up for repairs.`;
@@ -1076,36 +1185,35 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   }
 
   function updateRepair(dt) {
-    state.minutes += dt * 900;
-    while (state.minutes >= DAY_MINUTES) {
-      state.minutes -= DAY_MINUTES;
+    advanceTenMinuteClock(dt, () => {});
+    if (state.minutes < CLOCK_STEP_MINUTES) {
       state.repairDaysLeft -= 1;
       state.day += 1;
-      if (state.repairDaysLeft <= 0) {
-        advanceCalendarWeek();
-        state.phase = "planning";
-        state.day = 0;
-        state.minutes = 7 * 60;
-        state.message = "Repairs are complete. The crew warns you to respect the roof gauge.";
-        saveGame();
-        break;
-      }
+    }
+    if (state.repairDaysLeft <= 0) {
+      advanceCalendarWeek();
+      state.phase = "planning";
+      state.day = 0;
+      state.minutes = DAY_START_MINUTES;
+      state.clockAccumulator = 0;
+      state.message = "Repairs are complete. The crew warns you to respect the roof gauge.";
+      saveGame();
     }
   }
 
   function updateMarket(dt) {
-    const night = state.minutes < 6 * 60 || state.minutes > 20 * 60;
-    const speed = state.fast ? 960 : 240;
-    state.minutes += dt * speed * (night ? 1.55 : 1);
-    while (state.minutes >= DAY_MINUTES && state.phase === "market") {
-      state.minutes -= DAY_MINUTES;
+    advanceTenMinuteClock(dt, () => {
+      if (!state.marketOffers.length || Math.floor(state.minutes / 60) % 3 === 0) {
+        state.marketOffers = generateMarketOffers();
+      }
+    });
+    if (state.minutes < CLOCK_STEP_MINUTES && state.phase === "market") {
       state.day += 1;
       ageInventory(1);
       if (state.day > 7) {
         state.day = 7;
         state.minutes = 20 * 60;
         state.message = "The market weekend is ending. Press End Week when you are done with contacts.";
-        break;
       }
     }
   }
@@ -1146,21 +1254,22 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       return false;
     }
     if (!canPlantAt(col, row)) {
-      state.message = "Seeds need a clear 2 by 2 root space fully covered with soil.";
+      state.message = `${def.name} needs a clear ${def.rootRadius || 12}px root radius fully covered with soil.`;
       return false;
     }
     state.money -= def.seedCost;
+    const point = clampSamplePoint(col, row);
     state.plants.push({
       id: `${def.key}-${Date.now()}-${Math.floor(rand() * 10000)}`,
       crop: def.key,
-      col,
-      row,
+      col: point.col,
+      row: point.row,
       growthDays: 0,
       fruitDays: 0,
       fruitReady: false,
       thirst: 0,
     });
-    state.message = `${def.name} planted. Keep every root tile irrigated so it grows.`;
+    state.message = `${def.name} planted. Keep its circular root space irrigated so it grows.`;
     saveGame();
     return true;
   }
@@ -1169,7 +1278,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (!inBounds(col, row)) return false;
     const cell = cellAt(col, row);
     if (cell.sprinkler) {
-      state.message = "A pipe nozzle already hangs above this grid point.";
+      state.message = "A pipe nozzle already hangs above this roof spot.";
       return false;
     }
     if (sprinklerCount() > 0 && !hasAdjacentSprinkler(col, row)) {
@@ -1182,8 +1291,9 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       return false;
     }
     state.money -= cost;
-    cell.sprinkler = true;
-    waterRadius(col, row, 1);
+    const point = clampSamplePoint(col, row);
+    cellAt(Math.round(point.col), Math.round(point.row)).sprinkler = true;
+    waterRadius(point.col, point.row, sampleRadiusForPixels(WATER_RADIUS));
     state.message = `Overhead pipe nozzle added for ${formatMoney(cost)}. It waters nearby soil without taking root space.`;
     saveGame();
     return true;
@@ -1246,6 +1356,62 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       ? `Sold ${sold} box${sold === 1 ? "" : "es"} for ${formatMoney(earned)}${stallHelpers ? " with volunteer stall help" : ""}.`
       : "No fresh produce ready to sell.";
     saveGame();
+  }
+
+  function freshInventoryByCrop() {
+    const counts = {};
+    for (const item of state.inventory) {
+      if (item.spoiled) continue;
+      counts[item.crop] = (counts[item.crop] || 0) + item.qty;
+    }
+    return counts;
+  }
+
+  function generateMarketOffers() {
+    const counts = freshInventoryByCrop();
+    const crops = Object.keys(counts).filter((key) => counts[key] > 0 && cropDefs[key]);
+    if (!crops.length) return [];
+    const names = ["Mina", "Ollie", "Rae"];
+    const offers = [];
+    for (let i = 0; i < Math.min(3, crops.length); i += 1) {
+      const crop = crops[(Math.floor(randomBetween(0, crops.length)) + i) % crops.length];
+      const base = state.prices[crop] || cropDefs[crop].saleBase;
+      const premium = 1 + randomBetween(-0.08, 0.22);
+      offers.push({
+        id: `${crop}-${state.day}-${Math.round(state.minutes)}-${i}`,
+        npc: names[i],
+        crop,
+        qty: 1,
+        price: Math.max(1, Math.round(base * premium)),
+        patience: 1 - i * 0.18,
+      });
+    }
+    return offers;
+  }
+
+  function acceptMarketOffer(index) {
+    const offer = state.marketOffers[index];
+    if (!offer) {
+      state.message = "No shopper offer selected.";
+      return false;
+    }
+    const itemIndex = state.inventory.findIndex((item) => !item.spoiled && item.crop === offer.crop);
+    if (itemIndex < 0) {
+      state.message = `${offer.npc} wanted ${cropDefs[offer.crop]?.name || "produce"}, but storage is out.`;
+      state.marketOffers.splice(index, 1);
+      return false;
+    }
+    const item = state.inventory[itemIndex];
+    item.qty -= offer.qty;
+    if (item.qty <= 0) state.inventory.splice(itemIndex, 1);
+    state.money += offer.price;
+    state.stats.sold += offer.qty;
+    state.stats.stallSales += offer.qty;
+    state.message = `${offer.npc} bought ${cropDefs[offer.crop]?.name || offer.crop} for ${formatMoney(offer.price)}.`;
+    state.marketOffers.splice(index, 1);
+    if (!state.marketOffers.length) state.marketOffers = generateMarketOffers();
+    saveGame();
+    return true;
   }
 
   function stallVolunteerCount() {
@@ -1365,7 +1531,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       return false;
     }
     for (const cell of rootCells(plant)) {
-      cellAt(cell.col, cell.row).compost += 1;
+      if (cellAt(cell.col, cell.row).soil) cellAt(cell.col, cell.row).compost += 1;
     }
     state.compost -= 1;
     state.message = "Compost applied. Growth gets a small daily boost.";
@@ -1373,9 +1539,47 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     return true;
   }
 
+  function paintSoilAt(col, row) {
+    let painted = 0;
+    for (const sample of samplesInCircle(col, row, sampleRadiusForPixels(SOIL_BRUSH_RADIUS))) {
+      if (plantAt(sample.col, sample.row)) continue;
+      const target = cellAt(sample.col, sample.row);
+      if (!target.soil) painted += 1;
+      target.soil = Math.max(target.soil, 1);
+      target.watered = false;
+    }
+    if (painted > 0) {
+      state.message = "Soil painted like a brush stroke. Existing soil is not stacked.";
+      saveGame();
+    }
+    return painted;
+  }
+
+  function eraseAt(col, row) {
+    let cleared = 0;
+    const touchedPlants = new Set();
+    for (const sample of samplesInCircle(col, row, sampleRadiusForPixels(ERASER_RADIUS))) {
+      const plant = plantAt(sample.col, sample.row);
+      if (plant) touchedPlants.add(plant);
+      const target = cellAt(sample.col, sample.row);
+      if (target.soil || target.watered || target.sprinkler || target.compost) cleared += 1;
+      target.soil = 0;
+      target.watered = false;
+      target.sprinkler = false;
+      target.compost = 0;
+      state.weeds = state.weeds.filter((weed) => weed.col !== sample.col || weed.row !== sample.row);
+    }
+    for (const plant of touchedPlants) removePlant(plant);
+    if (cleared > 0 && touchedPlants.size === 0) {
+      state.message = "Eraser cleared an analog patch of soil and fixtures.";
+      saveGame();
+    }
+    return cleared + touchedPlants.size;
+  }
+
   function aimVolunteerAtCell(volunteer, col, row) {
-    volunteer.targetX = Math.max(0.08, Math.min(0.92, (col + 0.5) / COLS));
-    volunteer.targetY = Math.max(0.12, Math.min(0.9, (row + 0.5) / ROWS));
+    volunteer.targetX = Math.max(0.08, Math.min(0.92, col / COLS));
+    volunteer.targetY = Math.max(0.12, Math.min(0.9, row / ROWS));
   }
 
   function performVolunteerWater(volunteer, announceNoWork) {
@@ -1394,7 +1598,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         target.watered = true;
       }
     }
-    aimVolunteerAtCell(volunteer, targetPlant.col + 1, targetPlant.row + 1);
+    aimVolunteerAtCell(volunteer, targetPlant.col, targetPlant.row);
     state.stats.watered += newlyWatered;
     state.message = `${volunteer.name} watered ${cropDefs[targetPlant.crop]?.name || "crop"} root space.`;
     saveGame();
@@ -1419,7 +1623,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       if (announceNoWork) state.message = "No harvest-ready crops yet.";
       return false;
     }
-    aimVolunteerAtCell(volunteer, ready.col + 1, ready.row + 1);
+    aimVolunteerAtCell(volunteer, ready.col, ready.row);
     if (harvestPlant(ready, "volunteer")) {
       state.stats.volunteerHarvested += 1;
       saveGame();
@@ -1474,7 +1678,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const next = keys[(keys.indexOf(state.selectedSeed) + 1) % keys.length] || keys[0];
     state.selectedSeed = next;
     state.selectedTool = "seed";
-    state.message = `${cropDefs[next].name} selected. Click a 2 by 2 soil patch to plant.`;
+    state.message = `${cropDefs[next].name} selected. Click painted soil with a clear circular root space.`;
     saveGame();
   }
 
@@ -1482,10 +1686,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (state.mode !== "game") return;
 
     if (state.phase === "midweek") {
-      const night = state.minutes < 6 * 60 || state.minutes > 20 * 60;
-      const speed = state.fast ? 960 : 240;
       updateVolunteerActions(dt);
-      advanceMidweekMinutes(dt * speed * (night ? 1.55 : 1));
+      updateMidweekClock(dt);
     } else if (state.phase === "repair") {
       updateRepair(dt);
     } else if (state.phase === "market") {
@@ -1519,15 +1721,15 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (state.mode !== "game" || state.phase !== "planning" || state.selectedTool !== "seed") return null;
     const cell = gridFromPoint(input.x, input.y);
     if (!cell) return null;
-    const cells = [];
-    for (let r = cell.row; r < cell.row + 2; r += 1) {
-      for (let c = cell.col; c < cell.col + 2; c += 1) {
-        cells.push({ col: c, row: r, inBounds: inBounds(c, r) });
-      }
-    }
+    const radiusPx = cropDefs[state.selectedSeed]?.rootRadius || 12;
+    const radiusSamples = sampleRadiusForPixels(radiusPx);
+    const cells = samplesInCircle(cell.col, cell.row, radiusSamples)
+      .map((sample) => ({ ...sample, inBounds: true }));
     return {
       col: cell.col,
       row: cell.row,
+      radiusPx,
+      radiusSamples,
       valid: canPlantAt(cell.col, cell.row),
       cells,
     };
@@ -1580,16 +1782,15 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         const cell = cellAt(col, row);
         const x = boardX(col);
         const z = boardZ(row);
-        meshBox(group, x, 0.04, z, CELL_3D * 0.93, 0.035, CELL_3D * 0.93, three.mat.tile, false, true);
         if (cell.soil) {
           const mat = isCellIrrigated(col, row) ? three.mat.soilWet : three.mat.soil;
           const h = 0.07 + Math.min(0.05, cell.soil * 0.014);
-          meshBox(group, x, 0.08 + h * 0.5, z, CELL_3D * 0.78, h, CELL_3D * 0.78, mat, false, true);
+          meshCylinder(group, x, 0.08 + h * 0.5, z, CELL_3D * 0.82, h, mat, false);
           if (isCellIrrigated(col, row)) {
-            meshBox(group, x, 0.17 + h, z, CELL_3D * 0.68, 0.012, CELL_3D * 0.68, three.mat.water, false, false);
+            meshCylinder(group, x, 0.17 + h, z, CELL_3D * 0.72, 0.012, three.mat.water, false);
           }
           if (cell.compost > 0) {
-            meshBox(group, x, 0.19 + h, z, CELL_3D * 0.48, 0.018, CELL_3D * 0.48, three.mat.compost, false, false);
+            meshCylinder(group, x, 0.19 + h, z, CELL_3D * 0.58, 0.018, three.mat.compost, false);
           }
         }
       }
@@ -1600,10 +1801,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const preview = rootPreview();
     if (!preview) return;
     const mat = preview.valid ? three.mat.rootGood : three.mat.rootBad;
-    for (const cell of preview.cells) {
-      if (!cell.inBounds) continue;
-      meshBox(group, boardX(cell.col), 0.32, boardZ(cell.row), CELL_3D * 0.86, 0.032, CELL_3D * 0.86, mat, false, false);
-    }
+    meshCylinder(group, boardX(preview.col), 0.34, boardZ(preview.row), preview.radiusSamples * CELL_3D, 0.018, mat, false);
   }
 
   function draw3DPlants(group) {
@@ -1611,8 +1809,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       const def = cropDefs[plant.crop];
       if (!def) continue;
       const stage = plantStage(plant);
-      const centerX = boardX(plant.col + 0.5);
-      const centerZ = boardZ(plant.row + 0.5);
+      const centerX = boardX(plant.col);
+      const centerZ = boardZ(plant.row);
       const watered = isPlantWatered(plant);
       const leafMat = colorMat(watered ? def.leaf : "#7b895a", 0.84);
       const cropMat = colorMat(def.color, 0.68);
@@ -1737,7 +1935,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const margin = compact ? 14 : 28;
     const roofW = w - panelW - margin * 3;
     const roofH = h - top - bottom - margin;
-    const cell = Math.max(20, Math.min(roofW / COLS, roofH / ROWS));
+    const cell = Math.max(4, Math.min(roofW / COLS, roofH / ROWS));
     const gridW = cell * COLS;
     const gridH = cell * ROWS;
     view.roof = {
@@ -1936,26 +2134,26 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const cell = cellAt(col, row);
     const x = roof.x + col * roof.cell;
     const y = roof.y + row * roof.cell;
-    ctx.fillStyle = "#d5d0c2";
-    ctx.fillRect(x, y, roof.cell, roof.cell);
     if (cell.soil) {
       const soilAlpha = 0.68 + Math.min(0.25, cell.soil * 0.05);
       ctx.fillStyle = `rgba(103, 69, 38, ${soilAlpha})`;
-      roughRect(x + 2, y + 2, roof.cell - 4, roof.cell - 4, 4);
+      const daubRadius = roof.cell * (0.68 + ((col * 17 + row * 11) % 5) * 0.025);
+      ctx.beginPath();
+      ctx.ellipse(x + roof.cell * 0.5, y + roof.cell * 0.5, daubRadius, daubRadius * 0.82, ((col - row) % 4) * 0.25, 0, Math.PI * 2);
+      ctx.fill();
       if (cell.compost > 0) {
         ctx.fillStyle = "rgba(72, 118, 42, 0.35)";
-        ctx.fillRect(x + 5, y + 5, roof.cell - 10, roof.cell - 10);
+        ctx.beginPath();
+        ctx.arc(x + roof.cell * 0.5, y + roof.cell * 0.5, roof.cell * 0.48, 0, Math.PI * 2);
+        ctx.fill();
       }
       if (isCellIrrigated(col, row)) {
         ctx.fillStyle = "rgba(53, 160, 183, 0.28)";
         ctx.beginPath();
-        ctx.arc(x + roof.cell * 0.5, y + roof.cell * 0.5, roof.cell * 0.4, 0, Math.PI * 2);
+        ctx.arc(x + roof.cell * 0.5, y + roof.cell * 0.5, roof.cell * 0.62, 0, Math.PI * 2);
         ctx.fill();
       }
     }
-    ctx.strokeStyle = "rgba(35, 49, 46, 0.18)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, y, roof.cell, roof.cell);
   }
 
   function roughRect(x, y, w, h, inset) {
@@ -1973,13 +2171,21 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const roof = view.roof;
     for (const plant of state.plants) {
       const def = cropDefs[plant.crop];
-      const x = roof.x + (plant.col + 1) * roof.cell;
-      const y = roof.y + (plant.row + 1) * roof.cell;
+      const x = roof.x + plant.col * roof.cell;
+      const y = roof.y + plant.row * roof.cell;
       const stage = plantStage(plant);
       const watered = isPlantWatered(plant);
-      const radius = stage === "harvestable" ? roof.cell * 0.52 : stage === "mature" ? roof.cell * 0.46 : stage === "sprout" ? roof.cell * 0.38 : roof.cell * 0.22;
+      const rootRadius = sampleRadiusForPixels(def.rootRadius || 12) * roof.cell;
+      const radius = Math.max(5, rootRadius * (stage === "harvestable" ? 0.42 : stage === "mature" ? 0.36 : stage === "sprout" ? 0.28 : 0.16));
       ctx.save();
       ctx.translate(x, y);
+      ctx.strokeStyle = watered ? "rgba(45, 145, 160, 0.34)" : "rgba(65, 78, 73, 0.24)";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      ctx.arc(0, 0, rootRadius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
       ctx.fillStyle = watered ? def.leaf : "#7a8a5a";
       ctx.strokeStyle = "#1e3d25";
       ctx.lineWidth = 2;
@@ -2054,7 +2260,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         ctx.strokeStyle = "rgba(41, 147, 169, 0.35)";
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.arc(x, y, roof.cell * 1.45, 0, Math.PI * 2);
+        ctx.arc(x, y, sampleRadiusForPixels(WATER_RADIUS) * roof.cell, 0, Math.PI * 2);
         ctx.stroke();
         ctx.fillStyle = "#e8eef0";
         ctx.strokeStyle = "#243331";
@@ -2137,19 +2343,20 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
 
   function drawRoofDetails() {
     const roof = view.roof;
+    const unit = Math.max(18, roof.w / 14);
     ctx.fillStyle = "#b9b4a4";
     ctx.strokeStyle = "#273734";
     ctx.lineWidth = 2;
-    roundRect(roof.x + roof.w - roof.cell * 2.7, roof.y + roof.cell * 0.3, roof.cell * 2, roof.cell * 1.4, 5);
+    roundRect(roof.x + roof.w - unit * 2.7, roof.y + unit * 0.3, unit * 2, unit * 1.4, 5);
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "#8b998f";
-    ctx.fillRect(roof.x + roof.w - roof.cell * 2.45, roof.y + roof.cell * 0.58, roof.cell * 1.5, roof.cell * 0.28);
+    ctx.fillRect(roof.x + roof.w - unit * 2.45, roof.y + unit * 0.58, unit * 1.5, unit * 0.28);
     ctx.fillStyle = "#374743";
-    ctx.font = `${Math.max(10, roof.cell * 0.24)}px ui-sans-serif, system-ui`;
+    ctx.font = `${Math.max(10, unit * 0.24)}px ui-sans-serif, system-ui`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("storage", roof.x + roof.w - roof.cell * 1.72, roof.y + roof.cell * 1.18);
+    ctx.fillText("storage", roof.x + roof.w - unit * 1.72, roof.y + unit * 1.18);
   }
 
   function drawTopHud() {
@@ -2228,7 +2435,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       addButton(`seed-${key}`, bx, by, seedButtonW, seedButtonH, `${def.short} ${price}p`, () => {
         state.selectedSeed = key;
         state.selectedTool = "seed";
-        state.message = `${def.name} selected. Click a 2 by 2 soil patch to plant.`;
+        state.message = `${def.name} selected. Click painted soil with a clear ${def.rootRadius || 12}px root radius.`;
       }, { selected: state.selectedSeed === key });
     }
     y += Math.ceil(seedKeys.length / seedCols) * seedRowH + 12;
@@ -2253,7 +2460,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     }
 
     y += 8;
-    drawInventorySummary(p.x + 16, y, p.w - 32);
+    drawInventorySummary(p.x + 16, y, p.w - 32, p.y + p.h - 16);
   }
 
   function drawForecastPreview(x, y, w) {
@@ -2348,39 +2555,45 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       ctx.fillText(row.percentLabel, cols.trend, rowY);
       ctx.fillStyle = "#53625d";
       if (!compact) ctx.fillText(`${row.seasonLabel} ${row.rangeLabel}`, cols.season, rowY);
-      ctx.fillText(`${row.growWeeks}w`, cols.grow, rowY);
-      if (!compact) ctx.fillText(`${row.shelfWeeks}w`, cols.shelf, rowY);
+      ctx.fillText(`${row.growDays}d`, cols.grow, rowY);
+      if (!compact) ctx.fillText(`${row.shelfDays}d`, cols.shelf, rowY);
       rowY += compact ? 28 : 30;
     }
     ctx.restore();
   }
 
-  function drawInventorySummary(x, y, w) {
+  function drawInventorySummary(x, y, w, bottomY = Infinity) {
+    const compact = y + 98 > bottomY;
     ctx.font = "700 13px ui-sans-serif, system-ui";
     ctx.fillStyle = "#253331";
-    ctx.fillText("Storage", x, y);
-    y += 20;
+    ctx.fillText(compact ? "Storage / roof" : "Storage", x, y);
+    y += compact ? 18 : 20;
     ctx.font = "12px ui-sans-serif, system-ui";
     ctx.fillStyle = "#53625d";
     const fresh = state.inventory.filter((item) => !item.spoiled).length;
     const spoiled = state.inventory.filter((item) => item.spoiled).length;
-    drawWrappedText(`Fresh boxes: ${fresh}  Spoiled: ${spoiled}  Compost: ${state.compost}`, x, y, w, 16);
-    y += 20;
+    drawWrappedText(compact ? `Fresh ${fresh}, spoiled ${spoiled}, compost ${state.compost}` : `Fresh boxes: ${fresh}  Spoiled: ${spoiled}  Compost: ${state.compost}`, x, y, w, 16);
+    y += compact ? 18 : 20;
     const expiring = state.inventory
       .slice()
       .sort((a, b) => (a.shelfLife - a.age) - (b.shelfLife - b.age))
       .slice(0, 3)
       .map((item) => `${cropDefs[item.crop]?.short || item.crop} ${item.spoiled ? "spoiled" : `${Math.max(0, item.shelfLife - item.age)}d`}`);
     ctx.fillStyle = "#53625d";
-    drawWrappedText(expiring.length ? `Shelf life: ${expiring.join(", ")}` : "Shelf life: storage empty", x, y, w, 16);
-    y += 34;
-    ctx.font = "700 13px ui-sans-serif, system-ui";
-    ctx.fillStyle = "#253331";
-    ctx.fillText("Rooftop", x, y);
-    y += 20;
+    if (!compact) {
+      drawWrappedText(expiring.length ? `Shelf life: ${expiring.join(", ")}` : "Shelf life: storage empty", x, y, w, 16);
+      y += 34;
+      ctx.font = "700 13px ui-sans-serif, system-ui";
+      ctx.fillStyle = "#253331";
+      ctx.fillText("Rooftop", x, y);
+      y += 20;
+    }
     ctx.font = "12px ui-sans-serif, system-ui";
     ctx.fillStyle = "#53625d";
-    drawWrappedText(`Soil ${soilCount()}, water ${wateredCount()}, weeds ${state.weeds.length}, sprinklers ${sprinklerCount()} (${formatMoney(sprinklerCost())}), plants ${state.plants.length}.`, x, y, w, 16);
+    const roofText = compact
+      ? `Roof: soil ${soilCount()}, water ${wateredCount()}, weeds ${state.weeds.length}, sprinklers ${sprinklerCount()}, plants ${state.plants.length}.`
+      : `Soil ${soilCount()}, water ${wateredCount()}, weeds ${state.weeds.length}, sprinklers ${sprinklerCount()} (${formatMoney(sprinklerCost())}), plants ${state.plants.length}.`;
+    drawWrappedText(roofText, x, y, w, 16);
   }
 
   function drawBottomToolbar() {
@@ -2427,11 +2640,11 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
 
     buttonItems.push({
       id: "speed",
-      label: state.fast ? "Speed x1" : "Speed x4",
-      enabled: state.phase === "midweek",
-      selected: state.fast,
+      label: "10-min clock",
+      enabled: false,
+      selected: state.phase === "midweek",
       action: () => {
-        state.fast = !state.fast;
+        state.message = "The prototype clock advances one 10-minute interval at a time.";
       },
     });
 
@@ -2445,7 +2658,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         if (state.phase === "planning") passPlanning();
         else if (state.phase === "market") endMarketWeek();
         else if (state.phase === "midweek") {
-          state.minutes = DAY_MINUTES - 2;
+          state.minutes = DAY_MINUTES - CLOCK_STEP_MINUTES;
+          state.clockAccumulator = clockStepSeconds();
         }
       },
     });
@@ -2487,21 +2701,23 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const msgY = y - 38;
     ctx.fillStyle = "rgba(251, 248, 238, 0.88)";
     ctx.strokeStyle = "rgba(35, 49, 46, 0.25)";
-    roundRect(pad, msgY, Math.min(view.width - pad * 2, 920), 28, 7);
+    const msgMaxW = view.panel.w > 0 ? Math.max(360, view.panel.x - pad - 12) : view.width - pad * 2;
+    const msgW = Math.min(msgMaxW, 920);
+    roundRect(pad, msgY, msgW, 28, 7);
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "#253331";
     ctx.font = "13px ui-sans-serif, system-ui";
     ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillText(state.message, pad + 12, msgY + 14);
+    ctx.textBaseline = "top";
+    drawWrappedText(state.message, pad + 12, msgY + 8, msgW - 24, 14);
   }
 
   function toolMessage(tool) {
     if (tool === "soil") return "Drag across the rooftop to paint soil mass.";
     if (tool === "erase") return "Drag to remove soil, sprinklers, or crops. Removed crops become compost.";
-    if (tool === "seed") return "Move over the rooftop to preview the 2 by 2 root filter; click green space to plant.";
-    if (tool === "irrigation") return `Click a grid point to hang an overhead pipe nozzle for ${formatMoney(sprinklerCost())}; after the first, place beside the network.`;
+    if (tool === "seed") return "Move over painted soil to preview the circular root radius; click green space to plant.";
+    if (tool === "irrigation") return `Click the roof to hang an overhead pipe nozzle for ${formatMoney(sprinklerCost())}; after the first, place near the network.`;
     if (tool === "harvest") return "Click harvestable crops, or assign a volunteer to harvest.";
     return "Select a tool and work the rooftop.";
   }
@@ -2552,38 +2768,13 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     ctx.fillRect(0, tableY, view.width, 14);
 
     drawTopHud();
-    drawNeighbourhoodContacts(compact);
 
     const stallX = compact ? 18 : view.width * 0.08;
     const stallY = compact ? 92 : view.height * 0.28;
     const stallW = compact ? view.width - 36 : view.width * 0.42;
     const stallH = compact ? 168 : view.height * 0.34;
-    ctx.fillStyle = "#fbf8ee";
-    ctx.strokeStyle = "#253331";
-    ctx.lineWidth = 3;
-    roundRect(stallX, stallY, stallW, stallH, 8);
-    ctx.fill();
-    ctx.stroke();
-    ctx.fillStyle = "#5e9f61";
-    ctx.fillRect(stallX + 20, stallY + stallH - 78, stallW - 40, 18);
-    ctx.fillStyle = "#e26d3f";
-    ctx.beginPath();
-    ctx.arc(stallX + stallW * 0.24, stallY + stallH - 112, compact ? 17 : 28, 0, Math.PI * 2);
-    ctx.arc(stallX + stallW * 0.47, stallY + stallH - 116, compact ? 15 : 22, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#ead9a8";
-    ctx.beginPath();
-    ctx.ellipse(stallX + stallW * 0.72, stallY + stallH - 112, compact ? 24 : 34, compact ? 12 : 17, -0.3, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = "#1e2b29";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.font = `${compact ? 20 : 24}px ui-sans-serif, system-ui`;
-    ctx.fillText("Farmer's Market", stallX + 24, stallY + 22);
-    ctx.font = `${compact ? 12 : 14}px ui-sans-serif, system-ui`;
-    ctx.fillStyle = "#4c5b55";
-    drawWrappedText("Sell for cash or gift one fresh box to a useful contact. Favour unlocks compost, roof work, and volunteers.", stallX + 24, stallY + 58, stallW - 48, compact ? 15 : 18);
+    drawProduceStall(stallX, stallY, stallW, stallH, compact);
+    drawMarketShoppers(stallX, stallY, stallW, stallH, compact);
 
     const cardX = compact ? 18 : view.width * 0.55;
     const cardY = compact ? 258 : view.height * 0.25;
@@ -2591,6 +2782,141 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     drawMarketCard(cardX, cardY, cardW);
     drawBottomMarketControls();
     drawWeightGauge();
+  }
+
+  function drawProduceStall(x, y, w, h, compact) {
+    ctx.fillStyle = "#fbf8ee";
+    ctx.strokeStyle = "#253331";
+    ctx.lineWidth = 3;
+    roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "#1e2b29";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = `${compact ? 20 : 24}px ui-sans-serif, system-ui`;
+    ctx.fillText("Farmer's Market", x + 24, y + 22);
+    ctx.font = `${compact ? 12 : 14}px ui-sans-serif, system-ui`;
+    ctx.fillStyle = "#4c5b55";
+    drawWrappedText("Shoppers approach the stall and make offers for produce in storage.", x + 24, y + 58, w - 48, compact ? 15 : 18);
+
+    const counterY = y + h - (compact ? 70 : 88);
+    ctx.fillStyle = "#d79f49";
+    ctx.beginPath();
+    ctx.moveTo(x + 22, y + 92);
+    ctx.lineTo(x + w - 22, y + 92);
+    ctx.lineTo(x + w - 38, y + 126);
+    ctx.lineTo(x + 38, y + 126);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.22)";
+    ctx.lineWidth = 1.2;
+    for (let stripe = 0; stripe < 6; stripe += 1) {
+      const sx = x + 40 + stripe * ((w - 80) / 5);
+      ctx.beginPath();
+      ctx.moveTo(sx, y + 92);
+      ctx.lineTo(sx - 10, y + 126);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = "#5e9f61";
+    roundRect(x + 20, counterY, w - 40, 24, 8);
+    ctx.fill();
+    ctx.fillStyle = "#9f6d43";
+    ctx.fillRect(x + 20, counterY + 18, w - 40, compact ? 34 : 48);
+
+    const counts = freshInventoryByCrop();
+    const crops = Object.keys(counts).filter((key) => cropDefs[key]);
+    if (!crops.length) {
+      ctx.fillStyle = "#53625d";
+      ctx.font = "13px ui-sans-serif, system-ui";
+      ctx.fillText("The stall is empty. Harvest produce before market day.", x + 28, counterY - 28);
+      return;
+    }
+    const totalFresh = crops.reduce((sum, key) => sum + counts[key], 0);
+    const pileSlots = Math.min(compact ? 5 : 8, Math.max(crops.length, Math.min(8, totalFresh + 2)));
+    for (let i = 0; i < pileSlots; i += 1) {
+      const key = crops[i % crops.length];
+      const def = cropDefs[key];
+      const cx = x + 44 + i * ((w - 88) / Math.max(1, pileSlots - 1));
+      const cy = counterY - 18 - (i % 2) * 13 + Math.sin(state.minutes * 0.018 + i) * 2;
+      const qty = counts[key];
+      ctx.fillStyle = "#c68d52";
+      roundRect(cx - 24, cy + 12, 48, 28, 5);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(35, 49, 46, 0.22)";
+      ctx.stroke();
+      ctx.fillStyle = def.color;
+      for (let j = 0; j < Math.min(10, qty + 4); j += 1) {
+        ctx.beginPath();
+        ctx.ellipse(cx + (j % 5) * 7 - 15, cy + Math.floor(j / 5) * 7, 12, 8, (j % 3) * 0.35, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = def.leaf;
+      ctx.font = "700 11px ui-sans-serif, system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(i < crops.length ? `${def.short} x${qty}` : def.short, cx, cy + 43);
+    }
+  }
+
+  function drawMarketShoppers(stallX, stallY, stallW, stallH, compact) {
+    const offers = state.marketOffers.length ? state.marketOffers : generateMarketOffers();
+    const baseY = stallY + stallH + (compact ? 52 : 76);
+    for (let i = 0; i < Math.max(2, offers.length); i += 1) {
+      const offer = offers[i];
+      const progress = (Math.sin(state.minutes * 0.012 + i * 1.7) + 1) / 2;
+      const x = compact
+        ? stallX + stallW * (0.66 + i * 0.12) - progress * 64
+        : stallX + stallW - 34 + i * 78 - progress * 96;
+      const y = baseY + (i % 2) * 22;
+      const color = i === 0 ? "#d98845" : i === 1 ? "#4f7ecb" : "#6f9f59";
+      drawPerson(x, y, color, 1 + i * 0.12);
+      if (offer) drawOfferBubble(x + 18, y - 72, offer, compact);
+    }
+  }
+
+  function drawPerson(x, y, color, bob) {
+    ctx.save();
+    ctx.translate(x, y + Math.sin(state.minutes * 0.06 + bob) * 2);
+    ctx.fillStyle = "rgba(32, 45, 42, 0.18)";
+    ctx.beginPath();
+    ctx.ellipse(0, 20, 18, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(0, -8, 12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillRect(-10, 6, 20, 26);
+    ctx.fillStyle = "#f2d1aa";
+    ctx.beginPath();
+    ctx.arc(0, -27, 9, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawOfferBubble(x, y, offer, compact) {
+    const w = compact ? 104 : 126;
+    const h = compact ? 44 : 52;
+    const def = cropDefs[offer.crop];
+    ctx.fillStyle = "rgba(251, 248, 238, 0.96)";
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.35)";
+    ctx.lineWidth = 1.5;
+    roundRect(x, y, w, h, 10);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = def?.color || "#70a95f";
+    ctx.beginPath();
+    ctx.ellipse(x + 18, y + h / 2, 12, 9, -0.25, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#1e2b29";
+    ctx.font = "700 12px ui-sans-serif, system-ui";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${def?.short || offer.crop} x${offer.qty}`, x + 36, y + h * 0.38);
+    ctx.fillStyle = "#53625d";
+    ctx.font = "12px ui-sans-serif, system-ui";
+    ctx.fillText(`${offer.price}p`, x + 36, y + h * 0.68);
   }
 
   function drawNeighbourhoodContacts(compact) {
@@ -2622,40 +2948,52 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     ctx.fillStyle = "rgba(251, 248, 238, 0.94)";
     ctx.strokeStyle = "rgba(35, 49, 46, 0.35)";
     ctx.lineWidth = 1.5;
-    roundRect(x, y, w, 360, 8);
+    roundRect(x, y, w, 300, 8);
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "#1e2b29";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.font = "700 16px ui-sans-serif, system-ui";
-    ctx.fillText("Contacts", x + 16, y + 16);
+    ctx.fillText("Shopper offers", x + 16, y + 16);
     ctx.font = "12px ui-sans-serif, system-ui";
     ctx.fillStyle = "#53625d";
     ctx.fillText(`Fresh produce boxes: ${state.inventory.filter((item) => !item.spoiled).length}`, x + 16, y + 40);
 
-    addButton("sell-all", x + 16, y + 62, w - 32, 36, "Sell all fresh produce", () => sellAll(), { selected: true });
-    addButton("stall-volunteer", x + 16, y + 106, w - 32, 32, `Assign stall helper (${stallVolunteerCount()})`, () => assignStallVolunteer(), { subtle: true });
-
-    const contacts = [
-      ["restaurant", "Restaurant"],
-      ["carpenter", "Carpenter"],
-      ["social", "Social worker"],
-      ["engineer", "Engineer"],
-      ["mushroom", "Mushroom grower"],
-      ["beekeeper", "Beekeeper"],
-    ];
-    const contactW = (w - 42) / 2;
-    for (let i = 0; i < contacts.length; i += 1) {
-      const [key, label] = contacts[i];
-      const bx = x + 16 + (i % 2) * (contactW + 10);
-      const by = y + 150 + Math.floor(i / 2) * 40;
-      addButton(`gift-${key}`, bx, by, contactW, 34, `${label} ${state.favour[key] || 0}`, () => giftToNpc(key));
+    if (!state.marketOffers.length) state.marketOffers = generateMarketOffers();
+    let rowY = y + 66;
+    if (!state.marketOffers.length) {
+      ctx.fillStyle = "#53625d";
+      drawWrappedText("No shoppers are making offers because the stall has no fresh produce.", x + 16, rowY, w - 32, 17);
+      rowY += 54;
+    }
+    for (let i = 0; i < Math.min(3, state.marketOffers.length); i += 1) {
+      const offer = state.marketOffers[i];
+      const def = cropDefs[offer.crop];
+      ctx.fillStyle = "rgba(96, 112, 106, 0.08)";
+      roundRect(x + 16, rowY, w - 32, 42, 8);
+      ctx.fill();
+      ctx.fillStyle = def?.color || "#70a95f";
+      ctx.beginPath();
+      ctx.ellipse(x + 36, rowY + 21, 12, 8, -0.25, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#1e2b29";
+      ctx.font = "700 12px ui-sans-serif, system-ui";
+      ctx.fillText(`${offer.npc}: ${def?.name || offer.crop} x${offer.qty}`, x + 56, rowY + 8);
+      ctx.fillStyle = "#53625d";
+      ctx.font = "12px ui-sans-serif, system-ui";
+      ctx.fillText(`${formatMoney(offer.price)} offer`, x + 56, rowY + 24);
+      addButton(`accept-offer-${i}`, x + w - 96, rowY + 7, 72, 28, "Accept", () => acceptMarketOffer(i), { selected: i === 0 });
+      rowY += 50;
     }
 
-    addButton("compost-spoiled", x + 16, y + 278, contactW, 30, "Compost spoiled", () => compostSpoiled(), { subtle: true });
-    addButton("strengthen-roof", x + 26 + contactW, y + 278, contactW, 30, "Crew roof work", () => strengthenRoof(), { subtle: true });
-    addButton("consult-farms", x + 16, y + 318, w - 32, 28, "Winter farm consult", () => consultOtherFarm(), { subtle: !canConsultOtherFarm(), selected: canConsultOtherFarm() });
+    const half = (w - 42) / 2;
+    addButton("sell-all", x + 16, y + 220, half, 34, "Clear stall", () => sellAll(), { subtle: true });
+    addButton("compost-spoiled", x + 26 + half, y + 220, half, 34, "Compost spoiled", () => compostSpoiled(), { subtle: true });
+    addButton("refresh-offers", x + 16, y + 262, w - 32, 28, "Call next shoppers", () => {
+      state.marketOffers = generateMarketOffers();
+      state.message = state.marketOffers.length ? "New shoppers step up to the stall." : "No fresh produce for shoppers to buy.";
+    }, { selected: true });
   }
 
   function drawBottomMarketControls() {
@@ -2799,26 +3137,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
 
     if (state.selectedTool === "soil") {
       if (state.phase !== "planning") return;
-      const target = cellAt(cell.col, cell.row);
-      if (!plantAt(cell.col, cell.row)) {
-        target.soil = Math.max(target.soil, 1);
-        target.watered = false;
-        state.message = "Soil painted. Each tile adds mass to the roof.";
-      }
+      paintSoilAt(cell.col, cell.row);
     } else if (state.selectedTool === "erase") {
       if (state.phase !== "planning") return;
-      const plant = plantAt(cell.col, cell.row);
-      if (plant) {
-        removePlant(plant);
-      } else {
-        const target = cellAt(cell.col, cell.row);
-        target.soil = 0;
-        target.watered = false;
-        target.sprinkler = false;
-        target.compost = 0;
-        state.weeds = state.weeds.filter((weed) => weed.col !== cell.col || weed.row !== cell.row);
-        state.message = "Tile cleared.";
-      }
+      eraseAt(cell.col, cell.row);
     } else if (state.selectedTool === "seed" && !dragging) {
       if (state.phase !== "planning") return;
       plantSeed(cell.col, cell.row);
@@ -2913,7 +3235,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (key === "h") state.selectedTool = "harvest";
     if (event.key === " ") {
       if (state.phase === "planning") passPlanning();
-      else if (state.phase === "midweek") state.fast = !state.fast;
+      else if (state.phase === "midweek") {
+        state.minutes = DAY_MINUTES - CLOCK_STEP_MINUTES;
+        state.clockAccumulator = clockStepSeconds();
+      }
       else if (state.phase === "market") endMarketWeek();
       event.preventDefault();
     }
@@ -2958,7 +3283,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         key: plant.crop,
         col: plant.col,
         row: plant.row,
-        rootCells: rootCells(plant),
+        rootRadiusPx: def?.rootRadius || 12,
+        rootSamples: rootCells(plant).length,
         stage: plantStage(plant),
         watered: isPlantWatered(plant),
         weeded: !plantHasWeeds(plant),
@@ -2977,7 +3303,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       inventory[key] = (inventory[key] || 0) + item.qty;
     }
     return {
-      coordinateSystem: "grid origin top-left, col increases right, row increases down",
+      coordinateSystem: "analog roof samples: origin top-left, col increases right, row increases down; visible grid is hidden",
       visualMode: "3d rooftop scene with 2d HUD overlay",
       mode: state.mode,
       phase: state.phase,
@@ -2987,6 +3313,13 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       weekInMonth: state.weekInMonth,
       day: state.day,
       time: formatTime(state.minutes),
+      clock: {
+        stepMinutes: CLOCK_STEP_MINUTES,
+        daytimeStepSeconds: DAY_STEP_SECONDS,
+        nightStepSeconds: NIGHT_STEP_SECONDS,
+        repairStepSeconds: REPAIR_STEP_SECONDS,
+        accumulator: Math.round((state.clockAccumulator || 0) * 10) / 10,
+      },
       season: currentSeason(),
       money: Math.round(state.money),
       selectedTool: state.selectedTool,
@@ -3006,10 +3339,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         overloadDays: state.overloadDays,
       },
       rooftop: {
-        soilCells: soilCount(),
-        wateredCells: wateredCount(),
+        soilSamples: soilCount(),
+        wateredSamples: wateredCount(),
         sprinklers: sprinklerCount(),
-        irrigationModel: "overhead pipe network; nozzles do not consume root grid cells",
+        irrigationModel: "overhead pipe network; nozzles water circular analog soil samples and do not consume root space",
         sprinklerCost: sprinklerCost(),
         compost: state.compost,
         weeds: state.weeds.length,
@@ -3035,6 +3368,12 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         shelfLife: item.shelfLife,
         remainingShelfLife: Math.max(0, item.shelfLife - item.age),
         spoiled: item.spoiled,
+      })),
+      marketOffers: state.marketOffers.map((offer) => ({
+        npc: offer.npc,
+        crop: cropDefs[offer.crop]?.name || offer.crop,
+        qty: offer.qty,
+        price: offer.price,
       })),
       volunteers: state.volunteers.map((volunteer) => ({
         name: volunteer.name,
@@ -3062,6 +3401,13 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       }));
     if (state.mode !== "title") {
       items.push({
+        id: "roof-paint-area",
+        x: Math.round(view.roof.x),
+        y: Math.round(view.roof.y),
+        w: Math.round(view.roof.w),
+        h: Math.round(view.roof.h),
+      });
+      items.push({
         id: "roof-grid",
         x: Math.round(view.roof.x),
         y: Math.round(view.roof.y),
@@ -3069,12 +3415,14 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         h: Math.round(view.roof.h),
       });
       for (const plant of state.plants.slice(0, 12)) {
+        const def = cropDefs[plant.crop];
+        const radius = sampleRadiusForPixels(def?.rootRadius || 12) * view.roof.cell;
         items.push({
           id: `plant-${plant.col}-${plant.row}`,
-          x: Math.round(view.roof.x + plant.col * view.roof.cell),
-          y: Math.round(view.roof.y + plant.row * view.roof.cell),
-          w: Math.round(view.roof.cell * 2),
-          h: Math.round(view.roof.cell * 2),
+          x: Math.round(view.roof.x + plant.col * view.roof.cell - radius),
+          y: Math.round(view.roof.y + plant.row * view.roof.cell - radius),
+          w: Math.round(radius * 2),
+          h: Math.round(radius * 2),
         });
       }
     }
