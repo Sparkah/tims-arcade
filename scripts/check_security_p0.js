@@ -697,6 +697,22 @@ function testNoCommittedPostHogToken() {
   }
 }
 
+function testTelegramHotPathsDoNotUseKvRateLimiter() {
+  const apiDir = path.join(GALLERY, 'functions/api');
+  const offenders = fs.readdirSync(apiDir)
+    .filter((name) => /^tg-.*\.js$/.test(name))
+    .filter((name) => {
+      const src = fs.readFileSync(path.join(apiDir, name), 'utf8');
+      return src.includes('checkUserRate') ||
+        src.includes("../_lib/rateLimit.js") ||
+        src.includes("'../_lib/rateLimit.js'");
+    });
+  assert(
+    offenders.length === 0,
+    `Telegram API hot paths must not use KV-backed checkUserRate: ${offenders.join(', ')}`,
+  );
+}
+
 async function testSharePageCatalogueFetchIsHostAllowlisted() {
   const mod = await import(pathToFileURL(path.join(GALLERY, 'functions/p/[slug].js')).href);
   const games = [{
@@ -936,6 +952,7 @@ async function main() {
   testClientsUseVoteStateShape();
   testPublicDomSinksAvoidCatalogHtml();
   testNoCommittedPostHogToken();
+  testTelegramHotPathsDoNotUseKvRateLimiter();
   await testSharePageCatalogueFetchIsHostAllowlisted();
   await testPublicFunctionFetchesUseTrustedOrigins();
   console.log('PASS security P0 regressions');

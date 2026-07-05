@@ -1,5 +1,4 @@
 import { jsonError, sameOriginOk } from '../_lib/response.js';
-import { checkUserRate } from '../_lib/rateLimit.js';
 import { getProduct, hasStarsPrice, PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
 import {
@@ -30,15 +29,6 @@ export async function onRequestPost({ request, env }) {
   const initData = String(body.initData || '');
   const auth = await verifyTelegramInitData(initData, env.TELEGRAM_GAMEBOT_TOKEN);
   if (!auth.ok) return jsonError(auth.error, 401);
-
-  // Rate limit AFTER auth (keyed on the verified user, IP fallback) and BEFORE
-  // the createInvoiceLink fetch + Supabase writes below.
-  const rlId = auth.user && auth.user.id
-    ? `u:${auth.user.id}`
-    : `ip:${request.headers.get('cf-connecting-ip') || 'unknown'}`;
-  if (!await checkUserRate(env, 'tg-invoice', rlId, { perSec: 3, perMin: 20 })) {
-    return jsonError('rate limit', 429);
-  }
 
   const userId = String(auth.user.id);
   const nonce = crypto.randomUUID

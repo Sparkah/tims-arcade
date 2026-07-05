@@ -23,12 +23,10 @@ export async function checkRate(env, key, limit, ttlSeconds) {
   return true;
 }
 
-// Two-window guard for the authenticated Telegram payment/state endpoints
-// (tg-invoice / tg-purchase / tg-ton-order / tg-ton-verify / tg-state). Each of
-// those does real work per call — a Telegram/TONAPI fetch or a Supabase write —
-// so a spammed client can burn API quota or hammer the DB. This caps BOTH a
-// short burst (perSec) and a sustained rate (perMin), keyed by a caller-built
-// identity string (the verified Telegram user id, falling back to IP).
+// Two-window guard for lower-volume endpoints that still accept KV write cost.
+// Do not use this on Telegram Mini App save or payment polling endpoints:
+// those paths can be called many times per session, and each accepted request
+// spends two Workers KV writes.
 //
 // Buckets live in the same VOTES KV as checkRate. Each window is its own
 // rotating key (…:s<second> / …:m<minute>), so the window itself comes from the

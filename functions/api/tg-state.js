@@ -1,7 +1,6 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
 import { PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
 import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
-import { checkUserRate } from '../_lib/rateLimit.js';
 import {
   getTelegramState,
   supabaseIsConfigured,
@@ -65,16 +64,6 @@ export async function onRequestPost({ request, env }) {
   // launched by @gamesfactorybot or @gamesfactorytestbot, and the same Supabase save/grant state is shared.
   const auth = await verifyTelegramInitDataFromEnv(body.initData, env);
   if (!auth.ok) return jsonError(`Telegram auth failed: ${auth.error}`, 401);
-
-  // Rate limit AFTER auth (verified user, IP fallback), BEFORE player upsert +
-  // state read/write. Higher budget than the payment endpoints because this is
-  // the autosave/load path and gets called far more often in normal play.
-  const rlId = auth.user && auth.user.id
-    ? `u:${auth.user.id}`
-    : `ip:${request.headers.get('cf-connecting-ip') || 'unknown'}`;
-  if (!await checkUserRate(env, 'tg-state', rlId, { perSec: 5, perMin: 60 })) {
-    return jsonError('rate limit', 429);
-  }
 
   await upsertTelegramPlayer(env, auth.user, action === 'load' ? sourceMeta(body, auth) : {});
 
