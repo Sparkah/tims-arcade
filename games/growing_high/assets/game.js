@@ -31,6 +31,15 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   const WATER_RADIUS = 42;
   const VOLUNTEER_ACTION_SECONDS = 0.85;
   const WEED_SPAWN_CHANCE = 0.22;
+  const SALARY_BUFFER_PERCENT = 15;
+  const WEEKLY_LIVING_COSTS = [
+    { key: "rent", label: "Rent", amount: 180 },
+    { key: "food", label: "Food", amount: 58 },
+    { key: "commute", label: "Commute", amount: 26 },
+    { key: "utilities", label: "Utilities", amount: 22 },
+    { key: "phone", label: "Phone/data", amount: 8 },
+    { key: "essentials", label: "Essentials", amount: 24 },
+  ];
 
   const cropDefs = cloneBalance(DEFAULT_CROP_DEFS);
   let balanceSource = "defaults";
@@ -383,12 +392,13 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       selectedTool: "soil",
       selectedSeed: "carrot",
       showForecast: false,
+      showLivingCosts: false,
       balanceSource,
       balanceLabel,
       fast: false,
       weather: "Bright start, light rain later",
       marketMood: "Local demand favours quick greens",
-      message: "Paint soil in broad strokes, plant inside circular root space, then pass the week.",
+      message: "Paint soil in broad strokes, plant inside circular root space, then check Costs for the salary proposal.",
       grid,
       plants: [],
       weeds: [],
@@ -478,6 +488,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.hubReputation = state.hubReputation || 0;
     state.priceMemory = state.priceMemory || {};
     state.showForecast = Boolean(state.showForecast);
+    state.showLivingCosts = Boolean(state.showLivingCosts);
     state.clockAccumulator = Number.isFinite(state.clockAccumulator) ? state.clockAccumulator : 0;
     if (state.balanceSource !== balanceSource) {
       state.priceMemory = {};
@@ -662,6 +673,22 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
           shelfDays: def.shelfLife,
         };
       });
+  }
+
+  function livingCostSummary() {
+    const items = WEEKLY_LIVING_COSTS.map((item) => ({ ...item }));
+    const weeklyTotal = items.reduce((sum, item) => sum + item.amount, 0);
+    const proposedWeeklySalary = Math.ceil((weeklyTotal * (1 + SALARY_BUFFER_PERCENT / 100)) / 5) * 5;
+    const bufferAmount = proposedWeeklySalary - weeklyTotal;
+    return {
+      items,
+      weeklyTotal,
+      bufferPercent: SALARY_BUFFER_PERCENT,
+      bufferAmount,
+      proposedWeeklySalary,
+      proposedMonthlySalary: Math.round((proposedWeeklySalary * 52) / 12),
+      proposedAnnualSalary: proposedWeeklySalary * 52,
+    };
   }
 
   function availableCropKeys() {
@@ -956,7 +983,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.marketMood = generateMarketMood();
     state.prices = generatePrices();
     normalizeSelectedSeed();
-    state.message = "New planning phase. Check prices, expand carefully, and keep the roof load safe.";
+    const costs = livingCostSummary();
+    state.message = `New planning phase. Living costs are ${formatMoney(costs.weeklyTotal)}/week; salary proposal is ${formatMoney(costs.proposedWeeklySalary)}/week.`;
     saveGame();
   }
 
@@ -1923,6 +1951,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       if (state.phase === "repair") drawRepairOverlay();
       if (state.showForecast) drawForecastOverlay();
     }
+    if (state.showLivingCosts) drawLivingCostOverlay();
   }
 
   function layout() {
@@ -2416,6 +2445,9 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     y = drawForecastPreview(p.x + 16, y, p.w - 32);
     y += 12;
 
+    y = drawLivingCostPreview(p.x + 16, y, p.w - 32);
+    y += 12;
+
     ctx.font = "700 13px ui-sans-serif, system-ui";
     ctx.fillStyle = "#253331";
     ctx.fillText("Seeds and prices", p.x + 16, y);
@@ -2470,6 +2502,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     ctx.fillText("Weekly price forecast", x, y);
     addButton("forecast-open", x + w - 92, y - 6, 92, 26, "Open table", () => {
       state.showForecast = true;
+      state.showLivingCosts = false;
       state.message = "Forecast table shows every unlocked crop price for this planning week.";
     }, { selected: state.showForecast });
     y += 24;
@@ -2493,6 +2526,31 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       ctx.fillText(`+${rows.length - previewRows.length} more crops in table`, x, y);
       y += 15;
     }
+    return y;
+  }
+
+  function drawLivingCostPreview(x, y, w) {
+    const costs = livingCostSummary();
+    ctx.font = "700 13px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#253331";
+    ctx.fillText("Weekly living costs", x, y);
+    addButton("costs-open", x + w - 92, y - 6, 92, 26, "Breakdown", () => {
+      state.showLivingCosts = true;
+      state.showForecast = false;
+      state.message = "Cost table itemizes rent, food, commute, and other weekly needs for salary planning.";
+    }, { selected: state.showLivingCosts });
+    y += 24;
+
+    ctx.font = "11px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#53625d";
+    ctx.fillText(`Typical week ${formatMoney(costs.weeklyTotal)}`, x, y);
+    ctx.textAlign = "right";
+    ctx.fillText(`Salary ${formatMoney(costs.proposedWeeklySalary)}/wk`, x + w, y);
+    ctx.textAlign = "left";
+    y += 15;
+    const leadItems = costs.items.slice(0, 3).map((item) => `${item.label} ${formatMoney(item.amount)}`).join("  ");
+    drawWrappedText(leadItems, x, y, w, 15);
+    y += 30;
     return y;
   }
 
@@ -2562,6 +2620,75 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     ctx.restore();
   }
 
+  function drawLivingCostOverlay() {
+    const costs = livingCostSummary();
+    const compact = view.width < 820;
+    const w = Math.min(view.width - 28, compact ? 370 : 560);
+    const h = Math.min(view.height - 74, compact ? 374 : 360);
+    const x = (view.width - w) / 2;
+    const y = Math.max(58, (view.height - h) / 2);
+
+    ctx.save();
+    ctx.fillStyle = "rgba(20, 31, 29, 0.42)";
+    ctx.fillRect(0, 0, view.width, view.height);
+    ctx.fillStyle = "rgba(251, 248, 238, 0.98)";
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.38)";
+    ctx.lineWidth = 1.5;
+    roundRect(x, y, w, h, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "#1e2b29";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = compact ? "700 17px ui-sans-serif, system-ui" : "700 20px ui-sans-serif, system-ui";
+    ctx.fillText("Weekly Cost of Living", x + 18, y + 16);
+    ctx.font = "12px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#53625d";
+    ctx.fillText("Typical week estimate used to calculate the proposed salary.", x + 18, y + 42);
+    addButton("costs-close", x + w - 86, y + 14, 66, 30, "Close", () => {
+      state.showLivingCosts = false;
+    });
+
+    const tableX = x + 18;
+    let rowY = y + 76;
+    ctx.font = "700 11px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#253331";
+    ctx.fillText("Cost", tableX, rowY);
+    ctx.textAlign = "right";
+    ctx.fillText("Weekly", x + w - 22, rowY);
+    ctx.textAlign = "left";
+    rowY += 18;
+
+    for (const item of costs.items) {
+      ctx.fillStyle = "rgba(96, 112, 106, 0.08)";
+      roundRect(tableX - 8, rowY - 7, w - 36, 24, 5);
+      ctx.fill();
+      ctx.font = "12px ui-sans-serif, system-ui";
+      ctx.fillStyle = "#1e2b29";
+      ctx.fillText(item.label, tableX, rowY);
+      ctx.textAlign = "right";
+      ctx.fillText(formatMoney(item.amount), x + w - 22, rowY);
+      ctx.textAlign = "left";
+      rowY += 28;
+    }
+
+    const summaryY = rowY + 8;
+    ctx.fillStyle = "#edf1e7";
+    roundRect(tableX - 8, summaryY, w - 36, 84, 8);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.22)";
+    ctx.stroke();
+    ctx.font = "700 13px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#253331";
+    ctx.fillText(`Living cost total: ${formatMoney(costs.weeklyTotal)}/week`, tableX, summaryY + 12);
+    ctx.fillText(`Proposed salary floor: ${formatMoney(costs.proposedWeeklySalary)}/week`, tableX, summaryY + 34);
+    ctx.font = "12px ui-sans-serif, system-ui";
+    ctx.fillStyle = "#53625d";
+    drawWrappedText(`Includes a ${costs.bufferPercent}% buffer (${formatMoney(costs.bufferAmount)}) for tax, savings, and unexpected costs. Monthly equivalent ${formatMoney(costs.proposedMonthlySalary)}; annual equivalent ${formatMoney(costs.proposedAnnualSalary)}.`, tableX, summaryY + 56, w - 52, 15);
+    ctx.restore();
+  }
+
   function drawInventorySummary(x, y, w, bottomY = Infinity) {
     const compact = y + 98 > bottomY;
     ctx.font = "700 13px ui-sans-serif, system-ui";
@@ -2602,7 +2729,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const pad = compact ? 10 : 24;
     const h = compact ? 38 : 54;
     const gap = compact ? 6 : 10;
-    const maxButtons = toolDefs.length + 4;
+    const maxButtons = toolDefs.length + 5;
     const columns = compact ? 4 : maxButtons;
     const bw = compact
       ? (view.width - pad * 2 - gap * (columns - 1)) / columns
@@ -2682,7 +2809,20 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       selected: state.showForecast,
       action: () => {
         state.showForecast = true;
+        state.showLivingCosts = false;
         state.message = "Forecast table shows every unlocked crop price for this planning week.";
+      },
+    });
+
+    buttonItems.push({
+      id: "living-costs",
+      label: compact ? "Costs" : "Living Costs",
+      enabled: true,
+      selected: state.showLivingCosts,
+      action: () => {
+        state.showLivingCosts = true;
+        state.showForecast = false;
+        state.message = "Cost table itemizes rent, food, commute, and other weekly needs for salary planning.";
       },
     });
 
@@ -3180,8 +3320,9 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       }
     }
 
-    if (state.showForecast) {
+    if (state.showForecast || state.showLivingCosts) {
       state.showForecast = false;
+      state.showLivingCosts = false;
       event.preventDefault();
       return;
     }
@@ -3233,6 +3374,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (key === "p") state.selectedTool = "seed";
     if (key === "i") state.selectedTool = "irrigation";
     if (key === "h") state.selectedTool = "harvest";
+    if (key === "c") {
+      state.showLivingCosts = true;
+      state.showForecast = false;
+    }
     if (event.key === " ") {
       if (state.phase === "planning") passPlanning();
       else if (state.phase === "midweek") {
@@ -3326,6 +3471,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       selectedSeed: cropDefs[state.selectedSeed]?.name || state.selectedSeed,
       unlockedSeeds: availableCropKeys().map((key) => cropDefs[key].name),
       forecastOpen: state.showForecast,
+      livingCostsOpen: state.showLivingCosts,
+      livingCosts: livingCostSummary(),
       balance: {
         source: balanceSource,
         label: balanceLabel,
