@@ -1,5 +1,5 @@
 import * as THREE from "./three.module.js";
-import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-data.js";
+import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_pit_clock";
 
 (() => {
   "use strict";
@@ -21,18 +21,15 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   const TOOL_LOAD = 18;
   const DAY_MINUTES = 1440;
   const CLOCK_STEP_MINUTES = 10;
-  const DAY_STEP_SECONDS = 7;
-  const NIGHT_STEP_SECONDS = 4;
-  const REPAIR_STEP_SECONDS = 2;
   const DAY_START_MINUTES = 7 * 60;
   const DAY_END_MINUTES = 17 * 60;
   const SOIL_BRUSH_RADIUS = 24;
   const ERASER_RADIUS = 26;
   const WATER_RADIUS = 42;
-  const VOLUNTEER_ACTION_SECONDS = 0.85;
   const WEED_SPAWN_CHANCE = 0.22;
 
   const cropDefs = cloneBalance(DEFAULT_CROP_DEFS);
+  const gameSettings = cloneBalance(DEFAULT_GAME_SETTINGS);
   let balanceSource = "defaults";
   let balanceLabel = "Default Section 3 table";
   applyBalanceOverrides();
@@ -560,39 +557,63 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   }
 
   function applyBalancePayload(payload, source) {
-    if (!payload || typeof payload !== "object" || !payload.crops || typeof payload.crops !== "object") return false;
+    if (!payload || typeof payload !== "object") return false;
     let applied = 0;
-    for (const [key, override] of Object.entries(payload.crops)) {
-      if (!cropDefs[key] || !override || typeof override !== "object") continue;
-      const target = cropDefs[key];
-      for (const field of ["growDays", "seedCost", "saleBase", "saplingLoad", "rootRadius", "harvestLoad", "fruitLoad", "fruitInterval", "shelfLife"]) {
-        if (override[field] === undefined || override[field] === "") continue;
-        const value = Number(override[field]);
-        if (!Number.isFinite(value) || value < 0) continue;
-        if (field === "fruitLoad" && value === 0) {
-          delete target.fruitLoad;
-          continue;
+    if (payload.crops && typeof payload.crops === "object") {
+      for (const [key, override] of Object.entries(payload.crops)) {
+        if (!cropDefs[key] || !override || typeof override !== "object") continue;
+        const target = cropDefs[key];
+        for (const field of ["growDays", "seedCost", "saleBase", "saplingLoad", "rootRadius", "harvestLoad", "fruitLoad", "fruitInterval", "shelfLife"]) {
+          if (override[field] === undefined || override[field] === "") continue;
+          const value = Number(override[field]);
+          if (!Number.isFinite(value) || value < 0) continue;
+          if (field === "fruitLoad" && value === 0) {
+            delete target.fruitLoad;
+            continue;
+          }
+          if (field === "fruitInterval" && value === 0) {
+            delete target.fruitInterval;
+            continue;
+          }
+          target[field] = Math.max(field === "seedCost" ? 0 : 1, Math.round(value));
         }
-        if (field === "fruitInterval" && value === 0) {
-          delete target.fruitInterval;
-          continue;
+        if (Array.isArray(override.seasons)) {
+          const cleanSeasons = override.seasons.filter((season) => ["Spring", "Summer", "Autumn", "Winter"].includes(season));
+          if (cleanSeasons.length) target.seasons = cleanSeasons;
         }
-        target[field] = Math.max(field === "seedCost" ? 0 : 1, Math.round(value));
+        if (typeof override.name === "string" && override.name.trim()) target.name = override.name.trim().slice(0, 32);
+        if (typeof override.short === "string" && override.short.trim()) target.short = override.short.trim().slice(0, 16);
+        applied += 1;
       }
-      if (Array.isArray(override.seasons)) {
-        const cleanSeasons = override.seasons.filter((season) => ["Spring", "Summer", "Autumn", "Winter"].includes(season));
-        if (cleanSeasons.length) target.seasons = cleanSeasons;
-      }
-      if (typeof override.name === "string" && override.name.trim()) target.name = override.name.trim().slice(0, 32);
-      if (typeof override.short === "string" && override.short.trim()) target.short = override.short.trim().slice(0, 16);
-      applied += 1;
     }
+
+    const settingsApplied = applySettingsPayload(payload.settings);
+    if (settingsApplied) applied += 1;
     if (!applied) return false;
     balanceSource = source;
     balanceLabel = typeof payload.label === "string" && payload.label.trim()
       ? payload.label.trim().slice(0, 60)
       : source === "url" ? "Shared balance draft" : "Browser balance draft";
     return true;
+  }
+
+  function applySettingsPayload(settings) {
+    if (!settings || typeof settings !== "object") return false;
+    let applied = false;
+    for (const [key, fallback] of Object.entries(DEFAULT_GAME_SETTINGS)) {
+      if (settings[key] === undefined || settings[key] === "") continue;
+      const value = Number(settings[key]);
+      if (!Number.isFinite(value)) continue;
+      if (key === "midweekDays") gameSettings[key] = clampNumber(Math.round(value), 1, 6);
+      else if (key === "volunteerMoveSpeed") gameSettings[key] = clampNumber(value, 0.15, 2.5);
+      else gameSettings[key] = clampNumber(value, 0.1, Math.max(30, fallback * 8));
+      applied = true;
+    }
+    return applied;
+  }
+
+  function clampNumber(value, min, max) {
+    return Math.max(min, Math.min(max, value));
   }
 
   function rand() {
@@ -852,13 +873,39 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     return state.grid.filter((cell) => cell.sprinkler).length;
   }
 
-  function hasAdjacentSprinkler(col, row) {
-    return state.grid.some((cell, index) => {
-      if (!cell.sprinkler) return false;
-      const c = index % COLS;
-      const r = Math.floor(index / COLS);
-      return sampleDistance(c, r, col, row) <= sampleRadiusForPixels(38);
-    });
+  function pipeNeighbours(col, row) {
+    return [
+      { col: col - 1, row },
+      { col: col + 1, row },
+      { col, row: row - 1 },
+      { col, row: row + 1 },
+    ].filter((cell) => inBounds(cell.col, cell.row) && cellAt(cell.col, cell.row).sprinkler);
+  }
+
+  function isRoofEdgePipeStart(col, row) {
+    return col <= 1 || row <= 1 || col >= COLS - 2 || row >= ROWS - 2;
+  }
+
+  function canPlaceIrrigationPipe(col, row) {
+    if (sprinklerCount() === 0) {
+      return isRoofEdgePipeStart(col, row)
+        ? { ok: true }
+        : { ok: false, message: "Start the irrigation pipe on the roof edge first." };
+    }
+    const neighbours = pipeNeighbours(col, row);
+    if (neighbours.length !== 1) {
+      return {
+        ok: false,
+        message: neighbours.length === 0
+          ? "New irrigation pipes must snap to the open side of the existing pipe."
+          : "Place pipes one segment at a time so the network does not cross-connect.",
+      };
+    }
+    const junction = neighbours[0];
+    if (pipeNeighbours(junction.col, junction.row).length >= 3) {
+      return { ok: false, message: "That junction already branches in three directions." };
+    }
+    return { ok: true };
   }
 
   function wateredCount() {
@@ -883,33 +930,52 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   }
 
   function isDaytime(minutes = state.minutes) {
-    return minutes >= DAY_START_MINUTES && minutes <= DAY_END_MINUTES;
+    return minutes >= DAY_START_MINUTES && minutes < DAY_END_MINUTES;
   }
 
-  function clockStepSeconds(phase = state.phase) {
-    if (phase === "repair") return REPAIR_STEP_SECONDS;
-    return isDaytime() ? DAY_STEP_SECONDS : NIGHT_STEP_SECONDS;
+  function midweekDays() {
+    return clampNumber(Math.round(gameSettings.midweekDays || DEFAULT_GAME_SETTINGS.midweekDays), 1, 6);
   }
 
-  function advanceTenMinuteClock(realSeconds, onTick) {
+  function clockStepSeconds(phase = state.phase, minutes = state.minutes) {
+    if (phase === "repair") return Math.max(0.1, gameSettings.repairStepSeconds || DEFAULT_GAME_SETTINGS.repairStepSeconds);
+    const hourSeconds = isDaytime(minutes)
+      ? gameSettings.dayHourSeconds || DEFAULT_GAME_SETTINGS.dayHourSeconds
+      : gameSettings.nightHourSeconds || DEFAULT_GAME_SETTINGS.nightHourSeconds;
+    return Math.max(0.05, (hourSeconds * CLOCK_STEP_MINUTES) / 60);
+  }
+
+  function volunteerActionSeconds() {
+    return Math.max(0.1, gameSettings.volunteerActionSeconds || DEFAULT_GAME_SETTINGS.volunteerActionSeconds);
+  }
+
+  function volunteerMoveSpeed() {
+    return Math.max(0.15, gameSettings.volunteerMoveSpeed || DEFAULT_GAME_SETTINGS.volunteerMoveSpeed);
+  }
+
+  function advanceTenMinuteClock(realSeconds, onTick, onDayEnd) {
     if (realSeconds <= 0) return;
     state.clockAccumulator = (state.clockAccumulator || 0) + realSeconds;
+    const startingPhase = state.phase;
     let guard = 0;
-    while (state.clockAccumulator >= clockStepSeconds() && guard < 2000) {
-      state.clockAccumulator -= clockStepSeconds();
+    while (guard < 2000) {
+      const stepSeconds = clockStepSeconds(state.phase, state.minutes);
+      if (state.clockAccumulator < stepSeconds) break;
+      state.clockAccumulator -= stepSeconds;
       state.minutes += CLOCK_STEP_MINUTES;
       onTick?.(CLOCK_STEP_MINUTES);
       guard += 1;
       if (state.minutes >= DAY_MINUTES) {
         state.minutes -= DAY_MINUTES;
-        break;
+        const shouldContinue = onDayEnd?.();
+        if (shouldContinue === false || state.phase !== startingPhase) break;
       }
     }
   }
 
   function phaseLabel() {
     if (state.phase === "planning") return "Planning";
-    if (state.phase === "midweek") return `Day ${state.day}`;
+    if (state.phase === "midweek") return `Day ${state.day}/${midweekDays()}`;
     if (state.phase === "market") return `Market Day ${state.day}`;
     if (state.phase === "repair") return "Roof Repair";
     return state.phase;
@@ -923,7 +989,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.minutes = DAY_START_MINUTES;
     state.clockAccumulator = 0;
     state.fast = false;
-    state.message = "The week has started. The clock advances in 10-minute steps.";
+    state.message = `The week has started. Mid-week runs for ${midweekDays()} days before market day.`;
     clearWater();
     applySprinklers();
     saveGame();
@@ -1077,13 +1143,9 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   }
 
   function updateMidweekClock(dt) {
-    const previousDay = state.day;
     advanceTenMinuteClock(dt, (minutes) => {
       growPlantsByMinutes(minutes);
-    });
-    if (state.minutes < CLOCK_STEP_MINUTES && state.day === previousDay) {
-      endDay();
-    }
+    }, endDay);
   }
 
   function absorbSoil(plant, amount) {
@@ -1101,7 +1163,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.minutes = state.minutes % DAY_MINUTES;
     applyDailyCycle();
     state.day += 1;
-    if (state.day >= 7 && state.phase === "midweek") {
+    if (state.day > midweekDays() && state.phase === "midweek") {
       enterMarket();
     }
     saveGame();
@@ -1185,11 +1247,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
   }
 
   function updateRepair(dt) {
-    advanceTenMinuteClock(dt, () => {});
-    if (state.minutes < CLOCK_STEP_MINUTES) {
+    advanceTenMinuteClock(dt, () => {}, () => {
       state.repairDaysLeft -= 1;
       state.day += 1;
-    }
+    });
     if (state.repairDaysLeft <= 0) {
       advanceCalendarWeek();
       state.phase = "planning";
@@ -1206,16 +1267,18 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       if (!state.marketOffers.length || Math.floor(state.minutes / 60) % 3 === 0) {
         state.marketOffers = generateMarketOffers();
       }
-    });
-    if (state.minutes < CLOCK_STEP_MINUTES && state.phase === "market") {
+    }, () => {
       state.day += 1;
       ageInventory(1);
       if (state.day > 7) {
         state.day = 7;
         state.minutes = 20 * 60;
+        state.clockAccumulator = 0;
         state.message = "The market weekend is ending. Press End Week when you are done with contacts.";
+        return false;
       }
-    }
+      return true;
+    });
   }
 
   function spoilOutOfSeasonPlants() {
@@ -1281,8 +1344,9 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       state.message = "A pipe nozzle already hangs above this roof spot.";
       return false;
     }
-    if (sprinklerCount() > 0 && !hasAdjacentSprinkler(col, row)) {
-      state.message = "New sprinklers must snap beside the existing pipe network.";
+    const pipeCheck = canPlaceIrrigationPipe(col, row);
+    if (!pipeCheck.ok) {
+      state.message = pipeCheck.message;
       return false;
     }
     const cost = sprinklerCost();
@@ -1294,7 +1358,9 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     const point = clampSamplePoint(col, row);
     cellAt(Math.round(point.col), Math.round(point.row)).sprinkler = true;
     waterRadius(point.col, point.row, sampleRadiusForPixels(WATER_RADIUS));
-    state.message = `Overhead pipe nozzle added for ${formatMoney(cost)}. It waters nearby soil without taking root space.`;
+    state.message = sprinklerCount() === 1
+      ? `Edge pipe started for ${formatMoney(cost)}. Continue from an open side to branch irrigation.`
+      : `Pipe segment added for ${formatMoney(cost)}. It waters nearby soil without taking root space.`;
     saveGame();
     return true;
   }
@@ -1407,7 +1473,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.money += offer.price;
     state.stats.sold += offer.qty;
     state.stats.stallSales += offer.qty;
-    state.message = `${offer.npc} bought ${cropDefs[offer.crop]?.name || offer.crop} for ${formatMoney(offer.price)}.`;
+    state.message = `Bagged ${cropDefs[offer.crop]?.name || offer.crop} for ${offer.npc} and collected ${formatMoney(offer.price)}.`;
     state.marketOffers.splice(index, 1);
     if (!state.marketOffers.length) state.marketOffers = generateMarketOffers();
     saveGame();
@@ -1647,7 +1713,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       volunteer.actionTimer = Math.max(0, (volunteer.actionTimer || 0) - dt);
       if (volunteer.actionTimer <= 0) {
         const acted = performVolunteerTask(volunteer, false);
-        volunteer.actionTimer = acted ? VOLUNTEER_ACTION_SECONDS : VOLUNTEER_ACTION_SECONDS * 3;
+        const actionDelay = volunteerActionSeconds();
+        volunteer.actionTimer = acted ? actionDelay : actionDelay * 3;
       }
     }
   }
@@ -1660,7 +1727,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     state.message = `${volunteer.name} assigned to ${task === "idle" ? "wander" : task}.`;
     if (state.phase === "midweek" && task !== "idle") {
       performVolunteerTask(volunteer, true);
-      volunteer.actionTimer = VOLUNTEER_ACTION_SECONDS;
+      volunteer.actionTimer = volunteerActionSeconds();
     }
     saveGame();
   }
@@ -1698,13 +1765,14 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       const volunteer = state.volunteers[i];
       volunteer.bob += dt * (volunteer.task === "idle" ? 1.4 : 2.2);
       if (volunteer.task === "idle") {
-        volunteer.x += Math.sin(volunteer.bob * 0.8 + i) * dt * 0.015;
-        volunteer.y += Math.cos(volunteer.bob * 0.7 + i) * dt * 0.012;
+        volunteer.x += Math.sin(volunteer.bob * 0.8 + i) * dt * 0.008 * volunteerMoveSpeed();
+        volunteer.y += Math.cos(volunteer.bob * 0.7 + i) * dt * 0.007 * volunteerMoveSpeed();
       } else {
         const targetX = volunteer.targetX ?? (volunteer.task === "water" ? 0.28 + i * 0.12 : 0.64 - i * 0.1);
         const targetY = volunteer.targetY ?? (volunteer.task === "weed" ? 0.58 : 0.5);
-        volunteer.x += (targetX - volunteer.x) * dt * 1.4;
-        volunteer.y += (targetY - volunteer.y) * dt * 1.4;
+        const move = dt * volunteerMoveSpeed();
+        volunteer.x += (targetX - volunteer.x) * move;
+        volunteer.y += (targetY - volunteer.y) * move;
       }
       volunteer.x = Math.max(0.08, Math.min(0.92, volunteer.x));
       volunteer.y = Math.max(0.12, Math.min(0.9, volunteer.y));
@@ -1867,6 +1935,11 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         }
         if (inBounds(col, row + 1) && cellAt(col, row + 1).sprinkler) {
           cylinderBetween(group, { x, y: pipeY, z }, { x, y: pipeY, z: boardZ(row + 1) }, 0.035, three.mat.pipe);
+        }
+        if (isRoofEdgePipeStart(col, row) && pipeNeighbours(col, row).length <= 1) {
+          const edgeX = col <= 1 ? boardX(-1.35) : col >= COLS - 2 ? boardX(COLS + 0.35) : x;
+          const edgeZ = row <= 1 ? boardZ(-1.35) : row >= ROWS - 2 ? boardZ(ROWS + 0.35) : z;
+          cylinderBetween(group, { x: edgeX, y: pipeY, z: edgeZ }, { x, y: pipeY, z }, 0.035, three.mat.pipe);
         }
       }
     }
@@ -2042,7 +2115,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
 
     ctx.font = `${compact ? 12 : 13}px ui-sans-serif, system-ui`;
     ctx.fillStyle = "#4c5a55";
-    drawCenteredWrappedText("Shortcuts: S soil, E erase, P seed, I irrigation, H harvest, Space pass, F fullscreen", w / 2, h * 0.86, Math.min(w - 32, 680), compact ? 16 : 18);
+    drawCenteredWrappedText("Shortcuts: S soil, E erase, P seed, I irrigation, H harvest, Space pass/wait, F fullscreen", w / 2, h * 0.86, Math.min(w - 32, 680), compact ? 16 : 18);
   }
 
   function drawCity() {
@@ -2252,6 +2325,39 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
 
   function drawSprinklers() {
     const roof = view.roof;
+    ctx.save();
+    ctx.strokeStyle = "#71898d";
+    ctx.lineWidth = Math.max(3, roof.cell * 0.34);
+    ctx.lineCap = "round";
+    for (let row = 0; row < ROWS; row += 1) {
+      for (let col = 0; col < COLS; col += 1) {
+        if (!cellAt(col, row).sprinkler) continue;
+        const x = roof.x + (col + 0.5) * roof.cell;
+        const y = roof.y + (row + 0.5) * roof.cell;
+        if (isRoofEdgePipeStart(col, row) && pipeNeighbours(col, row).length <= 1) {
+          const edgeX = col <= 1 ? roof.x - 10 : col >= COLS - 2 ? roof.x + roof.w + 10 : x;
+          const edgeY = row <= 1 ? roof.y - 10 : row >= ROWS - 2 ? roof.y + roof.h + 10 : y;
+          ctx.beginPath();
+          ctx.moveTo(edgeX, edgeY);
+          ctx.lineTo(x, y);
+          ctx.stroke();
+        }
+        if (inBounds(col + 1, row) && cellAt(col + 1, row).sprinkler) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(roof.x + (col + 1.5) * roof.cell, y);
+          ctx.stroke();
+        }
+        if (inBounds(col, row + 1) && cellAt(col, row + 1).sprinkler) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x, roof.y + (row + 1.5) * roof.cell);
+          ctx.stroke();
+        }
+      }
+    }
+    ctx.restore();
+
     for (let row = 0; row < ROWS; row += 1) {
       for (let col = 0; col < COLS; col += 1) {
         if (!cellAt(col, row).sprinkler) continue;
@@ -2640,15 +2746,15 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
 
     buttonItems.push({
       id: "speed",
-      label: "10-min clock",
+      label: `1h ${gameSettings.dayHourSeconds}s/${gameSettings.nightHourSeconds}s`,
       enabled: false,
       selected: state.phase === "midweek",
       action: () => {
-        state.message = "The prototype clock advances one 10-minute interval at a time.";
+        state.message = "The clock simulates 10-minute ticks using the level-maker day and night hour speeds.";
       },
     });
 
-    const passLabel = state.phase === "planning" ? "Pass Week" : state.phase === "market" ? "End Week" : "Next";
+    const passLabel = state.phase === "planning" ? "Pass" : state.phase === "market" ? "End Week" : "Wait 10m";
     buttonItems.push({
       id: "primary-phase",
       label: passLabel,
@@ -2658,8 +2764,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         if (state.phase === "planning") passPlanning();
         else if (state.phase === "market") endMarketWeek();
         else if (state.phase === "midweek") {
-          state.minutes = DAY_MINUTES - CLOCK_STEP_MINUTES;
-          state.clockAccumulator = clockStepSeconds();
+          advanceMidweekMinutes(CLOCK_STEP_MINUTES);
+          state.clockAccumulator = 0;
+          state.message = "Ten in-game minutes passed; crop growth and roof state were simulated.";
+          saveGame();
         }
       },
     });
@@ -2717,7 +2825,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (tool === "soil") return "Drag across the rooftop to paint soil mass.";
     if (tool === "erase") return "Drag to remove soil, sprinklers, or crops. Removed crops become compost.";
     if (tool === "seed") return "Move over painted soil to preview the circular root radius; click green space to plant.";
-    if (tool === "irrigation") return `Click the roof to hang an overhead pipe nozzle for ${formatMoney(sprinklerCost())}; after the first, place near the network.`;
+    if (tool === "irrigation") return `Start a pipe on the roof edge for ${formatMoney(sprinklerCost())}; new pipes snap to one open network side.`;
     if (tool === "harvest") return "Click harvestable crops, or assign a volunteer to harvest.";
     return "Select a tool and work the rooftop.";
   }
@@ -2796,10 +2904,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.font = `${compact ? 20 : 24}px ui-sans-serif, system-ui`;
-    ctx.fillText("Farmer's Market", x + 24, y + 22);
+    ctx.fillText("Market Stall", x + 24, y + 22);
     ctx.font = `${compact ? 12 : 14}px ui-sans-serif, system-ui`;
     ctx.fillStyle = "#4c5b55";
-    drawWrappedText("Shoppers approach the stall and make offers for produce in storage.", x + 24, y + 58, w - 48, compact ? 15 : 18);
+    drawWrappedText("You man the counter while patrons stop with produce requests.", x + 24, y + 58, w - 48, compact ? 15 : 18);
 
     const counterY = y + h - (compact ? 70 : 88);
     ctx.fillStyle = "#d79f49";
@@ -2825,6 +2933,20 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     ctx.fill();
     ctx.fillStyle = "#9f6d43";
     ctx.fillRect(x + 20, counterY + 18, w - 40, compact ? 34 : 48);
+
+    const playerX = x + w * 0.22;
+    const playerY = counterY + (compact ? 8 : 2);
+    drawPerson(playerX, playerY, "#6f9f59", 0.2);
+    ctx.fillStyle = "rgba(251, 248, 238, 0.94)";
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.25)";
+    ctx.lineWidth = 1.2;
+    roundRect(playerX - 34, playerY - 66, 68, 24, 7);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#1e2b29";
+    ctx.font = "700 11px ui-sans-serif, system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("you", playerX, playerY - 52);
 
     const counts = freshInventoryByCrop();
     const crops = Object.keys(counts).filter((key) => cropDefs[key]);
@@ -2856,7 +2978,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       ctx.fillStyle = def.leaf;
       ctx.font = "700 11px ui-sans-serif, system-ui";
       ctx.textAlign = "center";
-      ctx.fillText(i < crops.length ? `${def.short} x${qty}` : def.short, cx, cy + 43);
+	      ctx.fillText(i < crops.length ? `${def.short} x${qty}` : def.short, cx, cy + 43);
     }
   }
 
@@ -2955,7 +3077,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
     ctx.font = "700 16px ui-sans-serif, system-ui";
-    ctx.fillText("Shopper offers", x + 16, y + 16);
+    ctx.fillText("Shopper requests", x + 16, y + 16);
     ctx.font = "12px ui-sans-serif, system-ui";
     ctx.fillStyle = "#53625d";
     ctx.fillText(`Fresh produce boxes: ${state.inventory.filter((item) => !item.spoiled).length}`, x + 16, y + 40);
@@ -2979,20 +3101,20 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       ctx.fill();
       ctx.fillStyle = "#1e2b29";
       ctx.font = "700 12px ui-sans-serif, system-ui";
-      ctx.fillText(`${offer.npc}: ${def?.name || offer.crop} x${offer.qty}`, x + 56, rowY + 8);
+      ctx.fillText(`${offer.npc} asks for ${def?.name || offer.crop} x${offer.qty}`, x + 56, rowY + 8);
       ctx.fillStyle = "#53625d";
       ctx.font = "12px ui-sans-serif, system-ui";
       ctx.fillText(`${formatMoney(offer.price)} offer`, x + 56, rowY + 24);
-      addButton(`accept-offer-${i}`, x + w - 96, rowY + 7, 72, 28, "Accept", () => acceptMarketOffer(i), { selected: i === 0 });
+      addButton(`accept-offer-${i}`, x + w - 96, rowY + 7, 72, 28, "Bag", () => acceptMarketOffer(i), { selected: i === 0 });
       rowY += 50;
     }
 
     const half = (w - 42) / 2;
     addButton("sell-all", x + 16, y + 220, half, 34, "Clear stall", () => sellAll(), { subtle: true });
     addButton("compost-spoiled", x + 26 + half, y + 220, half, 34, "Compost spoiled", () => compostSpoiled(), { subtle: true });
-    addButton("refresh-offers", x + 16, y + 262, w - 32, 28, "Call next shoppers", () => {
+    addButton("refresh-offers", x + 16, y + 262, w - 32, 28, "Next patrons", () => {
       state.marketOffers = generateMarketOffers();
-      state.message = state.marketOffers.length ? "New shoppers step up to the stall." : "No fresh produce for shoppers to buy.";
+      state.message = state.marketOffers.length ? "New patrons step up to the stall." : "No fresh produce for shoppers to buy.";
     }, { selected: true });
   }
 
@@ -3236,8 +3358,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
     if (event.key === " ") {
       if (state.phase === "planning") passPlanning();
       else if (state.phase === "midweek") {
-        state.minutes = DAY_MINUTES - CLOCK_STEP_MINUTES;
-        state.clockAccumulator = clockStepSeconds();
+        advanceMidweekMinutes(CLOCK_STEP_MINUTES);
+        state.clockAccumulator = 0;
+        state.message = "Ten in-game minutes passed; crop growth and roof state were simulated.";
+        saveGame();
       }
       else if (state.phase === "market") endMarketWeek();
       event.preventDefault();
@@ -3315,9 +3439,12 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
       time: formatTime(state.minutes),
       clock: {
         stepMinutes: CLOCK_STEP_MINUTES,
-        daytimeStepSeconds: DAY_STEP_SECONDS,
-        nightStepSeconds: NIGHT_STEP_SECONDS,
-        repairStepSeconds: REPAIR_STEP_SECONDS,
+        dayHourSeconds: gameSettings.dayHourSeconds,
+        nightHourSeconds: gameSettings.nightHourSeconds,
+        daytimeStepSeconds: clockStepSeconds("midweek", DAY_START_MINUTES),
+        nightStepSeconds: clockStepSeconds("midweek", 18 * 60),
+        repairStepSeconds: gameSettings.repairStepSeconds,
+        midweekDays: midweekDays(),
         accumulator: Math.round((state.clockAccumulator || 0) * 10) / 10,
       },
       season: currentSeason(),
@@ -3330,6 +3457,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         source: balanceSource,
         label: balanceLabel,
         adminUrl: "./balance-admin.html",
+        settings: { ...gameSettings },
       },
       priceForecast: priceForecastRows(),
       roof: {
@@ -3342,7 +3470,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-
         soilSamples: soilCount(),
         wateredSamples: wateredCount(),
         sprinklers: sprinklerCount(),
-        irrigationModel: "overhead pipe network; nozzles water circular analog soil samples and do not consume root space",
+        irrigationModel: "edge-started overhead pipe network; new segments snap orthogonally to one open side and nozzles do not consume root space",
         sprinklerCost: sprinklerCost(),
         compost: state.compost,
         weeds: state.weeds.length,

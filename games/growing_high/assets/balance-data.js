@@ -256,6 +256,15 @@ export const DEFAULT_CROP_DEFS = {
 export const BALANCE_SCHEMA_VERSION = 2;
 export const BALANCE_STORAGE_KEY = "growing-high-balance-v2";
 
+export const DEFAULT_GAME_SETTINGS = {
+  dayHourSeconds: 5,
+  nightHourSeconds: 3,
+  repairStepSeconds: 2,
+  midweekDays: 5,
+  volunteerActionSeconds: 4.5,
+  volunteerMoveSpeed: 0.65,
+};
+
 export function cloneBalance(value) {
   return JSON.parse(JSON.stringify(value));
 }

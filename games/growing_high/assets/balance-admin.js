@@ -1,4 +1,4 @@
-import { BALANCE_SCHEMA_VERSION, BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, cloneBalance } from "./balance-data.js";
+import { BALANCE_SCHEMA_VERSION, BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_pit_clock";
 
 const seasons = ["Spring", "Summer", "Autumn", "Winter"];
 const cropOrder = Object.keys(DEFAULT_CROP_DEFS);
@@ -11,12 +11,15 @@ const payloadEl = document.getElementById("payload-json");
 const importEl = document.getElementById("import-json");
 const shareUrlEl = document.getElementById("share-url");
 const frameEl = document.getElementById("game-preview");
+const settingsEl = document.getElementById("settings-grid");
 
 let crops = cloneBalance(DEFAULT_CROP_DEFS);
+let settings = cloneBalance(DEFAULT_GAME_SETTINGS);
 let selectedKey = "carrot";
 let reloadTimer = 0;
 
 loadStoredDraft();
+renderSettings();
 renderTable();
 renderPreview();
 persistDraft(false);
@@ -47,6 +50,23 @@ rowsEl.addEventListener("click", (event) => {
   renderPreview();
 });
 
+settingsEl.addEventListener("input", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  updateSettingFromInput(target);
+  renderPreview();
+  persistDraft(true);
+});
+
+settingsEl.addEventListener("change", (event) => {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  updateSettingFromInput(target);
+  renderSettings();
+  renderPreview();
+  persistDraft(true);
+});
+
 labelEl.addEventListener("input", () => {
   renderPreview();
   persistDraft(false);
@@ -56,7 +76,9 @@ seasonEl.addEventListener("change", renderPreview);
 
 document.getElementById("reset-defaults").addEventListener("click", () => {
   crops = cloneBalance(DEFAULT_CROP_DEFS);
+  settings = cloneBalance(DEFAULT_GAME_SETTINGS);
   localStorage.removeItem(BALANCE_STORAGE_KEY);
+  renderSettings();
   renderTable();
   renderPreview();
   persistDraft(true);
@@ -81,6 +103,7 @@ document.getElementById("import-draft").addEventListener("click", () => {
     const payload = JSON.parse(importEl.value);
     applyPayload(payload);
     labelEl.value = typeof payload.label === "string" ? payload.label.slice(0, 60) : labelEl.value;
+    renderSettings();
     renderTable();
     renderPreview();
     persistDraft(true);
@@ -92,9 +115,9 @@ document.getElementById("import-draft").addEventListener("click", () => {
 function loadStoredDraft() {
   try {
     const raw = localStorage.getItem(BALANCE_STORAGE_KEY);
-    if (!raw) return;
-    const payload = JSON.parse(raw);
-    applyPayload(payload);
+      if (!raw) return;
+      const payload = JSON.parse(raw);
+      applyPayload(payload);
     if (typeof payload.label === "string") labelEl.value = payload.label.slice(0, 60);
   } catch (_) {
     crops = cloneBalance(DEFAULT_CROP_DEFS);
@@ -102,13 +125,18 @@ function loadStoredDraft() {
 }
 
 function applyPayload(payload) {
-  if (!payload || typeof payload !== "object" || !payload.crops) return;
-  const next = cloneBalance(DEFAULT_CROP_DEFS);
-  for (const [key, crop] of Object.entries(payload.crops)) {
-    if (!next[key] || !crop || typeof crop !== "object") continue;
-    next[key] = normaliseCrop({ ...next[key], ...crop });
+  if (!payload || typeof payload !== "object") return;
+  if (payload.crops && typeof payload.crops === "object") {
+    const next = cloneBalance(DEFAULT_CROP_DEFS);
+    for (const [key, crop] of Object.entries(payload.crops)) {
+      if (!next[key] || !crop || typeof crop !== "object") continue;
+      next[key] = normaliseCrop({ ...next[key], ...crop });
+    }
+    crops = next;
   }
-  crops = next;
+  if (payload.settings && typeof payload.settings === "object") {
+    settings = normaliseSettings({ ...DEFAULT_GAME_SETTINGS, ...payload.settings });
+  }
 }
 
 function normaliseCrop(crop) {
@@ -127,6 +155,36 @@ function normaliseCrop(crop) {
     : ["Spring"];
   if (!clean.seasons.length) clean.seasons = ["Spring"];
   return clean;
+}
+
+function normaliseSettings(nextSettings) {
+  return {
+    dayHourSeconds: clampFloat(nextSettings.dayHourSeconds, 0.5, 30),
+    nightHourSeconds: clampFloat(nextSettings.nightHourSeconds, 0.5, 30),
+    repairStepSeconds: clampFloat(nextSettings.repairStepSeconds, 0.2, 20),
+    midweekDays: clampInt(nextSettings.midweekDays, 1, 6),
+    volunteerActionSeconds: clampFloat(nextSettings.volunteerActionSeconds, 0.5, 30),
+    volunteerMoveSpeed: clampFloat(nextSettings.volunteerMoveSpeed, 0.15, 2.5),
+  };
+}
+
+function renderSettings() {
+  const rows = [
+    ["dayHourSeconds", "Day hour seconds", settings.dayHourSeconds, "0.5"],
+    ["nightHourSeconds", "Night hour seconds", settings.nightHourSeconds, "0.5"],
+    ["repairStepSeconds", "Repair 10m seconds", settings.repairStepSeconds, "0.5"],
+    ["midweekDays", "Mid-week days", settings.midweekDays, "1"],
+    ["volunteerActionSeconds", "Volunteer action seconds", settings.volunteerActionSeconds, "0.5"],
+    ["volunteerMoveSpeed", "Volunteer move speed", settings.volunteerMoveSpeed, "0.05"],
+  ];
+  settingsEl.innerHTML = rows
+    .map(([key, label, value, step]) => `
+      <label>
+        ${label}
+        <input type="number" min="0" step="${step}" data-setting="${key}" value="${formatInput(value)}" />
+      </label>
+    `)
+    .join("");
 }
 
 function renderTable() {
@@ -160,6 +218,14 @@ function seasonInputs(key, activeSeasons) {
   return seasons
     .map((season) => `<label><input type="checkbox" data-key="${key}" data-field="season" value="${season}" ${activeSeasons.includes(season) ? "checked" : ""} />${season.slice(0, 3)}</label>`)
     .join("");
+}
+
+function updateSettingFromInput(input) {
+  const key = input.dataset.setting;
+  if (!key || settings[key] === undefined) return;
+  const value = Number(input.value);
+  if (!Number.isFinite(value)) return;
+  settings = normaliseSettings({ ...settings, [key]: value });
 }
 
 function updateCropFromInput(input) {
@@ -207,6 +273,8 @@ function renderPreview() {
     ["Fruit cycle", fruitText],
     ["Shelf life", `${crop.shelfLife} days`],
     ["Seasons", crop.seasons.join(", ")],
+    ["Clock", `${settings.midweekDays} mid-week days, ${settings.dayHourSeconds}s daytime hour`],
+    ["Volunteers", `${settings.volunteerActionSeconds}s action, ${settings.volunteerMoveSpeed}x move`],
   ]) {
     const dt = document.createElement("dt");
     const dd = document.createElement("dd");
@@ -230,6 +298,7 @@ function buildPayload() {
     schemaVersion: BALANCE_SCHEMA_VERSION,
     label: labelEl.value.trim() || "Growing High balance draft",
     updatedAt: new Date().toISOString(),
+    settings,
     crops,
   };
 }
@@ -257,9 +326,16 @@ function clampInt(value, min, max) {
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
+function clampFloat(value, min, max) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return min;
+  return Math.round(Math.max(min, Math.min(max, number)) * 100) / 100;
+}
+
 function formatInput(value) {
-  const rounded = Math.round(Number(value) * 10) / 10;
-  return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  const rounded = Math.round(Number(value) * 100) / 100;
+  if (Number.isInteger(rounded)) return String(rounded);
+  return rounded.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
 }
 
 function escapeHtml(value) {
