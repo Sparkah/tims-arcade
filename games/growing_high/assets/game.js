@@ -1,5 +1,5 @@
 import * as THREE from "./three.module.js";
-import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_pit_clock";
+import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_irrigation_grid";
 
 (() => {
   "use strict";
@@ -27,6 +27,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   const ERASER_RADIUS = 26;
   const WATER_RADIUS = 42;
   const WEED_SPAWN_CHANCE = 0.22;
+  const IRRIGATION_GRID_STEP = 4;
+  const IRRIGATION_SNAP_DISTANCE = 3.15;
+  const IRRIGATION_SOCKET_COLS = irrigationAxisValues(COLS);
+  const IRRIGATION_SOCKET_ROWS = irrigationAxisValues(ROWS);
 
   const cropDefs = cloneBalance(DEFAULT_CROP_DEFS);
   const gameSettings = cloneBalance(DEFAULT_GAME_SETTINGS);
@@ -228,6 +232,11 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     three.mat.pipe = standardMat(0xcfd9db, 0.32, 0.55);
     three.mat.pipeDark = standardMat(0x71898d, 0.38, 0.45);
     three.mat.pipeWater = transparentMat(0x48c9e2, 0.58, 0.1);
+    three.mat.irrigationGrid = transparentMat(0x2b7478, 0.22, 0.0);
+    three.mat.irrigationSocketDim = transparentMat(0x405955, 0.34, 0.0);
+    three.mat.irrigationSocketValid = standardMat(0x24a9bd, 0.38, 0.16);
+    three.mat.irrigationSocketHot = standardMat(0x0f86a0, 0.3, 0.2);
+    three.mat.irrigationSocketBad = standardMat(0xb95543, 0.48, 0.08);
     three.mat.rootGood = transparentMat(0x69c674, 0.34, 0.0);
     three.mat.rootBad = transparentMat(0xd95f4d, 0.36, 0.0);
     three.mat.weed = standardMat(0x3c783d, 0.88, 0.0);
@@ -476,6 +485,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     state.priceMemory = state.priceMemory || {};
     state.showForecast = Boolean(state.showForecast);
     state.clockAccumulator = Number.isFinite(state.clockAccumulator) ? state.clockAccumulator : 0;
+    const irrigationMigrated = normalizeIrrigationPipes();
     if (state.balanceSource !== balanceSource) {
       state.priceMemory = {};
       state.prices = generatePrices();
@@ -498,6 +508,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     }
     normalizeSelectedSeed();
     state.message = state.message || "Keep the rooftop productive without overloading the roof.";
+    if (irrigationMigrated) saveGame();
   }
 
   function saveGame() {
@@ -873,31 +884,209 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     return state.grid.filter((cell) => cell.sprinkler).length;
   }
 
-  function pipeNeighbours(col, row) {
+  function irrigationAxisValues(max) {
+    const values = [];
+    for (let value = 0; value < max; value += IRRIGATION_GRID_STEP) {
+      values.push(value);
+    }
+    if (values[values.length - 1] !== max - 1) values.push(max - 1);
+    return values;
+  }
+
+  function nearestAxisValue(value, values) {
+    let best = values[0];
+    let bestDistance = Math.abs(value - best);
+    for (const candidate of values) {
+      const distance = Math.abs(value - candidate);
+      if (distance < bestDistance) {
+        best = candidate;
+        bestDistance = distance;
+      }
+    }
+    return best;
+  }
+
+  function adjacentAxisValues(value, values) {
+    const index = values.indexOf(value);
+    if (index < 0) return [];
+    const adjacent = [];
+    if (index > 0) adjacent.push(values[index - 1]);
+    if (index < values.length - 1) adjacent.push(values[index + 1]);
+    return adjacent;
+  }
+
+  function isIrrigationSocket(col, row) {
+    return IRRIGATION_SOCKET_COLS.includes(col) && IRRIGATION_SOCKET_ROWS.includes(row);
+  }
+
+  function nearestIrrigationSocket(col, row) {
+    if (!Number.isFinite(col) || !Number.isFinite(row)) return null;
+    const point = clampSamplePoint(col, row);
+    const socket = {
+      col: nearestAxisValue(point.col, IRRIGATION_SOCKET_COLS),
+      row: nearestAxisValue(point.row, IRRIGATION_SOCKET_ROWS),
+    };
+    const distance = sampleDistance(point.col, point.row, socket.col, socket.row);
+    return {
+      ...socket,
+      distance,
+      inRange: distance <= IRRIGATION_SNAP_DISTANCE,
+    };
+  }
+
+  function pipeNeighbourCandidates(col, row) {
+    const candidates = [];
+    for (const nextCol of adjacentAxisValues(col, IRRIGATION_SOCKET_COLS)) {
+      candidates.push({ col: nextCol, row });
+    }
+    for (const nextRow of adjacentAxisValues(row, IRRIGATION_SOCKET_ROWS)) {
+      candidates.push({ col, row: nextRow });
+    }
+    return candidates;
+  }
+
+  function pipeKey(col, row) {
+    return `${col}:${row}`;
+  }
+
+  function oldPipeNeighbours(col, row, legacySet) {
     return [
       { col: col - 1, row },
       { col: col + 1, row },
       { col, row: row - 1 },
       { col, row: row + 1 },
-    ].filter((cell) => inBounds(cell.col, cell.row) && cellAt(cell.col, cell.row).sprinkler);
+    ].filter((cell) => legacySet.has(pipeKey(cell.col, cell.row)));
+  }
+
+  function edgeDistance(col, row) {
+    return Math.min(col, row, COLS - 1 - col, ROWS - 1 - row);
+  }
+
+  function nearestAvailableSocket(col, row, used, edgeOnly = false) {
+    const sockets = [];
+    for (const socketRow of IRRIGATION_SOCKET_ROWS) {
+      for (const socketCol of IRRIGATION_SOCKET_COLS) {
+        if (used.has(pipeKey(socketCol, socketRow))) continue;
+        if (edgeOnly && !isRoofEdgePipeStart(socketCol, socketRow)) continue;
+        sockets.push({
+          col: socketCol,
+          row: socketRow,
+          distance: sampleDistance(col, row, socketCol, socketRow),
+          edge: edgeDistance(socketCol, socketRow),
+        });
+      }
+    }
+    sockets.sort((a, b) => a.distance - b.distance || a.edge - b.edge || a.row - b.row || a.col - b.col);
+    return sockets[0] || null;
+  }
+
+  function axisStep(value, values, direction) {
+    const index = values.indexOf(value);
+    if (index < 0) return null;
+    const next = values[index + Math.sign(direction)];
+    return next === undefined ? null : next;
+  }
+
+  function preferredAdjacentSocket(parentSocket, legacyFrom, legacyTo, used) {
+    const dx = legacyTo.col - legacyFrom.col;
+    const dy = legacyTo.row - legacyFrom.row;
+    let preferred = null;
+    if (Math.abs(dx) >= Math.abs(dy) && dx !== 0) {
+      const nextCol = axisStep(parentSocket.col, IRRIGATION_SOCKET_COLS, dx);
+      if (nextCol !== null) preferred = { col: nextCol, row: parentSocket.row };
+    } else if (dy !== 0) {
+      const nextRow = axisStep(parentSocket.row, IRRIGATION_SOCKET_ROWS, dy);
+      if (nextRow !== null) preferred = { col: parentSocket.col, row: nextRow };
+    }
+    if (preferred && !used.has(pipeKey(preferred.col, preferred.row))) return preferred;
+
+    const candidates = pipeNeighbourCandidates(parentSocket.col, parentSocket.row)
+      .filter((socket) => !used.has(pipeKey(socket.col, socket.row)))
+      .map((socket) => ({
+        ...socket,
+        distance: sampleDistance(legacyTo.col, legacyTo.row, socket.col, socket.row),
+      }));
+    candidates.sort((a, b) => a.distance - b.distance || a.row - b.row || a.col - b.col);
+    return candidates[0] || null;
+  }
+
+  function normalizeIrrigationPipes() {
+    const legacyPipes = [];
+    for (let row = 0; row < ROWS; row += 1) {
+      for (let col = 0; col < COLS; col += 1) {
+        if (cellAt(col, row).sprinkler) legacyPipes.push({ col, row });
+      }
+    }
+    if (!legacyPipes.some((pipe) => !isIrrigationSocket(pipe.col, pipe.row))) return false;
+
+    const legacySet = new Set(legacyPipes.map((pipe) => pipeKey(pipe.col, pipe.row)));
+    for (const pipe of legacyPipes) {
+      cellAt(pipe.col, pipe.row).sprinkler = false;
+    }
+
+    const used = new Set();
+    const assigned = new Map();
+    const roots = [...legacyPipes].sort((a, b) => edgeDistance(a.col, a.row) - edgeDistance(b.col, b.row)
+      || sampleDistance(a.col, a.row, 0, 0) - sampleDistance(b.col, b.row, 0, 0));
+
+    const placeMigratedPipe = (legacyPipe, socket) => {
+      if (!socket || !inBounds(socket.col, socket.row)) return false;
+      const key = pipeKey(socket.col, socket.row);
+      if (used.has(key)) return false;
+      used.add(key);
+      assigned.set(pipeKey(legacyPipe.col, legacyPipe.row), socket);
+      cellAt(socket.col, socket.row).sprinkler = true;
+      waterRadius(socket.col, socket.row, sampleRadiusForPixels(WATER_RADIUS));
+      return true;
+    };
+
+    for (const root of roots) {
+      const rootKey = pipeKey(root.col, root.row);
+      if (assigned.has(rootKey)) continue;
+      const rootSocket = nearestAvailableSocket(root.col, root.row, used, true)
+        || nearestAvailableSocket(root.col, root.row, used, false);
+      if (!placeMigratedPipe(root, rootSocket)) continue;
+
+      const queue = [root];
+      for (let i = 0; i < queue.length; i += 1) {
+        const current = queue[i];
+        const currentSocket = assigned.get(pipeKey(current.col, current.row));
+        for (const next of oldPipeNeighbours(current.col, current.row, legacySet)) {
+          const nextKey = pipeKey(next.col, next.row);
+          if (assigned.has(nextKey)) continue;
+          const socket = preferredAdjacentSocket(currentSocket, current, next, used)
+            || nearestAvailableSocket(next.col, next.row, used, false);
+          if (placeMigratedPipe(next, socket)) queue.push(next);
+        }
+      }
+    }
+    return true;
+  }
+
+  function pipeNeighbours(col, row) {
+    return pipeNeighbourCandidates(col, row)
+      .filter((cell) => inBounds(cell.col, cell.row) && cellAt(cell.col, cell.row).sprinkler);
   }
 
   function isRoofEdgePipeStart(col, row) {
-    return col <= 1 || row <= 1 || col >= COLS - 2 || row >= ROWS - 2;
+    return col === 0 || row === 0 || col === COLS - 1 || row === ROWS - 1;
   }
 
-  function canPlaceIrrigationPipe(col, row) {
-    if (sprinklerCount() === 0) {
+  function canPlaceIrrigationPipe(col, row, hasPipes = sprinklerCount() > 0) {
+    if (!inBounds(col, row) || !isIrrigationSocket(col, row)) {
+      return { ok: false, message: "Click one of the highlighted irrigation pipe sockets." };
+    }
+    if (!hasPipes) {
       return isRoofEdgePipeStart(col, row)
         ? { ok: true }
-        : { ok: false, message: "Start the irrigation pipe on the roof edge first." };
+        : { ok: false, message: "Start the irrigation pipe on a highlighted roof edge socket first." };
     }
     const neighbours = pipeNeighbours(col, row);
     if (neighbours.length !== 1) {
       return {
         ok: false,
         message: neighbours.length === 0
-          ? "New irrigation pipes must snap to the open side of the existing pipe."
+          ? "New irrigation pipes must snap to a highlighted open socket on the existing pipe."
           : "Place pipes one segment at a time so the network does not cross-connect.",
       };
     }
@@ -906,6 +1095,39 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
       return { ok: false, message: "That junction already branches in three directions." };
     }
     return { ok: true };
+  }
+
+  function irrigationSocketSummary(limit = 48) {
+    const hasPipes = sprinklerCount() > 0;
+    const validSockets = [];
+    const existingSockets = [];
+    const edgeStartSockets = [];
+    for (const row of IRRIGATION_SOCKET_ROWS) {
+      for (const col of IRRIGATION_SOCKET_COLS) {
+        if (cellAt(col, row).sprinkler) {
+          existingSockets.push({ col, row });
+          continue;
+        }
+        if (!hasPipes && isRoofEdgePipeStart(col, row)) {
+          edgeStartSockets.push({ col, row });
+        }
+        if (canPlaceIrrigationPipe(col, row, hasPipes).ok) {
+          validSockets.push({ col, row });
+        }
+      }
+    }
+    return {
+      visible: state.mode === "game" && state.phase === "planning" && state.selectedTool === "irrigation",
+      socketStepSamples: IRRIGATION_GRID_STEP,
+      snapDistanceSamples: IRRIGATION_SNAP_DISTANCE,
+      columns: IRRIGATION_SOCKET_COLS.length,
+      rows: IRRIGATION_SOCKET_ROWS.length,
+      totalSockets: IRRIGATION_SOCKET_COLS.length * IRRIGATION_SOCKET_ROWS.length,
+      validSockets: validSockets.slice(0, limit),
+      validSocketCount: validSockets.length,
+      existingSockets,
+      edgeStartSockets: edgeStartSockets.slice(0, limit),
+    };
   }
 
   function wateredCount() {
@@ -1338,13 +1560,18 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   }
 
   function placeSprinkler(col, row) {
-    if (!inBounds(col, row)) return false;
-    const cell = cellAt(col, row);
+    const socket = nearestIrrigationSocket(col, row);
+    if (!socket || !socket.inRange) {
+      state.message = "Click one of the highlighted irrigation pipe sockets.";
+      return false;
+    }
+    const { col: socketCol, row: socketRow } = socket;
+    const cell = cellAt(socketCol, socketRow);
     if (cell.sprinkler) {
       state.message = "A pipe nozzle already hangs above this roof spot.";
       return false;
     }
-    const pipeCheck = canPlaceIrrigationPipe(col, row);
+    const pipeCheck = canPlaceIrrigationPipe(socketCol, socketRow);
     if (!pipeCheck.ok) {
       state.message = pipeCheck.message;
       return false;
@@ -1355,11 +1582,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
       return false;
     }
     state.money -= cost;
-    const point = clampSamplePoint(col, row);
-    cellAt(Math.round(point.col), Math.round(point.row)).sprinkler = true;
-    waterRadius(point.col, point.row, sampleRadiusForPixels(WATER_RADIUS));
+    cell.sprinkler = true;
+    waterRadius(socketCol, socketRow, sampleRadiusForPixels(WATER_RADIUS));
     state.message = sprinklerCount() === 1
-      ? `Edge pipe started for ${formatMoney(cost)}. Continue from an open side to branch irrigation.`
+      ? `Edge pipe started for ${formatMoney(cost)}. Continue from a highlighted socket to branch irrigation.`
       : `Pipe segment added for ${formatMoney(cost)}. It waters nearby soil without taking root space.`;
     saveGame();
     return true;
@@ -1803,6 +2029,25 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     };
   }
 
+  function irrigationPlacementPreview() {
+    if (state.mode !== "game" || state.phase !== "planning" || state.selectedTool !== "irrigation") return null;
+    const cell = gridFromPoint(input.x, input.y);
+    if (!cell) return null;
+    const socket = nearestIrrigationSocket(cell.col, cell.row);
+    if (!socket) return null;
+    const pipeCheck = canPlaceIrrigationPipe(socket.col, socket.row);
+    const occupied = cellAt(socket.col, socket.row).sprinkler;
+    return {
+      col: socket.col,
+      row: socket.row,
+      distanceSamples: Math.round(socket.distance * 10) / 10,
+      inRange: socket.inRange,
+      valid: socket.inRange && !occupied && pipeCheck.ok,
+      occupied,
+      message: occupied ? "A pipe nozzle already hangs above this roof spot." : pipeCheck.message || "Pipe socket can be placed here.",
+    };
+  }
+
   function render3DScene() {
     initThree();
     if (!three.initialized) return;
@@ -1817,6 +2062,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     draw3DEnvironment(three.world);
     draw3DRooftop(three.world);
     draw3DCells(three.world);
+    draw3DIrrigationPlacementGrid(three.world);
     draw3DRootPreview(three.world);
     draw3DPlants(three.world);
     draw3DWeeds(three.world);
@@ -1870,6 +2116,35 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     if (!preview) return;
     const mat = preview.valid ? three.mat.rootGood : three.mat.rootBad;
     meshCylinder(group, boardX(preview.col), 0.34, boardZ(preview.row), preview.radiusSamples * CELL_3D, 0.018, mat, false);
+  }
+
+  function draw3DIrrigationPlacementGrid(group) {
+    if (state.mode !== "game" || state.phase !== "planning" || state.selectedTool !== "irrigation") return;
+    const y = 0.3;
+    const hasPipes = sprinklerCount() > 0;
+    const preview = irrigationPlacementPreview();
+
+    for (const row of IRRIGATION_SOCKET_ROWS) {
+      cylinderBetween(group, { x: boardX(0), y, z: boardZ(row) }, { x: boardX(COLS - 1), y, z: boardZ(row) }, 0.006, three.mat.irrigationGrid);
+    }
+    for (const col of IRRIGATION_SOCKET_COLS) {
+      cylinderBetween(group, { x: boardX(col), y, z: boardZ(0) }, { x: boardX(col), y, z: boardZ(ROWS - 1) }, 0.006, three.mat.irrigationGrid);
+    }
+
+    for (const row of IRRIGATION_SOCKET_ROWS) {
+      for (const col of IRRIGATION_SOCKET_COLS) {
+        const occupied = cellAt(col, row).sprinkler;
+        const valid = !occupied && canPlaceIrrigationPipe(col, row, hasPipes).ok;
+        let material = occupied ? three.mat.pipeDark : valid ? three.mat.irrigationSocketValid : three.mat.irrigationSocketDim;
+        let scale = valid ? 0.055 : 0.033;
+        if (!hasPipes && isRoofEdgePipeStart(col, row)) scale = Math.max(scale, 0.047);
+        if (preview && preview.col === col && preview.row === row) {
+          material = preview.valid ? three.mat.irrigationSocketHot : three.mat.irrigationSocketBad;
+          scale = preview.valid ? 0.095 : 0.075;
+        }
+        meshSphere(group, boardX(col), y + 0.035, boardZ(row), scale, material, false);
+      }
+    }
   }
 
   function draw3DPlants(group) {
@@ -1930,11 +2205,10 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
           const angle = i * Math.PI / 3;
           meshSphere(group, x + Math.cos(angle) * 0.26, 0.48 + Math.sin(i + state.minutes * 0.02) * 0.025, z + Math.sin(angle) * 0.26, 0.025, three.mat.pipeWater, false);
         }
-        if (inBounds(col + 1, row) && cellAt(col + 1, row).sprinkler) {
-          cylinderBetween(group, { x, y: pipeY, z }, { x: boardX(col + 1), y: pipeY, z }, 0.035, three.mat.pipe);
-        }
-        if (inBounds(col, row + 1) && cellAt(col, row + 1).sprinkler) {
-          cylinderBetween(group, { x, y: pipeY, z }, { x, y: pipeY, z: boardZ(row + 1) }, 0.035, three.mat.pipe);
+        for (const neighbour of pipeNeighbourCandidates(col, row)) {
+          if (!inBounds(neighbour.col, neighbour.row) || !cellAt(neighbour.col, neighbour.row).sprinkler) continue;
+          if (neighbour.col < col || neighbour.row < row) continue;
+          cylinderBetween(group, { x, y: pipeY, z }, { x: boardX(neighbour.col), y: pipeY, z: boardZ(neighbour.row) }, 0.035, three.mat.pipe);
         }
         if (isRoofEdgePipeStart(col, row) && pipeNeighbours(col, row).length <= 1) {
           const edgeX = col <= 1 ? boardX(-1.35) : col >= COLS - 2 ? boardX(COLS + 0.35) : x;
@@ -2195,6 +2469,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
         drawCell(col, row);
       }
     }
+    drawIrrigationPlacementGrid();
     drawPlants();
     drawWeeds();
     drawSprinklers();
@@ -2238,6 +2513,62 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     ctx.lineTo(x, y + inset);
     ctx.closePath();
     ctx.fill();
+  }
+
+  function drawIrrigationPlacementGrid() {
+    if (state.mode !== "game" || state.phase !== "planning" || state.selectedTool !== "irrigation") return;
+    const roof = view.roof;
+    const hasPipes = sprinklerCount() > 0;
+    const preview = irrigationPlacementPreview();
+
+    ctx.save();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(40, 84, 89, 0.18)";
+    for (const row of IRRIGATION_SOCKET_ROWS) {
+      const y = roof.y + (row + 0.5) * roof.cell;
+      ctx.beginPath();
+      ctx.moveTo(roof.x + 0.5 * roof.cell, y);
+      ctx.lineTo(roof.x + (COLS - 0.5) * roof.cell, y);
+      ctx.stroke();
+    }
+    for (const col of IRRIGATION_SOCKET_COLS) {
+      const x = roof.x + (col + 0.5) * roof.cell;
+      ctx.beginPath();
+      ctx.moveTo(x, roof.y + 0.5 * roof.cell);
+      ctx.lineTo(x, roof.y + (ROWS - 0.5) * roof.cell);
+      ctx.stroke();
+    }
+
+    for (const row of IRRIGATION_SOCKET_ROWS) {
+      for (const col of IRRIGATION_SOCKET_COLS) {
+        const x = roof.x + (col + 0.5) * roof.cell;
+        const y = roof.y + (row + 0.5) * roof.cell;
+        const occupied = cellAt(col, row).sprinkler;
+        const valid = !occupied && canPlaceIrrigationPipe(col, row, hasPipes).ok;
+        const edgeStart = !hasPipes && isRoofEdgePipeStart(col, row);
+        let radius = valid ? 4.8 : edgeStart ? 4.2 : 2.3;
+        let fill = valid ? "rgba(41, 167, 189, 0.92)" : edgeStart ? "rgba(41, 167, 189, 0.62)" : "rgba(50, 67, 64, 0.22)";
+        let stroke = valid ? "rgba(246, 252, 252, 0.92)" : "rgba(35, 49, 46, 0.14)";
+        if (occupied) {
+          radius = 5.2;
+          fill = "rgba(92, 108, 111, 0.92)";
+          stroke = "rgba(232, 238, 240, 0.9)";
+        }
+        if (preview && preview.col === col && preview.row === row) {
+          radius = preview.valid ? 8 : 6;
+          fill = preview.valid ? "rgba(18, 132, 157, 0.96)" : "rgba(185, 82, 62, 0.84)";
+          stroke = "rgba(255, 255, 255, 0.96)";
+        }
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = preview && preview.col === col && preview.row === row ? 2 : 1;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
 
   function drawPlants() {
@@ -2342,16 +2673,12 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
           ctx.lineTo(x, y);
           ctx.stroke();
         }
-        if (inBounds(col + 1, row) && cellAt(col + 1, row).sprinkler) {
+        for (const neighbour of pipeNeighbourCandidates(col, row)) {
+          if (!inBounds(neighbour.col, neighbour.row) || !cellAt(neighbour.col, neighbour.row).sprinkler) continue;
+          if (neighbour.col < col || neighbour.row < row) continue;
           ctx.beginPath();
           ctx.moveTo(x, y);
-          ctx.lineTo(roof.x + (col + 1.5) * roof.cell, y);
-          ctx.stroke();
-        }
-        if (inBounds(col, row + 1) && cellAt(col, row + 1).sprinkler) {
-          ctx.beginPath();
-          ctx.moveTo(x, y);
-          ctx.lineTo(x, roof.y + (row + 1.5) * roof.cell);
+          ctx.lineTo(roof.x + (neighbour.col + 0.5) * roof.cell, roof.y + (neighbour.row + 0.5) * roof.cell);
           ctx.stroke();
         }
       }
@@ -2825,7 +3152,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     if (tool === "soil") return "Drag across the rooftop to paint soil mass.";
     if (tool === "erase") return "Drag to remove soil, sprinklers, or crops. Removed crops become compost.";
     if (tool === "seed") return "Move over painted soil to preview the circular root radius; click green space to plant.";
-    if (tool === "irrigation") return `Start a pipe on the roof edge for ${formatMoney(sprinklerCost())}; new pipes snap to one open network side.`;
+    if (tool === "irrigation") return `Click highlighted pipe sockets. First start on a roof edge for ${formatMoney(sprinklerCost())}; then extend from open sockets.`;
     if (tool === "harvest") return "Click harvestable crops, or assign a volunteer to harvest.";
     return "Select a tool and work the rooftop.";
   }
@@ -3427,7 +3754,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
       inventory[key] = (inventory[key] || 0) + item.qty;
     }
     return {
-      coordinateSystem: "analog roof samples: origin top-left, col increases right, row increases down; visible grid is hidden",
+      coordinateSystem: "analog roof samples: origin top-left, col increases right, row increases down; soil simulation grid is hidden, irrigation sockets become visible when the Irrigate tool is selected",
       visualMode: "3d rooftop scene with 2d HUD overlay",
       mode: state.mode,
       phase: state.phase,
@@ -3470,13 +3797,15 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
         soilSamples: soilCount(),
         wateredSamples: wateredCount(),
         sprinklers: sprinklerCount(),
-        irrigationModel: "edge-started overhead pipe network; new segments snap orthogonally to one open side and nozzles do not consume root space",
+        irrigationModel: "edge-started overhead pipe network; visible pipe sockets snap orthogonally to one open side and nozzles do not consume root space",
+        irrigationGrid: irrigationSocketSummary(),
         sprinklerCost: sprinklerCost(),
         compost: state.compost,
         weeds: state.weeds.length,
         stallHelpers: stallVolunteerCount(),
       },
       rootPreview: rootPreview(),
+      irrigationPreview: irrigationPlacementPreview(),
       services: {
         toolDiscount: state.toolDiscount || 0,
         pollinatorBonus: state.pollinatorBonus || 0,
@@ -3542,6 +3871,20 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
         w: Math.round(view.roof.w),
         h: Math.round(view.roof.h),
       });
+      if (state.phase === "planning" && state.selectedTool === "irrigation") {
+        const sockets = irrigationSocketSummary(24).validSockets;
+        for (const socket of sockets) {
+          const x = view.roof.x + (socket.col + 0.5) * view.roof.cell;
+          const y = view.roof.y + (socket.row + 0.5) * view.roof.cell;
+          items.push({
+            id: `irrigation-socket-${socket.col}-${socket.row}`,
+            x: Math.round(x - 8),
+            y: Math.round(y - 8),
+            w: 16,
+            h: 16,
+          });
+        }
+      }
       for (const plant of state.plants.slice(0, 12)) {
         const def = cropDefs[plant.crop];
         const radius = sampleRadiusForPixels(def?.rootRadius || 12) * view.roof.cell;
