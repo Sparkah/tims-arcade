@@ -1,5 +1,5 @@
 import * as THREE from "./three.module.js";
-import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_irrigation_grid";
+import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_irrigation_grid_load";
 
 (() => {
   "use strict";
@@ -16,7 +16,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   const ROOT_PIXEL_SCALE = ROOF_PIXEL_WIDTH / COLS;
   const CELL_SOIL_LOAD = 0.8;
   const CELL_WATER_LOAD = 0.25;
-  const SPRINKLER_LOAD = 18;
+  const SPRINKLER_LOAD = 0;
   const PEOPLE_LOAD = 44;
   const TOOL_LOAD = 18;
   const DAY_MINUTES = 1440;
