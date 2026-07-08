@@ -1,5 +1,5 @@
 import * as THREE from "./three.module.js";
-import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_irrigation_grid_load";
+import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_market_storefront";
 
 (() => {
   "use strict";
@@ -1224,7 +1224,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     state.minutes = 9 * 60;
     state.clockAccumulator = 0;
     state.fast = false;
-    state.message = "Market days. Shoppers walk up to the produce stall with offers.";
+    state.message = "Bag each patron's request.";
     state.prices = generatePrices();
     state.marketOffers = generateMarketOffers();
     saveGame();
@@ -1576,23 +1576,17 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
       state.message = pipeCheck.message;
       return false;
     }
-    const cost = sprinklerCost();
-    if (state.money < cost) {
-      state.message = `Need ${formatMoney(cost)} to add another sprinkler.`;
-      return false;
-    }
-    state.money -= cost;
     cell.sprinkler = true;
     waterRadius(socketCol, socketRow, sampleRadiusForPixels(WATER_RADIUS));
     state.message = sprinklerCount() === 1
-      ? `Edge pipe started for ${formatMoney(cost)}. Continue from a highlighted socket to branch irrigation.`
-      : `Pipe segment added for ${formatMoney(cost)}. It waters nearby soil without taking root space.`;
+      ? "Edge pipe started. Continue from a highlighted socket to branch irrigation."
+      : "Pipe segment added. It waters nearby soil without taking root space.";
     saveGame();
     return true;
   }
 
   function sprinklerCost() {
-    return Math.max(12, 25 - Math.floor(state.toolDiscount || 0));
+    return 0;
   }
 
   function harvestPlant(plant, source) {
@@ -1769,8 +1763,8 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
       }
       state.message = "Social worker referred another volunteer for future weeks.";
     } else if (npc === "engineer") {
-      state.toolDiscount = Math.min(13, (state.toolDiscount || 0) + 3);
-      state.message = `Engineer tuned your irrigation kit. Sprinklers now cost ${formatMoney(sprinklerCost())}.`;
+      state.roofLimit += 35;
+      state.message = "Engineer inspected the roof supports. The safe load limit increased.";
     } else if (npc === "mushroom") {
       state.compost += 8;
       state.soilBonus = Math.min(0.18, (state.soilBonus || 0) + 0.04);
@@ -3025,7 +3019,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     ctx.fillStyle = "#53625d";
     const roofText = compact
       ? `Roof: soil ${soilCount()}, water ${wateredCount()}, weeds ${state.weeds.length}, sprinklers ${sprinklerCount()}, plants ${state.plants.length}.`
-      : `Soil ${soilCount()}, water ${wateredCount()}, weeds ${state.weeds.length}, sprinklers ${sprinklerCount()} (${formatMoney(sprinklerCost())}), plants ${state.plants.length}.`;
+      : `Soil ${soilCount()}, water ${wateredCount()}, weeds ${state.weeds.length}, sprinklers ${sprinklerCount()}, plants ${state.plants.length}.`;
     drawWrappedText(roofText, x, y, w, 16);
   }
 
@@ -3152,7 +3146,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     if (tool === "soil") return "Drag across the rooftop to paint soil mass.";
     if (tool === "erase") return "Drag to remove soil, sprinklers, or crops. Removed crops become compost.";
     if (tool === "seed") return "Move over painted soil to preview the circular root radius; click green space to plant.";
-    if (tool === "irrigation") return `Click highlighted pipe sockets. First start on a roof edge for ${formatMoney(sprinklerCost())}; then extend from open sockets.`;
+    if (tool === "irrigation") return "Click highlighted pipe sockets. First start on a roof edge; then extend from open sockets.";
     if (tool === "harvest") return "Click harvestable crops, or assign a volunteer to harvest.";
     return "Select a tool and work the rooftop.";
   }
@@ -3193,30 +3187,218 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   }
 
   function drawMarket() {
-    const compact = view.width < 820;
+    const layout = marketSceneLayout();
+    const { compact, wallTop, counterTop } = layout;
     drawSkyGradient();
-    drawSkyline(view.height * 0.42);
-    const tableY = view.height * 0.64;
-    ctx.fillStyle = "#d9be83";
-    ctx.fillRect(0, tableY, view.width, view.height - tableY);
-    ctx.fillStyle = "#9f6d43";
-    ctx.fillRect(0, tableY, view.width, 14);
-
+    ctx.fillStyle = "#c7dce0";
+    ctx.fillRect(0, wallTop, view.width, counterTop - wallTop);
+    ctx.strokeStyle = "rgba(45, 72, 76, 0.18)";
+    ctx.lineWidth = 1;
+    const tile = compact ? 28 : 36;
+    for (let x = 0; x < view.width; x += tile) {
+      ctx.beginPath();
+      ctx.moveTo(x, wallTop);
+      ctx.lineTo(x, counterTop);
+      ctx.stroke();
+    }
+    for (let y = wallTop; y < counterTop; y += tile) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(view.width, y);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#d4b37a";
+    ctx.fillRect(0, counterTop, view.width, view.height - counterTop);
+    ctx.fillStyle = "#8c6344";
+    ctx.fillRect(0, counterTop, view.width, 14);
     drawTopHud();
-
-    const stallX = compact ? 18 : view.width * 0.08;
-    const stallY = compact ? 92 : view.height * 0.28;
-    const stallW = compact ? view.width - 36 : view.width * 0.42;
-    const stallH = compact ? 168 : view.height * 0.34;
-    drawProduceStall(stallX, stallY, stallW, stallH, compact);
-    drawMarketShoppers(stallX, stallY, stallW, stallH, compact);
-
-    const cardX = compact ? 18 : view.width * 0.55;
-    const cardY = compact ? 258 : view.height * 0.25;
-    const cardW = compact ? view.width - 36 : Math.min(420, view.width * 0.37);
-    drawMarketCard(cardX, cardY, cardW);
-    drawBottomMarketControls();
+    drawMarketStorefront(layout);
+    drawBottomMarketControls(layout.footer);
     drawWeightGauge();
+  }
+
+  function marketFooterLayout() {
+    const compact = view.width < 820 || view.height < 560;
+    const pad = compact ? 10 : 24;
+    const h = view.height < 460 ? 42 : compact ? 50 : 54;
+    const gap = compact ? 8 : 12;
+    const gaugeY = view.height - (compact ? 24 : 34);
+    const y = Math.max(84, gaugeY - h - (compact ? 18 : 22));
+    const endW = compact ? Math.min(view.width < 390 ? 82 : 92, Math.max(68, view.width * 0.28)) : 150;
+    const nextW = compact ? Math.min(view.width < 390 ? 82 : 106, Math.max(72, view.width * 0.32)) : 132;
+    const actionsW = endW + gap + nextW;
+    const inlineW = view.width - (pad + actionsW + gap) - pad;
+    const stacked = inlineW < (compact ? 184 : 240);
+    const messageX = stacked ? pad : pad + actionsW + gap;
+    const messageY = stacked ? Math.max(84, y - h - 8) : y;
+    const messageW = stacked ? view.width - pad * 2 : Math.min(780, inlineW);
+    const contentBottom = Math.min(y, messageY) - 8;
+    return { compact, pad, y, h, gap, endW, nextW, actionsW, stacked, messageX, messageY, messageW, contentBottom };
+  }
+
+  function marketSceneLayout() {
+    const footer = marketFooterLayout();
+    const compact = footer.compact;
+    const short = view.height < 520;
+    const wallTop = compact ? (short ? 72 : 78) : 82;
+    const counterOffset = compact ? (short ? 20 : 26) : 34;
+    const preferredCounterH = short ? 86 : compact ? 150 : 190;
+    const minCounterH = short ? 66 : compact ? 106 : 170;
+    const minCounterTop = wallTop + (short ? 108 : compact ? 150 : 210);
+    const desiredCounterTop = view.height * (compact ? (short ? 0.52 : 0.54) : 0.55);
+    const maxCounterTop = footer.contentBottom - counterOffset - minCounterH;
+    const counterTop = Math.max(wallTop + 88, Math.min(Math.max(desiredCounterTop, minCounterTop), maxCounterTop));
+    const counterY = counterTop + counterOffset;
+    const counterH = Math.max(50, Math.min(preferredCounterH, footer.contentBottom - counterY));
+    const margin = compact ? 10 : 28;
+    return {
+      compact,
+      short,
+      footer,
+      wallTop,
+      counterTop,
+      counterY,
+      counterH,
+      counterX: margin,
+      counterW: view.width - margin * 2,
+      margin,
+    };
+  }
+
+  function drawMarketStorefront(layout) {
+    if (!state.marketOffers.length) state.marketOffers = generateMarketOffers();
+    const { compact, short, margin, wallTop, counterTop, counterY, counterH, counterX, counterW } = layout;
+    const customerTop = wallTop + (short ? 8 : compact ? 14 : 18);
+
+    ctx.fillStyle = "#1e2b29";
+    ctx.font = `${short ? 14 : compact ? 16 : 20}px ui-sans-serif, system-ui`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("Market counter", margin + 18, customerTop + 6);
+    ctx.font = `${short ? 10 : compact ? 11 : 13}px ui-sans-serif, system-ui`;
+    ctx.fillStyle = "#53625d";
+    ctx.fillText("Bag the produce patrons request", margin + 18, customerTop + (short ? 26 : compact ? 30 : 34));
+
+    const playerX = margin + (compact ? 48 : 70);
+    drawPerson(playerX, counterTop - (short ? 14 : compact ? 18 : 26), "#6f9f59", 0.2);
+    ctx.fillStyle = "rgba(251, 248, 238, 0.94)";
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.25)";
+    ctx.lineWidth = 1.2;
+    const youY = Math.max(customerTop + (short ? 42 : 48), counterTop - (short ? 82 : compact ? 96 : 112));
+    roundRect(playerX - 34, youY, 68, 24, 7);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#1e2b29";
+    ctx.font = "700 11px ui-sans-serif, system-ui";
+    ctx.textAlign = "center";
+    ctx.fillText("you", playerX, youY + 14);
+
+    const visibleOfferCount = compact && view.width < 430 ? 2 : 3;
+    const offers = state.marketOffers.slice(0, visibleOfferCount);
+    if (!offers.length) {
+      ctx.fillStyle = "#53625d";
+      ctx.font = `${compact ? 12 : 15}px ui-sans-serif, system-ui`;
+      ctx.textAlign = "center";
+      drawCenteredWrappedText("No patrons yet because the stall has no fresh produce.", view.width / 2, counterTop - 70, Math.min(counterW - 32, 460), compact ? 16 : 19);
+    }
+    const stationLeft = compact ? margin + (view.width < 430 ? 96 : 104) : margin + 148;
+    const stationRight = view.width - margin - (compact ? 18 : 40);
+    const stationW = (stationRight - stationLeft) / Math.max(1, offers.length);
+    const bagButtons = [];
+    for (let i = 0; i < offers.length; i += 1) {
+      const offer = offers[i];
+      const x = stationLeft + stationW * (i + 0.5);
+      const patronY = counterTop - (short ? 18 : compact ? 24 : 30);
+      const color = i === 0 ? "#d98845" : i === 1 ? "#4f7ecb" : "#6f9f59";
+      drawPerson(x, patronY, color, 1 + i * 0.17);
+      const bubbleW = offerBubbleSize(compact, short).w;
+      const bubbleY = Math.max(customerTop + (short ? 42 : 54), counterTop - (short ? 112 : compact ? 142 : 164));
+      drawOfferBubble(x - bubbleW / 2, bubbleY, offer, compact, short);
+      const bagW = short ? 62 : compact ? 70 : 88;
+      const bagH = short ? 26 : compact ? 30 : 34;
+      bagButtons.push({
+        id: `accept-offer-${i}`,
+        x: x - bagW / 2,
+        y: counterY + (short ? 6 : 12),
+        w: bagW,
+        h: bagH,
+        index: i,
+      });
+    }
+
+    ctx.fillStyle = "#b98651";
+    ctx.strokeStyle = "#4a3324";
+    ctx.lineWidth = 2;
+    roundRect(counterX, counterY, counterW, counterH, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#dfb45f";
+    const awningH = Math.max(26, Math.min(counterH - 18, short ? 34 : compact ? 46 : 54));
+    roundRect(counterX + 18, counterY + 12, counterW - 36, awningH, 7);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(35, 49, 46, 0.22)";
+    ctx.lineWidth = 1;
+    for (let i = 0; i < (short ? 6 : 8); i += 1) {
+      const x = counterX + 28 + i * ((counterW - 56) / 7);
+      ctx.beginPath();
+      ctx.moveTo(x, counterY + 12);
+      ctx.lineTo(x - 12, counterY + 12 + awningH);
+      ctx.stroke();
+    }
+    const binY = counterY + (short ? 46 : compact ? 76 : 86);
+    const binH = counterH - (short ? 52 : compact ? 92 : 108);
+    drawMarketProduceBins(counterX + 22, binY, counterW - 44, binH, compact);
+    for (const button of bagButtons) {
+      addButton(button.id, button.x, button.y, button.w, button.h, "Bag", () => acceptMarketOffer(button.index), { selected: button.index === 0 });
+    }
+  }
+
+  function drawMarketProduceBins(x, y, w, h, compact) {
+    const counts = freshInventoryByCrop();
+    const crops = Object.keys(counts).filter((key) => cropDefs[key]);
+    const safeH = Math.max(24, h);
+    const tight = safeH < 42;
+    if (!crops.length) {
+      const boxH = Math.max(28, Math.min(52, safeH));
+      ctx.fillStyle = "#fbf8ee";
+      ctx.strokeStyle = "rgba(35, 49, 46, 0.28)";
+      roundRect(x, y, w, boxH, 8);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#53625d";
+      ctx.font = `${tight ? 10 : compact ? 12 : 14}px ui-sans-serif, system-ui`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(tight ? "Harvest produce first" : "Harvest produce before market day", x + w / 2, y + boxH / 2);
+      return;
+    }
+    const slots = Math.min(compact ? (view.width < 430 ? 3 : 4) : 7, crops.length);
+    const gap = compact ? 6 : 10;
+    const binW = (w - gap * (slots - 1)) / slots;
+    for (let i = 0; i < slots; i += 1) {
+      const key = crops[i];
+      const def = cropDefs[key];
+      const bx = x + i * (binW + gap);
+      const by = y;
+      ctx.fillStyle = "#d4a063";
+      ctx.strokeStyle = "rgba(35, 49, 46, 0.32)";
+      ctx.lineWidth = 1.5;
+      roundRect(bx, by, binW, safeH, 6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = def.color;
+      const pieces = tight ? Math.min(2, counts[key]) : Math.min(8, counts[key] + 3);
+      for (let j = 0; j < pieces; j += 1) {
+        ctx.beginPath();
+        ctx.ellipse(bx + binW * (tight ? 0.35 + j * 0.22 : 0.24 + (j % 4) * 0.16), by + safeH * (tight ? 0.36 : 0.28 + Math.floor(j / 4) * 0.16), Math.max(4, binW * (tight ? 0.08 : 0.1)), Math.max(3, safeH * (tight ? 0.08 : 0.09)), (j % 3) * 0.4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = "#1e2b29";
+      ctx.font = `700 ${tight ? 9 : compact ? 10 : 12}px ui-sans-serif, system-ui`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(`${def.short} x${counts[key]}`, bx + binW / 2, by + safeH - (tight ? 4 : 8));
+    }
   }
 
   function drawProduceStall(x, y, w, h, compact) {
@@ -3344,28 +3526,38 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     ctx.restore();
   }
 
-  function drawOfferBubble(x, y, offer, compact) {
-    const w = compact ? 104 : 126;
-    const h = compact ? 44 : 52;
+  function offerBubbleSize(compact, short) {
+    if (!compact) return { w: 144, h: 72 };
+    if (short) return { w: view.width < 430 ? 96 : 104, h: 54 };
+    return { w: view.width < 430 ? 104 : 108, h: 62 };
+  }
+
+  function drawOfferBubble(x, y, offer, compact, short = false) {
+    const { w, h } = offerBubbleSize(compact, short);
     const def = cropDefs[offer.crop];
     ctx.fillStyle = "rgba(251, 248, 238, 0.96)";
     ctx.strokeStyle = "rgba(35, 49, 46, 0.35)";
     ctx.lineWidth = 1.5;
-    roundRect(x, y, w, h, 10);
+    roundRect(x, y, w, h, 8);
     ctx.fill();
     ctx.stroke();
+    ctx.fillStyle = "#1e2b29";
+    ctx.font = `700 ${short ? 9 : compact ? 10 : 12}px ui-sans-serif, system-ui`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(offer.npc, x + 10, y + 8);
     ctx.fillStyle = def?.color || "#70a95f";
     ctx.beginPath();
-    ctx.ellipse(x + 18, y + h / 2, 12, 9, -0.25, 0, Math.PI * 2);
+    ctx.ellipse(x + 23, y + h * 0.58, short ? 10 : compact ? 12 : 14, short ? 7 : compact ? 9 : 10, -0.25, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = "#1e2b29";
-    ctx.font = "700 12px ui-sans-serif, system-ui";
+    ctx.font = `700 ${short ? 10 : compact ? 11 : 13}px ui-sans-serif, system-ui`;
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
-    ctx.fillText(`${def?.short || offer.crop} x${offer.qty}`, x + 36, y + h * 0.38);
+    ctx.fillText(`${def?.short || offer.crop} x${offer.qty}`, x + 42, y + h * 0.55);
     ctx.fillStyle = "#53625d";
-    ctx.font = "12px ui-sans-serif, system-ui";
-    ctx.fillText(`${offer.price}p`, x + 36, y + h * 0.68);
+    ctx.font = `${short ? 9 : compact ? 10 : 12}px ui-sans-serif, system-ui`;
+    ctx.fillText(`${offer.price}p`, x + 42, y + h * 0.78);
   }
 
   function drawNeighbourhoodContacts(compact) {
@@ -3445,21 +3637,23 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     }, { selected: true });
   }
 
-  function drawBottomMarketControls() {
-    const y = view.height - 96;
-    const pad = view.width < 820 ? 10 : 24;
-    addButton("market-end-week", pad, y, 150, 54, "End Week", () => endMarketWeek(), { selected: true });
-    const x = pad + 166;
+  function drawBottomMarketControls(layout = marketFooterLayout()) {
+    const { compact, pad, y, h, gap, endW, nextW, messageX, messageY, messageW } = layout;
+    addButton("market-end-week", pad, y, endW, h, "End Week", () => endMarketWeek(), { selected: true });
+    addButton("refresh-offers", pad + endW + gap, y, nextW, h, compact ? "Next" : "Next patrons", () => {
+      state.marketOffers = generateMarketOffers();
+      state.message = state.marketOffers.length ? "New patrons step up to the counter." : "No fresh produce for patrons to buy.";
+    });
     ctx.fillStyle = "rgba(251, 248, 238, 0.88)";
     ctx.strokeStyle = "rgba(35, 49, 46, 0.25)";
-    roundRect(x, y, Math.min(780, view.width - x - pad), 54, 8);
+    roundRect(messageX, messageY, messageW, h, 8);
     ctx.fill();
     ctx.stroke();
     ctx.fillStyle = "#253331";
-    ctx.font = "13px ui-sans-serif, system-ui";
+    ctx.font = `${h < 48 ? 11 : 13}px ui-sans-serif, system-ui`;
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
-    drawWrappedText(state.message, x + 14, y + 15, Math.min(740, view.width - x - pad - 28), 17);
+    drawWrappedText(state.message, messageX + 14, messageY + (h < 48 ? 13 : 15), messageW - 28, h < 48 ? 14 : 17);
   }
 
   function drawRepairOverlay() {
@@ -3832,6 +4026,11 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
         qty: offer.qty,
         price: offer.price,
       })),
+      market: {
+        interface: "storefront counter; patrons queue with visible request tickets and the player bags produce from counter bins",
+        freshByCrop: freshInventoryByCrop(),
+        activePatrons: state.marketOffers.length,
+      },
       volunteers: state.volunteers.map((volunteer) => ({
         name: volunteer.name,
         task: volunteer.task,
