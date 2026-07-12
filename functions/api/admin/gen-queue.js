@@ -5,7 +5,7 @@
 // Oldest-first. Auth is X-Relay-Token against GAME_FACTORY_RELAY_TOKEN; browser
 // admin sessions do not unlock the build queue. Read-only. Tim 2026-06-15.
 
-import { json } from '../../_lib/response.js';
+import { json, jsonError } from '../../_lib/response.js';
 import { requireRelay } from '../../_lib/adminAuth.js';
 import { queueCandidateIds, removeJobFromQueue } from '../../_lib/genQueue.js';
 
@@ -15,6 +15,11 @@ export async function onRequestGet({ request, env }) {
   const url = new URL(request.url);
   const guard = await requireRelay(request, env);
   if (guard) return guard;
+  // Fail closed to the public lane for legacy workers. A Codex worker must
+  // explicitly request lane=trusted-codex, so an old unfiltered relay cannot
+  // claim a partner prompt during a rollout.
+  const lane = String(url.searchParams.get('lane') || 'public');
+  if (lane !== 'trusted-codex' && lane !== 'public') return jsonError('bad_lane', 400);
 
   // Cheap poll path for the vibe-relay (every 15s): return the single
   // genjob:signal value — 1 READ, 0 LIST. The relay only does the full list
@@ -36,7 +41,7 @@ export async function onRequestGet({ request, env }) {
   // maintain bounded pending/inflight indexes, then we read only candidate ids.
   const now = Date.now();
   const jobs = [];
-  const ids = await queueCandidateIds(env, { limit, stuckMs: STUCK_MS, now });
+  const ids = await queueCandidateIds(env, { limit, stuckMs: STUCK_MS, now, lane });
   for (const id of ids) {
     const jobRec = await env.VOTES.get(`genjob:${id}`, 'json');
     if (!jobRec) {
@@ -46,8 +51,10 @@ export async function onRequestGet({ request, env }) {
     if (!jobRec.id) jobRec.id = id;
     const readyPending = jobRec.status === 'pending' && (!jobRec.retryAfter || jobRec.retryAfter <= now);
     const stuck = jobRec.status === 'building' && (now - (jobRec.updatedTs || 0)) > STUCK_MS;
+    const jobLane = jobRec.generatorLane === 'trusted-codex' ? 'trusted-codex' : 'public';
+    if (lane && jobLane !== lane) continue;
     if (readyPending || stuck) {
-      jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts, baseId: jobRec.baseId || null });
+      jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts, baseId: jobRec.baseId || null, generatorLane: jobLane });
       continue;
     }
     if (jobRec.status === 'ready' || jobRec.status === 'failed') {

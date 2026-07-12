@@ -1,7 +1,7 @@
 const PENDING_KEY = 'genqueue:pending';
 const INFLIGHT_KEY = 'genqueue:inflight';
 const SIGNAL_KEY = 'genjob:signal';
-const INDEX_TTL = 60 * 60 * 24 * 7;
+const INDEX_TTL = 60 * 60 * 24 * 30;
 const MAX_INDEX_ITEMS = 500;
 const ID_RE = /^[0-9a-z]{8,40}$/;
 
@@ -35,16 +35,25 @@ export async function removeJobFromQueue(env, jobRecOrId) {
   await removeFromIndex(env, INFLIGHT_KEY, id);
 }
 
-export async function queueCandidateIds(env, { limit = 5, stuckMs = 10 * 60 * 1000, now = Date.now() } = {}) {
+export async function queueCandidateIds(env, { limit = 5, stuckMs = 10 * 60 * 1000, now = Date.now(), lane = '' } = {}) {
   const [pending, inflight] = await Promise.all([
     readIndex(env, PENDING_KEY),
     readIndex(env, INFLIGHT_KEY),
   ]);
+  // Keep this boundary safe even if a caller or future index migration bypasses
+  // readIndex's queueItem normalization: missing/unknown lanes are legacy public,
+  // and only the exact trusted marker may enter the partner worker.
+  const laneMatches = item => {
+    const itemLane = item && item.generatorLane === 'trusted-codex' ? 'trusted-codex' : 'public';
+    return !lane || itemLane === lane;
+  };
   const readyPending = pending
+    .filter(laneMatches)
     .filter(item => !item.readyTs || item.readyTs <= now)
     .sort(comparePending)
     .slice(0, Math.max(limit * 4, limit));
   const stuckInflight = inflight
+    .filter(laneMatches)
     .filter(item => now - (item.updatedTs || item.ts || 0) > stuckMs)
     .sort(compareInflight)
     .slice(0, Math.max(limit * 4, limit));
@@ -98,6 +107,9 @@ function queueItem(jobRec, extra = {}) {
   if (readyTs) item.readyTs = readyTs;
   if (updatedTs) item.updatedTs = updatedTs;
   if (jobRec.baseId && validId(jobRec.baseId)) item.baseId = String(jobRec.baseId).toLowerCase();
+  // Jobs created before lane routing existed belong to the legacy public lane.
+  // Only an explicit trusted marker can enter the Codex partner lane.
+  item.generatorLane = jobRec.generatorLane === 'trusted-codex' ? 'trusted-codex' : 'public';
   return item;
 }
 

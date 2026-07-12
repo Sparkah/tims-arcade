@@ -1,10 +1,9 @@
 // POST /api/gen/submit  { prompt: string }
 // The player describes a game in one sentence. Requires sign-in (magic-link).
-// Spends GENERATION_COST tokens (new accounts get a 60-token signup bonus on first
-// sign-in that covers the first game; more are earned by play/rate/login). Enqueues
-// an async build job that Tim's Mac relay (Shared/tools/vibe-relay) picks up,
-// generates with claude --print, and posts back to /api/admin/gen-result.
-// Tim 2026-06-16.
+// Normally spends GENERATION_COST tokens (new accounts get a 60-token signup
+// bonus). Stable verified UIDs in GAME_FACTORY_COMPED_CREATOR_UIDS use the
+// isolated trusted-codex lane without token mutation. Tim's Mac relay posts
+// sanitized stage events and results back through /api/admin/gen-result.
 
 import { readSession } from '../_session.js';
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
@@ -14,10 +13,13 @@ import { parseCookie } from '../../_lib/cookie.js';
 import { spendTokens, refundTokens, readMeta, grantSignupBonus, GENERATION_COST } from '../../_lib/meta.js';
 import { appendCreationHistoryEvent, makeVersionName } from '../../_lib/creationHistory.js';
 import { addPendingJob } from '../../_lib/genQueue.js';
+import { isCompedCreatorSession } from '../../_lib/creatorEntitlement.js';
+import { appendBuildEvent } from '../../_lib/genJobLog.js';
+import { addUserJob, removeUserJob } from '../../_lib/genUserJobs.js';
 
 const MIN_PROMPT = 3;
 const MAX_PROMPT = 500;
-const JOB_TTL = 60 * 60 * 24 * 7;   // 7 days
+const JOB_TTL = 60 * 60 * 24 * 30;  // owner-visible build record retention
 const DAILY_GEN_CAP = 20;           // successful generations / uid / day
 const HOURLY_ATTEMPTS = 60;         // total submit attempts / IP / hour (anti-hammer)
 
@@ -27,6 +29,13 @@ export async function onRequestPost({ request, env }) {
   if (!sameOriginOk(request)) return jsonError('forbidden', 403);
   const session = await readSession(request, env);
   if (!session || !session.uid) return jsonError('sign_in_required', 401);
+  const partnerAccess = await isCompedCreatorSession(session, env);
+  // The Codex pilot runs only for explicitly allowlisted trusted accounts. Do
+  // not charge or queue ordinary/public users while no isolated public worker
+  // exists. Enabling public submission later is an explicit deploy setting.
+  if (!partnerAccess && String(env.GAME_FACTORY_PUBLIC_BUILDER_ENABLED || '') !== '1') {
+    return jsonError('builder_unavailable', 503);
+  }
 
   // Anti-hammer (counts every attempt, balance or not) so the endpoint can't be
   // pounded; the real per-day generation cap below only counts SUCCESSES, so a
@@ -83,7 +92,7 @@ export async function onRequestPost({ request, env }) {
     }
   }
 
-  // Generation always costs GENERATION_COST tokens from the COOKIE uid balance --
+  // Generation normally costs GENERATION_COST tokens from the COOKIE uid balance --
   // the visible/spendable pill balance. New accounts get a 60-token signup bonus on
   // their first signed-in load (grantSignupBonus), which covers the first game, so
   // there is no separate "free" path. Accepted-risk: KV has no compare-and-set, so
@@ -97,8 +106,10 @@ export async function onRequestPost({ request, env }) {
   // isn't wrongly rejected with need_tokens (Codex 2026-06-16). Idempotent per email.
   // Best-effort like the quota/me-meta call sites: a KV hiccup in the grant must not
   // 500 the submit -- spendTokens below still gates the actual charge.
-  try { await grantSignupBonus(env, session.uid, cookieUid); } catch (e) { /* never block submit */ }
-  const paid = cookieUid && await spendTokens(env, cookieUid, GENERATION_COST);
+  if (!partnerAccess) {
+    try { await grantSignupBonus(env, session.uid, cookieUid); } catch (e) { /* never block submit */ }
+  }
+  const paid = partnerAccess || (cookieUid && await spendTokens(env, cookieUid, GENERATION_COST));
   if (!paid) {
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('need_tokens', 402);
@@ -107,7 +118,7 @@ export async function onRequestPost({ request, env }) {
   // Daily cap counts only accepted generations -- so it never burns on rejects.
   const day = new Date().toISOString().slice(0, 10);
   if (!await checkRate(env, `genrate:${session.uid}:${day}`, DAILY_GEN_CAP, 60 * 60 * 26)) {
-    if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
+    if (!partnerAccess && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('daily_limit_reached', 429);
   }
@@ -117,21 +128,34 @@ export async function onRequestPost({ request, env }) {
   const currentVersion = Math.max(1, Math.floor(Number(baseRec && baseRec.versionNumber) || 1));
   const versionNumber = baseId ? currentVersion + 1 : 1;
   const versionName = makeVersionName(baseRec && (baseRec.title || baseRec.slug), versionNumber);
+  const charge = partnerAccess
+    ? { kind: 'comped', amount: 0 }
+    : { kind: 'tokens', uid: cookieUid, amount: GENERATION_COST };
   const jobRec = {
     id, uid: session.uid, email: session.email, prompt, displayName,
     status: 'pending', slug: null, title: null, error: null,
     baseId,   // non-null => in-place upgrade of that creation (gen-result overwrites it)
     targetCreationId, versionNumber, versionName,
+    generatorLane: partnerAccess ? 'trusted-codex' : 'public',
     // What this job was charged, so a terminal build failure refunds the EXACT
     // charge once (admin/gen-result.js): 60 cookie-uid tokens. cookieUid may be
     // null (no cookie) -> nothing to refund.
-    charge: { kind: 'tokens', uid: cookieUid, amount: GENERATION_COST },
+    charge,
     ts, updatedTs: ts,
   };
+  appendBuildEvent(jobRec, { stage: 'queued', state: 'queued', attempt: 1, ts });
   try {
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
   } catch (e) {
-    if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
+    if (charge.kind === 'tokens' && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
+    if (lockHeld) await releaseIterLock(env, baseId, id);
+    return jsonError('enqueue_failed', 500);
+  }
+  try {
+    await addUserJob(env, session.uid, jobRec);
+  } catch (e) {
+    try { await env.VOTES.delete(`genjob:${id}`); } catch (_) { /* best effort */ }
+    if (charge.kind === 'tokens' && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('enqueue_failed', 500);
   }
@@ -139,7 +163,8 @@ export async function onRequestPost({ request, env }) {
     await addPendingJob(env, jobRec);
   } catch (e) {
     try { await env.VOTES.delete(`genjob:${id}`); } catch (_) { /* best effort */ }
-    if (cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);
+    try { await removeUserJob(env, session.uid, id); } catch (_) { /* best effort */ }
+    if (charge.kind === 'tokens' && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('enqueue_failed', 500);
   }

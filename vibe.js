@@ -39,13 +39,30 @@
     stats: $('create-stats'),
     statsGrid: $('create-stats-grid'),
     statsEarn: $('create-stats-earn'),
+    partner: $('create-partner'),
+    buildLog: $('create-build-log'),
+    buildEvents: $('create-build-events'),
+    buildLive: $('create-build-log-live'),
+    recent: $('create-recent'),
+    recentList: $('create-recent-list'),
+    recentMore: $('create-recent-more'),
   };
   if (!els.composer) return;
 
   var pollTimer = null;
   var myName = '';
+  var currentUid = '';
+  var partnerAccess = false;
+  var lastLogEventKey = '';
+  var recentOffset = 0;
+  var recentSeen = Object.create(null);
   var lastBuild = null, buildTicker = null;
-  var BUILD_ETA_MIN = 22;   // Opus game gen under heavy concurrent-claude load (sonnet fallback is faster)
+  // Provider-neutral estimate until the trusted Codex lane has enough canary data
+  // for a measured percentile rather than a false single-minute promise.
+  // Two real trusted-Codex canaries completed in 68s and 98s. Keep a generous
+  // buffer for larger prompts and service load without showing the old Claude
+  // worker's 20-30 minute estimate.
+  var BUILD_ETA_MIN = 2, BUILD_ETA_MAX = 5;
 
   function show(el, on) { if (el) el.hidden = !on; }
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
@@ -82,6 +99,7 @@
     bad_json: 'Something went wrong. Try again.',
     already_improving: 'You are already improving this game - hang tight.',
     iterate_not_found: 'That game could not be found.',
+    builder_unavailable: 'The public builder is paused while the partner Codex pilot is tested.',
   };
 
   // ---- quota / routing ----
@@ -89,13 +107,22 @@
     return fetch('/api/gen/quota', { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.json(); })
       .then(function (q) {
-        if (!q.signed_in) { show(els.signin, true); show(els.composer, false); show(els.mine, false); show(els.stats, false); return q; }
+        if (!q.signed_in) {
+          currentUid = '';
+          show(els.signin, true); show(els.composer, false); show(els.mine, false); show(els.stats, false);
+          show(els.partner, false); show(els.recent, false);
+          return q;
+        }
+        currentUid = String(q.uid || '');
         show(els.signin, false);
         show(els.composer, true);
+        partnerAccess = q.partnerAccess === true;
+        show(els.partner, partnerAccess);
         if (els.creatorName && !els.creatorName.value && q.displayName) els.creatorName.value = q.displayName;
         myName = (els.creatorName && els.creatorName.value) || q.displayName || '';
         renderQuota(q);
         loadCreations();
+        loadRecentJobs();
         return q;
       })
       .catch(function () { setMsg('Could not load your account. Refresh to retry.', 'err'); });
@@ -104,10 +131,20 @@
   function renderQuota(q) {
     var cost   = q.generationCost || 60;
     var tokens = q.tokens || 0;
-    var canGen = q.canGenerate || tokens >= cost;
+    var isPartner = q.partnerAccess === true;
+    var builderAvailable = isPartner || q.builderAvailable !== false;
+    var canGen = builderAvailable && (isPartner || q.canGenerate || tokens >= cost);
     els.prompts.hidden = false;
-    els.prompts.textContent = canGen ? (cost + ' tokens ready') : (tokens + ' / ' + cost + ' tokens');
-    if (canGen) {
+    els.prompts.textContent = !builderAvailable
+      ? 'Builder paused'
+      : (isPartner ? 'Partner access' : (canGen ? (cost + ' tokens ready') : (tokens + ' / ' + cost + ' tokens')));
+    show(els.pay, builderAvailable);
+    if (!builderAvailable) {
+      show(els.gate, true);
+      els.generate.disabled = true;
+      els.gateFill.style.width = '0%';
+      els.gateText.textContent = 'The public builder is paused while the partner Codex pilot is tested. Existing games remain available.';
+    } else if (canGen) {
       show(els.gate, false);
       els.generate.disabled = false;
     } else {
@@ -130,7 +167,13 @@
     var lifetime = +q.lifetime || 0;
     var streak = +q.streak || 0, best = +q.bestStreak || 0;
     var canMake = Math.floor(tokens / cost);
-    var tiles = [
+    var tiles = q.partnerAccess === true ? [
+      ['Included', 'game builds / improvements'],
+      [q.dailyLimit || 20, 'daily safety limit'],
+      [tokens, 'player tokens unchanged'],
+      [lifetime, 'earned all-time'],
+      [streak + 'd', 'login streak' + (best > streak ? ' (best ' + best + 'd)' : '')],
+    ] : [
       [tokens, 'tokens now'],
       [canMake, canMake === 1 ? 'game you can make' : 'games you can make'],
       [cost, 'cost per game / improvement'],
@@ -152,7 +195,9 @@
       fragment.appendChild(tile);
     });
     els.statsGrid.replaceChildren(fragment);
-    if (els.statsEarn) els.statsEarn.textContent = 'Earn tokens by playing (+1/min), rating a game (+5, after 5 min on it), and logging in daily (+10, with bonuses at 3/7/14/30/60-day streaks). Each new game or improvement costs ' + cost + ' tokens.';
+    if (els.statsEarn) els.statsEarn.textContent = q.partnerAccess === true
+      ? 'Partner builds do not spend or refund player tokens. Ownership, moderation, one-update-at-a-time, rate limits, and the daily safety limit still apply.'
+      : 'Earn tokens by playing (+1/min), rating a game (+5, after 5 min on it), and logging in daily (+10, with bonuses at 3/7/14/30/60-day streaks). Each new game or improvement costs ' + cost + ' tokens.';
     show(els.stats, true);
   }
 
@@ -185,12 +230,14 @@
   }
 
   function beginJob(id) {
-    try { localStorage.setItem(JOB_KEY, JSON.stringify({ id: id, ts: Date.now() })); } catch (e) {}
+    saveJob(id, Date.now());
     show(els.composer, false);
     show(els.status, true);
     show(els.building, true);
     show(els.ready, false);
     show(els.failed, false);
+    resetBuildLog();
+    focusStatus();
     startPolling(id);
   }
 
@@ -207,13 +254,21 @@
   }
 
   function pollOnce(id) {
-    fetch('/api/gen/status?id=' + encodeURIComponent(id), { cache: 'no-store' })
-      .then(function (r) { return r.ok ? r.json() : null; })
+    fetch('/api/gen/status?id=' + encodeURIComponent(id), { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 401 || r.status === 404) {
+          dropInaccessibleJob();
+          return null;
+        }
+        return r.ok ? r.json() : null;
+      })
       .then(function (s) {
         if (!s) return;
-        if (s.status === 'ready' && s.playUrl) { stopPolling(); clearJob(); onReady(s); }
-        else if (s.status === 'failed') { stopPolling(); clearJob(); onFailed(s); }
-        else { lastBuild = { s: s, recvAt: Date.now() }; renderBuildStatus(); }   // pending/building -> live status
+        renderBuildLog(s.events || []);
+        lastBuild = { s: s, recvAt: Date.now() };
+        if (s.status === 'ready' && s.playUrl) { stopPolling(); onReady(s); }
+        else if (s.status === 'failed') { stopPolling(); onFailed(s); }
+        else { renderBuildStatus(); }   // pending/building -> live status
       })
       .catch(function () {});
   }
@@ -224,9 +279,50 @@
   function friendlyErr(e) {
     e = String(e || '');
     if (/timeout/i.test(e)) return 'the studio was busy and it timed out';
-    if (/smoke/i.test(e)) return 'a glitch in the generated game';
-    if (/html|empty|large/i.test(e)) return 'the output was not a clean game';
+    if (/smoke/i.test(e)) return 'a browser smoke-test failure';
+    if (/html|empty|large|level|creator/i.test(e)) return 'a game-file validation failure';
+    if (/limit|busy|capacity/i.test(e)) return 'the studio was temporarily busy';
     return 'a temporary hiccup';
+  }
+
+  function resetBuildLog() {
+    lastLogEventKey = '';
+    if (els.buildEvents) els.buildEvents.replaceChildren();
+    if (els.buildLive) els.buildLive.textContent = '';
+  }
+
+  function renderBuildLog(events) {
+    if (!els.buildEvents) return;
+    var list = Array.isArray(events) ? events : [];
+    var fragment = document.createDocumentFragment();
+    list.forEach(function (event) {
+      var item = document.createElement('li');
+      item.className = 'create-build-event';
+      var message = document.createElement('span');
+      message.textContent = event.message || 'Build updated.';
+      item.appendChild(message);
+      if (event.code) {
+        var code = document.createElement('span');
+        code.className = 'create-build-event-code';
+        code.textContent = ' [' + String(event.code).slice(0, 48) + ']';
+        item.appendChild(code);
+      }
+      var meta = document.createElement('span');
+      meta.className = 'create-build-event-meta';
+      var at = event.ts ? new Date(event.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'time unavailable';
+      meta.textContent = at + ' · ' + String(event.stage || 'build') + ' · attempt ' + (+event.attempt || 1);
+      item.appendChild(meta);
+      fragment.appendChild(item);
+    });
+    els.buildEvents.replaceChildren(fragment);
+
+    var latest = list[list.length - 1];
+    if (!latest) return;
+    var key = [latest.stage, latest.state, latest.code, latest.attempt, latest.ts].join(':');
+    if (key !== lastLogEventKey) {
+      lastLogEventKey = key;
+      if (els.buildLive) els.buildLive.textContent = latest.message || 'Build updated.';
+    }
   }
   function renderBuildStatus() {
     if (!lastBuild) return;
@@ -240,21 +336,61 @@
         detailEl.textContent = (s.error ? 'Last attempt hit ' + friendlyErr(s.error) + '. ' : '') + 'It is queued and will restart automatically.';
       } else {
         phaseEl.textContent = 'In the queue';
-        detailEl.textContent = 'Your game starts building when the studio is online. Builds take about ' + BUILD_ETA_MIN + ' minutes.';
+        detailEl.textContent = 'Your game starts building when the studio is online. Builds usually take about ' + BUILD_ETA_MIN + '-' + BUILD_ETA_MAX + ' minutes.';
       }
     } else if (s.status === 'building') {
       var elapsedMin = Math.max(0, Math.floor((serverNow - (s.updatedAt || serverNow)) / 60000));
       var tail = (s.attempts || 0) > 0 ? ' - attempt ' + ((s.attempts || 0) + 1) + ' after a restart.' : '.';
       phaseEl.textContent = 'Building your game now';
       if (elapsedMin < BUILD_ETA_MIN) {
-        detailEl.textContent = elapsedMin + ' min elapsed, about ' + (BUILD_ETA_MIN - elapsedMin) + ' min to go (good games take ~' + BUILD_ETA_MIN + ' min)' + tail;
+        detailEl.textContent = elapsedMin + ' min elapsed - builds usually take ' + BUILD_ETA_MIN + '-' + BUILD_ETA_MAX + ' min total' + tail;
+      } else if (elapsedMin < BUILD_ETA_MAX) {
+        detailEl.textContent = elapsedMin + ' min elapsed - inside the usual ' + BUILD_ETA_MIN + '-' + BUILD_ETA_MAX + ' min build window' + tail;
       } else {
         detailEl.textContent = elapsedMin + ' min elapsed - wrapping up, almost there' + tail;
       }
     }
   }
 
-  function clearJob() { try { localStorage.removeItem(JOB_KEY); } catch (e) {} }
+  function jobStorageKey() { return currentUid ? JOB_KEY + ':' + currentUid : ''; }
+  function saveJob(id, ts) {
+    var key = jobStorageKey();
+    if (!key) return;
+    try { localStorage.setItem(key, JSON.stringify({ id: id, ts: ts || Date.now() })); } catch (e) {}
+  }
+  function clearJob() {
+    var key = jobStorageKey();
+    try {
+      if (key) localStorage.removeItem(key);
+      // Never resume the old origin-wide key: it may belong to a different
+      // signed-in account on the same browser profile.
+      localStorage.removeItem(JOB_KEY);
+    } catch (e) {}
+  }
+  function focusStatus() {
+    if (!els.status) return;
+    requestAnimationFrame(function () { try { els.status.focus({ preventScroll: true }); } catch (e) { try { els.status.focus(); } catch (_) {} } });
+  }
+  function dropInaccessibleJob() {
+    stopPolling();
+    clearJob();
+    resetBuildLog();
+    lastBuild = null;
+    show(els.status, false);
+    show(els.composer, false);
+    // Refresh auth/quota so a 401 shows sign-in and a same-browser account
+    // switch shows that account's composer, instead of trusting stale JS state.
+    loadQuota().then(function (q) {
+      var target = q && q.signed_in
+        ? els.prompt
+        : (els.signin && els.signin.querySelector('a[href], button, [tabindex]:not([tabindex="-1"])'));
+      if (!target) return;
+      requestAnimationFrame(function () {
+        try { target.focus({ preventScroll: true }); }
+        catch (e) { try { target.focus(); } catch (_) {} }
+      });
+    });
+  }
 
   function onReady(s) {
     show(els.building, false);
@@ -289,6 +425,7 @@
     els.frameWrap.appendChild(iframe);
     capture('vibe_generate_ready', { slug: s.slug || '' });
     loadCreations();
+    loadRecentJobs();
   }
 
   function onFailed() {
@@ -296,6 +433,88 @@
     show(els.ready, false);
     show(els.failed, true);
     capture('vibe_generate_failed', {});
+    loadRecentJobs();
+  }
+
+  // Recent jobs are indexed by owner UID, so this includes first-build failures
+  // that never created an upload card. No KV LIST is used server-side.
+  function loadRecentJobs(append) {
+    if (!els.recent || !els.recentList) return;
+    if (!append) {
+      recentOffset = 0;
+      recentSeen = Object.create(null);
+      els.recentList.replaceChildren();
+    }
+    if (els.recentMore) els.recentMore.disabled = true;
+    fetch('/api/gen/jobs?limit=20&offset=' + recentOffset, { credentials: 'same-origin', cache: 'no-store' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        var jobs = data && Array.isArray(data.jobs) ? data.jobs : [];
+        var fragment = document.createDocumentFragment();
+        jobs.forEach(function (job) {
+          if (!job || !job.id || recentSeen[job.id]) return;
+          recentSeen[job.id] = true;
+          fragment.appendChild(recentJobItem(job));
+        });
+        els.recentList.appendChild(fragment);
+        recentOffset = data && Number.isFinite(Number(data.nextOffset))
+          ? Math.max(recentOffset, Number(data.nextOffset))
+          : recentOffset + jobs.length;
+        var hasAny = els.recentList.children.length > 0;
+        show(els.recent, hasAny);
+        show(els.recentMore, !!(data && data.hasMore && hasAny));
+        if (els.recentMore) els.recentMore.disabled = false;
+      })
+      .catch(function () { if (els.recentMore) els.recentMore.disabled = false; });
+  }
+
+  function recentJobItem(job) {
+    var item = document.createElement('li');
+    item.className = 'create-recent-item';
+    var copy = document.createElement('span');
+    copy.className = 'create-recent-copy';
+    var title = document.createElement('span');
+    title.className = 'create-recent-title';
+    title.textContent = job.versionName || job.title || 'Game build';
+    var meta = document.createElement('span');
+    meta.className = 'create-recent-meta';
+    var when = job.updatedAt || job.queuedAt;
+    var stamp = when ? new Date(when).toLocaleString() : 'time unavailable';
+    meta.textContent = String(job.status || 'pending') + ' · ' + stamp + (job.error ? ' · ' + String(job.error).slice(0, 48) : '');
+    copy.appendChild(title); copy.appendChild(meta);
+
+    var open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'create-mini-btn create-recent-open';
+    var label = document.createElement('span'); label.textContent = 'View log';
+    var context = document.createElement('span'); context.className = 'visually-hidden'; context.textContent = ' for ' + title.textContent;
+    open.appendChild(label); open.appendChild(context);
+    open.addEventListener('click', function () { inspectRecentJob(job); });
+
+    item.appendChild(copy); item.appendChild(open);
+    return item;
+  }
+
+  function inspectRecentJob(job) {
+    if (!job || !job.id) return;
+    saveJob(job.id, job.queuedAt || Date.now());
+    show(els.composer, false);
+    show(els.status, true);
+    show(els.building, false);
+    show(els.ready, false);
+    show(els.failed, false);
+    lastBuild = { s: job, recvAt: Date.now() };
+    resetBuildLog();
+    renderBuildLog(job.events || []);
+    if (job.status === 'ready' && job.playUrl) onReady(job);
+    else if (job.status === 'failed') onFailed(job);
+    else {
+      show(els.building, true);
+      renderBuildStatus();
+      startPolling(job.id);
+    }
+    focusStatus();
+    try { els.status.scrollIntoView({ block: 'start' }); } catch (e) {}
   }
 
   // ---- creations list ----
@@ -318,7 +537,8 @@
   // game (status.playUrl points at the base game). Tim 2026-06-17.
   function improve(g) {
     if (!g || !g.id) return;
-    var change = (window.prompt('What should change or be added to "' + (g.title || g.slug || 'your game') + '"?\n(Costs 60 tokens, like a new build.)') || '').trim();
+    var billing = partnerAccess ? 'Included with Partner access.' : 'Costs 60 tokens, like a new build.';
+    var change = (window.prompt('What should change or be added to "' + (g.title || g.slug || 'your game') + '"?\n(' + billing + ')') || '').trim();
     if (!change) return;
     if (change.length < 3) { toast('Add a few more words about the change.', 'err'); return; }
     toast('Sending your change...');
@@ -465,24 +685,31 @@
   els.generate.addEventListener('click', generate);
   els.pay.addEventListener('click', pay);
   if (els.creatorName) els.creatorName.addEventListener('change', saveCreatorName);
+  if (els.recentMore) els.recentMore.addEventListener('click', function () { loadRecentJobs(true); });
   els.again.addEventListener('click', function () {
+    clearJob(); resetBuildLog();
     show(els.status, false); show(els.composer, true);
     els.prompt.value = ''; els.counter.textContent = '0 / 500';
     loadQuota();
   });
   els.retry.addEventListener('click', function () {
+    clearJob(); resetBuildLog();
     show(els.status, false); show(els.composer, true);
     loadQuota();
   });
 
   // Resume an in-flight job from a previous visit.
-  function resume() {
+  function resume(q) {
+    // Status is owner-only. Signed-out visitors and a different signed-in UID
+    // must never be trapped behind another account's stale localStorage job.
+    if (!q || !q.signed_in || !currentUid) { clearJob(); return; }
     var saved = null;
-    try { saved = JSON.parse(localStorage.getItem(JOB_KEY) || 'null'); } catch (e) {}
-    if (saved && saved.id && (Date.now() - (saved.ts || 0) < 24 * 3600 * 1000)) {
+    try { saved = JSON.parse(localStorage.getItem(jobStorageKey()) || 'null'); localStorage.removeItem(JOB_KEY); } catch (e) {}
+    if (saved && saved.id && (Date.now() - (saved.ts || 0) < 30 * 24 * 3600 * 1000)) {
       show(els.composer, false);
       show(els.status, true);
       show(els.building, true);
+      focusStatus();
       startPolling(saved.id);
     } else {
       clearJob();

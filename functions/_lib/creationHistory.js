@@ -161,7 +161,7 @@ export function buildResultSummary({ prompt, html, levelSeed, isUpdate } = {}) {
   return cleanText(detail, 500);
 }
 
-export function buildFailureSummary(error) {
+export function buildFailureSummary(error, { comped = false } = {}) {
   const reason = cleanText(error || 'generation_failed', 140);
-  return `Update failed: ${reason}. Tokens were refunded.`;
+  return `Update failed: ${reason}. ${comped ? 'No tokens were charged.' : 'Tokens were refunded.'}`;
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pre_push_review.sh — 6-axis AI scorecard gate for production deploys.
 #
-# Runs `claude --print` against the pending diff with a strict 6-axis
+# Runs a non-interactive, read-only `codex exec` against the pending diff with a strict 6-axis
 # scorecard prompt (correctness, security, regression_risk, deploy_safety,
 # code_health, documentation). Each axis is scored 1-5. Push is BLOCKED
 # unless the AVERAGE score ≥ REVIEW_THRESHOLD (default 5.0 — strict).
@@ -11,40 +11,50 @@
 #   REVIEW_TIMEOUT_SECONDS default "420" — max seconds to wait for the
 #                                        AI review command before treating
 #                                        it as an AI error
-#   REVIEW_FAIL_OPEN   default "0"     — set 1 to keep pushing when the
-#                                        AI itself errors (no scorecard)
+#   CODEX_BIN          optional Codex CLI path (defaults to command -v codex)
+#   CODEX_MODEL        optional explicit review model
+#   MAX_REVIEW_CHARS   default "500000" — fail closed above this complete-diff limit
 #
 # Examples:
 #   REVIEW_THRESHOLD=4.5 git push      # relax — allow some 4s
-#   REVIEW_FAIL_OPEN=1   git push      # AI down? push anyway
-#   git push --no-verify               # bypass gate entirely
+# AI/tooling errors fail closed: a production push must have a valid scorecard.
 
 set -uo pipefail
 
-CLAUDE_BIN="/Users/timmarkin/.local/bin/claude"
+CODEX_BIN="${CODEX_BIN:-$(command -v codex 2>/dev/null || true)}"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-WORKSPACE="/Users/timmarkin/Desktop/Agents"
-LOG_DIR="$WORKSPACE/Shared/data/pre-push-reviews"
+WORKSPACE="${AGENTS_ROOT:-/Users/timmarkin/Agents}"
+LOG_DIR="${REVIEW_LOG_DIR:-$WORKSPACE/Shared/data/pre-push-reviews}"
+REVIEW_RULES_FILE="${CODEX_REVIEW_RULES_FILE:-$WORKSPACE/Shared/tools/vibe-relay/no-command.rules}"
 mkdir -p "$LOG_DIR"
 TS="$(date +%Y%m%d-%H%M%S)"
 LOG="$LOG_DIR/review-$(basename "$REPO_ROOT")-$TS.log"
 
 THRESHOLD="${REVIEW_THRESHOLD:-5.0}"
-# 420 (was 180): claude 2.1.x --print does agentic file-reading, so a real
-# review runs ~150s and intermittently crossed the old 180s ceiling, getting
-# killed mid-run and reported as a false "AI error" (2026-07-02). Output is
-# buffered, so a kill loses everything and the log is empty. Give it headroom.
 TIMEOUT_SECONDS="${REVIEW_TIMEOUT_SECONDS:-420}"
 
-# Pre-flight checks. Skip the gate (no-op) if the toolchain isn't available
-# rather than breaking pushes — but log loudly so Tim notices.
-if [[ ! -x "$CLAUDE_BIN" ]]; then
-  echo "pre-push-review: claude binary not at $CLAUDE_BIN — skipping" >&2
-  exit 0
+# Pre-flight checks fail closed. Silently skipping this gate would turn an
+# exhausted subscription or broken install into an unreviewed production deploy.
+if [[ -z "$CODEX_BIN" || ! -x "$CODEX_BIN" ]]; then
+  echo "pre-push-review: Codex CLI not found (set CODEX_BIN)" >&2
+  exit 1
 fi
 if ! command -v jq >/dev/null 2>&1; then
-  echo "pre-push-review: jq not in PATH — skipping (install jq for the scorecard gate)" >&2
-  exit 0
+  echo "pre-push-review: jq not in PATH — cannot validate scorecard" >&2
+  exit 1
+fi
+if [[ ! -f "$REVIEW_RULES_FILE" || -L "$REVIEW_RULES_FILE" ]]; then
+  echo "pre-push-review: regular no-command rules file not found: $REVIEW_RULES_FILE" >&2
+  exit 1
+fi
+
+# Fast deterministic gate for the partner entitlement, zero-charge paths,
+# owner/operator build logs, queue lane isolation, stale-job recovery, and UI
+# semantics. The script uses a synthetic identity unless a caller supplies an
+# explicit test identity; no real allowlist email is committed.
+if ! node "$REPO_ROOT/scripts/check_partner_creator.js"; then
+  echo "pre-push-review: partner creator regression failed" >&2
+  exit 1
 fi
 
 # Resolve diff vs upstream main.
@@ -70,8 +80,17 @@ else
   fi
 fi
 
-DIFF_TRUNCATED="$(printf '%s' "$DIFF" | head -c 60000)"
 DIFF_SIZE="$(printf '%s' "$DIFF" | wc -c | tr -d ' ')"
+MAX_REVIEW_CHARS="${MAX_REVIEW_CHARS:-500000}"
+if ! [[ "$MAX_REVIEW_CHARS" =~ ^[0-9]+$ ]] || (( MAX_REVIEW_CHARS < 60000 )); then
+  echo "pre-push-review: invalid MAX_REVIEW_CHARS=$MAX_REVIEW_CHARS" >&2
+  exit 1
+fi
+if (( DIFF_SIZE > MAX_REVIEW_CHARS )); then
+  echo "pre-push-review: diff is ${DIFF_SIZE} chars, above the ${MAX_REVIEW_CHARS}-char full-review limit" >&2
+  echo "Split the deploy into smaller commits; this gate never truncates unreviewed files." >&2
+  exit 1
+fi
 
 PROMPT="You are reviewing a git diff before push. The diff will deploy to https://game-factory.tech via Cloudflare Pages auto-deploy as soon as the push lands. Your job is a strict 6-axis scorecard.
 
@@ -105,9 +124,9 @@ OUTPUT FORMAT — JSON ONLY, no prose, no markdown fences:
 Findings list is for items that cost the diff points. Empty list is fine if every axis scored 5.
 
 Repo: $REPO_ROOT
-Diff (truncated to 60KB):
+Complete diff (${DIFF_SIZE} chars; no truncation):
 ---
-$DIFF_TRUNCATED
+$DIFF
 ---"
 
 echo "" >&2
@@ -120,64 +139,155 @@ if ! [[ "$TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || (( TIMEOUT_SECONDS <= 0 )); then
   exit 1
 fi
 
-RAW="$(CLAUDE_BIN="$CLAUDE_BIN" REVIEW_PROMPT="$PROMPT" REVIEW_TIMEOUT_SECONDS="$TIMEOUT_SECONDS" python3 - <<'PY' 2>&1
+RAW=$(CODEX_BIN="$CODEX_BIN" CODEX_MODEL="${CODEX_MODEL:-}" REPO_ROOT="$REPO_ROOT" REVIEW_TIMEOUT_SECONDS="$TIMEOUT_SECONDS" REVIEW_RULES_FILE="$REVIEW_RULES_FILE" python3 /dev/fd/3 3<<'PY' <<<"$PROMPT" 2>&1
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
-claude_bin = os.environ["CLAUDE_BIN"]
-prompt = os.environ["REVIEW_PROMPT"]
+codex_bin = os.environ["CODEX_BIN"]
+model = os.environ.get("CODEX_MODEL", "").strip()
+repo_root = os.environ["REPO_ROOT"]
+prompt = sys.stdin.read()
 timeout = int(os.environ["REVIEW_TIMEOUT_SECONDS"])
+rules_source = os.environ["REVIEW_RULES_FILE"]
 
-# Run the reviewer as a FRESH, top-level claude, NOT a nested child of the
-# agent session that triggered this push. When an agent (Claude Code) runs
-# git push, the hook claude otherwise inherits CLAUDECODE / CLAUDE_CODE_*
-# plus a non-tty stdin, and claude 2.1.x intermittently hangs at startup
-# trying to attach to the parent session, so the 180s timeout fires with
-# ZERO output (root cause of the 2026-07-02 push stalls). Strip those
-# session markers and give it /dev/null stdin so it starts clean, the same
-# way a manual terminal push does.
-child_env = {
-    k: v for k, v in os.environ.items()
-    if not k.startswith("CLAUDE_CODE") and k not in ("CLAUDECODE", "AI_AGENT", "CLAUDE_EFFORT")
+schema = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["scores", "findings", "summary"],
+    "properties": {
+        "scores": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["correctness", "security", "regression_risk", "deploy_safety", "code_health", "documentation"],
+            "properties": {axis: {"type": "integer", "minimum": 1, "maximum": 5} for axis in [
+                "correctness", "security", "regression_risk", "deploy_safety", "code_health", "documentation"
+            ]},
+        },
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["severity", "axis", "file", "issue", "fix"],
+                "properties": {
+                    "severity": {"type": "string", "enum": ["P0", "P1", "P2"]},
+                    "axis": {"type": "string"},
+                    "file": {"type": "string"},
+                    "issue": {"type": "string"},
+                    "fix": {"type": "string"},
+                },
+            },
+        },
+        "summary": {"type": "string"},
+    },
 }
 
-try:
-    result = subprocess.run(
-        [claude_bin, "--print", "--dangerously-skip-permissions", prompt],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        stdin=subprocess.DEVNULL,
-        text=True,
-        timeout=timeout,
-        env=child_env,
-    )
-except subprocess.TimeoutExpired as exc:
-    if exc.stdout:
-        sys.stdout.write(exc.stdout if isinstance(exc.stdout, str) else exc.stdout.decode("utf-8", "replace"))
-    print(f"pre-push-review: AI review timed out after {timeout}s", file=sys.stderr)
-    sys.exit(124)
+# Keep deployment/service credentials out of the reviewer environment. Codex
+# uses the caller's persistent CODEX_HOME only for CLI authentication; its HOME,
+# TMP and working tree are isolated. OAuth auth is never copied because refresh
+# tokens are single-use and a discarded copy eventually invalidates itself.
+source_codex_home = os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
+source_auth = os.path.join(source_codex_home, "auth.json")
+if not os.path.isfile(source_auth) or os.path.islink(source_auth):
+    print("pre-push-review: persistent Codex auth is unavailable", file=sys.stderr)
+    sys.exit(2)
+allowed_env = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "SSL_CERT_FILE")
+child_env_base = {key: os.environ[key] for key in allowed_env if key in os.environ}
 
-sys.stdout.write(result.stdout or "")
-sys.exit(result.returncode)
+with tempfile.TemporaryDirectory(prefix="gallery-codex-review-") as tmp:
+    isolated_home = os.path.join(tmp, "home")
+    review_workspace = os.path.join(tmp, "workspace")
+    rules_dir = os.path.join(review_workspace, ".codex", "rules")
+    os.makedirs(isolated_home, mode=0o700)
+    os.makedirs(rules_dir, mode=0o700)
+    rules_path = os.path.join(rules_dir, "reviewer.rules")
+    shutil.copyfile(rules_source, rules_path)
+    os.chmod(rules_path, 0o600)
+    schema_path = os.path.join(tmp, "scorecard.schema.json")
+    output_path = os.path.join(tmp, "scorecard.json")
+    with open(schema_path, "w", encoding="utf-8") as handle:
+        json.dump(schema, handle)
+    child_env = dict(child_env_base)
+    child_env.update({
+        "HOME": isolated_home,
+        "CODEX_HOME": source_codex_home,
+        "TMPDIR": tmp,
+        "TMP": tmp,
+        "TEMP": tmp,
+        "CI": "1",
+        "NO_COLOR": "1",
+    })
+    args = [
+        codex_bin,
+        "-a", "never",
+        "--sandbox", "read-only",
+        "-C", review_workspace,
+        "-c", "sandbox_workspace_write.network_access=false",
+        "-c", "web_search=\"disabled\"",
+        "-c", f"projects.{json.dumps(review_workspace)}.trust_level=\"trusted\"",
+        "-c", "skills.include_instructions=false",
+        "-c", "skills.bundled.enabled=false",
+        "--disable", "shell_tool",
+        "--disable", "multi_agent",
+        "--disable", "browser_use",
+        "--disable", "computer_use",
+        "--disable", "in_app_browser",
+        "--disable", "image_generation",
+        "--disable", "apps",
+        "--disable", "plugins",
+        "--disable", "remote_plugin",
+        "--disable", "tool_suggest",
+        "--disable", "skill_mcp_dependency_install",
+        "--disable", "hooks",
+        "exec", "--ephemeral", "--ignore-user-config",
+        "--skip-git-repo-check", "--output-schema", schema_path,
+        "-o", output_path, "-",
+    ]
+    if model:
+        args.extend(["-m", model])
+    try:
+        result = subprocess.run(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            input=prompt,
+            text=True,
+            timeout=timeout,
+            env=child_env,
+            cwd=review_workspace,
+        )
+    except subprocess.TimeoutExpired as exc:
+        if exc.stdout:
+            sys.stdout.write(exc.stdout if isinstance(exc.stdout, str) else exc.stdout.decode("utf-8", "replace"))
+        print(f"pre-push-review: Codex review timed out after {timeout}s", file=sys.stderr)
+        sys.exit(124)
+    if result.returncode != 0:
+        sys.stdout.write(result.stdout or "")
+        sys.exit(result.returncode)
+    try:
+        with open(output_path, "r", encoding="utf-8") as handle:
+            sys.stdout.write(handle.read())
+    except OSError as exc:
+        print(f"pre-push-review: Codex produced no scorecard: {exc}", file=sys.stderr)
+        sys.exit(2)
 PY
-)"
-CLAUDE_STATUS=$?
+)
+REVIEW_STATUS=$?
 echo "$RAW" > "$LOG"
 
-if (( CLAUDE_STATUS != 0 )); then
+if (( REVIEW_STATUS != 0 )); then
   echo "" >&2
-  echo "pre-push-review: AI review command failed with status $CLAUDE_STATUS — see $LOG" >&2
-  if [[ "${REVIEW_FAIL_OPEN:-0}" == "1" ]]; then
-    echo "(REVIEW_FAIL_OPEN=1 so push continues anyway)" >&2
-    exit 0
-  fi
-  echo "🚫 push aborted. Set REVIEW_FAIL_OPEN=1 to bypass when the AI errors." >&2
+  echo "pre-push-review: Codex review command failed with status $REVIEW_STATUS — see $LOG" >&2
+  echo "🚫 push aborted. Restore Codex auth/tooling and run the review again." >&2
   exit 1
 fi
 
-# Extract the first JSON object from raw output. Claude sometimes wraps
-# in ```json fences or adds preamble — be tolerant.
+# Extract the first JSON object. --output-schema + -o normally makes RAW pure
+# JSON; the tolerant parser keeps older Codex CLI output compatible.
 JSON="$(printf '%s' "$RAW" | awk '
   /^\{/    { inj=1 }
   inj      { print }
@@ -187,11 +297,7 @@ JSON="$(printf '%s' "$RAW" | awk '
 if [[ -z "$JSON" ]] || ! printf '%s' "$JSON" | jq -e . >/dev/null 2>&1; then
   echo "" >&2
   echo "pre-push-review: couldn't parse scorecard output — see $LOG" >&2
-  if [[ "${REVIEW_FAIL_OPEN:-0}" == "1" ]]; then
-    echo "(REVIEW_FAIL_OPEN=1 so push continues anyway)" >&2
-    exit 0
-  fi
-  echo "🚫 push aborted. Set REVIEW_FAIL_OPEN=1 to bypass when the AI errors." >&2
+  echo "🚫 push aborted. Codex must return a valid scorecard." >&2
   exit 1
 fi
 
@@ -228,8 +334,6 @@ if [[ "$PASS" == "1" ]]; then
   exit 0
 else
   echo "🚫 pre-push scorecard: BLOCKED (avg ${AVG} < ${THRESHOLD})" >&2
-  echo "   Fix the findings above OR:" >&2
-  echo "     • lower the bar: REVIEW_THRESHOLD=4.5 git push" >&2
-  echo "     • bypass entirely (use sparingly): git push --no-verify" >&2
+  echo "   Fix the findings above, then run the review again." >&2
   exit 1
 fi

@@ -40,6 +40,9 @@ function makeEnv(initial = {}, opts = {}) {
   return {
     AUTH_SECRET: 'auth-secret',
     GAME_FACTORY_RELAY_TOKEN: 'relay-secret',
+    // This regression exercises the legacy/public queue explicitly. Production
+    // defaults public submission off during the trusted Codex pilot.
+    GAME_FACTORY_PUBLIC_BUILDER_ENABLED: '1',
     VOTES: makeKv(initial, opts),
   };
 }

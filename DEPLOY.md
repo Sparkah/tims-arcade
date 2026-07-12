@@ -109,6 +109,21 @@ cd Gallery
 wrangler pages dev . --kv VOTES
 ```
 
+## Creator builder rollout settings
+
+The `/create` Codex pilot is fail-closed and configured through Pages secrets,
+not source code:
+
+- `GAME_FACTORY_COMPED_CREATOR_UIDS` — comma-separated 16-hex UIDs derived by
+  `functions/_lib/uid.js`; only verified sessions whose email hashes back to an
+  explicitly listed UID receive included builds and the `trusted-codex` lane.
+- `GAME_FACTORY_PUBLIC_BUILDER_ENABLED` — set to `1` only when a separately
+  reviewed public worker is online. Unset/anything else returns 503 before any
+  ordinary user's tokens are spent or a public job is queued.
+
+Deploy the lane-aware API before restarting the Mac relay. Verify the test UID
+on production first; add a partner UID only after the walkthrough is approved.
+
 ## Custom domain (when you're ready)
 
 In the Cloudflare dashboard → Pages → tims-arcade → Custom domains. Add the domain you bought, follow the DNS instructions. Free.

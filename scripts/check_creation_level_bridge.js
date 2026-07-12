@@ -15,9 +15,12 @@ const http = require('http');
 const path = require('path');
 
 const GALLERY = path.resolve(__dirname, '..');
+// Worktrees may live under Agents/.worktrees rather than directly under Agents.
+// Let the caller provide the canonical workspace root so the shared Puppeteer
+// install resolves consistently in both layouts.
+const AGENTS_ROOT = path.resolve(process.env.AGENTS_ROOT || path.join(GALLERY, '..'));
 const puppeteer = require(path.join(
-  GALLERY,
-  '..',
+  AGENTS_ROOT,
   'Shared',
   'skills',
   'game-factory',

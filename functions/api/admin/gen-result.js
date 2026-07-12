@@ -16,13 +16,17 @@ import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
 import { extractEmbeddedLevelSeed, seedCreationLevelsFromHtml } from '../../_lib/creationLevels.js';
 import { appendCreationHistoryEvent, buildFailureSummary, buildResultSummary, makeVersionName } from '../../_lib/creationHistory.js';
 import { markJobBuilding, requeueJob, removeJobFromQueue } from '../../_lib/genQueue.js';
+import { appendBuildEvent, classifyBuildError } from '../../_lib/genJobLog.js';
+import { addUserJob } from '../../_lib/genUserJobs.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
-const JOB_TTL = 60 * 60 * 24 * 7;
+const JOB_TTL = 60 * 60 * 24 * 30;
 const MAX_HTML = 600 * 1024;          // 600 KB cap for a single-file game
 const QUEUE_MAX_MS = 5 * 24 * 60 * 60 * 1000;   // keep retrying for up to 5 days (Tim 2026-06-15)
 const MAX_ATTEMPTS = 30;                         // safety cap so a truly-unbuildable prompt can't loop forever
+const RELAY_EVENT_STAGES = new Set(['generation', 'validation', 'smoke']);
+const RELAY_EVENT_STATES = new Set(['started', 'passed', 'failed', 'skipped']);
 
 export async function onRequestPost({ request, env }) {
   const guard = await requireRelay(request, env);
@@ -45,10 +49,49 @@ export async function onRequestPost({ request, env }) {
     try { await appendFailedHistory(env, jobRec, jobRec.error, jobRec.updatedTs || Date.now()); } catch (e) { /* best effort */ }
   }
 
+  // Optional fine-grained relay events. The server accepts only a small stage /
+  // state vocabulary and derives any failure message from a normalized code, so
+  // raw model stderr, local paths, prompts, or secrets can never enter KV/client.
+  if (status === 'event') {
+    if (terminal) return json({ ok: true, status: jobRec.status, noop: true });
+    const stage = String(body.stage || '');
+    const state = String(body.state || '');
+    if (!RELAY_EVENT_STAGES.has(stage) || !RELAY_EVENT_STATES.has(state)) return jsonError('bad_event', 400);
+    const failure = state === 'failed' ? classifyBuildError(body.error) : null;
+    appendBuildEvent(jobRec, {
+      stage,
+      state,
+      code: failure && failure.code,
+      attempt: (jobRec.attempts || 0) + 1,
+    });
+    await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+    return json({ ok: true, status: jobRec.status, event: { stage, state } });
+  }
+
   if (status === 'building') {
     if (terminal) return json({ ok: true, status: jobRec.status, noop: true });  // don't revert a finished job
+    const now = Date.now();
+    // Enforce the original five-day promise at claim time too. This closes the
+    // crash/offline hole where a stale job could otherwise be reclaimed forever
+    // because only caught `requeue` transitions checked its age.
+    if (now - (jobRec.ts || now) > QUEUE_MAX_MS) {
+      jobRec.status = 'failed';
+      jobRec.error = 'expired_after_5d';
+      jobRec.attempts = (jobRec.attempts || 0) + 1;
+      jobRec.updatedTs = now;
+      appendBuildEvent(jobRec, { stage: 'failed', state: 'failed', code: 'expired', attempt: jobRec.attempts, ts: now });
+      await persistTerminalJob(env, id, jobRec, JOB_TTL);
+      try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
+      try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }
+      try { await clearIterLock(env, jobRec); } catch (e) { /* best effort */ }
+      try { await appendFailedHistory(env, jobRec, jobRec.error, now); } catch (e) { /* best effort */ }
+      try { await emailUser(env, jobRec, null); } catch (e) { /* best effort */ }
+      return json({ ok: true, status: 'failed', reason: jobRec.error });
+    }
     jobRec.status = 'building';
-    jobRec.updatedTs = Date.now();
+    jobRec.updatedTs = now;
+    appendBuildEvent(jobRec, { stage: 'claimed', state: 'passed', attempt: (jobRec.attempts || 0) + 1, ts: jobRec.updatedTs });
+    appendBuildEvent(jobRec, { stage: 'generation', state: 'started', attempt: (jobRec.attempts || 0) + 1, ts: jobRec.updatedTs });
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
     try { await markJobBuilding(env, jobRec); } catch (e) { /* stale pending index is cleaned by gen-queue */ }
     return json({ ok: true, status: 'building' });
@@ -64,12 +107,20 @@ export async function onRequestPost({ request, env }) {
     const now = Date.now();
     const ageMs = now - (jobRec.ts || now);
     const attempts = (jobRec.attempts || 0) + 1;
+    const failure = classifyBuildError(body.error);
+    jobRec.error = failure.code;
+    appendBuildEvent(jobRec, { stage: failure.stage, state: 'failed', code: failure.code, attempt: attempts, ts: now });
     if (ageMs > QUEUE_MAX_MS || attempts > MAX_ATTEMPTS) {
       jobRec.status = 'failed';
       jobRec.error = ageMs > QUEUE_MAX_MS ? 'expired_after_5d' : 'max_attempts';
       jobRec.attempts = attempts;
       jobRec.updatedTs = now;
-      await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+      appendBuildEvent(jobRec, {
+        stage: 'failed', state: 'failed',
+        code: ageMs > QUEUE_MAX_MS ? 'expired' : 'max_attempts',
+        attempt: attempts, ts: now,
+      });
+      await persistTerminalJob(env, id, jobRec, JOB_TTL);
       try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
       try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
       try { await clearIterLock(env, jobRec); } catch (e) { /* best effort */ }
@@ -81,19 +132,23 @@ export async function onRequestPost({ request, env }) {
     jobRec.attempts = attempts;
     jobRec.retryAfter = now + Math.min(attempts * 120, 1800) * 1000;   // 2min..30min backoff
     jobRec.updatedTs = now;
-    // Expire ~5 days after the ORIGINAL submit, not after the last retry.
-    const remainingTtl = Math.max(3600, Math.floor((QUEUE_MAX_MS - ageMs) / 1000));
-    await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: remainingTtl });
+    appendBuildEvent(jobRec, { stage: 'retry', state: 'scheduled', code: failure.code, attempt: attempts, ts: now });
+    // Keep the owner-visible failure/retry record for 30 days even though the
+    // worker stops retrying after five days.
+    await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
     await requeueJob(env, jobRec);
     return json({ ok: true, status: 'pending', attempts, retryAfter: jobRec.retryAfter });
   }
 
   if (status === 'failed') {
     if (terminal) return json({ ok: true, status: jobRec.status, noop: true });  // refund/email already done (or job succeeded)
+    const failure = classifyBuildError(body.error);
     jobRec.status = 'failed';
-    jobRec.error = String(body.error || 'generation_failed').slice(0, 200);
+    jobRec.error = failure.code;
     jobRec.updatedTs = Date.now();
-    await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+    appendBuildEvent(jobRec, { stage: failure.stage, state: 'failed', code: failure.code, attempt: (jobRec.attempts || 0) + 1, ts: jobRec.updatedTs });
+    appendBuildEvent(jobRec, { stage: 'failed', state: 'failed', code: failure.code, attempt: (jobRec.attempts || 0) + 1, ts: jobRec.updatedTs });
+    await persistTerminalJob(env, id, jobRec, JOB_TTL);
     try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
     try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }   // reverse the exact charge, once
     try { await clearIterLock(env, jobRec); } catch (e) { /* best effort */ }
@@ -105,14 +160,20 @@ export async function onRequestPost({ request, env }) {
   if (status === 'ready') {
     if (terminal) return json({ ok: true, status: jobRec.status, noop: true });  // already ready, or failed+refunded -- don't resurrect
     const html = String(body.html || '');
-    if (html.length < 64) return jsonError('empty_html', 400);
-    if (html.length > MAX_HTML) return jsonError('html_too_large', 413);
-    if (!extractEmbeddedLevelSeed(html)) return jsonError('missing_level_seed', 400);
+    const attempt = (jobRec.attempts || 0) + 1;
+    appendBuildEvent(jobRec, { stage: 'validation', state: 'started', attempt });
+    if (html.length < 64) return rejectReadyValidation(env, id, jobRec, 'empty_html', 400, attempt);
+    if (html.length > MAX_HTML) return rejectReadyValidation(env, id, jobRec, 'html_too_large', 413, attempt);
+    if (!extractEmbeddedLevelSeed(html)) return rejectReadyValidation(env, id, jobRec, 'missing_level_seed', 400, attempt);
+    appendBuildEvent(jobRec, { stage: 'validation', state: 'passed', attempt });
     // Cover screenshot (base64 PNG from the relay's quality-smoke). Stored as-is;
     // /api/creation-cover decodes + serves it. Capped so a giant shot can't bust KV.
     const coverB64 = String(body.cover || '');
     const quality = String(body.quality || 'unverified').slice(0, 16);
     const now = Date.now();
+    appendBuildEvent(jobRec, {
+      stage: 'smoke', state: quality === 'ok' ? 'passed' : 'skipped', attempt, ts: now,
+    });
 
     // ---- In-place UPGRADE: overwrite the base game, keep its slug / link / plays /
     // likes / published state. A FAILED iterate never reaches here, so the original
@@ -123,7 +184,8 @@ export async function onRequestPost({ request, env }) {
       if (!base) {
         // Base deleted/expired mid-build: don't orphan the result -- fail + refund once.
         jobRec.status = 'failed'; jobRec.error = 'base_gone'; jobRec.updatedTs = now;
-        await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+        appendBuildEvent(jobRec, { stage: 'failed', state: 'failed', code: 'base_unavailable', attempt, ts: now });
+        await persistTerminalJob(env, id, jobRec, JOB_TTL);
         try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
         try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }
         await clearIterLock(env, jobRec);
@@ -134,7 +196,8 @@ export async function onRequestPost({ request, env }) {
         // Ownership mismatch (anomalous -- submit verified it). Terminal fail + refund,
         // NOT a 403: a 403 is not an accepted ack, so the relay would retry it forever.
         jobRec.status = 'failed'; jobRec.error = 'ownership_mismatch'; jobRec.updatedTs = now;
-        await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+        appendBuildEvent(jobRec, { stage: 'failed', state: 'failed', code: 'ownership_mismatch', attempt, ts: now });
+        await persistTerminalJob(env, id, jobRec, JOB_TTL);
         try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
         try { await refundCharge(env, jobRec); } catch (e) { /* best effort */ }
         await clearIterLock(env, jobRec);
@@ -172,7 +235,8 @@ export async function onRequestPost({ request, env }) {
 
       jobRec.status = 'ready'; jobRec.title = base.title; jobRec.slug = base.slug; jobRec.quality = quality; jobRec.updatedTs = now; jobRec.levelSeed = levelSeed;
       jobRec.targetCreationId = baseId; jobRec.versionNumber = versionNumber; jobRec.versionName = versionName; jobRec.summary = summary;
-      await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
+      appendBuildEvent(jobRec, { stage: 'ready', state: 'ready', attempt, ts: now });
+      await persistTerminalJob(env, id, jobRec, BLOB_TTL);
       try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
       await clearIterLock(env, jobRec);
       try { await appendRequestHistory(env, baseId, jobRec); } catch (e) { /* best effort */ }
@@ -209,7 +273,8 @@ export async function onRequestPost({ request, env }) {
     jobRec.versionNumber = versionNumber;
     jobRec.versionName = versionName;
     jobRec.summary = summary;
-    await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: BLOB_TTL });
+    appendBuildEvent(jobRec, { stage: 'ready', state: 'ready', attempt, ts: now });
+    await persistTerminalJob(env, id, jobRec, BLOB_TTL);
     try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
 
     // Surface in the creator's "My games" via the existing upload: schema. Private
@@ -238,6 +303,22 @@ export async function onRequestPost({ request, env }) {
   }
 
   return jsonError('bad_status', 400);
+}
+
+async function rejectReadyValidation(env, id, jobRec, error, status, attempt) {
+  const failure = classifyBuildError(error);
+  jobRec.error = failure.code;
+  appendBuildEvent(jobRec, { stage: 'validation', state: 'failed', code: failure.code, attempt });
+  await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+  return jsonError(error, status);
+}
+
+// Refresh both the job record and its owner index from the terminal timestamp.
+// Without the index refresh, a build that exhausts the five-day retry window is
+// retained for 30 days but disappears from Recent Builds about five days early.
+async function persistTerminalJob(env, id, jobRec, ttl) {
+  await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: ttl });
+  try { await addUserJob(env, jobRec.uid, { id, ts: jobRec.ts || jobRec.updatedTs || Date.now() }); } catch (e) { /* best effort */ }
 }
 
 // Reverse the exact charge recorded at submit time. Called only on the first
@@ -292,6 +373,7 @@ async function appendReadyHistory(env, creationId, jobRec, ts) {
 async function appendFailedHistory(env, jobRec, error, ts) {
   const creationId = jobRec && (jobRec.targetCreationId || jobRec.baseId || jobRec.id);
   if (!creationId) return;
+  const failureCode = classifyBuildError(error || jobRec.error).code;
   await appendCreationHistoryEvent(env, creationId, {
     id: `failed:${jobRec.id}`,
     role: 'studio',
@@ -300,7 +382,7 @@ async function appendFailedHistory(env, jobRec, error, ts) {
     versionNumber: jobRec.versionNumber || 1,
     versionName: jobRec.versionName || makeVersionName(jobRec.title || 'Game', jobRec.versionNumber || 1),
     text: '',
-    summary: buildFailureSummary(error || jobRec.error),
+    summary: buildFailureSummary(failureCode, { comped: jobRec.charge && jobRec.charge.kind === 'comped' }),
     ts,
     jobId: jobRec.id,
   });
@@ -330,10 +412,13 @@ async function emailUser(env, jobRec, playPath, isUpdate, adminInfo = {}) {
         ? `<p>Admin password: <code>${escapeHtml(adminInfo.adminPassword)}</code><br><small>Save this password. It lets you edit levels for this game.</small></p>`
         : `<p><small>Your existing game admin password still works.</small></p>`)
     : '';
+  const failureBilling = jobRec.charge && jobRec.charge.kind === 'comped'
+    ? 'No tokens were charged.'
+    : 'Your tokens were refunded.';
   const html = ready
     ? `<p>Your game <b>${escapeHtml(jobRec.title || 'game')}</b> ${isUpdate ? 'was updated and is ready' : 'is ready'}.</p>` +
       summaryBlock + `<p><a href="${link}">Play it now</a></p>${adminBlock}<p>-- game-factory.tech</p>`
-    : `<p>Sorry, we could not build your game this time, so your prompt was refunded.</p>` +
+    : `<p>Sorry, we could not build your game this time. ${failureBilling}</p>` +
       `<p><a href="${link}">Try again</a></p><p>-- game-factory.tech</p>`;
   await fetch('https://api.resend.com/emails', {
     method: 'POST',
