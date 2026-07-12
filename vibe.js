@@ -57,12 +57,10 @@
   var recentOffset = 0;
   var recentSeen = Object.create(null);
   var lastBuild = null, buildTicker = null;
-  // Provider-neutral estimate until the trusted Codex lane has enough canary data
-  // for a measured percentile rather than a false single-minute promise.
-  // Two real trusted-Codex canaries completed in 68s and 98s. Keep a generous
-  // buffer for larger prompts and service load without showing the old Claude
-  // worker's 20-30 minute estimate.
-  var BUILD_ETA_MIN = 2, BUILD_ETA_MAX = 5;
+  // Studio Max runs one full generation and one polish/QA pass. Keep this
+  // conservative until enough two-pass production canaries establish a useful
+  // percentile; the UI should never imply that a fast draft is the final game.
+  var BUILD_ETA_MIN = 20, BUILD_ETA_MAX = 45;
 
   function show(el, on) { if (el) el.hidden = !on; }
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
@@ -310,7 +308,20 @@
       var meta = document.createElement('span');
       meta.className = 'create-build-event-meta';
       var at = event.ts ? new Date(event.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'time unavailable';
-      meta.textContent = at + ' · ' + String(event.stage || 'build') + ' · attempt ' + (+event.attempt || 1);
+      var parts = [at, String(event.stage || 'build'), 'attempt ' + (+event.attempt || 1)];
+      if (event.pass) parts.push('pass ' + (+event.pass || 1) + ' of 2');
+      if (event.model) parts.push(String(event.model).slice(0, 48));
+      if (event.reasoningEffort) parts.push(String(event.reasoningEffort).slice(0, 16) + ' reasoning');
+      if (Number.isFinite(+event.durationMs) && +event.durationMs > 0) {
+        parts.push((+event.durationMs / 1000).toFixed(1) + 's');
+      }
+      if (Number.isFinite(+event.inputTokens) && Number.isFinite(+event.outputTokens)) {
+        parts.push((+event.inputTokens).toLocaleString() + ' input / ' + (+event.outputTokens).toLocaleString() + ' output tokens');
+      }
+      if (Number.isFinite(+event.reasoningTokens) && +event.reasoningTokens > 0) {
+        parts.push((+event.reasoningTokens).toLocaleString() + ' reasoning tokens');
+      }
+      meta.textContent = parts.join(' · ');
       item.appendChild(meta);
       fragment.appendChild(item);
     });
@@ -339,9 +350,16 @@
         detailEl.textContent = 'Your game starts building when the studio is online. Builds usually take about ' + BUILD_ETA_MIN + '-' + BUILD_ETA_MAX + ' minutes.';
       }
     } else if (s.status === 'building') {
-      var elapsedMin = Math.max(0, Math.floor((serverNow - (s.updatedAt || serverNow)) / 60000));
+      var elapsedMin = Math.max(0, Math.floor((serverNow - (s.buildingAt || s.updatedAt || serverNow)) / 60000));
       var tail = (s.attempts || 0) > 0 ? ' - attempt ' + ((s.attempts || 0) + 1) + ' after a restart.' : '.';
-      phaseEl.textContent = 'Building your game now';
+      var latest = Array.isArray(s.events) && s.events.length ? s.events[s.events.length - 1] : null;
+      phaseEl.textContent = latest && latest.stage === 'polish'
+        ? 'Polishing and QA in Studio Max'
+        : (latest && latest.stage === 'validation'
+          ? 'Validating your finished game'
+          : (latest && latest.stage === 'smoke'
+            ? 'Running the final browser test'
+            : 'Building your game in Studio Max'));
       if (elapsedMin < BUILD_ETA_MIN) {
         detailEl.textContent = elapsedMin + ' min elapsed - builds usually take ' + BUILD_ETA_MIN + '-' + BUILD_ETA_MAX + ' min total' + tail;
       } else if (elapsedMin < BUILD_ETA_MAX) {

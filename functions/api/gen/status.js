@@ -41,6 +41,7 @@ export async function onRequestGet({ request, env }) {
     billingMode: jobRec.charge && jobRec.charge.kind === 'comped' ? 'comped' : 'tokens',
     attempts: jobRec.attempts || 0,
     queuedAt: jobRec.ts || 0,
+    buildingAt: jobRec.buildStartedTs || 0,
     updatedAt: jobRec.updatedTs || 0,
     retryAfter: jobRec.retryAfter || 0,
     events: publicBuildEvents(jobRec.buildEvents),

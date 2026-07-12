@@ -37,6 +37,7 @@ export async function onRequestGet({ request, env }) {
       title: job.title || '',
       error: job.error ? classifyBuildError(job.error).code : null,
       queuedAt: job.ts || ref.ts || 0,
+      buildingAt: job.buildStartedTs || 0,
       updatedAt: job.updatedTs || 0,
       attempts: job.attempts || 0,
       playUrl: ready ? `/g/${playId}` : null,

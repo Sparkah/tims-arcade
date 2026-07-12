@@ -1,6 +1,9 @@
 // POST /api/admin/gen-result   (auth: X-Relay-Token header == env.GAME_FACTORY_RELAY_TOKEN)
-// The vibe-relay posts build outcomes here. Three actions via "status":
+// The vibe-relay posts build outcomes here. Actions via "status":
 //   building -> claim a pending job (so a relay restart won't double-build it)
+//   heartbeat -> renew a long-running claim without adding a visible log row
+//   event    -> persist a sanitized generation/polish/validation/smoke event
+//   requeue  -> return a transient failure to the bounded retry queue
 //   ready    -> store the generated HTML, mark ready, surface it in the creator's
 //               "My games" (reusing the upload: schema), and email the player
 //   failed   -> mark failed, refund the EXACT charge ONCE (free gen or 60 tokens), email
@@ -25,7 +28,8 @@ const JOB_TTL = 60 * 60 * 24 * 30;
 const MAX_HTML = 600 * 1024;          // 600 KB cap for a single-file game
 const QUEUE_MAX_MS = 5 * 24 * 60 * 60 * 1000;   // keep retrying for up to 5 days (Tim 2026-06-15)
 const MAX_ATTEMPTS = 30;                         // safety cap so a truly-unbuildable prompt can't loop forever
-const RELAY_EVENT_STAGES = new Set(['generation', 'validation', 'smoke']);
+const TRUSTED_CODEX_MAX_ATTEMPTS = 3;             // Studio Max can spend two model calls per attempt
+const RELAY_EVENT_STAGES = new Set(['generation', 'polish', 'validation', 'smoke']);
 const RELAY_EVENT_STATES = new Set(['started', 'passed', 'failed', 'skipped']);
 
 export async function onRequestPost({ request, env }) {
@@ -49,6 +53,17 @@ export async function onRequestPost({ request, env }) {
     try { await appendFailedHistory(env, jobRec, jobRec.error, jobRec.updatedTs || Date.now()); } catch (e) { /* best effort */ }
   }
 
+  // Studio Max calls can legitimately outlive the 10-minute stuck threshold.
+  // A relay-only heartbeat renews the claim without adding noisy build-log rows.
+  if (status === 'heartbeat') {
+    if (terminal) return json({ ok: true, status: jobRec.status, noop: true });
+    if (jobRec.status !== 'building') return jsonError('not_building', 409);
+    jobRec.updatedTs = Date.now();
+    await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
+    try { await markJobBuilding(env, jobRec); } catch (e) { /* next heartbeat/stuck sweep repairs it */ }
+    return json({ ok: true, status: 'building', heartbeatAt: jobRec.updatedTs });
+  }
+
   // Optional fine-grained relay events. The server accepts only a small stage /
   // state vocabulary and derives any failure message from a normalized code, so
   // raw model stderr, local paths, prompts, or secrets can never enter KV/client.
@@ -63,6 +78,7 @@ export async function onRequestPost({ request, env }) {
       state,
       code: failure && failure.code,
       attempt: (jobRec.attempts || 0) + 1,
+      ...relayEventTelemetry(body),
     });
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
     return json({ ok: true, status: jobRec.status, event: { stage, state } });
@@ -90,6 +106,7 @@ export async function onRequestPost({ request, env }) {
     }
     jobRec.status = 'building';
     jobRec.updatedTs = now;
+    jobRec.buildStartedTs = now;
     appendBuildEvent(jobRec, { stage: 'claimed', state: 'passed', attempt: (jobRec.attempts || 0) + 1, ts: jobRec.updatedTs });
     appendBuildEvent(jobRec, { stage: 'generation', state: 'started', attempt: (jobRec.attempts || 0) + 1, ts: jobRec.updatedTs });
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
@@ -110,7 +127,10 @@ export async function onRequestPost({ request, env }) {
     const failure = classifyBuildError(body.error);
     jobRec.error = failure.code;
     appendBuildEvent(jobRec, { stage: failure.stage, state: 'failed', code: failure.code, attempt: attempts, ts: now });
-    if (ageMs > QUEUE_MAX_MS || attempts > MAX_ATTEMPTS) {
+    const maxed = jobRec.generatorLane === 'trusted-codex'
+      ? attempts >= TRUSTED_CODEX_MAX_ATTEMPTS
+      : attempts > MAX_ATTEMPTS;
+    if (ageMs > QUEUE_MAX_MS || maxed) {
       jobRec.status = 'failed';
       jobRec.error = ageMs > QUEUE_MAX_MS ? 'expired_after_5d' : 'max_attempts';
       jobRec.attempts = attempts;
@@ -386,6 +406,22 @@ async function appendFailedHistory(env, jobRec, error, ts) {
     ts,
     jobId: jobRec.id,
   });
+}
+
+function relayEventTelemetry(body) {
+  const source = body && typeof body === 'object' ? body : {};
+  const out = {};
+  const model = String(source.model || '').toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 48);
+  const reasoningEffort = String(source.reasoningEffort || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 16);
+  if (model) out.model = model;
+  if (reasoningEffort) out.reasoningEffort = reasoningEffort;
+  const pass = Math.floor(Number(source.pass));
+  if (Number.isFinite(pass) && pass >= 1 && pass <= 2) out.pass = pass;
+  for (const field of ['durationMs', 'inputTokens', 'outputTokens', 'reasoningTokens']) {
+    const value = Math.floor(Number(source[field]));
+    if (Number.isFinite(value) && value >= 0) out[field] = Math.min(value, Number.MAX_SAFE_INTEGER);
+  }
+  return out;
 }
 
 function slugify(s) {

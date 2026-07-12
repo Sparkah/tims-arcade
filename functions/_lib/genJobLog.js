@@ -1,7 +1,7 @@
 const MAX_EVENTS = 40;
 
 const STAGES = new Set([
-  'queued', 'claimed', 'generation', 'validation', 'smoke', 'retry', 'ready', 'failed',
+  'queued', 'claimed', 'generation', 'polish', 'validation', 'smoke', 'retry', 'ready', 'failed',
 ]);
 const STATES = new Set([
   'queued', 'started', 'passed', 'failed', 'scheduled', 'skipped', 'ready',
@@ -12,7 +12,7 @@ const ERROR_RULES = [
   [/limit|usage|quota|exhaust|rate|overloaded|capacity|generator_busy/i, 'generator_busy', 'generation'],
   [/invalid_html|no_output|output_not_html|empty_html|doctype/i, 'invalid_html', 'validation'],
   [/too_large|html_too_large/i, 'output_too_large', 'validation'],
-  [/level_seed/i, 'invalid_level_seed', 'validation'],
+  [/level_seed|level_count|distinct_levels/i, 'invalid_level_seed', 'validation'],
   [/level_message|debug_state|creator_support/i, 'missing_creator_support', 'validation'],
   [/smoke|pageerror|blank_render/i, 'smoke_failed', 'smoke'],
   [/base_unavailable|base_gone/i, 'base_unavailable', 'generation'],
@@ -58,11 +58,20 @@ export function appendBuildEvent(jobRec, event = {}) {
   // Relay result POSTs retry on transport errors and the server synthesizes
   // fallback stage events for older relays. De-dupe the full bounded attempt,
   // not just adjacent rows, so those two paths cannot repeat validation/smoke.
-  const exists = current.some(existing =>
+  const existingIndex = current.findIndex(existing =>
     `${existing.stage}:${existing.state}:${existing.code}:${existing.attempt}` === signature
   );
-  if (!exists) {
-    current.push({ stage, state, code, attempt, ts });
+  const normalized = {
+    stage, state, code, attempt, ts,
+    ...normalizeTelemetry(event),
+  };
+  if (existingIndex >= 0) {
+    // The claim endpoint may synthesize generation:started before the relay
+    // sends its richer configured-model event. Merge the safe telemetry into
+    // the existing row instead of duplicating it or discarding observability.
+    current[existingIndex] = { ...current[existingIndex], ...normalized, ts: current[existingIndex].ts || ts };
+  } else {
+    current.push(normalized);
   }
   jobRec.buildEvents = current.slice(-MAX_EVENTS);
   return jobRec;
@@ -76,6 +85,7 @@ export function normalizeBuildEvents(events) {
     code: cleanCode(event && event.code),
     attempt: Math.max(1, Math.floor(Number(event && event.attempt) || 1)),
     ts: Math.max(0, Math.floor(Number(event && event.ts) || 0)),
+    ...normalizeTelemetry(event),
   })).slice(-MAX_EVENTS);
 }
 
@@ -91,13 +101,32 @@ function cleanCode(value) {
   return Object.prototype.hasOwnProperty.call(ERROR_MESSAGES, code) ? code : '';
 }
 
+function normalizeTelemetry(event) {
+  const source = event && typeof event === 'object' ? event : {};
+  const out = {};
+  const model = String(source.model || '').toLowerCase().replace(/[^a-z0-9_.-]/g, '').slice(0, 48);
+  const reasoningEffort = String(source.reasoningEffort || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 16);
+  if (model) out.model = model;
+  if (reasoningEffort) out.reasoningEffort = reasoningEffort;
+  const pass = Math.floor(Number(source.pass));
+  if (Number.isFinite(pass) && pass >= 1 && pass <= 2) out.pass = pass;
+  for (const field of ['durationMs', 'inputTokens', 'outputTokens', 'reasoningTokens']) {
+    const value = Math.floor(Number(source[field]));
+    if (Number.isFinite(value) && value >= 0) out[field] = Math.min(value, Number.MAX_SAFE_INTEGER);
+  }
+  return out;
+}
+
 function eventMessage(event) {
   if (event.state === 'failed' && event.code) return ERROR_MESSAGES[event.code];
   if (event.stage === 'queued') return 'Build queued.';
   if (event.stage === 'claimed') return 'Studio worker claimed the build.';
   if (event.stage === 'generation') return event.state === 'passed'
-    ? 'Game file generated.'
-    : 'Game generation started.';
+    ? 'First game draft generated.'
+    : 'Studio Max generation started.';
+  if (event.stage === 'polish') return event.state === 'passed'
+    ? 'Studio polish and QA pass completed.'
+    : 'Studio polish and QA pass started.';
   if (event.stage === 'validation') return event.state === 'passed'
     ? 'Game file passed validation.'
     : 'Checking the game file and creator tools.';

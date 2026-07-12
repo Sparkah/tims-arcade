@@ -215,6 +215,35 @@ async function main() {
     });
   }
   assert((await postResult({ status: 'building' })).status === 200, 'relay could not claim comped job');
+  job = JSON.parse(partnerKv.store.get(`genjob:${jobId}`));
+  const firstBuildStartedTs = job.buildStartedTs;
+  assert(Number.isFinite(firstBuildStartedTs) && firstBuildStartedTs > 0, 'claim did not record a stable build start');
+  // Simulate an apparently stale in-flight index, then renew it. A long Max
+  // pass must not be offered to a second worker after the 10-minute sweep.
+  job.updatedTs = Date.now() - 11 * 60 * 1000;
+  partnerKv.store.set(`genjob:${jobId}`, JSON.stringify(job));
+  await queueLib.markJobBuilding(partnerEnv, job);
+  assert((await postResult({ status: 'heartbeat' })).status === 200, 'Studio Max lease heartbeat failed');
+  job = JSON.parse(partnerKv.store.get(`genjob:${jobId}`));
+  assert(job.buildStartedTs === firstBuildStartedTs, 'heartbeat reset elapsed build time');
+  const duplicateCandidates = await queueLib.queueCandidateIds(partnerEnv, {
+    limit: 3, lane: 'trusted-codex', now: Date.now(), stuckMs: 10 * 60 * 1000,
+  });
+  assert(!duplicateCandidates.includes(jobId), 'heartbeat-renewed build was offered to a second worker');
+
+  assert((await postResult({
+    status: 'event', stage: 'generation', state: 'started', pass: 1,
+    model: 'gpt-5.6-sol', reasoningEffort: 'max',
+  })).status === 200, 'configured-model event failed');
+  assert((await postResult({
+    status: 'event', stage: 'generation', state: 'passed', pass: 1,
+    model: 'gpt-5.6-sol', reasoningEffort: 'max', durationMs: 123456,
+    inputTokens: 7752, outputTokens: 5625, reasoningTokens: 1400,
+  })).status === 200, 'generation token event failed');
+  assert((await postResult({
+    status: 'event', stage: 'polish', state: 'started', pass: 2,
+    model: 'gpt-5.6-sol', reasoningEffort: 'max',
+  })).status === 200, 'polish event failed');
   const rawFailure = 'smoke_failed: ReferenceError at /private/tmp/secret-path token=do-not-store';
   assert((await postResult({ status: 'event', stage: 'smoke', state: 'failed', error: rawFailure })).status === 200, 'relay event failed');
   assert((await postResult({ status: 'requeue', error: rawFailure })).status === 200, 'relay requeue failed');
@@ -224,6 +253,10 @@ async function main() {
   assert(!storedJob.includes('/private/tmp') && !storedJob.includes('do-not-store'), 'raw relay error leaked into KV');
   assert(job.buildEvents.filter(event => event.stage === 'smoke' && event.state === 'failed').length === 1, 'duplicate smoke failure was stored');
   assert(job.buildEvents.some(event => event.stage === 'retry' && event.state === 'scheduled'), 'retry event was not stored');
+  const generationDone = job.buildEvents.find(event => event.stage === 'generation' && event.state === 'passed');
+  assert(generationDone && generationDone.model === 'gpt-5.6-sol' && generationDone.reasoningEffort === 'max', 'model/effort telemetry was not persisted');
+  assert(generationDone.pass === 1 && generationDone.outputTokens === 5625 && generationDone.reasoningTokens === 1400, 'per-pass token telemetry was not persisted');
+  assert(job.buildEvents.some(event => event.stage === 'polish' && event.pass === 2), 'polish pass was not distinguishable in the build log');
   assert(partnerKv.store.get(`meta:${partnerCookieUid}`) === partnerMeta, 'comped requeue/refund mutated token balance');
 
   // Make it a terminal first-build failure. It must remain listable by the owner
@@ -268,6 +301,24 @@ async function main() {
   const retainedRefs = JSON.parse(partnerKv.store.get(`genjobs:user:${TEST_UID}`) || '[]');
   assert(retainedRefs.some(item => item.id === expiredId), 'terminal failure did not refresh the owner log index retention');
   assert(partnerKv.store.get(`meta:${partnerCookieUid}`) === partnerMeta, 'comped expiry mutated token balance');
+
+  // Trusted two-pass jobs stop after three failed attempts. This bounds one bad
+  // prompt to at most six Sol Max calls instead of the legacy 30-attempt loop.
+  const cappedId = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
+  partnerKv.store.set(`genjob:${cappedId}`, JSON.stringify({
+    id: cappedId, uid: TEST_UID, email: TEST_EMAIL, prompt: 'retry cap test', status: 'building',
+    generatorLane: 'trusted-codex', charge: { kind: 'comped', amount: 0 }, attempts: 2,
+    ts: Date.now(), updatedTs: Date.now(),
+  }));
+  response = await result.onRequestPost({
+    request: new Request('https://game-factory.test/api/admin/gen-result', {
+      method: 'POST', headers: relayHeaders,
+      body: JSON.stringify({ id: cappedId, status: 'requeue', error: 'rate_limited' }),
+    }),
+    env: partnerEnv,
+  });
+  parsed = await jsonResponse(response);
+  assert(parsed.status === 200 && parsed.body.status === 'failed' && parsed.body.reason === 'max_attempts', 'trusted Studio Max retry cap exceeded three attempts');
 
   // Every retained log must be reachable, not merely present in KV. Exercise
   // both pages so a high-volume partner can inspect more than one day's jobs.
@@ -366,6 +417,7 @@ async function main() {
   assert(/JOB_KEY \+ ':' \+ currentUid/.test(vibeJs), 'saved job key is not scoped to the signed-in UID');
   assert(/r\.status === 401 \|\| r\.status === 404[\s\S]+dropInaccessibleJob/.test(vibeJs), 'owner-only status errors do not clear stale resume state');
   assert(/api\/gen\/jobs\?limit=20&offset=[^\n]+recentOffset/.test(vibeJs), 'creator UI cannot page through retained build logs');
+  assert(/latest\.stage === 'polish'[\s\S]+Polishing and QA in Studio Max/.test(vibeJs), 'creator UI does not surface the second quality pass');
   assert(/s\.billingMode === 'comped'[\s\S]+No tokens were charged\./.test(creatorAdminHtml), 'creator admin failure copy is not charge-aware');
 
   const reviewScript = fs.readFileSync(path.join(ROOT, 'scripts/pre_push_review.sh'), 'utf8');
