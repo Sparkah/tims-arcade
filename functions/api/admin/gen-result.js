@@ -21,6 +21,7 @@ import { appendCreationHistoryEvent, buildFailureSummary, buildResultSummary, ma
 import { markJobBuilding, requeueJob, removeJobFromQueue } from '../../_lib/genQueue.js';
 import { appendBuildEvent, classifyBuildError } from '../../_lib/genJobLog.js';
 import { addUserJob } from '../../_lib/genUserJobs.js';
+import { deleteReferenceImage } from '../../_lib/genReferenceImage.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const BLOB_TTL = 60 * 60 * 24 * 30;   // generated game lives 30 days
@@ -46,6 +47,10 @@ export async function onRequestPost({ request, env }) {
   if (!jobRec) return jsonError('not_found', 404);
   if (!jobRec.id) jobRec.id = id;
   const terminal = jobRec.status === 'ready' || jobRec.status === 'failed';
+  // Retry cleanup on duplicate/late terminal calls too. The normal transition
+  // deletes through persistTerminalJob below; this closes a transient KV-delete
+  // failure without ever exposing the reference to a browser response.
+  if (terminal) await deleteReferenceImage(env, jobRec);
   if (terminal && status === 'ready' && jobRec.status === 'ready') {
     try { await appendRequestHistory(env, jobRec.targetCreationId || jobRec.baseId || id, jobRec); } catch (e) { /* best effort */ }
     try { await appendReadyHistory(env, jobRec.targetCreationId || jobRec.baseId || id, jobRec, jobRec.updatedTs || Date.now()); } catch (e) { /* best effort */ }
@@ -339,6 +344,7 @@ async function rejectReadyValidation(env, id, jobRec, error, status, attempt) {
 async function persistTerminalJob(env, id, jobRec, ttl) {
   await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: ttl });
   try { await addUserJob(env, jobRec.uid, { id, ts: jobRec.ts || jobRec.updatedTs || Date.now() }); } catch (e) { /* best effort */ }
+  await deleteReferenceImage(env, jobRec);
 }
 
 // Reverse the exact charge recorded at submit time. Called only on the first

@@ -54,7 +54,17 @@ export async function onRequestGet({ request, env }) {
     const jobLane = jobRec.generatorLane === 'trusted-codex' ? 'trusted-codex' : 'public';
     if (lane && jobLane !== lane) continue;
     if (readyPending || stuck) {
-      jobs.push({ id: jobRec.id, prompt: jobRec.prompt, ts: jobRec.ts, baseId: jobRec.baseId || null, generatorLane: jobLane });
+      jobs.push({
+        id: jobRec.id,
+        prompt: jobRec.prompt,
+        ts: jobRec.ts,
+        baseId: jobRec.baseId || null,
+        generatorLane: jobLane,
+        // The authenticated relay learns only whether it must make the separate
+        // binary fetch. Pixels, MIME, size, storage keys, and filenames stay out
+        // of this frequently-polled JSON response.
+        hasReferenceImage: !!jobRec.referenceImage,
+      });
       continue;
     }
     if (jobRec.status === 'ready' || jobRec.status === 'failed') {

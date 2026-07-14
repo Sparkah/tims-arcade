@@ -8,6 +8,10 @@
 
   var POLL_MS = 4000;
   var JOB_KEY = 'vibe_job';
+  var MAX_REFERENCE_SOURCE_BYTES = 12 * 1024 * 1024;
+  var MAX_REFERENCE_UPLOAD_BYTES = 2 * 1024 * 1024;
+  var MAX_REFERENCE_EDGE = 1600;
+  var REFERENCE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
 
   var $ = function (id) { return document.getElementById(id); };
   var els = {
@@ -15,6 +19,7 @@
     signin: $('create-signin'),
     composer: $('create-composer'),
     prompt: $('vibe-prompt'),
+    promptLabel: $('vibe-prompt-label'),
     counter: $('vibe-counter'),
     generate: $('vibe-generate'),
     msg: $('vibe-msg'),
@@ -46,6 +51,17 @@
     recent: $('create-recent'),
     recentList: $('create-recent-list'),
     recentMore: $('create-recent-more'),
+    improveContext: $('vibe-improve-context'),
+    improveTitle: $('vibe-improve-title'),
+    improveCancel: $('vibe-improve-cancel'),
+    reference: $('vibe-reference'),
+    referenceInput: $('vibe-reference-input'),
+    referencePreview: $('vibe-reference-preview'),
+    referenceImage: $('vibe-reference-image'),
+    referenceName: $('vibe-reference-name'),
+    referenceDetail: $('vibe-reference-detail'),
+    referenceRemove: $('vibe-reference-remove'),
+    referenceStatus: $('vibe-reference-status'),
   };
   if (!els.composer) return;
 
@@ -53,6 +69,14 @@
   var myName = '';
   var currentUid = '';
   var partnerAccess = false;
+  var quotaCanGenerate = false;
+  var submitInFlight = false;
+  var referenceLoading = false;
+  var referenceSelectionToken = 0;
+  var selectedReference = null;
+  var activeIteration = null;
+  var pendingRequestId = '';
+  var inspectingRecent = false;
   var lastLogEventKey = '';
   var recentOffset = 0;
   var recentSeen = Object.create(null);
@@ -95,10 +119,158 @@
     sign_in_required: 'Please sign in first.',
     enqueue_failed: 'Something went wrong. Try again.',
     bad_json: 'Something went wrong. Try again.',
+    bad_form: 'Something went wrong. Try again.',
+    image_not_available: 'Image references are currently available in the private Partner Studio.',
+    image_count: 'Attach one reference image at a time.',
+    image_missing: 'Choose a PNG, JPG, or WebP image.',
+    image_type: 'Use a PNG, JPG, or WebP image.',
+    image_too_small: 'That image appears to be empty.',
+    image_too_large: 'That image is too large. Try a smaller screenshot or sketch.',
+    image_dimensions: 'That image has unusually large dimensions. Export a version no larger than 2000 pixels per side.',
+    image_unreadable: 'That image could not be read. Try exporting it as PNG or JPG.',
+    image_mismatch: 'That file does not match its image type. Try exporting it again.',
     already_improving: 'You are already improving this game - hang tight.',
     iterate_not_found: 'That game could not be found.',
     builder_unavailable: 'The public builder is paused while the partner Codex pilot is tested.',
   };
+
+  function syncGenerateButton() {
+    els.generate.disabled = !quotaCanGenerate || referenceLoading || submitInFlight;
+    // Freeze the request inputs while a multipart submit is in flight. This
+    // keeps the visible draft aligned with the idempotency nonce if the network
+    // response is interrupted and the player retries the same request.
+    els.prompt.disabled = submitInFlight;
+    if (els.referenceInput) els.referenceInput.disabled = submitInFlight || referenceLoading;
+    if (els.referenceRemove) els.referenceRemove.disabled = submitInFlight;
+    if (els.improveCancel) els.improveCancel.disabled = submitInFlight;
+  }
+
+  function setReferenceStatus(text, kind) {
+    if (!els.referenceStatus) return;
+    els.referenceStatus.textContent = text || '';
+    els.referenceStatus.className = 'create-reference-status' + (kind ? ' ' + kind : '');
+  }
+
+  function clearReference(announce) {
+    pendingRequestId = '';
+    referenceSelectionToken++;
+    referenceLoading = false;
+    if (selectedReference && selectedReference.previewUrl) URL.revokeObjectURL(selectedReference.previewUrl);
+    selectedReference = null;
+    if (els.referenceInput) els.referenceInput.value = '';
+    if (els.referenceImage) els.referenceImage.removeAttribute('src');
+    if (els.referenceName) els.referenceName.textContent = 'Reference ready';
+    if (els.referenceDetail) els.referenceDetail.textContent = '';
+    show(els.referencePreview, false);
+    setReferenceStatus(announce ? 'Reference removed.' : '', '');
+    syncGenerateButton();
+  }
+
+  function canvasBlob(canvas, type, quality) {
+    return new Promise(function (resolve, reject) {
+      canvas.toBlob(function (blob) {
+        if (!blob) reject(new Error('image_unreadable'));
+        else resolve(blob);
+      }, type, quality);
+    });
+  }
+
+  function decodeReference(file) {
+    if (window.createImageBitmap) {
+      return window.createImageBitmap(file).then(function (bitmap) {
+        return {
+          source: bitmap,
+          width: bitmap.width,
+          height: bitmap.height,
+          close: function () { try { bitmap.close(); } catch (e) {} },
+        };
+      });
+    }
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var image = new Image();
+      image.onload = function () {
+        URL.revokeObjectURL(url);
+        resolve({ source: image, width: image.naturalWidth, height: image.naturalHeight, close: function () {} });
+      };
+      image.onerror = function () { URL.revokeObjectURL(url); reject(new Error('image_unreadable')); };
+      image.src = url;
+    });
+  }
+
+  function normalizeReference(file) {
+    var sourceType = String(file && file.type || '').toLowerCase();
+    var trustedExtension = /\.(?:png|jpe?g|webp)$/i.test(String(file && file.name || ''));
+    if (!file || (sourceType && REFERENCE_TYPES.indexOf(sourceType) < 0) || (!sourceType && !trustedExtension)) {
+      return Promise.reject(new Error('image_type'));
+    }
+    if (file.size < 32) return Promise.reject(new Error('image_too_small'));
+    if (file.size > MAX_REFERENCE_SOURCE_BYTES) return Promise.reject(new Error('image_too_large'));
+
+    return decodeReference(file).then(function (decoded) {
+      if (!decoded.width || !decoded.height || decoded.width * decoded.height > 40 * 1000 * 1000) {
+        decoded.close();
+        throw new Error('image_too_large');
+      }
+      var scale = Math.min(1, MAX_REFERENCE_EDGE / Math.max(decoded.width, decoded.height));
+      var width = Math.max(1, Math.round(decoded.width * scale));
+      var height = Math.max(1, Math.round(decoded.height * scale));
+      var canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      var context = canvas.getContext('2d', { alpha: true });
+      if (!context) { decoded.close(); throw new Error('image_unreadable'); }
+      context.drawImage(decoded.source, 0, 0, width, height);
+      decoded.close();
+      // Canvas re-encoding removes filenames and normal image metadata while
+      // keeping enough resolution for diagrams, UI screenshots, and sketches.
+      return canvasBlob(canvas, 'image/webp', 0.9)
+        .then(function (blob) {
+          return blob.size <= MAX_REFERENCE_UPLOAD_BYTES ? blob : canvasBlob(canvas, 'image/webp', 0.72);
+        })
+        .then(function (blob) {
+          if (REFERENCE_TYPES.indexOf(blob.type) < 0 || blob.size > MAX_REFERENCE_UPLOAD_BYTES) {
+            throw new Error('image_too_large');
+          }
+          return { blob: blob, width: width, height: height };
+        });
+    });
+  }
+
+  function chooseReference(file) {
+    clearReference(false);
+    var token = referenceSelectionToken;
+    referenceLoading = true;
+    syncGenerateButton();
+    setReferenceStatus('Preparing a private preview...', '');
+    normalizeReference(file)
+      .then(function (normalized) {
+        if (token !== referenceSelectionToken) return;
+        var previewUrl = URL.createObjectURL(normalized.blob);
+        selectedReference = {
+          blob: normalized.blob,
+          previewUrl: previewUrl,
+          name: String(file.name || 'Reference image'),
+          width: normalized.width,
+          height: normalized.height,
+        };
+        els.referenceImage.src = previewUrl;
+        els.referenceName.textContent = selectedReference.name;
+        els.referenceDetail.textContent = normalized.width + ' × ' + normalized.height + ' · ' + Math.max(1, Math.round(normalized.blob.size / 1024)) + ' KB · metadata removed';
+        show(els.referencePreview, true);
+        setReferenceStatus('Reference ready. Say what interaction or layout it should explain.', '');
+      })
+      .catch(function (error) {
+        if (token !== referenceSelectionToken) return;
+        var code = String(error && error.message || 'image_unreadable');
+        if (els.referenceInput) els.referenceInput.value = '';
+        setReferenceStatus(ERRORS[code] || ERRORS.image_unreadable, 'err');
+      })
+      .then(function () {
+        if (token !== referenceSelectionToken) return;
+        referenceLoading = false;
+        syncGenerateButton();
+      });
+  }
 
   // ---- quota / routing ----
   function loadQuota() {
@@ -106,16 +278,24 @@
       .then(function (r) { return r.json(); })
       .then(function (q) {
         if (!q.signed_in) {
+          resetComposerDraft();
           currentUid = '';
+          partnerAccess = false;
+          quotaCanGenerate = false;
+          clearReference(false);
           show(els.signin, true); show(els.composer, false); show(els.mine, false); show(els.stats, false);
-          show(els.partner, false); show(els.recent, false);
+          show(els.partner, false); show(els.reference, false); show(els.recent, false);
           return q;
         }
-        currentUid = String(q.uid || '');
+        var nextUid = String(q.uid || '');
+        if (currentUid && nextUid && currentUid !== nextUid) resetComposerDraft();
+        currentUid = nextUid;
         show(els.signin, false);
         show(els.composer, true);
         partnerAccess = q.partnerAccess === true;
         show(els.partner, partnerAccess);
+        show(els.reference, partnerAccess);
+        if (!partnerAccess && selectedReference) clearReference(false);
         if (els.creatorName && !els.creatorName.value && q.displayName) els.creatorName.value = q.displayName;
         myName = (els.creatorName && els.creatorName.value) || q.displayName || '';
         renderQuota(q);
@@ -132,6 +312,7 @@
     var isPartner = q.partnerAccess === true;
     var builderAvailable = isPartner || q.builderAvailable !== false;
     var canGen = builderAvailable && (isPartner || q.canGenerate || tokens >= cost);
+    quotaCanGenerate = canGen;
     els.prompts.hidden = false;
     els.prompts.textContent = !builderAvailable
       ? 'Builder paused'
@@ -139,19 +320,17 @@
     show(els.pay, builderAvailable);
     if (!builderAvailable) {
       show(els.gate, true);
-      els.generate.disabled = true;
       els.gateFill.style.width = '0%';
       els.gateText.textContent = 'The public builder is paused while the partner Codex pilot is tested. Existing games remain available.';
     } else if (canGen) {
       show(els.gate, false);
-      els.generate.disabled = false;
     } else {
       show(els.gate, true);
-      els.generate.disabled = true;
       els.gateFill.style.width = Math.min(100, Math.round((tokens / cost) * 100)) + '%';
       var need = q.tokensToNext != null ? q.tokensToNext : Math.max(0, cost - tokens);
       els.gateText.textContent = 'Earn ' + need + ' more tokens to make a game - play (+1/min), rate a game (+5), or log in daily (+10).';
     }
+    syncGenerateButton();
     renderStats(q);
   }
 
@@ -203,32 +382,72 @@
   function generate() {
     var prompt = (els.prompt.value || '').trim();
     if (prompt.length < 3) { setMsg(ERRORS.prompt_too_short, 'warn'); return; }
-    els.generate.disabled = true;
-    setMsg('Sending your idea...', '');
-    capture('vibe_generate_submit', { len: prompt.length });
+    if (referenceLoading) { setMsg('Wait for the reference preview to finish.', 'warn'); return; }
+    submitInFlight = true;
+    syncGenerateButton();
+    setMsg(activeIteration ? 'Sending your improvement...' : 'Sending your idea...', '');
+    var form = new FormData();
+    form.append('prompt', prompt);
+    // Retry deduplication is deliberately limited to the comped partner lane.
+    // Paid/public generation needs a strongly consistent server reservation
+    // before it can safely make the same promise.
+    if (partnerAccess) {
+      if (!pendingRequestId) pendingRequestId = createClientRequestId();
+      form.append('requestId', pendingRequestId);
+    } else {
+      pendingRequestId = '';
+    }
+    if (activeIteration && activeIteration.id) form.append('iterateId', activeIteration.id);
+    if (selectedReference && partnerAccess) form.append('referenceImage', selectedReference.blob, 'studio-reference.webp');
+    capture(activeIteration ? 'vibe_improve_submit' : 'vibe_generate_submit', {
+      len: prompt.length,
+      has_reference: !!selectedReference,
+    });
     fetch('/api/gen/submit', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
       credentials: 'same-origin',
-      body: JSON.stringify({ prompt: prompt }),
+      body: form,
     })
-      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }); })
+      .then(function (r) {
+        return r.json().then(
+          function (d) { return { ok: r.ok, d: d, ambiguous: false }; },
+          function () { return { ok: false, d: {}, ambiguous: r.ok }; },
+        );
+      })
       .then(function (res) {
         if (res.ok && res.d && res.d.id) {
           setMsg('', '');
           beginJob(res.d.id);
         } else {
           var code = (res.d && res.d.error) || 'enqueue_failed';
-          setMsg(ERRORS[code] || 'Could not start the build.', 'err');
-          els.generate.disabled = false;
+          if (!res.ambiguous) pendingRequestId = '';
+          setMsg(res.ambiguous
+            ? (partnerAccess
+              ? 'The response was interrupted. Retry - Studio will safely resume the same request.'
+              : 'The response was interrupted. Check Recent builds before trying again.')
+            : (ERRORS[code] || (activeIteration ? 'Could not start the improvement.' : 'Could not start the build.')), 'err');
+          submitInFlight = false;
+          syncGenerateButton();
           if (code === 'no_prompts' || code === 'need_tokens') loadQuota();
         }
       })
-      .catch(function () { setMsg('Network error. Try again.', 'err'); els.generate.disabled = false; });
+      .catch(function () {
+        setMsg(partnerAccess
+          ? 'Network error. Retry - Studio will safely resume the same request.'
+          : 'Network error. Check Recent builds before trying again.', 'err');
+        submitInFlight = false;
+        syncGenerateButton();
+      });
   }
 
   function beginJob(id) {
-    saveJob(id, Date.now());
+    pendingRequestId = '';
+    inspectingRecent = false;
+    els.again.textContent = 'Make another';
+    els.retry.textContent = 'Try again';
+    submitInFlight = false;
+    syncGenerateButton();
+    saveJob(id, Date.now(), activeIteration);
     show(els.composer, false);
     show(els.status, true);
     show(els.building, true);
@@ -264,7 +483,7 @@
         if (!s) return;
         renderBuildLog(s.events || []);
         lastBuild = { s: s, recvAt: Date.now() };
-        if (s.status === 'ready' && s.playUrl) { stopPolling(); onReady(s); }
+        if (s.status === 'ready' && s.playUrl) { stopPolling(); onReady(s, { preserveDraft: inspectingRecent }); }
         else if (s.status === 'failed') { stopPolling(); onFailed(s); }
         else { renderBuildStatus(); }   // pending/building -> live status
       })
@@ -371,10 +590,15 @@
   }
 
   function jobStorageKey() { return currentUid ? JOB_KEY + ':' + currentUid : ''; }
-  function saveJob(id, ts) {
+  function saveJob(id, ts, iteration) {
     var key = jobStorageKey();
     if (!key) return;
-    try { localStorage.setItem(key, JSON.stringify({ id: id, ts: ts || Date.now() })); } catch (e) {}
+    var saved = { id: id, ts: ts || Date.now() };
+    if (iteration && iteration.id) {
+      saved.iterateId = iteration.id;
+      saved.iterateTitle = String(iteration.title || 'your game').slice(0, 100);
+    }
+    try { localStorage.setItem(key, JSON.stringify(saved)); } catch (e) {}
   }
   function clearJob() {
     var key = jobStorageKey();
@@ -410,7 +634,7 @@
     });
   }
 
-  function onReady(s) {
+  function onReady(s, options) {
     show(els.building, false);
     show(els.failed, false);
     show(els.ready, true);
@@ -442,6 +666,10 @@
     iframe.src = s.playUrl;
     els.frameWrap.appendChild(iframe);
     capture('vibe_generate_ready', { slug: s.slug || '' });
+    // A completed job no longer needs the private Blob/object URL or the
+    // already-applied instruction. Keep failed jobs intact for explicit retry.
+    if (!options || options.preserveDraft !== true) resetComposerDraft();
+    if (inspectingRecent) els.again.textContent = 'Back to draft';
     loadCreations();
     loadRecentJobs();
   }
@@ -451,6 +679,7 @@
     show(els.ready, false);
     show(els.failed, true);
     capture('vibe_generate_failed', {});
+    if (inspectingRecent) els.retry.textContent = 'Back to draft';
     loadRecentJobs();
   }
 
@@ -515,7 +744,8 @@
 
   function inspectRecentJob(job) {
     if (!job || !job.id) return;
-    saveJob(job.id, job.queuedAt || Date.now());
+    inspectingRecent = true;
+    saveJob(job.id, job.queuedAt || Date.now(), null);
     show(els.composer, false);
     show(els.status, true);
     show(els.building, false);
@@ -524,7 +754,7 @@
     lastBuild = { s: job, recvAt: Date.now() };
     resetBuildLog();
     renderBuildLog(job.events || []);
-    if (job.status === 'ready' && job.playUrl) onReady(job);
+    if (job.status === 'ready' && job.playUrl) onReady(job, { preserveDraft: true });
     else if (job.status === 'failed') onFailed(job);
     else {
       show(els.building, true);
@@ -550,33 +780,55 @@
       .catch(function () {});
   }
 
-  // Iterate on an existing creation: prompt a change, enqueue an IN-PLACE upgrade
-  // (iterateId), then hand to the shared build/poll UI. onReady shows the upgraded
-  // game (status.playUrl points at the base game). Tim 2026-06-17.
+  // Switch the shared composer into an in-place improvement. This replaces the
+  // old window.prompt so a change request can use the same private image input
+  // as a fresh build, with a visible target and a cancellable mode.
   function improve(g) {
     if (!g || !g.id) return;
-    var billing = partnerAccess ? 'Included with Partner access.' : 'Costs 60 tokens, like a new build.';
-    var change = (window.prompt('What should change or be added to "' + (g.title || g.slug || 'your game') + '"?\n(' + billing + ')') || '').trim();
-    if (!change) return;
-    if (change.length < 3) { toast('Add a few more words about the change.', 'err'); return; }
-    toast('Sending your change...');
-    fetch('/api/gen/submit', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      credentials: 'same-origin', body: JSON.stringify({ iterateId: g.id, prompt: change }),
-    })
-      .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, d: d }; }, function () { return { ok: false, d: {} }; }); })
-      .then(function (res) {
-        if (res.ok && res.d && res.d.id) {
-          capture('vibe_improve_submit', { id: g.id });
-          try { window.scrollTo(0, 0); } catch (e) {}
-          beginJob(res.d.id);   // build-status view + polling; onReady shows the upgraded game
-        } else {
-          var code = (res.d && res.d.error) || 'enqueue_failed';
-          toast(ERRORS[code] || 'Could not start the improvement.', 'err');
-          if (code === 'need_tokens' || code === 'no_prompts') loadQuota();
-        }
-      })
-      .catch(function () { toast('Network error. Try again.', 'err'); });
+    if (els.status && !els.status.hidden && els.building && !els.building.hidden) {
+      toast('Let the current Studio build finish first.', 'err');
+      return;
+    }
+    var switchingTarget = !activeIteration || activeIteration.id !== g.id;
+    if (switchingTarget) {
+      els.prompt.value = '';
+      els.counter.textContent = '0 / 500';
+      clearReference(false);
+    }
+    activeIteration = { id: g.id, title: g.versionName || g.title || g.slug || 'your game' };
+    pendingRequestId = '';
+    if (els.improveTitle) els.improveTitle.textContent = activeIteration.title;
+    show(els.improveContext, true);
+    if (els.promptLabel) els.promptLabel.textContent = 'What should change?';
+    els.prompt.setAttribute('aria-describedby', 'vibe-improve-title');
+    els.prompt.placeholder = 'Describe the mechanic or layout change. If you attach an image, say exactly what it demonstrates.';
+    els.generate.textContent = 'Improve game';
+    clearJob(); stopPolling();
+    show(els.status, false); show(els.composer, true);
+    setMsg('', '');
+    syncGenerateButton();
+    try { els.composer.scrollIntoView({ block: 'start' }); } catch (e) {}
+    requestAnimationFrame(function () { try { els.prompt.focus(); } catch (e) {} });
+  }
+
+  function resetComposerDraft() {
+    pendingRequestId = '';
+    activeIteration = null;
+    show(els.improveContext, false);
+    if (els.promptLabel) els.promptLabel.textContent = 'Your game idea';
+    els.prompt.removeAttribute('aria-describedby');
+    els.prompt.placeholder = 'A one-tap game where a frog hops between lily pads and dodges splashes';
+    els.generate.textContent = 'Generate my game';
+    els.prompt.value = '';
+    els.counter.textContent = '0 / 500';
+    clearReference(false);
+    syncGenerateButton();
+  }
+
+  function cancelImprove() {
+    resetComposerDraft();
+    setMsg('', '');
+    requestAnimationFrame(function () { try { els.prompt.focus(); } catch (e) {} });
   }
 
   function creationCard(g) {
@@ -604,7 +856,10 @@
     // Improve -- iterate IN PLACE: prompt a change, the relay evolves THIS game and
     // overwrites it (same link + plays/likes). Reuses the build/poll UI; costs 60
     // tokens like a fresh build. (Tim 2026-06-17: creation "upgrade" button.)
-    var imp = document.createElement('button'); imp.type = 'button'; imp.className = 'create-mini-btn'; imp.textContent = 'Iterate';
+    var imp = document.createElement('button'); imp.type = 'button'; imp.className = 'create-mini-btn';
+    var impLabel = document.createElement('span'); impLabel.textContent = 'Improve';
+    var impContext = document.createElement('span'); impContext.className = 'visually-hidden'; impContext.textContent = ' ' + (g.versionName || g.title || g.slug || 'game');
+    imp.appendChild(impLabel); imp.appendChild(impContext);
     imp.addEventListener('click', function () { improve(g); });
     acts.appendChild(imp);
     // Publish / unpublish -- repaint from the API's authoritative {published}
@@ -697,24 +952,56 @@
 
   // ---- wire up ----
   els.prompt.addEventListener('input', function () {
+    pendingRequestId = '';
     els.counter.textContent = (els.prompt.value || '').length + ' / 500';
     if (els.msg.textContent) setMsg('', '');
   });
   els.generate.addEventListener('click', generate);
   els.pay.addEventListener('click', pay);
+  if (els.referenceInput) els.referenceInput.addEventListener('change', function () {
+    var file = els.referenceInput.files && els.referenceInput.files[0];
+    if (file) chooseReference(file);
+  });
+  if (els.referenceRemove) els.referenceRemove.addEventListener('click', function () {
+    clearReference(true);
+    if (els.referenceInput) els.referenceInput.focus();
+  });
+  if (els.improveCancel) els.improveCancel.addEventListener('click', cancelImprove);
   if (els.creatorName) els.creatorName.addEventListener('change', saveCreatorName);
   if (els.recentMore) els.recentMore.addEventListener('click', function () { loadRecentJobs(true); });
   els.again.addEventListener('click', function () {
+    if (inspectingRecent) { returnToDraft(); return; }
     clearJob(); resetBuildLog();
     show(els.status, false); show(els.composer, true);
+    cancelImprove(); clearReference(false);
     els.prompt.value = ''; els.counter.textContent = '0 / 500';
     loadQuota();
   });
   els.retry.addEventListener('click', function () {
+    if (inspectingRecent) { returnToDraft(); return; }
     clearJob(); resetBuildLog();
     show(els.status, false); show(els.composer, true);
     loadQuota();
   });
+
+  function returnToDraft() {
+    stopPolling(); clearJob(); resetBuildLog();
+    inspectingRecent = false;
+    els.again.textContent = 'Make another';
+    els.retry.textContent = 'Try again';
+    show(els.status, false); show(els.composer, true);
+    loadQuota();
+    requestAnimationFrame(function () { try { els.prompt.focus(); } catch (e) {} });
+  }
+
+  function createClientRequestId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID().replace(/-/g, '');
+    }
+    var bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.prototype.map.call(bytes, function (byte) { return byte.toString(16).padStart(2, '0'); }).join('');
+  }
 
   // Resume an in-flight job from a previous visit.
   function resume(q) {
@@ -724,6 +1011,15 @@
     var saved = null;
     try { saved = JSON.parse(localStorage.getItem(jobStorageKey()) || 'null'); localStorage.removeItem(JOB_KEY); } catch (e) {}
     if (saved && saved.id && (Date.now() - (saved.ts || 0) < 30 * 24 * 3600 * 1000)) {
+      if (saved.iterateId && /^[0-9a-z]{8,40}$/.test(String(saved.iterateId))) {
+        activeIteration = { id: String(saved.iterateId), title: String(saved.iterateTitle || 'your game').slice(0, 100) };
+        if (els.improveTitle) els.improveTitle.textContent = activeIteration.title;
+        show(els.improveContext, true);
+        if (els.promptLabel) els.promptLabel.textContent = 'What should change?';
+        els.prompt.setAttribute('aria-describedby', 'vibe-improve-title');
+        els.prompt.placeholder = 'Describe the mechanic or layout change. If you attach an image, say exactly what it demonstrates.';
+        els.generate.textContent = 'Improve game';
+      }
       show(els.composer, false);
       show(els.status, true);
       show(els.building, true);

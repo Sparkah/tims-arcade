@@ -1,4 +1,6 @@
-// POST /api/gen/submit  { prompt: string }
+// POST /api/gen/submit
+//   JSON:      { prompt: string, iterateId?: string }
+//   multipart: prompt, iterateId?, referenceImage? (trusted partner lane only)
 // The player describes a game in one sentence. Requires sign-in (magic-link).
 // Normally spends GENERATION_COST tokens (new accounts get a 60-token signup
 // bonus). Stable verified UIDs in GAME_FACTORY_COMPED_CREATOR_UIDS use the
@@ -16,12 +18,19 @@ import { addPendingJob } from '../../_lib/genQueue.js';
 import { isCompedCreatorSession } from '../../_lib/creatorEntitlement.js';
 import { appendBuildEvent } from '../../_lib/genJobLog.js';
 import { addUserJob, removeUserJob } from '../../_lib/genUserJobs.js';
+import {
+  deleteReferenceImage,
+  MAX_REFERENCE_IMAGE_BYTES,
+  storeReferenceImage,
+  validateReferenceImage,
+} from '../../_lib/genReferenceImage.js';
 
 const MIN_PROMPT = 3;
 const MAX_PROMPT = 500;
 const JOB_TTL = 60 * 60 * 24 * 30;  // owner-visible build record retention
 const DAILY_GEN_CAP = 20;           // successful generations / uid / day
 const HOURLY_ATTEMPTS = 60;         // total submit attempts / IP / hour (anti-hammer)
+const MAX_MULTIPART_BYTES = MAX_REFERENCE_IMAGE_BYTES + 128 * 1024;
 
 export async function onRequestPost({ request, env }) {
   // CSRF defense-in-depth (on top of the SameSite=Lax session cookie): this is
@@ -46,7 +55,31 @@ export async function onRequestPost({ request, env }) {
     return jsonError('rate_limit', 429);
 
   let body;
-  try { body = await request.json(); } catch { return jsonError('bad_json', 400); }
+  let referenceFile = null;
+  const contentType = String(request.headers.get('content-type') || '').toLowerCase();
+  if (contentType.startsWith('multipart/form-data')) {
+    const declaredLength = Number(request.headers.get('content-length') || 0);
+    if (declaredLength > MAX_MULTIPART_BYTES) return jsonError('image_too_large', 413);
+    const multipartBytes = await readRequestBodyCapped(request, MAX_MULTIPART_BYTES);
+    if (!multipartBytes) return jsonError('image_too_large', 413);
+    let form;
+    try {
+      form = await new Request(request.url, {
+        method: 'POST', headers: request.headers, body: multipartBytes,
+      }).formData();
+    } catch { return jsonError('bad_form', 400); }
+    body = {
+      prompt: form.get('prompt'),
+      iterateId: form.get('iterateId'),
+      requestId: form.get('requestId'),
+    };
+    const referenceFiles = form.getAll('referenceImage').filter(value => !(typeof value === 'string' && !value));
+    if (referenceFiles.length > 1) return jsonError('image_count', 400);
+    referenceFile = referenceFiles[0] || null;
+  } else {
+    try { body = await request.json(); } catch { return jsonError('bad_json', 400); }
+  }
+  if (!body || typeof body !== 'object') body = {};
   const rawPrompt = String(body.prompt || '').trim();
   if (rawPrompt.length < MIN_PROMPT) return jsonError('prompt_too_short', 400);
 
@@ -55,10 +88,56 @@ export async function onRequestPost({ request, env }) {
   const filtered = filterText(rawPrompt, MAX_PROMPT, { phone: false });   // allow big numbers in game ideas
   if (!filtered.ok) return jsonError('prompt_' + (filtered.reason || 'blocked'), 400);
   const prompt = filtered.text;
-  // Strong, unguessable id (128-bit) so the private /g/<id> link can't be
-  // enumerated (Codex review 2026-06-15). Created before optional lock acquisition
-  // so an iterate can reserve its in-flight slot before any token charge.
-  const id = crypto.randomUUID().replace(/-/g, '');
+
+  const suppliedRequestId = String(body.requestId || '').toLowerCase();
+  if (suppliedRequestId && !/^[0-9a-f]{32}$/.test(suppliedRequestId)) return jsonError('bad_request_id', 400);
+  // KV has no atomic conditional reservation. Keep retry deduplication inside
+  // the comped partner pilot, where an overlapping request cannot double-charge
+  // a player. Any future paid/public idempotency path must use a strongly
+  // consistent reservation (for example a Durable Object) before charging.
+  const requestId = partnerAccess ? suppliedRequestId : '';
+  const iterateId = String(body.iterateId || '').toLowerCase();
+  if (iterateId && !/^[0-9a-z]{8,40}$/.test(iterateId)) return jsonError('bad_id', 400);
+  // Reject a public image before any idempotent replay lookup. A reused nonce
+  // must never turn a forbidden image-bearing request into a successful text
+  // response, even though the image itself would not be stored.
+  if (referenceFile && !partnerAccess) return jsonError('image_not_available', 403);
+  const id = requestId
+    ? await idempotentJobId(env, session.uid, requestId)
+    : crypto.randomUUID().replace(/-/g, '');
+
+  // The partner browser keeps one cryptographically random id across an
+  // ambiguous network retry. Replaying that id returns the already-accepted
+  // owner job, so a lost private multipart response cannot queue/store twice.
+  if (requestId) {
+    const existing = await env.VOTES.get(`genjob:${id}`, 'json');
+    if (existing) {
+      if (existing.uid !== session.uid) return jsonError('request_conflict', 409);
+      if (String(existing.prompt || '') !== prompt || String(existing.baseId || '') !== iterateId) {
+        return jsonError('request_conflict', 409);
+      }
+      return acceptedJob(existing);
+    }
+    // Defense against an expired/missing job record or an astronomically
+    // unlikely hash collision: never reuse an existing creation namespace.
+    const [occupiedUpload, occupiedBlob] = await Promise.all([
+      env.VOTES.get(`upload:${id}`),
+      env.VOTES.get(`genblob:${id}`),
+    ]);
+    if (occupiedUpload || occupiedBlob) return jsonError('request_conflict', 409);
+  }
+
+  // Image references are deliberately limited to the allowlisted private
+  // Studio pilot. Validate every byte before acquiring an iterate lock, charging
+  // tokens, incrementing the daily success cap, or writing anything to KV.
+  let referenceImage = null;
+  if (referenceFile) {
+    const checked = await validateReferenceImage(referenceFile);
+    if (!checked.ok) return jsonError(checked.error, checked.status);
+    referenceImage = checked;
+  }
+  // Strong, unguessable 128-bit id (random for legacy clients, or a
+  // server-secret HMAC of uid+client nonce for idempotent multipart retry).
   const ts = Date.now();
 
   // Optional in-place ITERATE: evolve an EXISTING creation instead of building fresh.
@@ -67,9 +146,7 @@ export async function onRequestPost({ request, env }) {
   // costs tokens. (Tim 2026-06-17: "upgrade button ... prompt further and iterate".)
   let baseId = null;
   let baseRec = null;
-  const iterateId = String(body.iterateId || '').toLowerCase();
   if (iterateId) {
-    if (!/^[0-9a-z]{8,40}$/.test(iterateId)) return jsonError('bad_id', 400);
     const base = await env.VOTES.get(`upload:${iterateId}`, 'json');
     if (!base || base.source !== 'vibe') return jsonError('iterate_not_found', 404);
     if (base.uid !== session.uid) return jsonError('forbidden', 403);
@@ -117,7 +194,9 @@ export async function onRequestPost({ request, env }) {
 
   // Daily cap counts only accepted generations -- so it never burns on rejects.
   const day = new Date().toISOString().slice(0, 10);
-  if (!await checkRate(env, `genrate:${session.uid}:${day}`, DAILY_GEN_CAP, 60 * 60 * 26)) {
+  const dailyRateKey = `genrate:${session.uid}:${day}`;
+  const dailyRateTtl = 60 * 60 * 26;
+  if (!await checkRate(env, dailyRateKey, DAILY_GEN_CAP, dailyRateTtl)) {
     if (!partnerAccess && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('daily_limit_reached', 429);
@@ -137,6 +216,10 @@ export async function onRequestPost({ request, env }) {
     baseId,   // non-null => in-place upgrade of that creation (gen-result overwrites it)
     targetCreationId, versionNumber, versionName,
     generatorLane: partnerAccess ? 'trusted-codex' : 'public',
+    // Safe metadata only. The pixels live separately at genref:<job id>, never
+    // in a heartbeat-rewritten job record, queue response, history, or log.
+    referenceImage: referenceImage ? referenceImage.metadata : null,
+    clientRequestId: requestId || null,
     // What this job was charged, so a terminal build failure refunds the EXACT
     // charge once (admin/gen-result.js): 60 cookie-uid tokens. cookieUid may be
     // null (no cookie) -> nothing to refund.
@@ -144,9 +227,23 @@ export async function onRequestPost({ request, env }) {
     ts, updatedTs: ts,
   };
   appendBuildEvent(jobRec, { stage: 'queued', state: 'queued', attempt: 1, ts });
+  if (referenceImage) {
+    try {
+      await storeReferenceImage(env, id, referenceImage);
+    } catch (e) {
+      await deleteReferenceImage(env, jobRec);
+      await releaseDailyRateSlot(env, dailyRateKey, dailyRateTtl);
+      if (charge.kind === 'tokens' && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);
+      if (lockHeld) await releaseIterLock(env, baseId, id);
+      return jsonError('enqueue_failed', 500);
+    }
+  }
   try {
     await env.VOTES.put(`genjob:${id}`, JSON.stringify(jobRec), { expirationTtl: JOB_TTL });
   } catch (e) {
+    try { await env.VOTES.delete(`genjob:${id}`); } catch (_) { /* commit-then-error defense */ }
+    await deleteReferenceImage(env, jobRec);
+    await releaseDailyRateSlot(env, dailyRateKey, dailyRateTtl);
     if (charge.kind === 'tokens' && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);   // refund tokens (not lifetime)
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('enqueue_failed', 500);
@@ -155,6 +252,9 @@ export async function onRequestPost({ request, env }) {
     await addUserJob(env, session.uid, jobRec);
   } catch (e) {
     try { await env.VOTES.delete(`genjob:${id}`); } catch (_) { /* best effort */ }
+    try { await removeUserJob(env, session.uid, id); } catch (_) { /* commit-then-error defense */ }
+    await deleteReferenceImage(env, jobRec);
+    await releaseDailyRateSlot(env, dailyRateKey, dailyRateTtl);
     if (charge.kind === 'tokens' && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('enqueue_failed', 500);
@@ -164,6 +264,8 @@ export async function onRequestPost({ request, env }) {
   } catch (e) {
     try { await env.VOTES.delete(`genjob:${id}`); } catch (_) { /* best effort */ }
     try { await removeUserJob(env, session.uid, id); } catch (_) { /* best effort */ }
+    await deleteReferenceImage(env, jobRec);
+    await releaseDailyRateSlot(env, dailyRateKey, dailyRateTtl);
     if (charge.kind === 'tokens' && cookieUid) await refundTokens(env, cookieUid, GENERATION_COST);
     if (lockHeld) await releaseIterLock(env, baseId, id);
     return jsonError('enqueue_failed', 500);
@@ -183,7 +285,55 @@ export async function onRequestPost({ request, env }) {
     });
   } catch (e) { /* non-fatal: the job is already queued */ }
 
-  return json({ ok: true, id, status: 'pending', targetCreationId, versionNumber, versionName });
+  return acceptedJob(jobRec);
+}
+
+function acceptedJob(jobRec) {
+  return json({
+    ok: true,
+    id: jobRec.id,
+    status: jobRec.status || 'pending',
+    targetCreationId: jobRec.targetCreationId || jobRec.baseId || jobRec.id,
+    versionNumber: jobRec.versionNumber || null,
+    versionName: jobRec.versionName || null,
+    hasReferenceImage: !!jobRec.referenceImage,
+  });
+}
+
+async function readRequestBodyCapped(request, maxBytes) {
+  if (!request.body || typeof request.body.getReader !== 'function') return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value || 0);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch (e) {}
+        return null;
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch (e) {}
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.byteLength; }
+  return result;
+}
+
+async function idempotentJobId(env, uid, requestId) {
+  const secret = String(env.AUTH_SECRET || '');
+  const key = await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+  );
+  const payload = new TextEncoder().encode(`game-factory-gen-v1\0${uid}\0${requestId}`);
+  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, payload));
+  return Array.from(signature.subarray(0, 16), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
 async function releaseIterLock(env, baseId, jobId) {
@@ -192,5 +342,16 @@ async function releaseIterLock(env, baseId, jobId) {
     const key = `iteratelock:${baseId}`;
     const current = await env.VOTES.get(key);
     if (!current || current === jobId) await env.VOTES.delete(key);
+  } catch (e) { /* best effort */ }
+}
+
+// checkRate reserves the daily success slot before enqueue. If any enqueue
+// stage rolls back, return that reservation so storage faults do not consume a
+// player's successful-build allowance. This has the same bounded KV race as
+// the existing rate primitive, but fixes the normal serial failure path.
+async function releaseDailyRateSlot(env, key, ttl) {
+  try {
+    const current = parseInt(await env.VOTES.get(key), 10) || 0;
+    if (current > 0) await env.VOTES.put(key, String(current - 1), { expirationTtl: ttl });
   } catch (e) { /* best effort */ }
 }
