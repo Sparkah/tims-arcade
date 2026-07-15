@@ -9,6 +9,7 @@ import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord, verifyPasswordRecord } from '../../_lib/gameEditorAuth.js';
 import { readCreationLevels, writeCreationLevels } from '../../_lib/creationLevels.js';
 import { readCreationHistory, synthesizeInitialHistory } from '../../_lib/creationHistory.js';
+import { studioCreationVisibility } from '../../_lib/creationVisibility.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const TTL = 60 * 60 * 24 * 30;
@@ -39,13 +40,15 @@ async function ensureAdminPassword(env, id, rec) {
 }
 
 function publicRec(id, rec, owner) {
+  const visibility = studioCreationVisibility(rec);
   return {
     id,
     slug: rec.slug || '',
     title: rec.title || rec.slug || 'Untitled game',
     hook: rec.hook || '',
     status: rec.status || 'live',
-    published: !!rec.published,
+    published: visibility === 'listed',
+    visibility,
     owner: !!owner,
     hasAdminPassword: !!rec.adminPasswordHash,
     versionNumber: rec.versionNumber || 1,

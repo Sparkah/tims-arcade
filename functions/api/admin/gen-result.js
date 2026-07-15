@@ -319,7 +319,8 @@ export async function onRequestPost({ request, env }) {
         base.adminPasswordHash = await makeEditorPasswordRecord(adminPassword);
         base.adminPasswordSetAt = now;
       }
-      // Keep slug / title / published / created-ts / author / uid (stable link + stats);
+      // Keep slug / title / published / visibility / created-ts / author / uid
+      // (stable link + stats);
       // refresh quality + cover + updatedTs.
       const baseVersion = Math.max(1, Math.floor(Number(base.versionNumber) || 1));
       const plannedVersion = Math.floor(Number(jobRec.versionNumber));
@@ -375,8 +376,9 @@ export async function onRequestPost({ request, env }) {
     await persistTerminalJob(env, id, jobRec, BLOB_TTL);
     try { await removeJobFromQueue(env, jobRec); } catch (e) { /* best effort */ }
 
-    // Surface in the creator's "My games" via the existing upload: schema. Private
-    // by default (published:false) -- the creator opts in to the public gallery.
+    // Surface in the creator's "My games" via the existing upload: schema.
+    // Studio games are unlisted by default: the opaque link works immediately,
+    // while the creator separately opts into public gallery discovery.
     const rec = {
       id, slug, title,
       hook: String(jobRec.prompt || '').slice(0, 200),
@@ -385,7 +387,7 @@ export async function onRequestPost({ request, env }) {
       contact: jobRec.email || '',
       uid: jobRec.uid, email: jobRec.email,
       status: 'live', sandboxUrl: `/g/${id}`, source: 'vibe', ts: jobRec.ts,
-      published: false, quality, hasCover,
+      published: false, visibility: 'unlisted', quality, hasCover,
       adminPasswordHash, adminPasswordSetAt: now,
       versionNumber, versionName, lastUpdateSummary: summary,
     };

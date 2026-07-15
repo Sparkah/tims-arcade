@@ -98,7 +98,7 @@ function createServer(cplayCsp, externalReceiverUrl, observations) {
       window.addEventListener('message', function (event) {
         var data = event.data || {};
         if (data.type === 'gameFactoryLevels' && Array.isArray(data.levels)) {
-          location.href = '/second-private-receiver?name=' + encodeURIComponent((data.levels[0] || {}).name || 'missing');
+          location.href = '/second-level-receiver?name=' + encodeURIComponent((data.levels[0] || {}).name || 'missing');
         }
       });
       setTimeout(function () {
@@ -128,9 +128,9 @@ function createServer(cplayCsp, externalReceiverUrl, observations) {
       }
       return serve(res, 200, maliciousFirst, 'text/html; charset=utf-8');
     }
-    if (url.pathname === '/second-private-receiver') {
-      observations.secondPrivatePayloads++;
-      return serve(res, 200, 'second private payload observed');
+    if (url.pathname === '/second-level-receiver') {
+      observations.secondLevelPayloads++;
+      return serve(res, 200, 'second level payload observed');
     }
     if (url.pathname === '/api/creation-levels') {
       if (url.searchParams.get('id') === DENIED_ID) return serve(res, 404, '{"ok":false,"error":"not_found"}', 'application/json');
@@ -202,7 +202,7 @@ async function main() {
     phaseTwoLoads: 0,
     firstMessageCount: 0,
     firstMessageHadUpdatedTs: null,
-    secondPrivatePayloads: 0,
+    secondLevelPayloads: 0,
     metricPosts: [],
   };
   const server = createServer(cplayCsp, receiverUrl, observations);
@@ -247,8 +247,8 @@ async function main() {
       throw new Error(`malicious navigation did not follow one first payload: ${JSON.stringify(observations)}`);
     }
     if (observations.firstMessageHadUpdatedTs) throw new Error('malicious first document received updatedTs');
-    if (observations.secondPrivatePayloads !== 0) {
-      throw new Error(`private levels were posted after iframe navigation (${observations.secondPrivatePayloads})`);
+    if (observations.secondLevelPayloads !== 0) {
+      throw new Error(`levels were posted after iframe navigation (${observations.secondLevelPayloads})`);
     }
     if (receiverObservations.requests !== 0) throw new Error('external receiver was reached despite cplay frame-src');
 
@@ -256,7 +256,7 @@ async function main() {
     await deniedPage.goto(`http://127.0.0.1:${port}/cplay?id=${DENIED_ID}&slug=should-never-post`, { waitUntil:'load', timeout:30000 });
     await deniedPage.waitForFunction(() => {
       const error = document.querySelector('.cerr');
-      return !!(error && /private or unavailable/i.test(error.textContent || ''));
+      return !!(error && /unavailable, expired, or the link is invalid/i.test(error.textContent || ''));
     }, { timeout:5000 });
     await new Promise((resolve) => setTimeout(resolve, 200));
     const denied = await deniedPage.evaluate(() => ({ message:document.querySelector('.cerr').textContent, iframe:!!document.querySelector('iframe') }));

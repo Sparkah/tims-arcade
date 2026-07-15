@@ -615,7 +615,7 @@ async function main() {
   assert(!parsed.text.includes(TEST_EMAIL) && !parsed.text.includes('crystal flowers') && !parsed.text.includes('/tmp/private'), 'operator job status leaked private/raw fields');
 
   // Successful fresh and Improve lifecycles both delete the reference. Improve
-  // keeps the same public/private creation id, carries base HTML to the relay,
+  // keeps the same listed/unlisted creation id, carries base HTML to the relay,
   // and releases its one-in-flight lock.
   const freshRequestNonce = '2234567890abcdef1234567890abcdef';
   response = await submit.onRequestPost({
@@ -643,7 +643,7 @@ async function main() {
   assert(parsed.status === 200 && parsed.body.status === 'ready' && parsed.body.playUrl === `/g/${freshId}`, 'fresh image job did not finish ready');
   assert(!partnerKv.store.has(`genref:${freshId}`), 'successful fresh job retained its reference');
   const freshUpload = JSON.parse(partnerKv.store.get(`upload:${freshId}`));
-  assert(freshUpload && freshUpload.source === 'vibe' && freshUpload.uid === TEST_UID, 'fresh ready job did not create an owned private game');
+  assert(freshUpload && freshUpload.source === 'vibe' && freshUpload.uid === TEST_UID && freshUpload.visibility === 'unlisted', 'fresh ready job did not create an owned unlisted game');
 
   // A creator edit is authoritative during Improve. The queue must send this
   // exact runtime payload and the result receipt must bind it, not the new

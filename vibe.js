@@ -90,7 +90,7 @@
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
   function capture(ev, props) { try { if (window.posthog) window.posthog.capture(ev, props || {}); } catch (e) {} }
 
-  // Brief, dependency-free confirmation toast. Publish/unpublish/delete do NOT
+  // Brief, dependency-free confirmation toast. List/unlist/delete do NOT
   // reload the page, so the action needs visible feedback (Tim 2026-06-17: a
   // publish looked like a no-op until a manual reload). Bottom-center, safe-area
   // aware so it clears the iOS Safari toolbar.
@@ -862,31 +862,31 @@
     imp.appendChild(impLabel); imp.appendChild(impContext);
     imp.addEventListener('click', function () { improve(g); });
     acts.appendChild(imp);
-    // Publish / unpublish -- repaint from the API's authoritative {published}
+    // List / unlist -- repaint from the API's authoritative {published}
     // response, NOT a re-fetch. KV is eventually consistent, so re-reading
     // /api/me/games right after the write returns the STALE flag and the button
     // silently reverts (the bug Tim hit: publish looked like a no-op until reload).
     var pub = document.createElement('button'); pub.type = 'button';
     function paintPub() {
       pub.className = 'create-mini-btn' + (g.published ? ' on' : '');
-      pub.textContent = g.published ? 'Published ✓' : 'Publish to gallery';
+      pub.textContent = g.published ? 'Listed in gallery ✓' : 'List in gallery';
       pub.disabled = false;
     }
     paintPub();
     pub.addEventListener('click', function () {
       var want = !g.published;
-      // Publishing makes the game public under the creator's name -- confirm intent
-      // (Tim expected a confirmation step). Unpublish stays frictionless.
-      if (want && !confirm('Publish "' + (g.title || g.slug) + '" to the public gallery?\nAnyone will be able to play it. You can unpublish anytime.')) return;
+      // The direct link already works. Listing only makes the game discoverable
+      // under the creator's name; returning to unlisted stays frictionless.
+      if (want && !confirm('List "' + (g.title || g.slug) + '" in the public gallery?\nIts direct link already works. Listing makes it discoverable on the site.')) return;
       pub.disabled = true;
-      pub.textContent = want ? 'Publishing...' : 'Removing...';
+      pub.textContent = want ? 'Listing...' : 'Unlisting...';
       creationAction(g.id, want ? 'publish' : 'unpublish', function (ok, d) {
         // Paint from the server's authoritative {published}. A missing boolean
         // (even alongside ok) is a failure, not an optimistic assumption.
         if (ok && typeof d.published === 'boolean') {
           g.published = d.published;
           paintPub();
-          toast(g.published ? 'Published! Your game is now in the gallery.' : 'Removed from the gallery.');
+          toast(g.published ? 'Listed! Your game is now in the gallery.' : 'Removed from the gallery. Its direct link still works.');
         } else {
           paintPub();   // revert to the prior state
           toast('Could not update. Please try again.', 'err');

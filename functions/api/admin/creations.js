@@ -1,6 +1,6 @@
 // Player-creation moderation (admin-session gated). Tim 2026-06-15.
 //   GET  /api/admin/creations               -> all vibe creations (with email + flags)
-//   POST /api/admin/creations {id, action}:  delete | unpublish
+//   POST /api/admin/creations {id, action}:  delete | unpublish (unlist)
 // UI: /chat-mod (shared moderation page).
 //
 // The GET walks upload:* (a KV LIST). It returns submitter emails, so the
@@ -9,6 +9,7 @@
 import { json, jsonError } from '../../_lib/response.js';
 import { edgeCached } from '../../_lib/edgecache.js';
 import { requireAdmin } from '../../_lib/adminAuth.js';
+import { studioCreationVisibility } from '../../_lib/creationVisibility.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 const TTL = 60 * 60 * 24 * 30;
@@ -28,7 +29,8 @@ async function buildCreations(env) {
       if (!raw) continue;
       let r; try { r = JSON.parse(raw); } catch { continue; }
       if (r.source !== 'vibe') continue;
-      out.push({ id: r.id, slug: r.slug, title: r.title, author: r.author, email: r.email, published: !!r.published, quality: r.quality || 'unverified', ts: r.ts || 0 });
+      const visibility = studioCreationVisibility(r);
+      out.push({ id: r.id, slug: r.slug, title: r.title, author: r.author, email: r.email, published: visibility === 'listed', visibility, quality: r.quality || 'unverified', ts: r.ts || 0 });
     }
     cursor = list.list_complete ? null : list.cursor;
   } while (cursor);
@@ -57,6 +59,7 @@ export async function onRequestPost({ request, env }) {
     if (!raw) return jsonError('not_found', 404);
     let r; try { r = JSON.parse(raw); } catch { return jsonError('not_found', 404); }
     r.published = false;
+    r.visibility = 'unlisted';
     await env.VOTES.put(`upload:${id}`, JSON.stringify(r), { expirationTtl: TTL });
     return ns(json({ ok: true, unpublished: true }));
   }

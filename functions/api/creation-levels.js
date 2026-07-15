@@ -1,10 +1,10 @@
 // GET /api/creation-levels?id=<creationId>
-// Public/read-only level data for player-generated games. Published creations
-// can expose their level data to players; private creations require the owner
-// session, matching /g/<id> access control.
+// Public/read-only level data for live Studio games. New games are unlisted,
+// not private: anyone holding the opaque play URL needs this exact payload.
+// Mutation and history remain protected by /api/me/creation-admin.
 
 import { json, jsonError } from '../_lib/response.js';
-import { canReadPrivateCreation } from '../_lib/creationAccess.js';
+import { isPlayableStudioCreation } from '../_lib/creationVisibility.js';
 import { readCreationLevels } from '../_lib/creationLevels.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
@@ -20,9 +20,13 @@ export async function onRequestGet({ request, env }) {
   const id = String(url.searchParams.get('id') || '').toLowerCase();
   if (!ID_RE.test(id)) return fail('bad_id', 400);
 
-  const rec = await env.VOTES.get(`upload:${id}`, 'json');
-  if (!rec || rec.source !== 'vibe') return fail('not_found', 404);
-  if (!rec.published && !await canReadPrivateCreation(request, env, rec.uid)) return fail('not_found', 404);
+  const [rec, html] = await Promise.all([
+    env.VOTES.get(`upload:${id}`, 'json'),
+    env.VOTES.get(`genblob:${id}`),
+  ]);
+  // Match /g/<id> exactly so cplay never starts metrics and attaches an iframe
+  // for a metadata-only record whose actual game bytes are gone.
+  if (!html || !isPlayableStudioCreation(rec)) return fail('not_found', 404);
 
   const data = await readCreationLevels(env, id);
   const r = json({
@@ -34,8 +38,7 @@ export async function onRequestGet({ request, env }) {
     updatedTs: data.updatedTs,
     source: data.source,
   });
-  // Access can change at any time (publish/unpublish, logout, account switch).
-  // Never let an allowed response survive that authorization transition.
+  // Level edits, iteration, deletion, and moderation must be visible immediately.
   r.headers.set('cache-control', 'no-store');
   return r;
 }

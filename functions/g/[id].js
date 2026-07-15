@@ -9,7 +9,7 @@
 //   * the session cookie is HttpOnly regardless.
 // Tim 2026-06-15.
 
-import { canReadPrivateCreation } from '../_lib/creationAccess.js';
+import { isPlayableStudioCreation } from '../_lib/creationVisibility.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 
@@ -65,23 +65,15 @@ export async function onRequestGet({ request, env, params }) {
     });
   }
 
-  const html = await env.VOTES.get(`genblob:${id}`);
-  if (!html) return notFound();
-
-  // Access control (Codex review 2026-06-15): a published creation is public; an
-  // unpublished/private one is owner-only. So unpublish actually revokes the link.
-  const rec = await env.VOTES.get(`upload:${id}`, 'json');
-  if (!rec) {
-    // Access metadata missing (e.g. the upload write failed after the blob landed):
-    // default-DENY rather than serve open (Codex 2026-06-16). Fall back to the
-    // genjob record so the creator can still reach their own game.
-    const job = await env.VOTES.get(`genjob:${id}`, 'json');
-    if (!job || !await canReadPrivateCreation(request, env, job.uid)) return notFound();
-  } else if (rec.source !== 'vibe') {
-    return notFound();
-  } else if (!rec.published) {
-    if (!await canReadPrivateCreation(request, env, rec.uid)) return notFound();
-  }
+  const [html, rec] = await Promise.all([
+    env.VOTES.get(`genblob:${id}`),
+    env.VOTES.get(`upload:${id}`, 'json'),
+  ]);
+  // Studio games are unlisted by default, not private. `published` controls
+  // discovery only; the opaque direct link remains public while the record is
+  // live. Missing metadata, non-Studio records, and explicit takedowns fail
+  // closed instead of exposing an orphaned generated blob.
+  if (!html || !isPlayableStudioCreation(rec)) return notFound();
 
   return new Response(html, {
     headers: {
@@ -89,9 +81,9 @@ export async function onRequestGet({ request, env, params }) {
       'content-security-policy': CSP,
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-      // Authorization can change on logout/account switch or unpublish. Never
-      // reuse a previously allowed raw game response across that transition.
-      'cache-control': 'private, no-store',
+      // Iteration, deletion, or moderation can change these bytes at any time.
+      'cache-control': 'no-store',
+      'x-robots-tag': 'noindex, nofollow, noarchive',
       // key the cached raw response on Sec-Fetch-Dest so a browser-cached iframe load
       // isn't reused for a top-level visit (which must redirect to /cplay).
       'vary': 'Sec-Fetch-Dest',

@@ -1,5 +1,6 @@
 // GET /api/creations -> the PUBLIC "Player Creations" feed: vibe games their
-// creators chose to publish (published + ready/live). Returns cover + author
+// creators chose to list publicly. Unlisted games remain playable by direct
+// opaque link but do not appear here. Returns cover + author
 // display name + basic stats. Edge-cached 30s. Tim 2026-06-15.
 //
 // NOTE: walks upload:* records; fine at gallery volume + the edge cache. If
@@ -12,6 +13,7 @@
 
 import { json } from '../_lib/response.js';
 import { edgeCached } from '../_lib/edgecache.js';
+import { isListedStudioCreation } from '../_lib/creationVisibility.js';
 
 export function onRequestGet({ env }) {
   // Fixed cache key — this endpoint takes no query params. If a filter/sort/page
@@ -28,7 +30,7 @@ async function buildCreations(env) {
       const raw = await env.VOTES.get(k.name);
       if (!raw) continue;
       let r; try { r = JSON.parse(raw); } catch { continue; }
-      if (r.source !== 'vibe' || !r.published || r.status !== 'live') continue;
+      if (!isListedStudioCreation(r)) continue;
       const slug = String(r.slug || '');
       const [plays, seconds] = await Promise.all([
         env.VOTES.get(`plays:${slug}`),

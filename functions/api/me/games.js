@@ -21,6 +21,7 @@
 
 import { readSession } from '../_session.js';
 import { edgeCached } from '../../_lib/edgecache.js';
+import { studioCreationVisibility } from '../../_lib/creationVisibility.js';
 
 export async function onRequestGet({ request, env }) {
   const session = await readSession(request, env);
@@ -48,6 +49,7 @@ async function buildMyGames(env, session) {
 
   const games = await Promise.all(mine.map(async (row) => {
     const slug = String(row.slug || '');
+    const visibility = row.source === 'vibe' ? studioCreationVisibility(row) : (row.published ? 'listed' : 'unlisted');
     const [playsRaw, secondsRaw, votes] = await Promise.all([
       env.VOTES.get(`plays:${slug}`),
       env.VOTES.get(`seconds:${slug}`),
@@ -61,7 +63,8 @@ async function buildMyGames(env, session) {
       genre: row.genre || '',
       source: row.source || '',
       status: row.status || 'pending',
-      published: !!row.published,
+      published: visibility === 'listed',
+      visibility,
       hasCover: !!row.hasCover,
       versionNumber: row.versionNumber || 1,
       versionName: row.versionName || '',

@@ -1,7 +1,7 @@
 // POST /api/me/creations  { id, action: 'publish' | 'unpublish' | 'delete' }
-// The signed-in creator manages their OWN vibe creation: publish it to the public
-// gallery (under their display name), unpublish, or delete it entirely. Ownership
-// is enforced by uid. Same-origin + session only. Tim 2026-06-15.
+// The signed-in creator manages their OWN vibe creation: list it in the public
+// gallery, return it to unlisted direct-link access, or delete it entirely.
+// Ownership is enforced by uid. Same-origin + session only. Tim 2026-06-15.
 
 import { readSession } from '../_session.js';
 import { json, jsonError, sameOriginOk } from '../../_lib/response.js';
@@ -26,10 +26,12 @@ export async function onRequestPost({ request, env }) {
   if (rec.uid !== session.uid) return jsonError('forbidden', 403);   // must own it
 
   if (action === 'publish' || action === 'unpublish') {
+    if (rec.disabled === true || rec.visibility === 'disabled') return jsonError('creation_disabled', 409);
     if (action === 'publish' && (rec.source !== 'vibe' || rec.status !== 'live')) return jsonError('not_publishable', 400);
     rec.published = action === 'publish';
+    rec.visibility = rec.published ? 'listed' : 'unlisted';
     await env.VOTES.put(`upload:${id}`, JSON.stringify(rec), { expirationTtl: TTL });
-    return nostore(json({ ok: true, published: rec.published }));
+    return nostore(json({ ok: true, published: rec.published, visibility: rec.visibility }));
   }
   if (action === 'delete') {
     await env.VOTES.delete(`upload:${id}`);
