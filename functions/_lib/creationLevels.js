@@ -3,6 +3,8 @@ export const CREATION_LEVEL_TTL = 60 * 60 * 24 * 30;
 
 const MAX_LEVELS = 200;
 const FIELD = { w: 360, h: 640 };
+const MAX_WORLD_SIZE = 10_000;
+const MAX_OBJECT_VALUE = 1_000_000;
 
 export function levelsKey(id) {
   return `creation-levels:${id}`;
@@ -21,32 +23,39 @@ function cleanText(value, max = 80) {
   return String(value == null ? '' : value).replace(/[\r\n\t]/g, ' ').trim().slice(0, max);
 }
 
-function cleanPoint(value, fallbackX, fallbackY) {
+function cleanPoint(value, fallbackX, fallbackY, bounds = FIELD) {
   return {
-    x: clamp(num(value && value.x, fallbackX), 0, FIELD.w),
-    y: clamp(num(value && value.y, fallbackY), 0, FIELD.h),
+    x: clamp(num(value && value.x, fallbackX), 0, bounds.w),
+    y: clamp(num(value && value.y, fallbackY), 0, bounds.h),
   };
 }
 
-function objectId() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-    return crypto.randomUUID().replace(/-/g, '').slice(0, 12);
-  }
-  return Math.random().toString(16).slice(2, 14);
+function cleanType(value) {
+  return cleanText(value, 32).replace(/[^A-Za-z0-9_-]/g, '') || 'hazard';
 }
 
-function sanitizeObject(value) {
-  const type = cleanText(value && value.type, 20).toLowerCase();
-  const allowed = ['wall', 'hazard', 'coin', 'enemy', 'platform', 'note'];
-  const kind = allowed.includes(type) ? type : 'hazard';
+function cleanDimension(value, fallback) {
+  return clamp(num(value, fallback), 64, MAX_WORLD_SIZE);
+}
+
+function sanitizeObject(value, bounds = FIELD, levelIndex = 0, objectIndex = 0) {
+  // Generated games are allowed to give the generic shape game-specific
+  // semantics (camera, climate, coolRock, and so on). Coercing an unknown type
+  // to "hazard" changes gameplay and can turn a harmless world-sized region
+  // into a lethal one. Keep a bounded token instead; the game owns its mapping.
+  const kind = cleanType(value && value.type);
   return {
-    id: cleanText(value && value.id, 36) || objectId(),
+    // Stable fallback IDs make the exact runtime message reproducible across
+    // queue QA, result acceptance, KV storage, and the /cplay bridge.
+    id: cleanText(value && value.id, 36) || `level-${levelIndex + 1}-object-${objectIndex + 1}`,
     type: kind,
-    x: clamp(num(value && value.x, FIELD.w / 2), 0, FIELD.w),
-    y: clamp(num(value && value.y, FIELD.h / 2), 0, FIELD.h),
-    w: clamp(num(value && value.w, kind === 'wall' || kind === 'platform' ? 90 : 28), 6, FIELD.w),
-    h: clamp(num(value && value.h, kind === 'wall' || kind === 'platform' ? 20 : 28), 6, FIELD.h),
-    value: clamp(Math.round(num(value && value.value, kind === 'coin' ? 1 : 0)), 0, 999),
+    x: clamp(num(value && value.x, bounds.w / 2), 0, bounds.w),
+    y: clamp(num(value && value.y, bounds.h / 2), 0, bounds.h),
+    w: clamp(num(value && value.w, kind === 'wall' || kind === 'platform' ? 90 : 28), 1, MAX_WORLD_SIZE),
+    h: clamp(num(value && value.h, kind === 'wall' || kind === 'platform' ? 20 : 28), 1, MAX_WORLD_SIZE),
+    // Fractional and negative values are meaningful to generated mechanics
+    // (for example scan speed/direction), so do not round or force positive.
+    value: clamp(num(value && value.value, kind === 'coin' ? 1 : 0), -MAX_OBJECT_VALUE, MAX_OBJECT_VALUE),
     label: cleanText(value && value.label, 60),
   };
 }
@@ -64,13 +73,18 @@ export function defaultLevels() {
 }
 
 function sanitizeLevel(value, index) {
+  const width = cleanDimension(value && value.width, FIELD.w);
+  const height = cleanDimension(value && value.height, FIELD.h);
+  const bounds = { w: width, h: height };
   return {
     name: cleanText(value && value.name, 60) || `Level ${index + 1}`,
-    width: FIELD.w,
-    height: FIELD.h,
-    player: cleanPoint(value && value.player, 180, 560),
-    goal: cleanPoint(value && value.goal, 180, 100),
-    objects: Array.isArray(value && value.objects) ? value.objects.slice(0, 120).map(sanitizeObject) : [],
+    width,
+    height,
+    player: cleanPoint(value && value.player, width / 2, Math.max(0, height - 80), bounds),
+    goal: cleanPoint(value && value.goal, width / 2, Math.min(100, height), bounds),
+    objects: Array.isArray(value && value.objects)
+      ? value.objects.slice(0, 120).map((object, objectIndex) => sanitizeObject(object, bounds, index, objectIndex))
+      : [],
     notes: cleanText(value && value.notes, 500),
   };
 }
@@ -97,10 +111,16 @@ function stableLevel(value) {
   };
 }
 
-function isDefaultLevelSet(levels) {
+export function isDefaultLevelSet(levels) {
   const clean = sanitizeLevels(levels).map(stableLevel);
   const fallback = defaultLevels().map(stableLevel);
   return JSON.stringify(clean) === JSON.stringify(fallback);
+}
+
+export function shouldPreserveCreationLevels(payload) {
+  if (!hasLevelArray(payload)) return false;
+  const source = cleanText(payload.source, 40);
+  return (!source || source !== 'embedded-seed') && !isDefaultLevelSet(payload.levels);
 }
 
 export function normalizeLevelPayload(stored) {
@@ -195,15 +215,13 @@ export async function seedCreationLevelsFromHtml(env, id, html, options = {}) {
   if (!seed) return { seeded: false, reason: 'missing_seed' };
 
   const existing = await env.VOTES.get(levelsKey(id), 'json');
-  if (hasLevelArray(existing)) {
+  if (shouldPreserveCreationLevels(existing)) {
     const source = cleanText(existing.source, 40);
-    if ((!source || source !== 'embedded-seed') && !isDefaultLevelSet(existing.levels)) {
-      return {
-        seeded: false,
-        reason: source ? `existing_${source}` : 'existing_levels',
-        count: sanitizeLevels(existing.levels).length,
-      };
-    }
+    return {
+      seeded: false,
+      reason: source ? `existing_${source}` : 'existing_levels',
+      count: sanitizeLevels(existing.levels).length,
+    };
   }
 
   const payload = await writeCreationLevels(env, id, seed.levels, {

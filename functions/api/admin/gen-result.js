@@ -16,7 +16,7 @@ import { refundTokens } from '../../_lib/meta.js';
 import { requireRelay } from '../../_lib/adminAuth.js';
 import { makeReadablePassword } from '../../_lib/crypto.js';
 import { makeEditorPasswordRecord } from '../../_lib/gameEditorAuth.js';
-import { extractEmbeddedLevelSeed, seedCreationLevelsFromHtml } from '../../_lib/creationLevels.js';
+import { extractEmbeddedLevelSeed, readCreationLevels, seedCreationLevelsFromHtml, shouldPreserveCreationLevels } from '../../_lib/creationLevels.js';
 import { appendCreationHistoryEvent, buildFailureSummary, buildResultSummary, makeVersionName } from '../../_lib/creationHistory.js';
 import { markJobBuilding, requeueJob, removeJobFromQueue } from '../../_lib/genQueue.js';
 import { appendBuildEvent, classifyBuildError } from '../../_lib/genJobLog.js';
@@ -32,6 +32,71 @@ const MAX_ATTEMPTS = 30;                         // safety cap so a truly-unbuil
 const TRUSTED_CODEX_MAX_ATTEMPTS = 3;             // Studio Max can spend two model calls per attempt
 const RELAY_EVENT_STAGES = new Set(['generation', 'polish', 'validation', 'smoke']);
 const RELAY_EVENT_STATES = new Set(['started', 'passed', 'failed', 'skipped']);
+
+function canonicalRuntimeLevelPayload(payload) {
+  return {
+    schema: payload && payload.schema || 'game-factory-generic-levels-v1',
+    levels: (payload && Array.isArray(payload.levels) ? payload.levels : []).map(level => ({
+      name: level && level.name || '',
+      width: level && level.width,
+      height: level && level.height,
+      player: { x: level && level.player && level.player.x, y: level && level.player && level.player.y },
+      goal: { x: level && level.goal && level.goal.x, y: level && level.goal && level.goal.y },
+      objects: (level && Array.isArray(level.objects) ? level.objects : []).map(object => ({
+        id: object && object.id || '',
+        type: object && object.type,
+        x: object && object.x,
+        y: object && object.y,
+        w: object && object.w,
+        h: object && object.h,
+        value: object && object.value,
+        label: object && object.label || '',
+      })),
+      notes: level && level.notes || '',
+    })),
+  };
+}
+
+function runtimeLevelMessage(creationId, payload) {
+  const canonical = canonicalRuntimeLevelPayload(payload);
+  return {
+    type: 'gameFactoryLevels',
+    schema: canonical.schema,
+    id: String(creationId || '').toLowerCase(),
+    levels: canonical.levels,
+  };
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(value || '')));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function qaReceiptError(receipt, html, creationId, runtimeLevelPayload) {
+  if (!receipt || receipt.schema !== 'game-factory-runtime-smoke-v3') return 'qa_receipt_required';
+  if (receipt.htmlSha256 !== await sha256Hex(html)) return 'qa_receipt_html_mismatch';
+  const messageHash = await sha256Hex(JSON.stringify(runtimeLevelMessage(creationId, runtimeLevelPayload)));
+  if (receipt.levelMessageSha256 !== messageHash) return 'qa_receipt_levels_mismatch';
+  const requiredViewports = {
+    mobile: { width:393, height:808, hasTouch:true },
+    desktop: { width:1280, height:676, hasTouch:false },
+  };
+  for (const [name, required] of Object.entries(requiredViewports)) {
+    const result = receipt.viewports && receipt.viewports[name];
+    if (!result
+      || result.boot !== true
+      || result.rendered !== true
+      || result.levelBridge !== true
+      || result.firstAction !== true
+      || result.aliveAfterSettle !== true
+      || result.width !== required.width
+      || result.height !== required.height
+      || result.hasTouch !== required.hasTouch) {
+      return `qa_receipt_${name}_incomplete`;
+    }
+  }
+  return '';
+}
 
 export async function onRequestPost({ request, env }) {
   const guard = await requireRelay(request, env);
@@ -189,7 +254,15 @@ export async function onRequestPost({ request, env }) {
     appendBuildEvent(jobRec, { stage: 'validation', state: 'started', attempt });
     if (html.length < 64) return rejectReadyValidation(env, id, jobRec, 'empty_html', 400, attempt);
     if (html.length > MAX_HTML) return rejectReadyValidation(env, id, jobRec, 'html_too_large', 413, attempt);
-    if (!extractEmbeddedLevelSeed(html)) return rejectReadyValidation(env, id, jobRec, 'missing_level_seed', 400, attempt);
+    const embeddedLevelPayload = extractEmbeddedLevelSeed(html);
+    if (!embeddedLevelPayload) return rejectReadyValidation(env, id, jobRec, 'missing_level_seed', 400, attempt);
+    let runtimeLevelPayload = embeddedLevelPayload;
+    if (jobRec.baseId) {
+      const savedLevelPayload = await readCreationLevels(env, jobRec.baseId);
+      if (shouldPreserveCreationLevels(savedLevelPayload)) runtimeLevelPayload = savedLevelPayload;
+    }
+    const receiptError = await qaReceiptError(body.qaReceipt, html, jobRec.baseId || id, runtimeLevelPayload);
+    if (receiptError) return rejectReadyValidation(env, id, jobRec, receiptError, 400, attempt);
     appendBuildEvent(jobRec, { stage: 'validation', state: 'passed', attempt });
     // Cover screenshot (base64 PNG from the relay's quality-smoke). Stored as-is;
     // /api/creation-cover decodes + serves it. Capped so a giant shot can't bust KV.

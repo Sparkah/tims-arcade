@@ -7,6 +7,7 @@
 
 import { json, jsonError } from '../../_lib/response.js';
 import { requireRelay } from '../../_lib/adminAuth.js';
+import { readCreationLevels, shouldPreserveCreationLevels } from '../../_lib/creationLevels.js';
 import { queueCandidateIds, removeJobFromQueue } from '../../_lib/genQueue.js';
 
 const STUCK_MS = 10 * 60 * 1000;   // a "building" job older than this is presumed dropped
@@ -77,7 +78,25 @@ export async function onRequestGet({ request, env }) {
   // For in-place iterate jobs, attach the CURRENT game HTML so the relay can evolve it.
   // Only for the jobs we actually return -> bounds the extra KV reads + response size.
   for (const j of out) {
-    if (j.baseId) { j.iterate = true; j.baseHtml = (await env.VOTES.get(`genblob:${j.baseId}`)) || ''; }
+    // The runtime bridge identifies the persistent creation, not an iteration
+    // job. Relay receipts bind this exact id along with the injected levels.
+    j.creationId = j.baseId || j.id;
+    if (j.baseId) {
+      j.iterate = true;
+      j.baseHtml = (await env.VOTES.get(`genblob:${j.baseId}`)) || '';
+      const savedLevels = await readCreationLevels(env, j.baseId);
+      // gen-result deliberately preserves non-default creator edits. Send that
+      // authoritative runtime payload to the relay so browser QA tests what the
+      // wrapper will inject, not the replacement HTML's unused built-in seed.
+      if (shouldPreserveCreationLevels(savedLevels)) {
+        j.runtimeLevelPayload = {
+          schema: savedLevels.schema,
+          levels: savedLevels.levels,
+          source: savedLevels.source,
+          updatedTs: savedLevels.updatedTs,
+        };
+      }
+    }
     delete j.baseId;
   }
   const r = json({ ok: true, jobs: out });

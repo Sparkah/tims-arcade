@@ -32,7 +32,6 @@
     (function () {
       var q = new URLSearchParams(location.search);
       var id = (q.get('id') || '').toLowerCase();
-      var slug = (q.get('slug') || '').toLowerCase();
       var title = q.get('title') || '';
       var by = q.get('by') || '';
       if (title) document.getElementById('ctitle').textContent = title;
@@ -48,7 +47,7 @@
       f.setAttribute('allowfullscreen', '');
       f.setAttribute('title', title || 'Player creation');
       f.src = '/g/' + id;
-      document.getElementById('cwrap').appendChild(f);
+      var wrap = document.getElementById('cwrap');
 
       // Level-builder bridge: generated games are intentionally sandboxed with
       // no network access, so the trusted wrapper fetches creator-authored level
@@ -56,29 +55,22 @@
       var levelPayload = null;
       function sendLevels() {
         if (!levelPayload || !f.contentWindow) return;
-        try { f.contentWindow.postMessage(levelPayload, '*'); } catch (e) {}
+        // The sandboxed game has an opaque origin, so postMessage requires "*".
+        // Make that delivery strictly one-shot: a hostile game can navigate its
+        // own iframe, but the newly loaded document must never receive the private
+        // level payload from a second load event.
+        f.removeEventListener('load', sendLevels);
+        var payload = levelPayload;
+        levelPayload = null;
+        try { f.contentWindow.postMessage(payload, '*'); } catch (e) {}
       }
       f.addEventListener('load', sendLevels);
-      fetch('/api/creation-levels?id=' + encodeURIComponent(id), { credentials: 'same-origin', cache: 'no-store' })
-        .then(function (r) { return r.ok ? r.json() : null; })
-        .then(function (d) {
-          if (!d || !d.ok || !Array.isArray(d.levels)) return;
-          levelPayload = {
-            type: 'gameFactoryLevels',
-            schema: d.schema || 'game-factory-generic-levels-v1',
-            id: id,
-            levels: d.levels,
-            updatedTs: d.updatedTs || 0
-          };
-          sendLevels();
-        })
-        .catch(function () {});
 
-      // Metrics: count the play + flush VISIBLE playtime. kind:'creation' so the
-      // server records plays/seconds but does NOT accrue prompt credits (sandboxed
-      // iframe = can't input-gate, so it must not feed the economy).
-      var validSlug = /^[a-z0-9_-]{1,60}$/.test(slug);
-      if (validSlug) {
+      // Metrics start only after the access-controlled level API approves this
+      // viewer. The slug comes from that server record, never from the URL.
+      function startMetrics(serverSlug) {
+        var slug = String(serverSlug || '').toLowerCase();
+        if (!/^[a-z0-9_-]{1,60}$/.test(slug)) return;
         try { fetch('/api/play', { method: 'POST', headers: { 'content-type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ slug: slug }) }); } catch (e) {}
         var vis = 0;
         setInterval(function () { if (document.visibilityState === 'visible') vis++; }, 1000);
@@ -92,6 +84,27 @@
         document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') flush(false); });
         window.addEventListener('pagehide', function () { flush(true); });
       }
+
+      fetch('/api/creation-levels?id=' + encodeURIComponent(id), { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (r) { if (!r.ok) throw new Error('creation_unavailable'); return r.json(); })
+        .then(function (d) {
+          if (!d || !d.ok || !Array.isArray(d.levels) || !d.levels.length) throw new Error('creation_unavailable');
+          levelPayload = {
+            type: 'gameFactoryLevels',
+            schema: d.schema || 'game-factory-generic-levels-v1',
+            id: id,
+            levels: d.levels
+          };
+          wrap.appendChild(f);
+          startMetrics(d.slug);
+        })
+        .catch(function () {
+          var error = document.createElement('div');
+          error.className = 'cerr';
+          error.textContent = 'This game is private or unavailable. Sign in with the account that owns it.';
+          wrap.replaceChildren(error);
+        });
+
     })();
   </script>
 </body>

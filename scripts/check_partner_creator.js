@@ -7,6 +7,7 @@
  */
 
 const fs = require('fs');
+const nodeCrypto = require('crypto');
 const path = require('path');
 const childProcess = require('child_process');
 const { pathToFileURL } = require('url');
@@ -145,6 +146,49 @@ function validGameHtml(label) {
     '</script></body></html>';
 }
 
+function canonicalRuntimeLevelPayload(payload) {
+  return {
+    schema: payload && payload.schema || 'game-factory-generic-levels-v1',
+    levels: (payload && Array.isArray(payload.levels) ? payload.levels : []).map(level => ({
+      name: level && level.name || '',
+      width: level && level.width,
+      height: level && level.height,
+      player: { x: level && level.player && level.player.x, y: level && level.player && level.player.y },
+      goal: { x: level && level.goal && level.goal.x, y: level && level.goal && level.goal.y },
+      objects: (level && Array.isArray(level.objects) ? level.objects : []).map(object => ({
+        id: object && object.id || '',
+        type: object && object.type,
+        x: object && object.x,
+        y: object && object.y,
+        w: object && object.w,
+        h: object && object.h,
+        value: object && object.value,
+        label: object && object.label || '',
+      })),
+      notes: level && level.notes || '',
+    })),
+  };
+}
+
+function runtimeLevelMessage(creationId, payload) {
+  const canonical = canonicalRuntimeLevelPayload(payload);
+  return { type:'gameFactoryLevels', schema:canonical.schema, id:String(creationId || '').toLowerCase(), levels:canonical.levels };
+}
+
+function qaReceiptFor(html, creationId, runtimeLevelPayload) {
+  const sha256 = value => nodeCrypto.createHash('sha256').update(String(value || '')).digest('hex');
+  const pass = { boot: true, rendered: true, levelBridge: true, firstAction: true, aliveAfterSettle: true };
+  return {
+    schema: 'game-factory-runtime-smoke-v3',
+    htmlSha256: sha256(html),
+    levelMessageSha256: sha256(JSON.stringify(runtimeLevelMessage(creationId, runtimeLevelPayload))),
+    viewports: {
+      mobile: { width:393, height:808, hasTouch:true, ...pass },
+      desktop: { width:1280, height:676, hasTouch:false, ...pass },
+    },
+  };
+}
+
 async function jsonResponse(response) {
   const text = await response.text();
   let body = null;
@@ -172,6 +216,7 @@ async function main() {
   const adminJobApi = await import(pathToFileURL(path.join(ROOT, 'functions/api/admin/gen-job.js')).href);
   const history = await import(pathToFileURL(path.join(ROOT, 'functions/_lib/creationHistory.js')).href);
   const jobLog = await import(pathToFileURL(path.join(ROOT, 'functions/_lib/genJobLog.js')).href);
+  const creationLevels = await import(pathToFileURL(path.join(ROOT, 'functions/_lib/creationLevels.js')).href);
 
   for (const [bytes, mime] of [
     [referencePng(), 'image/png'],
@@ -589,14 +634,28 @@ async function main() {
   assert(parsed.status === 200 && /^[0-9a-f]{32}$/.test(parsed.body.id) && parsed.body.id !== freshRequestNonce, 'fresh image success fixture did not queue');
   const freshId = parsed.body.id;
   assert((await postResultFor(freshId, { status: 'building' })).status === 200, 'fresh success fixture could not be claimed');
+  const freshHtml = validGameHtml('Fresh Market Flow');
   response = await postResultFor(freshId, {
-    status: 'ready', html: validGameHtml('Fresh Market Flow'), title: 'Fresh Market Flow', quality: 'ok',
+    status: 'ready', html: freshHtml, title: 'Fresh Market Flow', quality: 'ok',
+    qaReceipt: qaReceiptFor(freshHtml, freshId, creationLevels.extractEmbeddedLevelSeed(freshHtml)),
   });
   parsed = await jsonResponse(response);
   assert(parsed.status === 200 && parsed.body.status === 'ready' && parsed.body.playUrl === `/g/${freshId}`, 'fresh image job did not finish ready');
   assert(!partnerKv.store.has(`genref:${freshId}`), 'successful fresh job retained its reference');
   const freshUpload = JSON.parse(partnerKv.store.get(`upload:${freshId}`));
   assert(freshUpload && freshUpload.source === 'vibe' && freshUpload.uid === TEST_UID, 'fresh ready job did not create an owned private game');
+
+  // A creator edit is authoritative during Improve. The queue must send this
+  // exact runtime payload and the result receipt must bind it, not the new
+  // HTML's otherwise-safe embedded seed.
+  partnerKv.store.set(`creation-levels:${freshId}`, JSON.stringify({
+    schema:'game-factory-generic-levels-v1', source:'creator-admin', updatedTs:12345,
+    levels:[{
+      name:'Saved Market Layout', width:1520, height:720,
+      player:{ x:90, y:620 }, goal:{ x:1435, y:620 },
+      objects:[{ id:'saved-counter', type:'counterBin', x:600, y:500, w:160, h:80, value:-0.25, label:'Saved bin' }], notes:'owner edit',
+    }],
+  }));
 
   const improveRequestNonce = '3234567890abcdef1234567890abcdef';
   response = await submit.onRequestPost({
@@ -623,10 +682,14 @@ async function main() {
   parsed = await jsonResponse(response);
   const improveQueueJob = parsed.body.jobs.find(item => item.id === improveId);
   assert(improveQueueJob && improveQueueJob.iterate === true && improveQueueJob.hasReferenceImage === true, 'relay queue lost Improve image/base mode');
+  assert(improveQueueJob.creationId === freshId, 'relay queue hashed the iteration job id instead of the persistent creation id');
+  assert(improveQueueJob.runtimeLevelPayload && improveQueueJob.runtimeLevelPayload.levels[0].name === 'Saved Market Layout', 'relay queue did not attach preserved creator levels');
   assert(/Fresh Market Flow/.test(improveQueueJob.baseHtml || ''), 'relay queue did not attach current base HTML to Improve');
   assert((await postResultFor(improveId, { status: 'building' })).status === 200, 'image-assisted Improve could not be claimed');
+  const improvedHtml = validGameHtml('Improved Counter Bagging');
   response = await postResultFor(improveId, {
-    status: 'ready', html: validGameHtml('Improved Counter Bagging'), title: 'Ignored New Title', quality: 'ok',
+    status: 'ready', html: improvedHtml, title: 'Ignored New Title', quality: 'ok',
+    qaReceipt: qaReceiptFor(improvedHtml, freshId, improveQueueJob.runtimeLevelPayload),
   });
   parsed = await jsonResponse(response);
   assert(parsed.status === 200 && parsed.body.status === 'ready' && parsed.body.playUrl === `/g/${freshId}`, 'Improve did not preserve the creation id');
@@ -635,6 +698,8 @@ async function main() {
   assert(!partnerKv.store.has(`genref:${improveId}`), 'successful Improve retained its reference');
   const improvedUpload = JSON.parse(partnerKv.store.get(`upload:${freshId}`));
   assert(improvedUpload.versionNumber >= 2 && improvedUpload.title === freshUpload.title, 'Improve did not version the same creation');
+  const improvedLevels = JSON.parse(partnerKv.store.get(`creation-levels:${freshId}`));
+  assert(improvedLevels.source === 'creator-admin' && improvedLevels.levels[0].name === 'Saved Market Layout', 'Improve replaced creator levels after QA tested them');
 
   // A relay coming back after five days must terminal-fail a stale job at claim
   // time instead of rebuilding forever. Comped expiry still cannot mutate tokens.

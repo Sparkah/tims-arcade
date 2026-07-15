@@ -9,7 +9,7 @@
 //   * the session cookie is HttpOnly regardless.
 // Tim 2026-06-15.
 
-import { readSession } from '../api/_session.js';
+import { canReadPrivateCreation } from '../_lib/creationAccess.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 
@@ -66,7 +66,7 @@ export async function onRequestGet({ request, env, params }) {
   }
 
   const html = await env.VOTES.get(`genblob:${id}`);
-  if (!html) return notFound('Game not found or expired.');
+  if (!html) return notFound();
 
   // Access control (Codex review 2026-06-15): a published creation is public; an
   // unpublished/private one is owner-only. So unpublish actually revokes the link.
@@ -76,11 +76,11 @@ export async function onRequestGet({ request, env, params }) {
     // default-DENY rather than serve open (Codex 2026-06-16). Fall back to the
     // genjob record so the creator can still reach their own game.
     const job = await env.VOTES.get(`genjob:${id}`, 'json');
-    const s = await readSession(request, env);
-    if (!job || !s || s.uid !== job.uid) return notFound();
+    if (!job || !await canReadPrivateCreation(request, env, job.uid)) return notFound();
+  } else if (rec.source !== 'vibe') {
+    return notFound();
   } else if (!rec.published) {
-    const s = await readSession(request, env);
-    if (!s || s.uid !== rec.uid) return notFound();
+    if (!await canReadPrivateCreation(request, env, rec.uid)) return notFound();
   }
 
   return new Response(html, {
@@ -89,9 +89,9 @@ export async function onRequestGet({ request, env, params }) {
       'content-security-policy': CSP,
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'no-referrer',
-      // `private` so the edge never caches it -> deleting the KV blob takes a game
-      // down within ~5 min (the browser-only window), instead of up to a day.
-      'cache-control': 'private, max-age=300',
+      // Authorization can change on logout/account switch or unpublish. Never
+      // reuse a previously allowed raw game response across that transition.
+      'cache-control': 'private, no-store',
       // key the cached raw response on Sec-Fetch-Dest so a browser-cached iframe load
       // isn't reused for a top-level visit (which must redirect to /cplay).
       'vary': 'Sec-Fetch-Dest',

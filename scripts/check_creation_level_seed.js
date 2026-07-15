@@ -61,6 +61,26 @@ async function main() {
     throw new Error('expected seed sanitizer to clamp player y');
   }
 
+  const customHtml = htmlWithLevels([{
+    name: 'Wide Custom World',
+    width: 1520,
+    height: 720,
+    player: { x: 90, y: 620 },
+    goal: { x: 1435, y: 620 },
+    objects: [
+      { type: 'climate', x: 0, y: 0, w: 1520, h: 720, value: 18, label: 'Cool night' },
+      { type: 'coolRock', x: 400, y: 588, w: 180, h: 32, value: 18, label: 'Blue stone' },
+      { type: 'camera', x: 720, y: 140, w: 430, h: 28, value: -0.35, label: 'Iris One' },
+    ],
+  }]);
+  const custom = mod.extractEmbeddedLevelSeed(customHtml);
+  if (!custom || custom.levels[0].width !== 1520 || custom.levels[0].height !== 720) throw new Error('custom world dimensions were changed');
+  if (custom.levels[0].objects[1].type !== 'coolRock') throw new Error('custom object type was changed');
+  if (custom.levels[0].objects[2].value !== -0.35) throw new Error('custom object value was changed');
+  if (custom.levels[0].objects[0].id !== 'level-1-object-1' || custom.levels[0].objects[2].id !== 'level-1-object-3') {
+    throw new Error('missing object IDs were not deterministic');
+  }
+
   const env = makeEnv();
   const seeded = await mod.seedCreationLevelsFromHtml(env, 'abc12345', html, { updatedTs: 123 });
   if (!seeded.seeded || seeded.count !== 2) throw new Error('seed write failed');

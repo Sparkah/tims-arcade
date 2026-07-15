@@ -17,6 +17,11 @@ const APP_CSP = [
   'upgrade-insecure-requests',
 ].join('; ');
 
+// /cplay embeds only the same-origin, access-controlled /g/<id> runtime. Keep
+// ordinary Gallery pages' broader iframe policy intact, while preventing a
+// hostile generated game from navigating its iframe to an external receiver.
+const CPLAY_CSP = APP_CSP.replace("frame-src 'self' https:", "frame-src 'self'");
+
 function isHtml(headers) {
   return (headers.get('content-type') || '').toLowerCase().includes('text/html');
 }
@@ -39,7 +44,11 @@ export async function onRequest(context) {
   const response = await context.next();
   const headers = new Headers(response.headers);
   headers.set('Strict-Transport-Security', HSTS);
-  if (shouldApplyCsp(context, headers)) headers.set('Content-Security-Policy', APP_CSP);
+  if (shouldApplyCsp(context, headers)) {
+    const pathname = new URL(context.request.url).pathname;
+    const isCplay = pathname === '/cplay' || pathname === '/cplay.html';
+    headers.set('Content-Security-Policy', isCplay ? CPLAY_CSP : APP_CSP);
+  }
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
