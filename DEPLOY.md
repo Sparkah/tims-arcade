@@ -109,6 +109,56 @@ cd Gallery
 wrangler pages dev . --kv VOTES
 ```
 
+## Dissertation study database
+
+The public repository contains the D1 schema but intentionally does not contain
+the game-to-condition seed. That mapping is blinded research data and lives in
+the private `qmul-agentic-game-production` workspace.
+
+Build the public opaque game copies and private seed together:
+
+```bash
+python3 scripts/build_dissertation_study.py \
+  --source-root /path/to/private/qmul-agentic-game-production
+```
+
+The private seed is written below that repository's
+`artifacts/player_study/dissertation-player-v1/` directory. Apply it only to the
+dedicated `dissertation-study` database, then verify the row count:
+
+```bash
+npx wrangler d1 migrations apply dissertation-study --remote
+npx wrangler d1 execute dissertation-study --remote \
+  --file=/path/to/private/0002_dissertation_games.sql
+npx wrangler d1 execute dissertation-study --remote \
+  --command="SELECT COUNT(*) AS active_games FROM study_games WHERE active=1"
+```
+
+The required result is `56`. Collection remains closed unless all three
+server-side gates are present: `DISSERTATION_STUDY_OPEN=1`, a non-empty
+`DISSERTATION_ETHICS_CONFIRMATION_ID`, and a non-empty
+`DISSERTATION_CONSENT_VERSION`. Never enable them before the written
+approval/exemption and participant wording are confirmed.
+
+The frozen game payloads landed in the four commits immediately before the
+study shell. Verify the complete checkout—not only the latest diff—before
+deploying:
+
+```bash
+python3 scripts/verify_dissertation_pool.py
+```
+
+The verifier requires all 56 opaque pool paths, checks each served SHA-256
+against the public integrity manifest, rejects extra/missing game directories,
+and confirms that the public JSON contains no condition, prompt, run, batch, or
+source mapping.
+
+The mutation API also fails closed unless the `DISSERTATION_RATE_LIMITER`
+binding is present. It allows at most 20 requests per minute for new-session
+creation and per random study session, while D1 enforces a global ceiling of
+500 new sessions per UTC day. These controls do not store IP addresses,
+cookies, device fingerprints, or other participant identifiers.
+
 ## Creator builder rollout settings
 
 The `/create` Codex pilot is fail-closed and configured through Pages secrets,

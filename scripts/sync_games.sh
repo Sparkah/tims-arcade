@@ -292,6 +292,7 @@ User-agent: *
 Allow: /
 Disallow: /admin.html
 Disallow: /api/
+Disallow: /dissertation/
 
 Sitemap: $SITE/sitemap.xml
 EOF
