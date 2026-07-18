@@ -76,12 +76,6 @@ export async function onRequestPost({ request, env }) {
   if (!hasRating && rating !== null) return studyError('invalid_rating', 400);
   if (!hasSkip && skipReason !== null) return studyError('invalid_skip_reason', 400);
 
-  const rateLimitResponse = await enforceStudyRateLimit(
-    gate.config,
-    `session:${sessionId}`,
-  );
-  if (rateLimitResponse) return rateLimitResponse;
-
   const { db } = gate.config;
   let assignment;
   try {
@@ -109,6 +103,12 @@ export async function onRequestPost({ request, env }) {
       && (serverElapsedSeconds < MIN_RATING_SECONDS || playtimeSeconds < MIN_RATING_SECONDS)) {
     return studyError('play_more_before_rating', 403);
   }
+
+  const rateLimitResponse = await enforceStudyRateLimit(
+    gate.config,
+    `session:${sessionId}`,
+  );
+  if (rateLimitResponse) return rateLimitResponse;
 
   const responseId = newUuid();
   const endedAt = new Date(endedAtMs).toISOString();

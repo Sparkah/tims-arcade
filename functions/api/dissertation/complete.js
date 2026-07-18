@@ -18,12 +18,6 @@ export async function onRequestPost({ request, env }) {
   const { sessionId } = parsed.body;
   if (!validSessionId(sessionId)) return studyError('invalid_session', 400);
 
-  const rateLimitResponse = await enforceStudyRateLimit(
-    gate.config,
-    `session:${sessionId}`,
-  );
-  if (rateLimitResponse) return rateLimitResponse;
-
   const { db } = gate.config;
   let session;
   let responseCount;
@@ -61,6 +55,12 @@ export async function onRequestPost({ request, env }) {
       sessionSize: STUDY_SESSION_SIZE,
     }, 409);
   }
+
+  const rateLimitResponse = await enforceStudyRateLimit(
+    gate.config,
+    `session:${sessionId}`,
+  );
+  if (rateLimitResponse) return rateLimitResponse;
 
   const completedAt = nowIso();
   try {

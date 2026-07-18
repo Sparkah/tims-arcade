@@ -153,11 +153,11 @@ against the public integrity manifest, rejects extra/missing game directories,
 and confirms that the public JSON contains no condition, prompt, run, batch, or
 source mapping.
 
-The mutation API also fails closed unless the `DISSERTATION_RATE_LIMITER`
-binding is present. It allows at most 20 requests per minute for new-session
-creation and per random study session, while D1 enforces a global ceiling of
-500 new sessions per UTC day. These controls do not store IP addresses,
-cookies, device fingerprints, or other participant identifiers.
+The mutation API uses atomic D1 buckets to allow at most 20 requests per minute
+for new-session creation and per random study session, plus a global ceiling of
+500 new sessions per UTC day. Status remains closed if the abuse-control table
+is unavailable. These controls do not store IP addresses, cookies, device
+fingerprints, or other participant identifiers.
 
 ## Creator builder rollout settings
 

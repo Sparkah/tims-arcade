@@ -5,6 +5,8 @@ export const STUDY_ELIGIBLE_FALLBACK = 56;
 export const STUDY_RECORD_VERSION = 1;
 export const MIN_RATING_SECONDS = 10;
 export const MAX_SESSIONS_PER_UTC_DAY = 500;
+export const MAX_MUTATIONS_PER_MINUTE = 20;
+export const RATE_BUCKET_RETENTION_DAYS = 2;
 
 const MAX_BODY_BYTES = 4096;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -43,19 +45,14 @@ export function studyConfiguration(env = {}) {
   const ethicsConfirmationId = String(env.DISSERTATION_ETHICS_CONFIRMATION_ID || '').trim();
   const consentVersion = String(env.DISSERTATION_CONSENT_VERSION || '').trim();
   const db = env.DISSERTATION_DB;
-  const rateLimiter = env.DISSERTATION_RATE_LIMITER;
-  const abuseProtectionReady = Boolean(rateLimiter && typeof rateLimiter.limit === 'function');
   const open = env.DISSERTATION_STUDY_OPEN === '1'
     && Boolean(ethicsConfirmationId)
     && Boolean(consentVersion)
-    && Boolean(db)
-    && abuseProtectionReady;
+    && Boolean(db);
 
   return {
     open,
     db,
-    rateLimiter,
-    abuseProtectionReady,
     ethicsConfirmationId,
     consentVersion,
   };
@@ -72,16 +69,40 @@ export function requireOpenStudy(env) {
   return { config, response: null };
 }
 
-export async function enforceStudyRateLimit(config, key) {
-  if (!config.abuseProtectionReady) {
-    return studyError('study_unavailable', 503);
-  }
+async function claimRateBudget(db, bucketKey, windowStart, limit) {
+  const row = await db.prepare(`
+    INSERT INTO study_rate_buckets (bucket_key, window_start, used)
+    VALUES (?, ?, 1)
+    ON CONFLICT(bucket_key) DO UPDATE SET
+      used = study_rate_buckets.used + 1
+    WHERE study_rate_buckets.used < ?
+    RETURNING used
+  `).bind(bucketKey, windowStart, limit).first();
+  return Boolean(row && Number(row.used) >= 1);
+}
 
+export async function studyAbuseProtectionReady(db) {
+  if (!db) return false;
   try {
-    const result = await config.rateLimiter.limit({
-      key: `dissertation-player-v1:${key}`,
-    });
-    if (!result || result.success !== true) {
+    await db.prepare('SELECT used FROM study_rate_buckets LIMIT 1').first();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function enforceStudyRateLimit(config, key, now = new Date()) {
+  const iso = now.toISOString();
+  const minute = iso.slice(0, 16);
+  const day = iso.slice(0, 10);
+  try {
+    const available = await claimRateBudget(
+      config.db,
+      `minute:${minute}:${key}`,
+      day,
+      MAX_MUTATIONS_PER_MINUTE,
+    );
+    if (!available) {
       return studyJson(
         { error: 'rate_limited' },
         429,
@@ -91,22 +112,25 @@ export async function enforceStudyRateLimit(config, key) {
   } catch {
     return studyError('study_unavailable', 503);
   }
-
   return null;
 }
 
 export async function claimDailySessionBudget(db, now = new Date()) {
   const day = now.toISOString().slice(0, 10);
   const bucketKey = `session-create:${day}`;
-  const row = await db.prepare(`
-    INSERT INTO study_rate_buckets (bucket_key, window_start, used)
-    VALUES (?, ?, 1)
-    ON CONFLICT(bucket_key) DO UPDATE SET
-      used = study_rate_buckets.used + 1
-    WHERE study_rate_buckets.used < ?
-    RETURNING used
-  `).bind(bucketKey, day, MAX_SESSIONS_PER_UTC_DAY).first();
-  return Boolean(row && Number(row.used) >= 1);
+  const available = await claimRateBudget(
+    db,
+    bucketKey,
+    day,
+    MAX_SESSIONS_PER_UTC_DAY,
+  );
+  const cutoff = new Date(
+    now.getTime() - RATE_BUCKET_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+  ).toISOString().slice(0, 10);
+  await db.prepare(
+    'DELETE FROM study_rate_buckets WHERE window_start < ?',
+  ).bind(cutoff).run();
+  return available;
 }
 
 export async function readStudyJson(request, allowedKeys, requiredKeys = allowedKeys) {

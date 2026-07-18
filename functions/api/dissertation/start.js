@@ -21,12 +21,6 @@ export async function onRequestPost({ request, env }) {
     return studyError('invalid_assignment', 400);
   }
 
-  const rateLimitResponse = await enforceStudyRateLimit(
-    gate.config,
-    `session:${sessionId}`,
-  );
-  if (rateLimitResponse) return rateLimitResponse;
-
   const { db } = gate.config;
   let assignment;
   try {
@@ -36,6 +30,12 @@ export async function onRequestPost({ request, env }) {
   }
   if (!assignment) return studyError('assignment_not_found', 404);
   if (assignment.session_status !== 'active') return studyError('session_not_active', 409);
+
+  const rateLimitResponse = await enforceStudyRateLimit(
+    gate.config,
+    `session:${sessionId}`,
+  );
+  if (rateLimitResponse) return rateLimitResponse;
 
   if (!assignment.started_at) {
     try {
