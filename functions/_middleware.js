@@ -1,4 +1,9 @@
 const HSTS = 'max-age=31536000';
+const CLOUDFLARE_ANALYTICS_SNIPPET = /<!--\s*Cloudflare (?:Pages|Web) Analytics\s*-->\s*<script\b[^>]*\bsrc=(['"])https:\/\/static\.cloudflareinsights\.com\/beacon\.min\.js(?:[/?][^'"]*)?\1[^>]*>\s*<\/script>\s*<!--\s*(?:End\s+)?Cloudflare (?:Pages|Web) Analytics\s*-->/giu;
+
+export function stripCloudflareAnalytics(html) {
+  return html.replace(CLOUDFLARE_ANALYTICS_SNIPPET, '');
+}
 
 const APP_CSP = [
   "default-src 'self'",
@@ -87,6 +92,7 @@ export async function onRequest(context) {
   }
   const response = await context.next();
   const headers = new Headers(response.headers);
+  let body = response.body;
   headers.set('Strict-Transport-Security', HSTS);
   if (pathname === '/dissertation' || pathname.startsWith('/dissertation/')
       || pathname.startsWith('/api/dissertation/')) {
@@ -114,7 +120,16 @@ export async function onRequest(context) {
       headers.set('Content-Security-Policy', isCplay ? CPLAY_CSP : APP_CSP);
     }
   }
-  return new Response(response.body, {
+  if ((pathname === '/dissertation' || pathname.startsWith('/dissertation/'))
+      && isHtml(headers)) {
+    // Pages one-click analytics modifies static HTML before Functions run.
+    // Remove only its explicitly marked beacon; no-transform above prevents
+    // a second injection later in the edge pipeline.
+    body = stripCloudflareAnalytics(await response.text());
+    headers.delete('Content-Length');
+    headers.delete('ETag');
+  }
+  return new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers,

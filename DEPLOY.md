@@ -153,9 +153,12 @@ against the public integrity manifest, rejects extra/missing game directories,
 and confirms that the public JSON contains no condition, prompt, run, batch, or
 source mapping.
 
-Keep `no-transform` on all dissertation HTML. Cloudflare Pages Web Analytics
-otherwise injects a browser beacon after deployment, changing the frozen game
-bytes and creating a second telemetry stream outside the research record.
+Keep the path-scoped Pages Analytics removal and `no-transform` middleware on
+all dissertation HTML. Pages injects its marked browser beacon into static HTML
+before Functions run; middleware removes that exact snippet, and
+`no-transform` prevents a later edge rewrite. Without both controls the frozen
+game bytes change and a second telemetry stream exists outside the research
+record.
 
 The mutation API uses atomic D1 buckets to allow at most 20 requests per minute
 for new-session creation and per random study session, plus a global ceiling of
