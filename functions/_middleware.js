@@ -94,6 +94,12 @@ export async function onRequest(context) {
     headers.set('Referrer-Policy', 'no-referrer');
     headers.set('X-Content-Type-Options', 'nosniff');
     headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    if (isHtml(headers)) {
+      // Cloudflare Web Analytics otherwise rewrites valid HTML to inject its
+      // beacon. The study must deliver frozen games byte-for-byte and must not
+      // add a second analytics stream.
+      headers.set('Cache-Control', 'public, max-age=0, must-revalidate, no-transform');
+    }
   }
   if (pathname.startsWith('/api/dissertation/')) {
     headers.set('Cache-Control', 'no-store');

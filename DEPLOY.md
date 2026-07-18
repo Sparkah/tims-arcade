@@ -153,6 +153,10 @@ against the public integrity manifest, rejects extra/missing game directories,
 and confirms that the public JSON contains no condition, prompt, run, batch, or
 source mapping.
 
+Keep `no-transform` on all dissertation HTML. Cloudflare Pages Web Analytics
+otherwise injects a browser beacon after deployment, changing the frozen game
+bytes and creating a second telemetry stream outside the research record.
+
 The mutation API uses atomic D1 buckets to allow at most 20 requests per minute
 for new-session creation and per random study session, plus a global ceiling of
 500 new sessions per UTC day. Status remains closed if the abuse-control table
