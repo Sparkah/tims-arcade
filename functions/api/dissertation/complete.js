@@ -1,4 +1,5 @@
 import {
+  STUDY_SCHEDULE_VERSION,
   STUDY_SESSION_SIZE,
   enforceStudyRateLimit,
   nowIso,
@@ -20,9 +21,10 @@ export async function onRequestPost({ request, env }) {
 
   const { db } = gate.config;
   let session;
+  let assignmentCount;
   let responseCount;
   try {
-    [session, responseCount] = await Promise.all([
+    [session, assignmentCount, responseCount] = await Promise.all([
       db.prepare(`
         SELECT
           s.status,
@@ -32,6 +34,11 @@ export async function onRequestPost({ request, env }) {
         FROM study_sessions AS s
         LEFT JOIN study_schedule_claims AS c ON c.session_id = s.session_id
         WHERE s.session_id = ?
+      `).bind(sessionId).first(),
+      db.prepare(`
+        SELECT COUNT(*) AS count
+        FROM study_assignments
+        WHERE session_id = ?
       `).bind(sessionId).first(),
       db.prepare(`
         SELECT COUNT(*) AS count
@@ -46,11 +53,17 @@ export async function onRequestPost({ request, env }) {
   if (!session.schedule_version || !session.sequence_number) {
     return studyError('schedule_claim_missing', 409);
   }
+  if (session.schedule_version !== STUDY_SCHEDULE_VERSION) {
+    return studyError('session_protocol_mismatch', 409);
+  }
 
+  const assigned = Number(assignmentCount && assignmentCount.count) || 0;
   const completed = Number(responseCount && responseCount.count) || 0;
-  if (session.status !== 'complete' && completed !== STUDY_SESSION_SIZE) {
+  if (session.status !== 'complete'
+      && (assigned !== STUDY_SESSION_SIZE || completed !== STUDY_SESSION_SIZE)) {
     return studyJson({
       error: 'session_incomplete',
+      assignedCount: assigned,
       completedCount: completed,
       sessionSize: STUDY_SESSION_SIZE,
     }, 409);
@@ -70,9 +83,12 @@ export async function onRequestPost({ request, env }) {
     await db.batch([
       db.prepare(`
         UPDATE study_sessions
-        SET status = ?, completed_at = COALESCE(completed_at, ?)
+        SET
+          status = ?,
+          completed_at = COALESCE(completed_at, ?),
+          last_activity_at = ?
         WHERE session_id = ? AND status = ?
-      `).bind('complete', completedAt, sessionId, 'active'),
+      `).bind('complete', completedAt, completedAt, sessionId, 'active'),
       db.prepare(`
         INSERT OR IGNORE INTO study_schedule_completions (
           session_id, version, sequence_number, completed_at
@@ -110,5 +126,7 @@ export async function onRequestPost({ request, env }) {
     sessionId,
     completedAt: session.completed_at,
     primaryCohort: Number(session.primary_cohort) === 1,
+    completedCount: STUDY_SESSION_SIZE,
+    sessionSize: STUDY_SESSION_SIZE,
   });
 }

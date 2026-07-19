@@ -20,7 +20,7 @@ BATCHES = (
 EXPECTED_FORMAL_RUNS = 90
 EXPECTED_ELIGIBLE_RUNS = 56
 STUDY_VERSION = "dissertation-player-v1"
-SESSION_SIZE = 5
+SESSION_SIZE = 56
 BRIDGE_TAG = '<script src="/dissertation/study-bridge.js"></script>'
 TECHNICAL_EXCLUSIONS: dict[str, str] = {
     "gd1181d5b7e5d": (

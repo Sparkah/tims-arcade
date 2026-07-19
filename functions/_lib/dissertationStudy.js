@@ -1,10 +1,13 @@
 import { json, sameOriginOk } from './response.js';
 
-export const STUDY_SESSION_SIZE = 5;
 export const STUDY_ELIGIBLE_FALLBACK = 56;
 export const STUDY_TARGET_SEQUENCES = 56;
-export const STUDY_SCHEDULE_HASH = '7c9d936307af533b738be71b08356e6dba987a2c9e9438a6b57c1de4d1dcebd2';
+export const STUDY_SESSION_SIZE = 56;
+export const STUDY_SCHEDULE_VERSION = 'dissertation-player-v2-all-56-block-1';
+export const STUDY_SCHEDULE_HASH = 'ff0fe46b9b68662aff522568f7287b5b9770fc63fb5a69265359ffaf4beb80be';
 export const STUDY_SCHEDULE_GUARD_TRIGGERS = Object.freeze([
+  'trg_study_assignment_start_in_order',
+  'trg_study_response_in_order',
   'trg_study_schedule_activate_valid',
   'trg_study_schedule_claim_valid',
   'trg_study_schedule_completion_valid',
@@ -19,11 +22,11 @@ export const STUDY_SCHEDULE_GUARD_TRIGGERS = Object.freeze([
   'trg_study_schedule_sequence_insert_frozen',
   'trg_study_schedule_sequence_update_frozen',
 ]);
-export const STUDY_RECORD_VERSION = 1;
+export const STUDY_RECORD_VERSION = 2;
 export const MIN_RATING_SECONDS = 10;
-export const SCHEDULE_REISSUE_AFTER_MS = 30 * 60 * 1000;
+export const SCHEDULE_REISSUE_AFTER_MS = 24 * 60 * 60 * 1000;
 export const MAX_SESSIONS_PER_UTC_DAY = 500;
-export const MAX_MUTATIONS_PER_MINUTE = 20;
+export const MAX_MUTATIONS_PER_MINUTE = 150;
 export const RATE_BUCKET_RETENTION_DAYS = 2;
 
 const MAX_BODY_BYTES = 4096;
@@ -214,6 +217,10 @@ export function validSessionId(value) {
   return typeof value === 'string' && SESSION_ID_RE.test(value);
 }
 
+export function validCreationId(value) {
+  return typeof value === 'string' && SESSION_ID_RE.test(value);
+}
+
 export function validPublicId(value) {
   return typeof value === 'string' && PUBLIC_ID_RE.test(value);
 }
@@ -239,8 +246,7 @@ function number(value) {
 
 export function validateScheduleStructure(summary = {}) {
   return number(summary.activeScheduleCount) === 1
-    && typeof summary.version === 'string'
-    && summary.version.length >= 1
+    && summary.version === STUDY_SCHEDULE_VERSION
     && summary.scheduleHash === STUDY_SCHEDULE_HASH
     && summary.computedScheduleHash === STUDY_SCHEDULE_HASH
     && summary.guardTriggersReady === true
@@ -359,8 +365,8 @@ async function scheduleSummary(db, schedule) {
               ON i.version = q.version AND i.sequence_number = q.sequence_number
             WHERE q.version = (SELECT version FROM chosen)
             GROUP BY q.sequence_number
-            HAVING COUNT(i.public_id) <> 5
-              OR COUNT(DISTINCT i.order_position) <> 5
+            HAVING COUNT(i.public_id) <> ${STUDY_SESSION_SIZE}
+              OR COUNT(DISTINCT i.order_position) <> ${STUDY_SESSION_SIZE}
           )
         ) AS bad_sequence_count,
         (
@@ -372,8 +378,8 @@ async function scheduleSummary(db, schedule) {
               AND i.version = (SELECT version FROM chosen)
             WHERE g.active = 1
             GROUP BY g.public_id
-            HAVING COUNT(i.public_id) <> 5
-              OR COUNT(DISTINCT i.order_position) <> 5
+            HAVING COUNT(i.public_id) <> ${STUDY_SESSION_SIZE}
+              OR COUNT(DISTINCT i.order_position) <> ${STUDY_SESSION_SIZE}
           )
         ) AS bad_game_count,
         (
@@ -406,7 +412,13 @@ async function scheduleSummary(db, schedule) {
       SELECT name
       FROM sqlite_master
       WHERE type = 'trigger'
-        AND name LIKE 'trg_study_schedule_%'
+        AND (
+          name LIKE 'trg_study_schedule_%'
+          OR name IN (
+            'trg_study_assignment_start_in_order',
+            'trg_study_response_in_order'
+          )
+        )
       ORDER BY name
     `).all(),
   ]);
@@ -469,12 +481,14 @@ export async function findEligibleScheduleCandidate(db, version, now = new Date(
       ON schedule.version = q.version AND schedule.active = 1
     INNER JOIN study_schedule_claims AS c
       ON c.version = q.version AND c.sequence_number = q.sequence_number
+    INNER JOIN study_sessions AS s
+      ON s.session_id = c.session_id AND s.status = 'active'
     LEFT JOIN study_schedule_completions AS done
       ON done.version = q.version AND done.sequence_number = q.sequence_number
     WHERE q.version = ? AND done.session_id IS NULL
     GROUP BY q.version, q.sequence_number, q.issue_order
-    HAVING MAX(c.claimed_at) <= ?
-    ORDER BY MAX(c.claimed_at), q.issue_order
+    HAVING MAX(COALESCE(s.last_activity_at, c.claimed_at)) <= ?
+    ORDER BY MAX(COALESCE(s.last_activity_at, c.claimed_at)), q.issue_order
     LIMIT 1
   `).bind(version, staleBefore).first();
   return selectScheduleCandidate(null, reissuable);
@@ -544,12 +558,15 @@ export async function assignmentForSession(db, sessionId, publicId) {
       a.order_position,
       a.started_at,
       s.status AS session_status,
+      c.version AS schedule_version,
       r.response_id,
       r.rating,
       r.skip_reason,
+      r.playtime_censored,
       r.ended_at
     FROM study_assignments AS a
     INNER JOIN study_sessions AS s ON s.session_id = a.session_id
+    LEFT JOIN study_schedule_claims AS c ON c.session_id = s.session_id
     LEFT JOIN study_responses AS r
       ON r.session_id = a.session_id AND r.public_id = a.public_id
     WHERE a.session_id = ? AND a.public_id = ?
@@ -564,6 +581,7 @@ export function duplicateResponseBody(row, publicId) {
     publicId,
     rating: row.rating || null,
     skipReason: row.skip_reason || null,
+    playtimeCensored: Number(row.playtime_censored) === 1,
     endedAt: row.ended_at,
   };
 }

@@ -143,28 +143,33 @@ npx wrangler d1 execute dissertation-study --remote \
   --command="SELECT COUNT(*) AS active_games FROM study_games WHERE active=1; \
     SELECT COUNT(*) AS sequences FROM study_schedule_sequences; \
     SELECT COUNT(*) AS slots FROM study_schedule_items; \
-    SELECT COUNT(*) AS schedule_guards FROM sqlite_master \
-      WHERE type='trigger' AND name LIKE 'trg_study_schedule_%';"
+    SELECT COUNT(*) AS protocol_guards FROM sqlite_master \
+      WHERE type='trigger' AND name LIKE 'trg_study_%';"
 ```
 
-The required results are 56 active games, 56 sequences, 280 slots, and 13
-schedule guards. The API checks the exact expected guard-trigger name set, so it
+The required results are 56 active games, 56 sequences, 3,136 slots, and 15
+protocol guards. The API checks the exact expected guard-trigger name set, so it
 fails closed if the separate public guard step is omitted or incomplete. It also
-checks that every active game appears exactly five times and exactly once at
-each order position. The private schedule seed must insert the schedule as
-inactive, idempotently insert its sequences and items, and set `active=1` only
-as its final statement. Activation requires schedule SHA-256
-`7c9d936307af533b738be71b08356e6dba987a2c9e9438a6b57c1de4d1dcebd2`.
+checks that every sequence contains all 56 active games, every active game
+appears exactly once at every order position, and every session starts with a
+different game across the complete block. The private schedule seed must insert
+the schedule as inactive, idempotently insert its sequences and items, and set
+`active=1` only as its final statement. Activation requires schedule SHA-256
+`ff0fe46b9b68662aff522568f7287b5b9770fc63fb5a69265359ffaf4beb80be`.
 The runtime recomputes that hash from canonical sequence/item rows, and database
 triggers prevent active rows from changing.
 
-Production activation receipt (2026-07-19): migration `0004`, all 13 public
-guards, and the private frozen schedule were applied to `dissertation-study`
-before the opening code was pushed. The verified state was 57 stored games, 56
-active games, 56 sequences, 280 slots, the exact schedule hash above, and zero
-sessions, assignments, responses, claims, or completions. The
-`DISSERTATION_STUDY_OPEN = "1"` setting below is therefore deliberate, not a
-request for Pages to run those database steps automatically.
+Production all-games activation receipt (2026-07-19): the unused five-game
+schedule was deactivated after production D1 was verified at zero sessions,
+assignments, responses, claims, and completions. Migration `0005`, all 15
+guards, and the private `dissertation-player-v2-all-56-block-1` schedule were
+then applied. The verified state was 57 stored games, 56 active games, 56
+sequences, 3,136 slots, 56 distinct starting games, zero malformed rows, the
+exact schedule hash above, a clean foreign-key check, and still zero participant
+records. Migration `0005` refuses to rebuild the protocol tables if any
+participant row exists. The `DISSERTATION_STUDY_OPEN = "1"` setting below is
+therefore deliberate, not a request for Pages to run those database steps
+automatically.
 
 Service evaluation opens only when all three namespaced server settings and D1
 are present:
@@ -172,7 +177,7 @@ are present:
 ```toml
 DISSERTATION_STUDY_OPEN = "1"
 DISSERTATION_SERVICE_EVALUATION_BASIS = "qmul-service-evaluation-email-alvaro-bort"
-DISSERTATION_INFORMATION_VERSION = "service-evaluation-notice-v1"
+DISSERTATION_INFORMATION_VERSION = "service-evaluation-notice-v2-all-56"
 ```
 
 The information version shown beside the visible data notice is sent when the
@@ -199,12 +204,13 @@ before Functions run; middleware removes that exact snippet, and
 game bytes change and a second telemetry stream exists outside the research
 record.
 
-The mutation API uses atomic D1 buckets to allow at most 20 requests per minute
+The mutation API uses atomic D1 buckets to allow at most 150 requests per minute
 for new-session creation and per random session UUID, plus a global ceiling of
 500 new sessions per UTC day. Session creation atomically claims the next
 never-issued frozen sequence. Only after all 56 have been issued can a sequence
-without a primary completion be reissued, and only when its latest claim is at
-least 30 minutes old. The first completed session for each sequence is the
+without a primary completion be reissued, and only after every active claim for
+that row has had no server-recorded activity for at least 24 hours. The first
+completed session for each sequence is the
 primary cohort; later completions remain stored but are flagged non-primary in
 the admin export.
 
@@ -212,7 +218,11 @@ Status remains closed if the abuse-control or schedule tables are unavailable.
 These controls do not store IP addresses, cookies, device fingerprints, or
 other participant identifiers. Browser playtime counts visible-display time:
 it pauses while the document is hidden, while visibility losses remain recorded
-separately.
+separately. Values above one hour per game are stored as 3,600 seconds with an
+explicit censor flag instead of stranding the session. The page stores its
+random session keys and current timing checkpoint in browser local storage so
+the same browser can resume the 56-game order; Begin is idempotent and a resumed
+session continues at the first unanswered position.
 
 ## Creator builder rollout settings
 

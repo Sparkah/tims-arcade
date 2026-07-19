@@ -9,15 +9,28 @@ const EXPORT_SQL = `
     s.information_version,
     s.service_evaluation_basis,
     s.opened_at,
+    s.last_activity_at,
     s.status AS session_status,
     s.completed_at AS session_completed_at,
     claim.version AS schedule_version,
+    schedule.schedule_hash,
+    schedule.session_size AS schedule_session_size,
     claim.sequence_number,
     sequence.issue_order AS schedule_issue_order,
     claim.claim_number,
     claim.claimed_at,
     CASE WHEN primary_done.session_id = s.session_id THEN 1 ELSE 0 END
       AS primary_cohort,
+    (
+      SELECT COUNT(*)
+      FROM study_assignments AS session_assignment
+      WHERE session_assignment.session_id = s.session_id
+    ) AS session_assignment_count,
+    (
+      SELECT COUNT(*)
+      FROM study_responses AS session_response
+      WHERE session_response.session_id = s.session_id
+    ) AS session_response_count,
     g.public_id AS game_id,
     g.prompt_id,
     g.condition AS team_condition,
@@ -29,8 +42,11 @@ const EXPORT_SQL = `
     a.order_position,
     a.assigned_at,
     a.started_at,
+    CASE WHEN r.response_id IS NULL THEN 'missing' ELSE 'responded' END
+      AS outcome_state,
     r.ended_at,
     r.playtime_seconds,
+    r.playtime_censored,
     r.rating,
     r.skip_reason,
     r.device_class,
@@ -43,6 +59,8 @@ const EXPORT_SQL = `
   LEFT JOIN study_schedule_sequences AS sequence
     ON sequence.version = claim.version
     AND sequence.sequence_number = claim.sequence_number
+  LEFT JOIN study_schedules AS schedule
+    ON schedule.version = claim.version
   LEFT JOIN study_schedule_completions AS primary_done
     ON primary_done.version = claim.version
     AND primary_done.sequence_number = claim.sequence_number
@@ -59,14 +77,19 @@ const COLUMNS = [
   'information_version',
   'service_evaluation_basis',
   'opened_at',
+  'last_activity_at',
   'session_status',
   'session_completed_at',
   'schedule_version',
+  'schedule_hash',
+  'schedule_session_size',
   'sequence_number',
   'schedule_issue_order',
   'claim_number',
   'claimed_at',
   'primary_cohort',
+  'session_assignment_count',
+  'session_response_count',
   'game_id',
   'prompt_id',
   'team_condition',
@@ -78,8 +101,10 @@ const COLUMNS = [
   'order_position',
   'assigned_at',
   'started_at',
+  'outcome_state',
   'ended_at',
   'playtime_seconds',
+  'playtime_censored',
   'rating',
   'skip_reason',
   'device_class',

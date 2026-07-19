@@ -3,6 +3,9 @@
 
   const RATING_DELAY_SECONDS = 10;
   const PLAYTIME_PROMPT_SECONDS = 90;
+  const FRAME_READY_TIMEOUT_MS = 20000;
+  const STORAGE_KEY = "dissertation-service-evaluation-v2";
+  const STORAGE_PROTOCOL = "all-56-v2";
   const LOCAL_PREVIEW_HOSTS = new Set(["localhost", "127.0.0.1"]);
   const PREVIEW_MODE = LOCAL_PREVIEW_HOSTS.has(window.location.hostname)
     && new URLSearchParams(window.location.search).get("preview") === "1";
@@ -19,20 +22,24 @@
     introView: document.querySelector("#intro-view"),
     playerView: document.querySelector("#player-view"),
     finishView: document.querySelector("#finish-view"),
+    finishHeading: document.querySelector("#finish-heading"),
     finishCopy: document.querySelector("#finish-copy"),
     footerMode: document.querySelector("#footer-mode"),
     progressLabel: document.querySelector("#progress-label"),
-    progressFill: document.querySelector("#progress-fill"),
-    elapsedLabel: document.querySelector("#elapsed-label"),
+    progressMeter: document.querySelector("#progress-meter"),
     frameShell: document.querySelector("#frame-shell"),
     frameLoading: document.querySelector("#frame-loading"),
+    frameLoadingCopy: document.querySelector("#frame-loading-copy"),
     frame: document.querySelector("#game-frame"),
+    gameHeading: document.querySelector("#game-heading"),
     ratingHelp: document.querySelector("#rating-help"),
     likeButton: document.querySelector("#like-button"),
     dislikeButton: document.querySelector("#dislike-button"),
     skipToggle: document.querySelector("#skip-toggle"),
     skipPanel: document.querySelector("#skip-panel"),
     confirmSkip: document.querySelector("#confirm-skip"),
+    retryGame: document.querySelector("#retry-game"),
+    technicalFailure: document.querySelector("#technical-failure"),
     responseError: document.querySelector("#response-error"),
   };
 
@@ -40,8 +47,10 @@
     mode: "closed",
     status: null,
     sessionId: null,
+    creationId: null,
     games: [],
     position: 0,
+    completedCount: 0,
     visibleElapsedMs: 0,
     visibleTickStartedAt: null,
     gameTimingActive: false,
@@ -49,7 +58,35 @@
     inputMethod: "unknown",
     timer: null,
     submitting: false,
+    readyWait: null,
+    gameLoadToken: 0,
+    lastCheckpointSecond: -1,
+    ratingPhase: "locked",
   };
+
+  class ApiError extends Error {
+    constructor(code, status) {
+      super(code || "The evaluation service could not complete that request.");
+      this.code = code || "study_request_failed";
+      this.status = status;
+    }
+  }
+
+  function playerErrorMessage(error, fallback) {
+    if (!(error instanceof ApiError)) {
+      return error && error.message ? error.message : fallback;
+    }
+    const messages = {
+      play_more_before_rating: "Please play for at least ten seconds before rating.",
+      rate_limited: "The evaluation service is busy. Please wait a moment and try again.",
+      response_save_failed: "The response could not be confirmed right now.",
+      study_database_error: "The evaluation service is temporarily unavailable.",
+      study_unavailable: "The evaluation service is temporarily unavailable.",
+      game_out_of_order: "Your saved position changed and needs to be refreshed.",
+      session_not_active: "This evaluation session is no longer active.",
+    };
+    return messages[error.code] || fallback;
+  }
 
   function setStatus(mode, label) {
     state.mode = mode;
@@ -84,6 +121,47 @@
     return result;
   }
 
+  function readStoredSession() {
+    if (PREVIEW_MODE) return null;
+    try {
+      const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      if (!value || value.protocol !== STORAGE_PROTOCOL) return null;
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  function persistSession({ completed = false, current = undefined } = {}) {
+    if (PREVIEW_MODE) return;
+    const previous = readStoredSession();
+    const value = {
+      protocol: STORAGE_PROTOCOL,
+      creationId: state.creationId,
+      sessionId: state.sessionId,
+      completed,
+    };
+    if (!completed && current === undefined && previous && previous.current) {
+      value.current = previous.current;
+    } else if (!completed && current !== null && current !== undefined) {
+      value.current = current;
+    }
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+    } catch {
+      // The server remains the source of truth. A storage-restricted browser
+      // can finish in this tab, but cannot be promised close-and-return resume.
+    }
+  }
+
+  function clearStoredSession() {
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Ignore storage restrictions.
+    }
+  }
+
   async function api(path, options = {}) {
     const response = await fetch(path, {
       credentials: "same-origin",
@@ -100,9 +178,7 @@
     } catch {
       body = {};
     }
-    if (!response.ok) {
-      throw new Error(body.error || "The study service could not complete that request.");
-    }
+    if (!response.ok) throw new ApiError(body.error, response.status);
     return body;
   }
 
@@ -123,6 +199,17 @@
     return state.visibleElapsedMs + Math.max(0, performance.now() - state.visibleTickStartedAt);
   }
 
+  function checkpointTiming() {
+    if (!state.sessionId || !state.games[state.position] || !state.gameTimingActive) return;
+    persistSession({
+      current: {
+        publicId: state.games[state.position].publicId,
+        visibleElapsedMs: Math.round(visibleElapsedMs()),
+        visibilityLossCount: state.visibilityLossCount,
+      },
+    });
+  }
+
   function pauseVisibleGameTiming() {
     if (!state.gameTimingActive || state.visibleTickStartedAt === null) return;
     state.visibleElapsedMs = visibleElapsedMs();
@@ -135,7 +222,6 @@
   }
 
   function startVisibleGameTiming() {
-    state.visibleElapsedMs = 0;
     state.visibleTickStartedAt = null;
     state.gameTimingActive = true;
     resumeVisibleGameTiming();
@@ -146,15 +232,113 @@
     state.gameTimingActive = false;
   }
 
+  function restoreCheckpoint(publicId) {
+    const stored = readStoredSession();
+    const current = stored && stored.current;
+    if (!current || current.publicId !== publicId) {
+      state.visibleElapsedMs = 0;
+      state.visibilityLossCount = 0;
+      return;
+    }
+    state.visibleElapsedMs = Math.max(0, Number(current.visibleElapsedMs) || 0);
+    state.visibilityLossCount = Math.max(
+      0,
+      Math.min(1000, Number(current.visibilityLossCount) || 0),
+    );
+  }
+
+  function applySession(payload) {
+    state.sessionId = payload.sessionId;
+    state.games = Array.isArray(payload.assignments) ? payload.assignments : [];
+    state.completedCount = Number(payload.completedCount) || 0;
+    const nextIndex = state.games.findIndex(game => !game.responded);
+    state.position = nextIndex >= 0 ? nextIndex : state.games.length;
+    persistSession({ completed: payload.status === "complete" });
+  }
+
+  function showFinish() {
+    stopVisibleGameTiming();
+    clearInterval(state.timer);
+    state.submitting = false;
+    elements.frame.removeAttribute("src");
+    elements.introView.classList.add("is-hidden");
+    elements.playerView.classList.add("is-hidden");
+    elements.finishView.classList.remove("is-hidden");
+    if (PREVIEW_MODE) {
+      setStatus("preview", "Preview complete");
+      elements.footerMode.textContent = "Preview only · responses discarded";
+    } else {
+      setStatus("complete", "Evaluation complete");
+      elements.footerMode.textContent = "Anonymous service-evaluation responses saved";
+    }
+    persistSession({ completed: true });
+    elements.finishHeading.focus({ preventScroll: true });
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }
+
+  async function tryResume(stored) {
+    if (!stored || !stored.sessionId) return false;
+    state.creationId = stored.creationId || null;
+    state.sessionId = stored.sessionId;
+    try {
+      const session = await api("/api/dissertation/resume", {
+        method: "POST",
+        body: JSON.stringify({ sessionId: stored.sessionId }),
+      });
+      state.status = { informationVersion: session.informationVersion };
+      applySession(session);
+      if (session.status !== "complete" && state.completedCount === session.sessionSize) {
+        await api("/api/dissertation/complete", {
+          method: "POST",
+          body: JSON.stringify({ sessionId: state.sessionId }),
+        });
+        session.status = "complete";
+      }
+      if (session.status === "complete") {
+        showFinish();
+        return true;
+      }
+      setStatus("open", "Session ready");
+      elements.closedNotice.classList.add("is-hidden");
+      elements.dataNotice.classList.remove("is-hidden");
+      elements.informationVersion.textContent = session.informationVersion;
+      elements.footerMode.textContent = "Anonymous service-evaluation session saved";
+      setStartState(
+        true,
+        `Resume at game ${state.position + 1} of ${session.sessionSize}`,
+        `${state.completedCount} responses saved on this browser.`,
+      );
+      return true;
+    } catch (error) {
+      if (["session_not_found", "invalid_session", "session_protocol_mismatch"].includes(error.code)) {
+        clearStoredSession();
+        state.sessionId = null;
+        state.creationId = null;
+        return false;
+      }
+      setStatus("closed", "Resume temporarily unavailable");
+      setStartState(
+        false,
+        "Session saved",
+        "Your progress is still saved. Please try this page again shortly.",
+      );
+      return true;
+    }
+  }
+
   async function initialise() {
     if (PREVIEW_MODE) {
       setStatus("preview", "Preview · not recording");
       elements.closedNotice.innerHTML =
         "<strong>Preview mode is local to this browser tab.</strong><span>You can play the full flow, but no evaluation record is created.</span>";
       elements.footerMode.textContent = "Preview only · responses discarded";
-      setStartState(true, "Open five-game preview", "No responses will be recorded.");
+      setStartState(true, "Open 56-game preview", "No responses will be recorded.");
       return;
     }
+
+    const stored = readStoredSession();
+    if (await tryResume(stored)) return;
+    if (stored && stored.creationId) state.creationId = stored.creationId;
 
     try {
       const status = await api("/api/dissertation/status", { method: "GET", headers: {} });
@@ -167,25 +351,26 @@
         elements.footerMode.textContent = "Anonymous service-evaluation records";
         setStartState(
           true,
-          "Begin five-game session",
-          "Begin opens one assigned evaluation sequence.",
+          "Begin all 56 games",
+          "Your progress is saved after every response.",
         );
       } else if (status.recruitmentComplete) {
         setStatus("closed", "Evaluation complete");
         elements.closedNotice.innerHTML =
-          "<strong>The planned evaluation is complete.</strong><span>All frozen sequences have a completed primary session, so no new session will be issued.</span>";
+          "<strong>The planned evaluation is complete.</strong><span>No new session will be issued.</span>";
         setStartState(false, "Evaluation complete", "No more responses are being collected.");
       } else if (status.collectionEnabled && status.scheduleReady) {
         setStatus("closed", "Sequences in progress");
         elements.closedNotice.innerHTML =
-          "<strong>All currently available sequences are in progress.</strong><span>Please try again after 30 minutes. No evaluation record has been created from this page.</span>";
-        setStartState(false, "Temporarily unavailable", "A stale incomplete sequence will be reissued automatically.");
+          "<strong>All currently available orders are in progress.</strong><span>Please try again tomorrow. No evaluation record has been created from this page.</span>";
+        setStartState(false, "Temporarily unavailable", "Inactive orders are reissued after 24 hours.");
       } else {
         setStatus("closed", "Evaluation unavailable");
       }
     } catch {
       setStatus("closed", "Evaluation unavailable");
-      elements.buttonNote.textContent = "The evaluation service is unavailable and no response can be recorded.";
+      elements.buttonNote.textContent =
+        "The evaluation service is unavailable and no response can be recorded.";
     }
   }
 
@@ -197,36 +382,48 @@
     elements.startLabel.textContent = "Preparing games…";
 
     try {
-      if (PREVIEW_MODE) {
+      if (PREVIEW_MODE && state.games.length === 0) {
         const pool = await api("/dissertation/pool.json", { method: "GET", headers: {} });
-        state.games = randomOrder(pool.games)
-          .slice(0, pool.sessionSize || 5)
-          .map((game, index) => ({
-            publicId: game.id,
-            path: game.path,
-            order: index + 1,
-          }));
-      } else {
+        state.games = randomOrder(pool.games).map((game, index) => ({
+          publicId: game.id,
+          path: game.path,
+          order: index + 1,
+          responded: false,
+        }));
+        state.completedCount = 0;
+        state.position = 0;
+      } else if (!PREVIEW_MODE && !state.sessionId) {
+        state.creationId = state.creationId || crypto.randomUUID();
+        persistSession();
         const session = await api("/api/dissertation/session", {
           method: "POST",
           body: JSON.stringify({
             informationVersion: state.status.informationVersion,
+            creationId: state.creationId,
           }),
         });
-        state.sessionId = session.sessionId;
-        state.games = session.assignments;
+        applySession(session);
+        if (session.status === "complete") {
+          showFinish();
+          return;
+        }
       }
 
-      if (!Array.isArray(state.games) || state.games.length === 0) {
-        throw new Error("No study games are available.");
+      if (state.games.length !== 56 || state.position >= state.games.length) {
+        throw new Error("The complete 56-game order is unavailable.");
       }
 
       elements.introView.classList.add("is-hidden");
+      elements.finishView.classList.add("is-hidden");
       elements.playerView.classList.remove("is-hidden");
       await loadCurrentGame();
     } catch (error) {
       state.submitting = false;
-      setStartState(true, "Try again", error.message);
+      setStartState(
+        true,
+        "Try again",
+        playerErrorMessage(error, "The evaluation session could not be prepared."),
+      );
     } finally {
       delete elements.startButton.dataset.state;
     }
@@ -234,16 +431,39 @@
 
   function resetResponseControls() {
     clearError();
-    state.visibilityLossCount = 0;
     state.inputMethod = "unknown";
+    state.ratingPhase = "locked";
     elements.likeButton.disabled = true;
     elements.dislikeButton.disabled = true;
     elements.skipToggle.disabled = true;
     elements.confirmSkip.disabled = true;
+    elements.retryGame.classList.add("is-hidden");
+    elements.retryGame.textContent = "Retry game";
+    delete elements.retryGame.dataset.action;
+    elements.technicalFailure.classList.add("is-hidden");
+    elements.technicalFailure.disabled = false;
     elements.skipPanel.classList.add("is-hidden");
     elements.skipToggle.setAttribute("aria-expanded", "false");
     document.querySelectorAll('input[name="skip-reason"]').forEach((input) => {
       input.checked = false;
+    });
+  }
+
+  function waitForGameReady(token) {
+    return new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        if (!state.readyWait || state.readyWait.token !== token) return;
+        state.readyWait = null;
+        reject(new Error("game_ready_timeout"));
+      }, FRAME_READY_TIMEOUT_MS);
+      state.readyWait = {
+        token,
+        resolve: () => {
+          clearTimeout(timeout);
+          state.readyWait = null;
+          resolve();
+        },
+      };
     });
   }
 
@@ -254,60 +474,101 @@
     resetResponseControls();
     const game = state.games[state.position];
     const total = state.games.length;
-    const progress = (state.position + 1) / total;
-    elements.progressLabel.textContent = `Game ${state.position + 1} of ${total}`;
-    elements.progressFill.style.transform = `scaleX(${progress})`;
-    elements.elapsedLabel.textContent = "0:00";
-    elements.ratingHelp.textContent = `Try the game first. Rating unlocks in ${RATING_DELAY_SECONDS} seconds.`;
+    const remaining = total - state.completedCount;
+    elements.progressLabel.textContent =
+      `Game ${state.position + 1} of ${total} · ${state.completedCount} completed · ${remaining} remaining`;
+    elements.progressMeter.max = total;
+    elements.progressMeter.value = state.completedCount;
+    elements.progressMeter.setAttribute("aria-valuetext", `${state.completedCount} of ${total} games completed`);
+    elements.gameHeading.textContent = `Game ${state.position + 1} of ${total}`;
+    elements.ratingHelp.textContent =
+      `Try the game first. Rating becomes available after ${RATING_DELAY_SECONDS} seconds.`;
     elements.frame.title = `Game ${state.position + 1} of ${total}`;
     elements.frameShell.dataset.state = "loading";
-
-    const loaded = new Promise((resolve) => {
-      elements.frame.addEventListener("load", resolve, { once: true });
-    });
-    elements.frame.src = game.path;
-    await loaded;
-    elements.frameShell.dataset.state = "ready";
+    elements.frameLoading.removeAttribute("aria-hidden");
+    elements.frameLoadingCopy.textContent = "Loading game…";
+    restoreCheckpoint(game.publicId);
+    state.lastCheckpointSecond = -1;
 
     if (!PREVIEW_MODE) {
       try {
-        await api("/api/dissertation/start", {
+        const started = await api("/api/dissertation/start", {
           method: "POST",
           body: JSON.stringify({
             sessionId: state.sessionId,
             publicId: game.publicId,
           }),
         });
+        if (started.alreadyResponded) {
+          await refreshSession();
+          return;
+        }
       } catch (error) {
-        showError(`${error.message} Reload the page before continuing.`);
+        showError(
+          `${playerErrorMessage(error, "The game could not be started right now.")} `
+          + "Your saved session has not been changed.",
+        );
+        elements.retryGame.classList.remove("is-hidden");
+        state.submitting = false;
         return;
       }
     }
 
+    const token = state.gameLoadToken + 1;
+    state.gameLoadToken = token;
+    const ready = waitForGameReady(token);
+    elements.frame.src = `${game.path}?studyLoad=${token}`;
+    try {
+      await ready;
+    } catch {
+      if (token !== state.gameLoadToken) return;
+      elements.frameShell.dataset.state = "error";
+      elements.frameLoading.removeAttribute("aria-hidden");
+      elements.frameLoadingCopy.textContent = "Game did not load.";
+      showError("This game did not finish loading. Retry it, or record a technical failure and continue.");
+      elements.retryGame.classList.remove("is-hidden");
+      elements.technicalFailure.classList.remove("is-hidden");
+      state.submitting = false;
+      return;
+    }
+    if (token !== state.gameLoadToken) return;
+
+    elements.frameShell.dataset.state = "ready";
+    elements.frameLoadingCopy.textContent = "Game ready.";
+    elements.frameLoading.setAttribute("aria-hidden", "true");
     startVisibleGameTiming();
     state.submitting = false;
     elements.skipToggle.disabled = false;
     updateTimer();
     state.timer = window.setInterval(updateTimer, 250);
-    elements.frame.focus({ preventScroll: true });
+    elements.gameHeading.focus({ preventScroll: true });
+    if (window.matchMedia("(max-width: 56rem)").matches) {
+      elements.frameShell.scrollIntoView({
+        block: "start",
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      });
+    }
   }
 
   function updateTimer() {
     const elapsed = Math.max(0, Math.floor(visibleElapsedMs() / 1000));
-    const minutes = Math.floor(elapsed / 60);
-    const seconds = String(elapsed % 60).padStart(2, "0");
-    elements.elapsedLabel.textContent = `${minutes}:${seconds}`;
-
-    if (elapsed >= RATING_DELAY_SECONDS) {
-      elements.likeButton.disabled = state.submitting;
-      elements.dislikeButton.disabled = state.submitting;
+    const ratingAvailable = elapsed >= RATING_DELAY_SECONDS;
+    if (elapsed >= PLAYTIME_PROMPT_SECONDS && state.ratingPhase !== "long") {
+      state.ratingPhase = "long";
       elements.ratingHelp.textContent =
-        elapsed >= PLAYTIME_PROMPT_SECONDS
-          ? "You have played for 90 seconds. Rate now, or continue if you want."
-          : "Rating is open. Choose based on the game you just played.";
-    } else {
+        "You have played for at least 90 seconds. Rate now, or continue if you want.";
+    } else if (elapsed >= RATING_DELAY_SECONDS && state.ratingPhase === "locked") {
+      state.ratingPhase = "open";
       elements.ratingHelp.textContent =
-        `Try the game first. Rating unlocks in ${RATING_DELAY_SECONDS - elapsed} seconds.`;
+        "Rating is available. Choose based on the game you just played.";
+    }
+    elements.likeButton.disabled = state.submitting || !ratingAvailable;
+    elements.dislikeButton.disabled = state.submitting || !ratingAvailable;
+    if (elapsed > 0 && elapsed % 5 === 0 && elapsed !== state.lastCheckpointSecond) {
+      state.lastCheckpointSecond = elapsed;
+      checkpointTiming();
     }
   }
 
@@ -315,9 +576,11 @@
     if (state.submitting) return;
     state.submitting = true;
     clearError();
+    pauseVisibleGameTiming();
     elements.likeButton.disabled = true;
     elements.dislikeButton.disabled = true;
     elements.confirmSkip.disabled = true;
+    elements.technicalFailure.disabled = true;
     const game = state.games[state.position];
 
     try {
@@ -335,48 +598,94 @@
           }),
         });
       }
+      if (!game.responded) {
+        game.responded = true;
+        state.completedCount += 1;
+      }
+      persistSession({ current: null });
       await advance();
     } catch (error) {
-      showError(`${error.message} Your response has not been lost; please try again.`);
+      if (game.responded) {
+        showError("Your response is saved, but the next step was not confirmed. Continue the saved session.");
+        state.submitting = false;
+        elements.retryGame.textContent = "Continue saved session";
+        elements.retryGame.dataset.action = "continue";
+        elements.retryGame.classList.remove("is-hidden");
+        return;
+      }
+      showError(
+        `${playerErrorMessage(error, "We could not confirm the save.")} `
+        + "Try again; duplicate submissions are safely ignored.",
+      );
       state.submitting = false;
+      resumeVisibleGameTiming();
       updateTimer();
-      if (skipReason) elements.confirmSkip.disabled = false;
+      if (skipReason) {
+        elements.confirmSkip.disabled = false;
+        elements.technicalFailure.disabled = false;
+      }
     }
   }
 
   async function advance() {
     clearInterval(state.timer);
     stopVisibleGameTiming();
-    const isFinalGame = state.position === state.games.length - 1;
-    if (!isFinalGame) {
-      state.position += 1;
+    const nextIndex = state.games.findIndex(game => !game.responded);
+    if (nextIndex >= 0) {
+      state.position = nextIndex;
       await loadCurrentGame();
       return;
     }
 
-    // Keep the final position intact until completion succeeds. A transient
-    // failure can then be retried: the response POST is idempotent and this
-    // completion call is idempotent too.
     if (!PREVIEW_MODE) {
       await api("/api/dissertation/complete", {
         method: "POST",
         body: JSON.stringify({ sessionId: state.sessionId }),
       });
-    }
-    elements.frame.removeAttribute("src");
-    elements.playerView.classList.add("is-hidden");
-    elements.finishView.classList.remove("is-hidden");
-    if (PREVIEW_MODE) {
+    } else {
       elements.finishCopy.textContent =
         "Preview complete. Every response was kept only in memory and has now been discarded.";
     }
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    window.scrollTo({ top: 0, behavior: reducedMotion ? "auto" : "smooth" });
+    showFinish();
+  }
+
+  async function refreshSession() {
+    if (PREVIEW_MODE) return;
+    const session = await api("/api/dissertation/resume", {
+      method: "POST",
+      body: JSON.stringify({ sessionId: state.sessionId }),
+    });
+    applySession(session);
+    if (session.status !== "complete" && state.position >= state.games.length) {
+      await api("/api/dissertation/complete", {
+        method: "POST",
+        body: JSON.stringify({ sessionId: state.sessionId }),
+      });
+      session.status = "complete";
+    }
+    if (session.status === "complete") {
+      showFinish();
+      return;
+    }
+    await loadCurrentGame();
   }
 
   elements.startButton.addEventListener("click", beginSession);
   elements.likeButton.addEventListener("click", () => submitResponse({ rating: "like" }));
   elements.dislikeButton.addEventListener("click", () => submitResponse({ rating: "dislike" }));
+  elements.retryGame.addEventListener("click", () => {
+    if (elements.retryGame.dataset.action === "continue") {
+      refreshSession().catch((error) => {
+        showError(playerErrorMessage(error, "The saved session could not be refreshed."));
+      });
+      return;
+    }
+    loadCurrentGame();
+  });
+  elements.technicalFailure.addEventListener(
+    "click",
+    () => submitResponse({ skipReason: "technical_failure" }),
+  );
   elements.skipToggle.addEventListener("click", () => {
     const open = elements.skipPanel.classList.toggle("is-hidden") === false;
     elements.skipToggle.setAttribute("aria-expanded", String(open));
@@ -397,14 +706,28 @@
     if (document.hidden) {
       pauseVisibleGameTiming();
       state.visibilityLossCount += 1;
+      checkpointTiming();
     } else {
       resumeVisibleGameTiming();
     }
   });
 
+  window.addEventListener("pagehide", () => {
+    pauseVisibleGameTiming();
+    checkpointTiming();
+  });
+
   window.addEventListener("message", (event) => {
     if (event.source !== elements.frame.contentWindow) return;
     if (!event.data || event.data.source !== "dissertation-game") return;
+    const loadToken = Number(event.data.loadToken);
+    if (!Number.isInteger(loadToken) || loadToken !== state.gameLoadToken) return;
+    if (event.data.type === "ready"
+        && state.readyWait
+        && loadToken === state.readyWait.token) {
+      state.readyWait.resolve();
+      return;
+    }
     if (event.data.type === "first-input") {
       const allowed = new Set(["touch", "mouse-or-trackpad", "keyboard"]);
       if (allowed.has(event.data.inputMethod)) state.inputMethod = event.data.inputMethod;

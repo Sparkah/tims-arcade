@@ -2,6 +2,7 @@
   "use strict";
 
   let firstInputSent = false;
+  const loadToken = new URLSearchParams(window.location.search).get("studyLoad");
 
   function send(type, inputMethod) {
     window.parent.postMessage(
@@ -9,6 +10,7 @@
         source: "dissertation-game",
         type,
         inputMethod,
+        loadToken,
       },
       "*",
     );
@@ -30,5 +32,9 @@
     () => firstInput("keyboard"),
     { capture: true, passive: true },
   );
-  send("ready", "unknown");
+  if (document.readyState === "complete") {
+    send("ready", "unknown");
+  } else {
+    window.addEventListener("load", () => send("ready", "unknown"), { once: true });
+  }
 })();

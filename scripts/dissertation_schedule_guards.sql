@@ -3,7 +3,7 @@
 --   wrangler d1 execute dissertation-study --remote \
 --     --file=scripts/dissertation_schedule_guards.sql
 --
--- Every statement is idempotent. Runtime schedule validation checks the exact
+-- Every statement is idempotent. Runtime protocol validation checks the exact
 -- expected trigger-name set and fails closed if this file was not applied.
 PRAGMA foreign_keys = ON;
 
@@ -23,9 +23,15 @@ CREATE TRIGGER IF NOT EXISTS trg_study_schedule_activate_valid
 BEFORE UPDATE OF active ON study_schedules
 WHEN OLD.active = 0 AND NEW.active = 1
 BEGIN
+  SELECT CASE WHEN NEW.version <> 'dissertation-player-v2-all-56-block-1'
+    THEN RAISE(ABORT, 'schedule_version_mismatch') END;
+
   SELECT CASE WHEN NEW.schedule_hash
-    <> '7c9d936307af533b738be71b08356e6dba987a2c9e9438a6b57c1de4d1dcebd2'
+    <> 'ff0fe46b9b68662aff522568f7287b5b9770fc63fb5a69265359ffaf4beb80be'
     THEN RAISE(ABORT, 'schedule_hash_mismatch') END;
+
+  SELECT CASE WHEN NEW.target_sequences <> 56 OR NEW.session_size <> 56
+    THEN RAISE(ABORT, 'schedule_shape_mismatch') END;
 
   SELECT CASE WHEN (
     SELECT COUNT(*) FROM study_games WHERE active = 1
@@ -41,7 +47,7 @@ BEGIN
     SELECT COUNT(*)
     FROM study_schedule_items
     WHERE version = NEW.version
-  ) <> 280 THEN RAISE(ABORT, 'schedule_slot_count_invalid') END;
+  ) <> 3136 THEN RAISE(ABORT, 'schedule_slot_count_invalid') END;
 
   SELECT CASE WHEN (
     SELECT COUNT(*) FROM (
@@ -51,8 +57,8 @@ BEGIN
         ON i.version = q.version AND i.sequence_number = q.sequence_number
       WHERE q.version = NEW.version
       GROUP BY q.sequence_number
-      HAVING COUNT(i.public_id) <> 5
-        OR COUNT(DISTINCT i.order_position) <> 5
+      HAVING COUNT(i.public_id) <> 56
+        OR COUNT(DISTINCT i.order_position) <> 56
     )
   ) <> 0 THEN RAISE(ABORT, 'schedule_sequence_balance_invalid') END;
 
@@ -64,8 +70,8 @@ BEGIN
         ON i.public_id = g.public_id AND i.version = NEW.version
       WHERE g.active = 1
       GROUP BY g.public_id
-      HAVING COUNT(i.public_id) <> 5
-        OR COUNT(DISTINCT i.order_position) <> 5
+      HAVING COUNT(i.public_id) <> 56
+        OR COUNT(DISTINCT i.order_position) <> 56
     )
   ) <> 0 THEN RAISE(ABORT, 'schedule_game_balance_invalid') END;
 
@@ -247,13 +253,14 @@ BEGIN
 
   SELECT CASE WHEN NEW.claim_number > 1 AND COALESCE((
     SELECT
-      unixepoch(NEW.claimed_at) - unixepoch(claimed_at)
-    FROM study_schedule_claims
-    WHERE version = NEW.version
-      AND sequence_number = NEW.sequence_number
-    ORDER BY claim_number DESC
-    LIMIT 1
-  ), -1) < 1800 THEN RAISE(ABORT, 'schedule_claim_not_stale') END;
+      unixepoch(NEW.claimed_at)
+        - unixepoch(MAX(COALESCE(s.last_activity_at, c.claimed_at)))
+    FROM study_schedule_claims AS c
+    INNER JOIN study_sessions AS s
+      ON s.session_id = c.session_id AND s.status = 'active'
+    WHERE c.version = NEW.version
+      AND c.sequence_number = NEW.sequence_number
+  ), -1) < 86400 THEN RAISE(ABORT, 'schedule_claim_not_stale') END;
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_study_schedule_completion_valid
@@ -268,4 +275,60 @@ BEGIN
       AND c.version = NEW.version
       AND c.sequence_number = NEW.sequence_number
   ) THEN RAISE(ABORT, 'invalid_schedule_completion') END;
+
+  SELECT CASE WHEN (
+    SELECT COUNT(*)
+    FROM study_assignments
+    WHERE session_id = NEW.session_id
+  ) <> 56 THEN RAISE(ABORT, 'completion_assignment_count_invalid') END;
+
+  SELECT CASE WHEN (
+    SELECT COUNT(*)
+    FROM study_responses
+    WHERE session_id = NEW.session_id
+  ) <> 56 THEN RAISE(ABORT, 'completion_response_count_invalid') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_study_assignment_start_in_order
+BEFORE UPDATE OF started_at ON study_assignments
+WHEN OLD.started_at IS NULL AND NEW.started_at IS NOT NULL
+BEGIN
+  SELECT CASE WHEN OLD.order_position <> COALESCE((
+    SELECT MIN(a.order_position)
+    FROM study_assignments AS a
+    LEFT JOIN study_responses AS r
+      ON r.session_id = a.session_id AND r.public_id = a.public_id
+    WHERE a.session_id = OLD.session_id
+      AND r.response_id IS NULL
+  ), -1) THEN RAISE(ABORT, 'assignment_started_out_of_order') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_study_response_in_order
+BEFORE INSERT ON study_responses
+WHEN NOT EXISTS (
+  SELECT 1
+  FROM study_responses
+  WHERE session_id = NEW.session_id AND public_id = NEW.public_id
+)
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1
+    FROM study_assignments
+    WHERE session_id = NEW.session_id
+      AND public_id = NEW.public_id
+      AND started_at IS NOT NULL
+  ) THEN RAISE(ABORT, 'response_assignment_not_started') END;
+
+  SELECT CASE WHEN (
+    SELECT order_position
+    FROM study_assignments
+    WHERE session_id = NEW.session_id AND public_id = NEW.public_id
+  ) <> COALESCE((
+    SELECT MIN(a.order_position)
+    FROM study_assignments AS a
+    LEFT JOIN study_responses AS r
+      ON r.session_id = a.session_id AND r.public_id = a.public_id
+    WHERE a.session_id = NEW.session_id
+      AND r.response_id IS NULL
+  ), -1) THEN RAISE(ABORT, 'response_saved_out_of_order') END;
 END;

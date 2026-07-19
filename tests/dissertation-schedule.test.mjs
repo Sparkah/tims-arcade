@@ -15,21 +15,24 @@ const testableSource = librarySource.replace(
 const study = await import(
   `data:text/javascript;base64,${Buffer.from(testableSource).toString('base64')}`
 );
+const responseApiModule = await import(
+  new URL('../functions/api/dissertation/response.js', import.meta.url)
+);
 
 
 function validSummary(overrides = {}) {
   return {
     activeScheduleCount: 1,
-    version: 'service-evaluation-schedule-v1',
+    version: study.STUDY_SCHEDULE_VERSION,
     scheduleHash: study.STUDY_SCHEDULE_HASH,
     computedScheduleHash: study.STUDY_SCHEDULE_HASH,
     guardTriggersReady: true,
     guardTriggerCount: study.STUDY_SCHEDULE_GUARD_TRIGGERS.length,
     targetSequences: 56,
-    sessionSize: 5,
+    sessionSize: 56,
     activeGames: 56,
     sequenceCount: 56,
-    slotCount: 280,
+    slotCount: 3136,
     badSequenceCount: 0,
     badGameCount: 0,
     inactiveItemCount: 0,
@@ -38,7 +41,7 @@ function validSummary(overrides = {}) {
 }
 
 
-test('accepts only the complete frozen 56 × 5 schedule structure', () => {
+test('accepts only the complete frozen 56 × 56 schedule structure', () => {
   assert.equal(study.validateScheduleStructure(validSummary()), true);
 
   for (const [field, value] of [
@@ -48,10 +51,10 @@ test('accepts only the complete frozen 56 × 5 schedule structure', () => {
     ['guardTriggersReady', false],
     ['guardTriggerCount', study.STUDY_SCHEDULE_GUARD_TRIGGERS.length - 1],
     ['targetSequences', 55],
-    ['sessionSize', 4],
+    ['sessionSize', 55],
     ['activeGames', 55],
     ['sequenceCount', 55],
-    ['slotCount', 279],
+    ['slotCount', 3135],
     ['badSequenceCount', 1],
     ['badGameCount', 1],
     ['inactiveItemCount', 1],
@@ -68,8 +71,8 @@ test('accepts only the complete frozen 56 × 5 schedule structure', () => {
 test('canonical hash binds sequence order and every frozen row', async () => {
   const rows = [];
   for (let sequenceNumber = 1; sequenceNumber <= 56; sequenceNumber += 1) {
-    for (let position = 1; position <= 5; position += 1) {
-      const gameNumber = ((sequenceNumber - 1 + (position - 1) * 11) % 56) + 1;
+    for (let position = 1; position <= 56; position += 1) {
+      const gameNumber = ((sequenceNumber - 1 + position - 1) % 56) + 1;
       rows.push({
         sequence_number: sequenceNumber,
         issue_order: 57 - sequenceNumber,
@@ -83,13 +86,10 @@ test('canonical hash binds sequence order and every frozen row', async () => {
   const parsed = JSON.parse(canonical);
   assert.equal(parsed.issue_order.length, 56);
   assert.deepEqual(parsed.issue_order.slice(0, 3), [56, 55, 54]);
-  assert.deepEqual(parsed.rows[0], [
-    'game0001',
-    'game0012',
-    'game0023',
-    'game0034',
-    'game0045',
-  ]);
+  assert.deepEqual(
+    parsed.rows[0],
+    Array.from({ length: 56 }, (_, index) => `game${String(index + 1).padStart(4, '0')}`),
+  );
 
   const originalHash = await study.computeScheduleHash(rows);
   assert.match(originalHash, /^[0-9a-f]{64}$/);
@@ -161,11 +161,24 @@ test('participant flow sends information version and uses visible time', async (
     new URL('../functions/api/dissertation/response.js', import.meta.url),
     'utf8',
   );
+  const sessionApi = await readFile(
+    new URL('../functions/api/dissertation/session.js', import.meta.url),
+    'utf8',
+  );
+  const bridge = await readFile(
+    new URL('../dissertation/study-bridge.js', import.meta.url),
+    'utf8',
+  );
 
   assert.match(app, /informationVersion: state\.status\.informationVersion/);
+  assert.match(app, /creationId: state\.creationId/);
+  assert.match(app, /\/api\/dissertation\/resume/);
+  assert.match(app, /localStorage\.setItem\(STORAGE_KEY/);
   assert.doesNotMatch(app, /\bconsent\b|consentVersion|acknowledgement/);
   assert.match(app, /performance\.now\(\)/);
   assert.match(app, /pauseVisibleGameTiming\(\)/);
+  assert.match(app, /likeButton\.disabled = state\.submitting \|\| !ratingAvailable/);
+  assert.match(app, /dislikeButton\.disabled = state\.submitting \|\| !ratingAvailable/);
   assert.match(app, /resumeVisibleGameTiming\(\)/);
   assert.doesNotMatch(app, /Date\.now\(\) - state\.gameStartedAt/);
   assert.match(app, /status\.collectionEnabled && status\.scheduleReady/);
@@ -173,12 +186,28 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(app, /LOCAL_PREVIEW_HOSTS\.has\(window\.location\.hostname\)/);
   assert.equal(study.DEVICE_CLASSES.has('tablet'), true);
   assert.match(responseApi, /DEVICE_CLASSES\.has\(deviceClass\)/);
+  assert.match(sessionApi, /const MAX_CLAIM_ATTEMPTS = 6/);
+  assert.match(bridge, /addEventListener\("load".*\{ once: true \}/);
+  assert.match(bridge, /URLSearchParams\(window\.location\.search\)\.get\("studyLoad"\)/);
+  assert.match(bridge, /loadToken,/);
 
   assert.match(html, /id="data-notice"/);
   assert.match(html, /Information version:/);
   assert.match(html, /Please complete one session only\./);
   assert.match(html, /No evaluation record is created until/);
-  assert.match(html, /Choosing Begin creates an anonymous five-game evaluation session/);
+  assert.match(html, /Choosing Begin creates an anonymous 56-game evaluation session/);
+  assert.match(html, /Play all 56 games/);
+  assert.match(html, /Allow about two hours/);
+  assert.match(html, /random session key/);
+  assert.match(html, /current-game timing/);
+  assert.match(app, /matchMedia\("\(max-width: 56rem\)"\)/);
+  assert.match(app, /frameLoading\.setAttribute\("aria-hidden", "true"\)/);
+  assert.match(app, /\?studyLoad=\$\{token\}/);
+  assert.match(app, /loadToken === state\.readyWait\.token/);
+  assert.match(app, /setStatus\("preview", "Preview complete"\)/);
+  assert.match(app, /Preview only · responses discarded/);
+  assert.match(html, /role="group" aria-labelledby="response-heading"/);
+  assert.match(html, /All 56 anonymous service-evaluation responses were recorded/);
   assert.doesNotMatch(html, /type="checkbox"|want to take part/);
 });
 
@@ -188,11 +217,20 @@ test('schema migration stays trigger-free and separate guards are complete', asy
     new URL('../migrations/0004_dissertation_service_evaluation_schedule.sql', import.meta.url),
     'utf8',
   );
+  const allGamesMigration = await readFile(
+    new URL('../migrations/0005_dissertation_all_games_protocol.sql', import.meta.url),
+    'utf8',
+  );
   const guards = await readFile(
     new URL('../scripts/dissertation_schedule_guards.sql', import.meta.url),
     'utf8',
   );
   assert.doesNotMatch(migration, /CREATE\s+TRIGGER/i);
+  assert.doesNotMatch(allGamesMigration, /CREATE\s+TRIGGER/i);
+  assert.match(allGamesMigration, /order_position BETWEEN 1 AND 56/);
+  assert.match(allGamesMigration, /session_size = 56/);
+  assert.match(allGamesMigration, /playtime_censored/);
+  assert.match(allGamesMigration, /_study_all_games_empty_guard/);
   assert.match(guards, new RegExp(study.STUDY_SCHEDULE_HASH));
   for (const trigger of study.STUDY_SCHEDULE_GUARD_TRIGGERS) {
     assert.match(guards, new RegExp(`CREATE TRIGGER IF NOT EXISTS ${trigger}\\b`));
@@ -201,4 +239,28 @@ test('schema migration stays trigger-free and separate guards are complete', asy
     (guards.match(/CREATE TRIGGER IF NOT EXISTS/g) || []).length,
     study.STUDY_SCHEDULE_GUARD_TRIGGERS.length,
   );
+});
+
+
+test('playtime over one hour is capped and explicitly marked, never rejected', () => {
+  assert.deepEqual(responseApiModule.normalizePlaytimeForStorage(7200), {
+    rawSeconds: 7200,
+    recordedSeconds: 3600,
+    censored: true,
+  });
+  assert.deepEqual(responseApiModule.normalizePlaytimeForStorage(42.26), {
+    rawSeconds: 42.26,
+    recordedSeconds: 42.3,
+    censored: false,
+  });
+  assert.equal(responseApiModule.normalizePlaytimeForStorage(-1), null);
+});
+
+
+test('long-session protocol uses 24-hour activity-based reissue', () => {
+  assert.equal(study.STUDY_SESSION_SIZE, 56);
+  assert.equal(study.SCHEDULE_REISSUE_AFTER_MS, 24 * 60 * 60 * 1000);
+  assert.equal(study.STUDY_RECORD_VERSION, 2);
+  assert.match(librarySource, /MAX\(COALESCE\(s\.last_activity_at, c\.claimed_at\)\)/);
+  assert.doesNotMatch(librarySource, /30 \* 60 \* 1000/);
 });
