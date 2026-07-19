@@ -1,7 +1,8 @@
 import {
   STUDY_ELIGIBLE_FALLBACK,
   STUDY_SESSION_SIZE,
-  readActiveGamePool,
+  STUDY_TARGET_SEQUENCES,
+  readActiveScheduleState,
   studyAbuseProtectionReady,
   studyConfiguration,
   studyJson,
@@ -12,33 +13,50 @@ export async function onRequestGet({ env }) {
   let eligibleGames = STUDY_ELIGIBLE_FALLBACK;
   let databaseReady = false;
   let abuseProtectionReady = false;
+  let scheduleReady = false;
+  let completedSequences = 0;
+  let recruitmentComplete = false;
+  let eligibleSequence = false;
 
   if (config.db) {
     try {
-      const [pool, protectionReady] = await Promise.all([
-        readActiveGamePool(config.db),
+      const [schedule, protectionReady] = await Promise.all([
+        readActiveScheduleState(config.db),
         studyAbuseProtectionReady(config.db),
       ]);
-      eligibleGames = pool.length;
-      databaseReady = eligibleGames === STUDY_ELIGIBLE_FALLBACK;
+      scheduleReady = schedule.scheduleReady;
+      completedSequences = schedule.completedSequences;
+      recruitmentComplete = schedule.recruitmentComplete;
+      eligibleSequence = Boolean(schedule.candidate);
+      databaseReady = true;
       abuseProtectionReady = protectionReady;
     } catch {
       databaseReady = false;
       abuseProtectionReady = false;
-      eligibleGames = STUDY_ELIGIBLE_FALLBACK;
+      scheduleReady = false;
+      completedSequences = 0;
+      recruitmentComplete = false;
+      eligibleSequence = false;
     }
   }
 
   const open = config.open
     && databaseReady
     && abuseProtectionReady
-    && eligibleGames === STUDY_ELIGIBLE_FALLBACK;
+    && scheduleReady
+    && !recruitmentComplete
+    && eligibleSequence;
   return studyJson({
     open,
+    collectionEnabled: config.open,
     databaseReady,
     abuseProtectionReady,
+    scheduleReady,
+    completedSequences,
+    targetSequences: STUDY_TARGET_SEQUENCES,
+    recruitmentComplete,
     sessionSize: STUDY_SESSION_SIZE,
     eligibleGames,
-    consentVersion: open ? config.consentVersion : null,
+    informationVersion: open ? config.informationVersion : null,
   });
 }

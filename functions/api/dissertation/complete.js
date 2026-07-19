@@ -24,9 +24,14 @@ export async function onRequestPost({ request, env }) {
   try {
     [session, responseCount] = await Promise.all([
       db.prepare(`
-        SELECT status, completed_at
-        FROM study_sessions
-        WHERE session_id = ?
+        SELECT
+          s.status,
+          s.completed_at,
+          c.version AS schedule_version,
+          c.sequence_number
+        FROM study_sessions AS s
+        LEFT JOIN study_schedule_claims AS c ON c.session_id = s.session_id
+        WHERE s.session_id = ?
       `).bind(sessionId).first(),
       db.prepare(`
         SELECT COUNT(*) AS count
@@ -38,17 +43,12 @@ export async function onRequestPost({ request, env }) {
     return studyError('study_database_error', 503);
   }
   if (!session) return studyError('session_not_found', 404);
-  if (session.status === 'complete') {
-    return studyJson({
-      ok: true,
-      duplicate: true,
-      sessionId,
-      completedAt: session.completed_at,
-    });
+  if (!session.schedule_version || !session.sequence_number) {
+    return studyError('schedule_claim_missing', 409);
   }
 
   const completed = Number(responseCount && responseCount.count) || 0;
-  if (completed !== STUDY_SESSION_SIZE) {
+  if (session.status !== 'complete' && completed !== STUDY_SESSION_SIZE) {
     return studyJson({
       error: 'session_incomplete',
       completedCount: completed,
@@ -56,23 +56,46 @@ export async function onRequestPost({ request, env }) {
     }, 409);
   }
 
-  const rateLimitResponse = await enforceStudyRateLimit(
-    gate.config,
-    `session:${sessionId}`,
-  );
-  if (rateLimitResponse) return rateLimitResponse;
+  const duplicate = session.status === 'complete';
+  if (!duplicate) {
+    const rateLimitResponse = await enforceStudyRateLimit(
+      gate.config,
+      `session:${sessionId}`,
+    );
+    if (rateLimitResponse) return rateLimitResponse;
+  }
 
-  const completedAt = nowIso();
+  const completedAt = session.completed_at || nowIso();
   try {
-    await db.prepare(`
-      UPDATE study_sessions
-      SET status = ?, completed_at = COALESCE(completed_at, ?)
-      WHERE session_id = ? AND status = ?
-    `).bind('complete', completedAt, sessionId, 'active').run();
+    await db.batch([
+      db.prepare(`
+        UPDATE study_sessions
+        SET status = ?, completed_at = COALESCE(completed_at, ?)
+        WHERE session_id = ? AND status = ?
+      `).bind('complete', completedAt, sessionId, 'active'),
+      db.prepare(`
+        INSERT OR IGNORE INTO study_schedule_completions (
+          session_id, version, sequence_number, completed_at
+        )
+        SELECT
+          s.session_id,
+          c.version,
+          c.sequence_number,
+          s.completed_at
+        FROM study_sessions AS s
+        INNER JOIN study_schedule_claims AS c ON c.session_id = s.session_id
+        WHERE s.session_id = ? AND s.status = ?
+      `).bind(sessionId, 'complete'),
+    ]);
     session = await db.prepare(`
-      SELECT status, completed_at
-      FROM study_sessions
-      WHERE session_id = ?
+      SELECT
+        s.status,
+        s.completed_at,
+        CASE WHEN done.session_id = s.session_id THEN 1 ELSE 0 END AS primary_cohort
+      FROM study_sessions AS s
+      LEFT JOIN study_schedule_completions AS done
+        ON done.session_id = s.session_id
+      WHERE s.session_id = ?
     `).bind(sessionId).first();
   } catch {
     return studyError('session_completion_failed', 503);
@@ -83,8 +106,9 @@ export async function onRequestPost({ request, env }) {
 
   return studyJson({
     ok: true,
-    duplicate: false,
+    duplicate,
     sessionId,
     completedAt: session.completed_at,
+    primaryCohort: Number(session.primary_cohort) === 1,
   });
 }

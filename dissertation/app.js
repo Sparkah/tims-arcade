@@ -3,14 +3,16 @@
 
   const RATING_DELAY_SECONDS = 10;
   const PLAYTIME_PROMPT_SECONDS = 90;
-  const PREVIEW_MODE = new URLSearchParams(window.location.search).get("preview") === "1";
+  const LOCAL_PREVIEW_HOSTS = new Set(["localhost", "127.0.0.1"]);
+  const PREVIEW_MODE = LOCAL_PREVIEW_HOSTS.has(window.location.hostname)
+    && new URLSearchParams(window.location.search).get("preview") === "1";
 
   const elements = {
     status: document.querySelector("#study-status"),
     statusLabel: document.querySelector("#status-label"),
     closedNotice: document.querySelector("#closed-notice"),
-    acknowledgementWrap: document.querySelector("#acknowledgement-wrap"),
-    acknowledgement: document.querySelector("#acknowledgement"),
+    dataNotice: document.querySelector("#data-notice"),
+    informationVersion: document.querySelector("#information-version"),
     startButton: document.querySelector("#start-button"),
     startLabel: document.querySelector("#start-label"),
     buttonNote: document.querySelector("#button-note"),
@@ -40,7 +42,9 @@
     sessionId: null,
     games: [],
     position: 0,
-    gameStartedAt: 0,
+    visibleElapsedMs: 0,
+    visibleTickStartedAt: null,
+    gameTimingActive: false,
     visibilityLossCount: 0,
     inputMethod: "unknown",
     timer: null,
@@ -105,18 +109,48 @@
   function broadContext() {
     const width = window.innerWidth;
     return {
-      deviceClass: width < 768 ? "mobile" : "desktop",
+      deviceClass: width < 640 ? "mobile" : width < 1100 ? "tablet" : "desktop",
       viewportClass: width < 640 ? "narrow" : width < 1100 ? "medium" : "wide",
       inputMethod: state.inputMethod,
       visibilityLossCount: state.visibilityLossCount,
     };
   }
 
+  function visibleElapsedMs() {
+    if (!state.gameTimingActive || state.visibleTickStartedAt === null) {
+      return state.visibleElapsedMs;
+    }
+    return state.visibleElapsedMs + Math.max(0, performance.now() - state.visibleTickStartedAt);
+  }
+
+  function pauseVisibleGameTiming() {
+    if (!state.gameTimingActive || state.visibleTickStartedAt === null) return;
+    state.visibleElapsedMs = visibleElapsedMs();
+    state.visibleTickStartedAt = null;
+  }
+
+  function resumeVisibleGameTiming() {
+    if (!state.gameTimingActive || document.hidden || state.visibleTickStartedAt !== null) return;
+    state.visibleTickStartedAt = performance.now();
+  }
+
+  function startVisibleGameTiming() {
+    state.visibleElapsedMs = 0;
+    state.visibleTickStartedAt = null;
+    state.gameTimingActive = true;
+    resumeVisibleGameTiming();
+  }
+
+  function stopVisibleGameTiming() {
+    pauseVisibleGameTiming();
+    state.gameTimingActive = false;
+  }
+
   async function initialise() {
     if (PREVIEW_MODE) {
       setStatus("preview", "Preview · not recording");
       elements.closedNotice.innerHTML =
-        "<strong>Preview mode is local to this browser tab.</strong><span>You can play the full flow, but nothing is sent or saved.</span>";
+        "<strong>Preview mode is local to this browser tab.</strong><span>You can play the full flow, but no evaluation record is created.</span>";
       elements.footerMode.textContent = "Preview only · responses discarded";
       setStartState(true, "Open five-game preview", "No responses will be recorded.");
       return;
@@ -126,17 +160,32 @@
       const status = await api("/api/dissertation/status", { method: "GET", headers: {} });
       state.status = status;
       if (status.open) {
-        setStatus("open", "Study open");
+        setStatus("open", "Evaluation open");
         elements.closedNotice.classList.add("is-hidden");
-        elements.acknowledgementWrap.classList.remove("is-hidden");
-        elements.footerMode.textContent = "Anonymous participant data collection";
-        setStartState(false, "Begin five-game session", "Tick the acknowledgement to continue.");
+        elements.dataNotice.classList.remove("is-hidden");
+        elements.informationVersion.textContent = status.informationVersion;
+        elements.footerMode.textContent = "Anonymous service-evaluation records";
+        setStartState(
+          true,
+          "Begin five-game session",
+          "Begin opens one assigned evaluation sequence.",
+        );
+      } else if (status.recruitmentComplete) {
+        setStatus("closed", "Evaluation complete");
+        elements.closedNotice.innerHTML =
+          "<strong>The planned evaluation is complete.</strong><span>All frozen sequences have a completed primary session, so no new session will be issued.</span>";
+        setStartState(false, "Evaluation complete", "No more responses are being collected.");
+      } else if (status.collectionEnabled && status.scheduleReady) {
+        setStatus("closed", "Sequences in progress");
+        elements.closedNotice.innerHTML =
+          "<strong>All currently available sequences are in progress.</strong><span>Please try again after 30 minutes. No evaluation record has been created from this page.</span>";
+        setStartState(false, "Temporarily unavailable", "A stale incomplete sequence will be reissued automatically.");
       } else {
-        setStatus("closed", "Collection closed");
+        setStatus("closed", "Evaluation unavailable");
       }
     } catch {
-      setStatus("closed", "Collection closed");
-      elements.buttonNote.textContent = "The study service is unavailable and no response can be recorded.";
+      setStatus("closed", "Evaluation unavailable");
+      elements.buttonNote.textContent = "The evaluation service is unavailable and no response can be recorded.";
     }
   }
 
@@ -161,8 +210,7 @@
         const session = await api("/api/dissertation/session", {
           method: "POST",
           body: JSON.stringify({
-            consent: true,
-            consentVersion: state.status.consentVersion,
+            informationVersion: state.status.informationVersion,
           }),
         });
         state.sessionId = session.sessionId;
@@ -201,6 +249,7 @@
 
   async function loadCurrentGame() {
     state.submitting = true;
+    stopVisibleGameTiming();
     clearInterval(state.timer);
     resetResponseControls();
     const game = state.games[state.position];
@@ -235,7 +284,7 @@
       }
     }
 
-    state.gameStartedAt = Date.now();
+    startVisibleGameTiming();
     state.submitting = false;
     elements.skipToggle.disabled = false;
     updateTimer();
@@ -244,7 +293,7 @@
   }
 
   function updateTimer() {
-    const elapsed = Math.max(0, Math.floor((Date.now() - state.gameStartedAt) / 1000));
+    const elapsed = Math.max(0, Math.floor(visibleElapsedMs() / 1000));
     const minutes = Math.floor(elapsed / 60);
     const seconds = String(elapsed % 60).padStart(2, "0");
     elements.elapsedLabel.textContent = `${minutes}:${seconds}`;
@@ -273,9 +322,7 @@
 
     try {
       if (!PREVIEW_MODE) {
-        const playtimeSeconds = Math.round(
-          ((Date.now() - state.gameStartedAt) / 1000) * 10,
-        ) / 10;
+        const playtimeSeconds = Math.round((visibleElapsedMs() / 1000) * 10) / 10;
         await api("/api/dissertation/response", {
           method: "POST",
           body: JSON.stringify({
@@ -299,6 +346,7 @@
 
   async function advance() {
     clearInterval(state.timer);
+    stopVisibleGameTiming();
     const isFinalGame = state.position === state.games.length - 1;
     if (!isFinalGame) {
       state.position += 1;
@@ -326,16 +374,6 @@
     window.scrollTo({ top: 0, behavior: reducedMotion ? "auto" : "smooth" });
   }
 
-  elements.acknowledgement.addEventListener("change", () => {
-    setStartState(
-      elements.acknowledgement.checked,
-      "Begin five-game session",
-      elements.acknowledgement.checked
-        ? "A random anonymous session will be created."
-        : "Tick the acknowledgement to continue.",
-    );
-  });
-
   elements.startButton.addEventListener("click", beginSession);
   elements.likeButton.addEventListener("click", () => submitResponse({ rating: "like" }));
   elements.dislikeButton.addEventListener("click", () => submitResponse({ rating: "dislike" }));
@@ -355,8 +393,12 @@
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden && !elements.playerView.classList.contains("is-hidden")) {
+    if (!state.gameTimingActive) return;
+    if (document.hidden) {
+      pauseVisibleGameTiming();
       state.visibilityLossCount += 1;
+    } else {
+      resumeVisibleGameTiming();
     }
   });
 

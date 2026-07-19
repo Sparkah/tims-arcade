@@ -109,36 +109,75 @@ cd Gallery
 wrangler pages dev . --kv VOTES
 ```
 
-## Dissertation study database
+## Dissertation service-evaluation database
 
 The public repository contains the D1 schema but intentionally does not contain
-the game-to-condition seed. That mapping is blinded research data and lives in
-the private `qmul-agentic-game-production` workspace.
+the game-to-condition mapping or frozen 56-sequence schedule. Those blinded
+evaluation artifacts live in the private `qmul-agentic-game-production`
+workspace.
 
 Build the public opaque game copies and private seed together:
 
 ```bash
 python3 scripts/build_dissertation_study.py \
   --source-root /path/to/private/qmul-agentic-game-production
+python3 /path/to/private/qmul-agentic-game-production/scripts/build_dissertation_schedule.py
 ```
 
-The private seed is written below that repository's
-`artifacts/player_study/dissertation-player-v1/` directory. Apply it only to the
-dedicated `dissertation-study` database, then verify the row count:
+Apply public migrations first. They rename the session metadata to
+`information_version`, `service_evaluation_basis`, and `opened_at`, and create
+the frozen-schedule claim/completion tables. Cloudflare's migration runner does
+not reliably parse trigger bodies, so install the public idempotent guard file
+with `d1 execute --file` next. Only then apply the private game and schedule
+seeds to the dedicated `dissertation-study` database:
 
 ```bash
 npx wrangler d1 migrations apply dissertation-study --remote
 npx wrangler d1 execute dissertation-study --remote \
-  --file=/path/to/private/0002_dissertation_games.sql
+  --file=scripts/dissertation_schedule_guards.sql
 npx wrangler d1 execute dissertation-study --remote \
-  --command="SELECT COUNT(*) AS active_games FROM study_games WHERE active=1"
+  --file=/path/to/private/qmul-agentic-game-production/artifacts/player_study/dissertation-player-v1/0002_dissertation_games.sql
+npx wrangler d1 execute dissertation-study --remote \
+  --file=/path/to/private/qmul-agentic-game-production/artifacts/player_study/dissertation-player-v1/seed_dissertation_schedule.sql
+npx wrangler d1 execute dissertation-study --remote \
+  --command="SELECT COUNT(*) AS active_games FROM study_games WHERE active=1; \
+    SELECT COUNT(*) AS sequences FROM study_schedule_sequences; \
+    SELECT COUNT(*) AS slots FROM study_schedule_items; \
+    SELECT COUNT(*) AS schedule_guards FROM sqlite_master \
+      WHERE type='trigger' AND name LIKE 'trg_study_schedule_%';"
 ```
 
-The required result is `56`. Collection remains closed unless all three
-server-side gates are present: `DISSERTATION_STUDY_OPEN=1`, a non-empty
-`DISSERTATION_ETHICS_CONFIRMATION_ID`, and a non-empty
-`DISSERTATION_CONSENT_VERSION`. Never enable them before the written
-approval/exemption and participant wording are confirmed.
+The required results are 56 active games, 56 sequences, 280 slots, and 13
+schedule guards. The API checks the exact expected guard-trigger name set, so it
+fails closed if the separate public guard step is omitted or incomplete. It also
+checks that every active game appears exactly five times and exactly once at
+each order position. The private schedule seed must insert the schedule as
+inactive, idempotently insert its sequences and items, and set `active=1` only
+as its final statement. Activation requires schedule SHA-256
+`7c9d936307af533b738be71b08356e6dba987a2c9e9438a6b57c1de4d1dcebd2`.
+The runtime recomputes that hash from canonical sequence/item rows, and database
+triggers prevent active rows from changing.
+
+Production activation receipt (2026-07-19): migration `0004`, all 13 public
+guards, and the private frozen schedule were applied to `dissertation-study`
+before the opening code was pushed. The verified state was 57 stored games, 56
+active games, 56 sequences, 280 slots, the exact schedule hash above, and zero
+sessions, assignments, responses, claims, or completions. The
+`DISSERTATION_STUDY_OPEN = "1"` setting below is therefore deliberate, not a
+request for Pages to run those database steps automatically.
+
+Service evaluation opens only when all three namespaced server settings and D1
+are present:
+
+```toml
+DISSERTATION_STUDY_OPEN = "1"
+DISSERTATION_SERVICE_EVALUATION_BASIS = "qmul-service-evaluation-email-alvaro-bort"
+DISSERTATION_INFORMATION_VERSION = "service-evaluation-notice-v1"
+```
+
+The information version shown beside the visible data notice is sent when the
+player chooses Begin and is stored with that session. There is no consent
+checkbox or consent boolean.
 
 The frozen game payloads landed in the four commits immediately before the
 study shell. Verify the complete checkout—not only the latest diff—before
@@ -161,10 +200,19 @@ game bytes change and a second telemetry stream exists outside the research
 record.
 
 The mutation API uses atomic D1 buckets to allow at most 20 requests per minute
-for new-session creation and per random study session, plus a global ceiling of
-500 new sessions per UTC day. Status remains closed if the abuse-control table
-is unavailable. These controls do not store IP addresses, cookies, device
-fingerprints, or other participant identifiers.
+for new-session creation and per random session UUID, plus a global ceiling of
+500 new sessions per UTC day. Session creation atomically claims the next
+never-issued frozen sequence. Only after all 56 have been issued can a sequence
+without a primary completion be reissued, and only when its latest claim is at
+least 30 minutes old. The first completed session for each sequence is the
+primary cohort; later completions remain stored but are flagged non-primary in
+the admin export.
+
+Status remains closed if the abuse-control or schedule tables are unavailable.
+These controls do not store IP addresses, cookies, device fingerprints, or
+other participant identifiers. Browser playtime counts visible-display time:
+it pauses while the document is hidden, while visibility losses remain recorded
+separately.
 
 ## Creator builder rollout settings
 
