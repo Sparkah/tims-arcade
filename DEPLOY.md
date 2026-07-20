@@ -180,9 +180,9 @@ DISSERTATION_SERVICE_EVALUATION_BASIS = "qmul-service-evaluation-email-alvaro-bo
 DISSERTATION_INFORMATION_VERSION = "service-evaluation-notice-v2-all-56"
 ```
 
-The information version shown beside the visible data notice is sent when the
-player chooses Begin and is stored with that session. There is no consent
-checkbox or consent boolean.
+The information version is returned by the status API, sent when the player
+chooses Begin, and stored with that session. It is not printed in the
+streamlined entry UI. There is no consent checkbox or consent boolean.
 
 The frozen game payloads landed in the four commits immediately before the
 study shell. Verify the complete checkout—not only the latest diff—before

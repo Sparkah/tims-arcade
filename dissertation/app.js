@@ -15,7 +15,6 @@
     statusLabel: document.querySelector("#status-label"),
     closedNotice: document.querySelector("#closed-notice"),
     dataNotice: document.querySelector("#data-notice"),
-    informationVersion: document.querySelector("#information-version"),
     startButton: document.querySelector("#start-button"),
     startLabel: document.querySelector("#start-label"),
     buttonNote: document.querySelector("#button-note"),
@@ -92,6 +91,7 @@
     state.mode = mode;
     elements.status.dataset.state = mode;
     elements.statusLabel.textContent = label;
+    elements.status.classList.toggle("is-hidden", !label);
   }
 
   function setStartState(enabled, label, note) {
@@ -301,7 +301,6 @@
       setStatus("open", "Session ready");
       elements.closedNotice.classList.add("is-hidden");
       elements.dataNotice.classList.remove("is-hidden");
-      elements.informationVersion.textContent = session.informationVersion;
       elements.footerMode.textContent = "Anonymous service-evaluation session saved";
       setStartState(
         true,
@@ -344,10 +343,9 @@
       const status = await api("/api/dissertation/status", { method: "GET", headers: {} });
       state.status = status;
       if (status.open) {
-        setStatus("open", "Evaluation open");
+        setStatus("open", "");
         elements.closedNotice.classList.add("is-hidden");
         elements.dataNotice.classList.remove("is-hidden");
-        elements.informationVersion.textContent = status.informationVersion;
         elements.footerMode.textContent = "Anonymous service-evaluation records";
         setStartState(
           true,
