@@ -262,7 +262,7 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(html, /Choosing Begin creates an anonymous 56-game evaluation session/);
   assert.match(html, /random session key/);
   assert.match(html, /current-game timing/);
-  assert.match(html, /data-copy-version="minimal-entry-v3"/);
+  assert.match(html, /data-copy-version="minimal-entry-v4"/);
   assert.match(html, /<h1 class="visually-hidden" id="study-title">Evaluation<\/h1>/);
   assert.doesNotMatch(html, /Information version:/);
   assert.doesNotMatch(html, /Anonymous browser-game service evaluation/);
@@ -285,7 +285,15 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(app, /loadToken === state\.readyWait\.token/);
   assert.match(app, /setStatus\("preview", "Preview complete"\)/);
   assert.match(app, /Preview only · responses discarded/);
-  assert.match(html, /role="group" aria-labelledby="response-heading"/);
+  assert.match(html, /<h2 id="response-heading">Rate your experience<\/h2>/);
+  assert.match(html, /role="group" aria-labelledby="response-heading" aria-describedby="rating-help"/);
+  assert.match(html, /id="rating-help" class="visually-hidden" aria-live="polite"/);
+  assert.match(html, />\s*Like\s*<\/span>/);
+  assert.match(html, />\s*Dislike\s*<\/span>/);
+  assert.match(html, /id="skip-toggle"[^>]*>[\s\S]*?Skip\s*<\/button>/);
+  assert.match(app, /elements\.ratingHelp\.textContent = "Rating is available\."/);
+  assert.doesNotMatch(html, /Your response|Would you keep playing\?|I need to skip this game|[↑↓]/);
+  assert.doesNotMatch(app, /Try the game first|Choose based on the game you just played|played for at least 90 seconds/);
   assert.match(html, /sandbox="allow-scripts"/);
   assert.doesNotMatch(html, /allow-same-origin/);
   assert.match(html, /All 56 anonymous service-evaluation responses were recorded/);

@@ -2,7 +2,6 @@
   "use strict";
 
   const RATING_DELAY_SECONDS = 10;
-  const PLAYTIME_PROMPT_SECONDS = 90;
   const FRAME_READY_TIMEOUT_MS = 20000;
   const STORAGE_KEY = "dissertation-service-evaluation-v2";
   const STORAGE_PROTOCOL = "all-56-v2";
@@ -481,7 +480,7 @@
     elements.progressMeter.setAttribute("aria-valuetext", `${state.completedCount} of ${total} games completed`);
     elements.gameHeading.textContent = `Game ${state.position + 1} of ${total}`;
     elements.ratingHelp.textContent =
-      `Try the game first. Rating becomes available after ${RATING_DELAY_SECONDS} seconds.`;
+      `Rating unlocks after ${RATING_DELAY_SECONDS} seconds.`;
     elements.frame.title = `Game ${state.position + 1} of ${total}`;
     elements.frameShell.dataset.state = "loading";
     elements.frameLoading.removeAttribute("aria-hidden");
@@ -554,14 +553,9 @@
   function updateTimer() {
     const elapsed = Math.max(0, Math.floor(visibleElapsedMs() / 1000));
     const ratingAvailable = elapsed >= RATING_DELAY_SECONDS;
-    if (elapsed >= PLAYTIME_PROMPT_SECONDS && state.ratingPhase !== "long") {
-      state.ratingPhase = "long";
-      elements.ratingHelp.textContent =
-        "You have played for at least 90 seconds. Rate now, or continue if you want.";
-    } else if (elapsed >= RATING_DELAY_SECONDS && state.ratingPhase === "locked") {
+    if (ratingAvailable && state.ratingPhase === "locked") {
       state.ratingPhase = "open";
-      elements.ratingHelp.textContent =
-        "Rating is available. Choose based on the game you just played.";
+      elements.ratingHelp.textContent = "Rating is available.";
     }
     elements.likeButton.disabled = state.submitting || !ratingAvailable;
     elements.dislikeButton.disabled = state.submitting || !ratingAvailable;
