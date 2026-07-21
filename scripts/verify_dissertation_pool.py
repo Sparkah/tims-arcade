@@ -9,7 +9,14 @@ from pathlib import Path
 
 
 EXPECTED_GAMES = 56
-BRIDGE_TAG = '<script src="/dissertation/study-bridge.js"></script>'
+INLINE_READY_TAG = (
+    '<script>(()=>{const loadToken=new URLSearchParams(window.location.search)'
+    '.get("studyLoad");const sendReady=()=>window.parent.postMessage({source:'
+    '"dissertation-game",type:"ready",inputMethod:"unknown",loadToken},"*");'
+    'if(document.readyState==="complete"){sendReady();}else{window.addEventListener('
+    '"load",sendReady,{once:true});}})();</script>'
+)
+BRIDGE_TAG = '<script src="/dissertation/study-bridge.js?v=token-ready-v2"></script>'
 PRIVATE_KEYS = {
     "condition",
     "prompt",
@@ -83,8 +90,12 @@ def main() -> None:
         if not game_path.is_file():
             raise SystemExit(f"{public_id}: missing {game_path}")
         content = game_path.read_bytes()
+        if content.count(INLINE_READY_TAG.encode()) != 1:
+            raise SystemExit(f"{public_id}: inline ready bridge must appear exactly once")
         if content.count(BRIDGE_TAG.encode()) != 1:
-            raise SystemExit(f"{public_id}: study bridge must appear exactly once")
+            raise SystemExit(f"{public_id}: input bridge must appear exactly once")
+        if content.index(BRIDGE_TAG.encode()) > content.index(INLINE_READY_TAG.encode()):
+            raise SystemExit(f"{public_id}: input bridge must precede inline ready fallback")
         actual_hash = hashlib.sha256(content).hexdigest()
         if actual_hash != expected_hash:
             raise SystemExit(f"{public_id}: served SHA-256 mismatch")

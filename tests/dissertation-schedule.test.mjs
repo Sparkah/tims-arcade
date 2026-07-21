@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 
 const libraryUrl = new URL('../functions/_lib/dissertationStudy.js', import.meta.url);
@@ -169,6 +170,21 @@ test('participant flow sends information version and uses visible time', async (
     new URL('../dissertation/study-bridge.js', import.meta.url),
     'utf8',
   );
+  const pool = JSON.parse(await readFile(
+    new URL('../dissertation/pool.json', import.meta.url),
+    'utf8',
+  ));
+  const gameDocuments = await Promise.all(pool.games.map(game => readFile(
+    new URL(`../dissertation/g/${game.id}/index.html`, import.meta.url),
+    'utf8',
+  )));
+  const inlineReadyTag = [
+    '<script>(()=>{const loadToken=new URLSearchParams(window.location.search)',
+    '.get("studyLoad");const sendReady=()=>window.parent.postMessage({source:',
+    '"dissertation-game",type:"ready",inputMethod:"unknown",loadToken},"*");',
+    'if(document.readyState==="complete"){sendReady();}else{window.addEventListener(',
+    '"load",sendReady,{once:true});}})();</script>',
+  ].join('');
 
   assert.match(app, /informationVersion: state\.status\.informationVersion/);
   assert.match(app, /creationId: state\.creationId/);
@@ -190,6 +206,55 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(bridge, /addEventListener\("load".*\{ once: true \}/);
   assert.match(bridge, /URLSearchParams\(window\.location\.search\)\.get\("studyLoad"\)/);
   assert.match(bridge, /loadToken,/);
+  for (const gameDocument of gameDocuments) {
+    assert.equal(gameDocument.split(inlineReadyTag).length - 1, 1);
+    assert.equal(
+      gameDocument.split(
+        '<script src="/dissertation/study-bridge.js?v=token-ready-v2"></script>',
+      ).length - 1,
+      1,
+    );
+    assert.ok(
+      gameDocument.indexOf('study-bridge.js?v=token-ready-v2')
+        < gameDocument.indexOf(inlineReadyTag),
+    );
+  }
+  const readyMessages = [];
+  let readyListener = null;
+  let readyListenerOptions = null;
+  runInNewContext(
+    inlineReadyTag.slice('<script>'.length, -'</script>'.length),
+    {
+      document: { readyState: 'loading' },
+      URLSearchParams,
+      window: {
+        location: { search: '?studyLoad=37' },
+        addEventListener: (type, listener, options) => {
+          assert.equal(type, 'load');
+          readyListener = listener;
+          readyListenerOptions = options;
+        },
+        parent: {
+          postMessage: (message, targetOrigin) => {
+            readyMessages.push({ message, targetOrigin });
+          },
+        },
+      },
+    },
+  );
+  assert.equal(readyMessages.length, 0);
+  assert.equal(typeof readyListener, 'function');
+  assert.equal(readyListenerOptions.once, true);
+  readyListener();
+  assert.equal(JSON.stringify(readyMessages), JSON.stringify([{
+    message: {
+      source: 'dissertation-game',
+      type: 'ready',
+      inputMethod: 'unknown',
+      loadToken: '37',
+    },
+    targetOrigin: '*',
+  }]));
 
   assert.match(html, /id="data-notice"/);
   assert.match(html, /Please complete one session only\./);
@@ -197,7 +262,7 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(html, /Choosing Begin creates an anonymous 56-game evaluation session/);
   assert.match(html, /random session key/);
   assert.match(html, /current-game timing/);
-  assert.match(html, /data-copy-version="minimal-entry-v2"/);
+  assert.match(html, /data-copy-version="minimal-entry-v3"/);
   assert.match(html, /<h1 class="visually-hidden" id="study-title">Evaluation<\/h1>/);
   assert.doesNotMatch(html, /Information version:/);
   assert.doesNotMatch(html, /Anonymous browser-game service evaluation/);
@@ -215,10 +280,14 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(app, /matchMedia\("\(max-width: 56rem\)"\)/);
   assert.match(app, /frameLoading\.setAttribute\("aria-hidden", "true"\)/);
   assert.match(app, /\?studyLoad=\$\{token\}/);
+  assert.match(app, /waitForGameReady\(token\)/);
+  assert.doesNotMatch(app, /isVerifiedGameDocument|onFrameLoad/);
   assert.match(app, /loadToken === state\.readyWait\.token/);
   assert.match(app, /setStatus\("preview", "Preview complete"\)/);
   assert.match(app, /Preview only · responses discarded/);
   assert.match(html, /role="group" aria-labelledby="response-heading"/);
+  assert.match(html, /sandbox="allow-scripts"/);
+  assert.doesNotMatch(html, /allow-same-origin/);
   assert.match(html, /All 56 anonymous service-evaluation responses were recorded/);
   assert.doesNotMatch(html, /type="checkbox"|want to take part/);
 });

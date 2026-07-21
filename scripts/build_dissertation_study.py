@@ -21,7 +21,16 @@ EXPECTED_FORMAL_RUNS = 90
 EXPECTED_ELIGIBLE_RUNS = 56
 STUDY_VERSION = "dissertation-player-v1"
 SESSION_SIZE = 56
-BRIDGE_TAG = '<script src="/dissertation/study-bridge.js"></script>'
+# Keep readiness inline so a privacy blocker or stale cached bridge cannot remove
+# the tokened signal. It still waits for window.load, so incomplete frames fail.
+INLINE_READY_TAG = (
+    '<script>(()=>{const loadToken=new URLSearchParams(window.location.search)'
+    '.get("studyLoad");const sendReady=()=>window.parent.postMessage({source:'
+    '"dissertation-game",type:"ready",inputMethod:"unknown",loadToken},"*");'
+    'if(document.readyState==="complete"){sendReady();}else{window.addEventListener('
+    '"load",sendReady,{once:true});}})();</script>'
+)
+BRIDGE_TAG = '<script src="/dissertation/study-bridge.js?v=token-ready-v2"></script>'
 TECHNICAL_EXCLUSIONS: dict[str, str] = {
     "gd1181d5b7e5d": (
         "core input throws before visible feedback or termination; "
@@ -67,16 +76,23 @@ def public_id(run_id: str) -> str:
 def inject_bridge(source: bytes, source_path: Path) -> bytes:
     text = source.decode("utf-8")
     lower = text.lower()
-    if BRIDGE_TAG in text:
+    if INLINE_READY_TAG in text and BRIDGE_TAG in text:
         return source
+    # The normal bridge registers first and remains authoritative. The inline
+    # listener follows only so blocked/stale bridge responses cannot deadlock.
+    missing_tags = [
+        tag for tag in (BRIDGE_TAG, INLINE_READY_TAG)
+        if tag not in text
+    ]
+    instrumentation = "\n  ".join(missing_tags)
     head_end = lower.find("</head>")
     if head_end >= 0:
-        text = text[:head_end] + f"  {BRIDGE_TAG}\n" + text[head_end:]
+        text = text[:head_end] + f"  {instrumentation}\n" + text[head_end:]
     else:
         body_end = lower.rfind("</body>")
         if body_end < 0:
             raise ValueError(f"{source_path} has neither </head> nor </body>")
-        text = text[:body_end] + f"  {BRIDGE_TAG}\n" + text[body_end:]
+        text = text[:body_end] + f"  {instrumentation}\n" + text[body_end:]
     return text.encode("utf-8")
 
 
