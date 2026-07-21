@@ -98,6 +98,7 @@
     elements.startButton.disabled = !enabled;
     elements.startLabel.textContent = label;
     elements.buttonNote.textContent = note;
+    elements.buttonNote.classList.toggle("is-hidden", !note);
   }
 
   function showError(message) {
@@ -349,8 +350,8 @@
         elements.footerMode.textContent = "Anonymous service-evaluation records";
         setStartState(
           true,
-          "Begin all 56 games",
-          "Your progress is saved after every response.",
+          "Begin",
+          "",
         );
       } else if (status.recruitmentComplete) {
         setStatus("closed", "Evaluation complete");

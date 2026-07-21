@@ -197,7 +197,7 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(html, /Choosing Begin creates an anonymous 56-game evaluation session/);
   assert.match(html, /random session key/);
   assert.match(html, /current-game timing/);
-  assert.match(html, /data-copy-version="minimal-entry-v1"/);
+  assert.match(html, /data-copy-version="minimal-entry-v2"/);
   assert.match(html, /<h1 class="visually-hidden" id="study-title">Evaluation<\/h1>/);
   assert.doesNotMatch(html, /Information version:/);
   assert.doesNotMatch(html, /Anonymous browser-game service evaluation/);
@@ -206,8 +206,12 @@ test('participant flow sends information version and uses visible time', async (
   assert.doesNotMatch(html, /Stay anonymous/);
   assert.doesNotMatch(html, /What is recorded/);
   assert.doesNotMatch(app, /Evaluation open/);
+  assert.doesNotMatch(app, /Begin all 56 games/);
+  assert.doesNotMatch(app, /Your progress is saved after every response\./);
   assert.match(app, /classList\.toggle\("is-hidden", !label\)/);
+  assert.match(app, /buttonNote\.classList\.toggle\("is-hidden", !note\)/);
   assert.match(app, /setStatus\("open", ""\)/);
+  assert.match(app, /setStartState\(\s*true,\s*"Begin",\s*"",\s*\)/);
   assert.match(app, /matchMedia\("\(max-width: 56rem\)"\)/);
   assert.match(app, /frameLoading\.setAttribute\("aria-hidden", "true"\)/);
   assert.match(app, /\?studyLoad=\$\{token\}/);
