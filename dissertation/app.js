@@ -3,11 +3,10 @@
 
   const RATING_DELAY_SECONDS = 10;
   const FRAME_READY_TIMEOUT_MS = 20000;
-  const PLAYER_LAYOUT_VERSION = "mobile-fit-v1";
+  const PLAYER_LAYOUT_VERSION = "universal-fit-v1";
   const STORAGE_KEY = "dissertation-service-evaluation-v2";
   const STORAGE_PROTOCOL = "all-56-v2";
   const LOCAL_PREVIEW_HOSTS = new Set(["localhost", "127.0.0.1"]);
-  const MOBILE_PLAYER_QUERY = window.matchMedia("(max-width: 64rem)");
   const PREVIEW_MODE = LOCAL_PREVIEW_HOSTS.has(window.location.hostname)
     && new URLSearchParams(window.location.search).get("preview") === "1";
 
@@ -123,17 +122,17 @@
 
   async function loadGameLayouts() {
     if (state.gameLayouts) return state.gameLayouts;
-    const response = await fetch("/dissertation/game-layouts.json?v=mobile-fit-v1", {
+    const response = await fetch("/dissertation/game-layouts.json?v=universal-fit-v1", {
       credentials: "same-origin",
       cache: "no-store",
     });
-    if (!response.ok) throw new Error("The mobile game layout map is unavailable.");
+    if (!response.ok) throw new Error("The game layout map is unavailable.");
     const payload = await response.json();
     const layouts = payload && payload.games;
     if (payload.playerLayoutVersion !== PLAYER_LAYOUT_VERSION
         || !layouts
         || Object.keys(layouts).length !== 56) {
-      throw new Error("The mobile game layout map is incomplete.");
+      throw new Error("The game layout map is incomplete.");
     }
     for (const layout of Object.values(layouts)) {
       const fixed = layout && layout.mode === "fixed";
@@ -145,7 +144,7 @@
           || layout.width > 1200
           || layout.height < 240
           || layout.height > 1200)) {
-        throw new Error("The mobile game layout map contains an invalid entry.");
+        throw new Error("The game layout map contains an invalid entry.");
       }
     }
     state.gameLayouts = layouts;
@@ -162,7 +161,7 @@
 
   function applyFrameFit() {
     const layout = state.currentFrameLayout;
-    if (!MOBILE_PLAYER_QUERY.matches || !layout || layout.mode !== "fixed") {
+    if (!layout || layout.mode !== "fixed") {
       elements.frame.dataset.fit = "fluid";
       for (const property of ["width", "height", "left", "top", "transform"]) {
         elements.frame.style.removeProperty(property);
@@ -179,18 +178,19 @@
       1,
     );
     const renderedWidth = layout.width * scale;
+    const renderedHeight = layout.height * scale;
     elements.frame.dataset.fit = "fixed";
     elements.frame.style.width = `${layout.width}px`;
     elements.frame.style.height = `${layout.height}px`;
     elements.frame.style.left = `${Math.max(0, (shellWidth - renderedWidth) / 2)}px`;
-    elements.frame.style.top = "0px";
+    elements.frame.style.top = `${Math.max(0, (shellHeight - renderedHeight) / 2)}px`;
     elements.frame.style.transform = `scale(${scale})`;
   }
 
   function configureFrameFit(game) {
     resetFrameFit();
     const layout = state.gameLayouts && state.gameLayouts[game.publicId];
-    if (!layout) throw new Error("This game is missing mobile layout metadata.");
+    if (!layout) throw new Error("This game is missing layout metadata.");
     state.currentFrameLayout = layout;
     applyFrameFit();
   }
@@ -800,11 +800,6 @@
     frameResizeObserver.observe(elements.frameShell);
   } else {
     window.addEventListener("resize", applyFrameFit);
-  }
-  if (typeof MOBILE_PLAYER_QUERY.addEventListener === "function") {
-    MOBILE_PLAYER_QUERY.addEventListener("change", applyFrameFit);
-  } else {
-    MOBILE_PLAYER_QUERY.addListener(applyFrameFit);
   }
 
   window.addEventListener("message", (event) => {

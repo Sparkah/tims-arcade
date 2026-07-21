@@ -35,7 +35,16 @@ const FIELDS = [
 ];
 const REQUIRED_FIELDS = FIELDS.filter(field => field !== 'playerLayoutVersion');
 
-export const CURRENT_PLAYER_LAYOUT_VERSION = 'mobile-fit-v1';
+export const CURRENT_PLAYER_LAYOUT_VERSION = 'universal-fit-v1';
+
+// Every shell version that may still legitimately submit. A participant who
+// loaded the phone-fit shell before the universal-fit deploy keeps a cached
+// app.js until reload; their responses stay valid and stay labelled with the
+// shell they actually used.
+const ACCEPTED_PLAYER_LAYOUT_VERSIONS = new Set([
+  'mobile-fit-v1',
+  CURRENT_PLAYER_LAYOUT_VERSION,
+]);
 
 const MAX_RECORDED_PLAYTIME_SECONDS = 3600;
 
@@ -56,7 +65,8 @@ export function normalizePlaytimeForStorage(value) {
 export async function onRequestPost({ request, env }) {
   // playerLayoutVersion is optional only so a participant with the pre-fix app
   // already open can finish safely. Those legacy responses are stored as NULL
-  // and remain distinguishable from the mobile-fit-v1 intervention.
+  // and remain distinguishable from the fitted-shell interventions
+  // (mobile-fit-v1 = phone-only fit, universal-fit-v1 = all-viewport fit).
   const parsed = await readStudyJson(request, FIELDS, REQUIRED_FIELDS);
   if (parsed.response) return parsed.response;
   const gate = requireOpenStudy(env);
@@ -80,7 +90,7 @@ export async function onRequestPost({ request, env }) {
   }
   if (playerLayoutVersion !== undefined
       && playerLayoutVersion !== null
-      && playerLayoutVersion !== CURRENT_PLAYER_LAYOUT_VERSION) {
+      && !ACCEPTED_PLAYER_LAYOUT_VERSIONS.has(playerLayoutVersion)) {
     return studyError('invalid_player_layout_version', 400);
   }
   if (playtime === null) return studyError('invalid_playtime', 400);

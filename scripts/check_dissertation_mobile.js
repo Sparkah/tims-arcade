@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 /**
- * Hard mobile-containment gate for the dissertation participant player.
+ * Hard containment gate for the dissertation participant player.
  *
  * This opens the real participant shell in local preview mode, intercepts only
  * pool.json, and supplies 56 copies of one opaque game assignment. That keeps
  * the production app/session path intact while making the first game
  * deterministic. Every public game is checked across the supported portrait
- * and phone-landscape viewport set.
+ * and phone-landscape viewport set (trusted touch taps) and the desktop
+ * viewport set (trusted mouse clicks).
  *
  * With no base URL, the gate serves the checked-out Gallery tree on an
  * ephemeral loopback port. An existing local server can be supplied instead:
@@ -37,11 +38,15 @@ const GAME_READY_TIMEOUT_MS = 35_000;
 const TOLERANCE_PX = 4;
 
 const VIEWPORTS = [
-  { name: 'mobile-small-320x568', width: 320, height: 568 },
-  { name: 'mobile-393x852', width: 393, height: 852 },
-  { name: 'mobile-360x640', width: 360, height: 640 },
-  { name: 'mobile-landscape-844x390', width: 844, height: 390 },
-  { name: 'mobile-large-landscape-932x430', width: 932, height: 430 },
+  { name: 'mobile-small-320x568', width: 320, height: 568, input: 'touch' },
+  { name: 'mobile-393x852', width: 393, height: 852, input: 'touch' },
+  { name: 'mobile-360x640', width: 360, height: 640, input: 'touch' },
+  { name: 'mobile-landscape-844x390', width: 844, height: 390, input: 'touch' },
+  { name: 'mobile-large-landscape-932x430', width: 932, height: 430, input: 'touch' },
+  { name: 'desktop-short-1280x620', width: 1280, height: 620, input: 'mouse' },
+  { name: 'desktop-1280x720', width: 1280, height: 720, input: 'mouse' },
+  { name: 'desktop-1440x900', width: 1440, height: 900, input: 'mouse' },
+  { name: 'desktop-wide-1920x1080', width: 1920, height: 1080, input: 'mouse' },
 ];
 
 function hasPuppeteer(root) {
@@ -634,28 +639,43 @@ async function tapGame(page, frame, viewport) {
   const scaleY = outerRect.height / inner.height;
   const x = Math.max(2, Math.min(viewport.width - 2, outerRect.left + target.x * scaleX));
   const y = Math.max(2, Math.min(viewport.height - 2, outerRect.top + target.y * scaleY));
-  await page.touchscreen.tap(x, y);
+  if (viewport.input === 'mouse') {
+    await page.mouse.click(x, y);
+  } else {
+    await page.touchscreen.tap(x, y);
+  }
   return { x, y, scaleX, scaleY, outerRect, inner, target };
 }
 
-async function inspectInputEvidence(page, frame, tap) {
+async function inspectInputEvidence(page, frame, tap, viewport) {
   const [parentEvidence, childEvidence] = await Promise.all([
     page.evaluate(() => window.__dissertationMobileQa || { inputs: [], messages: [] }),
     frame.evaluate(() => window.__dissertationMobileQa || { inputs: [], messages: [] }),
   ]);
-  const trustedTouch = childEvidence.inputs.some(event => event.isTrusted
-    && (event.pointerType === 'touch' || event.type === 'touchstart'));
-  const coordinateEvent = childEvidence.inputs.find(event => event.isTrusted
-    && (event.pointerType === 'touch' || event.type === 'touchstart')
+  const wantsTouch = viewport.input !== 'mouse';
+  const matchesProfile = event => event.isTrusted
+    && (wantsTouch
+      ? (event.pointerType === 'touch' || event.type === 'touchstart')
+      : event.pointerType === 'mouse');
+  const trustedInput = childEvidence.inputs.some(matchesProfile);
+  const coordinateEvent = childEvidence.inputs.find(event => matchesProfile(event)
     && Number.isFinite(event.clientX)
     && Number.isFinite(event.clientY));
-  const bridgeTouch = parentEvidence.messages.some(message => message.type === 'first-input'
-    && message.inputMethod === 'touch');
+  const expectedBridgeMethod = wantsTouch ? 'touch' : 'mouse-or-trackpad';
+  const bridgeInput = parentEvidence.messages.some(message => message.type === 'first-input'
+    && message.inputMethod === expectedBridgeMethod);
   const errors = [];
-  if (!trustedTouch) errors.push('input: real touchscreen tap produced no trusted touch/pointer event in game');
-  if (!bridgeTouch) errors.push('input: game bridge did not report first-input with inputMethod=touch');
+  if (!trustedInput) {
+    errors.push(
+      `input: real ${wantsTouch ? 'touchscreen tap' : 'mouse click'} produced no trusted `
+      + `${wantsTouch ? 'touch' : 'mouse'} event in game`,
+    );
+  }
+  if (!bridgeInput) {
+    errors.push(`input: game bridge did not report first-input with inputMethod=${expectedBridgeMethod}`);
+  }
   if (!coordinateEvent) {
-    errors.push('input: trusted touch had no child-frame coordinates');
+    errors.push(`input: trusted ${wantsTouch ? 'touch' : 'mouse'} input had no child-frame coordinates`);
   } else if (Math.abs(coordinateEvent.clientX - tap.target.x) > TOLERANCE_PX
       || Math.abs(coordinateEvent.clientY - tap.target.y) > TOLERANCE_PX) {
     errors.push(
@@ -666,8 +686,8 @@ async function inspectInputEvidence(page, frame, tap) {
   }
   return {
     errors,
-    trustedTouch,
-    bridgeTouch,
+    trustedInput,
+    bridgeInput,
     coordinateEvent,
     parentEvidence,
     childEvidence,
@@ -736,8 +756,8 @@ async function runCase(browser, baseUrl, pool, game, viewport) {
       width: viewport.width,
       height: viewport.height,
       deviceScaleFactor: 1,
-      isMobile: true,
-      hasTouch: true,
+      isMobile: viewport.input === 'touch',
+      hasTouch: viewport.input === 'touch',
     });
     await page.setCacheEnabled(false);
     await installInstrumentation(page);
@@ -782,7 +802,7 @@ async function runCase(browser, baseUrl, pool, game, viewport) {
 
     result.tap = await tapGame(page, frame, viewport);
     await sleep(350);
-    result.input = await inspectInputEvidence(page, frame, result.tap);
+    result.input = await inspectInputEvidence(page, frame, result.tap, viewport);
     result.errors.push(...result.input.errors);
 
     await forceScrollAttempts(page, frame);
@@ -848,7 +868,7 @@ async function runCase(browser, baseUrl, pool, game, viewport) {
           console.error(`\u2717 ${result.gameId} @ ${result.viewport.name}`);
           for (const error of result.errors) console.error(`    ${error}`);
         } else if (!options.quiet && completed % 8 === 0) {
-          console.log(`  \u2026${completed}/${cases.length} mobile cases passed`);
+          console.log(`  \u2026${completed}/${cases.length} cases passed`);
         }
       }
     }));
@@ -901,9 +921,12 @@ async function runCase(browser, baseUrl, pool, game, viewport) {
     }, null, 2)}\n`,
   );
 
+  const touchCount = VIEWPORTS.filter(viewport => viewport.input === 'touch').length;
+  const mouseCount = VIEWPORTS.length - touchCount;
   console.log(
-    `\u2705 dissertation mobile gate: ${games.length} game(s) \u00d7 ${VIEWPORTS.length} phone viewports; `
-    + 'one-screen shell, contained game UI, 44px controls, and trusted touch bridge all passed',
+    `\u2705 dissertation containment gate: ${games.length} game(s) \u00d7 ${VIEWPORTS.length} viewports `
+    + `(${touchCount} phone + ${mouseCount} desktop); one-screen shell, contained game UI, `
+    + '44px controls, and trusted input bridge all passed',
   );
   process.exit(0);
 })().catch((error) => {

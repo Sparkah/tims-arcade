@@ -218,12 +218,30 @@ query still returned 3 sessions, 168 assignments, 3 responses, 3 claims, and 0
 completions; all 3 responses had `player_layout_version = NULL`, the column was
 nullable `TEXT`, and `PRAGMA foreign_key_check` returned no rows.
 
+`universal-fit-v1` (2026-07-21, same day) extends that fit to every viewport.
+The `mobile-fit-v1` shell applied the fixed-game scale-to-fit only below 64rem,
+so desktop windows rendered fixed-size games unscaled inside a shorter shell;
+with the games' own internal `overflow:hidden`, their lower half, including
+each game's own Start button, was clipped. The shell now scales fixed games on
+all viewports and centres them on both axes, desktop playing mode is
+viewport-contained like mobile (footer hidden, shell fills the remaining
+height, no page scroll), and the response API accepts both `mobile-fit-v1`
+and `universal-fit-v1` so a participant holding the cached phone-fit shell can
+still submit; each stored value keeps naming the shell actually used. No
+frozen game HTML, integrity hash, schedule, assignment, or D1 game row
+changed, and no migration was needed (the `player_layout_version` column
+already accepts any 1-64 text). Immediately before this deploy the production
+database contained 4 sessions, 224 assignments, 5 responses (3 `NULL` legacy
+plus 2 `mobile-fit-v1`), 4 claims, and 0 completions. The Git commit that
+contains this entry is the intervention build boundary for analysis.
+
 The release gate is `node scripts/check_dissertation_mobile.js`. It loads all
-56 games in the real preview shell at five phone shapes (280 cases), verifies
-outer and sandboxed-child containment, checks the study controls, and sends trusted touch
-input through the fitted iframe. `study.css`, `app.js`, and the layout map use
-the `mobile-fit-v1` cache key so a participant cannot receive a mixed old/new
-shell after deployment.
+56 games in the real preview shell at five phone shapes and four desktop
+shapes (504 cases), verifies outer and sandboxed-child containment, checks the
+study controls, and sends trusted touch or mouse input through the fitted
+iframe. `study.css`, `app.js`, and the layout map use the `universal-fit-v1`
+cache key so a participant cannot receive a mixed old/new shell after
+deployment.
 
 Keep the path-scoped Pages Analytics removal and `no-transform` middleware on
 all dissertation HTML. Pages injects its marked browser beacon into static HTML

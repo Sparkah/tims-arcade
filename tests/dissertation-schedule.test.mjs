@@ -206,9 +206,11 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(app, /status\.collectionEnabled && status\.scheduleReady/);
   assert.match(app, /width < 640 \? "mobile" : width < 1100 \? "tablet"/);
   assert.match(app, /LOCAL_PREVIEW_HOSTS\.has\(window\.location\.hostname\)/);
-  assert.match(app, /PLAYER_LAYOUT_VERSION = "mobile-fit-v1"/);
-  assert.match(app, /fetch\("\/dissertation\/game-layouts\.json\?v=mobile-fit-v1"/);
+  assert.match(app, /PLAYER_LAYOUT_VERSION = "universal-fit-v1"/);
+  assert.match(app, /fetch\("\/dissertation\/game-layouts\.json\?v=universal-fit-v1"/);
   assert.match(app, /elements\.frame\.style\.transform = `scale\(\$\{scale\}\)`/);
+  assert.doesNotMatch(app, /MOBILE_PLAYER_QUERY/);
+  assert.match(studyCss, /@media \(min-width: 64\.0625rem\)/);
   assert.doesNotMatch(app, /scrollIntoView/);
   assert.match(studyCss, /body\.study-playing \.study-shell/);
   assert.match(studyCss, /height: 100dvh/);
@@ -278,9 +280,9 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(html, /random session key/);
   assert.match(html, /current-game timing/);
   assert.match(html, /data-copy-version="minimal-entry-v4"/);
-  assert.match(html, /data-player-layout-version="mobile-fit-v1"/);
-  assert.match(html, /study\.css\?v=mobile-fit-v1/);
-  assert.match(html, /app\.js\?v=mobile-fit-v1/);
+  assert.match(html, /data-player-layout-version="universal-fit-v1"/);
+  assert.match(html, /study\.css\?v=universal-fit-v1/);
+  assert.match(html, /app\.js\?v=universal-fit-v1/);
   assert.match(html, /<h1 class="visually-hidden" id="study-title">Evaluation<\/h1>/);
   assert.doesNotMatch(html, /Information version:/);
   assert.doesNotMatch(html, /Anonymous browser-game service evaluation/);
@@ -295,7 +297,7 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(app, /buttonNote\.classList\.toggle\("is-hidden", !note\)/);
   assert.match(app, /setStatus\("open", ""\)/);
   assert.match(app, /setStartState\(\s*true,\s*"Begin",\s*"",\s*\)/);
-  assert.match(app, /matchMedia\("\(max-width: 64rem\)"\)/);
+  assert.doesNotMatch(app, /matchMedia/);
   assert.match(app, /frameLoading\.setAttribute\("aria-hidden", "true"\)/);
   assert.match(app, /\?studyLoad=\$\{token\}/);
   assert.match(app, /waitForGameReady\(token\)/);
@@ -317,7 +319,7 @@ test('participant flow sends information version and uses visible time', async (
   assert.doesNotMatch(html, /allow-same-origin/);
   assert.match(html, /All 56 anonymous service-evaluation responses were recorded/);
   assert.doesNotMatch(html, /type="checkbox"|want to take part/);
-  assert.equal(gameLayouts.playerLayoutVersion, 'mobile-fit-v1');
+  assert.equal(gameLayouts.playerLayoutVersion, 'universal-fit-v1');
   assert.deepEqual(
     Object.keys(gameLayouts.games).sort(),
     pool.games.map(game => game.id).sort(),
@@ -403,7 +405,7 @@ test('responses preserve the participant player intervention boundary', async ()
     new URL('../functions/api/admin/dissertation-export.js', import.meta.url),
     'utf8',
   );
-  assert.equal(responseApiModule.CURRENT_PLAYER_LAYOUT_VERSION, 'mobile-fit-v1');
+  assert.equal(responseApiModule.CURRENT_PLAYER_LAYOUT_VERSION, 'universal-fit-v1');
   assert.match(app, /playerLayoutVersion: PLAYER_LAYOUT_VERSION/);
   assert.match(responseApi, /field !== 'playerLayoutVersion'/);
   assert.match(responseApi, /playerLayoutVersion \?\? null/);
@@ -449,9 +451,15 @@ test('responses preserve the participant player intervention boundary', async ()
   assert.equal(legacyResponse.status, 503, 'pre-deploy tabs remain request-compatible');
   assert.deepEqual(await legacyResponse.json(), { error: 'study_database_error' });
 
-  const currentResponse = await submit({
+  const supersededResponse = await submit({
     ...legacyPayload,
     playerLayoutVersion: 'mobile-fit-v1',
+  });
+  assert.equal(supersededResponse.status, 503, 'cached mobile-fit-v1 payload stays accepted');
+
+  const currentResponse = await submit({
+    ...legacyPayload,
+    playerLayoutVersion: 'universal-fit-v1',
   });
   assert.equal(currentResponse.status, 503, 'current fitted-player payload is accepted');
 
