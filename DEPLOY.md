@@ -234,6 +234,11 @@ already accepts any 1-64 text). Immediately before this deploy the production
 database contained 4 sessions, 224 assignments, 5 responses (3 `NULL` legacy
 plus 2 `mobile-fit-v1`), 4 claims, and 0 completions. The Git commit that
 contains this entry is the intervention build boundary for analysis.
+Post-deploy live verification on 2026-07-21 (~12:30 UTC) created two
+zero-response QA sessions (schedule claims 5 and 6, one desktop and one
+phone viewport). They contain no responses, are non-primary by definition,
+and their sequences reissue automatically after 24 inactive hours; exclude
+any zero-response session from analysis as usual.
 
 The release gate is `node scripts/check_dissertation_mobile.js`. It loads all
 56 games in the real preview shell at five phone shapes and four desktop
