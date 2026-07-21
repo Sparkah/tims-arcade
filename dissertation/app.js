@@ -3,9 +3,11 @@
 
   const RATING_DELAY_SECONDS = 10;
   const FRAME_READY_TIMEOUT_MS = 20000;
+  const PLAYER_LAYOUT_VERSION = "mobile-fit-v1";
   const STORAGE_KEY = "dissertation-service-evaluation-v2";
   const STORAGE_PROTOCOL = "all-56-v2";
   const LOCAL_PREVIEW_HOSTS = new Set(["localhost", "127.0.0.1"]);
+  const MOBILE_PLAYER_QUERY = window.matchMedia("(max-width: 64rem)");
   const PREVIEW_MODE = LOCAL_PREVIEW_HOSTS.has(window.location.hostname)
     && new URLSearchParams(window.location.search).get("preview") === "1";
 
@@ -60,6 +62,8 @@
     gameLoadToken: 0,
     lastCheckpointSecond: -1,
     ratingPhase: "locked",
+    gameLayouts: null,
+    currentFrameLayout: null,
   };
 
   class ApiError extends Error {
@@ -108,6 +112,87 @@
   function clearError() {
     elements.responseError.textContent = "";
     elements.responseError.classList.add("is-hidden");
+  }
+
+  function setPlayerActive(active) {
+    if (active) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    document.documentElement.classList.toggle("study-playing", active);
+    document.body.classList.toggle("study-playing", active);
+    if (!active) window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }
+
+  async function loadGameLayouts() {
+    if (state.gameLayouts) return state.gameLayouts;
+    const response = await fetch("/dissertation/game-layouts.json?v=mobile-fit-v1", {
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("The mobile game layout map is unavailable.");
+    const payload = await response.json();
+    const layouts = payload && payload.games;
+    if (payload.playerLayoutVersion !== PLAYER_LAYOUT_VERSION
+        || !layouts
+        || Object.keys(layouts).length !== 56) {
+      throw new Error("The mobile game layout map is incomplete.");
+    }
+    for (const layout of Object.values(layouts)) {
+      const fixed = layout && layout.mode === "fixed";
+      const fluid = layout && layout.mode === "fluid";
+      if (!fluid && (!fixed
+          || !Number.isInteger(layout.width)
+          || !Number.isInteger(layout.height)
+          || layout.width < 240
+          || layout.width > 1200
+          || layout.height < 240
+          || layout.height > 1200)) {
+        throw new Error("The mobile game layout map contains an invalid entry.");
+      }
+    }
+    state.gameLayouts = layouts;
+    return layouts;
+  }
+
+  function resetFrameFit() {
+    state.currentFrameLayout = null;
+    elements.frame.dataset.fit = "fluid";
+    for (const property of ["width", "height", "left", "top", "transform"]) {
+      elements.frame.style.removeProperty(property);
+    }
+  }
+
+  function applyFrameFit() {
+    const layout = state.currentFrameLayout;
+    if (!MOBILE_PLAYER_QUERY.matches || !layout || layout.mode !== "fixed") {
+      elements.frame.dataset.fit = "fluid";
+      for (const property of ["width", "height", "left", "top", "transform"]) {
+        elements.frame.style.removeProperty(property);
+      }
+      return;
+    }
+
+    const shellWidth = elements.frameShell.clientWidth;
+    const shellHeight = elements.frameShell.clientHeight;
+    if (shellWidth < 1 || shellHeight < 1) return;
+    const scale = Math.min(
+      shellWidth / layout.width,
+      shellHeight / layout.height,
+      1,
+    );
+    const renderedWidth = layout.width * scale;
+    elements.frame.dataset.fit = "fixed";
+    elements.frame.style.width = `${layout.width}px`;
+    elements.frame.style.height = `${layout.height}px`;
+    elements.frame.style.left = `${Math.max(0, (shellWidth - renderedWidth) / 2)}px`;
+    elements.frame.style.top = "0px";
+    elements.frame.style.transform = `scale(${scale})`;
+  }
+
+  function configureFrameFit(game) {
+    resetFrameFit();
+    const layout = state.gameLayouts && state.gameLayouts[game.publicId];
+    if (!layout) throw new Error("This game is missing mobile layout metadata.");
+    state.currentFrameLayout = layout;
+    applyFrameFit();
   }
 
   function randomOrder(items) {
@@ -264,6 +349,7 @@
     elements.introView.classList.add("is-hidden");
     elements.playerView.classList.add("is-hidden");
     elements.finishView.classList.remove("is-hidden");
+    setPlayerActive(false);
     if (PREVIEW_MODE) {
       setStatus("preview", "Preview complete");
       elements.footerMode.textContent = "Preview only · responses discarded";
@@ -380,6 +466,7 @@
     elements.startLabel.textContent = "Preparing games…";
 
     try {
+      await loadGameLayouts();
       if (PREVIEW_MODE && state.games.length === 0) {
         const pool = await api("/dissertation/pool.json", { method: "GET", headers: {} });
         state.games = randomOrder(pool.games).map((game, index) => ({
@@ -414,9 +501,13 @@
       elements.introView.classList.add("is-hidden");
       elements.finishView.classList.add("is-hidden");
       elements.playerView.classList.remove("is-hidden");
+      setPlayerActive(true);
       await loadCurrentGame();
     } catch (error) {
       state.submitting = false;
+      setPlayerActive(false);
+      elements.playerView.classList.add("is-hidden");
+      elements.introView.classList.remove("is-hidden");
       setStartState(
         true,
         "Try again",
@@ -485,6 +576,7 @@
     elements.frameShell.dataset.state = "loading";
     elements.frameLoading.removeAttribute("aria-hidden");
     elements.frameLoadingCopy.textContent = "Loading game…";
+    configureFrameFit(game);
     restoreCheckpoint(game.publicId);
     state.lastCheckpointSecond = -1;
 
@@ -540,14 +632,6 @@
     updateTimer();
     state.timer = window.setInterval(updateTimer, 250);
     elements.gameHeading.focus({ preventScroll: true });
-    if (window.matchMedia("(max-width: 56rem)").matches) {
-      elements.frameShell.scrollIntoView({
-        block: "start",
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? "auto"
-          : "smooth",
-      });
-    }
   }
 
   function updateTimer() {
@@ -584,6 +668,7 @@
           body: JSON.stringify({
             sessionId: state.sessionId,
             publicId: game.publicId,
+            playerLayoutVersion: PLAYER_LAYOUT_VERSION,
             playtimeSeconds,
             rating,
             skipReason,
@@ -709,6 +794,18 @@
     pauseVisibleGameTiming();
     checkpointTiming();
   });
+
+  if (typeof ResizeObserver === "function") {
+    const frameResizeObserver = new ResizeObserver(() => applyFrameFit());
+    frameResizeObserver.observe(elements.frameShell);
+  } else {
+    window.addEventListener("resize", applyFrameFit);
+  }
+  if (typeof MOBILE_PLAYER_QUERY.addEventListener === "function") {
+    MOBILE_PLAYER_QUERY.addEventListener("change", applyFrameFit);
+  } else {
+    MOBILE_PLAYER_QUERY.addListener(applyFrameFit);
+  }
 
   window.addEventListener("message", (event) => {
     if (event.source !== elements.frame.contentWindow) return;

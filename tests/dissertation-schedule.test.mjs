@@ -158,6 +158,8 @@ test('service evaluation opens only with all namespaced server gates', () => {
 test('participant flow sends information version and uses visible time', async () => {
   const app = await readFile(new URL('../dissertation/app.js', import.meta.url), 'utf8');
   const html = await readFile(new URL('../dissertation/index.html', import.meta.url), 'utf8');
+  const studyCss = await readFile(new URL('../dissertation/study.css', import.meta.url), 'utf8');
+  const prePushHook = await readFile(new URL('../scripts/hooks/pre-push', import.meta.url), 'utf8');
   const responseApi = await readFile(
     new URL('../functions/api/dissertation/response.js', import.meta.url),
     'utf8',
@@ -172,6 +174,10 @@ test('participant flow sends information version and uses visible time', async (
   );
   const pool = JSON.parse(await readFile(
     new URL('../dissertation/pool.json', import.meta.url),
+    'utf8',
+  ));
+  const gameLayouts = JSON.parse(await readFile(
+    new URL('../dissertation/game-layouts.json', import.meta.url),
     'utf8',
   ));
   const gameDocuments = await Promise.all(pool.games.map(game => readFile(
@@ -200,6 +206,15 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(app, /status\.collectionEnabled && status\.scheduleReady/);
   assert.match(app, /width < 640 \? "mobile" : width < 1100 \? "tablet"/);
   assert.match(app, /LOCAL_PREVIEW_HOSTS\.has\(window\.location\.hostname\)/);
+  assert.match(app, /PLAYER_LAYOUT_VERSION = "mobile-fit-v1"/);
+  assert.match(app, /fetch\("\/dissertation\/game-layouts\.json\?v=mobile-fit-v1"/);
+  assert.match(app, /elements\.frame\.style\.transform = `scale\(\$\{scale\}\)`/);
+  assert.doesNotMatch(app, /scrollIntoView/);
+  assert.match(studyCss, /body\.study-playing \.study-shell/);
+  assert.match(studyCss, /height: 100dvh/);
+  assert.match(studyCss, /grid-template-rows: minmax\(0, 1fr\) auto/);
+  assert.match(studyCss, /overflow: clip/);
+  assert.match(prePushHook, /check_dissertation_mobile\.js/);
   assert.equal(study.DEVICE_CLASSES.has('tablet'), true);
   assert.match(responseApi, /DEVICE_CLASSES\.has\(deviceClass\)/);
   assert.match(sessionApi, /const MAX_CLAIM_ATTEMPTS = 6/);
@@ -263,6 +278,9 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(html, /random session key/);
   assert.match(html, /current-game timing/);
   assert.match(html, /data-copy-version="minimal-entry-v4"/);
+  assert.match(html, /data-player-layout-version="mobile-fit-v1"/);
+  assert.match(html, /study\.css\?v=mobile-fit-v1/);
+  assert.match(html, /app\.js\?v=mobile-fit-v1/);
   assert.match(html, /<h1 class="visually-hidden" id="study-title">Evaluation<\/h1>/);
   assert.doesNotMatch(html, /Information version:/);
   assert.doesNotMatch(html, /Anonymous browser-game service evaluation/);
@@ -277,7 +295,7 @@ test('participant flow sends information version and uses visible time', async (
   assert.match(app, /buttonNote\.classList\.toggle\("is-hidden", !note\)/);
   assert.match(app, /setStatus\("open", ""\)/);
   assert.match(app, /setStartState\(\s*true,\s*"Begin",\s*"",\s*\)/);
-  assert.match(app, /matchMedia\("\(max-width: 56rem\)"\)/);
+  assert.match(app, /matchMedia\("\(max-width: 64rem\)"\)/);
   assert.match(app, /frameLoading\.setAttribute\("aria-hidden", "true"\)/);
   assert.match(app, /\?studyLoad=\$\{token\}/);
   assert.match(app, /waitForGameReady\(token\)/);
@@ -295,9 +313,23 @@ test('participant flow sends information version and uses visible time', async (
   assert.doesNotMatch(html, /Your response|Would you keep playing\?|I need to skip this game|[↑↓]/);
   assert.doesNotMatch(app, /Try the game first|Choose based on the game you just played|played for at least 90 seconds/);
   assert.match(html, /sandbox="allow-scripts"/);
+  assert.match(html, /scrolling="no"/);
   assert.doesNotMatch(html, /allow-same-origin/);
   assert.match(html, /All 56 anonymous service-evaluation responses were recorded/);
   assert.doesNotMatch(html, /type="checkbox"|want to take part/);
+  assert.equal(gameLayouts.playerLayoutVersion, 'mobile-fit-v1');
+  assert.deepEqual(
+    Object.keys(gameLayouts.games).sort(),
+    pool.games.map(game => game.id).sort(),
+  );
+  assert.equal(
+    Object.values(gameLayouts.games).filter(layout => layout.mode === 'fixed').length,
+    55,
+  );
+  assert.equal(
+    Object.values(gameLayouts.games).filter(layout => layout.mode === 'fluid').length,
+    1,
+  );
 });
 
 
@@ -310,6 +342,10 @@ test('schema migration stays trigger-free and separate guards are complete', asy
     new URL('../migrations/0005_dissertation_all_games_protocol.sql', import.meta.url),
     'utf8',
   );
+  const playerLayoutMigration = await readFile(
+    new URL('../migrations/0006_dissertation_player_layout_version.sql', import.meta.url),
+    'utf8',
+  );
   const guards = await readFile(
     new URL('../scripts/dissertation_schedule_guards.sql', import.meta.url),
     'utf8',
@@ -320,6 +356,8 @@ test('schema migration stays trigger-free and separate guards are complete', asy
   assert.match(allGamesMigration, /session_size = 56/);
   assert.match(allGamesMigration, /playtime_censored/);
   assert.match(allGamesMigration, /_study_all_games_empty_guard/);
+  assert.match(playerLayoutMigration, /ADD COLUMN player_layout_version TEXT/);
+  assert.match(playerLayoutMigration, /length\(player_layout_version\) BETWEEN 1 AND 64/);
   assert.match(guards, new RegExp(study.STUDY_SCHEDULE_HASH));
   for (const trigger of study.STUDY_SCHEDULE_GUARD_TRIGGERS) {
     assert.match(guards, new RegExp(`CREATE TRIGGER IF NOT EXISTS ${trigger}\\b`));
@@ -352,4 +390,77 @@ test('long-session protocol uses 24-hour activity-based reissue', () => {
   assert.equal(study.STUDY_RECORD_VERSION, 2);
   assert.match(librarySource, /MAX\(COALESCE\(s\.last_activity_at, c\.claimed_at\)\)/);
   assert.doesNotMatch(librarySource, /30 \* 60 \* 1000/);
+});
+
+
+test('responses preserve the participant player intervention boundary', async () => {
+  const app = await readFile(new URL('../dissertation/app.js', import.meta.url), 'utf8');
+  const responseApi = await readFile(
+    new URL('../functions/api/dissertation/response.js', import.meta.url),
+    'utf8',
+  );
+  const exportApi = await readFile(
+    new URL('../functions/api/admin/dissertation-export.js', import.meta.url),
+    'utf8',
+  );
+  assert.equal(responseApiModule.CURRENT_PLAYER_LAYOUT_VERSION, 'mobile-fit-v1');
+  assert.match(app, /playerLayoutVersion: PLAYER_LAYOUT_VERSION/);
+  assert.match(responseApi, /field !== 'playerLayoutVersion'/);
+  assert.match(responseApi, /playerLayoutVersion \?\? null/);
+  assert.match(responseApi, /invalid_player_layout_version/);
+  assert.match(exportApi, /r\.player_layout_version/);
+  assert.match(exportApi, /'player_layout_version'/);
+
+  const legacyPayload = {
+    sessionId: '11111111-1111-4111-8111-111111111111',
+    publicId: 'g1e195684dedf',
+    playtimeSeconds: 0,
+    rating: null,
+    skipReason: 'voluntary_skip',
+    deviceClass: 'mobile',
+    viewportClass: 'narrow',
+    inputMethod: 'touch',
+    visibilityLossCount: 0,
+  };
+  const env = {
+    DISSERTATION_STUDY_OPEN: '1',
+    DISSERTATION_SERVICE_EVALUATION_BASIS: 'test-basis',
+    DISSERTATION_INFORMATION_VERSION: 'test-notice',
+    DISSERTATION_DB: {
+      prepare() {
+        throw new Error('stop after request validation');
+      },
+    },
+  };
+  const submit = payload => responseApiModule.onRequestPost({
+    request: new Request('https://game-factory.tech/api/dissertation/response', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        origin: 'https://game-factory.tech',
+        'sec-fetch-site': 'same-origin',
+      },
+      body: JSON.stringify(payload),
+    }),
+    env,
+  });
+
+  const legacyResponse = await submit(legacyPayload);
+  assert.equal(legacyResponse.status, 503, 'pre-deploy tabs remain request-compatible');
+  assert.deepEqual(await legacyResponse.json(), { error: 'study_database_error' });
+
+  const currentResponse = await submit({
+    ...legacyPayload,
+    playerLayoutVersion: 'mobile-fit-v1',
+  });
+  assert.equal(currentResponse.status, 503, 'current fitted-player payload is accepted');
+
+  const unknownResponse = await submit({
+    ...legacyPayload,
+    playerLayoutVersion: 'unknown-layout',
+  });
+  assert.equal(unknownResponse.status, 400);
+  assert.deepEqual(await unknownResponse.json(), {
+    error: 'invalid_player_layout_version',
+  });
 });

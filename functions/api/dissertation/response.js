@@ -24,6 +24,7 @@ import {
 const FIELDS = [
   'sessionId',
   'publicId',
+  'playerLayoutVersion',
   'playtimeSeconds',
   'rating',
   'skipReason',
@@ -32,6 +33,9 @@ const FIELDS = [
   'inputMethod',
   'visibilityLossCount',
 ];
+const REQUIRED_FIELDS = FIELDS.filter(field => field !== 'playerLayoutVersion');
+
+export const CURRENT_PLAYER_LAYOUT_VERSION = 'mobile-fit-v1';
 
 const MAX_RECORDED_PLAYTIME_SECONDS = 3600;
 
@@ -50,7 +54,10 @@ export function normalizePlaytimeForStorage(value) {
 }
 
 export async function onRequestPost({ request, env }) {
-  const parsed = await readStudyJson(request, FIELDS);
+  // playerLayoutVersion is optional only so a participant with the pre-fix app
+  // already open can finish safely. Those legacy responses are stored as NULL
+  // and remain distinguishable from the mobile-fit-v1 intervention.
+  const parsed = await readStudyJson(request, FIELDS, REQUIRED_FIELDS);
   if (parsed.response) return parsed.response;
   const gate = requireOpenStudy(env);
   if (gate.response) return gate.response;
@@ -58,6 +65,7 @@ export async function onRequestPost({ request, env }) {
   const {
     sessionId,
     publicId,
+    playerLayoutVersion,
     rating,
     skipReason,
     deviceClass,
@@ -69,6 +77,11 @@ export async function onRequestPost({ request, env }) {
 
   if (!validSessionId(sessionId) || !validPublicId(publicId)) {
     return studyError('invalid_assignment', 400);
+  }
+  if (playerLayoutVersion !== undefined
+      && playerLayoutVersion !== null
+      && playerLayoutVersion !== CURRENT_PLAYER_LAYOUT_VERSION) {
+    return studyError('invalid_player_layout_version', 400);
   }
   if (playtime === null) return studyError('invalid_playtime', 400);
   if (!Number.isInteger(visibilityLossCount)
@@ -149,6 +162,7 @@ export async function onRequestPost({ request, env }) {
         INSERT OR IGNORE INTO study_responses (
           response_id,
           record_version,
+          player_layout_version,
           session_id,
           public_id,
           ended_at,
@@ -160,10 +174,11 @@ export async function onRequestPost({ request, env }) {
           viewport_class,
           input_method,
           visibility_loss_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).bind(
         responseId,
         STUDY_RECORD_VERSION,
+        playerLayoutVersion ?? null,
         sessionId,
         publicId,
         endedAt,

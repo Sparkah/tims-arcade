@@ -197,6 +197,34 @@ against the public integrity manifest, rejects extra/missing game directories,
 and confirms that the public JSON contains no condition, prompt, run, batch, or
 source mapping.
 
+### Participant player intervention log
+
+`mobile-fit-v1` (2026-07-21) changes only the participant shell and separate
+opaque-ID iframe layout metadata. It does not modify any of the 56 frozen game
+HTML files, their integrity hashes, the schedule, assignments, or D1 game rows.
+Immediately before this repair, the production database contained 3 sessions,
+168 assignments, 3 responses, 3 claims, and 0 completions. The Git commit that
+contains this entry is the intervention build boundary for analysis.
+Migration `0006_dissertation_player_layout_version.sql` leaves those existing
+responses as `player_layout_version = NULL`; the fitted player submits
+`mobile-fit-v1` with every later response. A participant who still has the old
+page open can submit safely and is likewise recorded as `NULL`. Analysis must
+treat `mobile-fit-v1` as a confirmed fitted-player marker and `NULL` as
+legacy/unknown, not as cryptographic proof of when the response was collected.
+
+Production migration receipt: `0006` was applied to D1 at
+`2026-07-21 08:50:29 UTC`, before the Pages push. The immediate post-migration
+query still returned 3 sessions, 168 assignments, 3 responses, 3 claims, and 0
+completions; all 3 responses had `player_layout_version = NULL`, the column was
+nullable `TEXT`, and `PRAGMA foreign_key_check` returned no rows.
+
+The release gate is `node scripts/check_dissertation_mobile.js`. It loads all
+56 games in the real preview shell at five phone shapes (280 cases), verifies
+outer and sandboxed-child containment, checks the study controls, and sends trusted touch
+input through the fitted iframe. `study.css`, `app.js`, and the layout map use
+the `mobile-fit-v1` cache key so a participant cannot receive a mixed old/new
+shell after deployment.
+
 Keep the path-scoped Pages Analytics removal and `no-transform` middleware on
 all dissertation HTML. Pages injects its marked browser beacon into static HTML
 before Functions run; middleware removes that exact snippet, and

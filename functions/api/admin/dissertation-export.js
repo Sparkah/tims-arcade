@@ -4,6 +4,7 @@ import { studyError, studyJson } from '../../_lib/dissertationStudy.js';
 const EXPORT_SQL = `
   SELECT
     r.record_version,
+    r.player_layout_version,
     r.response_id,
     s.session_id,
     s.information_version,
@@ -72,6 +73,7 @@ const EXPORT_SQL = `
 
 const COLUMNS = [
   'record_version',
+  'player_layout_version',
   'response_id',
   'session_id',
   'information_version',
