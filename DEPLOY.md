@@ -86,10 +86,16 @@ After the daily game-factory runs and a new game lands in `Games/N_slug/`:
    bash Gallery/scripts/sync_games.sh
    ```
 
-3. Deploy:
+3. Deploy (ALWAYS freshness-check first — a direct upload replaces the whole
+   tree, so a checkout that lags another session's fix silently reverts it):
    ```bash
-   cd Gallery && wrangler pages deploy . --project-name=tims-arcade
+   cd Gallery
+   bash scripts/predeploy_freshness_check.sh   # live commit must be ancestor of HEAD
+   wrangler pages deploy . --project-name=tims-arcade --branch=main
    ```
+   After deploying a fix, push the commits to origin/main promptly so parallel
+   worktrees inherit them, and re-verify live bytes if another session may have
+   deployed since yours.
 
 That's it. Set `published: false` for any game you don't want public yet.
 
