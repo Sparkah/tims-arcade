@@ -81,10 +81,11 @@
   var recentOffset = 0;
   var recentSeen = Object.create(null);
   var lastBuild = null, buildTicker = null;
-  // Studio Max runs one full generation and one polish/QA pass. Keep this
-  // conservative until enough two-pass production canaries establish a useful
-  // percentile; the UI should never imply that a fast draft is the final game.
-  var BUILD_ETA_MIN = 20, BUILD_ETA_MAX = 45;
+  // Studio Max runs one full generation and one polish/QA pass on Claude Opus
+  // at max effort. Measured 2026-07-21: one pass took 29.5 min, so the honest
+  // two-pass window is about an hour (reference-image builds run the GPT-5.6
+  // lane and tend to land faster). Never promise a window a real build exceeds.
+  var BUILD_ETA_MIN = 45, BUILD_ETA_MAX = 75;
 
   function show(el, on) { if (el) el.hidden = !on; }
   function setMsg(t, kind) { els.msg.textContent = t || ''; els.msg.className = 'create-msg' + (kind ? ' ' + kind : ''); }
