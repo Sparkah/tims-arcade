@@ -1,0 +1,1731 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Food Jutsu</title>
+  <script src="/sdk.js"></script>
+  <style>
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #152238;
+      color: #f8fafc;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
+
+    #game-root {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100dvh;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    #game {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      cursor: crosshair;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+  </style>
+</head>
+<body>
+  <main id="game-root" aria-label="Food Jutsu cooking action game">
+    <canvas id="game" role="img" aria-label="Food Jutsu canvas game. Draw or flick gestures on food orders to cook and plate them."></canvas>
+    <p id="instructions" class="sr-only">
+      Draw a horizontal slash to slice, a vertical stroke to grill, a loop to freeze, an upward diagonal flick to launch, and a tap to plate. Keyboard fallback: left or A slices, down grills, up freezes, right launches, space plates.
+    </p>
+    <p id="status" class="sr-only" role="status" aria-live="polite"></p>
+  </main>
+
+  <script>
+  (function () {
+    "use strict";
+
+    var canvas = document.getElementById("game");
+    var ctx = canvas.getContext("2d");
+    var statusEl = document.getElementById("status");
+    var cssW = Math.max(1, window.innerWidth || 1);
+    var cssH = Math.max(1, window.innerHeight || 1);
+    var dpr = Math.max(1, window.devicePixelRatio || 1);
+    var lastTs = 0;
+    var lastStatusText = "";
+
+    var ACTIONS = {
+      slice: { label: "Slice", key: "Left / A", color: "#ff5b5b" },
+      grill: { label: "Grill", key: "Down", color: "#ff9f1c" },
+      freeze: { label: "Freeze", key: "Up", color: "#4cc9f0" },
+      launch: { label: "Launch", key: "Right", color: "#74d680" },
+      plate: { label: "Plate", key: "Space", color: "#f9d65c" }
+    };
+
+    var DISHES = [
+      { name: "Pepper Skewer", shape: "skewer", steps: ["slice", "grill", "plate"], color: "#f9735b" },
+      { name: "Frost Mochi", shape: "mochi", steps: ["freeze", "launch", "plate"], color: "#8fd8ff" },
+      { name: "Storm Ramen", shape: "ramen", steps: ["slice", "freeze", "plate"], color: "#ffd166" },
+      { name: "Fire Roll", shape: "roll", steps: ["grill", "slice", "launch", "plate"], color: "#68d391" },
+      { name: "Cloud Bento", shape: "bento", steps: ["slice", "grill", "freeze", "plate"], color: "#c084fc" }
+    ];
+    var ORDER_SCRIPT = [0, 1, 2, 3, 4, 0, 2, 1];
+    var MAX_ORDERS = 3;
+    var SAVE_KEY = "food-jutsu-v2";
+    var OLD_SAVE_KEY = "food-jutsu-v1";
+    var UPGRADES = [
+      { id: "prep", label: "Prep Seal", desc: "Longer rush and ticket timers", color: "#4cc9f0" },
+      { id: "calm", label: "Calm Flame", desc: "Lower pressure spikes", color: "#74d680" },
+      { id: "tips", label: "Tip Charm", desc: "Higher combo and plating score", color: "#f9d65c" }
+    ];
+    var meta = loadMeta();
+    var audio = {
+      ctx: null,
+      master: null,
+      muted: !!meta.muted,
+      nextMusic: 0,
+      step: 0
+    };
+
+    function defaultMeta() {
+      return {
+        stars: 0,
+        totalStars: 0,
+        bestScore: 0,
+        bestCombo: 0,
+        muted: false,
+        upgrades: { prep: 0, calm: 0, tips: 0 }
+      };
+    }
+
+    function normalizeMeta(data) {
+      var base = defaultMeta();
+      if (!data) return base;
+      base.stars = Math.max(0, Number(data.stars) || 0);
+      base.totalStars = Math.max(base.stars, Number(data.totalStars) || base.stars || 0);
+      base.bestScore = Math.max(0, Number(data.bestScore) || 0);
+      base.bestCombo = Math.max(0, Number(data.bestCombo) || 0);
+      base.muted = !!data.muted;
+      if (data.upgrades) {
+        for (var i = 0; i < UPGRADES.length; i++) {
+          var id = UPGRADES[i].id;
+          base.upgrades[id] = clamp(Number(data.upgrades[id]) || 0, 0, 3);
+        }
+      }
+      return base;
+    }
+
+    function loadMeta() {
+      try {
+        var raw = localStorage.getItem(SAVE_KEY);
+        if (!raw) raw = localStorage.getItem(OLD_SAVE_KEY);
+        if (!raw) return defaultMeta();
+        var data = JSON.parse(raw);
+        if (!data || (data.version !== 2 && data.version !== 3)) return defaultMeta();
+        return normalizeMeta(data);
+      } catch (_) {
+        return defaultMeta();
+      }
+    }
+
+    function saveMeta() {
+      try {
+        localStorage.setItem(SAVE_KEY, JSON.stringify({
+          version: 3,
+          stars: meta.stars,
+          totalStars: meta.totalStars,
+          bestScore: meta.bestScore,
+          bestCombo: meta.bestCombo,
+          muted: !!meta.muted,
+          upgrades: meta.upgrades
+        }));
+      } catch (_) {
+        /* localStorage can be unavailable in restricted browser modes. */
+      }
+    }
+
+    function clamp(v, min, max) {
+      return Math.max(min, Math.min(max, v));
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function dist(a, b) {
+      var dx = a.x - b.x;
+      var dy = a.y - b.y;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function upgradeLevel(id) {
+      return meta.upgrades && meta.upgrades[id] ? meta.upgrades[id] : 0;
+    }
+
+    function upgradeCost(id) {
+      return upgradeLevel(id) + 1;
+    }
+
+    function canBuyUpgrade(upgrade) {
+      return upgradeLevel(upgrade.id) < 3 && meta.stars >= upgradeCost(upgrade.id);
+    }
+
+    function makeState(level, mode) {
+      var prep = upgradeLevel("prep");
+      return {
+        mode: mode || "play",
+        level: level || 1,
+        time: 0,
+        levelTime: 42 + prep * 2,
+        score: 0,
+        combo: 0,
+        bestCombo: meta.bestCombo || 0,
+        served: 0,
+        missed: 0,
+        goal: 4,
+        pressure: 10,
+        focus: 0,
+        fever: 0,
+        hitPause: 0,
+        nextId: 1,
+        spawnCursor: 0,
+        spawnTimer: 0,
+        orders: [],
+        particles: [],
+        floaters: [],
+        gesture: null,
+        message: "Rush is live: draw the next jutsu on the hottest ticket.",
+        shake: 0,
+        rewardFlash: 0,
+        starsEarned: 0,
+        upgradeHint: "",
+        statusTimer: 0
+      };
+    }
+
+    var state = makeState(1);
+
+    function ensureAudio() {
+      var AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) return false;
+      if (!audio.ctx) {
+        audio.ctx = new AudioCtor();
+        audio.master = audio.ctx.createGain();
+        audio.master.gain.value = audio.muted ? 0 : 0.52;
+        audio.master.connect(audio.ctx.destination);
+        audio.nextMusic = audio.ctx.currentTime + 0.12;
+      }
+      if (audio.ctx.state === "suspended" && audio.ctx.resume) {
+        audio.ctx.resume().catch(function () {});
+      }
+      return true;
+    }
+
+    function setMuted(nextMuted) {
+      audio.muted = !!nextMuted;
+      meta.muted = audio.muted;
+      if (audio.master && audio.ctx) {
+        audio.master.gain.setTargetAtTime(audio.muted ? 0 : 0.52, audio.ctx.currentTime, 0.025);
+      }
+      saveMeta();
+      syncStatus(true);
+    }
+
+    function toggleMute() {
+      ensureAudio();
+      setMuted(!audio.muted);
+      state.message = audio.muted ? "Kitchen audio muted." : "Kitchen audio on.";
+      if (!audio.muted) playTone(660, 0.08, "triangle", 0.08, 880);
+    }
+
+    function canPlayAudio() {
+      return audio.ctx && audio.master && !audio.muted;
+    }
+
+    function playTone(freq, duration, type, gainValue, endFreq, delay) {
+      if (!canPlayAudio()) return;
+      var now = audio.ctx.currentTime + (delay || 0);
+      var osc = audio.ctx.createOscillator();
+      var gain = audio.ctx.createGain();
+      osc.type = type || "sine";
+      osc.frequency.setValueAtTime(freq, now);
+      if (endFreq) osc.frequency.exponentialRampToValueAtTime(Math.max(20, endFreq), now + duration);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, gainValue || 0.05), now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+      osc.connect(gain);
+      gain.connect(audio.master);
+      osc.start(now);
+      osc.stop(now + duration + 0.03);
+    }
+
+    function playNoise(duration, gainValue, filterFreq) {
+      if (!canPlayAudio()) return;
+      var rate = audio.ctx.sampleRate;
+      var length = Math.max(1, Math.floor(rate * duration));
+      var buffer = audio.ctx.createBuffer(1, length, rate);
+      var data = buffer.getChannelData(0);
+      for (var i = 0; i < length; i++) data[i] = Math.random() * 2 - 1;
+      var source = audio.ctx.createBufferSource();
+      var filter = audio.ctx.createBiquadFilter();
+      var gain = audio.ctx.createGain();
+      source.buffer = buffer;
+      filter.type = "bandpass";
+      filter.frequency.value = filterFreq || 900;
+      filter.Q.value = 1.8;
+      var now = audio.ctx.currentTime;
+      gain.gain.setValueAtTime(gainValue || 0.025, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+      source.connect(filter);
+      filter.connect(gain);
+      gain.connect(audio.master);
+      source.start(now);
+      source.stop(now + duration + 0.02);
+    }
+
+    function playActionSound(action, ok) {
+      if (!canPlayAudio()) return;
+      if (!ok) {
+        playTone(180, 0.16, "sawtooth", 0.05, 90);
+        playNoise(0.08, 0.018, 260);
+        return;
+      }
+      var tones = { slice: 880, grill: 260, freeze: 660, launch: 520, plate: 740 };
+      var base = tones[action] || 520;
+      if (action === "slice") playNoise(0.06, 0.025, 1800);
+      if (action === "grill") playNoise(0.09, 0.018, 420);
+      playTone(base, 0.09, action === "grill" ? "square" : "triangle", 0.045, base * 1.18);
+    }
+
+    function playServeSound() {
+      playTone(523.25, 0.12, "triangle", 0.055, 659.25);
+      playTone(783.99, 0.16, "sine", 0.045, 1046.5, 0.06);
+    }
+
+    function playFeverSound() {
+      playTone(392, 0.14, "triangle", 0.055, 784);
+      playTone(587.33, 0.14, "triangle", 0.05, 1174.66, 0.08);
+      playTone(880, 0.18, "sine", 0.045, 1320, 0.16);
+    }
+
+    function playUpgradeSound() {
+      playTone(440, 0.08, "triangle", 0.05, 660);
+      playTone(880, 0.14, "sine", 0.04, 990, 0.07);
+    }
+
+    function tickMusic() {
+      if (!canPlayAudio() || state.mode === "over") return;
+      var now = audio.ctx.currentTime;
+      if (audio.nextMusic < now) audio.nextMusic = now + 0.02;
+      var scale = [261.63, 293.66, 329.63, 392, 440, 523.25];
+      while (audio.nextMusic < now + 0.08) {
+        var idx = (audio.step + state.level + (state.fever > 0 ? 2 : 0)) % scale.length;
+        var freq = scale[idx] * (state.mode === "reward" ? 1.5 : 1);
+        playTone(freq, 0.12, "sine", state.mode === "play" ? 0.018 : 0.012, freq * 1.005, audio.nextMusic - now);
+        if (audio.step % 4 === 0) {
+          playTone(freq * 0.5, 0.18, "triangle", 0.014, freq * 0.505, audio.nextMusic - now);
+        }
+        audio.nextMusic += state.fever > 0 ? 0.24 : 0.42;
+        audio.step += 1;
+      }
+    }
+
+    function getLayout() {
+      var small = Math.min(cssW, cssH);
+      var margin = clamp(small * 0.035, 12, 26);
+      var hudH = clamp(cssH * 0.13, 78, 112);
+      var actionH = clamp(cssH * 0.18, 106, 138);
+      var playY = hudH + margin * 0.6;
+      var playH = Math.max(190, cssH - hudH - actionH - margin * 1.6);
+      var portrait = cssH > cssW * 1.08;
+      var cardW = portrait ? clamp(cssW * 0.68, 170, 250) : clamp(cssW * 0.21, 148, 214);
+      var cardH = clamp(cardW * 0.72, 108, 154);
+      return {
+        margin: margin,
+        hudH: hudH,
+        actionH: actionH,
+        playX: margin,
+        playY: playY,
+        playW: Math.max(1, cssW - margin * 2),
+        playH: playH,
+        cardW: cardW,
+        cardH: cardH,
+        portrait: portrait
+      };
+    }
+
+    function updateOrderTargets() {
+      var layout = getLayout();
+      var count = Math.max(1, state.orders.length);
+      for (var i = 0; i < state.orders.length; i++) {
+        var order = state.orders[i];
+        if (state.mode === "intro") {
+          order.targetX = cssW * 0.5;
+          order.targetY = layout.playY + layout.playH * 0.72;
+        } else if (layout.portrait) {
+          var usable = Math.max(layout.cardH + 14, layout.playH - layout.cardH);
+          var gap = count > 1 ? Math.min(layout.cardH + 13, usable / (count - 1)) : 0;
+          order.targetX = cssW * 0.5;
+          order.targetY = layout.playY + layout.cardH * 0.72 + i * gap;
+        } else {
+          var step = layout.cardW + 18;
+          order.targetX = cssW * 0.5 + (i - (count - 1) * 0.5) * step;
+          order.targetY = layout.playY + layout.playH * 0.52;
+        }
+      }
+    }
+
+    function spawnOrder() {
+      if ((state.mode !== "play" && state.mode !== "intro") || state.orders.length >= MAX_ORDERS) return;
+      var dish = DISHES[ORDER_SCRIPT[state.spawnCursor % ORDER_SCRIPT.length]];
+      var layout = getLayout();
+      var due = Math.max(6.5, 9 - state.level * 0.35 + state.served * 0.12 + upgradeLevel("prep") * 0.45);
+      var order = {
+        id: state.nextId++,
+        dishIndex: ORDER_SCRIPT[state.spawnCursor % ORDER_SCRIPT.length],
+        name: dish.name,
+        shape: dish.shape,
+        steps: dish.steps.slice(),
+        step: 0,
+        due: due,
+        maxDue: due,
+        age: 0,
+        x: cssW + layout.cardW,
+        y: layout.playY + layout.playH * 0.5,
+        targetX: cssW * 0.5,
+        targetY: layout.playY + layout.playH * 0.5,
+        flash: 0,
+        wrong: 0,
+        wobble: (state.nextId * 37) % 11
+      };
+      state.orders.push(order);
+      state.spawnCursor += 1;
+      updateOrderTargets();
+    }
+
+    function resetRun(nextLevel) {
+      state = makeState(nextLevel || state.level || 1);
+      state.goal = 4 + Math.min(2, state.level - 1);
+      state.pressure = Math.max(4, 8 + Math.min(18, state.level * 3) - upgradeLevel("calm") * 3);
+      spawnOrder();
+      syncStatus(true);
+    }
+
+    function startIntro() {
+      state = makeState(1, "intro");
+      state.goal = 4;
+      state.pressure = Math.max(4, 8 + Math.min(18, state.level * 3) - upgradeLevel("calm") * 3);
+      state.message = "Draw the first jutsu on the visible ticket. Space starts without cooking.";
+      spawnOrder();
+      updateOrderTargets();
+      for (var i = 0; i < state.orders.length; i++) {
+        state.orders[i].x = state.orders[i].targetX;
+        state.orders[i].y = state.orders[i].targetY;
+      }
+      syncStatus(true);
+    }
+
+    function beginPlayFromIntro() {
+      state.mode = "play";
+      state.message = "Rush is live: draw the next jutsu on the hottest ticket.";
+      if (state.orders.length === 0) spawnOrder();
+      for (var i = 0; i < state.orders.length; i++) {
+        state.orders[i].due = state.orders[i].maxDue;
+        state.orders[i].age = 0;
+      }
+      syncStatus(true);
+    }
+
+    function roundedRect(x, y, w, h, r) {
+      var rr = Math.min(r, w * 0.5, h * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(x + rr, y);
+      ctx.lineTo(x + w - rr, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+      ctx.lineTo(x + w, y + h - rr);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+      ctx.lineTo(x + rr, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+      ctx.lineTo(x, y + rr);
+      ctx.quadraticCurveTo(x, y, x + rr, y);
+      ctx.closePath();
+    }
+
+    function text(str, x, y, size, color, align, weight) {
+      ctx.fillStyle = color;
+      ctx.textAlign = align || "left";
+      ctx.textBaseline = "middle";
+      ctx.font = (weight || "700") + " " + Math.round(size) + "px Inter, ui-sans-serif, system-ui, sans-serif";
+      ctx.fillText(str, x, y);
+    }
+
+    function addFloater(label, x, y, color) {
+      state.floaters.push({ label: label, x: x, y: y, vy: -34, life: 1, color: color });
+    }
+
+    function burst(x, y, color, count) {
+      for (var i = 0; i < count; i++) {
+        var a = (i / Math.max(1, count)) * Math.PI * 2 + state.time;
+        var s = 70 + (i % 5) * 18;
+        state.particles.push({
+          x: x,
+          y: y,
+          vx: Math.cos(a) * s,
+          vy: Math.sin(a) * s - 20,
+          r: 3 + (i % 3),
+          life: 0.55 + (i % 4) * 0.06,
+          color: color
+        });
+      }
+    }
+
+    function orderRect(order) {
+      var layout = getLayout();
+      return {
+        x: order.x - layout.cardW * 0.5,
+        y: order.y - layout.cardH * 0.5,
+        w: layout.cardW,
+        h: layout.cardH
+      };
+    }
+
+    function pointInRect(p, r) {
+      return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+    }
+
+    function findOrderForPath(path) {
+      if (!path || !path.length) return null;
+      for (var i = 0; i < state.orders.length; i++) {
+        var rect = orderRect(state.orders[i]);
+        for (var j = 0; j < path.length; j++) {
+          if (pointInRect(path[j], rect)) return state.orders[i];
+        }
+      }
+      var mid = path[Math.floor(path.length * 0.5)];
+      var best = null;
+      var bestD = Infinity;
+      var layout = getLayout();
+      for (var k = 0; k < state.orders.length; k++) {
+        var o = state.orders[k];
+        var d = dist(mid, o);
+        if (d < bestD) {
+          best = o;
+          bestD = d;
+        }
+      }
+      return bestD <= layout.cardW * 0.9 ? best : null;
+    }
+
+    function classifyGesture(path) {
+      if (!path || path.length < 2) return "plate";
+      var first = path[0];
+      var last = path[path.length - 1];
+      var dx = last.x - first.x;
+      var dy = last.y - first.y;
+      var minX = first.x;
+      var maxX = first.x;
+      var minY = first.y;
+      var maxY = first.y;
+      var len = 0;
+      for (var i = 1; i < path.length; i++) {
+        len += dist(path[i - 1], path[i]);
+        minX = Math.min(minX, path[i].x);
+        maxX = Math.max(maxX, path[i].x);
+        minY = Math.min(minY, path[i].y);
+        maxY = Math.max(maxY, path[i].y);
+      }
+      var direct = Math.sqrt(dx * dx + dy * dy);
+      var boxW = maxX - minX;
+      var boxH = maxY - minY;
+      var closed = direct < Math.max(34, Math.min(boxW, boxH) * 0.55);
+      if (len < 36 && direct < 28) return "plate";
+      if (closed && len > 150 && boxW > 48 && boxH > 48) return "freeze";
+      if (Math.abs(dx) > 68 && Math.abs(dy) < Math.abs(dx) * 0.52) return "slice";
+      if (Math.abs(dy) > 68 && Math.abs(dx) < Math.abs(dy) * 0.56) return "grill";
+      if (dy < -48 && direct > 82 && Math.abs(dx) > 28) return "launch";
+      if (dy < -82 && direct > 92) return "launch";
+      return null;
+    }
+
+    function pickOrder(targetOrder) {
+      if (targetOrder && state.orders.indexOf(targetOrder) !== -1) return targetOrder;
+      var best = null;
+      for (var i = 0; i < state.orders.length; i++) {
+        if (state.orders[i].step > 0) {
+          if (!best || best.step === 0 || state.orders[i].due < best.due) best = state.orders[i];
+        }
+      }
+      if (best) return best;
+      for (var j = 0; j < state.orders.length; j++) {
+        if (!best || state.orders[j].due < best.due) best = state.orders[j];
+      }
+      return best;
+    }
+
+    function hotOrder() {
+      var best = null;
+      for (var i = 0; i < state.orders.length; i++) {
+        var order = state.orders[i];
+        if (!best || order.due < best.due || (order.step > best.step && order.due < best.due + 1.2)) {
+          best = order;
+        }
+      }
+      return best;
+    }
+
+    function activateFever() {
+      if (state.fever > 0) return;
+      state.focus = 0;
+      state.fever = 6.8;
+      state.rewardFlash = 0.5;
+      state.message = "FEVER JUTSU: tickets slow down and tips hit harder.";
+      burst(cssW * 0.5, getLayout().playY + 28, "#f9d65c", 24);
+      playFeverSound();
+    }
+
+    function applyAction(action, targetOrder) {
+      if (state.mode === "intro") {
+        beginPlayFromIntro();
+        if (!action || action === "plate") return;
+      }
+      if (state.mode === "reward" || state.mode === "over") {
+        resetRun(state.mode === "reward" ? state.level + 1 : state.level);
+        return;
+      }
+      if (!action) {
+        state.message = "Unknown jutsu. Try a clear slash, line, loop, flick, or tap.";
+        return;
+      }
+      var order = pickOrder(targetOrder);
+      if (!order) {
+        state.message = "No ticket is active yet.";
+        return;
+      }
+      var expected = order.steps[order.step];
+      if (action !== expected) {
+        state.combo = 0;
+        state.focus = clamp(state.focus - 18, 0, 100);
+        state.pressure = clamp(state.pressure + Math.max(3.5, 7 - upgradeLevel("calm") * 1.2), 0, 100);
+        order.due = Math.max(0.8, order.due - 0.75);
+        order.wrong = 0.32;
+        state.shake = 0.14;
+        state.message = "Wrong jutsu: " + order.name + " needs " + ACTIONS[expected].label + ".";
+        addFloater("Need " + ACTIONS[expected].label, order.x, order.y - 48, "#ffb4a8");
+        playActionSound(action, false);
+        return;
+      }
+
+      order.step += 1;
+      order.flash = 0.34;
+      order.due = Math.min(order.maxDue + 1.4, order.due + (state.fever > 0 ? 1.35 : 0.9));
+      state.combo += 1;
+      state.bestCombo = Math.max(state.bestCombo, state.combo);
+      var gain = Math.round(35 * (1 + Math.min(7, state.combo) * 0.18 + upgradeLevel("tips") * 0.08) * (state.fever > 0 ? 1.35 : 1));
+      state.score += gain;
+      state.pressure = clamp(state.pressure - 2.5, 0, 100);
+      state.focus = clamp(state.focus + 9 + Math.min(16, state.combo * 2), 0, 100);
+      state.hitPause = state.fever > 0 ? 0.035 : 0.055;
+      state.message = ACTIONS[action].label + " landed. Combo x" + state.combo + ".";
+      burst(order.x, order.y, ACTIONS[action].color, 9 + Math.min(8, state.combo));
+      addFloater("+" + gain, order.x + 28, order.y - 54, ACTIONS[action].color);
+      playActionSound(action, true);
+      if (state.focus >= 100) activateFever();
+
+      if (order.step >= order.steps.length) {
+        serveOrder(order);
+      }
+    }
+
+    function serveOrder(order) {
+      var index = state.orders.indexOf(order);
+      if (index === -1) return;
+      var bonus = 115 + state.combo * (14 + upgradeLevel("tips") * 2) + Math.round(order.due * 8);
+      if (state.fever > 0) bonus = Math.round(bonus * 1.25);
+      state.score += bonus;
+      state.served += 1;
+      state.focus = clamp(state.focus + 8, 0, 100);
+      state.pressure = clamp(state.pressure - 8, 0, 100);
+      state.message = order.name + " plated. Tip +" + bonus + ".";
+      burst(order.x, order.y, "#f9d65c", 18);
+      addFloater("PLATED", order.x, order.y - 72, "#f9d65c");
+      playServeSound();
+      state.orders.splice(index, 1);
+      updateOrderTargets();
+      state.spawnTimer = Math.min(state.spawnTimer, 0.25);
+      if (state.served >= state.goal) {
+        completeLevel();
+      } else if (state.orders.length === 0) {
+        spawnOrder();
+      }
+    }
+
+    function missOrder(order) {
+      var index = state.orders.indexOf(order);
+      if (index === -1) return;
+      state.orders.splice(index, 1);
+      state.combo = 0;
+      state.focus = clamp(state.focus - 24, 0, 100);
+      state.missed += 1;
+      state.pressure = clamp(state.pressure + Math.max(12, 22 - upgradeLevel("calm") * 3), 0, 100);
+      state.message = order.name + " overcooked. Pressure is rising.";
+      state.shake = 0.25;
+      addFloater("MISSED", order.x, order.y - 48, "#ff5b5b");
+      burst(order.x, order.y, "#ff5b5b", 12);
+      playActionSound("grill", false);
+      updateOrderTargets();
+      state.spawnTimer = Math.min(state.spawnTimer, 0.45);
+      if (state.pressure >= 100) {
+        endRun();
+      }
+    }
+
+    function completeLevel() {
+      state.mode = "reward";
+      state.rewardFlash = 1;
+      state.starsEarned = calculateStarAward();
+      state.message = "Level " + state.level + " clear. +" + state.starsEarned + " stars banked.";
+      state.orders.length = 0;
+      meta.stars += state.starsEarned;
+      meta.totalStars += state.starsEarned;
+      meta.bestScore = Math.max(meta.bestScore, state.score);
+      meta.bestCombo = Math.max(meta.bestCombo, state.bestCombo);
+      saveMeta();
+      burst(cssW * 0.5, cssH * 0.42, "#f9d65c", 36);
+      playServeSound();
+      syncStatus(true);
+    }
+
+    function calculateStarAward() {
+      var stars = 1;
+      if (state.missed === 0 && state.pressure < 55) stars += 1;
+      if (state.bestCombo >= Math.max(7, state.goal * 2) || state.levelTime > 9) stars += 1;
+      return stars;
+    }
+
+    function buyUpgrade(index) {
+      var upgrade = UPGRADES[index];
+      if (!upgrade) return false;
+      var level = upgradeLevel(upgrade.id);
+      var cost = upgradeCost(upgrade.id);
+      if (level >= 3) {
+        state.upgradeHint = upgrade.label + " is maxed.";
+        state.message = state.upgradeHint;
+        syncStatus(true);
+        return false;
+      }
+      if (meta.stars < cost) {
+        state.upgradeHint = "Need " + cost + " stars for " + upgrade.label + ".";
+        state.message = state.upgradeHint;
+        syncStatus(true);
+        return false;
+      }
+      meta.stars -= cost;
+      meta.upgrades[upgrade.id] = level + 1;
+      state.upgradeHint = upgrade.label + " upgraded to level " + (level + 1) + ".";
+      state.message = state.upgradeHint;
+      saveMeta();
+      playUpgradeSound();
+      burst(cssW * 0.5, cssH * 0.54, upgrade.color, 18);
+      syncStatus(true);
+      return true;
+    }
+
+    function endRun() {
+      state.mode = "over";
+      state.message = "Kitchen pressure broke the rhythm. Tap or press space to retry.";
+      state.orders.length = 0;
+      meta.bestScore = Math.max(meta.bestScore, state.score);
+      meta.bestCombo = Math.max(meta.bestCombo, state.bestCombo);
+      saveMeta();
+      syncStatus(true);
+    }
+
+    function update(dt) {
+      dt = Math.min(0.1, Math.max(0, dt));
+      state.time += dt;
+      state.shake = Math.max(0, state.shake - dt);
+      state.rewardFlash = Math.max(0, state.rewardFlash - dt * 1.3);
+      state.fever = Math.max(0, state.fever - dt);
+      var activeDt = state.hitPause > 0 ? dt * 0.22 : dt;
+      state.hitPause = Math.max(0, state.hitPause - dt);
+
+      if (state.mode === "play") {
+        state.spawnTimer -= activeDt;
+        if (state.orders.length === 0 || (state.spawnTimer <= 0 && state.orders.length < MAX_ORDERS)) {
+          spawnOrder();
+          state.spawnTimer = Math.max(1.9, 3.2 - state.level * 0.18);
+        }
+        updateOrderTargets();
+        for (var i = state.orders.length - 1; i >= 0; i--) {
+          var order = state.orders[i];
+          order.age += activeDt;
+          order.due -= activeDt * (state.fever > 0 ? 0.72 : 1);
+          order.flash = Math.max(0, order.flash - dt);
+          order.wrong = Math.max(0, order.wrong - dt);
+          order.x = lerp(order.x, order.targetX, Math.min(1, activeDt * 7.5));
+          order.y = lerp(order.y, order.targetY + Math.sin(state.time * 3 + order.wobble) * 2.2, Math.min(1, activeDt * 7.5));
+          if (order.due <= 0) missOrder(order);
+        }
+        state.levelTime -= activeDt;
+        state.pressure = clamp(state.pressure - activeDt * (state.fever > 0 ? 1.25 : 0.65), 0, 100);
+        if (state.levelTime <= 0) {
+          if (state.served >= Math.max(2, state.goal - 1)) completeLevel();
+          else endRun();
+        }
+      }
+
+      for (var p = state.particles.length - 1; p >= 0; p--) {
+        var part = state.particles[p];
+        part.life -= dt;
+        part.x += part.vx * dt;
+        part.y += part.vy * dt;
+        part.vy += 130 * dt;
+        if (part.life <= 0) state.particles.splice(p, 1);
+      }
+
+      for (var f = state.floaters.length - 1; f >= 0; f--) {
+        var floater = state.floaters[f];
+        floater.life -= dt;
+        floater.y += floater.vy * dt;
+        if (floater.life <= 0) state.floaters.splice(f, 1);
+      }
+
+      state.statusTimer -= dt;
+      if (state.statusTimer <= 0) {
+        syncStatus(false);
+        state.statusTimer = 0.45;
+      }
+      tickMusic();
+    }
+
+    function drawBackground() {
+      var g = ctx.createLinearGradient(0, 0, cssW, cssH);
+      g.addColorStop(0, "#14324a");
+      g.addColorStop(0.38, "#245a61");
+      g.addColorStop(0.7, "#4f4738");
+      g.addColorStop(1, "#171d2d");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cssW, cssH);
+
+      var layout = getLayout();
+      var wallBottom = layout.playY + layout.playH * 0.18;
+      ctx.globalAlpha = 0.16;
+      ctx.strokeStyle = "#e8fff8";
+      ctx.lineWidth = 1;
+      var tile = 42;
+      for (var y = layout.hudH - tile; y < wallBottom; y += tile) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(cssW, y);
+        ctx.stroke();
+      }
+      for (var x = -tile; x < cssW + tile; x += tile) {
+        ctx.beginPath();
+        ctx.moveTo(x + ((Math.floor(x / tile) % 2) ? tile * 0.5 : 0), layout.hudH);
+        ctx.lineTo(x + ((Math.floor(x / tile) % 2) ? tile * 0.5 : 0), wallBottom);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = "rgba(255, 244, 209, 0.14)";
+      for (var lamp = 0; lamp < 3; lamp++) {
+        var lx = cssW * (0.2 + lamp * 0.3);
+        ctx.beginPath();
+        ctx.moveTo(lx, layout.hudH * 0.38);
+        ctx.lineTo(lx, layout.hudH + 10);
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.ellipse(lx, layout.hudH + 20, 22, 12, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      var boardY = layout.playY + layout.playH * 0.58;
+      var boardW = Math.min(layout.playW * 0.9, 780);
+      var boardH = Math.min(layout.playH * 0.7, 360);
+      ctx.save();
+      ctx.translate(cssW * 0.5, boardY);
+      ctx.rotate(Math.sin(state.time * 0.35) * 0.01);
+      ctx.fillStyle = "rgba(120, 72, 38, 0.82)";
+      ctx.beginPath();
+      ctx.ellipse(0, 0, boardW * 0.5, boardH * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 228, 181, 0.38)";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.globalAlpha = 0.2;
+      ctx.strokeStyle = "#ffe7bd";
+      ctx.lineWidth = 1;
+      for (var plank = -5; plank <= 5; plank++) {
+        ctx.beginPath();
+        ctx.moveTo(plank * boardW * 0.09, -boardH * 0.42);
+        ctx.bezierCurveTo(plank * boardW * 0.1 + 8, -boardH * 0.12, plank * boardW * 0.08 - 8, boardH * 0.2, plank * boardW * 0.09, boardH * 0.42);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+
+      for (var steam = 0; steam < 5; steam++) {
+        var sx = cssW * (0.18 + steam * 0.16);
+        var sy = layout.playY + layout.playH * (0.22 + (steam % 2) * 0.08);
+        ctx.globalAlpha = 0.16;
+        ctx.strokeStyle = "#f8fafc";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy + 42);
+        ctx.bezierCurveTo(sx - 18, sy + 14, sx + 20, sy, sx + Math.sin(state.time + steam) * 16, sy - 34);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      ctx.fillStyle = "rgba(18, 24, 39, 0.42)";
+      ctx.fillRect(0, wallBottom, cssW, Math.max(1, cssH - wallBottom));
+      ctx.fillStyle = "rgba(255, 255, 255, 0.07)";
+      ctx.fillRect(0, wallBottom, cssW, 3);
+
+      var beltY = cssH - layout.actionH;
+      ctx.fillStyle = "rgba(9, 13, 24, 0.8)";
+      ctx.fillRect(0, beltY, cssW, layout.actionH);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.09)";
+      ctx.fillRect(0, beltY, cssW, 2);
+      ctx.globalAlpha = 0.16;
+      ctx.strokeStyle = "#f8fafc";
+      for (var rail = layout.margin; rail < cssW; rail += 34) {
+        ctx.beginPath();
+        ctx.moveTo(rail, beltY + 6);
+        ctx.lineTo(rail + 18, cssH - 8);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawHud() {
+      var layout = getLayout();
+      var margin = layout.margin;
+      var top = Math.max(10, margin * 0.65);
+      var titleSize = clamp(cssW * 0.045, 24, 42);
+      text("Food Jutsu", margin, top + titleSize * 0.5, titleSize, "#ffffff", "left", "900");
+      var levelLabel = cssW < 520 ? "L" + state.level + "  Stars " + meta.stars : "Level " + state.level + "  Stars " + meta.stars;
+      text(levelLabel, margin, top + titleSize + 19, clamp(cssW * 0.018, 13, 17), "#a7f3d0", "left", "800");
+
+      var audioRect = audioButtonRect();
+      var rightX = audioRect.x - 10;
+      text(String(state.score), rightX, top + titleSize * 0.45, clamp(cssW * 0.04, 24, 38), "#f9d65c", "right", "900");
+      text("score", rightX, top + titleSize + 19, 13, "#dbeafe", "right", "700");
+      drawAudioButton(audioRect);
+
+      var barW = clamp(cssW * 0.28, 128, 260);
+      var barH = 12;
+      var barX = cssW * 0.5 - barW * 0.5;
+      var barY = top + 18;
+      roundedRect(barX, barY, barW, barH, 6);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.18)";
+      ctx.fill();
+      roundedRect(barX, barY, barW * clamp(state.pressure / 100, 0, 1), barH, 6);
+      ctx.fillStyle = state.pressure > 72 ? "#ff5b5b" : "#ff9f1c";
+      ctx.fill();
+      text("PRESS", barX - 8, barY + barH * 0.5, 10, "#dbeafe", "right", "800");
+
+      var focusY = barY + 21;
+      roundedRect(barX, focusY, barW, 9, 5);
+      ctx.fillStyle = "rgba(255, 255, 255, 0.16)";
+      ctx.fill();
+      roundedRect(barX, focusY, barW * (state.fever > 0 ? 1 : clamp(state.focus / 100, 0, 1)), 9, 5);
+      ctx.fillStyle = state.fever > 0 ? "#f9d65c" : "#4cc9f0";
+      ctx.fill();
+      text(state.fever > 0 ? "FEVER" : "FOCUS", barX - 8, focusY + 4.5, 10, "#dbeafe", "right", "800");
+
+      var progress = state.served + "/" + state.goal + " plated";
+      var combo = state.combo > 0 ? "combo x" + state.combo : "combo ready";
+      text(progress + "  " + combo, cssW * 0.5, top + layout.hudH - 18, clamp(cssW * 0.018, 12, 16), "#ffffff", "center", "900");
+    }
+
+    function audioButtonRect() {
+      var layout = getLayout();
+      var size = clamp(Math.min(cssW, cssH) * 0.058, 34, 42);
+      return {
+        x: cssW - layout.margin - size,
+        y: Math.max(9, layout.margin * 0.55),
+        w: size,
+        h: size
+      };
+    }
+
+    function drawAudioButton(rect) {
+      roundedRect(rect.x, rect.y, rect.w, rect.h, 8);
+      ctx.fillStyle = audio.muted ? "rgba(127, 29, 29, 0.78)" : "rgba(15, 23, 42, 0.76)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      var cx = rect.x + rect.w * 0.5;
+      var cy = rect.y + rect.h * 0.5;
+      ctx.strokeStyle = "#ffffff";
+      ctx.fillStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(cx - rect.w * 0.23, cy - rect.h * 0.09);
+      ctx.lineTo(cx - rect.w * 0.1, cy - rect.h * 0.09);
+      ctx.lineTo(cx + rect.w * 0.08, cy - rect.h * 0.23);
+      ctx.lineTo(cx + rect.w * 0.08, cy + rect.h * 0.23);
+      ctx.lineTo(cx - rect.w * 0.1, cy + rect.h * 0.09);
+      ctx.lineTo(cx - rect.w * 0.23, cy + rect.h * 0.09);
+      ctx.closePath();
+      ctx.fill();
+      if (!audio.muted) {
+        ctx.beginPath();
+        ctx.arc(cx + rect.w * 0.1, cy, rect.w * 0.17, -0.65, 0.65);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(cx + rect.w * 0.1, cy, rect.w * 0.28, -0.55, 0.55);
+        ctx.stroke();
+      } else {
+        ctx.strokeStyle = "#ffb4a8";
+        ctx.beginPath();
+        ctx.moveTo(rect.x + rect.w * 0.24, rect.y + rect.h * 0.24);
+        ctx.lineTo(rect.x + rect.w * 0.76, rect.y + rect.h * 0.76);
+        ctx.stroke();
+      }
+    }
+
+    function drawActionIcon(action, x, y, s, color) {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = Math.max(2, s * 0.09);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      if (action === "slice") {
+        ctx.beginPath();
+        ctx.moveTo(x - s * 0.42, y + s * 0.1);
+        ctx.lineTo(x + s * 0.42, y - s * 0.1);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + s * 0.2, y - s * 0.22);
+        ctx.lineTo(x + s * 0.43, y - s * 0.1);
+        ctx.lineTo(x + s * 0.24, y + s * 0.08);
+        ctx.stroke();
+      } else if (action === "grill") {
+        ctx.beginPath();
+        ctx.moveTo(x, y + s * 0.35);
+        ctx.bezierCurveTo(x - s * 0.32, y + s * 0.02, x - s * 0.08, y - s * 0.15, x - s * 0.02, y - s * 0.42);
+        ctx.bezierCurveTo(x + s * 0.32, y - s * 0.15, x + s * 0.28, y + s * 0.12, x, y + s * 0.35);
+        ctx.fill();
+      } else if (action === "freeze") {
+        for (var i = 0; i < 3; i++) {
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(i * Math.PI / 3);
+          ctx.beginPath();
+          ctx.moveTo(-s * 0.36, 0);
+          ctx.lineTo(s * 0.36, 0);
+          ctx.stroke();
+          ctx.restore();
+        }
+        ctx.beginPath();
+        ctx.arc(x, y, s * 0.12, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (action === "launch") {
+        ctx.beginPath();
+        ctx.moveTo(x - s * 0.28, y + s * 0.28);
+        ctx.lineTo(x + s * 0.26, y - s * 0.28);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x + s * 0.03, y - s * 0.29);
+        ctx.lineTo(x + s * 0.27, y - s * 0.29);
+        ctx.lineTo(x + s * 0.27, y - s * 0.05);
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.ellipse(x, y + s * 0.08, s * 0.38, s * 0.16, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(x, y - s * 0.08, s * 0.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawActionStrip() {
+      var layout = getLayout();
+      var y = cssH - layout.actionH;
+      var keys = ["slice", "grill", "freeze", "launch", "plate"];
+      var gap = 7;
+      var cellW = (cssW - layout.margin * 2 - gap * (keys.length - 1)) / keys.length;
+      var cellH = layout.actionH - 24;
+      for (var i = 0; i < keys.length; i++) {
+        var action = keys[i];
+        var x = layout.margin + i * (cellW + gap);
+        var cardY = y + 12;
+        roundedRect(x, cardY, cellW, cellH, 8);
+        ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.13)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        drawActionIcon(action, x + cellW * 0.5, cardY + cellH * 0.34, clamp(cellW * 0.34, 24, 44), ACTIONS[action].color);
+        text(ACTIONS[action].label, x + cellW * 0.5, cardY + cellH * 0.68, clamp(cellW * 0.16, 11, 15), "#ffffff", "center", "900");
+        text(ACTIONS[action].key, x + cellW * 0.5, cardY + cellH * 0.86, clamp(cellW * 0.12, 9, 12), "#b7c8dd", "center", "800");
+      }
+    }
+
+    function drawFood(shape, x, y, s, color) {
+      ctx.save();
+      ctx.translate(x, y);
+      if (shape === "skewer") {
+        ctx.strokeStyle = "#f8fafc";
+        ctx.lineWidth = s * 0.1;
+        ctx.beginPath();
+        ctx.moveTo(-s * 0.48, s * 0.28);
+        ctx.lineTo(s * 0.48, -s * 0.28);
+        ctx.stroke();
+        for (var i = -1; i <= 1; i++) {
+          ctx.fillStyle = i === 0 ? "#74d680" : color;
+          ctx.beginPath();
+          ctx.arc(i * s * 0.2, -i * s * 0.11, s * 0.16, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else if (shape === "mochi") {
+        ctx.fillStyle = "#e0f7ff";
+        ctx.beginPath();
+        ctx.ellipse(0, s * 0.08, s * 0.45, s * 0.28, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.arc(-s * 0.16, -s * 0.02, s * 0.11, 0, Math.PI * 2);
+        ctx.arc(s * 0.14, -s * 0.03, s * 0.1, 0, Math.PI * 2);
+        ctx.fill();
+      } else if (shape === "ramen") {
+        ctx.fillStyle = "#263b66";
+        ctx.beginPath();
+        ctx.ellipse(0, s * 0.16, s * 0.5, s * 0.24, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.ellipse(0, 0, s * 0.43, s * 0.26, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#fff7ad";
+        ctx.lineWidth = s * 0.05;
+        for (var n = 0; n < 3; n++) {
+          ctx.beginPath();
+          ctx.arc(-s * 0.18 + n * s * 0.16, 0, s * 0.17, Math.PI * 0.1, Math.PI * 0.9);
+          ctx.stroke();
+        }
+      } else if (shape === "roll") {
+        for (var r = 0; r < 3; r++) {
+          ctx.fillStyle = "#f8fafc";
+          ctx.beginPath();
+          ctx.arc((r - 1) * s * 0.24, 0, s * 0.2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = r === 1 ? color : "#172554";
+          ctx.beginPath();
+          ctx.arc((r - 1) * s * 0.24, 0, s * 0.11, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      } else {
+        ctx.fillStyle = "#212f55";
+        roundedRect(-s * 0.45, -s * 0.28, s * 0.9, s * 0.56, s * 0.08);
+        ctx.fill();
+        ctx.fillStyle = color;
+        roundedRect(-s * 0.37, -s * 0.2, s * 0.32, s * 0.18, s * 0.04);
+        ctx.fill();
+        ctx.fillStyle = "#74d680";
+        roundedRect(s * 0.04, -s * 0.2, s * 0.32, s * 0.18, s * 0.04);
+        ctx.fill();
+        ctx.fillStyle = "#ffd166";
+        roundedRect(-s * 0.18, s * 0.03, s * 0.36, s * 0.18, s * 0.04);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawOrder(order) {
+      var layout = getLayout();
+      var rect = orderRect(order);
+      var dish = DISHES[order.dishIndex];
+      var warn = order.due / order.maxDue < 0.32;
+      var hot = order === hotOrder();
+      var lift = order.flash > 0 ? -4 : 0;
+      roundedRect(rect.x, rect.y + lift, rect.w, rect.h, 8);
+      ctx.fillStyle = order.wrong > 0 ? "rgba(127, 29, 29, 0.86)" : "rgba(248, 250, 252, 0.94)";
+      ctx.fill();
+      ctx.strokeStyle = hot ? "#f9d65c" : (order.flash > 0 ? ACTIONS[order.steps[Math.max(0, order.step - 1)]].color : "rgba(15, 23, 42, 0.34)");
+      ctx.lineWidth = hot || order.flash > 0 ? 4 : 2;
+      ctx.stroke();
+
+      var topColor = warn ? "#ff5b5b" : "#20c997";
+      roundedRect(rect.x + 10, rect.y + 10 + lift, (rect.w - 20) * clamp(order.due / order.maxDue, 0, 1), 8, 4);
+      ctx.fillStyle = topColor;
+      ctx.fill();
+      if (hot) {
+        roundedRect(rect.x + 12, rect.y + 22 + lift, 48, 22, 6);
+        ctx.fillStyle = "#172554";
+        ctx.fill();
+        text("NEXT", rect.x + 36, rect.y + 33 + lift, 10, "#f9d65c", "center", "950");
+      }
+
+      drawFood(order.shape, rect.x + rect.w * 0.22, rect.y + rect.h * 0.52 + lift, rect.h * 0.43, dish.color);
+      text(order.name, rect.x + rect.w * 0.43, rect.y + rect.h * 0.28 + lift, clamp(rect.w * 0.07, 11, 14), "#162033", "left", "900");
+      text(Math.ceil(order.due) + "s", rect.x + rect.w - 14, rect.y + rect.h * 0.28 + lift, clamp(rect.w * 0.052, 11, 13), warn ? "#b91c1c" : "#31556b", "right", "900");
+
+      var next = order.steps[order.step];
+      var action = ACTIONS[next];
+      drawActionIcon(next, rect.x + rect.w * 0.52, rect.y + rect.h * 0.62 + lift, rect.h * 0.28, action.color);
+      text(action.label, rect.x + rect.w * 0.68, rect.y + rect.h * 0.61 + lift, clamp(rect.w * 0.08, 12, 16), "#172554", "left", "900");
+
+      var dotY = rect.y + rect.h - 18 + lift;
+      var stepGap = order.steps.length > 1 ? Math.min(22, (rect.w * 0.48) / (order.steps.length - 1)) : 0;
+      var startX = rect.x + rect.w * 0.44;
+      for (var i = 0; i < order.steps.length; i++) {
+        var sx = startX + i * stepGap;
+        ctx.beginPath();
+        ctx.arc(sx, dotY, i === order.step ? 10 : 8, 0, Math.PI * 2);
+        ctx.fillStyle = i < order.step ? ACTIONS[order.steps[i]].color : "rgba(15, 23, 42, 0.13)";
+        ctx.fill();
+        if (i === order.step) {
+          ctx.strokeStyle = "#172554";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        drawActionIcon(order.steps[i], sx, dotY, 12, i < order.step ? "#ffffff" : ACTIONS[order.steps[i]].color);
+      }
+    }
+
+    function drawParticles() {
+      for (var i = 0; i < state.particles.length; i++) {
+        var p = state.particles[i];
+        ctx.globalAlpha = clamp(p.life * 1.8, 0, 1);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      for (var f = 0; f < state.floaters.length; f++) {
+        var fl = state.floaters[f];
+        ctx.globalAlpha = clamp(fl.life, 0, 1);
+        text(fl.label, fl.x, fl.y, 15, fl.color, "center", "900");
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawGestureTrail() {
+      if (!state.gesture || state.gesture.path.length < 2) return;
+      ctx.save();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 5;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.shadowColor = "#4cc9f0";
+      ctx.shadowBlur = 12;
+      ctx.beginPath();
+      ctx.moveTo(state.gesture.path[0].x, state.gesture.path[0].y);
+      for (var i = 1; i < state.gesture.path.length; i++) {
+        ctx.lineTo(state.gesture.path[i].x, state.gesture.path[i].y);
+      }
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawCoachRibbon() {
+      if (state.mode !== "play") return;
+      var order = hotOrder();
+      if (!order) return;
+      var layout = getLayout();
+      var next = order.steps[order.step];
+      var action = ACTIONS[next];
+      var w = Math.min(cssW - layout.margin * 2, layout.portrait ? cssW - 28 : 470);
+      var h = layout.portrait ? 38 : 36;
+      var x = cssW * 0.5 - w * 0.5;
+      var y = layout.playY + 8;
+      roundedRect(x, y, w, h, 8);
+      ctx.fillStyle = state.fever > 0 ? "rgba(249, 214, 92, 0.92)" : "rgba(15, 23, 42, 0.88)";
+      ctx.fill();
+      ctx.strokeStyle = state.fever > 0 ? "#172554" : "rgba(255, 255, 255, 0.22)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      drawActionIcon(next, x + 28, y + h * 0.5, 20, state.fever > 0 ? "#172554" : action.color);
+      text("Next: " + order.name + " - " + action.label, x + 56, y + h * 0.5, clamp(w * 0.035, 13, 17), state.fever > 0 ? "#172554" : "#ffffff", "left", "900");
+      text(Math.ceil(order.due) + "s", x + w - 18, y + h * 0.5, 13, state.fever > 0 ? "#172554" : "#f9d65c", "right", "900");
+    }
+
+    function overlayPanelRect(mode) {
+      var panelW = clamp(cssW * 0.76, 286, 560);
+      var panelH = mode === "reward" ? clamp(cssH * 0.66, 340, 500) : clamp(cssH * 0.46, 270, 370);
+      if (mode === "intro") {
+        var layout = getLayout();
+        panelW = clamp(cssW * 0.72, 286, 560);
+        panelH = clamp(cssH * 0.34, 225, 300);
+        return {
+          x: cssW * 0.5 - panelW * 0.5,
+          y: layout.playY + 8,
+          w: panelW,
+          h: panelH
+        };
+      }
+      return {
+        x: cssW * 0.5 - panelW * 0.5,
+        y: cssH * 0.5 - panelH * 0.5,
+        w: panelW,
+        h: panelH
+      };
+    }
+
+    function upgradeRects(panel) {
+      var rows = [];
+      var rowH = clamp(panel.h * 0.105, 40, 52);
+      var gap = clamp(panel.h * 0.018, 6, 10);
+      var startY = panel.y + panel.h * 0.43;
+      for (var i = 0; i < UPGRADES.length; i++) {
+        rows.push({
+          x: panel.x + panel.w * 0.08,
+          y: startY + i * (rowH + gap),
+          w: panel.w * 0.84,
+          h: rowH
+        });
+      }
+      return rows;
+    }
+
+    function drawStarRow(x, y, earned) {
+      var gap = 34;
+      for (var i = 0; i < 3; i++) {
+        drawStar(x + (i - 1) * gap, y, 13, i < earned ? "#f9d65c" : "rgba(148, 163, 184, 0.55)");
+      }
+    }
+
+    function drawIntroOverlay() {
+      ctx.fillStyle = "rgba(5, 10, 24, 0.52)";
+      ctx.fillRect(0, 0, cssW, cssH);
+      var panel = overlayPanelRect("intro");
+      roundedRect(panel.x, panel.y, panel.w, panel.h, 8);
+      ctx.fillStyle = "#f8fafc";
+      ctx.fill();
+      ctx.strokeStyle = "#4cc9f0";
+      ctx.lineWidth = 4;
+      ctx.stroke();
+
+      text("Gesture Kitchen", cssW * 0.5, panel.y + panel.h * 0.16, clamp(panel.w * 0.07, 25, 39), "#172554", "center", "900");
+      text("Start by slashing the visible ticket.", cssW * 0.5, panel.y + panel.h * 0.28, clamp(panel.w * 0.036, 13, 18), "#31556b", "center", "850");
+
+      var recipe = ["slice", "grill", "plate"];
+      var centerY = panel.y + panel.h * 0.47;
+      var startX = cssW * 0.5 - 70;
+      for (var i = 0; i < recipe.length; i++) {
+        var action = recipe[i];
+        var cx = startX + i * 70;
+        ctx.beginPath();
+        ctx.arc(cx, centerY, 24, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(15, 23, 42, 0.08)";
+        ctx.fill();
+        drawActionIcon(action, cx, centerY, 28, ACTIONS[action].color);
+        if (i < recipe.length - 1) {
+          text(">", cx + 35, centerY, 18, "#64748b", "center", "900");
+        }
+      }
+
+      text("Draw on tickets, or use keys.", cssW * 0.5, panel.y + panel.h * 0.66, clamp(panel.w * 0.032, 12, 16), "#172554", "center", "850");
+      text("Arrows + Space match icons.", cssW * 0.5, panel.y + panel.h * 0.75, clamp(panel.w * 0.03, 11, 15), "#31556b", "center", "800");
+      text("M sound. F fullscreen.", cssW * 0.5, panel.y + panel.h * 0.84, clamp(panel.w * 0.03, 11, 15), "#31556b", "center", "800");
+      text("Space starts without cooking", cssW * 0.5, panel.y + panel.h * 0.94, clamp(panel.w * 0.033, 12, 16), "#0f766e", "center", "900");
+    }
+
+    function drawOverlay() {
+      if (state.mode === "intro") {
+        drawIntroOverlay();
+        return;
+      }
+      if (state.mode === "play") {
+        var layout = getLayout();
+        text(state.message, cssW * 0.5, layout.playY + layout.playH - 24, clamp(cssW * 0.018, 12, 16), "#ffffff", "center", "800");
+        return;
+      }
+
+      ctx.fillStyle = "rgba(8, 13, 28, 0.72)";
+      ctx.fillRect(0, 0, cssW, cssH);
+      var panel = overlayPanelRect(state.mode);
+      var x = panel.x;
+      var y = panel.y;
+      var panelW = panel.w;
+      var panelH = panel.h;
+      roundedRect(x, y, panelW, panelH, 8);
+      ctx.fillStyle = "#f8fafc";
+      ctx.fill();
+      ctx.strokeStyle = state.mode === "reward" ? "#f9d65c" : "#ff5b5b";
+      ctx.lineWidth = 4;
+      ctx.stroke();
+
+      if (state.mode === "reward") {
+        drawStarRow(cssW * 0.5, y + panelH * 0.12, state.starsEarned || 1);
+        text("Level " + state.level + " Clear", cssW * 0.5, y + panelH * 0.23, clamp(panelW * 0.065, 24, 37), "#172554", "center", "900");
+        text("+" + (state.starsEarned || 1) + " stars earned. Bank " + meta.stars, cssW * 0.5, y + panelH * 0.33, clamp(panelW * 0.034, 13, 17), "#31556b", "center", "800");
+        var rows = upgradeRects(panel);
+        for (var i = 0; i < UPGRADES.length; i++) {
+          var up = UPGRADES[i];
+          var rect = rows[i];
+          var level = upgradeLevel(up.id);
+          var cost = upgradeCost(up.id);
+          var maxed = level >= 3;
+          var affordable = canBuyUpgrade(up);
+          roundedRect(rect.x, rect.y, rect.w, rect.h, 8);
+          ctx.fillStyle = maxed ? "rgba(116, 214, 128, 0.16)" : (affordable ? "rgba(249, 214, 92, 0.20)" : "rgba(15, 23, 42, 0.07)");
+          ctx.fill();
+          ctx.strokeStyle = affordable ? up.color : "rgba(15, 23, 42, 0.16)";
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(rect.x + 24, rect.y + rect.h * 0.5, 14, 0, Math.PI * 2);
+          ctx.fillStyle = up.color;
+          ctx.fill();
+          text(String(i + 1), rect.x + 24, rect.y + rect.h * 0.5, 13, "#172554", "center", "950");
+          text(up.label + "  Lv " + level + "/3", rect.x + 48, rect.y + rect.h * 0.34, clamp(panelW * 0.031, 12, 16), "#172554", "left", "900");
+          text(up.desc, rect.x + 48, rect.y + rect.h * 0.72, clamp(panelW * 0.024, 10, 13), "#475569", "left", "800");
+          text(maxed ? "MAX" : cost + " star", rect.x + rect.w - 14, rect.y + rect.h * 0.5, clamp(panelW * 0.027, 11, 14), affordable || maxed ? "#0f766e" : "#64748b", "right", "900");
+        }
+        if (state.upgradeHint) {
+          text(state.upgradeHint, cssW * 0.5, y + panelH * 0.83, clamp(panelW * 0.029, 12, 15), "#0f766e", "center", "850");
+        } else {
+          text("Press 1-3 or tap an upgrade", cssW * 0.5, y + panelH * 0.83, clamp(panelW * 0.029, 12, 15), "#31556b", "center", "850");
+        }
+        text("Space or tap outside upgrades for next rush", cssW * 0.5, y + panelH * 0.92, clamp(panelW * 0.031, 12, 16), "#0f766e", "center", "900");
+      } else {
+        drawActionIcon("grill", cssW * 0.5, y + panelH * 0.26, panelH * 0.16, "#ff5b5b");
+        text("Rush Failed", cssW * 0.5, y + panelH * 0.48, clamp(panelW * 0.07, 25, 38), "#172554", "center", "900");
+        text("Pressure overflowed. Keep the hottest ticket moving.", cssW * 0.5, y + panelH * 0.61, clamp(panelW * 0.03, 12, 16), "#31556b", "center", "800");
+        text("Score " + state.score + "  Best " + meta.bestScore + "  Combo x" + state.bestCombo, cssW * 0.5, y + panelH * 0.74, clamp(panelW * 0.034, 13, 17), "#172554", "center", "900");
+        text("Tap or press Space", cssW * 0.5, y + panelH * 0.87, clamp(panelW * 0.036, 14, 18), "#0f766e", "center", "900");
+      }
+    }
+
+    function drawStar(x, y, r, color) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.beginPath();
+      for (var i = 0; i < 10; i++) {
+        var a = -Math.PI / 2 + i * Math.PI / 5;
+        var rr = i % 2 === 0 ? r : r * 0.45;
+        var px = Math.cos(a) * rr;
+        var py = Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+      ctx.strokeStyle = "#172554";
+      ctx.lineWidth = Math.max(2, r * 0.08);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function render() {
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, cssW, cssH);
+      ctx.save();
+      if (state.shake > 0) {
+        var s = state.shake * 12;
+        ctx.translate(Math.sin(state.time * 80) * s, Math.cos(state.time * 73) * s);
+      }
+      drawBackground();
+      drawHud();
+      for (var i = 0; i < state.orders.length; i++) drawOrder(state.orders[i]);
+      drawCoachRibbon();
+      drawParticles();
+      drawGestureTrail();
+      drawActionStrip();
+      drawOverlay();
+      ctx.restore();
+    }
+
+    function canvasPoint(evt) {
+      var rect = canvas.getBoundingClientRect();
+      var sx = rect.width > 0 ? cssW / rect.width : 1;
+      var sy = rect.height > 0 ? cssH / rect.height : 1;
+      return {
+        x: (evt.clientX - rect.left) * sx,
+        y: (evt.clientY - rect.top) * sy,
+        t: performance.now()
+      };
+    }
+
+    function onPointerDown(evt) {
+      evt.preventDefault();
+      var p = canvasPoint(evt);
+      if (pointInRect(p, audioButtonRect())) {
+        ensureAudio();
+        toggleMute();
+        state.gesture = { id: evt.pointerId, ui: "audio" };
+        return;
+      }
+      if (canvas.setPointerCapture) canvas.setPointerCapture(evt.pointerId);
+      state.gesture = { id: evt.pointerId, path: [p] };
+    }
+
+    function onPointerMove(evt) {
+      if (!state.gesture || state.gesture.id !== evt.pointerId) return;
+      evt.preventDefault();
+      var p = canvasPoint(evt);
+      var path = state.gesture.path;
+      var last = path[path.length - 1];
+      if (!last || dist(last, p) > 3) path.push(p);
+    }
+
+    function onPointerUp(evt) {
+      if (!state.gesture || state.gesture.id !== evt.pointerId) return;
+      evt.preventDefault();
+      if (state.gesture.ui) {
+        state.gesture = null;
+        return;
+      }
+      var p = canvasPoint(evt);
+      state.gesture.path.push(p);
+      var path = state.gesture.path.slice();
+      state.gesture = null;
+      ensureAudio();
+      if (state.mode === "reward") {
+        var rows = upgradeRects(overlayPanelRect("reward"));
+        for (var i = 0; i < rows.length; i++) {
+          if (pointInRect(p, rows[i])) {
+            buyUpgrade(i);
+            return;
+          }
+        }
+        resetRun(state.level + 1);
+        return;
+      }
+      if (state.mode === "over") {
+        resetRun(state.level);
+        return;
+      }
+      if (state.mode === "intro") {
+        var introTarget = findOrderForPath(path);
+        var introAction = classifyGesture(path);
+        applyAction(introAction, introTarget);
+        return;
+      }
+      if (state.mode !== "play") return;
+      var target = findOrderForPath(path);
+      applyAction(classifyGesture(path), target);
+    }
+
+    function keyAction(code) {
+      if (code === "ArrowLeft" || code === "KeyA") return "slice";
+      if (code === "ArrowDown") return "grill";
+      if (code === "ArrowUp") return "freeze";
+      if (code === "ArrowRight") return "launch";
+      if (code === "Space" || code === "Enter") return "plate";
+      return null;
+    }
+
+    function onKeyDown(evt) {
+      if (evt.repeat) return;
+      if (evt.code === "KeyM") {
+        evt.preventDefault();
+        ensureAudio();
+        toggleMute();
+        return;
+      }
+      if (state.mode === "reward" && (evt.code === "Digit1" || evt.code === "Digit2" || evt.code === "Digit3")) {
+        evt.preventDefault();
+        ensureAudio();
+        buyUpgrade(Number(evt.code.slice(5)) - 1);
+        return;
+      }
+      if (evt.code === "KeyF") {
+        evt.preventDefault();
+        toggleFullscreen();
+        return;
+      }
+      var action = keyAction(evt.code);
+      if (action) {
+        evt.preventDefault();
+        ensureAudio();
+        applyAction(action, null);
+      }
+    }
+
+    function toggleFullscreen() {
+      var root = document.getElementById("game-root");
+      if (!document.fullscreenElement && root.requestFullscreen) {
+        root.requestFullscreen().catch(function () {});
+      } else if (document.exitFullscreen) {
+        document.exitFullscreen().catch(function () {});
+      }
+    }
+
+    function syncStatus(force) {
+      var first = state.orders[0];
+      var bits = [
+        "Mode " + state.mode,
+        "score " + state.score,
+        "served " + state.served + " of " + state.goal,
+        "combo " + state.combo,
+        "pressure " + Math.round(state.pressure),
+        "focus " + Math.round(state.focus),
+        "stars " + meta.stars,
+        audio.muted ? "audio muted" : "audio on"
+      ];
+      var hot = hotOrder() || first;
+      if (hot) {
+        bits.push("next order " + hot.name + " needs " + ACTIONS[hot.steps[hot.step]].label + " in " + Math.ceil(hot.due) + " seconds");
+      }
+      bits.push(state.message);
+      var next = bits.join(". ");
+      if (force || next !== lastStatusText) {
+        lastStatusText = next;
+        statusEl.textContent = next;
+      }
+    }
+
+    function renderGameToText() {
+      var payload = {
+        coordinateSystem: "Canvas CSS pixels. Origin top-left. Positive x moves right. Positive y moves down.",
+        mode: state.mode,
+        level: state.level,
+        score: state.score,
+        combo: state.combo,
+        bestCombo: state.bestCombo,
+        focus: Math.round(state.focus),
+        feverSeconds: Math.round(state.fever * 10) / 10,
+        stars: meta.stars,
+        bestScore: meta.bestScore,
+        audioMuted: audio.muted,
+        upgrades: {
+          prep: upgradeLevel("prep"),
+          calm: upgradeLevel("calm"),
+          tips: upgradeLevel("tips")
+        },
+        starsEarned: state.starsEarned,
+        upgradeHint: state.upgradeHint,
+        upgradeChoices: state.mode === "reward" ? UPGRADES.map(function (upgrade) {
+          return {
+            id: upgrade.id,
+            label: upgrade.label,
+            level: upgradeLevel(upgrade.id),
+            cost: upgradeCost(upgrade.id),
+            canBuy: canBuyUpgrade(upgrade)
+          };
+        }) : [],
+        served: state.served,
+        goal: state.goal,
+        missed: state.missed,
+        pressure: Math.round(state.pressure),
+        timeRemaining: Math.max(0, Math.round(state.levelTime * 10) / 10),
+        message: state.message,
+        hotOrderId: hotOrder() ? hotOrder().id : null,
+        controls: {
+          slice: "Draw horizontal slash, or ArrowLeft/A",
+          grill: "Draw vertical stroke, or ArrowDown",
+          freeze: "Draw a loop, or ArrowUp",
+          launch: "Draw upward diagonal flick, or ArrowRight",
+          plate: "Tap, or Space/Enter"
+        },
+        orders: state.orders.map(function (order) {
+          return {
+            id: order.id,
+            name: order.name,
+            x: Math.round(order.x),
+            y: Math.round(order.y),
+            nextAction: order.steps[order.step],
+            fullRecipe: order.steps.slice(),
+            hot: hotOrder() === order,
+            step: order.step,
+            totalSteps: order.steps.length,
+            due: Math.max(0, Math.round(order.due * 10) / 10)
+          };
+        })
+      };
+      return JSON.stringify(payload);
+    }
+
+    function resizeCanvas(entry) {
+      var rect = canvas.getBoundingClientRect();
+      cssW = Math.max(1, rect.width || window.innerWidth || 1);
+      cssH = Math.max(1, rect.height || window.innerHeight || 1);
+      var dpc = entry && entry.devicePixelContentBoxSize;
+      var box = dpc && (Array.isArray(dpc) ? dpc[0] : dpc);
+      var nextW = box ? box.inlineSize : Math.round(cssW * Math.max(1, window.devicePixelRatio || 1));
+      var nextH = box ? box.blockSize : Math.round(cssH * Math.max(1, window.devicePixelRatio || 1));
+      nextW = Math.max(1, nextW);
+      nextH = Math.max(1, nextH);
+      dpr = Math.max(1, nextW / cssW);
+      if (canvas.width !== nextW || canvas.height !== nextH) {
+        canvas.width = nextW;
+        canvas.height = nextH;
+      }
+      updateOrderTargets();
+      render();
+    }
+
+    var supportsDevicePixelContentBox =
+      typeof ResizeObserverEntry !== "undefined" &&
+      "devicePixelContentBoxSize" in ResizeObserverEntry.prototype;
+    var resizeObserver = new ResizeObserver(function (entries) {
+      resizeCanvas(entries[0]);
+    });
+    resizeObserver.observe(canvas, supportsDevicePixelContentBox ? { box: "device-pixel-content-box" } : {});
+
+    canvas.addEventListener("pointerdown", onPointerDown, { passive: false });
+    canvas.addEventListener("pointermove", onPointerMove, { passive: false });
+    canvas.addEventListener("pointerup", onPointerUp, { passive: false });
+    canvas.addEventListener("pointercancel", function () { state.gesture = null; }, { passive: false });
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("resize", function () { resizeCanvas(null); });
+    document.addEventListener("visibilitychange", function () { lastTs = 0; });
+    document.addEventListener("fullscreenchange", function () { resizeCanvas(null); });
+
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = function (ms) {
+      var total = Math.max(0, Number(ms) || 0) / 1000;
+      var step = 1 / 60;
+      var guard = 0;
+      while (total > 0 && guard < 600) {
+        var dt = Math.min(step, total);
+        update(dt);
+        total -= dt;
+        guard += 1;
+      }
+      render();
+      return Promise.resolve(renderGameToText());
+    };
+
+    function frame(ts) {
+      if (!lastTs) lastTs = ts;
+      var dt = (ts - lastTs) / 1000;
+      lastTs = ts;
+      if (!document.hidden) {
+        update(dt);
+        render();
+      }
+      requestAnimationFrame(frame);
+    }
+
+    startIntro();
+    resizeCanvas(null);
+    requestAnimationFrame(frame);
+  }());
+  </script>
+</body>
+</html>

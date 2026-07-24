@@ -1,0 +1,1259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Spaghetti Monster</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #2a1a10; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — both languages) ────────────────────
+var STRINGS = {
+  en: {
+    title: 'Spaghetti Monster', sub: 'Slurp the market, dodge the chefs',
+    play: 'PLAY', retry: 'RETRY', score: 'SCORE', best: 'BEST',
+    gameover: 'GAME OVER', sauce: 'Sauce', next: 'Next', max: 'MAX',
+    tier_0: 'Snack', tier_1: 'Lunch', tier_2: 'Feast', tier_3: 'Festival', tier_4: 'Kaiju Pasta',
+    tierup: 'TIER UP!', pow_marinara: 'Marinara', pow_shield: 'Shield', pow_speed: 'Speed',
+    up_tent: 'Extra Arm', up_magnet: 'Slurp Magnet', up_resist: 'Tough Noodles',
+    up_tent_eff: '+1 start arm', up_magnet_eff: '+6 slurp reach', up_resist_eff: '-1 lost per cut',
+    frenzy: 'FRENZY', ready: 'READY', banked: 'Banked',
+    tut_step_drag: 'Drag to steer your monster',
+    tut_step_slurp: 'Brush food with your noodles',
+    tut_step_grow: 'Grow big! Mind the chef scissors',
+    tut_goal: 'Grow the biggest spaghetti monster by slurping street food.',
+    tut_controls: 'Drag to steer; your noodles auto-slurp what they brush.',
+    tut_win: 'Endless: climb the size tiers for the high score.',
+    tut_lose: 'Chefs snip your noodles; if your length runs out, game over.',
+    tut_tip: 'Grab marinara sauce to gulp chefs whole for a few seconds.',
+  },
+  ru: {
+    title: 'Спагетти-Монстр', sub: 'Съешь рынок, беги от поваров',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ', score: 'ОЧКИ', best: 'РЕКОРД',
+    gameover: 'ИГРА ОКОНЧЕНА', sauce: 'Соус', next: 'Далее', max: 'МАКС',
+    tier_0: 'Закуска', tier_1: 'Обед', tier_2: 'Пир', tier_3: 'Фестиваль', tier_4: 'Кайдзю',
+    tierup: 'НОВЫЙ УРОВЕНЬ!', pow_marinara: 'Маринара', pow_shield: 'Щит', pow_speed: 'Скорость',
+    up_tent: 'Ещё рука', up_magnet: 'Магнит', up_resist: 'Крепкая лапша',
+    up_tent_eff: '+1 рука в начале', up_magnet_eff: '+6 к захвату', up_resist_eff: '-1 при срезе',
+    frenzy: 'БЕЗУМИЕ', ready: 'ГОТОВО', banked: 'Соус',
+    tut_step_drag: 'Веди пальцем и управляй монстром',
+    tut_step_slurp: 'Касайся еды лапшой',
+    tut_step_grow: 'Расти! Берегись ножниц поваров',
+    tut_goal: 'Вырасти самого большого монстра, поглощая уличную еду.',
+    tut_controls: 'Веди пальцем; лапша сама всасывает всё, чего коснётся.',
+    tut_win: 'Бесконечно: расти по уровням ради рекорда.',
+    tut_lose: 'Повара режут лапшу; кончится длина, игра окончена.',
+    tut_tip: 'Хватай соус маринара, чтобы глотать поваров целиком.',
+  },
+};
+
+// food_sausage intentionally omitted — it draws from its vector fallback (the
+// Flux content filter rejects every sausage/bratwurst prompt); no load, no 404.
+var SPRITE_NAMES = ['core', 'food_noodle', 'food_meatball', 'food_dumpling'];
+
+// ── REMOTE CONFIG DEFAULTS (live-ops DATA channel; offline = these) ───────
+var CFG = {
+  tuning: { speed_mult: 1, spawn_mult: 1 },
+  events: { golden_rush: false },
+  daily:  { seed: 0 },
+  motd:   { en: '', ru: '' },
+  version: 0,
+};
+
+// ── TUNABLES (see DESIGN.md) ─────────────────────────────────────────────
+var SEG_LEN = 15, SEG_START = 8, MAX_SEG = 20, CORE_R0 = 20;
+var SLURP_RADIUS = 26, SLURP_SPEED = 9, CORE_SPEED = 235, STRAND_DAMP = 0.86;
+var CONSTRAINT_ITERS = 3, SNIP_COST = 4, LENGTH_MIN = 8, CHEF_SPEED = 66;
+var POWERUP_TIME = 6, START_TENTACLES = 3, OUTWARD = 30;
+// CHEF_SPEED tuned so chefs keep pace with a moving monster yet stay dodgeable.
+var TIER_SCORES = [30, 70, 130, 210];
+var FRENZY_STEP = 100;           // score past Kaiju (210) per post-Kaiju frenzy wave
+var TIER_NAMES = ['tier_0', 'tier_1', 'tier_2', 'tier_3', 'tier_4'];
+var FOOD_R = 11, CHEF_R = 18, BLADE_R = 22, FORK_R = 16, SAUCE_R = 14;
+
+// food catalogue: value + first tier it appears + colour
+// Pickup hues are kept deliberately DISTINCT from the saucy-red strands and the
+// tan plaza so food reads as collectible at a glance (each also gets a dark rim
+// + pulse halo in drawFoods). glow = the pulse-halo colour.
+var FOOD_DEFS = [
+  { k: 'noodle',   spr: 'food_noodle',   v: 1, minTier: 0, col: '#ffd21f', glow: '#fff3a0' },
+  { k: 'meatball', spr: 'food_meatball', v: 3, minTier: 1, col: '#8a4a22', glow: '#e8b070' },
+  { k: 'sausage',  spr: 'food_sausage',  v: 4, minTier: 2, col: '#b8674a', glow: '#f0b49a' },
+  { k: 'dumpling', spr: 'food_dumpling', v: 6, minTier: 3, col: '#f4efe2', glow: '#ffffff' },
+  { k: 'hotdog',   spr: 'food_noodle',   v: 8, minTier: 1, col: '#ffe14a', glow: '#fff6c0', rare: true },
+];
+var POWER_KINDS = ['marinara', 'shield', 'speed'];
+var STALL_COLORS = [
+  ['#c63d32', '#f7d26a'],
+  ['#2f8f74', '#f4efe2'],
+  ['#3d6fb2', '#f2b36d'],
+  ['#8a58a8', '#f7d26a'],
+];
+
+// ── STATE ────────────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | GAMEOVER
+var score = 0, best = 0, noodleLength = 24, tier = 0, tentacleCount = START_TENTACLES;
+var core = { x: 0, y: 0, vx: 0, vy: 0, r: CORE_R0, mouth: 0 };
+var tentacles = [], foods = [], chefs = [], forks = [], sauces = [];
+var arenaW = 900, arenaH = 1200;
+var camScale = 1, time = 0, saveAccum = 0, spawnAccum = 0, sauceAccum = 0;
+var power = { type: null, t: 0 };
+var lookX = 0, lookY = -1;
+var flashRed = 0, tierupFlash = 0;
+var frenzy = 0, sauceMult = 1;   // post-Kaiju endless ramp: waves + sauce-prestige multiplier
+var lastRunBank = 0;             // sauce banked by the most recent run (for the game-over payoff)
+var _pendingAd = false;
+
+// persistent meta
+var meta = { best: 0, sauce: 0, up: { tent: 0, magnet: 0, resist: 0 } };
+var META_KEY = 'spaghetti_monster_meta_v1';
+
+// input
+var ptr = { active: false, x: 0, y: 0, dnx: 0, dny: 0, moved: false };
+var uiButtons = [];              // rebuilt per frame for HUD + game-over
+var uiCaptured = false;
+var _ssInvuln = false;           // screenshot-only: block snips so captures never fall to GAMEOVER
+
+// derived from meta
+function slurpR()  { return SLURP_RADIUS + meta.up.magnet * 6; }
+function snipCost(){ return Math.max(2, SNIP_COST - meta.up.resist); }
+
+// ── CAMERA (world <-> screen; folds GF.S device scale + tier zoom) ────────
+function zoom()   { return camScale * GF.S; }
+function w2sx(x)  { return (x - core.x) * zoom() + GF.cx; }
+function w2sy(y)  { return (y - core.y) * zoom() + GF.cy; }
+function s2wx(sx) { return (sx - GF.cx) / zoom() + core.x; }
+function s2wy(sy) { return (sy - GF.cy) / zoom() + core.y; }
+
+// ── UTILS ──────────────────────────────────────────────────────────────
+function rand(a, b) { return a + Math.random() * (b - a); }
+function hyp(x, y)  { return Math.sqrt(x * x + y * y); }
+function unlockedFoods() {
+  var out = [];
+  for (var i = 0; i < FOOD_DEFS.length; i++) if (FOOD_DEFS[i].minTier <= tier) out.push(FOOD_DEFS[i]);
+  return out;
+}
+
+// ── TENTACLES (verlet spaghetti strands) ─────────────────────────────────
+function makeTentacle(angle) {
+  var t = { angle: angle, seg: SEG_START, pts: [], pin: 0, pinIdx: -1, pinX: 0, pinY: 0, cut: 0, phase: rand(0, 6.28) };
+  for (var i = 0; i <= t.seg; i++) {
+    var d = i * SEG_LEN;
+    var x = core.x + Math.cos(angle) * (core.r + d);
+    var y = core.y + Math.sin(angle) * (core.r + d);
+    t.pts.push({ x: x, y: y, px: x, py: y });
+  }
+  return t;
+}
+function spreadTentacles() {
+  for (var i = 0; i < tentacles.length; i++) {
+    tentacles[i].angle = -Math.PI / 2 + (i / tentacles.length) * Math.PI * 2;
+  }
+}
+function recomputeLength() {
+  var n = 0;
+  for (var i = 0; i < tentacles.length; i++) n += tentacles[i].seg;
+  noodleLength = n;
+}
+function growSegments(units) {
+  while (units > 0) {
+    var best_i = -1, minSeg = 1e9;
+    for (var i = 0; i < tentacles.length; i++) {
+      if (tentacles[i].seg < MAX_SEG && tentacles[i].seg < minSeg) { minSeg = tentacles[i].seg; best_i = i; }
+    }
+    if (best_i < 0) break;              // all maxed
+    var t = tentacles[best_i];
+    t.seg++;
+    var tip = t.pts[t.pts.length - 1], prev = t.pts[t.pts.length - 2] || tip;
+    var dx = tip.x - prev.x, dy = tip.y - prev.y, d = hyp(dx, dy) || 1;
+    var nx = tip.x + dx / d * SEG_LEN, ny = tip.y + dy / d * SEG_LEN;
+    t.pts.push({ x: nx, y: ny, px: nx, py: ny });
+    units--;
+  }
+  recomputeLength();
+}
+function updateTentacles(dt) {
+  var out = OUTWARD * (power.type === 'speed' ? 1.35 : 1);
+  for (var ti = 0; ti < tentacles.length; ti++) {
+    var t = tentacles[ti];
+    if (t.pin > 0) t.pin -= dt;
+    if (t.cut > 0) t.cut -= dt;
+    var n = t.seg;
+    var ax = core.x + Math.cos(t.angle) * core.r, ay = core.y + Math.sin(t.angle) * core.r;
+    t.pts[0].x = ax; t.pts[0].y = ay; t.pts[0].px = ax; t.pts[0].py = ay;
+    var ox = Math.cos(t.angle), oy = Math.sin(t.angle), perpx = -oy, perpy = ox;
+    for (var i = 1; i <= n; i++) {
+      var p = t.pts[i];
+      if (t.pin > 0 && i === t.pinIdx) { p.x = t.pinX; p.y = t.pinY; p.px = t.pinX; p.py = t.pinY; continue; }
+      var vx = (p.x - p.px) * STRAND_DAMP, vy = (p.y - p.py) * STRAND_DAMP;
+      p.px = p.x; p.py = p.y;
+      var frac = i / n;
+      var wig = Math.sin(time * 4.2 + t.phase + i * 0.55) * 22 * frac;
+      p.x += vx + (ox * out * frac + perpx * wig) * dt;
+      p.y += vy + (oy * out * frac + perpy * wig) * dt;
+    }
+    for (var k = 0; k < CONSTRAINT_ITERS; k++) {
+      for (var j = 0; j < n; j++) {
+        var a = t.pts[j], b = t.pts[j + 1];
+        var dx2 = b.x - a.x, dy2 = b.y - a.y, dd = hyp(dx2, dy2) || 0.0001;
+        var diff = (SEG_LEN - dd) / dd * 0.5;
+        var offx = dx2 * diff, offy = dy2 * diff;
+        var aFixed = (j === 0) || (t.pin > 0 && j === t.pinIdx);
+        var bFixed = (t.pin > 0 && (j + 1) === t.pinIdx);
+        if (aFixed && !bFixed) { b.x += offx * 2; b.y += offy * 2; }
+        else if (bFixed && !aFixed) { a.x -= offx * 2; a.y -= offy * 2; }
+        else if (!aFixed && !bFixed) { a.x -= offx; a.y -= offy; b.x += offx; b.y += offy; }
+      }
+    }
+  }
+}
+function tentPointAt(t, segT) {
+  segT = Math.max(0, Math.min(t.seg, segT));
+  var i0 = Math.floor(segT), i1 = Math.min(t.seg, i0 + 1), f = segT - i0;
+  var a = t.pts[i0], b = t.pts[i1];
+  return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+}
+
+// ── SPAWNING ─────────────────────────────────────────────────────────────
+function randArenaPos(minFromCore) {
+  for (var tries = 0; tries < 12; tries++) {
+    var x = rand(60, arenaW - 60), y = rand(60, arenaH - 60);
+    if (!minFromCore || hyp(x - core.x, y - core.y) > minFromCore) return { x: x, y: y };
+  }
+  return { x: rand(60, arenaW - 60), y: rand(60, arenaH - 60) };
+}
+function foodTarget() { return Math.round((14 + tier * 7 + arenaW / 130) * CFG.tuning.spawn_mult); }
+function spawnFood(nearCore) {
+  var pool = unlockedFoods();
+  var def = pool[(Math.random() * pool.length) | 0];
+  if (def.rare && Math.random() > 0.12) def = pool[0];   // hotdog stays rare
+  // regular food spawns clear of the monster's reach, so growth requires active
+  // steering (a passive monster does not self-heal faster than chefs cut it).
+  var p = nearCore ? { x: core.x + rand(-70, 70), y: core.y + rand(60, 120) } : randArenaPos(core.r + SEG_START * SEG_LEN + 55);
+  p.x = Math.max(40, Math.min(arenaW - 40, p.x));
+  p.y = Math.max(40, Math.min(arenaH - 40, p.y));
+  foods.push({ x: p.x, y: p.y, def: def, cap: false, ti: -1, segT: 0, wob: rand(0, 6.28), sc: 1 });
+}
+function topUpFood() { var tgt = foodTarget(); var guard = 0; while (foods.length < tgt && guard++ < 80) spawnFood(false); }
+
+function spawnChef(type, pos) {
+  var p = pos || randArenaPos(220);
+  var speed = CHEF_SPEED * (type === 'cleaver' ? 1.45 : 1) * (type === 'granny' ? 1.7 : 1);
+  var ch = { x: p.x, y: p.y, type: type, r: CHEF_R, speed: speed, cool: rand(1.2, 2.4),
+             windup: 0, blink: rand(0, 3), dirx: 0, diry: 0, summon: 6, zx: null, zy: null, zr: 0 };
+  if (type === 'granny') { var a = rand(0, 6.28); ch.dirx = Math.cos(a); ch.diry = Math.sin(a); }
+  chefs.push(ch);
+}
+function desiredChefs() {
+  return { scissor: 1 + tier, cleaver: tier >= 3 ? tier - 2 : 0, granny: tier >= 4 ? 1 : 0, inspector: tier >= 4 ? 1 : 0 };
+}
+function topUpChefs() {
+  var want = desiredChefs(), have = { scissor: 0, cleaver: 0, granny: 0, inspector: 0 };
+  for (var i = 0; i < chefs.length; i++) have[chefs[i].type]++;
+  for (var k in want) { while (have[k] < want[k]) { spawnChef(k); have[k]++; } }
+}
+function topUpForks() {
+  if (tier < 2) return;
+  var want = Math.min(4, tier);
+  while (forks.length < want) { var p = randArenaPos(160); forks.push({ x: p.x, y: p.y, wob: rand(0, 6.28) }); }
+}
+
+// ── GAME LIFECYCLE ─────────────────────────────────────────────────────
+function startGame() {
+  score = 0; tier = 0;
+  tentacleCount = Math.min(6, START_TENTACLES + meta.up.tent);
+  arenaW = 900; arenaH = 1200;
+  core.x = arenaW / 2; core.y = arenaH / 2; core.vx = 0; core.vy = 0; core.r = CORE_R0; core.mouth = 0;
+  tentacles = [];
+  for (var i = 0; i < tentacleCount; i++) tentacles.push(makeTentacle(0));
+  spreadTentacles();
+  recomputeLength();
+  foods = []; chefs = []; forks = []; sauces = [];
+  power = { type: null, t: 0 };
+  camScale = 1; flashRed = 0; tierupFlash = 0;
+  frenzy = 0; sauceMult = 1;
+  spawnFood(true); spawnFood(true);           // food beside the monster for the coach
+  topUpFood();
+  spawnChef('scissor');
+  gs = 'PLAYING';
+  GF.gameStarted();
+  maybeStartCoach();
+  GF.saveRun();
+}
+function runSauce() { return Math.round(score * sauceMult); }   // sauce this run would bank (prestige-scaled)
+function gameOver() {
+  if (score > best) best = score;
+  meta.best = Math.max(meta.best, score);
+  lastRunBank = runSauce();                // post-Kaiju sauce-prestige multiplier pays out here
+  meta.sauce += lastRunBank;
+  saveMeta();
+  gs = 'GAMEOVER';
+  _pendingAd = true;
+  GF.gameEnded();
+  if (score > 0 && score >= best) GF.happytime();
+  GF.saveRun();
+}
+function addScore(v, wx, wy) {
+  score += v;
+  growSegments(v);
+  core.mouth = 1;
+  GF.spawnFloat(w2sx(wx), w2sy(wy), '+' + v, '#ffe680');
+  GF.spawnParticles(w2sx(wx), w2sy(wy), '#ffd21f', 6);
+  checkTier();
+  checkFrenzy();
+}
+// Post-Kaiju endless ramp: once past the top tier, every FRENZY_STEP of score
+// spawns an escalating chef wave + a food bonanza and raises the sauce-prestige
+// multiplier — so minute 6-10 keeps introducing something new and pays out more.
+function checkFrenzy() {
+  var kaiju = TIER_SCORES[TIER_SCORES.length - 1];
+  if (score < kaiju) return;
+  var want = Math.floor((score - kaiju) / FRENZY_STEP);
+  while (frenzy < want) {
+    frenzy++;
+    sauceMult = 1 + frenzy * 0.5;                 // x1.5, x2.0, x2.5 ...
+    spawnChef(frenzy % 2 ? 'cleaver' : 'scissor'); spawnChef('scissor');   // escalating wave
+    for (var i = 0; i < 6; i++) spawnFood(false);                          // food bonanza
+    if (frenzy % 2 === 0) spawnFood(false), spawnFood(false);
+    GF.sfx('levelup'); GF.setShake(0.45);
+    GF.spawnFloat(GF.cx, GF.cy - 60 * GF.S, GF.t('frenzy') + ' x' + frenzy + '  ' + GF.t('sauce') + ' x' + sauceMult.toFixed(1), '#ff7a3c');
+    GF.saveRun();
+  }
+}
+function checkTier() {
+  while (tier < TIER_SCORES.length && score >= TIER_SCORES[tier]) {
+    tier++;
+    tentacles.push(makeTentacle(0)); spreadTentacles(); recomputeLength();
+    core.r = CORE_R0 + tier * 5;
+    arenaW = 900 + tier * 240; arenaH = 1200 + tier * 300;
+    camScale = Math.max(0.62, 1.05 - tier * 0.09);
+    tierupFlash = 1.2;
+    GF.sfx('levelup');
+    GF.spawnFloat(GF.cx, GF.cy - 40 * GF.S, GF.t('tierup') + ' ' + GF.t(TIER_NAMES[tier]), '#7CFC9A');
+    for (var i = 0; i < 22; i++) GF.spawnParticles(GF.cx + rand(-60, 60), GF.cy + rand(-60, 60), i % 2 ? '#7CFC9A' : '#ffd54a', 1);
+    GF.setShake(0.5);
+    topUpForks();
+    GF.saveRun();
+  }
+}
+
+// ── EATING / SLURP ────────────────────────────────────────────────────
+function updateFoods(dt) {
+  var sr = slurpR();
+  for (var fi = foods.length - 1; fi >= 0; fi--) {
+    var f = foods[fi];
+    f.wob += dt * 3;
+    if (f.cap) {
+      var t = tentacles[f.ti];
+      if (!t) { f.cap = false; continue; }
+      f.segT = Math.min(f.segT, t.seg);
+      f.segT -= SLURP_SPEED * dt;
+      f.sc = 0.6 + 0.4 * (f.segT / Math.max(1, t.seg));
+      if (f.segT <= 0.4) { addScore(f.def.v, core.x, core.y); GF.sfx('coin'); foods.splice(fi, 1); continue; }
+      var pp = tentPointAt(t, f.segT); f.x = pp.x; f.y = pp.y;
+      continue;
+    }
+    if (hyp(f.x - core.x, f.y - core.y) < core.r + FOOD_R) { addScore(f.def.v, f.x, f.y); GF.sfx('coin'); foods.splice(fi, 1); continue; }
+    var captured = false;
+    for (var ti = 0; ti < tentacles.length && !captured; ti++) {
+      var tt = tentacles[ti];
+      for (var i = 1; i <= tt.seg; i++) {
+        var p = tt.pts[i];
+        if (hyp(p.x - f.x, p.y - f.y) < sr + FOOD_R) {
+          f.cap = true; f.ti = ti; f.segT = i; captured = true; GF.sfx('click');
+          if (GF.tutorial.active && GF.tutorial.step === 1) GF.tutorial.next();
+          break;
+        }
+      }
+    }
+  }
+  spawnAccum += dt;
+  if (spawnAccum > 0.6) { spawnAccum = 0; if (foods.length < foodTarget()) spawnFood(false); }
+}
+
+// ── CHEFS / HAZARDS ──────────────────────────────────────────────────
+// a tentacle is "cuttable" only while it still has segments above the floor
+function cuttable(t) { return t.seg > 2; }
+function nearestTentPointInZone(zx, zy, zr, cuttableOnly) {
+  var bestT = -1, bestI = -1, bd = zr * zr;
+  for (var ti = 0; ti < tentacles.length; ti++) {
+    var t = tentacles[ti];
+    if (cuttableOnly && !cuttable(t)) continue;
+    for (var i = 1; i <= t.seg; i++) {
+      var p = t.pts[i], dx = p.x - zx, dy = p.y - zy, d2 = dx * dx + dy * dy;
+      if (d2 < bd) { bd = d2; bestT = ti; bestI = i; }
+    }
+  }
+  return bestT < 0 ? null : { ti: bestT, i: bestI };
+}
+// nearest strand point to (fromX,fromY) — chefs hunt CUTTABLE noodles so they
+// move on to a fresh strand instead of gnawing a spent 2-segment stub forever
+function nearestTentPoint(fromX, fromY, cuttableOnly) {
+  var bx = 0, by = 0, bd = 1e18, found = false;
+  for (var ti = 0; ti < tentacles.length; ti++) {
+    var t = tentacles[ti];
+    if (cuttableOnly && !cuttable(t)) continue;
+    for (var i = 1; i <= t.seg; i++) {
+      var p = t.pts[i], dx = p.x - fromX, dy = p.y - fromY, d2 = dx * dx + dy * dy;
+      if (d2 < bd) { bd = d2; bx = p.x; by = p.y; found = true; }
+    }
+  }
+  return found ? { x: bx, y: by, d: Math.sqrt(bd) } : null;
+}
+function doSnip(ch, zx, zy, zr) {
+  if (_ssInvuln) return;
+  var hit = nearestTentPointInZone(zx, zy, zr, true);
+  if (!hit) return;
+  if (power.type === 'shield') { GF.spawnParticles(w2sx(zx), w2sy(zy), '#eaf6ff', 6); GF.sfx('click'); return; }
+  var t = tentacles[hit.ti];
+  t.seg = Math.max(2, t.seg - snipCost());
+  t.pts.length = t.seg + 1; t.cut = 0.4;
+  recomputeLength();
+  GF.sfx('hurt'); flashRed = 0.5; GF.setShake(0.7);
+  for (var i = 0; i < 10; i++) GF.spawnParticles(w2sx(zx) + rand(-6, 6), w2sy(zy) + rand(-6, 6), i % 2 ? '#f4c430' : '#c0392b', 1);
+  if (noodleLength <= LENGTH_MIN) gameOver();
+}
+function updateChefs(dt) {
+  var safe = GF.tutorial.active;   // hold chefs back during the coach
+  for (var ci = chefs.length - 1; ci >= 0; ci--) {
+    var ch = chefs[ci];
+    ch.blink -= dt;
+    if (power.type === 'marinara' && ch.type !== 'granny' && hyp(ch.x - core.x, ch.y - core.y) < core.r + ch.r + 4) {
+      GF.sfx('win'); core.mouth = 1; score += 5; growSegments(2);
+      for (var g = 0; g < 14; g++) GF.spawnParticles(w2sx(ch.x) + rand(-8, 8), w2sy(ch.y) + rand(-8, 8), g % 2 ? '#c0392b' : '#fff', 1);
+      GF.spawnFloat(w2sx(ch.x), w2sy(ch.y), 'GULP! +5', '#7CFC9A');
+      chefs.splice(ci, 1); continue;
+    }
+    if (ch.type === 'granny') {
+      ch.x += ch.dirx * ch.speed * dt; ch.y += ch.diry * ch.speed * dt;
+      if (ch.x < 40 || ch.x > arenaW - 40) ch.dirx *= -1;
+      if (ch.y < 40 || ch.y > arenaH - 40) ch.diry *= -1;
+      if (!safe && hyp(ch.x - core.x, ch.y - core.y) < core.r + ch.r) {
+        var gdx = core.x - ch.x, gdy = core.y - ch.y, gd = hyp(gdx, gdy) || 1;
+        core.vx += gdx / gd * 220; core.vy += gdy / gd * 220; GF.setShake(0.4); GF.sfx('hit');
+      }
+      continue;
+    }
+    if (ch.type === 'inspector') {
+      ch.summon -= dt;
+      if (!safe && ch.summon <= 0) { ch.summon = 7; spawnChef('scissor', { x: ch.x + rand(-40, 40), y: ch.y + rand(-40, 40) }); spawnChef('scissor', { x: ch.x + rand(-40, 40), y: ch.y + rand(-40, 40) }); GF.sfx('spawn'); }
+      var idx = core.x - ch.x, idy = core.y - ch.y, idd = hyp(idx, idy) || 1;
+      ch.x += idx / idd * ch.speed * 0.4 * dt; ch.y += idy / idd * ch.speed * 0.4 * dt;
+      continue;
+    }
+    // scissor / cleaver — hunt the nearest noodle point (guarantees the blade
+    // can always find a strand, so a cornered monster is genuinely at risk)
+    var np = nearestTentPoint(ch.x, ch.y, true) || nearestTentPoint(ch.x, ch.y, false);
+    var tgx = np ? np.x : core.x, tgy = np ? np.y : core.y;
+    var dx = tgx - ch.x, dy = tgy - ch.y, d = hyp(dx, dy) || 1;
+    var ux = dx / d, uy = dy / d;
+    if (!safe && d > 2) { ch.x += ux * ch.speed * dt; ch.y += uy * ch.speed * dt; }
+    var zr = BLADE_R * (ch.type === 'cleaver' ? 1.5 : 1);
+    var reach = ch.r + zr;                    // generous cut radius so wiggle can't dodge the snip
+    ch.zx = ch.x; ch.zy = ch.y; ch.zr = zr;   // blade rides on the chef, over the noodle
+    if (safe) continue;
+    if (ch.windup > 0) {
+      ch.windup -= dt;
+      if (ch.windup <= 0) { doSnip(ch, ch.x, ch.y, reach); ch.cool = ch.type === 'cleaver' ? 1.8 : 1.4; }
+    } else {
+      ch.cool -= dt;
+      if (ch.cool <= 0 && np && np.d < reach) ch.windup = ch.type === 'cleaver' ? 0.5 : 0.4;
+    }
+  }
+}
+function updateForks(dt) {
+  for (var i = 0; i < forks.length; i++) {
+    var fk = forks[i]; fk.wob += dt;
+    for (var ti = 0; ti < tentacles.length; ti++) {
+      var t = tentacles[ti];
+      if (t.pin > 0) continue;
+      for (var j = 3; j <= t.seg; j++) {
+        var p = t.pts[j];
+        if (hyp(p.x - fk.x, p.y - fk.y) < FORK_R) { t.pin = 2; t.pinIdx = j; t.pinX = fk.x; t.pinY = fk.y; GF.sfx('hit'); break; }
+      }
+    }
+  }
+}
+function updateSauce(dt) {
+  sauceAccum += dt;
+  if (sauces.length === 0 && sauceAccum > (tier >= 1 ? 10 : 16)) { sauceAccum = 0; var p = randArenaPos(180); sauces.push({ x: p.x, y: p.y, kind: POWER_KINDS[(Math.random() * POWER_KINDS.length) | 0], wob: rand(0, 6.28) }); }
+  for (var i = sauces.length - 1; i >= 0; i--) {
+    var s = sauces[i]; s.wob += dt * 2;
+    if (hyp(s.x - core.x, s.y - core.y) < core.r + SAUCE_R) {
+      power.type = s.kind; power.t = POWERUP_TIME;
+      GF.sfx('unlock'); GF.spawnFloat(w2sx(s.x), w2sy(s.y), GF.t('pow_' + s.kind), '#ffd54a');
+      for (var g = 0; g < 12; g++) GF.spawnParticles(w2sx(s.x), w2sy(s.y), '#ffd54a', 1);
+      sauces.splice(i, 1);
+    }
+  }
+  if (power.t > 0) { power.t -= dt; if (power.t <= 0) power.type = null; }
+}
+
+// ── COACH (interactive, action-gated) ───────────────────────────────────
+function maybeStartCoach() {
+  GF.tutorial.start([
+    { text: GF.t('tut_step_drag'),
+      target: function () { return { x: w2sx(core.x), y: w2sy(core.y), r: core.r * zoom() + 10 }; },
+      target2: function () { return { x: w2sx(core.x) + 70 * GF.S, y: w2sy(core.y) + 40 * GF.S, r: 30 }; },
+      gesture: 'drag', advance: 'manual' },
+    { text: GF.t('tut_step_slurp'),
+      target: function () { var f = nearestFood(); return f ? { x: w2sx(f.x), y: w2sy(f.y), r: 34 } : { x: w2sx(core.x), y: w2sy(core.y) - 60 * GF.S, r: 34 }; },
+      gesture: 'tap', advance: 'manual' },
+    { text: GF.t('tut_step_grow'),
+      target: function () { return { x: w2sx(core.x), y: w2sy(core.y), r: core.r * zoom() + 14 }; },
+      advance: 'auto', after: 2600 },
+  ], { storageKey: 'spaghetti_monster_seen_tutorial' });
+}
+function nearestFood() {
+  var bd = 1e18, bf = null;
+  for (var i = 0; i < foods.length; i++) { if (foods[i].cap) continue; var d = hyp(foods[i].x - core.x, foods[i].y - core.y); if (d < bd) { bd = d; bf = foods[i]; } }
+  return bf;
+}
+
+// ── INPUT ───────────────────────────────────────────────────────────────
+function onDown(x, y) {
+  ptr.dnx = x; ptr.dny = y; ptr.moved = false;
+  if (GF.tutorial.active) { GF.tutorial.handleClick(x, y); ptr.active = true; ptr.x = x; ptr.y = y; uiCaptured = false; return; }
+  for (var i = 0; i < uiButtons.length; i++) {
+    var b = uiButtons[i];
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) { b.fn(); uiCaptured = true; return; }
+  }
+  uiCaptured = false;
+  if (gs === 'PLAYING') { ptr.active = true; ptr.x = x; ptr.y = y; }
+}
+function onMove(x, y) {
+  ptr.x = x; ptr.y = y;
+  if (Math.abs(x - ptr.dnx) + Math.abs(y - ptr.dny) > 6) {
+    ptr.moved = true;
+    if (GF.tutorial.active && GF.tutorial.step === 0) GF.tutorial.next();
+  }
+}
+function onUp() { ptr.active = false; uiCaptured = false; }
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  time += dt;
+  if (flashRed > 0) flashRed -= dt;
+  if (tierupFlash > 0) tierupFlash -= dt;
+  if (core.mouth > 0) core.mouth = Math.max(0, core.mouth - dt * 2.2);
+  GF.tutorial.update(dt);
+  if (gs !== 'PLAYING') return;
+
+  var tx = core.x, ty = core.y, steering = false;
+  if (ptr.active && !uiCaptured) { tx = s2wx(ptr.x); ty = s2wy(ptr.y); steering = true; }
+  var kx = 0, ky = 0;
+  if (GF.keys['ArrowLeft'] || GF.keys['KeyA']) kx -= 1;
+  if (GF.keys['ArrowRight'] || GF.keys['KeyD']) kx += 1;
+  if (GF.keys['ArrowUp'] || GF.keys['KeyW']) ky -= 1;
+  if (GF.keys['ArrowDown'] || GF.keys['KeyS']) ky += 1;
+  var spd = CORE_SPEED * (power.type === 'speed' ? 1.6 : 1) * CFG.tuning.speed_mult;
+  if (kx || ky) { var kl = hyp(kx, ky); tx = core.x + kx / kl * 200; ty = core.y + ky / kl * 200; steering = true; }
+  if (steering) {
+    var dx = tx - core.x, dy = ty - core.y, d = hyp(dx, dy);
+    if (d > 2) { var ux = dx / d, uy = dy / d, target = Math.min(spd, d * 5); core.vx += (ux * target - core.vx) * 0.25; core.vy += (uy * target - core.vy) * 0.25; lookX = ux; lookY = uy; }
+    else { core.vx *= 0.8; core.vy *= 0.8; }
+  } else { core.vx *= 0.85; core.vy *= 0.85; }
+  core.x += core.vx * dt; core.y += core.vy * dt;
+  var mg = core.r + 10;
+  core.x = Math.max(mg, Math.min(arenaW - mg, core.x));
+  core.y = Math.max(mg, Math.min(arenaH - mg, core.y));
+
+  updateTentacles(dt);
+  updateFoods(dt);
+  updateChefs(dt);
+  updateForks(dt);
+  updateSauce(dt);
+  topUpChefs();
+
+  saveAccum += dt;
+  if (saveAccum > 5) { saveAccum = 0; GF.saveRun(); }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  drawPlaza(ctx);
+  if (gs === 'PLAYING' || gs === 'GAMEOVER') {
+    drawArenaEdge(ctx);
+    drawForks(ctx);
+    drawSauces(ctx);
+    drawFoods(ctx);
+    drawChefs(ctx);
+    drawMonster(ctx);
+  }
+  if (gs === 'PLAYING') { drawHUD(ctx); if (power.type) drawPowerVignette(ctx); }
+  if (flashRed > 0) { ctx.save(); ctx.fillStyle = 'rgba(200,30,30,' + (flashRed * 0.5).toFixed(3) + ')'; ctx.fillRect(0, 0, GF.W, GF.H); ctx.restore(); }
+  GF.tutorial.draw(ctx);
+  if (gs === 'MENU') GF.drawOverlay({ title: GF.t('title'), sub: GF.t('sub'), btnText: GF.t('play'), btnFn: startGame, bestText: best > 0 ? GF.t('best') + ': ' + best : null });
+  if (gs === 'GAMEOVER') drawGameOver(ctx);
+}
+
+function drawPlaza(ctx) {
+  var W = GF.W, H = GF.H;
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#f0d29a'); g.addColorStop(1, '#e2b877');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  var T = 60, z = zoom();
+  var wx0 = s2wx(0), wy0 = s2wy(0), wx1 = s2wx(W), wy1 = s2wy(H);
+  var gx0 = Math.floor(wx0 / T) * T, gy0 = Math.floor(wy0 / T) * T;
+  ctx.strokeStyle = 'rgba(120,80,40,0.16)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var x = gx0; x <= wx1 + T; x += T) { var sx = w2sx(x); ctx.moveTo(sx, 0); ctx.lineTo(sx, H); }
+  for (var y = gy0; y <= wy1 + T; y += T) { var sy = w2sy(y); ctx.moveTo(0, sy); ctx.lineTo(W, sy); }
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(120,80,40,0.10)';
+  for (var yy = gy0; yy <= wy1 + T; yy += T) {
+    for (var xx = gx0; xx <= wx1 + T; xx += T) {
+      var h = ((xx * 73856093) ^ (yy * 19349663)) >>> 0;
+      if (h % 3 === 0) { var cxp = w2sx(xx + 30), cyp = w2sy(yy + 30); ctx.beginPath(); ctx.ellipse(cxp, cyp, 22 * z, 16 * z, 0, 0, Math.PI * 2); ctx.fill(); }
+    }
+  }
+  drawMarketProps(ctx);
+  var v = ctx.createRadialGradient(GF.cx, GF.cy, Math.min(W, H) * 0.35, GF.cx, GF.cy, Math.max(W, H) * 0.72);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(40,20,5,0.42)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+}
+function drawMarketProps(ctx) {
+  var z = zoom();
+  var props = [
+    { x: 70, y: 100, w: 185, h: 78, c: 0, baskets: 2 },
+    { x: arenaW - 260, y: 135, w: 195, h: 80, c: 1, baskets: 3 },
+    { x: 92, y: arenaH - 245, w: 205, h: 82, c: 2, baskets: 3 },
+    { x: arenaW - 285, y: arenaH - 255, w: 215, h: 86, c: 3, baskets: 2 },
+    { x: arenaW * 0.5 - 92, y: 72, w: 184, h: 70, c: 2, baskets: 2 },
+  ];
+  ctx.save();
+  for (var i = 0; i < props.length; i++) drawStall(ctx, props[i], z);
+  drawPlanter(ctx, arenaW * 0.24, arenaH * 0.52, z, 0);
+  drawPlanter(ctx, arenaW * 0.78, arenaH * 0.46, z, 1);
+  drawPlanter(ctx, arenaW * 0.52, arenaH * 0.82, z, 2);
+  ctx.restore();
+}
+function isWorldBoxVisible(x, y, w, h, pad) {
+  pad = pad || 80;
+  var sx = w2sx(x), sy = w2sy(y), z = zoom();
+  return sx + w * z > -pad && sx < GF.W + pad && sy + h * z > -pad && sy < GF.H + pad;
+}
+function drawStall(ctx, p, z) {
+  if (!isWorldBoxVisible(p.x, p.y, p.w, p.h, 90)) return;
+  var sx = w2sx(p.x), sy = w2sy(p.y), w = p.w * z, h = p.h * z;
+  var cols = STALL_COLORS[p.c % STALL_COLORS.length];
+  ctx.save();
+  ctx.globalAlpha = 0.74;
+  ctx.fillStyle = 'rgba(80,45,20,0.20)';
+  ctx.beginPath(); ctx.ellipse(sx + w * 0.5, sy + h * 0.95, w * 0.62, h * 0.22, 0, 0, Math.PI * 2); ctx.fill();
+  GF.rr(ctx, sx + w * 0.08, sy + h * 0.40, w * 0.84, h * 0.46, 7 * z);
+  ctx.fillStyle = '#9b6435'; ctx.fill();
+  ctx.fillStyle = '#6d4425';
+  ctx.fillRect(sx + w * 0.13, sy + h * 0.76, w * 0.74, h * 0.09);
+  ctx.fillStyle = '#5d3820';
+  ctx.fillRect(sx + w * 0.16, sy + h * 0.84, w * 0.08, h * 0.28);
+  ctx.fillRect(sx + w * 0.76, sy + h * 0.84, w * 0.08, h * 0.28);
+  var stripeW = w / 6;
+  for (var i = 0; i < 6; i++) {
+    ctx.fillStyle = i % 2 ? cols[0] : cols[1];
+    ctx.beginPath();
+    ctx.moveTo(sx + i * stripeW, sy + h * 0.24);
+    ctx.lineTo(sx + (i + 1) * stripeW, sy + h * 0.24);
+    ctx.lineTo(sx + (i + 0.88) * stripeW, sy + h * 0.48);
+    ctx.lineTo(sx + (i + 0.12) * stripeW, sy + h * 0.48);
+    ctx.closePath(); ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(80,45,20,0.45)'; ctx.lineWidth = Math.max(1, 2 * z);
+  ctx.beginPath(); ctx.moveTo(sx, sy + h * 0.24); ctx.lineTo(sx + w, sy + h * 0.24); ctx.stroke();
+  for (var b = 0; b < p.baskets; b++) {
+    drawBasket(ctx, sx + w * (0.25 + b * 0.22), sy + h * 0.64, w * 0.13, z, b + p.c);
+  }
+  ctx.restore();
+}
+function drawBasket(ctx, x, y, r, z, seed) {
+  ctx.fillStyle = '#7a4b28';
+  ctx.beginPath(); ctx.ellipse(x, y + r * 0.18, r, r * 0.55, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(55,30,15,0.5)'; ctx.lineWidth = Math.max(1, 1.4 * z); ctx.stroke();
+  var cols = ['#5fb36f', '#d94f45', '#7b4fb0', '#f0b949'];
+  for (var i = 0; i < 5; i++) {
+    var a = (i * 1.9 + seed) % 6.28;
+    ctx.fillStyle = cols[(i + seed) % cols.length];
+    ctx.beginPath(); ctx.arc(x + Math.cos(a) * r * 0.48, y - r * 0.08 + Math.sin(a) * r * 0.18, r * 0.22, 0, Math.PI * 2); ctx.fill();
+  }
+}
+function drawPlanter(ctx, x, y, z, seed) {
+  if (!isWorldBoxVisible(x - 48, y - 28, 96, 56, 80)) return;
+  var sx = w2sx(x), sy = w2sy(y), w = 86 * z, h = 30 * z;
+  ctx.save();
+  ctx.globalAlpha = 0.58;
+  ctx.fillStyle = 'rgba(80,45,20,0.16)';
+  ctx.beginPath(); ctx.ellipse(sx, sy + h * 0.48, w * 0.62, h * 0.36, 0, 0, Math.PI * 2); ctx.fill();
+  GF.rr(ctx, sx - w / 2, sy, w, h, 8 * z);
+  ctx.fillStyle = '#8b5a30'; ctx.fill();
+  ctx.strokeStyle = 'rgba(70,40,18,0.5)'; ctx.lineWidth = Math.max(1, 2 * z); ctx.stroke();
+  for (var i = 0; i < 7; i++) {
+    var px = sx - w * 0.38 + i * w * 0.13;
+    var ph = (18 + ((i + seed) % 3) * 5) * z;
+    ctx.strokeStyle = i % 2 ? '#357a51' : '#4f944c';
+    ctx.lineWidth = Math.max(1.5, 2.3 * z); ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(px, sy + h * 0.15); ctx.quadraticCurveTo(px + (i % 2 ? 7 : -7) * z, sy - ph * 0.45, px + (i % 3 - 1) * 6 * z, sy - ph); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawArenaEdge(ctx) {
+  var z = zoom();
+  ctx.save();
+  ctx.lineWidth = 14 * z; ctx.strokeStyle = '#8a5a2b';
+  ctx.strokeRect(w2sx(0), w2sy(0), arenaW * z, arenaH * z);
+  ctx.lineWidth = 6 * z;
+  var cols = ['#d94f45', '#e8b64a', '#59a86b', '#4a86c8'];
+  for (var i = 0; i * 60 < arenaW; i++) {
+    ctx.strokeStyle = cols[i % 4];
+    var x = w2sx(i * 60), x2 = w2sx(i * 60 + 44);
+    ctx.beginPath(); ctx.moveTo(x, w2sy(-4)); ctx.lineTo((x + x2) / 2, w2sy(24)); ctx.lineTo(x2, w2sy(-4)); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawFoods(ctx) {
+  var z = zoom();
+  for (var i = 0; i < foods.length; i++) {
+    var f = foods[i];
+    var pulse = 0.5 + 0.5 * Math.sin(time * 4 + f.wob);
+    var sx = w2sx(f.x), sy = w2sy(f.y) + Math.sin(f.wob) * 2 * z;
+    var baseS = FOOD_R * z * (f.cap ? f.sc : 1) * 2;
+    var s = baseS * (f.cap ? 1 : (1 + pulse * 0.07));           // subtle "collect me" pulse
+    if (!f.cap) {
+      // distinct pulse halo so pickups pop off the saucy strands + tan floor (critic fix 1)
+      ctx.save();
+      ctx.globalAlpha = 0.16 + 0.24 * pulse;
+      ctx.fillStyle = f.def.glow || '#fff3a0';
+      ctx.beginPath(); ctx.arc(sx, sy, baseS * (0.72 + pulse * 0.28), 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.28)'; ctx.shadowBlur = 6 * z; ctx.shadowOffsetY = 3 * z;
+    (function (def) { GF.drawSprite(def.spr, sx, sy, s, function (c, x, y, sz) { drawFoodVec(c, x, y, sz, def); }); })(f.def);
+    ctx.restore();
+  }
+}
+function drawFoodVec(c, x, y, sz, def) {
+  var r = sz / 2;
+  c.lineWidth = Math.max(1.5, r * 0.16); c.strokeStyle = 'rgba(70,40,15,0.9)';
+  if (def.k === 'noodle' || def.k === 'hotdog') {
+    c.fillStyle = def.col; c.beginPath();
+    for (var a = 0; a < 6.28; a += 0.5) { var rr2 = r * (0.7 + 0.28 * Math.sin(a * 3)); var px = x + Math.cos(a) * rr2, py = y + Math.sin(a) * rr2; if (a === 0) c.moveTo(px, py); else c.lineTo(px, py); }
+    c.closePath(); c.fill(); c.stroke();
+    if (def.k === 'hotdog') { c.fillStyle = '#c0392b'; c.beginPath(); c.ellipse(x, y, r * 0.5, r * 0.24, 0.5, 0, Math.PI * 2); c.fill(); }
+  } else if (def.k === 'meatball') {
+    var gg = c.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.2, x, y, r);
+    gg.addColorStop(0, '#b06a34'); gg.addColorStop(1, def.col);
+    c.fillStyle = gg; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill(); c.stroke();
+    c.fillStyle = 'rgba(255,255,255,0.55)'; c.beginPath(); c.arc(x - r * 0.32, y - r * 0.32, r * 0.22, 0, Math.PI * 2); c.fill();
+  } else if (def.k === 'sausage') {
+    c.fillStyle = def.col; c.save(); c.translate(x, y); c.rotate(0.6);
+    if (c.roundRect) { c.beginPath(); c.roundRect(-r, -r * 0.5, r * 2, r, r * 0.5); c.fill(); c.stroke(); }
+    else { c.beginPath(); c.ellipse(0, 0, r, r * 0.5, 0, 0, Math.PI * 2); c.fill(); c.stroke(); }
+    c.restore();
+  } else {
+    c.fillStyle = def.col; c.beginPath(); c.ellipse(x, y, r, r * 0.8, 0, 0, Math.PI * 2); c.fill(); c.stroke();
+    c.strokeStyle = 'rgba(120,90,50,0.5)'; c.lineWidth = Math.max(1, r * 0.1);
+    for (var p = -2; p <= 2; p++) { c.beginPath(); c.moveTo(x + p * r * 0.35, y - r * 0.7); c.lineTo(x + p * r * 0.28, y + r * 0.5); c.stroke(); }
+  }
+}
+function drawChefs(ctx) {
+  var z = zoom();
+  for (var i = 0; i < chefs.length; i++) {
+    var ch = chefs[i], sx = w2sx(ch.x), sy = w2sy(ch.y), r = ch.r * z;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = 6 * z; ctx.shadowOffsetY = 4 * z;
+    ctx.fillStyle = ch.type === 'granny' ? '#e79ab0' : '#f4f0ea';
+    ctx.beginPath(); ctx.arc(sx, sy, r, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.fillStyle = '#ffe0bd'; ctx.beginPath(); ctx.arc(sx, sy + r * 0.15, r * 0.6, 0, Math.PI * 2); ctx.fill();
+    if (ch.type === 'granny') { ctx.fillStyle = '#d8d8e0'; ctx.beginPath(); ctx.arc(sx, sy - r * 0.6, r * 0.6, 0, Math.PI * 2); ctx.fill(); }
+    else if (ch.type === 'inspector') { ctx.fillStyle = '#3a5a8c'; ctx.beginPath(); ctx.arc(sx, sy - r * 0.55, r * 0.62, Math.PI, 0); ctx.fill(); ctx.fillRect(sx - r * 0.62, sy - r * 0.58, r * 1.24, r * 0.2); }
+    else {
+      ctx.fillStyle = '#fff';
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(sx - r * 0.62, sy - r * 1.25, r * 1.24, r * 0.85, r * 0.3); ctx.fill(); } else { ctx.fillRect(sx - r * 0.62, sy - r * 1.25, r * 1.24, r * 0.85); }
+      ctx.beginPath(); ctx.ellipse(sx, sy - r * 1.2, r * 0.66, r * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = '#222';
+    ctx.beginPath(); ctx.arc(sx - r * 0.25, sy + r * 0.05, r * 0.09, 0, Math.PI * 2); ctx.arc(sx + r * 0.25, sy + r * 0.05, r * 0.09, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#222'; ctx.lineWidth = 2 * z;
+    ctx.beginPath(); ctx.moveTo(sx - r * 0.4, sy - r * 0.18); ctx.lineTo(sx - r * 0.12, sy - r * 0.05); ctx.moveTo(sx + r * 0.4, sy - r * 0.18); ctx.lineTo(sx + r * 0.12, sy - r * 0.05); ctx.stroke();
+    var wob = Math.sin(time * 20) * (ch.windup > 0 ? 4 : 0) * z;
+    if (ch.type === 'scissor' || ch.type === 'cleaver') {
+      if (ch.zx != null) {
+        if (ch.windup > 0) { ctx.strokeStyle = 'rgba(255,60,60,0.9)'; ctx.lineWidth = 3 * z; ctx.beginPath(); ctx.arc(w2sx(ch.zx), w2sy(ch.zy), ch.zr * z, 0, Math.PI * 2); ctx.stroke(); }
+        drawScissors(ctx, w2sx(ch.zx), w2sy(ch.zy) + wob, ch.zr * z * 0.9, ch.type === 'cleaver');
+      }
+    } else if (ch.type === 'inspector') {
+      ctx.fillStyle = '#e8b64a'; ctx.beginPath(); ctx.arc(sx + r * 0.8, sy + r * 0.2, r * 0.28, 0, Math.PI * 2); ctx.fill();
+    } else if (ch.type === 'granny') {
+      ctx.fillStyle = '#b5722f'; ctx.save(); ctx.translate(sx + ch.dirx * r * 1.1, sy + ch.diry * r * 1.1); ctx.rotate(Math.atan2(ch.diry, ch.dirx));
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(-r * 0.8, -r * 0.28, r * 1.6, r * 0.56, r * 0.28); ctx.fill(); } else ctx.fillRect(-r * 0.8, -r * 0.28, r * 1.6, r * 0.56);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+}
+function drawScissors(c, x, y, r, cleaver) {
+  c.save(); c.translate(x, y);
+  if (cleaver) {
+    c.fillStyle = '#cfd6dd'; c.strokeStyle = '#6a7079'; c.lineWidth = 2;
+    if (c.roundRect) { c.beginPath(); c.roundRect(-r * 0.7, -r * 0.5, r * 1.4, r * 0.9, r * 0.14); c.fill(); c.stroke(); }
+    else { c.fillRect(-r * 0.7, -r * 0.5, r * 1.4, r * 0.9); }
+    c.fillStyle = '#5a3a1c'; c.fillRect(r * 0.6, -r * 0.16, r * 0.7, r * 0.32);
+  } else {
+    c.strokeStyle = '#9aa3ad'; c.lineWidth = Math.max(2, r * 0.18); c.lineCap = 'round';
+    c.beginPath(); c.moveTo(-r * 0.5, r * 0.5); c.lineTo(r * 0.6, -r * 0.5); c.moveTo(-r * 0.5, -r * 0.5); c.lineTo(r * 0.6, r * 0.5); c.stroke();
+    c.fillStyle = '#d94f45'; c.beginPath(); c.arc(-r * 0.55, r * 0.55, r * 0.22, 0, Math.PI * 2); c.arc(-r * 0.55, -r * 0.55, r * 0.22, 0, Math.PI * 2); c.fill();
+  }
+  c.restore();
+}
+function drawForks(ctx) {
+  var z = zoom();
+  for (var i = 0; i < forks.length; i++) {
+    var fk = forks[i], sx = w2sx(fk.x), sy = w2sy(fk.y), r = FORK_R * z;
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(0.3 + Math.sin(fk.wob) * 0.05);
+    ctx.strokeStyle = '#9098a2'; ctx.fillStyle = '#c2cad3'; ctx.lineWidth = 2 * z; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(0, r); ctx.lineTo(0, -r * 0.2); ctx.stroke();
+    for (var p = -1; p <= 1; p++) { ctx.beginPath(); ctx.moveTo(p * r * 0.32, -r * 0.2); ctx.lineTo(p * r * 0.32, -r); ctx.stroke(); }
+    ctx.restore();
+  }
+}
+function drawSauces(ctx) {
+  var z = zoom();
+  var col = { marinara: '#c0392b', shield: '#eaf6ff', speed: '#59a86b' };
+  for (var i = 0; i < sauces.length; i++) {
+    var s = sauces[i], sx = w2sx(s.x), sy = w2sy(s.y) + Math.sin(s.wob) * 3 * z, r = SAUCE_R * z;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.3)'; ctx.shadowBlur = 8 * z;
+    ctx.fillStyle = '#f4ede0'; if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(sx - r * 0.6, sy - r, r * 1.2, r * 2, r * 0.4); ctx.fill(); } else ctx.fillRect(sx - r * 0.6, sy - r, r * 1.2, r * 2);
+    ctx.shadowColor = 'transparent';
+    ctx.fillStyle = col[s.kind] || '#c0392b'; if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(sx - r * 0.45, sy - r * 0.2, r * 0.9, r * 1.0, r * 0.2); ctx.fill(); } else ctx.fillRect(sx - r * 0.45, sy - r * 0.2, r * 0.9, r);
+    ctx.fillStyle = '#8a5a2b'; ctx.fillRect(sx - r * 0.3, sy - r * 1.35, r * 0.6, r * 0.4);
+    var pulse = 0.5 + 0.5 * Math.sin(time * 5);
+    ctx.strokeStyle = 'rgba(255,220,90,' + (0.4 + 0.4 * pulse).toFixed(2) + ')'; ctx.lineWidth = 2 * z;
+    ctx.beginPath(); ctx.arc(sx, sy, r * 1.6, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawMonster(ctx) {
+  var z = zoom();
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath(); ctx.ellipse(w2sx(core.x), w2sy(core.y) + core.r * z * 0.7, core.r * z * 1.3, core.r * z * 0.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  var baseW = (7 + tier * 1.2) * z;
+  for (var pass = 0; pass < 2; pass++) {
+    for (var ti = 0; ti < tentacles.length; ti++) {
+      var t = tentacles[ti];
+      // saucy red-orange strands read as the monster's sauce-coated limbs, clearly
+      // distinct from the gold pickups and the tan plaza (critic fix 1)
+      strokeNoodle(ctx, t, pass === 0 ? (baseW + 4 * z) : baseW, pass === 0 ? '#9c3f16' : (t.cut > 0 ? '#ffb066' : '#e06a2c'));
+    }
+  }
+  ctx.fillStyle = '#c0392b';
+  for (var ti2 = 0; ti2 < tentacles.length; ti2++) {
+    var tt = tentacles[ti2];
+    for (var i = 2; i <= tt.seg; i += 3) { var p = tt.pts[i]; ctx.beginPath(); ctx.arc(w2sx(p.x), w2sy(p.y), baseW * 0.4, 0, Math.PI * 2); ctx.fill(); }
+  }
+  var sx = w2sx(core.x), sy = w2sy(core.y), r = core.r * z * (1 + core.mouth * 0.06);
+  GF.drawSprite('core', sx, sy, r * 2, function (c, x, y, s) { drawCoreVec(c, x, y, s / 2); });
+  ctx.strokeStyle = 'rgba(192,57,43,0.85)'; ctx.lineWidth = r * 0.22;
+  ctx.beginPath(); ctx.arc(sx, sy, r * 0.92, 0, Math.PI * 2); ctx.stroke();
+  var ex = lookX * r * 0.16, ey = lookY * r * 0.16, eo = r * 0.36, eyR = r * 0.28;
+  drawEye(ctx, sx - eo, sy - r * 0.28, eyR, ex, ey);
+  drawEye(ctx, sx + eo, sy - r * 0.28, eyR, ex, ey);
+  ctx.fillStyle = '#5a1a12';
+  var mo = 0.15 + core.mouth * 0.5;
+  ctx.beginPath(); ctx.ellipse(sx, sy + r * 0.35, r * 0.34, r * mo, 0, 0, Math.PI * 2); ctx.fill();
+  if (power.type === 'shield') { ctx.strokeStyle = 'rgba(180,220,255,' + (0.5 + 0.3 * Math.sin(time * 6)).toFixed(2) + ')'; ctx.lineWidth = 3 * z; ctx.beginPath(); ctx.arc(sx, sy, r * 1.5, 0, Math.PI * 2); ctx.stroke(); }
+}
+function drawCoreVec(c, x, y, r) {
+  var g = c.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.2, x, y, r);
+  g.addColorStop(0, '#b5763a'); g.addColorStop(1, '#7a3d14');
+  c.fillStyle = g; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+  c.fillStyle = 'rgba(255,255,255,0.25)'; c.beginPath(); c.arc(x - r * 0.35, y - r * 0.4, r * 0.3, 0, Math.PI * 2); c.fill();
+}
+function drawEye(c, x, y, r, ox, oy) {
+  c.fillStyle = '#fff'; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
+  c.strokeStyle = 'rgba(60,30,10,0.5)'; c.lineWidth = Math.max(1, r * 0.14); c.stroke();
+  c.fillStyle = '#1a1a1a'; c.beginPath(); c.arc(x + ox, y + oy, r * 0.5, 0, Math.PI * 2); c.fill();
+  c.fillStyle = '#fff'; c.beginPath(); c.arc(x + ox - r * 0.15, y + oy - r * 0.15, r * 0.16, 0, Math.PI * 2); c.fill();
+}
+function strokeNoodle(ctx, t, w, col) {
+  if (t.seg < 1) return;
+  ctx.lineWidth = w; ctx.strokeStyle = col; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(w2sx(t.pts[0].x), w2sy(t.pts[0].y));
+  for (var i = 1; i < t.seg; i++) {
+    var xc = (t.pts[i].x + t.pts[i + 1].x) / 2, yc = (t.pts[i].y + t.pts[i + 1].y) / 2;
+    ctx.quadraticCurveTo(w2sx(t.pts[i].x), w2sy(t.pts[i].y), w2sx(xc), w2sy(yc));
+  }
+  var last = t.pts[t.seg];
+  ctx.lineTo(w2sx(last.x), w2sy(last.y));
+  ctx.stroke();
+}
+
+// ── HUD ──────────────────────────────────────────────────────────────────
+function drawHUD(ctx) {
+  uiButtons.length = 0;
+  var S = GF.S, W = GF.W;
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(17 * S, 13, 24) + 'px sans-serif';
+  var _tn = GF.t(TIER_NAMES[tier]);
+  var _tnw = ctx.measureText(_tn).width;
+  GF.rr(ctx, 10 * S, 9 * S, _tnw + 14 * S, GF.clamp(24 * S, 19, 32), 7 * S);
+  ctx.fillStyle = 'rgba(42,22,10,0.5)'; ctx.fill();
+  ctx.fillStyle = '#fff6e6'; ctx.textAlign = 'left';
+  ctx.fillText(_tn, 17 * S, 26 * S);
+  var bw = GF.clamp(150 * S, 110, 220), bh = GF.clamp(11 * S, 8, 16), bx = 14 * S, by = 34 * S;
+  var cap = Math.max(noodleLength, tentacleCount * 12);
+  var hf = GF.clamp((noodleLength - LENGTH_MIN) / (cap - LENGTH_MIN), 0, 1);
+  var danger = noodleLength <= LENGTH_MIN + 8;
+  GF.rr(ctx, bx, by, bw, bh, bh / 2); ctx.fillStyle = 'rgba(0,0,0,0.3)'; ctx.fill();
+  var hc = danger ? (Math.sin(time * 8) > 0 ? '#ff4d4d' : '#c0392b') : '#f4c430';
+  GF.rr(ctx, bx, by, Math.max(bh, bw * hf), bh, bh / 2); ctx.fillStyle = hc; ctx.fill();
+  ctx.fillStyle = '#3a1e0a'; ctx.font = 'bold ' + GF.clamp(10 * S, 8, 14) + 'px sans-serif';
+  ctx.fillText('' + noodleLength, bx + 5 * S, by + bh - 2 * S);
+  var ny = by + bh + 6 * S, nh = GF.clamp(7 * S, 5, 11);
+  var prevT = tier > 0 ? TIER_SCORES[tier - 1] : 0;
+  var nextT = tier < TIER_SCORES.length ? TIER_SCORES[tier] : null;
+  var nf = nextT ? GF.clamp((score - prevT) / (nextT - prevT), 0, 1) : 1;
+  GF.rr(ctx, bx, ny, bw, nh, nh / 2); ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fill();
+  GF.rr(ctx, bx, ny, Math.max(nh, bw * nf), nh, nh / 2); ctx.fillStyle = '#59a86b'; ctx.fill();
+  ctx.fillStyle = '#5a2f12'; ctx.font = GF.clamp(9 * S, 7, 12) + 'px sans-serif';
+  ctx.fillText(nextT ? (GF.t('next') + ': ' + GF.t(TIER_NAMES[tier + 1])) : GF.t(TIER_NAMES[tier]), bx, ny + nh + 10 * S);
+
+  ctx.font = 'bold ' + GF.clamp(22 * S, 16, 34) + 'px sans-serif';
+  var _sc = GF.t('score') + ' ' + score;
+  var _scw = ctx.measureText(_sc).width;
+  GF.rr(ctx, GF.cx - _scw / 2 - 12 * S, 7 * S, _scw + 24 * S, GF.clamp(32 * S, 26, 44), 9 * S);
+  ctx.fillStyle = 'rgba(42,22,10,0.5)'; ctx.fill();
+  ctx.fillStyle = '#fff6e6'; ctx.textAlign = 'center';
+  ctx.fillText(_sc, GF.cx, 29 * S);
+
+  var iy = 48 * S;
+  if (power.type) {
+    ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif'; ctx.fillStyle = '#b5450f'; ctx.textAlign = 'center';
+    ctx.fillText(GF.t('pow_' + power.type) + ' ' + power.t.toFixed(1) + 's', GF.cx, iy); iy += 17 * S;
+  }
+  if (frenzy > 0) {
+    ctx.font = 'bold ' + GF.clamp(12 * S, 10, 16) + 'px sans-serif'; ctx.fillStyle = '#ff7a3c'; ctx.textAlign = 'center';
+    ctx.fillText(GF.t('frenzy') + ' x' + frenzy + '   ' + GF.t('sauce') + ' x' + sauceMult.toFixed(1), GF.cx, iy);
+  }
+
+  // ── SAUCE CARROT (bottom center): pulls the meta mid-run — banked + this-run
+  // projected sauce vs the next affordable upgrade, with a live progress bar.
+  var nu = nextUpgrade();
+  var totalSauce = meta.sauce + runSauce();
+  var pillW = GF.clamp(232 * S, 172, 320), pillH = GF.clamp(34 * S, 27, 46);
+  var cpx = GF.cx - pillW / 2, cpy = GF.H - pillH - GF.clamp(12 * S, 9, 22);
+  var ready = nu && totalSauce >= nu.cost;
+  GF.rr(ctx, cpx, cpy, pillW, pillH, pillH / 2);
+  ctx.fillStyle = ready ? 'rgba(28,92,46,0.74)' : 'rgba(42,22,10,0.6)'; ctx.fill();
+  ctx.fillStyle = '#e05a3a'; ctx.beginPath(); ctx.arc(cpx + pillH * 0.6, cpy + pillH * 0.5, pillH * 0.24, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(cpx + pillH * 0.53, cpy + pillH * 0.42, pillH * 0.08, 0, Math.PI * 2); ctx.fill();
+  ctx.textBaseline = 'middle';
+  var txtX = cpx + pillH * 1.02;
+  if (nu) {
+    ctx.textAlign = 'left';
+    var line = GF.t('up_' + nu.u.k) + '  ' + totalSauce + '/' + nu.cost;
+    var maxLine = pillW - (txtX - cpx) - 14 * S;
+    var lfs = GF.clamp(12 * S, 10, 16); ctx.font = 'bold ' + lfs + 'px sans-serif';
+    while (ctx.measureText(line).width > maxLine && lfs > 9) { lfs--; ctx.font = 'bold ' + lfs + 'px sans-serif'; }
+    ctx.fillStyle = ready ? '#bfffce' : '#ffe6b0';
+    ctx.fillText(line, txtX, cpy + pillH * 0.36);
+    var barX = txtX, barW = pillW - (txtX - cpx) - 14 * S, barY = cpy + pillH * 0.64, barH = GF.clamp(5 * S, 4, 8);
+    GF.rr(ctx, barX, barY, barW, barH, barH / 2); ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill();
+    var frac = GF.clamp(totalSauce / nu.cost, 0, 1);
+    GF.rr(ctx, barX, barY, Math.max(barH, barW * frac), barH, barH / 2); ctx.fillStyle = ready ? '#7CFC9A' : '#ffd54a'; ctx.fill();
+  } else {
+    ctx.textAlign = 'left'; ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif'; ctx.fillStyle = '#ffe6b0';
+    ctx.fillText(GF.t('sauce') + '  ' + totalSauce, txtX, cpy + pillH * 0.5);
+  }
+  ctx.textBaseline = 'alphabetic';
+
+  var r = GF.clamp(15 * S, 12, 20), pad = 12 * S;
+  var muteX = W - pad - r, muteY = 24 * S;
+  var helpX = muteX - r * 2 - 10 * S, helpY = muteY;
+  ctx.fillStyle = 'rgba(90,47,18,0.14)';
+  ctx.beginPath(); ctx.arc(muteX, muteY, r, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(helpX, helpY, r, 0, Math.PI * 2); ctx.fill();
+  GF.drawMuteIcon(ctx, muteX, muteY, r * 0.6, GF.muted);
+  ctx.fillStyle = '#5a2f12'; ctx.font = 'bold ' + GF.clamp(17 * S, 13, 22) + 'px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', helpX, helpY + 1);
+  ctx.textBaseline = 'alphabetic';
+  uiButtons.push({ x: muteX - r, y: muteY - r, w: r * 2, h: r * 2, fn: function () { GF.toggleMute(); } });
+  uiButtons.push({ x: helpX - r, y: helpY - r, w: r * 2, h: r * 2, fn: function () { GF.tutorial.reopen(); } });
+}
+function drawPowerVignette(ctx) {
+  var col = { marinara: 'rgba(192,57,43,0.16)', shield: 'rgba(120,180,255,0.14)', speed: 'rgba(89,168,107,0.14)' }[power.type];
+  var v = ctx.createRadialGradient(GF.cx, GF.cy, Math.min(GF.W, GF.H) * 0.3, GF.cx, GF.cy, Math.max(GF.W, GF.H) * 0.6);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, col);
+  ctx.fillStyle = v; ctx.fillRect(0, 0, GF.W, GF.H);
+}
+
+// ── GAME OVER (custom: score + 3 upgrade cards + retry) ──────────────────
+var UP_DEFS = [
+  { k: 'tent', max: 3, cost: [40, 90, 160] },
+  { k: 'magnet', max: 4, cost: [30, 70, 130, 220] },
+  { k: 'resist', max: 2, cost: [45, 110] },
+];
+function upCost(u) { return meta.up[u.k] >= u.max ? null : u.cost[meta.up[u.k]]; }
+// cheapest not-yet-maxed upgrade — the carrot the in-run HUD points the player at
+function nextUpgrade() {
+  var best = null;
+  for (var i = 0; i < UP_DEFS.length; i++) {
+    var c = upCost(UP_DEFS[i]);
+    if (c == null) continue;
+    if (!best || c < best.cost) best = { u: UP_DEFS[i], cost: c };
+  }
+  return best;
+}
+function buyUpgrade(u) {
+  var c = upCost(u);
+  if (c == null || meta.sauce < c) { GF.sfx('lose'); return; }
+  meta.sauce -= c; meta.up[u.k]++; saveMeta(); GF.sfx('unlock');
+  GF.spawnFloat(GF.cx, GF.cy, GF.t('up_' + u.k) + ' +1', '#7CFC9A');
+}
+function drawGameOver(ctx) {
+  uiButtons.length = 0;
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(30,16,8,0.92)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  var topY = GF.clamp(H * 0.13, 46, 190);
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(32 * S, 22, 50) + 'px sans-serif';
+  ctx.fillText(GF.t('gameover'), GF.cx, topY);
+  var y = topY + 27 * S;
+  ctx.font = GF.clamp(16 * S, 12, 22) + 'px sans-serif'; ctx.fillStyle = '#eaccaa';
+  ctx.fillText(GF.t('score') + ': ' + score + '    ' + GF.t('best') + ': ' + best, GF.cx, y);
+  y += 30 * S;
+
+  // PROMINENT banked sauce total + what this run added (concrete payoff)
+  ctx.font = 'bold ' + GF.clamp(26 * S, 18, 38) + 'px sans-serif';
+  var sTxt = GF.t('sauce') + ' ' + meta.sauce;
+  var sW = ctx.measureText(sTxt).width, sIcR = GF.clamp(11 * S, 8, 15);
+  ctx.fillStyle = '#e05a3a'; ctx.beginPath(); ctx.arc(GF.cx - sW / 2 - sIcR - 4 * S, y - GF.clamp(8 * S, 6, 12), sIcR, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffd54a'; ctx.fillText(sTxt, GF.cx + sIcR * 0.7, y);
+  if (lastRunBank > 0) {
+    y += 20 * S;
+    ctx.font = 'bold ' + GF.clamp(14 * S, 11, 19) + 'px sans-serif'; ctx.fillStyle = '#7CFC9A';
+    ctx.fillText('+' + lastRunBank + ' ' + GF.t('banked') + (sauceMult > 1 ? '   x' + sauceMult.toFixed(1) : ''), GF.cx, y);
+  }
+  y += 18 * S;
+
+  var cardW = GF.clamp(110 * S, 86, 158), cardH = GF.clamp(120 * S, 98, 150), gap = GF.clamp(10 * S, 7, 14);
+  var totalW = cardW * 3 + gap * 2, startX = GF.cx - totalW / 2, cardY = y + 4 * S;
+  for (var i = 0; i < UP_DEFS.length; i++) {
+    var u = UP_DEFS[i], cxp = startX + i * (cardW + gap), c = upCost(u);
+    var afford = c != null && meta.sauce >= c;
+    GF.rr(ctx, cxp, cardY, cardW, cardH, 13 * S);
+    ctx.fillStyle = afford ? 'rgba(89,168,107,0.30)' : 'rgba(255,255,255,0.07)'; ctx.fill();
+    ctx.strokeStyle = afford ? '#7CFC9A' : 'rgba(255,255,255,0.16)'; ctx.lineWidth = (afford ? 2.5 : 2) * S; ctx.stroke();
+    drawUpgradeIcon(ctx, u.k, cxp + cardW / 2, cardY + cardH * 0.24, GF.clamp(16 * S, 12, 22));
+    // title
+    ctx.fillStyle = '#fff'; var tfs = GF.clamp(12 * S, 10, 16); ctx.font = 'bold ' + tfs + 'px sans-serif';
+    fitText(ctx, GF.t('up_' + u.k), cardW - 10 * S, tfs);
+    ctx.fillText(GF.t('up_' + u.k), cxp + cardW / 2, cardY + cardH * 0.48);
+    // concrete before/after effect copy
+    ctx.fillStyle = '#cfe8d4'; var efs = GF.clamp(10 * S, 8, 13); ctx.font = efs + 'px sans-serif';
+    fitText2(ctx, GF.t('up_' + u.k + '_eff'), cardW - 8 * S, efs);
+    ctx.fillText(GF.t('up_' + u.k + '_eff'), cxp + cardW / 2, cardY + cardH * 0.62);
+    // cost
+    ctx.font = 'bold ' + GF.clamp(13 * S, 11, 17) + 'px sans-serif';
+    ctx.fillStyle = c == null ? '#9ad' : (afford ? '#ffd54a' : '#a88');
+    ctx.fillText(c == null ? GF.t('max') : (GF.t('sauce') + ' ' + c), cxp + cardW / 2, cardY + cardH * 0.8);
+    for (var l = 0; l < u.max; l++) { ctx.fillStyle = l < meta.up[u.k] ? '#7CFC9A' : 'rgba(255,255,255,0.22)'; ctx.beginPath(); ctx.arc(cxp + cardW / 2 + (l - (u.max - 1) / 2) * 9 * S, cardY + cardH - 9 * S, 2.8 * S, 0, Math.PI * 2); ctx.fill(); }
+    (function (uu) { uiButtons.push({ x: cxp, y: cardY, w: cardW, h: cardH, fn: function () { buyUpgrade(uu); } }); })(u);
+  }
+
+  var btnW = GF.clamp(230 * S, 170, 360), btnH = GF.clamp(56 * S, 44, 76);
+  var btnX = GF.cx - btnW / 2, btnY = cardY + cardH + 20 * S;
+  var g = ctx.createLinearGradient(btnX, btnY, btnX, btnY + btnH);
+  g.addColorStop(0, '#2ee07a'); g.addColorStop(1, '#23a657');
+  ctx.save(); ctx.shadowColor = 'rgba(46,224,122,0.5)'; ctx.shadowBlur = 20 * S;
+  GF.rr(ctx, btnX, btnY, btnW, btnH, btnH / 2); ctx.fillStyle = g; ctx.fill(); ctx.restore();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(20 * S, 15, 28) + 'px sans-serif'; ctx.textBaseline = 'middle';
+  ctx.fillText('▶ ' + GF.t('retry'), GF.cx, btnY + btnH / 2);
+  ctx.textBaseline = 'alphabetic';
+  uiButtons.push({ x: btnX, y: btnY, w: btnW, h: btnH, fn: function () { doRetry(); } });
+}
+function fitText(ctx, txt, maxW, baseFs) {
+  var fs = baseFs;
+  while (ctx.measureText(txt).width > maxW && fs > 8) { fs--; ctx.font = 'bold ' + fs + 'px sans-serif'; }
+}
+function fitText2(ctx, txt, maxW, baseFs) {   // non-bold variant for the effect copy line
+  var fs = baseFs;
+  while (ctx.measureText(txt).width > maxW && fs > 7) { fs--; ctx.font = fs + 'px sans-serif'; }
+}
+function drawUpgradeIcon(c, k, x, y, r) {
+  c.save(); c.translate(x, y);
+  if (k === 'tent') { c.strokeStyle = '#f4c430'; c.lineWidth = r * 0.4; c.lineCap = 'round'; c.beginPath(); c.moveTo(-r, r); c.quadraticCurveTo(0, -r * 0.5, r, r); c.stroke(); }
+  else if (k === 'magnet') { c.strokeStyle = '#e8b64a'; c.lineWidth = r * 0.35; c.beginPath(); c.arc(0, 0, r * 0.7, Math.PI * 0.15, Math.PI * 0.85, true); c.stroke(); c.beginPath(); c.arc(0, 0, r * 0.7, Math.PI * 1.15, Math.PI * 1.85, true); c.stroke(); }
+  else { c.strokeStyle = '#f4c430'; c.fillStyle = 'rgba(244,196,48,0.3)'; c.lineWidth = r * 0.28; c.beginPath(); c.moveTo(0, -r); c.lineTo(r * 0.85, -r * 0.4); c.lineTo(r * 0.6, r * 0.8); c.lineTo(-r * 0.6, r * 0.8); c.lineTo(-r * 0.85, -r * 0.4); c.closePath(); c.fill(); c.stroke(); }
+  c.restore();
+}
+function doRetry() {
+  if (_pendingAd) { _pendingAd = false; try { GF.ads.interstitial(); } catch (e) {} }
+  startGame();
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+function loadMeta() {
+  try {
+    var raw = localStorage.getItem(META_KEY);
+    if (raw) { var m = JSON.parse(raw); if (m) { meta = m; if (!meta.up) meta.up = { tent: 0, magnet: 0, resist: 0 }; best = meta.best || 0; } }
+  } catch (e) {}
+}
+function saveMeta() { try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {} }
+
+GF.init({
+  designW: 450,
+  designH: 800,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'spaghetti_monster',
+  onReady: function () {
+    loadMeta();
+
+    // Yandex 1.9 — run progress persists across reload (lightweight resume).
+    GF.persist('spaghetti_monster_run_v1',
+      function () { return { gs: gs, score: score, tier: tier, tentacleCount: tentacles.length, noodleLength: noodleLength }; },
+      function (s) {
+        if (!s || s.gs !== 'PLAYING') return;
+        startGame();
+        score = s.score || 0; tier = Math.min(TIER_SCORES.length, s.tier || 0);
+        var wantT = Math.min(6, Math.max(tentacleCount, s.tentacleCount || tentacleCount));
+        while (tentacles.length < wantT) tentacles.push(makeTentacle(0));
+        spreadTentacles();
+        if (s.noodleLength) growSegments(Math.max(0, s.noodleLength - noodleLength));
+        core.r = CORE_R0 + tier * 5;
+        arenaW = 900 + tier * 240; arenaH = 1200 + tier * 300;
+        camScale = Math.max(0.62, 1.05 - tier * 0.09);
+        core.x = arenaW / 2; core.y = arenaH / 2;
+        topUpFood();
+      }
+    );
+    if (gs !== 'PLAYING') gs = 'MENU';
+
+    // MUSIC (HARD RULE 8) — mp3-first, procedural fallback, mute-aware.
+    GF.bgMusic({ file: 'audio/bg_track.mp3', preset: 'arcade', muted: GF.muted });
+
+    GF.remoteConfig('spaghetti_monster', CFG, {
+      clamps: { 'tuning.speed_mult': [0.5, 2], 'tuning.spawn_mult': [0.5, 2] },
+      onUpdate: function (c) { CFG = c; },
+    }).then(function (c) { CFG = c; });
+
+    var cv = GF.canvas;
+    cv.addEventListener('pointerdown', function (e) { onDown(e.clientX, e.clientY); });
+    cv.addEventListener('pointermove', function (e) { onMove(e.clientX, e.clientY); });
+    cv.addEventListener('pointerup',   function () { onUp(); });
+    cv.addEventListener('pointercancel', function () { onUp(); });
+
+    // PLATFORM AUTOSTART (HARD RULE 9) — straight into gameplay on platforms.
+    if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') { startGame(); }
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// state exposure for the post-build-tester gate (matches DESIGN.md vars)
+GF.exposeState(function () {
+  // coreX/coreY are the player-steered variables — exposing them lets the funnel
+  // probe detect the first input (a drag moves the core) against the auto-evolving
+  // food/score counts.
+  return { gs: gs, score: score, noodleLength: noodleLength, tier: tier, tentacleCount: tentacles.length, saucePoints: meta.sauce, best: best, frenzy: frenzy, sauceMult: sauceMult, coreX: Math.round(core.x), coreY: Math.round(core.y), chefs: chefs.length, foods: foods.length };
+});
+window.render_game_to_text = function () {
+  var st = window.__gfState ? window.__gfState() : {};
+  st.coordinateSystem = 'world pixels, origin top-left, x right, y down';
+  st.tutorial = { active: !!GF.tutorial.active, step: GF.tutorial.step || 0 };
+  st.power = power.type ? { type: power.type, seconds: Math.round(power.t * 10) / 10 } : null;
+  st.nearestFood = (function () {
+    var f = nearestFood();
+    return f ? { x: Math.round(f.x), y: Math.round(f.y), kind: f.def.k, value: f.def.v } : null;
+  })();
+  st.core = { x: Math.round(core.x), y: Math.round(core.y), r: Math.round(core.r) };
+  st.visibleChefs = chefs.slice(0, 6).map(function (c) {
+    return { x: Math.round(c.x), y: Math.round(c.y), type: c.type, windup: Math.round(c.windup * 10) / 10 };
+  });
+  st.visibleForks = forks.slice(0, 5).map(function (f) {
+    return { x: Math.round(f.x), y: Math.round(f.y) };
+  });
+  st.visibleSauces = sauces.slice(0, 4).map(function (s) {
+    return { x: Math.round(s.x), y: Math.round(s.y), kind: s.kind };
+  });
+  return JSON.stringify(st);
+};
+window.advanceTime = function (ms) {
+  var steps = Math.max(1, Math.round((ms || 16.67) / (1000 / 60)));
+  if (typeof window.__gfStep === 'function') window.__gfStep(steps, 1 / 60);
+  draw(GF.ctx);
+};
+// reachability hook (Yandex 1.10.x) — the interactive controls are the HUD
+// mute/help pills and, on game-over, the upgrade cards + retry; all are drawn
+// clear of the screen edges so nothing hides under platform chrome.
+GF.exposeReach(function () {
+  return { screen: gs, viewportH: GF.H, items: uiButtons.map(function (b, i) { return { id: 'ui_' + i, x: b.x, y: b.y, w: b.w, h: b.h }; }) };
+});
+// balance-probe bot
+GF.exposeBot(
+  function () {
+    if (gs === 'GAMEOVER') { var a = []; if (meta.sauce >= 30) a.push('buy'); a.push('retry'); return a; }
+    if (gs === 'PLAYING') return ['seek'];
+    return ['start'];
+  },
+  function (action) {
+    if (action === 'start') { startGame(); return; }
+    if (action === 'retry') { doRetry(); return; }
+    if (action === 'buy') { for (var i = 0; i < UP_DEFS.length; i++) { if (upCost(UP_DEFS[i]) != null && meta.sauce >= upCost(UP_DEFS[i])) { buyUpgrade(UP_DEFS[i]); return; } } return; }
+    if (action === 'seek') { var f = nearestFood(); if (f) { ptr.active = true; ptr.x = w2sx(f.x); ptr.y = w2sy(f.y); } }
+  }
+);
+
+// screenshot / test hooks.
+// _jumpLevel(n) contract (webapp_gate relies on it):
+//   n=1  -> a clean PLAYING run (coach suppressed)
+//   n=99 -> a terminal GAMEOVER state
+//   n>=2 -> a dense, framed mid-game scene for promo screenshots
+function setupDense(n) {
+  _ssInvuln = true;                       // captures never die mid-shoot
+  var target = 140;                       // Festival tier (dumplings, cleaver chef, forks)
+  if (n <= 2) target = 40; else if (n === 3) target = 90; else if (n >= 6) target = 220;
+  score = target; checkTier();
+  growSegments(26);
+  camScale = 0.95;                        // frame the hero + surrounding market
+  spawnChef('scissor'); spawnChef('scissor'); spawnChef('cleaver');
+  if (tier >= 4) spawnChef('inspector');
+  topUpForks();
+  sauces.push({ x: core.x + 130, y: core.y - 60, kind: 'marinara', wob: 0 });
+  topUpFood();
+  // fan several foods onto the strands so slurps read as mid-flight
+  for (var k = 0; k < 8 && k < foods.length; k++) { var a = k / 8 * 6.28, rr = rand(70, 160); foods[k].x = core.x + Math.cos(a) * rr; foods[k].y = core.y + Math.sin(a) * rr; foods[k].cap = false; }
+}
+window._jumpLevel = function (n) {
+  n = (typeof n === 'number') ? n : 1;
+  if (n >= 99) { if (gs !== 'PLAYING') startGame(); GF.tutorial.active = false; if (score < 1) score = 1; gameOver(); return; }
+  startGame();
+  try { localStorage.setItem('spaghetti_monster_seen_tutorial', '1'); } catch (e) {}
+  GF.tutorial.active = false;
+  if (n >= 2) setupDense(n);
+};
+window._setupForScreenshot = function (level) { window._jumpLevel(level || 5); };
+
+})();
+</script>
+</body>
+</html>
