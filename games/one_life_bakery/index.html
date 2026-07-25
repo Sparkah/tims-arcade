@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>One Life Bakery</title>
+  <!-- PLATFORM_SDK -->
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #2a1a12; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+'use strict';
+
+// ── Virtual portrait canvas ────────────────────────────────────────────────
+var VW = 450, VH = 800;
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+var view = { scale: 1, ox: 0, oy: 0, dpr: 1 };
+
+function resize() {
+  var cssW = window.innerWidth, cssH = window.innerHeight;
+  var dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  canvas.style.width = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+  var scale = Math.min(cssW / VW, cssH / VH);
+  view.scale = scale;
+  view.ox = (cssW - VW * scale) / 2;
+  view.oy = (cssH - VH * scale) / 2;
+  view.dpr = dpr;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── Pastries ────────────────────────────────────────────────────────────────
+var PASTRIES = [
+  { key: 'croissant', emoji: '🥐', name: 'Croissant' },
+  { key: 'cupcake',   emoji: '🧁', name: 'Cupcake' },
+  { key: 'donut',     emoji: '🍩', name: 'Donut' },
+  { key: 'cookie',    emoji: '🍪', name: 'Cookie' },
+  { key: 'cake',      emoji: '🍰', name: 'Cake' },
+  { key: 'pie',       emoji: '🥧', name: 'Pie' }
+];
+var HAPPY = ['🙂','😊','😃','🤗','😋'];
+var DONE_LINES = [
+  'The health inspector was not impressed.',
+  'One wrong cake and it all crumbles.',
+  'You had ONE rule. One.',
+  'Reviews incoming. They are not kind.',
+  'The oven is cold now.'
+];
+
+// ── State ────────────────────────────────────────────────────────────────────
+var mode = 'menu'; // menu | play | over | howto
+var streak = 0, best = 0;
+var need = {}, tray = [], orderList = [], orderSize = 0;
+var timeLimit = 0, timeLeft = 0;
+var serveTimer = 0, failTimer = 0;
+var custFace = HAPPY[0], custMood = 'happy';
+var doneLine = DONE_LINES[0];
+var flash = { a: 0, color: '#000' };
+var shakeMag = 0;
+var floats = [], confetti = [], pressFx = { idx: -1, t: 0 };
+
+try { best = parseInt(localStorage.getItem('olb_best_v1') || '0', 10) || 0; } catch (e) {}
+function saveBest() { try { localStorage.setItem('olb_best_v1', String(best)); } catch (e) {} }
+
+// ── Audio (init on first gesture) ─────────────────────────────────────────────
+var actx = null;
+function initAudio() {
+  if (actx) return;
+  try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { actx = null; }
+}
+function beep(freq, dur, type, vol, when) {
+  if (!actx) return;
+  var o = actx.createOscillator(), g = actx.createGain();
+  o.type = type || 'sine'; o.frequency.value = freq;
+  o.connect(g); g.connect(actx.destination);
+  var t = actx.currentTime + (when || 0);
+  g.gain.setValueAtTime(vol || 0.06, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function sndAdd(n) { beep(540 + n * 70, 0.07, 'sine', 0.05); }
+function sndServe() { beep(660, 0.09, 'sine', 0.07, 0); beep(880, 0.12, 'sine', 0.07, 0.09); beep(1180, 0.14, 'sine', 0.05, 0.2); }
+function sndFail() { beep(180, 0.45, 'sawtooth', 0.12, 0); beep(90, 0.5, 'sawtooth', 0.1, 0.05); }
+
+// ── Game logic ────────────────────────────────────────────────────────────────
+function rint(n) { return Math.floor(Math.random() * n); }
+function countIn(arr, k) { var n = 0; for (var i = 0; i < arr.length; i++) if (arr[i] === k) n++; return n; }
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+function newOrder() {
+  orderSize = clamp(2 + Math.floor(streak / 4), 2, 6);
+  need = {};
+  var placed = 0;
+  while (placed < orderSize) {
+    var k = PASTRIES[rint(PASTRIES.length)].key;
+    if ((need[k] || 0) < 3) { need[k] = (need[k] || 0) + 1; placed++; }
+  }
+  orderList = [];
+  for (var i = 0; i < PASTRIES.length; i++) {
+    var c = need[PASTRIES[i].key] || 0;
+    for (var j = 0; j < c; j++) orderList.push(PASTRIES[i].key);
+  }
+  tray = [];
+  timeLimit = Math.max(2.4, 2.6 + orderSize * 0.85 - streak * 0.06);
+  timeLeft = timeLimit;
+  custFace = HAPPY[rint(HAPPY.length)];
+  custMood = 'happy';
+}
+
+function startGame() {
+  streak = 0; mode = 'play'; serveTimer = 0; failTimer = 0; flash.a = 0;
+  floats = []; confetti = []; shakeMag = 0;
+  newOrder();
+}
+
+function emojiFor(key) {
+  for (var i = 0; i < PASTRIES.length; i++) if (PASTRIES[i].key === key) return PASTRIES[i].emoji;
+  return '';
+}
+
+function pastryTap(idx) {
+  var key = PASTRIES[idx].key;
+  pressFx.idx = idx; pressFx.t = 0.12;
+  if ((need[key] || 0) > countIn(tray, key)) {
+    tray.push(key);
+    sndAdd(tray.length);
+    custMood = 'happy';
+    if (tray.length >= orderSize) success();
+  } else {
+    fail();
+  }
+}
+
+function success() {
+  streak++;
+  if (streak > best) { best = streak; saveBest(); }
+  sndServe();
+  custMood = 'served';
+  flash.color = '#43c59e'; flash.a = 0.5;
+  floats.push({ x: 225, y: 372, vy: -70, text: '+1', ttl: 0.9, color: '#2e8b6b', size: 56 });
+  for (var i = 0; i < 14; i++) {
+    confetti.push({ x: 225 + (Math.random() - 0.5) * 180, y: 372,
+      vx: (Math.random() - 0.5) * 260, vy: -120 - Math.random() * 200,
+      ttl: 0.9 + Math.random() * 0.4, col: ['#ff6fa5','#ffcf5c','#43c59e','#7aa2ff'][rint(4)] });
+  }
+  serveTimer = 0.34;
+}
+
+function fail() {
+  sndFail();
+  custMood = 'angry';
+  flash.color = '#ff4d57'; flash.a = 0.7;
+  shakeMag = 16;
+  doneLine = DONE_LINES[rint(DONE_LINES.length)];
+  failTimer = 1.0;
+}
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+function toVirtual(e) {
+  // map pointer (CSS px) into virtual coords; recompute from rect every event
+  var r = canvas.getBoundingClientRect();
+  var cx = e.clientX - r.left, cy = e.clientY - r.top;
+  return { x: (cx - view.ox) / view.scale, y: (cy - view.oy) / view.scale };
+}
+function inRect(p, x, y, w, h) { return p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h; }
+
+// layout rects
+var R = {
+  start:   { x: 95, y: 474, w: 260, h: 80 },
+  howto:   { x: 135, y: 570, w: 180, h: 52 },
+  retry:   { x: 85, y: 536, w: 280, h: 78 },
+  toMenu:  { x: 145, y: 632, w: 160, h: 52 }
+};
+function btnRect(i) {
+  var ax = 30, ay = 484, aw = 390, ah = 304, gap = 16, cols = 3, rows = 2;
+  var cw = (aw - gap * (cols - 1)) / cols, ch = (ah - gap * (rows - 1)) / rows;
+  var col = i % cols, row = Math.floor(i / cols);
+  return { x: ax + col * (cw + gap), y: ay + row * (ch + gap), w: cw, h: ch };
+}
+
+function onDown(e) {
+  e.preventDefault();
+  initAudio();
+  var p = toVirtual(e);
+  if (mode === 'menu') {
+    if (inRect(p, R.start.x, R.start.y, R.start.w, R.start.h)) startGame();
+    else if (inRect(p, R.howto.x, R.howto.y, R.howto.w, R.howto.h)) mode = 'howto';
+  } else if (mode === 'howto') {
+    mode = 'menu';
+  } else if (mode === 'over') {
+    if (inRect(p, R.retry.x, R.retry.y, R.retry.w, R.retry.h)) startGame();
+    else if (inRect(p, R.toMenu.x, R.toMenu.y, R.toMenu.w, R.toMenu.h)) mode = 'menu';
+  } else if (mode === 'play') {
+    if (serveTimer > 0 || failTimer > 0) return;
+    for (var i = 0; i < PASTRIES.length; i++) {
+      var b = btnRect(i);
+      if (inRect(p, b.x, b.y, b.w, b.h)) { pastryTap(i); return; }
+    }
+  }
+}
+canvas.addEventListener('pointerdown', onDown, { passive: false });
+
+// ── Update ────────────────────────────────────────────────────────────────────
+function update(dt) {
+  if (mode === 'play') {
+    if (serveTimer > 0) { serveTimer -= dt; if (serveTimer <= 0) newOrder(); }
+    else if (failTimer > 0) { failTimer -= dt; if (failTimer <= 0) mode = 'over'; }
+    else {
+      timeLeft -= dt;
+      if (timeLeft < timeLimit * 0.34 && custMood === 'happy') custMood = 'nervous';
+      if (timeLeft <= 0) { timeLeft = 0; fail(); }
+    }
+  }
+  if (flash.a > 0) flash.a = Math.max(0, flash.a - dt * 1.6);
+  if (shakeMag > 0) shakeMag = Math.max(0, shakeMag - dt * 60);
+  if (pressFx.t > 0) pressFx.t -= dt;
+  for (var i = floats.length - 1; i >= 0; i--) {
+    var f = floats[i]; f.ttl -= dt; f.y += f.vy * dt; f.vy *= 0.96;
+    if (f.ttl <= 0) floats.splice(i, 1);
+  }
+  for (var k = confetti.length - 1; k >= 0; k--) {
+    var c = confetti[k]; c.ttl -= dt; c.x += c.vx * dt; c.y += c.vy * dt; c.vy += 520 * dt;
+    if (c.ttl <= 0) confetti.splice(k, 1);
+  }
+}
+
+// ── Draw helpers ──────────────────────────────────────────────────────────────
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function text(str, x, y, size, color, weight, align) {
+  ctx.fillStyle = color;
+  ctx.font = (weight || '700') + ' ' + size + "px 'Trebuchet MS', 'Segoe UI', system-ui, sans-serif";
+  ctx.textAlign = align || 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(str, x, y);
+}
+function emoji(str, x, y, size) {
+  ctx.font = size + "px 'Apple Color Emoji','Segoe UI Emoji','Noto Color Emoji',sans-serif";
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(str, x, y);
+}
+function iconRow(arr, cx, cy, gap, size) {
+  var total = (arr.length - 1) * gap;
+  var start = cx - total / 2;
+  for (var i = 0; i < arr.length; i++) emoji(emojiFor(arr[i]), start + i * gap, cy, size);
+}
+function button(rect, label, fill, fg, emj) {
+  ctx.fillStyle = 'rgba(0,0,0,0.12)'; rr(rect.x, rect.y + 5, rect.w, rect.h, 18); ctx.fill();
+  ctx.fillStyle = fill; rr(rect.x, rect.y, rect.w, rect.h, 18); ctx.fill();
+  if (emj) emoji(emj, rect.x + 34, rect.y + rect.h / 2, 34);
+  text(label, rect.x + rect.w / 2 + (emj ? 14 : 0), rect.y + rect.h / 2 + 1, 26, fg, '800');
+}
+
+// ── Screens ───────────────────────────────────────────────────────────────────
+function drawBakeryBg() {
+  ctx.fillStyle = '#fbe9d7'; ctx.fillRect(0, 0, VW, VH);
+  // wall stripes
+  ctx.fillStyle = '#f6ddc5';
+  for (var x = -40; x < VW; x += 56) { ctx.save(); ctx.translate(x, 0); ctx.fillRect(0, 0, 28, VH); ctx.restore(); }
+}
+function drawHeader() {
+  ctx.fillStyle = '#5b3a29'; ctx.fillRect(0, 0, VW, 70);
+  // awning scallops
+  for (var i = 0; i < 9; i++) {
+    ctx.fillStyle = (i % 2) ? '#ff6fa5' : '#fff3ea';
+    ctx.beginPath(); ctx.arc(26 + i * 52, 70, 26, 0, Math.PI, false); ctx.fill();
+  }
+  text('STREAK', 70, 26, 14, '#f3d9c4', '700');
+  text(String(streak), 70, 48, 30, '#ffffff', '900');
+  text('BEST', VW - 70, 26, 14, '#f3d9c4', '700');
+  text(String(best), VW - 70, 48, 28, '#ffd34d', '900');
+  text('ONE LIFE BAKERY', VW / 2, 36, 17, '#fff3ea', '800');
+}
+
+function drawPlay() {
+  drawBakeryBg();
+  drawHeader();
+
+  // customer
+  var faceY = 152;
+  ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(VW / 2, faceY, 52, 0, Math.PI * 2); ctx.fill();
+  var face = custMood === 'angry' ? '😡' : custMood === 'served' ? '😋'
+    : custMood === 'nervous' ? '😟' : custFace;
+  emoji(face, VW / 2, faceY, 78);
+
+  // order ticket
+  var tx = 60, ty = 212, tw = 330, th = 92;
+  ctx.fillStyle = '#fffdf7'; rr(tx, ty, tw, th, 14); ctx.fill();
+  ctx.setLineDash([7, 6]); ctx.lineWidth = 2.5; ctx.strokeStyle = '#d9b48f';
+  rr(tx + 6, ty + 6, tw - 12, th - 12, 10); ctx.stroke(); ctx.setLineDash([]);
+  text('ORDER', VW / 2, ty + 20, 13, '#c08552', '800');
+  iconRow(orderList, VW / 2, ty + 58, Math.min(48, (tw - 40) / orderList.length), 40);
+
+  // tray / plate
+  var py = 372;
+  ctx.fillStyle = '#eadbc8'; rr(60, py - 38, 330, 80, 16); ctx.fill();
+  var n = orderSize, gap = Math.min(50, 290 / n), startX = VW / 2 - (n - 1) * gap / 2;
+  for (var i = 0; i < n; i++) {
+    var sx = startX + i * gap;
+    if (i < tray.length) { emoji(emojiFor(tray[i]), sx, py, 38); }
+    else {
+      ctx.strokeStyle = '#cdb89f'; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(sx, py, 18, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  // timer bar
+  var bx = 40, bw = 370, by = 446;
+  ctx.fillStyle = '#e7d3bd'; rr(bx, by, bw, 12, 6); ctx.fill();
+  var frac = clamp(timeLeft / timeLimit, 0, 1);
+  ctx.fillStyle = frac > 0.5 ? '#43c59e' : frac > 0.25 ? '#ffb43d' : '#ff5c66';
+  rr(bx, by, Math.max(4, bw * frac), 12, 6); ctx.fill();
+
+  // pastry buttons
+  for (var b = 0; b < PASTRIES.length; b++) {
+    var rt = btnRect(b);
+    var pressed = (pressFx.idx === b && pressFx.t > 0);
+    var dy = pressed ? 3 : 0;
+    ctx.fillStyle = 'rgba(91,58,41,0.18)'; rr(rt.x, rt.y + 6, rt.w, rt.h, 18); ctx.fill();
+    ctx.fillStyle = pressed ? '#ffe3ef' : '#ffffff';
+    rr(rt.x, rt.y + dy, rt.w, rt.h - dy, 18); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = '#ffd0e2'; rr(rt.x, rt.y + dy, rt.w, rt.h - dy, 18); ctx.stroke();
+    emoji(PASTRIES[b].emoji, rt.x + rt.w / 2, rt.y + dy + rt.h * 0.42, 50);
+    text(PASTRIES[b].name, rt.x + rt.w / 2, rt.y + dy + rt.h - 22, 14, '#8a5a3c', '700');
+  }
+
+  drawFx();
+}
+
+function drawFx() {
+  for (var i = 0; i < confetti.length; i++) {
+    var c = confetti[i]; ctx.globalAlpha = clamp(c.ttl, 0, 1); ctx.fillStyle = c.col;
+    ctx.fillRect(c.x - 4, c.y - 4, 8, 8);
+  }
+  ctx.globalAlpha = 1;
+  for (var j = 0; j < floats.length; j++) {
+    var f = floats[j]; ctx.globalAlpha = clamp(f.ttl, 0, 1);
+    text(f.text, f.x, f.y, f.size || 30, f.color || '#333', '900');
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawMenu() {
+  drawBakeryBg();
+  // awning
+  ctx.fillStyle = '#5b3a29'; ctx.fillRect(0, 0, VW, 54);
+  for (var i = 0; i < 9; i++) { ctx.fillStyle = (i % 2) ? '#ff6fa5' : '#fff3ea'; ctx.beginPath(); ctx.arc(26 + i * 52, 54, 26, 0, Math.PI, false); ctx.fill(); }
+
+  emoji('🧁', VW / 2 - 70, 150, 64);
+  emoji('🥐', VW / 2, 142, 70);
+  emoji('🍰', VW / 2 + 70, 150, 64);
+
+  text('ONE LIFE', VW / 2, 250, 56, '#5b3a29', '900');
+  text('BAKERY', VW / 2, 308, 56, '#ff6fa5', '900');
+
+  // stamp hook
+  ctx.save();
+  ctx.translate(VW / 2, 386); ctx.rotate(-0.05);
+  ctx.lineWidth = 4; ctx.strokeStyle = '#d6453f';
+  rr(-168, -30, 336, 60, 12); ctx.stroke();
+  text('ONE MISTAKE. START OVER.', 0, 1, 21, '#d6453f', '900');
+  ctx.restore();
+
+  button(R.start, 'OPEN UP', '#ff6fa5', '#ffffff', '🔓');
+  button(R.howto, 'HOW TO PLAY', '#fff3ea', '#8a5a3c');
+  text('Best streak: ' + best + ' orders', VW / 2, 668, 18, '#8a5a3c', '700');
+}
+
+function drawHowto() {
+  drawBakeryBg();
+  ctx.fillStyle = 'rgba(43,26,18,0.55)'; ctx.fillRect(0, 0, VW, VH);
+  ctx.fillStyle = '#fffdf7'; rr(40, 150, 370, 500, 22); ctx.fill();
+  text('HOW TO PLAY', VW / 2, 200, 28, '#5b3a29', '900');
+  var lines = [
+    ['Goal', 'Serve every customer the exact pastries on their ticket.'],
+    ['Tap', 'Tap the pastry buttons to fill the tray. It serves itself when the order is complete.'],
+    ['The rule', 'ONE wrong pastry, or letting the timer run out, shuts the whole bakery down.'],
+    ['Score', 'Your streak is how many orders you serve before that one mistake. No saves.']
+  ];
+  var y = 256;
+  for (var i = 0; i < lines.length; i++) {
+    text(lines[i][0].toUpperCase(), 70, y, 16, '#ff6fa5', '800', 'left');
+    y += 26;
+    y = wrap(lines[i][1], 70, y, 310, 21, '#5b3a29');
+    y += 18;
+  }
+  text('tap anywhere to close', VW / 2, 620, 16, '#b08968', '700');
+}
+
+function wrap(str, x, y, maxW, lh, color) {
+  ctx.fillStyle = color;
+  ctx.font = "600 19px 'Trebuchet MS','Segoe UI',system-ui,sans-serif";
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  var words = str.split(' '), line = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = line + words[i] + ' ';
+    if (ctx.measureText(test).width > maxW && line) { ctx.fillText(line, x, y); line = words[i] + ' '; y += lh; }
+    else line = test;
+  }
+  ctx.fillText(line, x, y);
+  return y + lh;
+}
+
+function drawOver() {
+  // keep the failed scene behind
+  drawPlay();
+  ctx.fillStyle = 'rgba(43,26,18,0.72)'; ctx.fillRect(0, 0, VW, VH);
+
+  ctx.save();
+  ctx.translate(VW / 2, 250); ctx.rotate(-0.08);
+  ctx.lineWidth = 8; ctx.strokeStyle = '#ff5c66';
+  rr(-190, -52, 380, 104, 16); ctx.stroke();
+  text('SHUT DOWN', 0, 2, 46, '#ff5c66', '900');
+  ctx.restore();
+
+  text('You served', VW / 2, 360, 22, '#f3d9c4', '700');
+  text(streak + (streak === 1 ? ' order' : ' orders'), VW / 2, 404, 46, '#ffffff', '900');
+  text('Best: ' + best, VW / 2, 452, 20, '#ffd34d', '800');
+  wrapCenter(doneLine, VW / 2, 492, 320, 24, '#e8c8b4');
+
+  button(R.retry, 'REOPEN', '#ff6fa5', '#ffffff', '🔁');
+  button(R.toMenu, 'MENU', 'rgba(255,255,255,0.15)', '#ffffff');
+}
+
+function wrapCenter(str, cx, y, maxW, lh, color) {
+  ctx.font = "600 18px 'Trebuchet MS','Segoe UI',system-ui,sans-serif";
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = color;
+  var words = str.split(' '), line = '', lines = [];
+  for (var i = 0; i < words.length; i++) {
+    var test = line + words[i] + ' ';
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = words[i] + ' '; }
+    else line = test;
+  }
+  lines.push(line);
+  for (var j = 0; j < lines.length; j++) ctx.fillText(lines[j].trim(), cx, y + j * lh);
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+var last = performance.now();
+function frame(now) {
+  var dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt);
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#2a1a12';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  var sx = 0, sy = 0;
+  if (shakeMag > 0) { sx = (Math.random() - 0.5) * shakeMag; sy = (Math.random() - 0.5) * shakeMag; }
+  ctx.setTransform(view.dpr * view.scale, 0, 0, view.dpr * view.scale,
+    view.dpr * (view.ox + sx), view.dpr * (view.oy + sy));
+
+  // clip to play area
+  ctx.save();
+  rr(0, 0, VW, VH, 0); ctx.clip();
+
+  if (mode === 'menu') drawMenu();
+  else if (mode === 'howto') drawHowto();
+  else if (mode === 'over') drawOver();
+  else drawPlay();
+
+  if (flash.a > 0) {
+    ctx.globalAlpha = flash.a; ctx.fillStyle = flash.color;
+    ctx.fillRect(0, 0, VW, VH); ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Signal Smith</title>
+<style>
+html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #07111d;
+}
+body {
+    touch-action: none;
+}
+canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function() {
+"use strict";
+
+var canvas = document.getElementById("game");
+var ctx = canvas.getContext("2d");
+
+var BASE_W = 1440;
+var BASE_H = 900;
+var DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+var POINTER_NONE = -1;
+var GATE_SIZE = 86;
+var SLOT_RADIUS = 24;
+var SIM_STEPS = 12;
+var TICK_MS = 650;
+
+var GATE_DEFS = {
+    source_on: { label: "ON", color: "#36d977", inputs: 0, outputs: 1, eval: function() { return true; } },
+    source_off: { label: "OFF", color: "#50627a", inputs: 0, outputs: 1, eval: function() { return false; } },
+    not: { label: "NOT", color: "#f08a4b", inputs: 1, outputs: 1, eval: function(inputs) { return !inputs[0]; } },
+    and: { label: "AND", color: "#5bc0ff", inputs: 2, outputs: 1, eval: function(inputs) { return inputs[0] && inputs[1]; } },
+    or: { label: "OR", color: "#9f7bff", inputs: 2, outputs: 1, eval: function(inputs) { return inputs[0] || inputs[1]; } },
+    splitter: { label: "SPLIT", color: "#f0cf4b", inputs: 1, outputs: 2, eval: function(inputs) { return [inputs[0], inputs[0]]; } },
+    delay: { label: "DELAY", color: "#ff6f91", inputs: 1, outputs: 1, memory: [false], eval: function(inputs, memory) {
+        var out = memory[0];
+        memory[0] = !!inputs[0];
+        return out;
+    } },
+    toggle: { label: "TOGGLE", color: "#37d0c9", inputs: 1, outputs: 1, memory: [false, false], eval: function(inputs, memory) {
+        var signal = !!inputs[0];
+        if (signal && !memory[1]) {
+            memory[0] = !memory[0];
+        }
+        memory[1] = signal;
+        return memory[0];
+    } }
+};
+
+var LEVELS = [
+    {
+        title: "Power the Lamp",
+        briefing: "The lamp needs a steady ON signal. Drag one gate from the tray into the empty slot.",
+        inventory: ["source_on", "source_off", "not"],
+        slots: [
+            { id: "slot_a", x: 520, y: 420 }
+        ],
+        nodes: [],
+        connections: [
+            { from: { kind: "input", index: 0 }, to: { kind: "slot", id: "slot_a", port: 0 } },
+            { from: { kind: "slot", id: "slot_a", port: 0 }, to: { kind: "output", index: 0 } }
+        ],
+        inputs: [
+            { label: "Grid", pattern: [false, false, false, false, false, false, false, false, false, false, false, false] }
+        ],
+        outputs: [
+            { label: "Lamp", target: [true, true, true, true, true, true, true, true, true, true, true, true] }
+        ]
+    },
+    {
+        title: "Safety Inverter",
+        briefing: "The alarm should ring only when the beam goes dark. Build the inversion chain.",
+        inventory: ["not", "source_on", "source_off"],
+        slots: [
+            { id: "slot_a", x: 520, y: 420 }
+        ],
+        nodes: [],
+        connections: [
+            { from: { kind: "input", index: 0 }, to: { kind: "slot", id: "slot_a", port: 0 } },
+            { from: { kind: "slot", id: "slot_a", port: 0 }, to: { kind: "output", index: 0 } }
+        ],
+        inputs: [
+            { label: "Beam", pattern: [true, true, false, false, true, false, true, true, false, false, true, true] }
+        ],
+        outputs: [
+            { label: "Alarm", target: [false, false, true, true, false, true, false, false, true, true, false, false] }
+        ]
+    },
+    {
+        title: "Two Keys, One Door",
+        briefing: "The vault opens only when both pressure plates are active at the same time.",
+        inventory: ["and", "or", "not"],
+        slots: [
+            { id: "slot_a", x: 540, y: 340 }
+        ],
+        nodes: [],
+        connections: [
+            { from: { kind: "input", index: 0 }, to: { kind: "slot", id: "slot_a", port: 0 } },
+            { from: { kind: "input", index: 1 }, to: { kind: "slot", id: "slot_a", port: 1 } },
+            { from: { kind: "slot", id: "slot_a", port: 0 }, to: { kind: "output", index: 0 } }
+        ],
+        inputs: [
+            { label: "Plate A", pattern: [false, false, true, true, false, true, true, false, true, false, true, true] },
+            { label: "Plate B", pattern: [false, true, true, false, false, true, false, false, true, true, true, false] }
+        ],
+        outputs: [
+            { label: "Vault", target: [false, false, true, false, false, true, false, false, true, false, true, false] }
+        ]
+    },
+    {
+        title: "Pulse Duplicator",
+        briefing: "One pulse must activate two machines together. Use a splitter.",
+        inventory: ["splitter", "delay", "source_on"],
+        slots: [
+            { id: "slot_a", x: 420, y: 420 }
+        ],
+        nodes: [],
+        connections: [
+            { from: { kind: "input", index: 0 }, to: { kind: "slot", id: "slot_a", port: 0 } },
+            { from: { kind: "slot", id: "slot_a", port: 0 }, to: { kind: "output", index: 0 } },
+            { from: { kind: "slot", id: "slot_a", port: 1 }, to: { kind: "output", index: 1 } }
+        ],
+        inputs: [
+            { label: "Pulse", pattern: [false, true, false, false, true, false, true, false, false, true, false, false] }
+        ],
+        outputs: [
+            { label: "Drill", target: [false, true, false, false, true, false, true, false, false, true, false, false] },
+            { label: "Welder", target: [false, true, false, false, true, false, true, false, false, true, false, false] }
+        ]
+    },
+    {
+        title: "Timed Gate",
+        briefing: "The cargo arm should only fire one tick after the sensor pulse. Delay the signal.",
+        inventory: ["delay", "not", "source_on"],
+        slots: [
+            { id: "slot_a", x: 520, y: 420 }
+        ],
+        nodes: [],
+        connections: [
+            { from: { kind: "input", index: 0 }, to: { kind: "slot", id: "slot_a", port: 0 } },
+            { from: { kind: "slot", id: "slot_a", port: 0 }, to: { kind: "output", index: 0 } }
+        ],
+        inputs: [
+            { label: "Sensor", pattern: [false, true, false, false, true, false, false, true, false, false, false, true] }
+        ],
+        outputs: [
+            { label: "Arm", target: [false, false, true, false, false, true, false, false, true, false, false, false] }
+        ]
+    },
+    {
+        title: "Latch the Reactor",
+        briefing: "One startup pulse should flip the reactor on and keep it on. Toggle is the memory gate.",
+        inventory: ["toggle", "delay", "not"],
+        slots: [
+            { id: "slot_a", x: 520, y: 420 }
+        ],
+        nodes: [],
+        connections: [
+            { from: { kind: "input", index: 0 }, to: { kind: "slot", id: "slot_a", port: 0 } },
+            { from: { kind: "slot", id: "slot_a", port: 0 }, to: { kind: "output", index: 0 } }
+        ],
+        inputs: [
+            { label: "Boot Pulse", pattern: [false, true, false, false, false, false, false, false, false, false, false, false] }
+        ],
+        outputs: [
+            { label: "Reactor", target: [false, true, true, true, true, true, true, true, true, true, true, true] }
+        ]
+    }
+];
+
+function cloneLevel(level) {
+    return JSON.parse(JSON.stringify(level));
+}
+
+var state = {
+    mode: "edit",
+    levelIndex: 0,
+    level: null,
+    tray: [],
+    slots: [],
+    connections: [],
+    placed: {},
+    drag: null,
+    pointerId: POINTER_NONE,
+    selectedTray: -1,
+    simTick: 0,
+    simElapsed: 0,
+    simOutputs: [],
+    simSolved: false,
+    simFailed: false,
+    solvedLevels: loadSolvedLevels(),
+    message: "Build the circuit, then run it.",
+    hoverSlot: null,
+    lastTickFlash: 0
+};
+
+function loadSolvedLevels() {
+    try {
+        var raw = localStorage.getItem("signal-smith-solved");
+        if (!raw) {
+            return {};
+        }
+        return JSON.parse(raw);
+    } catch (err) {
+        return {};
+    }
+}
+
+function saveSolvedLevels() {
+    localStorage.setItem("signal-smith-solved", JSON.stringify(state.solvedLevels));
+}
+
+function deepCloneGate(type, instanceId) {
+    var def = GATE_DEFS[type];
+    return {
+        instanceId: instanceId,
+        type: type,
+        label: def.label,
+        color: def.color,
+        inputs: def.inputs,
+        outputs: def.outputs,
+        memory: def.memory ? def.memory.slice() : null
+    };
+}
+
+function buildLevel(index) {
+    state.levelIndex = index;
+    state.level = cloneLevel(LEVELS[index]);
+    state.slots = state.level.slots.slice();
+    state.connections = state.level.connections.slice();
+    state.placed = {};
+    state.drag = null;
+    state.selectedTray = -1;
+    state.mode = "edit";
+    state.simTick = 0;
+    state.simElapsed = 0;
+    state.simOutputs = [];
+    state.simSolved = false;
+    state.simFailed = false;
+    state.lastTickFlash = 0;
+    state.message = state.level.briefing;
+    state.tray = [];
+    for (var i = 0; i < state.level.inventory.length; i += 1) {
+        state.tray.push({
+            trayIndex: i,
+            type: state.level.inventory[i],
+            x: 1080,
+            y: 180 + i * 108,
+            w: GATE_SIZE,
+            h: GATE_SIZE
+        });
+    }
+}
+
+function resetLevel() {
+    buildLevel(state.levelIndex);
+}
+
+function nextLevel() {
+    var next = (state.levelIndex + 1) % LEVELS.length;
+    buildLevel(next);
+}
+
+function resize() {
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    canvas.width = Math.round(w * DPR);
+    canvas.height = Math.round(h * DPR);
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+
+function getPointerPos(evt) {
+    var rect = canvas.getBoundingClientRect();
+    return {
+        x: evt.clientX - rect.left,
+        y: evt.clientY - rect.top
+    };
+}
+
+function drawRoundedRect(x, y, w, h, r, fill, stroke, width) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    if (fill) {
+        ctx.fillStyle = fill;
+        ctx.fill();
+    }
+    if (stroke) {
+        ctx.lineWidth = width || 1;
+        ctx.strokeStyle = stroke;
+        ctx.stroke();
+    }
+}
+
+function currentScale() {
+    return Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H);
+}
+
+function screenToWorld(pos) {
+    var scale = currentScale();
+    var offsetX = (window.innerWidth - BASE_W * scale) * 0.5;
+    var offsetY = (window.innerHeight - BASE_H * scale) * 0.5;
+    return {
+        x: (pos.x * scale) + offsetX,
+        y: (pos.y * scale) + offsetY
+    };
+}
+
+function worldToGame(pos) {
+    var scale = currentScale();
+    var offsetX = (window.innerWidth - BASE_W * scale) * 0.5;
+    var offsetY = (window.innerHeight - BASE_H * scale) * 0.5;
+    return {
+        x: (pos.x - offsetX) / scale,
+        y: (pos.y - offsetY) / scale
+    };
+}
+
+function hitTray(gamePos) {
+    for (var i = 0; i < state.tray.length; i += 1) {
+        var tray = state.tray[i];
+        if (gamePos.x >= tray.x && gamePos.x <= tray.x + tray.w && gamePos.y >= tray.y && gamePos.y <= tray.y + tray.h) {
+            return tray;
+        }
+    }
+    return null;
+}
+
+function hitSlot(gamePos) {
+    for (var i = 0; i < state.slots.length; i += 1) {
+        var slot = state.slots[i];
+        var dx = gamePos.x - slot.x;
+        var dy = gamePos.y - slot.y;
+        if (Math.sqrt(dx * dx + dy * dy) <= SLOT_RADIUS + 26) {
+            return slot;
+        }
+    }
+    return null;
+}
+
+function createDragFromTray(tray, gamePos) {
+    state.drag = {
+        fromTray: tray.trayIndex,
+        type: tray.type,
+        x: gamePos.x,
+        y: gamePos.y
+    };
+    state.message = "Drop onto an empty socket.";
+}
+
+function createDragFromSlot(slot, gamePos) {
+    var gate = state.placed[slot.id];
+    if (!gate) {
+        return;
+    }
+    delete state.placed[slot.id];
+    state.drag = {
+        fromSlot: slot.id,
+        type: gate.type,
+        x: gamePos.x,
+        y: gamePos.y
+    };
+    state.message = "Move the gate or drop outside to return it to the tray.";
+}
+
+function placeDraggedGate(slotId) {
+    if (!state.drag) {
+        return;
+    }
+    state.placed[slotId] = deepCloneGate(state.drag.type, slotId);
+    state.drag = null;
+    state.message = "Circuit updated. Press Run to test.";
+    state.mode = "edit";
+}
+
+function pointerDown(evt) {
+    if (state.pointerId !== POINTER_NONE) {
+        return;
+    }
+    var gamePos = worldToGame(getPointerPos(evt));
+    state.pointerId = evt.pointerId;
+    var button = hitButton(gamePos);
+    if (button) {
+        handleButton(button);
+        state.pointerId = POINTER_NONE;
+        return;
+    }
+    if (state.mode === "sim") {
+        state.pointerId = POINTER_NONE;
+        return;
+    }
+    var slot = hitSlot(gamePos);
+    if (slot && state.selectedTray >= 0 && !state.placed[slot.id]) {
+        var selectedTray = state.tray[state.selectedTray];
+        state.placed[slot.id] = deepCloneGate(selectedTray.type, slot.id);
+        state.selectedTray = -1;
+        state.message = "Gate placed. Press Run to test.";
+        state.pointerId = POINTER_NONE;
+        return;
+    }
+    if (slot && state.selectedTray >= 0 && state.placed[slot.id]) {
+        state.message = "That socket is already occupied.";
+        state.pointerId = POINTER_NONE;
+        return;
+    }
+    if (slot && state.placed[slot.id]) {
+        if (state.selectedTray >= 0) {
+            state.message = "Selected tray gate cleared.";
+            state.selectedTray = -1;
+        } else {
+            createDragFromSlot(slot, gamePos);
+        }
+        return;
+    }
+    var tray = hitTray(gamePos);
+    if (tray) {
+        if (state.selectedTray === tray.trayIndex) {
+            state.selectedTray = -1;
+            state.message = "Tray selection cleared.";
+        } else {
+            state.selectedTray = tray.trayIndex;
+            state.message = "Gate selected. Tap an empty socket to place it, or drag as usual.";
+            createDragFromTray(tray, gamePos);
+            state.drag = null;
+        }
+        state.pointerId = POINTER_NONE;
+        return;
+    }
+    state.pointerId = POINTER_NONE;
+}
+
+function pointerMove(evt) {
+    var gamePos = worldToGame(getPointerPos(evt));
+    state.hoverSlot = hitSlot(gamePos);
+    if (state.pointerId !== evt.pointerId || !state.drag) {
+        return;
+    }
+    state.drag.x = gamePos.x;
+    state.drag.y = gamePos.y;
+}
+
+function pointerUp(evt) {
+    if (state.pointerId !== evt.pointerId) {
+        return;
+    }
+    var gamePos = worldToGame(getPointerPos(evt));
+    if (state.drag) {
+        var slot = hitSlot(gamePos);
+        if (slot && !state.placed[slot.id]) {
+            placeDraggedGate(slot.id);
+        } else if (slot && state.placed[slot.id]) {
+            state.message = "That socket is already occupied.";
+            state.drag = null;
+        } else {
+            state.drag = null;
+            state.message = "Gate returned to tray.";
+        }
+    }
+    state.pointerId = POINTER_NONE;
+}
+
+function resetGateMemory() {
+    var ids = Object.keys(state.placed);
+    for (var i = 0; i < ids.length; i += 1) {
+        var gate = state.placed[ids[i]];
+        var def = GATE_DEFS[gate.type];
+        gate.memory = def.memory ? def.memory.slice() : null;
+    }
+}
+
+function readEndpoint(endpoint, values, tick) {
+    if (endpoint.kind === "input") {
+        return !!state.level.inputs[endpoint.index].pattern[tick];
+    }
+    if (endpoint.kind === "slot") {
+        var key = endpoint.id + ":out:" + endpoint.port;
+        return !!values[key];
+    }
+    return false;
+}
+
+function writeEndpoint(endpoint, values, value) {
+    if (endpoint.kind === "output") {
+        values["output:" + endpoint.index] = !!value;
+    }
+}
+
+function evaluateTick(tick) {
+    var values = {};
+    var outputCounts = {};
+    var iteration;
+    for (iteration = 0; iteration < 4; iteration += 1) {
+        var slotIds = Object.keys(state.placed);
+        for (var i = 0; i < slotIds.length; i += 1) {
+            var slotId = slotIds[i];
+            var gate = state.placed[slotId];
+            var inputs = [];
+            for (var p = 0; p < gate.inputs; p += 1) {
+                inputs.push(false);
+            }
+            for (var c = 0; c < state.connections.length; c += 1) {
+                var conn = state.connections[c];
+                if (conn.to.kind === "slot" && conn.to.id === slotId) {
+                    inputs[conn.to.port] = readEndpoint(conn.from, values, tick);
+                }
+            }
+            var result = GATE_DEFS[gate.type].eval(inputs, gate.memory);
+            if (!Array.isArray(result)) {
+                result = [result];
+            }
+            for (var o = 0; o < gate.outputs; o += 1) {
+                values[slotId + ":out:" + o] = !!result[o];
+            }
+        }
+    }
+
+    for (var c2 = 0; c2 < state.connections.length; c2 += 1) {
+        var conn2 = state.connections[c2];
+        var outValue = readEndpoint(conn2.from, values, tick);
+        if (conn2.to.kind === "output") {
+            writeEndpoint(conn2.to, values, outValue);
+            outputCounts[conn2.to.index] = outValue;
+        }
+    }
+
+    var outputs = [];
+    for (var out = 0; out < state.level.outputs.length; out += 1) {
+        outputs.push(!!outputCounts[out]);
+    }
+
+    return {
+        inputs: state.level.inputs.map(function(input) { return !!input.pattern[tick]; }),
+        outputs: outputs
+    };
+}
+
+function circuitComplete() {
+    for (var i = 0; i < state.level.slots.length; i += 1) {
+        if (!state.placed[state.level.slots[i].id]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+function startSimulation() {
+    if (!circuitComplete()) {
+        state.message = "Every socket must be filled before you run the circuit.";
+        return;
+    }
+    resetGateMemory();
+    state.mode = "sim";
+    state.simTick = 0;
+    state.simElapsed = 0;
+    state.simOutputs = [];
+    state.simSolved = false;
+    state.simFailed = false;
+    state.message = "Simulation live.";
+    var t;
+    for (t = 0; t < SIM_STEPS; t += 1) {
+        state.simOutputs.push(evaluateTick(t));
+    }
+}
+
+function finishSimulation() {
+    var success = true;
+    for (var tick = 0; tick < SIM_STEPS; tick += 1) {
+        for (var out = 0; out < state.level.outputs.length; out += 1) {
+            if (state.simOutputs[tick].outputs[out] !== state.level.outputs[out].target[tick]) {
+                success = false;
+            }
+        }
+    }
+    state.mode = "result";
+    state.simSolved = success;
+    state.simFailed = !success;
+    if (success) {
+        state.solvedLevels[state.levelIndex] = true;
+        saveSolvedLevels();
+        state.message = "Solved. The automation holds.";
+    } else {
+        state.message = "Mismatch detected. Adjust the circuit and rerun.";
+    }
+}
+
+var buttons = [];
+
+function layoutButtons() {
+    buttons = [
+        { id: "run", label: state.mode === "sim" ? "RUNNING" : "RUN", x: 1020, y: 690, w: 170, h: 58, disabled: state.mode === "sim" },
+        { id: "reset", label: "RESET", x: 1210, y: 690, w: 170, h: 58, disabled: false },
+        { id: "next", label: "NEXT", x: 1210, y: 760, w: 170, h: 58, disabled: !state.simSolved },
+        { id: "level_prev", label: "<", x: 44, y: 40, w: 54, h: 46, disabled: false },
+        { id: "level_next", label: ">", x: 106, y: 40, w: 54, h: 46, disabled: false }
+    ];
+}
+
+function hitButton(gamePos) {
+    layoutButtons();
+    for (var i = 0; i < buttons.length; i += 1) {
+        var b = buttons[i];
+        if (gamePos.x >= b.x && gamePos.x <= b.x + b.w && gamePos.y >= b.y && gamePos.y <= b.y + b.h) {
+            return b;
+        }
+    }
+    return null;
+}
+
+function handleButton(button) {
+    if (button.disabled) {
+        return;
+    }
+    if (button.id === "run") {
+        startSimulation();
+    } else if (button.id === "reset") {
+        resetLevel();
+    } else if (button.id === "next" && state.simSolved) {
+        nextLevel();
+    } else if (button.id === "level_prev") {
+        buildLevel((state.levelIndex + LEVELS.length - 1) % LEVELS.length);
+    } else if (button.id === "level_next") {
+        buildLevel((state.levelIndex + 1) % LEVELS.length);
+    }
+}
+
+function update(dt) {
+    if (state.mode === "sim") {
+        state.simElapsed += dt * 1000;
+        while (state.simElapsed >= TICK_MS && state.simTick < SIM_STEPS) {
+            state.simElapsed -= TICK_MS;
+            state.lastTickFlash = 0.3;
+            state.simTick += 1;
+            if (state.simTick >= SIM_STEPS) {
+                finishSimulation();
+                break;
+            }
+        }
+    }
+    if (state.lastTickFlash > 0) {
+        state.lastTickFlash = Math.max(0, state.lastTickFlash - dt);
+    }
+}
+
+function drawBackground() {
+    var grad = ctx.createLinearGradient(0, 0, BASE_W, BASE_H);
+    grad.addColorStop(0, "#06111c");
+    grad.addColorStop(0.6, "#0c1f2b");
+    grad.addColorStop(1, "#132f3e");
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+    ctx.fillStyle = "rgba(255,255,255,0.03)";
+    for (var i = 0; i < 40; i += 1) {
+        ctx.beginPath();
+        ctx.arc((i * 171) % BASE_W, (i * 93) % BASE_H, 2 + (i % 4), 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+function drawHeader() {
+    ctx.fillStyle = "rgba(3, 12, 19, 0.82)";
+    ctx.fillRect(0, 0, BASE_W, 108);
+    ctx.fillStyle = "#f4e9cc";
+    ctx.font = "700 38px Georgia, serif";
+    ctx.fillText("Signal Smith", 180, 58);
+    ctx.font = "500 18px system-ui, sans-serif";
+    ctx.fillStyle = "#9ab0bf";
+    ctx.fillText("Automation puzzles without code. Build logic that behaves correctly over time.", 182, 84);
+    ctx.fillStyle = "#d8c782";
+    ctx.font = "700 22px system-ui, sans-serif";
+    ctx.fillText("Level " + (state.levelIndex + 1) + " / " + LEVELS.length + ": " + state.level.title, 44, 146);
+    ctx.fillStyle = "#ccd9e4";
+    ctx.font = "400 18px system-ui, sans-serif";
+    wrapText(state.level.briefing, 44, 178, 700, 24);
+}
+
+function wrapText(text, x, y, maxWidth, lineHeight) {
+    var words = text.split(" ");
+    var line = "";
+    for (var i = 0; i < words.length; i += 1) {
+        var test = line ? line + " " + words[i] : words[i];
+        if (ctx.measureText(test).width > maxWidth && line) {
+            ctx.fillText(line, x, y);
+            y += lineHeight;
+            line = words[i];
+        } else {
+            line = test;
+        }
+    }
+    if (line) {
+        ctx.fillText(line, x, y);
+    }
+}
+
+function drawBoardPanel() {
+    drawRoundedRect(32, 218, 936, 632, 26, "rgba(4, 15, 24, 0.8)", "rgba(125, 168, 193, 0.24)", 2);
+    drawRoundedRect(992, 118, 416, 732, 26, "rgba(5, 16, 25, 0.84)", "rgba(125, 168, 193, 0.22)", 2);
+    ctx.fillStyle = "#90a7b8";
+    ctx.font = "600 18px system-ui, sans-serif";
+    ctx.fillText("WORKBENCH", 58, 250);
+    ctx.fillText("TRAY", 1020, 154);
+}
+
+function connectionPoint(endpoint) {
+    if (endpoint.kind === "input") {
+        return { x: 110, y: 360 + endpoint.index * 120 };
+    }
+    if (endpoint.kind === "output") {
+        return { x: 890, y: 360 + endpoint.index * 120 };
+    }
+    if (endpoint.kind === "slot") {
+        var slot = null;
+        for (var i = 0; i < state.slots.length; i += 1) {
+            if (state.slots[i].id === endpoint.id) {
+                slot = state.slots[i];
+                break;
+            }
+        }
+        if (!slot) {
+            return { x: 0, y: 0 };
+        }
+        var gate = state.placed[slot.id];
+        if (endpoint.port < (gate ? gate.inputs : 1)) {
+            return { x: slot.x - 54, y: slot.y - 18 + endpoint.port * 34 };
+        }
+        return { x: slot.x + 54, y: slot.y - 18 + (endpoint.port - (gate ? gate.inputs : 1)) * 34 };
+    }
+    return { x: 0, y: 0 };
+}
+
+function drawNode(type, x, y, ghost) {
+    var def = GATE_DEFS[type];
+    drawRoundedRect(x - GATE_SIZE * 0.5, y - GATE_SIZE * 0.5, GATE_SIZE, GATE_SIZE, 20,
+        ghost ? "rgba(255,255,255,0.08)" : def.color,
+        ghost ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.22)", 2);
+    ctx.fillStyle = ghost ? "rgba(255,255,255,0.55)" : "#07111d";
+    ctx.font = "700 18px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(def.label, x, y + 6);
+    ctx.textAlign = "left";
+}
+
+function drawWorkbench() {
+    ctx.strokeStyle = "rgba(160, 201, 223, 0.12)";
+    ctx.lineWidth = 1;
+    for (var gx = 56; gx < 936; gx += 48) {
+        ctx.beginPath();
+        ctx.moveTo(gx, 240);
+        ctx.lineTo(gx, 830);
+        ctx.stroke();
+    }
+    for (var gy = 240; gy < 840; gy += 48) {
+        ctx.beginPath();
+        ctx.moveTo(56, gy);
+        ctx.lineTo(936, gy);
+        ctx.stroke();
+    }
+
+    var i;
+    for (i = 0; i < state.level.inputs.length; i += 1) {
+        var ip = connectionPoint({ kind: "input", index: i });
+        ctx.fillStyle = "#17c873";
+        ctx.beginPath();
+        ctx.arc(ip.x, ip.y, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#06111c";
+        ctx.font = "700 16px system-ui, sans-serif";
+        ctx.fillText("IN", ip.x - 11, ip.y + 6);
+        ctx.fillStyle = "#bcd0de";
+        ctx.font = "500 16px system-ui, sans-serif";
+        ctx.fillText(state.level.inputs[i].label, ip.x - 22, ip.y - 32);
+    }
+    for (i = 0; i < state.level.outputs.length; i += 1) {
+        var op = connectionPoint({ kind: "output", index: i });
+        ctx.fillStyle = "#ffd166";
+        ctx.beginPath();
+        ctx.arc(op.x, op.y, 18, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#06111c";
+        ctx.font = "700 16px system-ui, sans-serif";
+        ctx.fillText("OUT", op.x - 18, op.y + 6);
+        ctx.fillStyle = "#bcd0de";
+        ctx.font = "500 16px system-ui, sans-serif";
+        ctx.fillText(state.level.outputs[i].label, op.x - 18, op.y - 32);
+    }
+
+    for (i = 0; i < state.connections.length; i += 1) {
+        var from = connectionPoint(state.connections[i].from);
+        var to = connectionPoint(state.connections[i].to);
+        ctx.strokeStyle = "rgba(123, 240, 214, 0.58)";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(from.x, from.y);
+        ctx.bezierCurveTo(from.x + 80, from.y, to.x - 80, to.y, to.x, to.y);
+        ctx.stroke();
+    }
+
+    for (i = 0; i < state.slots.length; i += 1) {
+        var slot = state.slots[i];
+        var occupied = !!state.placed[slot.id];
+        var isHover = state.hoverSlot && state.hoverSlot.id === slot.id;
+        ctx.beginPath();
+        ctx.arc(slot.x, slot.y, SLOT_RADIUS + 16, 0, Math.PI * 2);
+        ctx.fillStyle = occupied ? "rgba(55, 208, 201, 0.16)" : "rgba(255,255,255,0.05)";
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(slot.x, slot.y, SLOT_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = occupied ? "rgba(15, 42, 53, 0.95)" : "rgba(5, 18, 29, 0.95)";
+        ctx.fill();
+        ctx.lineWidth = isHover ? 4 : 2;
+        ctx.strokeStyle = isHover ? "#f4e9cc" : "rgba(145, 173, 191, 0.45)";
+        ctx.stroke();
+        if (occupied) {
+            drawNode(state.placed[slot.id].type, slot.x, slot.y, false);
+        } else {
+            ctx.fillStyle = "rgba(255,255,255,0.4)";
+            ctx.font = "700 14px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.fillText("DROP", slot.x, slot.y + 5);
+            ctx.textAlign = "left";
+        }
+    }
+}
+
+function drawTray() {
+    for (var i = 0; i < state.tray.length; i += 1) {
+        var tray = state.tray[i];
+        if (state.selectedTray === tray.trayIndex) {
+            drawRoundedRect(tray.x - 10, tray.y - 10, tray.w + 20, tray.h + 20, 24, "rgba(244, 233, 204, 0.12)", "#f4e9cc", 3);
+        }
+        drawNode(tray.type, tray.x + tray.w * 0.5, tray.y + tray.h * 0.5, false);
+        ctx.fillStyle = "#b8c9d4";
+        ctx.font = "500 14px system-ui, sans-serif";
+        ctx.fillText(GATE_DEFS[tray.type].inputs + " in / " + GATE_DEFS[tray.type].outputs + " out", tray.x + 4, tray.y + tray.h + 18);
+    }
+    if (state.drag) {
+        ctx.globalAlpha = 0.85;
+        drawNode(state.drag.type, state.drag.x, state.drag.y, false);
+        ctx.globalAlpha = 1;
+    }
+}
+
+function drawButtons() {
+    layoutButtons();
+    for (var i = 0; i < buttons.length; i += 1) {
+        var b = buttons[i];
+        var fill = b.disabled ? "rgba(97, 112, 123, 0.35)" : (b.id === "run" ? "#1fd18f" : "#163144");
+        if (b.id === "next") {
+            fill = b.disabled ? "rgba(97, 112, 123, 0.35)" : "#f3b44b";
+        }
+        drawRoundedRect(b.x, b.y, b.w, b.h, 16, fill, "rgba(255,255,255,0.15)", 2);
+        ctx.fillStyle = b.disabled ? "rgba(255,255,255,0.5)" : "#06111c";
+        if (b.id !== "run" && b.id !== "next") {
+            ctx.fillStyle = b.disabled ? "rgba(255,255,255,0.45)" : "#dbe6ed";
+        }
+        ctx.font = "700 20px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText(b.label, b.x + b.w * 0.5, b.y + 36);
+        ctx.textAlign = "left";
+    }
+}
+
+function drawTimelineRow(label, pattern, actual, y) {
+    ctx.fillStyle = "#dbe6ed";
+    ctx.font = "600 16px system-ui, sans-serif";
+    ctx.fillText(label, 1018, y + 18);
+    for (var t = 0; t < SIM_STEPS; t += 1) {
+        var x = 1120 + t * 22;
+        ctx.fillStyle = pattern[t] ? "#1fd18f" : "#2a3d4c";
+        drawRoundedRect(x, y, 16, 26, 5, ctx.fillStyle, "rgba(255,255,255,0.08)", 1);
+        if (actual) {
+            var ok = actual[t] === pattern[t];
+            ctx.fillStyle = ok ? "#7de8c6" : "#ff7b7b";
+            ctx.beginPath();
+            ctx.arc(x + 8, y + 36, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+function drawSimulationPanel() {
+    ctx.fillStyle = "#90a7b8";
+    ctx.font = "600 18px system-ui, sans-serif";
+    ctx.fillText("TARGET TIMELINE", 1018, 378);
+    for (var i = 0; i < state.level.inputs.length; i += 1) {
+        drawTimelineRow(state.level.inputs[i].label, state.level.inputs[i].pattern, null, 410 + i * 82);
+    }
+    for (var j = 0; j < state.level.outputs.length; j += 1) {
+        var actual = [];
+        for (var tick = 0; tick < SIM_STEPS; tick += 1) {
+            actual.push(state.simOutputs[tick] ? state.simOutputs[tick].outputs[j] : false);
+        }
+        drawTimelineRow(state.level.outputs[j].label, state.level.outputs[j].target, actual, 410 + (state.level.inputs.length + j) * 82);
+    }
+
+    ctx.fillStyle = "#c9d7df";
+    ctx.font = "500 16px system-ui, sans-serif";
+    ctx.fillText("Green blocks are ON. Dots under outputs turn red when your circuit mismatches the target.", 1018, 640);
+    ctx.fillText("Tick: " + state.simTick + " / " + SIM_STEPS, 1018, 665);
+}
+
+function drawFooter() {
+    ctx.fillStyle = "rgba(3, 12, 19, 0.85)";
+    ctx.fillRect(0, 856, BASE_W, 44);
+    ctx.fillStyle = state.simSolved ? "#7de8c6" : (state.simFailed ? "#ff9c9c" : "#cbd8e2");
+    ctx.font = "500 18px system-ui, sans-serif";
+    ctx.fillText(state.message, 42, 884);
+    if (state.lastTickFlash > 0) {
+        ctx.fillStyle = "rgba(255, 255, 255, " + (state.lastTickFlash * 0.6) + ")";
+        ctx.fillRect(36, 224, 928, 620);
+    }
+}
+
+function drawResultBadge() {
+    if (state.mode !== "result") {
+        return;
+    }
+    var fill = state.simSolved ? "rgba(31, 209, 143, 0.16)" : "rgba(255, 123, 123, 0.18)";
+    var stroke = state.simSolved ? "#1fd18f" : "#ff7b7b";
+    drawRoundedRect(1018, 288, 360, 62, 18, fill, stroke, 2);
+    ctx.fillStyle = "#f4e9cc";
+    ctx.font = "700 26px system-ui, sans-serif";
+    ctx.fillText(state.simSolved ? "Automation Stable" : "Signal Mismatch", 1042, 328);
+}
+
+function draw() {
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    var scale = currentScale();
+    var offsetX = (window.innerWidth - BASE_W * scale) * 0.5;
+    var offsetY = (window.innerHeight - BASE_H * scale) * 0.5;
+
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+    ctx.scale(scale, scale);
+    drawBackground();
+    drawHeader();
+    drawBoardPanel();
+    drawWorkbench();
+    drawTray();
+    drawButtons();
+    drawSimulationPanel();
+    drawResultBadge();
+    drawFooter();
+    ctx.restore();
+}
+
+function renderGameToText() {
+    var outputs = [];
+    for (var i = 0; i < state.level.outputs.length; i += 1) {
+        var actual = [];
+        for (var tick = 0; tick < SIM_STEPS; tick += 1) {
+            actual.push(state.simOutputs[tick] ? state.simOutputs[tick].outputs[i] : null);
+        }
+        outputs.push({
+            label: state.level.outputs[i].label,
+            target: state.level.outputs[i].target.slice(),
+            actual: actual
+        });
+    }
+    return JSON.stringify({
+        coordinate_system: "Game space 1440x900, origin top-left, +x right, +y down.",
+        mode: state.mode,
+        levelIndex: state.levelIndex,
+        levelTitle: state.level.title,
+        message: state.message,
+        placed: Object.keys(state.placed).map(function(slotId) {
+            return { slotId: slotId, gate: state.placed[slotId].type };
+        }),
+        simTick: state.simTick,
+        solved: state.simSolved,
+        outputs: outputs
+    });
+}
+
+window.render_game_to_text = renderGameToText;
+window.advanceTime = function(ms) {
+    var step = 1000 / 60;
+    var count = Math.max(1, Math.round(ms / step));
+    for (var i = 0; i < count; i += 1) {
+        update(step / 1000);
+    }
+    draw();
+};
+
+var lastTime = 0;
+function frame(ts) {
+    if (!lastTime) {
+        lastTime = ts;
+    }
+    var dt = Math.min(0.05, (ts - lastTime) / 1000);
+    lastTime = ts;
+    update(dt);
+    draw();
+    requestAnimationFrame(frame);
+}
+
+window.addEventListener("resize", resize);
+canvas.addEventListener("pointerdown", pointerDown);
+canvas.addEventListener("pointermove", pointerMove);
+canvas.addEventListener("pointerup", pointerUp);
+canvas.addEventListener("pointercancel", pointerUp);
+window.addEventListener("keydown", function(evt) {
+    if (evt.key === "r" || evt.key === "R") {
+        startSimulation();
+    } else if (evt.key === "Escape") {
+        resetLevel();
+    } else if (evt.key === "n" || evt.key === "N") {
+        if (state.simSolved) {
+            nextLevel();
+        }
+    } else if (evt.key === "f" || evt.key === "F") {
+        if (!document.fullscreenElement) {
+            document.documentElement.requestFullscreen();
+        } else {
+            document.exitFullscreen();
+        }
+    }
+});
+
+resize();
+buildLevel(0);
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Советский Суйка</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a0a2e;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+canvas { display: block; cursor: none; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+const { Engine, Events, Bodies, World } = Matter;
+
+// ── Item definitions ─────────────────────────────────────────────────────────
+const ITEMS = [
+  { name: 'Барбарис',  r: 18,  color: '#C0392B', emoji: '🍬', score: 1,   img: 'img/01_barbaris.svg'   },
+  { name: 'Сушка',     r: 26,  color: '#F5DEB3', emoji: '⭕',  score: 3,   img: 'img/02_sushka.svg'     },
+  { name: 'Пряник',    r: 35,  color: '#A0522D', emoji: '🍪', score: 6,   img: 'img/03_pryanik.svg'    },
+  { name: 'Лабубу',    r: 46,  color: '#8E44AD', emoji: '👾', score: 10,  img: 'img/04_labubu.svg'     },
+  { name: 'Капибара',  r: 57,  color: '#A0785A', emoji: '🦫', score: 15,  img: 'img/05_capybara.svg'   },
+  { name: 'Скибиди',   r: 68,  color: '#95A5A6', emoji: '🚽', score: 21,  img: 'img/06_skibidi.svg'    },
+  { name: 'Блин',      r: 80,  color: '#E67E22', emoji: '🥞', score: 28,  img: 'img/07_blin.svg'       },
+  { name: 'Крипер',    r: 93,  color: '#27AE60', emoji: '💚', score: 36,  img: 'img/08_creeper.svg'    },
+  { name: 'Пельмень',  r: 107, color: '#F9E79F', emoji: '🥟', score: 45,  img: 'img/09_pelmeni.svg'    },
+  { name: 'Борщ',      r: 122, color: '#922B21', emoji: '🍲', score: 55,  img: 'img/10_borsch.svg'     },
+  { name: 'Самовар',   r: 138, color: '#D4AC0D', emoji: '🫖', score: 66,  img: 'img/11_samovar.svg'    },
+  { name: 'Матрёшка',  r: 154, color: '#E74C3C', emoji: '🪆', score: 78,  img: 'img/12_matryoshka.svg' },
+  { name: 'Медведь',   r: 164, color: '#6D4C41', emoji: '🐻', score: 91,  img: 'img/13_medved.svg'     },
+  { name: 'Кремль',    r: 175, color: '#7B241C', emoji: '🏰', score: 120, img: 'img/14_kreml.svg'      },
+];
+const SPAWN_POOL = 5; // only first N items can spawn from top
+
+// ── Preload images ────────────────────────────────────────────────────────────
+const IMG_CACHE = {};
+ITEMS.forEach((item, i) => {
+  if (!item.img) return;
+  const im = new Image();
+  im.onload = () => { IMG_CACHE[i] = im; };
+  im.onerror = () => {}; // falls back to emoji
+  im.src = item.img;
+});
+
+// ── Canvas ───────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+const BW     = 420;
+const BH     = 700;
+canvas.width  = BW;
+canvas.height = BH;
+
+function applyScale() {
+  const s = Math.min(window.innerWidth / BW, window.innerHeight / BH);
+  canvas.style.width  = BW * s + 'px';
+  canvas.style.height = BH * s + 'px';
+  canvas._scale = s;
+}
+applyScale();
+window.addEventListener('resize', applyScale);
+
+// ── Layout ───────────────────────────────────────────────────────────────────
+const CL   = 20;     // container left inner edge
+const CR   = 400;    // container right inner edge
+const CT   = 145;    // container top / danger line y
+const CB   = 680;    // container bottom inner edge
+const CW   = CR - CL;
+const WALL = 10;
+const MID  = BW / 2;
+const DROP_Y = CT - 8;
+
+// ── Physics ──────────────────────────────────────────────────────────────────
+const engine = Engine.create({ gravity: { y: 2.2 } });
+const world  = engine.world;
+
+const staticOpts = { isStatic: true, friction: 0.5, restitution: 0.15, label: 'wall' };
+World.add(world, [
+  Bodies.rectangle(CL - WALL / 2, (CT + CB) / 2, WALL, CB - CT + WALL, staticOpts), // left
+  Bodies.rectangle(CR + WALL / 2, (CT + CB) / 2, WALL, CB - CT + WALL, staticOpts), // right
+  Bodies.rectangle(MID, CB + WALL / 2, CW + WALL * 2, WALL, staticOpts),            // bottom
+]);
+
+// ── State ────────────────────────────────────────────────────────────────────
+let bodies       = [];
+let pending      = [];
+let score        = 0;
+let best         = +(localStorage.getItem('ss_best') || 0);
+let gameOver     = false;
+let aimX         = MID;
+let current      = rand();
+let next         = rand();
+let canDrop      = true;
+let lastDrop     = 0;
+let lastTime     = 0;
+
+function rand() { return Math.floor(Math.random() * SPAWN_POOL); }
+
+// ── Spawn ────────────────────────────────────────────────────────────────────
+function spawn(x, y, type) {
+  const body = Bodies.circle(x, y, ITEMS[type].r, {
+    restitution: 0.2,
+    friction: 0.5,
+    frictionAir: 0.012,
+    density: 0.003,
+    label: 'item',
+  });
+  body.itemType = type;
+  body.merging  = false;
+  World.add(world, body);
+  bodies.push(body);
+}
+
+// ── Merge logic ───────────────────────────────────────────────────────────────
+Events.on(engine, 'collisionStart', ({ pairs }) => {
+  for (const { bodyA, bodyB } of pairs) {
+    if (bodyA.label !== 'item' || bodyB.label !== 'item') continue;
+    if (bodyA.itemType !== bodyB.itemType) continue;
+    if (bodyA.merging || bodyB.merging) continue;
+    if (bodyA.itemType >= ITEMS.length - 1) continue;
+    bodyA.merging = bodyB.merging = true;
+    pending.push([bodyA, bodyB]);
+  }
+});
+
+Events.on(engine, 'afterUpdate', () => {
+  for (const [a, b] of pending) {
+    const x = (a.position.x + b.position.x) / 2;
+    const y = (a.position.y + b.position.y) / 2;
+    const t = a.itemType + 1;
+    bodies = bodies.filter(bd => bd !== a && bd !== b);
+    World.remove(world, a);
+    World.remove(world, b);
+    spawn(x, y, t);
+    score += ITEMS[t].score;
+    if (score > best) { best = score; localStorage.setItem('ss_best', best); }
+  }
+  pending = [];
+});
+
+// ── Drop & game over ──────────────────────────────────────────────────────────
+function drop() {
+  if (!canDrop || gameOver) return;
+  const r = ITEMS[current].r;
+  const x = Math.max(CL + r, Math.min(aimX, CR - r));
+  spawn(x, DROP_Y, current);
+  current  = next;
+  next     = rand();
+  canDrop  = false;
+  lastDrop = performance.now();
+  setTimeout(() => { canDrop = true; }, 650);
+}
+
+function checkLose() {
+  if (gameOver || performance.now() - lastDrop < 1300) return;
+  for (const b of bodies) {
+    if (b.merging) continue;
+    if (b.position.y - ITEMS[b.itemType].r < CT + 5) { endGame(); return; }
+  }
+}
+
+function endGame() {
+  gameOver = true;
+}
+
+function restart() {
+  for (const b of bodies) World.remove(world, b);
+  bodies   = [];
+  pending  = [];
+  score    = 0;
+  gameOver = false;
+  canDrop  = true;
+  lastDrop = 0;
+  aimX     = MID;
+  current  = rand();
+  next     = rand();
+}
+
+// ── Input ────────────────────────────────────────────────────────────────────
+function toCanvasX(clientX) {
+  const rect = canvas.getBoundingClientRect();
+  return (clientX - rect.left) / (canvas._scale || 1);
+}
+
+canvas.addEventListener('mousemove', e => { aimX = toCanvasX(e.clientX); });
+canvas.addEventListener('click', e => {
+  if (gameOver) { restart(); return; }
+  aimX = toCanvasX(e.clientX);
+  drop();
+});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  aimX = toCanvasX(e.touches[0].clientX);
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (gameOver) { restart(); return; }
+  drop();
+}, { passive: false });
+
+// ── Drawing helpers ───────────────────────────────────────────────────────────
+function drawCircle(x, y, type, alpha) {
+  const { r, color, emoji } = ITEMS[type];
+  ctx.save();
+  ctx.globalAlpha = alpha ?? 1;
+
+  const imgObj = IMG_CACHE[type];
+
+  if (imgObj) {
+    // Clip to circle so transparent SVG corners don't bleed outside
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(imgObj, x - r, y - r, r * 2, r * 2);
+  } else {
+    // Fallback: colored circle + emoji
+    if (r > 80) { ctx.shadowColor = color; ctx.shadowBlur = 14; }
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    const fs = Math.max(10, r * 0.88);
+    ctx.font = `${fs}px serif`;
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(emoji, x, y + 1);
+  }
+
+  ctx.restore();
+}
+
+function roundRect(x, y, w, h, rad) {
+  ctx.beginPath();
+  ctx.moveTo(x + rad, y);
+  ctx.lineTo(x + w - rad, y);
+  ctx.arcTo(x + w, y, x + w, y + rad, rad);
+  ctx.lineTo(x + w, y + h - rad);
+  ctx.arcTo(x + w, y + h, x + w - rad, y + h, rad);
+  ctx.lineTo(x + rad, y + h);
+  ctx.arcTo(x, y + h, x, y + h - rad, rad);
+  ctx.lineTo(x, y + rad);
+  ctx.arcTo(x, y, x + rad, y, rad);
+  ctx.closePath();
+}
+
+// ── Main loop ────────────────────────────────────────────────────────────────
+function frame(ts) {
+  requestAnimationFrame(frame);
+  const delta = Math.min(ts - lastTime, 48);
+  lastTime = ts;
+  Engine.update(engine, delta);
+  checkLose();
+
+  // background
+  ctx.fillStyle = '#1a0a2e';
+  ctx.fillRect(0, 0, BW, BH);
+
+  // stars (decorative)
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  for (let i = 0; i < 30; i++) {
+    // deterministic fake stars
+    const sx = (i * 137 + 42) % BW;
+    const sy = (i * 97  + 17) % CT;
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+
+  // ── score ──
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = 'bold 11px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('СЧЁТ', 24, 14);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 26px Arial';
+  ctx.fillText(score, 24, 28);
+
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = 'bold 11px Arial';
+  ctx.fillText('РЕКОРД', BW - 24, 14);
+  ctx.fillStyle = '#F1C40F';
+  ctx.font = 'bold 26px Arial';
+  ctx.fillText(best, BW - 24, 28);
+
+  // ── next preview ──
+  ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = 'bold 11px Arial';
+  ctx.textBaseline = 'top';
+  ctx.fillText('СЛЕДУЮЩИЙ', MID, 14);
+  drawCircle(MID, 85, next);
+
+  // ── container walls visual ──
+  ctx.fillStyle = 'rgba(255,255,255,0.07)';
+  ctx.fillRect(CL - WALL, CT, WALL, CB - CT + WALL);         // left wall
+  ctx.fillRect(CR,        CT, WALL, CB - CT + WALL);          // right wall
+  ctx.fillRect(CL - WALL, CB, CW + WALL * 2, WALL);           // bottom wall
+
+  // danger gradient
+  const grad = ctx.createLinearGradient(0, CT, 0, CT + 50);
+  grad.addColorStop(0, 'rgba(231,76,60,0.3)');
+  grad.addColorStop(1, 'rgba(231,76,60,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(CL, CT, CW, 50);
+
+  // danger line
+  ctx.setLineDash([6, 5]);
+  ctx.strokeStyle = 'rgba(231,76,60,0.6)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(CL, CT);
+  ctx.lineTo(CR, CT);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // ── game bodies ──
+  for (const b of bodies) {
+    if (!b.merging) drawCircle(b.position.x, b.position.y, b.itemType);
+  }
+
+  // ── aim ──
+  if (!gameOver && canDrop) {
+    const r  = ITEMS[current].r;
+    const ax = Math.max(CL + r, Math.min(aimX, CR - r));
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(ax, DROP_Y + r);
+    ctx.lineTo(ax, CB);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    drawCircle(ax, DROP_Y, current, 0.7);
+  }
+
+  // ── game over ──
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(10,5,20,0.82)';
+    ctx.fillRect(0, 0, BW, BH);
+
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+
+    ctx.font      = 'bold 48px Arial';
+    ctx.fillStyle = '#E74C3C';
+    ctx.fillText('КОНЕЦ!', MID, 260);
+
+    ctx.font      = 'bold 22px Arial';
+    ctx.fillStyle = '#fff';
+    ctx.fillText('Счёт: ' + score, MID, 320);
+    ctx.fillStyle = '#F1C40F';
+    ctx.fillText('Рекорд: ' + best, MID, 355);
+
+    roundRect(MID - 110, 395, 220, 56, 14);
+    ctx.fillStyle = '#E74C3C';
+    ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 20px Arial';
+    ctx.fillText('ИГРАТЬ СНОВА', MID, 395 + 28);
+
+    // hint
+    ctx.font      = '13px Arial';
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.fillText('нажми куда угодно', MID, 470);
+  }
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

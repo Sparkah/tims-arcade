@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Space Dodge</title>
+<script src="https://yandex.ru/games/sdk/v2"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+    background: #000;
+    max-width: 100vw;
+    max-height: 100vh;
+    touch-action: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function() {
+  'use strict';
+
+  // --- Constants ---
+  var W = 800, H = 600;
+  var SHIP_W = 40, SHIP_H = 30;
+  var SHIP_HITBOX_R = 12;
+  var PLAYER_SPEED = 300; // 5px/frame * 60fps
+  var START_X = 400, START_Y = 500;
+  var MAX_LIVES = 3;
+  var EDGE_PAD = 20;
+
+  var AST_SIZES = [15, 25, 38];
+  var AST_SPEED_MIN = 120; // 2px/f * 60
+  var AST_SPEED_MAX = 300; // 5px/f * 60
+  var AST_SPEED_CAP = 480; // 8px/f * 60
+  var AST_SPAWN_BASE = 0.7;
+  var AST_SPAWN_MIN = 0.2;
+
+  var STAR_OR = 12, STAR_IR = 5;
+  var STAR_HIT_R = 14;
+  var STAR_SPEED = 120; // 2px/f * 60
+  var STAR_PTS = 10;
+
+  var BG_COUNT = 100;
+  var BG_SPEED = 18; // 0.3px/f * 60
+
+  // --- Colors (design spec) ---
+  var C_BG       = '#0B0E17';
+  var C_SHIP     = '#00E5FF';
+  var C_SHIP_S   = '#0091EA';
+  var C_ENGINE   = '#00B0FF';
+  var C_AST      = '#A1623A';
+  var C_AST_D    = '#7A4428';
+  var C_STAR     = '#FFD740';
+  var C_STAR_G   = '#FFECB3';
+  var C_TEXT     = '#FFFFFF';
+  var C_TEXT_S   = '#B0BEC5';
+  var C_ACCENT   = '#00E5FF';
+  var C_DANGER   = '#FF5252';
+  var C_DIM      = '#1A1F2E';
+
+  // --- Canvas ---
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+  canvas.width = W;
+  canvas.height = H;
+
+  function resize() {
+    var r = W / H, vw = window.innerWidth, vh = window.innerHeight;
+    if (vw / vh > r) {
+      canvas.style.height = vh + 'px';
+      canvas.style.width = (vh * r) + 'px';
+    } else {
+      canvas.style.width = vw + 'px';
+      canvas.style.height = (vw / r) + 'px';
+    }
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // --- Yandex SDK ---
+  var ysdk = null, lboard = null;
+  if (typeof YaGames !== 'undefined') {
+    YaGames.init().then(function(sdk) {
+      ysdk = sdk;
+      sdk.getLeaderboards().then(function(l) { lboard = l; }).catch(function(){});
+    }).catch(function(){});
+  }
+  function submitScore(s) {
+    if (lboard) lboard.setLeaderboardScore('main', s).catch(function(){});
+  }
+
+  // --- State ---
+  var S_START = 0, S_PLAY = 1, S_OVER = 2;
+  var state = S_START;
+  var score = 0;
+  var hi = parseInt(localStorage.getItem('spacedodge_hi') || '0', 10);
+  var lives = MAX_LIVES;
+  var gTime = 0;
+  var lastT = 0;
+
+  // Timers
+  var overFade = 0;
+  var respawnT = 0;
+  var invincT = 0;
+  var flashT = 0;
+
+  var px = START_X, py = START_Y;
+
+  // --- Input ---
+  var keys = {};
+  var touchX = null;
+
+  document.addEventListener('keydown', function(e) {
+    keys[e.code] = true;
+    if (state === S_START) startGame();
+    else if (state === S_OVER && (e.code === 'Space' || e.code === 'Enter')) startGame();
+    if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].indexOf(e.code) >= 0) e.preventDefault();
+  });
+  document.addEventListener('keyup', function(e) { keys[e.code] = false; });
+
+  canvas.addEventListener('touchstart', function(e) {
+    e.preventDefault();
+    if (state === S_START) { startGame(); return; }
+    if (state === S_OVER) { startGame(); return; }
+    doTouch(e);
+  }, { passive: false });
+  canvas.addEventListener('touchmove', function(e) { e.preventDefault(); doTouch(e); }, { passive: false });
+  canvas.addEventListener('touchend', function(e) { e.preventDefault(); touchX = null; }, { passive: false });
+  canvas.addEventListener('mousedown', function() {
+    if (state === S_START) startGame();
+    else if (state === S_OVER) startGame();
+  });
+
+  function doTouch(e) {
+    var r = canvas.getBoundingClientRect();
+    touchX = (e.touches[0].clientX - r.left) * (W / r.width);
+  }
+
+  // --- Arrays ---
+  var asteroids = [], starItems = [], particles = [], floats = [], trail = [], bgStars = [];
+
+  function initBg() {
+    bgStars = [];
+    for (var i = 0; i < BG_COUNT; i++) {
+      bgStars.push({
+        x: Math.random() * W, y: Math.random() * H,
+        r: 1 + Math.random(),
+        br: 0.2 + Math.random() * 0.3,
+        to: Math.random() * Math.PI * 2,
+        tp: 2 + Math.random() * 2
+      });
+    }
+  }
+  initBg();
+
+  // --- Difficulty ---
+  function speedBonus() {
+    return Math.min(Math.floor(score / 500) * 30, AST_SPEED_CAP - AST_SPEED_MAX);
+  }
+
+  // --- Spawn ---
+  var spawnT = 0, astSinceStar = 0;
+
+  function spawnAst() {
+    var r = AST_SIZES[Math.floor(Math.random() * 3)];
+    var base = AST_SPEED_MIN + Math.random() * (AST_SPEED_MAX - AST_SPEED_MIN);
+    var spd = Math.min(base + speedBonus(), AST_SPEED_CAP);
+    var n = 8 + Math.floor(Math.random() * 3);
+    var verts = [];
+    for (var i = 0; i < n; i++) {
+      var a = (i / n) * Math.PI * 2;
+      verts.push({ a: a, d: r * (0.7 + Math.random() * 0.3) });
+    }
+    var craters = [];
+    var cc = 1 + Math.floor(Math.random() * 2);
+    for (var i = 0; i < cc; i++) {
+      var ca = Math.random() * Math.PI * 2;
+      var cd = Math.random() * r * 0.5;
+      craters.push({ x: Math.cos(ca) * cd, y: Math.sin(ca) * cd, r: 3 + Math.random() * 3 });
+    }
+    asteroids.push({
+      x: 30 + Math.random() * (W - 60), y: -50,
+      r: r, spd: spd,
+      rot: Math.random() * Math.PI * 2,
+      rs: (0.5 + Math.random()) * (Math.random() < 0.5 ? 1 : -1) * 0.026,
+      v: verts, cr: craters
+    });
+    astSinceStar++;
+  }
+
+  function spawnStar() {
+    starItems.push({
+      x: 30 + Math.random() * (W - 60), y: -30,
+      p: Math.random() * Math.PI * 2
+    });
+    astSinceStar = 0;
+  }
+
+  // --- Particles ---
+  function burst(x, y, cols, n, sMin, sMax, lMin, lMax, rMin, rMax) {
+    for (var i = 0; i < n; i++) {
+      var a = Math.random() * Math.PI * 2;
+      var s = sMin + Math.random() * (sMax - sMin);
+      var l = lMin + Math.random() * (lMax - lMin);
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        l: l, ml: l,
+        r: rMin + Math.random() * (rMax - rMin),
+        c: cols[Math.floor(Math.random() * cols.length)]
+      });
+    }
+  }
+
+  function addFloat(x, y, txt, col) {
+    floats.push({ x: x, y: y, t: txt, c: col, l: 0.5, ml: 0.5 });
+  }
+
+  // --- Collision ---
+  function hit(x1, y1, r1, x2, y2, r2) {
+    var dx = x1 - x2, dy = y1 - y2;
+    return Math.sqrt(dx * dx + dy * dy) < r1 + r2;
+  }
+
+  // --- Game flow ---
+  function startGame() {
+    state = S_PLAY;
+    score = 0; lives = MAX_LIVES; gTime = 0; spawnT = 0; astSinceStar = 0;
+    overFade = 0; respawnT = 0; invincT = 0; flashT = 0;
+    px = START_X; py = START_Y;
+    asteroids = []; starItems = []; particles = []; floats = []; trail = [];
+    touchX = null;
+    lastT = performance.now();
+  }
+
+  function die() {
+    burst(px, py, [C_DANGER, C_STAR, C_SHIP], 25, 120, 360, 0.5, 0.75, 2, 5);
+    flashT = 0.05;
+    lives--;
+    if (lives <= 0) {
+      state = S_OVER;
+      overFade = 0;
+      if (score > hi) { hi = score; localStorage.setItem('spacedodge_hi', String(hi)); }
+      submitScore(score);
+    } else {
+      respawnT = 1.0;
+      invincT = 3.0;
+    }
+  }
+
+  // --- Update ---
+  function update(dt) {
+    // BG stars
+    for (var i = 0; i < bgStars.length; i++) {
+      var b = bgStars[i];
+      b.y += BG_SPEED * dt;
+      if (b.y > H) { b.y = 0; b.x = Math.random() * W; }
+    }
+
+    // Particles always
+    for (var i = particles.length - 1; i >= 0; i--) {
+      var p = particles[i];
+      p.vx *= Math.pow(0.95, dt * 60);
+      p.vy *= Math.pow(0.95, dt * 60);
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.l -= dt;
+      if (p.l <= 0) particles.splice(i, 1);
+    }
+
+    // Float texts
+    for (var i = floats.length - 1; i >= 0; i--) {
+      var f = floats[i];
+      f.y -= 120 * dt; f.l -= dt;
+      if (f.l <= 0) floats.splice(i, 1);
+    }
+
+    // Trail
+    for (var i = trail.length - 1; i >= 0; i--) {
+      var t = trail[i];
+      t.y += (60 + Math.random() * 60) * dt;
+      t.x += t.dx * dt;
+      t.l -= dt;
+      if (t.l <= 0) trail.splice(i, 1);
+    }
+
+    if (flashT > 0) flashT -= dt;
+
+    if (state === S_OVER) {
+      overFade = Math.min(overFade + dt / 0.5, 1);
+      return;
+    }
+    if (state !== S_PLAY) return;
+
+    gTime += dt;
+
+    // Respawn delay
+    if (respawnT > 0) {
+      respawnT -= dt;
+      if (respawnT <= 0) { px = START_X; py = START_Y; }
+      updateWorld(dt);
+      if (invincT > 0) invincT -= dt;
+      return;
+    }
+    if (invincT > 0) invincT -= dt;
+
+    // Player movement
+    var mx = 0;
+    if (keys['ArrowLeft'] || keys['KeyA']) mx -= 1;
+    if (keys['ArrowRight'] || keys['KeyD']) mx += 1;
+
+    if (touchX !== null) {
+      var diff = touchX - px;
+      if (Math.abs(diff) > 5) {
+        var ts = Math.min(Math.abs(diff) * 8, PLAYER_SPEED);
+        px += (diff > 0 ? 1 : -1) * ts * dt;
+        mx = 0;
+      }
+    }
+    px += mx * PLAYER_SPEED * dt;
+    px = Math.max(EDGE_PAD, Math.min(W - EDGE_PAD, px));
+
+    // Engine trail
+    if (Math.random() < 0.5) {
+      var tl = 0.25 + Math.random() * 0.08;
+      trail.push({ x: px, y: py + 15, dx: (Math.random() - 0.5) * 60, r: 2 + Math.random() * 2, l: tl, ml: tl });
+    }
+
+    score += Math.round(dt * 10);
+
+    updateWorld(dt);
+
+    // Collisions: asteroids
+    if (invincT <= 0) {
+      for (var i = asteroids.length - 1; i >= 0; i--) {
+        var a = asteroids[i];
+        if (hit(px, py, SHIP_HITBOX_R, a.x, a.y, a.r * 0.85)) {
+          asteroids.splice(i, 1);
+          die();
+          return;
+        }
+      }
+    }
+
+    // Collisions: stars
+    for (var i = starItems.length - 1; i >= 0; i--) {
+      var s = starItems[i];
+      if (hit(px, py, SHIP_HITBOX_R + 2, s.x, s.y, STAR_HIT_R)) {
+        score += STAR_PTS;
+        burst(s.x, s.y, [C_STAR], 10, 60, 180, 0.25, 0.33, 1, 3);
+        addFloat(s.x, s.y - 10, '+' + STAR_PTS, C_STAR);
+        starItems.splice(i, 1);
+      }
+    }
+  }
+
+  function updateWorld(dt) {
+    // Spawn
+    spawnT -= dt;
+    if (spawnT <= 0) {
+      spawnAst();
+      var interval = AST_SPAWN_BASE / (1 + gTime * 0.015);
+      spawnT = Math.max(interval, AST_SPAWN_MIN);
+    }
+    if (astSinceStar >= 3 + Math.floor(Math.random() * 3)) spawnStar();
+
+    // Move asteroids
+    for (var i = asteroids.length - 1; i >= 0; i--) {
+      var a = asteroids[i];
+      a.y += a.spd * dt;
+      a.rot += a.rs * dt * 60;
+      if (a.y > H + 60) asteroids.splice(i, 1);
+    }
+
+    // Move stars
+    for (var i = starItems.length - 1; i >= 0; i--) {
+      var s = starItems[i];
+      s.y += STAR_SPEED * dt;
+      s.p += dt * 7.85;
+      if (s.y > H + 30) starItems.splice(i, 1);
+    }
+  }
+
+  // --- Drawing ---
+  function draw() {
+    ctx.fillStyle = C_BG;
+    ctx.fillRect(0, 0, W, H);
+
+    // BG stars with twinkle
+    var now = performance.now() / 1000;
+    for (var i = 0; i < bgStars.length; i++) {
+      var b = bgStars[i];
+      var tw = 0.5 + 0.5 * Math.sin(now / b.tp * Math.PI * 2 + b.to);
+      ctx.globalAlpha = b.br * tw;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    if (state === S_START) { drawStart(); return; }
+
+    // Engine trail
+    for (var i = 0; i < trail.length; i++) {
+      var t = trail[i];
+      var al = (t.l / t.ml) * 0.8;
+      ctx.globalAlpha = al;
+      ctx.fillStyle = C_ENGINE;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, t.r * (t.l / t.ml), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Asteroids
+    for (var i = 0; i < asteroids.length; i++) drawAst(asteroids[i]);
+
+    // Star collectibles
+    for (var i = 0; i < starItems.length; i++) drawStarItem(starItems[i]);
+
+    // Player
+    if (state === S_PLAY && respawnT <= 0) {
+      var show = true;
+      if (invincT > 0) show = Math.floor(invincT * 10) % 2 === 0;
+      if (show) drawShip(px, py, 1);
+    }
+
+    // Particles
+    for (var i = 0; i < particles.length; i++) {
+      var p = particles[i];
+      var al = p.l / p.ml;
+      ctx.globalAlpha = al;
+      ctx.fillStyle = p.c;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * al, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Float texts
+    for (var i = 0; i < floats.length; i++) {
+      var f = floats[i];
+      ctx.globalAlpha = f.l / f.ml;
+      ctx.fillStyle = f.c;
+      ctx.font = 'bold 16px "Courier New", Courier, monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(f.t, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
+
+    // Flash
+    if (flashT > 0) {
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, W, H);
+      ctx.globalAlpha = 1;
+    }
+
+    drawHUD();
+    if (state === S_OVER) drawOver();
+  }
+
+  function drawShip(x, y, scale) {
+    ctx.save();
+    ctx.translate(x, y);
+    if (scale !== 1) ctx.scale(scale, scale);
+    ctx.fillStyle = C_SHIP;
+    ctx.strokeStyle = C_SHIP_S;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, -15);
+    ctx.lineTo(-20, 15);
+    ctx.lineTo(20, 15);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawShipIcon(x, y, dimmed) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = dimmed ? C_DIM : C_SHIP;
+    ctx.beginPath();
+    ctx.moveTo(0, -6);
+    ctx.lineTo(-8, 6);
+    ctx.lineTo(8, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawAst(a) {
+    ctx.save();
+    ctx.translate(a.x, a.y);
+    ctx.rotate(a.rot);
+
+    ctx.fillStyle = C_AST;
+    ctx.strokeStyle = C_AST_D;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    var v = a.v[0];
+    ctx.moveTo(Math.cos(v.a) * v.d, Math.sin(v.a) * v.d);
+    for (var i = 1; i < a.v.length; i++) {
+      v = a.v[i];
+      ctx.lineTo(Math.cos(v.a) * v.d, Math.sin(v.a) * v.d);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    // Craters
+    ctx.fillStyle = C_AST_D;
+    for (var i = 0; i < a.cr.length; i++) {
+      var c = a.cr[i];
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.restore();
+  }
+
+  function drawStarItem(s) {
+    var pulse = 1 + (Math.sin(s.p) * 0.5 + 0.5) * 0.15;
+    var or = STAR_OR * pulse, ir = STAR_IR * pulse;
+
+    ctx.save();
+    ctx.shadowBlur = 8;
+    ctx.shadowColor = C_STAR_G;
+    ctx.fillStyle = C_STAR;
+    ctx.beginPath();
+    for (var i = 0; i < 10; i++) {
+      var ang = (i * Math.PI / 5) - Math.PI / 2;
+      var r = i % 2 === 0 ? or : ir;
+      if (i === 0) ctx.moveTo(s.x + Math.cos(ang) * r, s.y + Math.sin(ang) * r);
+      else ctx.lineTo(s.x + Math.cos(ang) * r, s.y + Math.sin(ang) * r);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    var ss = ('0000' + score).slice(-4);
+    ctx.fillStyle = C_TEXT;
+    ctx.font = 'bold 24px "Courier New", Courier, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText('Score: ' + ss, 20, 32);
+
+    // Lives as ship icons top-right
+    for (var i = 0; i < MAX_LIVES; i++) {
+      drawShipIcon(780 - i * 24, 28, i >= lives);
+    }
+  }
+
+  function rRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  }
+
+  function drawBtn(label, bx, by) {
+    var pulse = 0.6 + 0.4 * (Math.sin(performance.now() / 750 * Math.PI) * 0.5 + 0.5);
+    ctx.save();
+    ctx.globalAlpha = pulse;
+    ctx.strokeStyle = C_ACCENT;
+    ctx.lineWidth = 2;
+    rRect(bx - 90, by - 25, 180, 50, 6);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = C_TEXT;
+    ctx.font = 'bold 28px Arial, "Helvetica Neue", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, bx, by + 10);
+    ctx.restore();
+  }
+
+  function drawStart() {
+    // Title
+    ctx.fillStyle = C_ACCENT;
+    ctx.font = '900 48px "Arial Black", Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('SPACE DODGE', W / 2, 180);
+
+    // Ship icon 1.5x
+    drawShip(W / 2, 260, 1.5);
+
+    // PLAY button
+    drawBtn('PLAY', W / 2, 340);
+
+    // Instructions
+    ctx.fillStyle = C_TEXT_S;
+    ctx.font = '18px Arial, "Helvetica Neue", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Arrow keys or touch to move', W / 2, 400);
+    ctx.fillText('Dodge asteroids, collect stars!', W / 2, 430);
+  }
+
+  function drawOver() {
+    // Overlay fade
+    ctx.globalAlpha = 0.7 * overFade;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = overFade;
+
+    ctx.textAlign = 'center';
+
+    // GAME OVER
+    ctx.fillStyle = C_DANGER;
+    ctx.font = '900 56px "Arial Black", Arial, sans-serif';
+    ctx.fillText('GAME OVER', W / 2, 200);
+
+    // Score
+    ctx.fillStyle = C_STAR;
+    ctx.font = 'bold 36px "Courier New", Courier, monospace';
+    ctx.fillText('Score: ' + score, W / 2, 280);
+
+    // Best
+    ctx.fillStyle = C_TEXT_S;
+    ctx.font = '24px "Courier New", Courier, monospace';
+    ctx.fillText('Best: ' + hi, W / 2, 320);
+
+    // RETRY button (only after fade complete)
+    if (overFade >= 1) drawBtn('RETRY', W / 2, 400);
+
+    ctx.globalAlpha = 1;
+  }
+
+  // --- Loop ---
+  function loop(time) {
+    var dt = Math.min((time - lastT) / 1000, 0.05);
+    lastT = time;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  lastT = performance.now();
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,2121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Cell Division TD</title>
+  <style>
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #f4fbf7;
+      color: #18312c;
+      touch-action: none;
+      overscroll-behavior: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    canvas {
+      display: block;
+      width: 100dvw;
+      height: 100dvh;
+      touch-action: none;
+      outline: none;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" tabindex="0" aria-label="Cell Division TD game canvas"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const TAU = Math.PI * 2;
+  const LANES = 4;
+  const COLS = 7;
+  const SAVE_KEY = 'cell_division_td_v1';
+  const CELL_PALETTE = ['#2fd0a5', '#3b82f6', '#f4b942', '#f2688f', '#8b5cf6', '#22c55e'];
+  const ENEMY_PALETTE = {
+    virion: '#f05a7d',
+    splitter: '#fb923c',
+    shell: '#8b5cf6'
+  };
+  const rand = (min, max) => min + Math.random() * (max - min);
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  const easeOut = (t) => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
+
+  let W = 1;
+  let H = 1;
+  let dpr = 1;
+  let lastTs = 0;
+  let state = null;
+  let pointer = { x: -999, y: -999, down: false };
+  let buttons = [];
+  let slots = [];
+  let benchRects = [];
+  let audioCtx = null;
+  let masterGain = null;
+  let muted = false;
+  let musicClock = 0;
+  let bestWave = 1;
+
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
+    if (Number.isFinite(saved.bestWave)) bestWave = saved.bestWave;
+  } catch (e) {}
+
+  function cellMaxHp(level, phenotype) {
+    const base = 42 + level * 12 + level * level * 3;
+    return Math.round(base * (phenotype === 'phagocyte' ? 1.85 : 1));
+  }
+
+  function newCell(level, source, phenotype = 'secretor') {
+    const maxHp = cellMaxHp(level, phenotype);
+    return {
+      id: Math.random().toString(36).slice(2),
+      level,
+      source,
+      phenotype,
+      hp: maxHp,
+      maxHp,
+      cooldown: rand(0, 0.2),
+      mitosis: level === 1 ? 0.35 : 0.12,
+      pulse: rand(0, TAU),
+      birth: 0,
+      flash: 0,
+      splitT: 0,
+      targetId: null
+    };
+  }
+
+  function newScaffold(lane, col) {
+    return {
+      id: `matrix-${lane}-${col}`,
+      lane,
+      col,
+      hp: 96,
+      maxHp: 96,
+      flash: 0,
+      pulse: rand(0, TAU)
+    };
+  }
+
+  function resetGame() {
+    state = {
+      mode: 'menu',
+      time: 0,
+      wave: 1,
+      atp: 96,
+      pendingNutrient: 0,
+      score: 0,
+      membrane: 18,
+      membraneMax: 18,
+      buyCost: 24,
+      divideCost: 38,
+      kills: 0,
+      merges: 0,
+      divisions: 0,
+      cellsLost: 0,
+      scaffoldsLost: 0,
+      selected: null,
+      grid: Array.from({ length: LANES }, () => Array.from({ length: COLS }, () => null)),
+      bench: [newCell(1, 'starter-bench')],
+      scaffolds: Array.from({ length: LANES }, (_, lane) => newScaffold(lane, 3)),
+      enemies: [],
+      shots: [],
+      particles: [],
+      ripples: [],
+      floatTexts: [],
+      nutrientDrops: [],
+      husks: [],
+      organelles: [],
+      waveActive: false,
+      waveSize: 0,
+      spawned: 0,
+      spawnTimer: 0,
+      toast: '',
+      toastT: 0,
+      shake: 0,
+      autoId: 0
+    };
+
+    state.grid[0][5] = newCell(1, 'starter-field-front', 'phagocyte');
+    state.grid[1][2] = newCell(1, 'starter-field-rear', 'secretor');
+    state.grid[2][2] = newCell(1, 'starter-field-rear', 'secretor');
+
+    for (let i = 0; i < 42; i++) {
+      state.organelles.push({
+        x: Math.random(),
+        y: Math.random(),
+        r: rand(2, 7),
+        drift: rand(0.02, 0.09),
+        phase: rand(0, TAU),
+        color: Math.random() > 0.5 ? '#a7f3d0' : '#bfdbfe'
+      });
+    }
+  }
+
+  function persist() {
+    try {
+      if (state) bestWave = Math.max(bestWave, state.wave);
+      localStorage.setItem(SAVE_KEY, JSON.stringify({ bestWave }));
+    } catch (e) {}
+  }
+
+  function ensureAudio() {
+    if (!audioCtx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      audioCtx = new AC();
+      masterGain = audioCtx.createGain();
+      masterGain.gain.value = muted ? 0 : 0.12;
+      masterGain.connect(audioCtx.destination);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function tone(freq, duration, type, volume, slide) {
+    if (!audioCtx || muted || !masterGain) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type || 'sine';
+    osc.frequency.setValueAtTime(freq, now);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(45, freq + slide), now + duration);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(volume || 0.1, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc.connect(gain);
+    gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + duration + 0.03);
+  }
+
+  function sfx(kind) {
+    ensureAudio();
+    if (!audioCtx || muted) return;
+    if (kind === 'buy') tone(300, 0.08, 'triangle', 0.12, 90);
+    else if (kind === 'merge') {
+      tone(360, 0.11, 'triangle', 0.13, 190);
+      setTimeout(() => tone(620, 0.1, 'sine', 0.09, 120), 70);
+    } else if (kind === 'divide') {
+      tone(250, 0.15, 'sine', 0.1, 150);
+      setTimeout(() => tone(520, 0.14, 'triangle', 0.08, 80), 80);
+    } else if (kind === 'wave') tone(155, 0.22, 'sawtooth', 0.08, 90);
+    else if (kind === 'hit') tone(780 + rand(-60, 60), 0.045, 'square', 0.025, -90);
+    else if (kind === 'break') tone(130, 0.22, 'sawtooth', 0.11, -55);
+    else if (kind === 'clear') {
+      tone(420, 0.11, 'triangle', 0.1, 90);
+      setTimeout(() => tone(720, 0.14, 'sine', 0.08, 90), 90);
+    } else if (kind === 'deny') tone(120, 0.12, 'square', 0.08, -30);
+    else tone(260, 0.05, 'triangle', 0.07, 45);
+  }
+
+  function updateMusic(dt) {
+    if (!audioCtx || muted || !state) return;
+    musicClock -= dt;
+    if (musicClock <= 0) {
+      musicClock = state.mode === 'combat' ? 0.46 : 0.82;
+      tone(state.mode === 'combat' ? 98 : 82, 0.07, 'sine', 0.018, 0);
+      if (state.mode !== 'menu') tone(196, 0.05, 'triangle', 0.014, 10);
+    }
+  }
+
+  function resize() {
+    dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    W = Math.max(1, window.innerWidth || canvas.clientWidth || 320);
+    H = Math.max(1, window.innerHeight || canvas.clientHeight || 360);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    render();
+  }
+
+  function isShortLandscape() {
+    return H < 480 && W > H;
+  }
+
+  function headerHeight() {
+    if (isShortLandscape()) return 58;
+    return W < 560 ? 150 : Math.max(74, Math.min(108, H * 0.13));
+  }
+
+  function bottomHeight() {
+    if (isShortLandscape()) return Math.max(76, Math.min(92, H * 0.28));
+    return Math.max(150, Math.min(176, H * 0.22));
+  }
+
+  function layout() {
+    const margin = Math.max(14, Math.min(28, W * 0.03));
+    const shortLandscape = isShortLandscape();
+    const headerH = headerHeight();
+    const bottomH = bottomHeight();
+    const gridLeft = margin;
+    const gridRight = W - margin;
+    const gridTop = headerH + 8;
+    const gridBottom = H - bottomH - 8;
+    const laneGap = Math.max(6, Math.min(12, H * 0.012));
+    const colGap = Math.max(6, Math.min(12, W * 0.012));
+    const slotW = (gridRight - gridLeft - colGap * (COLS - 1)) / COLS;
+    const slotH = (gridBottom - gridTop - laneGap * (LANES - 1)) / LANES;
+    const slotMin = shortLandscape ? 24 : 34;
+    const size = Math.max(slotMin, Math.min(slotW, slotH));
+    const left = gridLeft + Math.max(0, ((gridRight - gridLeft) - (size * COLS + colGap * (COLS - 1))) / 2);
+    const top = gridTop + Math.max(0, ((gridBottom - gridTop) - (size * LANES + laneGap * (LANES - 1))) / 2);
+
+    slots = [];
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        slots.push({
+          lane,
+          col,
+          x: left + col * (size + colGap),
+          y: top + lane * (size + laneGap),
+          w: size,
+          h: size,
+          cx: left + col * (size + colGap) + size / 2,
+          cy: top + lane * (size + laneGap) + size / 2
+        });
+      }
+    }
+
+    const benchTop = H - bottomH + (shortLandscape ? 10 : 16);
+    const benchSize = shortLandscape ? Math.max(30, Math.min(36, W * 0.075)) : Math.max(42, Math.min(60, W * 0.12));
+    benchRects = [];
+    const maxBench = Math.min(shortLandscape ? 4 : 7, state ? state.bench.length : 0);
+    for (let i = 0; i < maxBench; i++) {
+      benchRects.push({
+        i,
+        x: margin + i * (benchSize + 8),
+        y: benchTop,
+        w: benchSize,
+        h: benchSize,
+        cx: margin + i * (benchSize + 8) + benchSize / 2,
+        cy: benchTop + benchSize / 2
+      });
+    }
+
+    buttons = [];
+    const gap = 6;
+    const feedCell = state && state.selected && state.selected.type === 'grid' ? selectedCell() : null;
+    const needsGuard = state && !hasPhagocyte();
+    const growLabel = feedCell && state.mode === 'build'
+      ? `Feed ${feedCost(feedCell)}`
+      : `${needsGuard ? 'Grow Guard' : 'Grow'} ${state ? state.buyCost : 24}`;
+    const waveLabel = state && state.mode === 'combat'
+      ? 'Wave Live'
+      : state && state.mode === 'over'
+        ? 'Reset Required'
+        : 'Start Wave';
+    if (shortLandscape) {
+      const btnH = 38;
+      const sideW = Math.max(88, Math.min(96, (W - margin * 2 - gap * 2) / 3));
+      const totalW = sideW * 3 + gap * 2;
+      const by = H - btnH - 8;
+      let bx = W - margin - totalW;
+      addButton('buy', bx, by, sideW, btnH, growLabel);
+      bx += sideW + gap;
+      addButton('divide', bx, by, sideW, btnH, `Split ${state ? state.divideCost : 38}`);
+      bx += sideW + gap;
+      addButton('wave', bx, by, sideW, btnH, waveLabel);
+    } else {
+      const btnH = 40;
+      const sideW = Math.max(116, Math.min(154, W * 0.24));
+      const bx = W - margin - sideW;
+      let by = H - bottomH + 8;
+      addButton('buy', bx, by, sideW, btnH, growLabel);
+      by += btnH + gap;
+      addButton('divide', bx, by, sideW, btnH, `Split ${state ? state.divideCost : 38}`);
+      by += btnH + gap;
+      addButton('wave', bx, by, sideW, btnH, waveLabel);
+    }
+
+    const small = Math.max(42, Math.min(54, W * 0.12));
+    addButton('mute', W - margin - small, margin, small, small, muted ? 'Sound' : 'Mute');
+    addButton('restart', W - margin - small * 2 - 8, margin, small, small, 'Reset');
+  }
+
+  function addButton(id, x, y, w, h, label) {
+    buttons.push({ id, x, y, w, h, label });
+  }
+
+  function selectedCell() {
+    if (!state.selected) return null;
+    if (state.selected.type === 'bench') return state.bench[state.selected.i] || null;
+    return state.grid[state.selected.lane] && state.grid[state.selected.lane][state.selected.col];
+  }
+
+  function showToast(text) {
+    state.toast = text;
+    state.toastT = 1.3;
+  }
+
+  function cellStats(cellOrLevel) {
+    const level = typeof cellOrLevel === 'number' ? cellOrLevel : cellOrLevel.level;
+    const phenotype = typeof cellOrLevel === 'number' ? 'secretor' : cellOrLevel.phenotype;
+    const stats = {
+      damage: 7 + level * 7 + level * level * 1.3,
+      fire: Math.max(0.24, 0.86 - level * 0.065),
+      range: 260 + level * 26,
+      radius: 15 + level * 2.1
+    };
+    if (phenotype === 'phagocyte') {
+      stats.damage *= 0.42;
+      stats.fire *= 1.18;
+      stats.range *= 0.58;
+      stats.radius *= 1.18;
+    }
+    return stats;
+  }
+
+  function scaffoldAt(lane, col) {
+    return state.scaffolds.find((scaffold) => scaffold.lane === lane && scaffold.col === col) || null;
+  }
+
+  function hasPhagocyte() {
+    if (state.bench.some((cell) => cell && cell.phenotype === 'phagocyte')) return true;
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const cell = state.grid[lane][col];
+        if (cell && cell.phenotype === 'phagocyte') return true;
+      }
+    }
+    return false;
+  }
+
+  function feedCost(cell) {
+    const level = cell ? cell.level : 1;
+    return 12 + level * 8 + Math.floor(level * level * 2);
+  }
+
+  function nutrientLabel() {
+    const pending = Math.floor(state.pendingNutrient || 0);
+    return `Nutrient ${Math.floor(state.atp)}${pending > 0 ? ` +${pending}` : ''}`;
+  }
+
+  function enemyStats(kind, wave) {
+    const base = {
+      virion: { hp: 30, speed: 42, reward: 7, r: 13, attack: 7, attackRate: 0.72 },
+      splitter: { hp: 44, speed: 35, reward: 9, r: 15, attack: 6, attackRate: 0.56 },
+      shell: { hp: 72, speed: 25, reward: 13, r: 17, attack: 13, attackRate: 0.9 }
+    }[kind];
+    const scale = 1 + wave * 0.18;
+    return {
+      hp: base.hp * scale + wave * wave * 1.6,
+      speed: base.speed + Math.min(26, wave * 1.7),
+      reward: base.reward + Math.floor(wave * 1.4),
+      r: base.r,
+      attack: base.attack * (1 + wave * 0.08),
+      attackRate: Math.max(0.38, base.attackRate - wave * 0.008)
+    };
+  }
+
+  function startBuildFromMenu() {
+    if (state.mode === 'menu') {
+      state.mode = 'build';
+      showToast('Merge equal cells during or between waves.');
+    }
+  }
+
+  function buyCell() {
+    startBuildFromMenu();
+    if (state.mode !== 'build') {
+      showToast('Wait for the wave to settle');
+      sfx('deny');
+      return;
+    }
+    const selected = selectedCell();
+    if (state.selected && state.selected.type === 'grid' && selected) {
+      feedSelectedCell(selected);
+      return;
+    }
+    if (state.bench.length >= 7) {
+      showToast('Bench is full');
+      sfx('deny');
+      return;
+    }
+    if (state.atp < state.buyCost) {
+      showToast('Need more nutrient');
+      sfx('deny');
+      return;
+    }
+    const phenotype = hasPhagocyte() ? 'secretor' : 'phagocyte';
+    state.atp -= state.buyCost;
+    state.buyCost = Math.min(160, Math.ceil(state.buyCost * 1.09 + 2));
+    state.bench.push(newCell(1, 'grown', phenotype));
+    showToast(phenotype === 'phagocyte' ? 'New front-line guard grown' : 'New secretor cell grown');
+    sfx('buy');
+  }
+
+  function feedSelectedCell(cell) {
+    const cost = feedCost(cell);
+    if (state.atp < cost) {
+      showToast('Need more nutrient');
+      sfx('deny');
+      return;
+    }
+    if (cell.level >= 9) {
+      showToast('Cell is saturated');
+      sfx('deny');
+      return;
+    }
+    state.atp -= cost;
+    cell.level += 1;
+    cell.maxHp = cellMaxHp(cell.level, cell.phenotype);
+    cell.hp = cell.maxHp;
+    cell.mitosis = Math.min(0.9, cell.mitosis + 0.32);
+    cell.flash = 0.5;
+    cell.splitT = 0.5;
+    state.score += 10 * cell.level;
+    const source = state.selected;
+    const slot = getSlot(source.lane, source.col);
+    burst(slot.cx, slot.cy, '#22c55e', 22, 95);
+    addRipple(slot.cx, slot.cy, 14, 92, '#22c55e');
+    floatText(slot.cx, slot.cy - 20, `Fed to L${cell.level}`, '#0f766e');
+    showToast(`Fed cell to L${cell.level}`);
+    sfx('buy');
+  }
+
+  function startWave() {
+    startBuildFromMenu();
+    if (state.mode === 'combat') {
+      showToast('Wave already active');
+      sfx('deny');
+      return;
+    }
+    if (state.mode !== 'build') {
+      showToast('Reset the culture before a new wave');
+      sfx('deny');
+      return;
+    }
+    const placed = countCells();
+    if (placed === 0) {
+      showToast('Place at least one cell');
+      sfx('deny');
+      return;
+    }
+    state.mode = 'combat';
+    state.selected = null;
+    state.waveActive = true;
+    state.spawned = 0;
+    state.waveSize = 7 + Math.floor(state.wave * 2.2);
+    state.spawnTimer = 0.25;
+    showToast(`Wave ${state.wave}: merge live cells under pressure`);
+    sfx('wave');
+  }
+
+  function countCells() {
+    let n = 0;
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) if (state.grid[lane][col]) n++;
+    }
+    return n;
+  }
+
+  function findSlotAt(x, y) {
+    let nearest = null;
+    let nearestD = Infinity;
+    for (const slot of slots) {
+      if (x >= slot.x && x <= slot.x + slot.w && y >= slot.y && y <= slot.y + slot.h) return slot;
+      const pad = Math.max(4, Math.min(8, Math.min(slot.w, slot.h) * 0.18));
+      if (x >= slot.x - pad && x <= slot.x + slot.w + pad && y >= slot.y - pad && y <= slot.y + slot.h + pad) {
+        const d = Math.hypot(x - slot.cx, y - slot.cy);
+        if (d < nearestD) {
+          nearest = slot;
+          nearestD = d;
+        }
+      }
+    }
+    return nearest;
+  }
+
+  function findBenchAt(x, y) {
+    for (const rect of benchRects) {
+      if (x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h) return rect;
+    }
+    return null;
+  }
+
+  function hitButton(x, y) {
+    for (const btn of buttons) {
+      if (x >= btn.x && x <= btn.x + btn.w && y >= btn.y && y <= btn.y + btn.h) return btn;
+    }
+    return null;
+  }
+
+  function selectBench(i) {
+    if (!state.bench[i]) return;
+    state.selected = { type: 'bench', i };
+    sfx('tap');
+  }
+
+  function selectGrid(lane, col) {
+    if (!state.grid[lane][col]) return;
+    state.selected = { type: 'grid', lane, col };
+    sfx('tap');
+  }
+
+  function takeSelectedCell() {
+    if (!state.selected) return null;
+    let cell = null;
+    if (state.selected.type === 'bench') {
+      cell = state.bench[state.selected.i];
+      state.bench.splice(state.selected.i, 1);
+    } else {
+      cell = state.grid[state.selected.lane][state.selected.col];
+      state.grid[state.selected.lane][state.selected.col] = null;
+    }
+    state.selected = null;
+    return cell;
+  }
+
+  function restoreCell(cell, original) {
+    if (!cell || !original) return;
+    if (original.type === 'bench') state.bench.splice(Math.min(original.i, state.bench.length), 0, cell);
+    else state.grid[original.lane][original.col] = cell;
+  }
+
+  function completeMerge(target, x, y, live) {
+    target.level += 1;
+    target.maxHp = cellMaxHp(target.level, target.phenotype);
+    target.hp = target.maxHp;
+    target.mitosis = Math.min(0.95, target.mitosis + 0.34);
+    target.cooldown = Math.max(0, target.cooldown - 0.24);
+    target.flash = 0.55;
+    target.splitT = 0.48;
+    state.selected = null;
+    state.merges += 1;
+    state.score += 22 * target.level;
+    burst(x, y, CELL_PALETTE[target.level % CELL_PALETTE.length], 24, 112);
+    addRipple(x, y, 18, 110, '#38bdf8');
+    floatText(x, y - 22, `${live ? 'Live merge' : 'Merge'} L${target.level}`, '#2563eb');
+    showToast(`${live ? 'Live merge' : 'Between-wave merge'}: L${target.level}`);
+    sfx('merge');
+  }
+
+  function handleSlot(slot) {
+    startBuildFromMenu();
+    const scaffold = scaffoldAt(slot.lane, slot.col);
+    if (scaffold) {
+      showToast('Collagen scaffold occupies this site');
+      sfx('deny');
+      return;
+    }
+    const target = state.grid[slot.lane][slot.col];
+    if (state.mode === 'combat') {
+      if (!state.selected) {
+        if (target) selectGrid(slot.lane, slot.col);
+        else {
+          showToast('Select a cell to reposition');
+          sfx('deny');
+        }
+        return;
+      }
+      if (state.selected.type !== 'grid') {
+        state.selected = null;
+        if (target) selectGrid(slot.lane, slot.col);
+        return;
+      }
+      if (state.selected.lane === slot.lane && state.selected.col === slot.col) {
+        selectGrid(slot.lane, slot.col);
+        return;
+      }
+      const source = state.selected;
+      const moving = state.grid[source.lane] && state.grid[source.lane][source.col];
+      if (!moving) {
+        state.selected = null;
+        if (target) selectGrid(slot.lane, slot.col);
+        return;
+      }
+      if (!target) {
+        state.grid[source.lane][source.col] = null;
+        state.grid[slot.lane][slot.col] = moving;
+        state.selected = null;
+        moving.birth = Math.max(moving.birth, 0.18);
+        burst(slot.cx, slot.cy, '#2dd4bf', 9, 48);
+        showToast('Cell repositioned under pressure');
+        sfx('tap');
+        return;
+      }
+      if (target.level === moving.level && target.phenotype === moving.phenotype) {
+        state.grid[source.lane][source.col] = null;
+        completeMerge(target, slot.cx, slot.cy, true);
+        return;
+      }
+      selectGrid(slot.lane, slot.col);
+      showToast('Equal cell types and levels merge');
+      sfx('deny');
+      return;
+    }
+    if (state.mode !== 'build') {
+      if (target) selectGrid(slot.lane, slot.col);
+      return;
+    }
+    if (!state.selected) {
+      if (target) selectGrid(slot.lane, slot.col);
+      return;
+    }
+    const original = { ...state.selected };
+    const moving = takeSelectedCell();
+    if (!moving) return;
+    if (!target) {
+      moving.birth = 0.25;
+      state.grid[slot.lane][slot.col] = moving;
+      showToast(original.type === 'bench' ? 'Cell placed' : 'Cell moved');
+      sfx('tap');
+      return;
+    }
+    if (target.id === moving.id) {
+      restoreCell(moving, original);
+      selectGrid(slot.lane, slot.col);
+      return;
+    }
+    if (target.level === moving.level && target.phenotype === moving.phenotype) {
+      completeMerge(target, slot.cx, slot.cy, false);
+      return;
+    }
+    restoreCell(moving, original);
+    selectGrid(slot.lane, slot.col);
+    showToast('Only equal cell types and levels merge');
+    sfx('deny');
+  }
+
+  function handleBench(rect) {
+    startBuildFromMenu();
+    if (state.mode !== 'build') {
+      showToast('Only placed cells merge during waves');
+      sfx('deny');
+      return;
+    }
+    if (!state.selected) {
+      selectBench(rect.i);
+      return;
+    }
+    const target = state.bench[rect.i];
+    const original = { ...state.selected };
+    const moving = takeSelectedCell();
+    if (!moving || !target) {
+      if (moving) restoreCell(moving, original);
+      return;
+    }
+    if (target.id === moving.id) {
+      restoreCell(moving, original);
+      selectBench(rect.i);
+      return;
+    }
+    if (target.level === moving.level) {
+      restoreCell(moving, original);
+      selectBench(rect.i);
+      showToast('Merge onto a placed cell');
+      sfx('deny');
+      return;
+    }
+    restoreCell(moving, original);
+    selectBench(rect.i);
+    showToast('Only equal cell types and levels merge');
+    sfx('deny');
+  }
+
+  function divideSelected() {
+    startBuildFromMenu();
+    if (state.mode !== 'build') {
+      showToast('Split between waves');
+      sfx('deny');
+      return;
+    }
+    const cell = selectedCell();
+    if (!cell || state.selected.type !== 'grid') {
+      showToast('Select a placed cell first');
+      sfx('deny');
+      return;
+    }
+    if (state.atp < state.divideCost) {
+      showToast('Need nutrient to split');
+      sfx('deny');
+      return;
+    }
+    const source = state.selected;
+    const open = adjacentOpen(source.lane, source.col);
+    if (!open) {
+      showToast('No adjacent tissue space');
+      sfx('deny');
+      return;
+    }
+    state.atp -= state.divideCost;
+    state.divideCost = Math.min(150, Math.ceil(state.divideCost * 1.1 + 3));
+    const daughter = newCell(Math.max(1, cell.level - (cell.level >= 4 ? 1 : 0)), 'division', cell.phenotype);
+    daughter.mitosis = 0.08;
+    daughter.birth = 0.55;
+    daughter.splitT = 0.65;
+    cell.mitosis = Math.max(0.1, cell.mitosis - 0.45);
+    cell.splitT = 0.7;
+    state.grid[open.lane][open.col] = daughter;
+    state.divisions += 1;
+    const src = getSlot(source.lane, source.col);
+    const dst = getSlot(open.lane, open.col);
+    burst((src.cx + dst.cx) / 2, (src.cy + dst.cy) / 2, '#2fd0a5', 24, 105);
+    addRipple(src.cx, src.cy, 20, 120, '#2dd4bf');
+    addRipple(dst.cx, dst.cy, 10, 88, '#86efac');
+    showToast('Split complete');
+    sfx('divide');
+  }
+
+  function adjacentOpen(lane, col) {
+    const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0], [1, 1], [-1, 1], [1, -1], [-1, -1]];
+    for (const [dl, dc] of dirs) {
+      const l = lane + dl;
+      const c = col + dc;
+      if (l >= 0 && l < LANES && c >= 0 && c < COLS && !state.grid[l][c] && !scaffoldAt(l, c)) return { lane: l, col: c };
+    }
+    return null;
+  }
+
+  function getSlot(lane, col) {
+    return slots.find((s) => s.lane === lane && s.col === col);
+  }
+
+  function membraneBoundaryX() {
+    return slots.length ? Math.max(6, slots[0].x - Math.min(28, slots[0].w * 0.28)) : W * 0.08;
+  }
+
+  function pointerDown(x, y) {
+    pointer.x = x;
+    pointer.y = y;
+    pointer.down = true;
+    ensureAudio();
+
+    const btn = hitButton(x, y);
+    if (btn) {
+      if (btn.id === 'buy') buyCell();
+      else if (btn.id === 'divide') divideSelected();
+      else if (btn.id === 'wave') startWave();
+      else if (btn.id === 'mute') {
+        muted = !muted;
+        if (masterGain && audioCtx) masterGain.gain.setTargetAtTime(muted ? 0 : 0.12, audioCtx.currentTime, 0.02);
+        showToast(muted ? 'Sound muted' : 'Sound on');
+      } else if (btn.id === 'restart') {
+        persist();
+        resetGame();
+        showToast('Culture reset');
+        sfx('tap');
+      }
+      return;
+    }
+
+    if (state.mode === 'menu') {
+      startBuildFromMenu();
+      sfx('tap');
+      return;
+    }
+
+    const slot = findSlotAt(x, y);
+    if (slot) {
+      handleSlot(slot);
+      return;
+    }
+
+    const bench = findBenchAt(x, y);
+    if (bench) {
+      handleBench(bench);
+      return;
+    }
+
+    state.selected = null;
+  }
+
+  function spawnEnemy() {
+    const lane = Math.floor(rand(0, LANES));
+    let kind = 'virion';
+    if (state.wave >= 3 && Math.random() < 0.28) kind = 'splitter';
+    if (state.wave >= 5 && Math.random() < 0.2) kind = 'shell';
+    const stats = enemyStats(kind, state.wave);
+    const slot = getSlot(lane, COLS - 1);
+    const enemy = {
+      id: state.autoId++,
+      kind,
+      lane,
+      x: W + 30 + rand(0, 80),
+      y: slot ? slot.cy + rand(-8, 8) : H * 0.5,
+      hp: stats.hp,
+      maxHp: stats.hp,
+      speed: stats.speed,
+      reward: stats.reward,
+      r: stats.r,
+      attackDamage: stats.attack,
+      attackRate: stats.attackRate,
+      attackCooldown: rand(0.12, 0.4),
+      attackT: 0,
+      attacking: false,
+      targetId: null,
+      targetType: null,
+      targetX: 0,
+      targetY: 0,
+      phase: rand(0, TAU),
+      split: kind === 'splitter',
+      tiny: false,
+      flash: 0
+    };
+    state.enemies.push(enemy);
+    state.spawned += 1;
+  }
+
+  function update(dt) {
+    if (!state) return;
+    dt = Math.min(0.05, dt);
+    state.time += dt;
+    state.toastT = Math.max(0, state.toastT - dt);
+    state.shake = Math.max(0, state.shake - dt * 7);
+    updateMusic(dt);
+
+    for (const organelle of state.organelles) {
+      organelle.phase += dt * organelle.drift * 4;
+      organelle.x += Math.cos(organelle.phase) * dt * organelle.drift * 0.04;
+      organelle.y += Math.sin(organelle.phase * 0.9) * dt * organelle.drift * 0.035;
+      if (organelle.x < -0.04) organelle.x = 1.04;
+      if (organelle.x > 1.04) organelle.x = -0.04;
+      if (organelle.y < -0.04) organelle.y = 1.04;
+      if (organelle.y > 1.04) organelle.y = -0.04;
+    }
+
+    for (const scaffold of state.scaffolds) {
+      scaffold.flash = Math.max(0, scaffold.flash - dt);
+      scaffold.pulse += dt * 1.4;
+    }
+
+    forEachCell((cell, lane, col) => {
+      cell.cooldown = Math.max(0, cell.cooldown - dt);
+      cell.pulse += dt * (1.8 + cell.level * 0.25);
+      cell.birth = Math.max(0, cell.birth - dt);
+      cell.flash = Math.max(0, cell.flash - dt);
+      cell.splitT = Math.max(0, cell.splitT - dt);
+      if (state.mode === 'combat') {
+        cell.mitosis = Math.min(1, cell.mitosis + dt * (0.015 + cell.level * 0.003));
+      }
+      if (state.mode === 'combat' && cell.cooldown <= 0) {
+        const slot = getSlot(lane, col);
+        const target = nearestEnemy(slot.cx, slot.cy, lane, cellStats(cell).range);
+        if (target) shootCell(cell, slot, target);
+      }
+    });
+
+    if (state.mode === 'combat') {
+      state.spawnTimer -= dt;
+      if (state.spawned < state.waveSize && state.spawnTimer <= 0) {
+        spawnEnemy();
+        state.spawnTimer = Math.max(0.42, 1.08 - state.wave * 0.035) + rand(0, 0.25);
+      }
+    }
+
+    updateShots(dt);
+    updateEnemies(dt);
+    updateParticles(dt);
+    updateRipples(dt);
+    updateFloatTexts(dt);
+    updateNutrientDrops(dt);
+    updateHusks(dt);
+
+    if (state.mode === 'combat' && state.spawned >= state.waveSize && state.enemies.length === 0) {
+      state.mode = 'build';
+      state.waveActive = false;
+      recoverFieldAfterWave();
+      const bonus = 42 + state.wave * 10;
+      const material = Math.floor(state.pendingNutrient || 0);
+      state.atp += bonus + material;
+      state.pendingNutrient = 0;
+      state.nutrientDrops.length = 0;
+      state.floatTexts.length = 0;
+      state.wave += 1;
+      bestWave = Math.max(bestWave, state.wave);
+      showToast(`Culture stabilized: +${bonus + material} nutrient`);
+      sfx('clear');
+      persist();
+    }
+
+    if (state.membrane <= 0 && state.mode !== 'over') {
+      state.mode = 'over';
+      state.waveActive = false;
+      state.selected = null;
+      showToast('Membrane breached');
+      sfx('break');
+      persist();
+    }
+  }
+
+  function forEachCell(fn) {
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const cell = state.grid[lane][col];
+        if (cell) fn(cell, lane, col);
+      }
+    }
+    for (let i = 0; i < state.bench.length; i++) {
+      const cell = state.bench[i];
+      if (cell) {
+        cell.pulse += 0.016 * (1.6 + cell.level * 0.2);
+        cell.birth = Math.max(0, cell.birth - 0.016);
+        cell.flash = Math.max(0, cell.flash - 0.016);
+        cell.splitT = Math.max(0, cell.splitT - 0.016);
+      }
+    }
+  }
+
+  function nearestEnemy(x, y, lane, range) {
+    let best = null;
+    let bestD = Infinity;
+    for (const enemy of state.enemies) {
+      const laneBias = enemy.lane === lane ? 0.78 : 1.15;
+      const dx = enemy.x - x;
+      const dy = enemy.y - y;
+      const d = Math.hypot(dx, dy) * laneBias;
+      if (d < range && d < bestD && enemy.x > x - 10) {
+        best = enemy;
+        bestD = d;
+      }
+    }
+    return best;
+  }
+
+  function shootCell(cell, slot, target) {
+    const stats = cellStats(cell);
+    cell.cooldown = stats.fire;
+    cell.mitosis = Math.min(1, cell.mitosis + 0.035);
+    cell.flash = Math.max(cell.flash, 0.08);
+    state.shots.push({
+      x: slot.cx,
+      y: slot.cy,
+      tx: target.x,
+      ty: target.y,
+      targetId: target.id,
+      speed: 560 + cell.level * 40,
+      damage: stats.damage,
+      level: cell.level,
+      color: CELL_PALETTE[cell.level % CELL_PALETTE.length],
+      life: 0.9,
+      phase: rand(0, TAU)
+    });
+    sfx('hit');
+  }
+
+  function updateShots(dt) {
+    for (let i = state.shots.length - 1; i >= 0; i--) {
+      const shot = state.shots[i];
+      shot.life -= dt;
+      const target = state.enemies.find((e) => e.id === shot.targetId);
+      const tx = target ? target.x : shot.tx;
+      const ty = target ? target.y : shot.ty;
+      const dx = tx - shot.x;
+      const dy = ty - shot.y;
+      const d = Math.max(1, Math.hypot(dx, dy));
+      shot.x += (dx / d) * shot.speed * dt;
+      shot.y += (dy / d) * shot.speed * dt;
+      shot.phase += dt * 11;
+      if (target && Math.hypot(target.x - shot.x, target.y - shot.y) < target.r + 8) {
+        damageEnemy(target, shot.damage, shot.color);
+        state.shots.splice(i, 1);
+      } else if (shot.life <= 0 || shot.x < -40 || shot.x > W + 80 || shot.y < -60 || shot.y > H + 60) {
+        state.shots.splice(i, 1);
+      }
+    }
+  }
+
+  function damageEnemy(enemy, amount, color) {
+    enemy.hp -= amount;
+    enemy.flash = 0.12;
+    burst(enemy.x, enemy.y, color, 5, 42);
+    if (enemy.split && !enemy.tiny && enemy.hp < enemy.maxHp * 0.47) {
+      enemy.split = false;
+      splitEnemy(enemy);
+    }
+    if (enemy.hp <= 0) killEnemy(enemy, color);
+  }
+
+  function splitEnemy(enemy) {
+    enemy.tiny = true;
+    enemy.r *= 0.78;
+    enemy.speed *= 1.16;
+    enemy.hp = Math.max(12, enemy.hp * 0.62);
+    enemy.maxHp = Math.max(enemy.maxHp * 0.52, enemy.hp);
+    for (let i = 0; i < 1; i++) {
+      const clone = {
+        ...enemy,
+        id: state.autoId++,
+        x: enemy.x + rand(12, 24),
+        y: enemy.y + rand(-22, 22),
+        hp: enemy.hp * 0.72,
+        maxHp: enemy.maxHp * 0.72,
+        reward: Math.max(4, Math.floor(enemy.reward * 0.55)),
+        r: Math.max(9, enemy.r * 0.82),
+        phase: rand(0, TAU),
+        split: false,
+        tiny: true,
+        flash: 0.18,
+        attackCooldown: rand(0.12, 0.35),
+        attackT: 0,
+        attacking: false,
+        targetId: null,
+        targetType: null
+      };
+      state.enemies.push(clone);
+    }
+    addRipple(enemy.x, enemy.y, 10, 80, '#fb923c');
+    burst(enemy.x, enemy.y, '#fb923c', 16, 70);
+  }
+
+  function killEnemy(enemy, color) {
+    const idx = state.enemies.indexOf(enemy);
+    if (idx >= 0) state.enemies.splice(idx, 1);
+    state.kills += 1;
+    state.score += 11 + state.wave * 3;
+    state.pendingNutrient += enemy.reward;
+    state.nutrientDrops.push({
+      x: enemy.x,
+      y: enemy.y,
+      amount: enemy.reward,
+      phase: rand(0, TAU),
+      r: rand(6, 10),
+      age: 0
+    });
+    burst(enemy.x, enemy.y, color || '#67e8f9', 10, 74);
+    burst(enemy.x, enemy.y, '#22c55e', 10, 58);
+    addRipple(enemy.x, enemy.y, 6, 64, '#67e8f9');
+    floatText(enemy.x, enemy.y - 18, `+${enemy.reward} material`, '#0f766e');
+  }
+
+  function battlefieldTargetForEnemy(enemy) {
+    let best = null;
+    for (let col = 0; col < COLS; col++) {
+      const cell = state.grid[enemy.lane][col];
+      const scaffold = scaffoldAt(enemy.lane, col);
+      const object = cell || scaffold;
+      if (!object) continue;
+      const slot = getSlot(enemy.lane, col);
+      if (!slot || slot.cx > enemy.x + enemy.r * 0.45) continue;
+      if (!best || slot.cx > best.x) {
+        best = {
+          id: object.id,
+          type: cell ? 'cell' : 'scaffold',
+          object,
+          lane: enemy.lane,
+          col,
+          x: slot.cx,
+          y: slot.cy,
+          r: cell ? Math.max(cellStats(cell).radius, Math.min(slot.w, slot.h) * 0.25) : Math.min(slot.w, slot.h) * 0.34
+        };
+      }
+    }
+    return best;
+  }
+
+  function damageBattlefieldTarget(target, enemy) {
+    const object = target.object;
+    object.hp -= enemy.attackDamage;
+    object.flash = 0.22;
+    burst(target.x, target.y, target.type === 'cell' ? '#fb7185' : '#d4a72c', 7, 52);
+    addRipple(target.x, target.y, 5, 34, target.type === 'cell' ? '#fb7185' : '#d4a72c');
+    if (object.hp > 0) return;
+
+    object.hp = 0;
+    if (target.type === 'cell') {
+      if (state.grid[target.lane][target.col] === object) state.grid[target.lane][target.col] = null;
+      if (state.selected && state.selected.type === 'grid' && state.selected.lane === target.lane && state.selected.col === target.col) state.selected = null;
+      state.cellsLost += 1;
+      showToast('Defender cell lysed');
+      floatText(target.x, target.y - 20, 'CELL LYSED', '#be123c');
+    } else {
+      const index = state.scaffolds.indexOf(object);
+      if (index >= 0) state.scaffolds.splice(index, 1);
+      state.scaffoldsLost += 1;
+      showToast('Collagen scaffold breached');
+      floatText(target.x, target.y - 20, 'MATRIX BREACHED', '#a16207');
+    }
+    state.husks.push({ lane: target.lane, col: target.col, kind: target.type, life: 4.2, maxLife: 4.2, phase: rand(0, TAU) });
+    state.shake = Math.max(state.shake, 0.85);
+    burst(target.x, target.y, target.type === 'cell' ? '#f43f5e' : '#ca8a04', 22, 105);
+    addRipple(target.x, target.y, 12, 100, target.type === 'cell' ? '#f43f5e' : '#ca8a04');
+    enemy.attacking = false;
+    enemy.targetId = null;
+    enemy.targetType = null;
+    sfx('break');
+  }
+
+  function recoverFieldAfterWave() {
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const cell = state.grid[lane][col];
+        if (cell) cell.hp = Math.min(cell.maxHp, cell.hp + Math.ceil(cell.maxHp * 0.28));
+      }
+    }
+    for (const scaffold of state.scaffolds) {
+      scaffold.hp = Math.min(scaffold.maxHp, scaffold.hp + Math.ceil(scaffold.maxHp * 0.18));
+    }
+  }
+
+  function updateHusks(dt) {
+    for (let i = state.husks.length - 1; i >= 0; i--) {
+      state.husks[i].life -= dt;
+      if (state.husks[i].life <= 0) state.husks.splice(i, 1);
+    }
+  }
+
+  function updateEnemies(dt) {
+    if (state.mode !== 'combat') return;
+    for (let i = state.enemies.length - 1; i >= 0; i--) {
+      const enemy = state.enemies[i];
+      enemy.phase += dt * (enemy.tiny ? 9 : 5.5);
+      enemy.flash = Math.max(0, enemy.flash - dt);
+      enemy.attackT = Math.max(0, enemy.attackT - dt);
+      const slot = getSlot(enemy.lane, 0);
+      const target = battlefieldTargetForEnemy(enemy);
+      const targetY = target ? target.y : slot ? slot.cy : enemy.y;
+      enemy.y += (targetY - enemy.y) * dt * 2.4 + Math.sin(enemy.phase) * dt * 7;
+      enemy.attacking = false;
+      enemy.targetId = null;
+      enemy.targetType = null;
+      if (target) {
+        enemy.targetId = target.id;
+        enemy.targetType = target.type;
+        enemy.targetX = target.x;
+        enemy.targetY = target.y;
+        const stopX = target.x + target.r + enemy.r * 0.72;
+        if (enemy.x <= stopX + 2) {
+          enemy.x = Math.max(enemy.x, stopX);
+          enemy.attacking = true;
+          enemy.attackCooldown -= dt;
+          if (enemy.attackCooldown <= 0) {
+            enemy.attackCooldown = enemy.attackRate;
+            enemy.attackT = 0.22;
+            damageBattlefieldTarget(target, enemy);
+          }
+        } else {
+          enemy.x -= enemy.speed * dt;
+        }
+      } else {
+        enemy.x -= enemy.speed * dt;
+      }
+      const membraneX = membraneBoundaryX();
+      if (enemy.x < membraneX) {
+        state.enemies.splice(i, 1);
+        state.membrane = Math.max(0, state.membrane - (enemy.tiny ? 1 : (enemy.kind === 'shell' ? 3 : 2)));
+        state.shake = 1;
+        addRipple(membraneX, enemy.y, 12, 120, '#ef4444');
+        burst(membraneX, enemy.y, '#ef4444', 18, 95);
+        sfx('break');
+      }
+    }
+  }
+
+  function updateParticles(dt) {
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.life -= dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= Math.pow(0.15, dt);
+      p.vy *= Math.pow(0.15, dt);
+      p.r *= Math.pow(0.22, dt);
+      if (p.life <= 0 || p.r < 0.2) state.particles.splice(i, 1);
+    }
+  }
+
+  function updateRipples(dt) {
+    for (let i = state.ripples.length - 1; i >= 0; i--) {
+      const r = state.ripples[i];
+      r.life -= dt;
+      r.age += dt;
+      if (r.life <= 0) state.ripples.splice(i, 1);
+    }
+  }
+
+  function updateFloatTexts(dt) {
+    for (let i = state.floatTexts.length - 1; i >= 0; i--) {
+      const f = state.floatTexts[i];
+      f.life -= dt;
+      f.y += f.vy * dt;
+      f.vy -= dt * 8;
+      if (f.life <= 0) state.floatTexts.splice(i, 1);
+    }
+  }
+
+  function updateNutrientDrops(dt) {
+    for (const drop of state.nutrientDrops) {
+      drop.age += dt;
+      drop.phase += dt * 3.6;
+      drop.y += Math.sin(drop.phase) * dt * 2.5;
+    }
+  }
+
+  function burst(x, y, color, count, power) {
+    for (let i = 0; i < count; i++) {
+      const a = rand(0, TAU);
+      const sp = rand(power * 0.25, power);
+      state.particles.push({
+        x,
+        y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        r: rand(1.4, 4.2),
+        life: rand(0.25, 0.62),
+        maxLife: 0.62,
+        color
+      });
+    }
+  }
+
+  function addRipple(x, y, start, size, color) {
+    state.ripples.push({ x, y, start, size, color, age: 0, life: 0.55 });
+  }
+
+  function floatText(x, y, text, color) {
+    state.floatTexts.push({ x, y, text, color, vy: -26, life: 1, maxLife: 1 });
+  }
+
+  function render() {
+    if (!ctx || !state) return;
+    layout();
+    const sx = state.shake ? rand(-4, 4) * state.shake : 0;
+    const sy = state.shake ? rand(-3, 3) * state.shake : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+    drawBackground();
+    drawGrid();
+    drawHusks();
+    drawScaffolds();
+    drawCells();
+    drawEnemies();
+    drawShots();
+    drawCellHealthBars();
+    drawNutrientDrops();
+    drawParticles();
+    drawRipples();
+    drawFloatTexts();
+    ctx.restore();
+    drawHud();
+    if (state.mode === 'menu') drawMenu();
+    if (state.mode === 'over') drawGameOver();
+  }
+
+  function drawBackground() {
+    const bg = ctx.createLinearGradient(0, 0, W, H);
+    bg.addColorStop(0, '#f7fff7');
+    bg.addColorStop(0.42, '#e2f8f0');
+    bg.addColorStop(1, '#dbeafe');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const dishR = Math.max(W, H) * 0.54;
+    ctx.save();
+    ctx.translate(W * 0.5, H * 0.52);
+    ctx.strokeStyle = 'rgba(45, 212, 191, 0.2)';
+    ctx.lineWidth = Math.max(4, W * 0.006);
+    ctx.beginPath();
+    ctx.arc(0, 0, dishR, 0, TAU);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(59, 130, 246, 0.08)';
+    ctx.lineWidth = Math.max(16, W * 0.03);
+    ctx.beginPath();
+    ctx.arc(0, 0, dishR * 0.72 + Math.sin(state.time * 0.5) * 6, 0.2, TAU - 0.6);
+    ctx.stroke();
+    ctx.restore();
+
+    for (const organelle of state.organelles) {
+      const x = organelle.x * W;
+      const y = organelle.y * H;
+      const r = organelle.r * (1 + Math.sin(state.time * 1.5 + organelle.phase) * 0.16);
+      ctx.globalAlpha = 0.34;
+      ctx.fillStyle = organelle.color;
+      ctx.beginPath();
+      ctx.ellipse(x, y, r * 1.8, r, organelle.phase, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawGrid() {
+    if (!slots.length) return;
+    const left = slots[0].x - 14;
+    const right = slots[slots.length - 1].x + slots[slots.length - 1].w + 14;
+    const top = slots[0].y - 14;
+    const bottom = slots[slots.length - 1].y + slots[slots.length - 1].h + 14;
+
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.54)';
+    roundRect(left, top, right - left, bottom - top, 26);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(20, 184, 166, 0.2)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    const membraneX = membraneBoundaryX();
+    ctx.save();
+    ctx.strokeStyle = `rgba(15, 118, 110, ${0.34 + Math.sin(state.time * 3) * 0.06})`;
+    ctx.lineWidth = 8;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(membraneX, top + 8);
+    for (let y = top + 8; y <= bottom - 8; y += 16) {
+      ctx.lineTo(membraneX + Math.sin(y * 0.045 + state.time * 2.4) * 5, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+
+    for (const slot of slots) {
+      const active = state.selected && state.selected.type === 'grid' && state.selected.lane === slot.lane && state.selected.col === slot.col;
+      const hover = pointer.x >= slot.x && pointer.x <= slot.x + slot.w && pointer.y >= slot.y && pointer.y <= slot.y + slot.h;
+      const blocked = !!scaffoldAt(slot.lane, slot.col);
+      ctx.fillStyle = blocked ? 'rgba(241, 230, 166, 0.26)' : active ? 'rgba(45, 212, 191, 0.34)' : hover ? 'rgba(255, 255, 255, 0.62)' : 'rgba(255, 255, 255, 0.32)';
+      roundRect(slot.x, slot.y, slot.w, slot.h, 18);
+      ctx.fill();
+      ctx.strokeStyle = blocked ? 'rgba(161, 98, 7, 0.3)' : active ? 'rgba(13, 148, 136, 0.9)' : 'rgba(15, 118, 110, 0.18)';
+      ctx.lineWidth = active ? 3 : 1.5;
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(45, 212, 191, 0.14)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(slot.x + slot.w * 0.18, slot.cy);
+      ctx.bezierCurveTo(slot.x + slot.w * 0.36, slot.y + slot.h * 0.12, slot.x + slot.w * 0.64, slot.y + slot.h * 0.88, slot.x + slot.w * 0.82, slot.cy);
+      ctx.stroke();
+    }
+  }
+
+  function drawCells() {
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const cell = state.grid[lane][col];
+        if (!cell) continue;
+        const slot = getSlot(lane, col);
+        drawCell(cell, slot.cx, slot.cy, Math.min(slot.w, slot.h) * 0.34, isSelectedGrid(lane, col), true);
+      }
+    }
+
+    for (let i = 0; i < state.bench.length && i < benchRects.length; i++) {
+      const rect = benchRects[i];
+      const cell = state.bench[i];
+      drawCell(cell, rect.cx, rect.cy, Math.min(rect.w, rect.h) * 0.33, state.selected && state.selected.type === 'bench' && state.selected.i === i, false);
+    }
+  }
+
+  function drawScaffolds() {
+    for (const scaffold of state.scaffolds) {
+      const slot = getSlot(scaffold.lane, scaffold.col);
+      if (!slot) continue;
+      const r = Math.min(slot.w, slot.h) * 0.31;
+      const pulse = Math.sin(state.time * 1.8 + scaffold.pulse) * 0.05;
+      const hpRatio = clamp(scaffold.hp / scaffold.maxHp, 0, 1);
+      ctx.save();
+      ctx.translate(slot.cx, slot.cy);
+      ctx.rotate(Math.sin(scaffold.pulse) * 0.16);
+      ctx.globalAlpha = scaffold.flash > 0 ? 1 : 0.9;
+      ctx.fillStyle = scaffold.flash > 0 ? '#ffffff' : 'rgba(244, 220, 114, 0.34)';
+      ctx.strokeStyle = 'rgba(161, 98, 7, 0.62)';
+      ctx.lineWidth = 3;
+      roundRect(-r * 1.12, -r * 0.76, r * 2.24, r * 1.52, r * 0.62);
+      ctx.fill();
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(120, 53, 15, 0.46)';
+      ctx.lineWidth = Math.max(2, r * 0.11);
+      ctx.lineCap = 'round';
+      for (let i = -1; i <= 1; i++) {
+        const y = i * r * 0.36;
+        ctx.beginPath();
+        ctx.moveTo(-r * (0.82 + pulse), y - r * 0.22);
+        ctx.bezierCurveTo(-r * 0.28, y + r * 0.28, r * 0.28, y - r * 0.28, r * (0.82 + pulse), y + r * 0.22);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      const hpW = Math.max(28, r * 1.8);
+      const hpY = slot.cy + r + 9;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.18)';
+      roundRect(slot.cx - hpW / 2, hpY, hpW, 5, 5);
+      ctx.fill();
+      ctx.fillStyle = hpRatio > 0.45 ? '#d4a72c' : '#ef4444';
+      roundRect(slot.cx - hpW / 2, hpY, hpW * hpRatio, 5, 5);
+      ctx.fill();
+    }
+  }
+
+  function drawHusks() {
+    for (const husk of state.husks) {
+      const slot = getSlot(husk.lane, husk.col);
+      if (!slot) continue;
+      const alpha = clamp(husk.life / husk.maxLife, 0, 1) * 0.55;
+      const r = Math.min(slot.w, slot.h) * (husk.kind === 'cell' ? 0.26 : 0.31);
+      ctx.save();
+      ctx.translate(slot.cx, slot.cy);
+      ctx.rotate(husk.phase);
+      ctx.globalAlpha = alpha;
+      ctx.strokeStyle = husk.kind === 'cell' ? '#be123c' : '#a16207';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([5, 5]);
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0.2, Math.PI * 1.35);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 0.62, Math.PI, Math.PI * 1.82);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawCell(cell, x, y, baseR, selected, showHp) {
+    const level = cell.level;
+    const color = cell.phenotype === 'phagocyte' ? '#22c55e' : CELL_PALETTE[level % CELL_PALETTE.length];
+    const pulse = Math.sin(cell.pulse) * 0.08;
+    const birth = cell.birth > 0 ? easeOut(1 - cell.birth / 0.55) : 1;
+    const split = cell.splitT > 0 ? Math.sin((cell.splitT / 0.7) * Math.PI) : 0;
+    const r = baseR * (cell.phenotype === 'phagocyte' ? 1.08 : 1) * (1 + pulse) * birth;
+    const flash = cell.flash > 0 ? cell.flash / 0.45 : 0;
+
+    ctx.save();
+    ctx.translate(x, y);
+    if (selected) {
+      ctx.strokeStyle = 'rgba(13, 148, 136, 0.78)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0, 0, r + 12 + Math.sin(state.time * 7) * 2, 0, TAU);
+      ctx.stroke();
+    }
+
+    const grad = ctx.createRadialGradient(-r * 0.3, -r * 0.35, r * 0.2, 0, 0, r * 1.25);
+    grad.addColorStop(0, mixColor('#ffffff', color, 0.38));
+    grad.addColorStop(0.65, color);
+    grad.addColorStop(1, 'rgba(15, 118, 110, 0.08)');
+    ctx.globalAlpha = 0.88;
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    organicBlob(ctx, r, state.time * 1.2 + cell.pulse, split);
+    ctx.fill();
+
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = flash > 0 ? 'rgba(255, 255, 255, 0.92)' : 'rgba(15, 118, 110, 0.35)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.42 + flash * 0.5})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(-r * 0.16 - split * r * 0.18, -r * 0.04, r * 0.42, 0, TAU);
+    ctx.stroke();
+    if (split > 0.2) {
+      ctx.beginPath();
+      ctx.arc(r * 0.22 + split * r * 0.16, r * 0.05, r * 0.34, 0, TAU);
+      ctx.stroke();
+    }
+
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.58)';
+    ctx.font = `700 ${Math.max(12, r * 0.52)}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(level), 0, 0);
+
+    if (cell.phenotype === 'phagocyte') {
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
+      for (let i = 0; i < 3; i++) {
+        const a = i * TAU / 3 + state.time * 0.35;
+        ctx.beginPath();
+        ctx.arc(Math.cos(a) * r * 0.58, Math.sin(a) * r * 0.58, Math.max(1.8, r * 0.09), 0, TAU);
+        ctx.fill();
+      }
+    }
+
+    ctx.strokeStyle = `rgba(45, 212, 191, ${0.18 + cell.mitosis * 0.5})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, r + 6, -Math.PI / 2, -Math.PI / 2 + TAU * cell.mitosis);
+    ctx.stroke();
+
+    if (level >= 3) {
+      ctx.strokeStyle = 'rgba(59, 130, 246, 0.28)';
+      ctx.lineWidth = 1.2;
+      for (let i = 0; i < level; i++) {
+        const a = state.time * 0.6 + i * TAU / level;
+        const x1 = Math.cos(a) * (r + 9);
+        const y1 = Math.sin(a) * (r + 9);
+        const x2 = Math.cos(a + 0.22) * (r + 13);
+        const y2 = Math.sin(a + 0.22) * (r + 13);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  function drawCellHealthBars() {
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const cell = state.grid[lane][col];
+        if (!cell) continue;
+        const slot = getSlot(lane, col);
+        const r = Math.min(slot.w, slot.h) * 0.34 * (cell.phenotype === 'phagocyte' ? 1.08 : 1);
+        const hpW = Math.max(24, r * 1.8);
+        const hpY = slot.cy + r + 10;
+        const hpRatio = clamp(cell.hp / cell.maxHp, 0, 1);
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.22)';
+        roundRect(slot.cx - hpW / 2, hpY, hpW, 5, 5);
+        ctx.fill();
+        ctx.fillStyle = hpRatio > 0.45 ? '#22c55e' : '#ef4444';
+        roundRect(slot.cx - hpW / 2, hpY, hpW * hpRatio, 5, 5);
+        ctx.fill();
+      }
+    }
+  }
+
+  function organicBlob(pathCtx, r, phase, split) {
+    const squeeze = split * 0.28;
+    for (let i = 0; i <= 24; i++) {
+      const a = i / 24 * TAU;
+      const wobble = 1 + Math.sin(a * 3 + phase) * 0.06 + Math.cos(a * 5 - phase * 0.7) * 0.035;
+      const neck = 1 - squeeze * Math.max(0, Math.cos(a * 2));
+      const x = Math.cos(a) * r * wobble * (1 + squeeze * 0.16);
+      const y = Math.sin(a) * r * wobble * neck;
+      if (i === 0) pathCtx.moveTo(x, y);
+      else pathCtx.lineTo(x, y);
+    }
+    pathCtx.closePath();
+  }
+
+  function isSelectedGrid(lane, col) {
+    return state.selected && state.selected.type === 'grid' && state.selected.lane === lane && state.selected.col === col;
+  }
+
+  function drawEnemies() {
+    for (const enemy of state.enemies) {
+      const color = ENEMY_PALETTE[enemy.kind] || '#ef4444';
+      const r = enemy.r * (1 + Math.sin(enemy.phase) * 0.07);
+      if (enemy.attacking) {
+        ctx.strokeStyle = `rgba(190, 24, 93, ${0.35 + Math.sin(state.time * 18) * 0.15})`;
+        ctx.lineWidth = 3;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(enemy.x - r * 0.4, enemy.y);
+        ctx.quadraticCurveTo((enemy.x + enemy.targetX) / 2, enemy.y + Math.sin(enemy.phase) * 9, enemy.targetX + r * 0.45, enemy.targetY);
+        ctx.stroke();
+      }
+      ctx.save();
+      ctx.translate(enemy.x, enemy.y);
+      ctx.rotate(Math.sin(enemy.phase * 0.6) * 0.2);
+      if (enemy.attackT > 0) {
+        const lunge = Math.sin((enemy.attackT / 0.22) * Math.PI) * 0.16;
+        ctx.scale(1 + lunge, 1 - lunge * 0.55);
+      }
+
+      ctx.fillStyle = enemy.flash > 0 ? '#ffffff' : color;
+      ctx.strokeStyle = 'rgba(88, 28, 135, 0.35)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const points = enemy.kind === 'shell' ? 9 : 7;
+      for (let i = 0; i < points; i++) {
+        const a = i / points * TAU + enemy.phase * 0.15;
+        const rr = r * (i % 2 ? 0.78 : 1.12);
+        const x = Math.cos(a) * rr;
+        const y = Math.sin(a) * rr;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.lineWidth = 1.5;
+      for (let i = 0; i < 4; i++) {
+        const a = enemy.phase + i * TAU / 4;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * r * 0.6, Math.sin(a) * r * 0.6);
+        ctx.quadraticCurveTo(Math.cos(a + 0.4) * r * 1.2, Math.sin(a + 0.4) * r * 1.2, Math.cos(a + 0.8) * r * 1.6, Math.sin(a + 0.8) * r * 1.6);
+        ctx.stroke();
+      }
+
+      ctx.restore();
+
+      const hpW = r * 2.1;
+      ctx.fillStyle = 'rgba(15, 23, 42, 0.18)';
+      roundRect(enemy.x - hpW / 2, enemy.y - r - 12, hpW, 4, 4);
+      ctx.fill();
+      ctx.fillStyle = '#ef4444';
+      roundRect(enemy.x - hpW / 2, enemy.y - r - 12, hpW * clamp(enemy.hp / enemy.maxHp, 0, 1), 4, 4);
+      ctx.fill();
+    }
+  }
+
+  function drawShots() {
+    for (const shot of state.shots) {
+      ctx.strokeStyle = shot.color;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(shot.x, shot.y);
+      ctx.lineTo(shot.x - Math.cos(shot.phase) * 9, shot.y - Math.sin(shot.phase) * 9);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.85)';
+      ctx.beginPath();
+      ctx.arc(shot.x, shot.y, 4 + Math.sin(shot.phase) * 1.5, 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  function drawParticles() {
+    for (const p of state.particles) {
+      const a = clamp(p.life / p.maxLife, 0, 1);
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawNutrientDrops() {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '800 10px system-ui, sans-serif';
+    for (const drop of state.nutrientDrops) {
+      const wobble = Math.sin(drop.phase) * 1.8;
+      const r = drop.r + Math.sin(drop.phase * 1.7) * 1.2;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
+      ctx.beginPath();
+      ctx.arc(drop.x + wobble, drop.y, r + 4, 0, TAU);
+      ctx.fill();
+      const grad = ctx.createRadialGradient(drop.x - r * 0.3, drop.y - r * 0.4, 2, drop.x, drop.y, r + 3);
+      grad.addColorStop(0, '#f0fdf4');
+      grad.addColorStop(0.55, '#22c55e');
+      grad.addColorStop(1, '#0f766e');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(drop.x + wobble, drop.y, r, 0, TAU);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(15, 118, 110, 0.45)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = '#ecfdf5';
+      ctx.fillText(String(drop.amount), drop.x + wobble, drop.y + 0.5);
+    }
+    ctx.restore();
+  }
+
+  function drawRipples() {
+    for (const r of state.ripples) {
+      const t = 1 - r.life / 0.55;
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      ctx.strokeStyle = r.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, r.start + r.size * easeOut(t), 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawFloatTexts() {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '800 13px system-ui, sans-serif';
+    for (const f of state.floatTexts) {
+      const a = clamp(f.life / f.maxLife, 0, 1);
+      ctx.globalAlpha = Math.min(1, a * 1.4);
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.78)';
+      const w = ctx.measureText(f.text).width + 14;
+      roundRect(f.x - w / 2, f.y - 12, w, 24, 12);
+      ctx.fill();
+      ctx.fillStyle = f.color;
+      ctx.fillText(f.text, f.x, f.y);
+    }
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawHud() {
+    const margin = Math.max(14, Math.min(28, W * 0.03));
+    ctx.save();
+    const shortLandscape = isShortLandscape();
+    const compact = W < 560 && !shortLandscape;
+    const topButtonSize = Math.max(42, Math.min(54, W * 0.12));
+    const availableHeaderW = Math.max(150, W - margin * 2 - topButtonSize * 2 - 18);
+    const headerW = compact ? availableHeaderW : Math.min(availableHeaderW, 560);
+    const headerCardH = shortLandscape ? 46 : compact ? 122 : 62;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.72)';
+    roundRect(margin, margin, headerW, headerCardH, 20);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(15, 118, 110, 0.12)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#14342f';
+    ctx.font = `800 ${shortLandscape ? 18 : compact ? Math.max(20, Math.min(30, headerW * 0.12)) : Math.max(18, Math.min(28, W * 0.037))}px system-ui, sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Cell Division TD', margin + 16, margin + (shortLandscape ? 5 : 9));
+
+    ctx.font = `700 ${shortLandscape ? 11 : compact ? 15 : Math.max(12, Math.min(15, W * 0.018))}px system-ui, sans-serif`;
+    ctx.fillStyle = '#0f766e';
+    if (shortLandscape) {
+      ctx.textBaseline = 'top';
+      ctx.fillText(`Wave ${state.wave}  ${nutrientLabel()}  Membrane ${Math.max(0, state.membrane)}/${state.membraneMax}  Score ${Math.floor(state.score)}`, margin + 16, margin + 30);
+    } else if (compact) {
+      ctx.textBaseline = 'top';
+      ctx.fillText(`Wave ${state.wave}  ${nutrientLabel()}`, margin + 16, margin + 52);
+      ctx.fillText(`Membrane ${Math.max(0, state.membrane)}/${state.membraneMax}`, margin + 16, margin + 76);
+      ctx.fillText(`Score ${Math.floor(state.score)}`, margin + 16, margin + 100);
+    } else {
+      ctx.textBaseline = 'bottom';
+      const stats = `Wave ${state.wave}  ${nutrientLabel()}  Membrane ${Math.max(0, state.membrane)}/${state.membraneMax}  Score ${Math.floor(state.score)}`;
+      ctx.fillText(stats, margin + 16, margin + 52);
+
+      ctx.font = '700 12px system-ui, sans-serif';
+      ctx.fillStyle = 'rgba(20, 49, 44, 0.72)';
+      ctx.textAlign = 'right';
+      ctx.fillText(`Best ${bestWave}`, headerW + margin - 14, margin + 52);
+    }
+    ctx.restore();
+
+    for (const btn of buttons) drawButton(btn);
+
+    const benchY = H - bottomHeight() + (shortLandscape ? 6 : 8);
+    ctx.fillStyle = 'rgba(20, 49, 44, 0.72)';
+    ctx.font = '700 12px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('BENCH', margin, benchY);
+    for (const rect of benchRects) {
+      const active = state.selected && state.selected.type === 'bench' && state.selected.i === rect.i;
+      ctx.fillStyle = active ? 'rgba(45, 212, 191, 0.28)' : 'rgba(255, 255, 255, 0.42)';
+      roundRect(rect.x, rect.y, rect.w, rect.h, 18);
+      ctx.fill();
+      ctx.strokeStyle = active ? 'rgba(13, 148, 136, 0.85)' : 'rgba(15, 118, 110, 0.16)';
+      ctx.lineWidth = active ? 3 : 1.5;
+      ctx.stroke();
+    }
+
+    if (state.toastT > 0 && state.toast) {
+      const alpha = clamp(state.toastT / 0.25, 0, 1);
+      ctx.globalAlpha = Math.min(1, alpha);
+      ctx.font = '800 14px system-ui, sans-serif';
+      const tw = ctx.measureText(state.toast).width + 34;
+      const x = W / 2 - tw / 2;
+      const y = Math.max(headerHeight() + 8, H * 0.13);
+      ctx.fillStyle = 'rgba(20, 49, 44, 0.84)';
+      roundRect(x, y, tw, 38, 19);
+      ctx.fill();
+      ctx.fillStyle = '#ecfeff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(state.toast, W / 2, y + 19);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawButton(btn) {
+    const canDivide = canDivideSelected() && state.atp >= state.divideCost;
+    const canBuyAction = canGrowOrFeed();
+    const canStartWave = state.mode === 'build' && countCells() > 0;
+    const disabled = (btn.id === 'wave' && !canStartWave) || (btn.id === 'divide' && !canDivide) || (btn.id === 'buy' && !canBuyAction);
+    const hover = pointer.x >= btn.x && pointer.x <= btn.x + btn.w && pointer.y >= btn.y && pointer.y <= btn.y + btn.h;
+    const press = pointer.down && hover;
+    ctx.save();
+    ctx.translate(btn.x + btn.w / 2, btn.y + btn.h / 2);
+    ctx.scale(press ? 0.96 : 1, press ? 0.96 : 1);
+    const x = -btn.w / 2;
+    const y = -btn.h / 2;
+    const grad = ctx.createLinearGradient(x, y, x + btn.w, y + btn.h);
+    if (disabled) {
+      grad.addColorStop(0, '#d1d5db');
+      grad.addColorStop(1, '#a3a3a3');
+    } else if (btn.id === 'wave') {
+      grad.addColorStop(0, '#0f766e');
+      grad.addColorStop(1, '#2563eb');
+    } else if (btn.id === 'divide') {
+      grad.addColorStop(0, '#2dd4bf');
+      grad.addColorStop(1, '#22c55e');
+    } else {
+      grad.addColorStop(0, '#ffffff');
+      grad.addColorStop(1, hover ? '#ccfbf1' : '#e0f2fe');
+    }
+    ctx.fillStyle = grad;
+    roundRect(x, y, btn.w, btn.h, 14);
+    ctx.fill();
+    ctx.strokeStyle = disabled ? 'rgba(82, 82, 82, 0.18)' : 'rgba(15, 118, 110, 0.2)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.fillStyle = btn.id === 'wave' && !disabled ? '#ecfeff' : '#14342f';
+    ctx.font = `800 ${Math.max(11, Math.min(14, btn.w * 0.11))}px system-ui, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(btn.label, 0, 0);
+    ctx.restore();
+  }
+
+  function drawMenu() {
+    ctx.save();
+    ctx.fillStyle = 'rgba(247, 255, 247, 0.72)';
+    ctx.fillRect(0, 0, W, H);
+    const shortLandscape = isShortLandscape();
+    const edgePortrait = !shortLandscape && (W < 350 || H < 620);
+    const cx = W * 0.5;
+    const cy = shortLandscape ? H * 0.34 : edgePortrait ? H * 0.37 : H * 0.47;
+    const heroR = shortLandscape ? 40 : edgePortrait ? 46 : 54;
+    const ringBase = shortLandscape ? 54 : edgePortrait ? 62 : 74;
+    const ringStep = shortLandscape ? 17 : edgePortrait ? 20 : 24;
+    for (let i = 0; i < 4; i++) {
+      ctx.strokeStyle = `rgba(45, 212, 191, ${0.16 - i * 0.025})`;
+      ctx.lineWidth = 10 - i;
+      ctx.beginPath();
+      ctx.arc(cx, cy, ringBase + i * ringStep + Math.sin(state.time * 1.2 + i) * 3, 0, TAU);
+      ctx.stroke();
+    }
+    drawCell({ level: 3, pulse: state.time * 2, birth: 0, flash: 0, splitT: Math.max(0, Math.sin(state.time * 1.1)) * 0.7, mitosis: 0.86 }, cx, cy - 8, heroR, false);
+
+    ctx.fillStyle = '#14342f';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (shortLandscape) {
+      ctx.font = `900 ${Math.max(26, Math.min(38, W * 0.058))}px system-ui, sans-serif`;
+      ctx.fillText('Cell Division TD', cx, cy + 82);
+      ctx.font = '800 13px system-ui, sans-serif';
+      ctx.fillStyle = '#0f766e';
+      ctx.fillText('28 sites: move, merge, survive.', cx, cy + 112);
+    } else if (edgePortrait) {
+      ctx.font = `900 ${Math.max(28, Math.min(38, W * 0.09))}px system-ui, sans-serif`;
+      ctx.fillText('Cell Division TD', cx, cy + 84);
+      ctx.font = '800 13px system-ui, sans-serif';
+      ctx.fillStyle = '#0f766e';
+      ctx.fillText('28 sites: move, merge, survive.', cx, cy + 114);
+      ctx.fillStyle = '#134e4a';
+      ctx.fillText('Green blocks. Blue fires. Pathogens destroy.', cx, cy + 144);
+    } else {
+      ctx.font = `900 ${Math.max(30, Math.min(52, W * 0.085))}px system-ui, sans-serif`;
+      ctx.fillText('Cell Division TD', cx, cy + 112);
+      ctx.font = `700 ${Math.max(14, Math.min(18, W * 0.03))}px system-ui, sans-serif`;
+      ctx.fillStyle = '#0f766e';
+      ctx.fillText('28 sites: green blocker, blue secretors, collagen.', cx, cy + 146);
+      ctx.font = '800 14px system-ui, sans-serif';
+      ctx.fillStyle = '#134e4a';
+      ctx.fillText('Move and merge while pathogens attack cells.', cx, cy + 178);
+    }
+    ctx.restore();
+  }
+
+  function drawGameOver() {
+    ctx.save();
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.55)';
+    ctx.fillRect(0, 0, W, H);
+    const w = Math.min(420, W - 36);
+    const h = 190;
+    const x = W / 2 - w / 2;
+    const y = H / 2 - h / 2;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+    roundRect(x, y, w, h, 24);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(15, 118, 110, 0.18)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = '#14342f';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '900 28px system-ui, sans-serif';
+    ctx.fillText('Membrane Breached', W / 2, y + 44);
+    ctx.font = '700 15px system-ui, sans-serif';
+    ctx.fillStyle = '#0f766e';
+    ctx.fillText(`Wave ${state.wave}  Score ${Math.floor(state.score)}  Splits ${state.divisions}`, W / 2, y + 82);
+    ctx.fillStyle = '#134e4a';
+    ctx.fillText('Press Reset or R to restart the culture.', W / 2, y + 118);
+    ctx.restore();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+  }
+
+  function mixColor(a, b, t) {
+    const ca = hexToRgb(a);
+    const cb = hexToRgb(b);
+    return `rgb(${Math.round(ca.r + (cb.r - ca.r) * t)}, ${Math.round(ca.g + (cb.g - ca.g) * t)}, ${Math.round(ca.b + (cb.b - ca.b) * t)})`;
+  }
+
+  function hexToRgb(hex) {
+    const value = hex.replace('#', '');
+    const n = parseInt(value.length === 3 ? value.split('').map((c) => c + c).join('') : value, 16);
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+  }
+
+  function canDivideSelected() {
+    return !!(state.selected && state.selected.type === 'grid' && selectedCell() && state.mode === 'build');
+  }
+
+  function canFeedSelected() {
+    const cell = selectedCell();
+    return !!(state.selected && state.selected.type === 'grid' && cell && state.mode === 'build' && state.atp >= feedCost(cell) && cell.level < 9);
+  }
+
+  function canGrowOrFeed() {
+    if (state.mode !== 'build') return false;
+    if (state.selected && state.selected.type === 'grid' && selectedCell()) return canFeedSelected();
+    return state.bench.length < 7 && state.atp >= state.buyCost;
+  }
+
+  function renderGameToText() {
+    if (!state) return '{}';
+    const grid = [];
+    for (let lane = 0; lane < LANES; lane++) {
+      for (let col = 0; col < COLS; col++) {
+        const cell = state.grid[lane][col];
+        if (cell) grid.push({ id: cell.id, lane, col, phenotype: cell.phenotype, level: cell.level, hp: Math.max(0, Math.ceil(cell.hp)), maxHp: cell.maxHp, mitosis: Number(cell.mitosis.toFixed(2)) });
+      }
+    }
+    const payload = {
+      note: 'Canvas coordinates use origin top-left, x right, y down.',
+      mode: state.mode,
+      wave: state.wave,
+      board: { lanes: LANES, cols: COLS, totalSlots: LANES * COLS, openSlots: LANES * COLS - grid.length - state.scaffolds.length },
+      nutrient: Math.floor(state.atp),
+      pendingNutrient: Math.floor(state.pendingNutrient || 0),
+      membrane: state.membrane,
+      score: Math.floor(state.score),
+      selected: state.selected,
+      costs: { buy: state.buyCost, divide: state.divideCost },
+      controls: {
+        canBuy: canGrowOrFeed(),
+        canGrow: state.mode === 'build' && !(state.selected && state.selected.type === 'grid' && selectedCell()) && state.bench.length < 7 && state.atp >= state.buyCost,
+        canFeed: canFeedSelected(),
+        canDivide: canDivideSelected() && state.atp >= state.divideCost,
+        canMerge: state.mode === 'build' || state.mode === 'combat',
+        canStartWave: state.mode === 'build' && countCells() > 0,
+        nextGrowthPhenotype: hasPhagocyte() ? 'secretor' : 'phagocyte'
+      },
+      bench: state.bench.slice(0, 7).map((c) => c.level),
+      benchPhenotypes: state.bench.slice(0, 7).map((c) => c.phenotype),
+      grid,
+      scaffolds: state.scaffolds.map((s) => ({ id: s.id, lane: s.lane, col: s.col, hp: Math.max(0, Math.ceil(s.hp)), maxHp: s.maxHp })),
+      husks: state.husks.map((h) => ({ lane: h.lane, col: h.col, kind: h.kind })),
+      nutrientDrops: state.nutrientDrops.slice(0, 12).map((d) => ({ x: Math.round(d.x), y: Math.round(d.y), amount: d.amount })),
+      enemyCount: state.enemies.length,
+      enemies: state.enemies.slice(0, 12).map((e) => ({ id: e.id, kind: e.kind, lane: e.lane, x: Math.round(e.x), y: Math.round(e.y), hp: Math.ceil(e.hp), action: e.attacking ? 'attack' : 'advance', targetId: e.targetId, targetType: e.targetType })),
+      shots: state.shots.length,
+      kills: state.kills,
+      merges: state.merges,
+      divisions: state.divisions,
+      cellsLost: state.cellsLost,
+      scaffoldsLost: state.scaffoldsLost,
+      toast: state.toastT > 0 ? state.toast : ''
+    };
+    return JSON.stringify(payload);
+  }
+
+  function frame(ts) {
+    if (!lastTs) lastTs = ts;
+    const dt = (ts - lastTs) / 1000;
+    lastTs = ts;
+    update(dt);
+    render();
+    requestAnimationFrame(frame);
+  }
+
+  function canvasPoint(e) {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W / Math.max(1, rect.width);
+    const scaleY = H / Math.max(1, rect.height);
+    return {
+      x: (e.clientX - rect.left) * scaleX,
+      y: (e.clientY - rect.top) * scaleY
+    };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const p = canvasPoint(e);
+    if (canvas.setPointerCapture) {
+      try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+    }
+    pointerDown(p.x, p.y);
+    e.preventDefault();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    const p = canvasPoint(e);
+    pointer.x = p.x;
+    pointer.y = p.y;
+    e.preventDefault();
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    pointer.down = false;
+    if (canvas.releasePointerCapture) {
+      try { canvas.releasePointerCapture(e.pointerId); } catch (err) {}
+    }
+    e.preventDefault();
+  });
+  canvas.addEventListener('pointercancel', () => {
+    pointer.down = false;
+  });
+  canvas.addEventListener('pointerleave', () => {
+    pointer.down = false;
+  });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'm' || e.key === 'M') {
+      muted = !muted;
+      ensureAudio();
+      if (masterGain && audioCtx) masterGain.gain.setTargetAtTime(muted ? 0 : 0.12, audioCtx.currentTime, 0.02);
+      showToast(muted ? 'Sound muted' : 'Sound on');
+    } else if (e.key === 'r' || e.key === 'R') {
+      persist();
+      resetGame();
+      showToast('Culture reset');
+    } else if (e.key === ' ') {
+      startWave();
+      e.preventDefault();
+    }
+  });
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('pagehide', persist);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      persist();
+      try {
+        if (audioCtx && audioCtx.state === 'running') audioCtx.suspend();
+      } catch (e) {}
+    } else if (!muted) {
+      try {
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      } catch (e) {}
+    }
+  });
+
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms) => {
+    const steps = Math.max(1, Math.min(600, Math.round(ms / (1000 / 60))));
+    for (let i = 0; i < steps; i++) update(1 / 60);
+    render();
+    return renderGameToText();
+  };
+
+  resetGame();
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
