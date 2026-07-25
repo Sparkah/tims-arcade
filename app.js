@@ -1114,6 +1114,11 @@ function platformEntries(platforms) {
   const specs = [
     { key: 'yandex', label: 'Yandex', badge: 'Yandex' },
     { key: 'crazygames', label: 'CrazyGames', badge: 'CG' },
+    { key: 'gamepix', label: 'GamePix', badge: 'GamePix' },
+    { key: 'playgama', label: 'Playgama', badge: 'Playgama' },
+    { key: 'gamepush', label: 'GamePush', badge: 'GamePush' },
+    { key: 'gamedistribution', label: 'GameDistribution', badge: 'GD' },
+    { key: 'youtube', label: 'YouTube Playables', badge: 'YT' },
   ];
   const out = [];
   for (const spec of specs) {
