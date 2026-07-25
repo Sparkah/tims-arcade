@@ -1,0 +1,1926 @@
+<!DOCTYPE html>
+<!-- v1.0 -->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Merge Cleaners</title>
+<script src="/sdk.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; user-select:none; -webkit-tap-highlight-color:transparent; -webkit-touch-callout:none; }
+html,body { width:100%; height:100%; background:#0d1a26; overflow:hidden; position:fixed; overscroll-behavior:none; touch-action:none; display:flex; align-items:center; justify-content:center; }
+canvas { display:block; image-rendering:pixelated; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+'use strict';
+
+// ── Canvas ────────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('game');
+const ctx    = canvas.getContext('2d');
+const W = 800, H = 600;
+
+function resize() {
+    const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+    canvas.width  = W; canvas.height = H;
+    canvas.style.width  = (W * s) + 'px';
+    canvas.style.height = (H * s) + 'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Prevent pull-to-refresh, swipe nav, and context menu (Yandex rules 1.6.2.7, 1.10.2)
+document.addEventListener('touchmove',   e => e.preventDefault(), { passive: false });
+document.addEventListener('wheel',       e => e.preventDefault(), { passive: false });
+document.addEventListener('contextmenu', e => e.preventDefault());
+
+// Game loop error overlay — visible to user, never to DevTools (rule 1.14)
+let _errShown = false;
+function _showGameError(msg) {
+    if (_errShown) return; _errShown = true;
+    const d = document.createElement('div');
+    d.style.cssText = 'position:fixed;top:0;left:0;background:rgba(200,0,0,0.88);color:#fff;padding:8px;font-size:12px;z-index:9999;max-width:100%';
+    d.textContent = msg;
+    document.body.appendChild(d);
+    setTimeout(() => { d.remove(); _errShown = false; }, 8000);
+}
+
+// ── Asset loader ──────────────────────────────────────────────────────────────
+const IMGS = {};
+const GUN_SPRITES   = ['cleaner_t1_rag','cleaner_t2_sponge','cleaner_t3_brush','cleaner_t4_mop',
+                        'cleaner_t5_vacuum','cleaner_t6_washer','cleaner_t7_steam','cleaner_t8_laser'];
+const ENEMY_SPRITES = ['dirt_t1_dust','dirt_t2_crumb','dirt_t3_grime','dirt_t4_mold'];
+
+[...GUN_SPRITES, ...ENEMY_SPRITES].forEach(id => {
+    const img = new Image();
+    img.src = 'assets/' + id + '.png';
+    IMGS[id] = img;
+});
+
+function imgReady(id) {
+    const img = IMGS[id];
+    return img && img.complete && img.naturalWidth > 0;
+}
+
+// ── Audio engine (Web Audio API — no files) ───────────────────────────────────
+let _ac = null;
+let _muted = false;
+
+function ac() {
+    if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {} }
+    if (_ac && _ac.state === 'suspended') _ac.resume();
+    return _ac;
+}
+
+function _play(fn) {
+    if (_muted) return;
+    const ctx2 = ac();
+    if (!ctx2) return;
+    try { fn(ctx2); } catch(e) {}
+}
+
+function sfxShoot(tier) { _play(ctx2 => {
+    const g = ctx2.createGain();
+    g.gain.setValueAtTime(0.18 - tier * 0.01, ctx2.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx2.currentTime + 0.12);
+    g.connect(ctx2.destination);
+    const o = ctx2.createOscillator();
+    const freqs = [520, 460, 400, 340, 600, 280, 800, 240];
+    o.type = tier >= 6 ? 'sawtooth' : 'square';
+    o.frequency.setValueAtTime(freqs[tier] || 400, ctx2.currentTime);
+    o.frequency.exponentialRampToValueAtTime((freqs[tier] || 400) * 0.4, ctx2.currentTime + 0.1);
+    o.connect(g); o.start(); o.stop(ctx2.currentTime + 0.12);
+}); }
+
+function sfxMerge() { _play(ctx2 => {
+    for (let i = 0; i < 3; i++) {
+        const g = ctx2.createGain();
+        const t = ctx2.currentTime + i * 0.07;
+        g.gain.setValueAtTime(0.22, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
+        g.connect(ctx2.destination);
+        const o = ctx2.createOscillator();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(440 + i * 220, t);
+        o.connect(g); o.start(t); o.stop(t + 0.18);
+    }
+}); }
+
+function sfxBuy() { _play(ctx2 => {
+    const g = ctx2.createGain();
+    g.gain.setValueAtTime(0.2, ctx2.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx2.currentTime + 0.15);
+    g.connect(ctx2.destination);
+    const o = ctx2.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(660, ctx2.currentTime);
+    o.frequency.exponentialRampToValueAtTime(880, ctx2.currentTime + 0.12);
+    o.connect(g); o.start(); o.stop(ctx2.currentTime + 0.15);
+}); }
+
+function sfxWallHit() { _play(ctx2 => {
+    const buf = ctx2.createBuffer(1, ctx2.sampleRate * 0.25, ctx2.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
+    const src = ctx2.createBufferSource();
+    src.buffer = buf;
+    const g = ctx2.createGain();
+    g.gain.setValueAtTime(0.35, ctx2.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx2.currentTime + 0.25);
+    const filt = ctx2.createBiquadFilter();
+    filt.type = 'bandpass'; filt.frequency.value = 180; filt.Q.value = 0.8;
+    src.connect(filt); filt.connect(g); g.connect(ctx2.destination);
+    src.start(); src.stop(ctx2.currentTime + 0.25);
+}); }
+
+function sfxWaveClear() { _play(ctx2 => {
+    const notes = [523, 659, 784, 1047];
+    notes.forEach((freq, i) => {
+        const t = ctx2.currentTime + i * 0.12;
+        const g = ctx2.createGain();
+        g.gain.setValueAtTime(0.2, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+        g.connect(ctx2.destination);
+        const o = ctx2.createOscillator();
+        o.type = 'sine'; o.frequency.value = freq;
+        o.connect(g); o.start(t); o.stop(t + 0.3);
+    });
+}); }
+
+function sfxGameOver() { _play(ctx2 => {
+    const notes = [392, 330, 294, 220];
+    notes.forEach((freq, i) => {
+        const t = ctx2.currentTime + i * 0.18;
+        const g = ctx2.createGain();
+        g.gain.setValueAtTime(0.22, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+        g.connect(ctx2.destination);
+        const o = ctx2.createOscillator();
+        o.type = 'sawtooth'; o.frequency.value = freq;
+        o.connect(g); o.start(t); o.stop(t + 0.35);
+    });
+}); }
+
+function sfxAchievement() { _play(ctx2 => {
+    const notes = [523, 659, 784, 659, 1047];
+    notes.forEach((freq, i) => {
+        const t = ctx2.currentTime + i * 0.09;
+        const g = ctx2.createGain();
+        g.gain.setValueAtTime(0.18, t);
+        g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+        g.connect(ctx2.destination);
+        const o = ctx2.createOscillator();
+        o.type = 'sine'; o.frequency.value = freq;
+        o.connect(g); o.start(t); o.stop(t + 0.22);
+    });
+}); }
+
+// Unlock audio on first user interaction (required by browsers)
+let _audioUnlocked = false;
+canvas.addEventListener('pointerdown', () => {
+    if (_audioUnlocked) return;
+    _audioUnlocked = true;
+    ac();
+}, { once: false });
+
+// ── Yandex SDK globals (declared here so detectLang can read ysdk safely) ─────
+let ysdk = null;
+let _adInProgress = false;
+let _gamePaused = false;
+let _prePauseMuted = false;
+
+// ── Localisation ──────────────────────────────────────────────────────────────
+let lang = 'en';
+
+const STRINGS = {
+en: {
+  title:'Merge Cleaners', subtitle:'Merge same-tier tools · Stop the grime',
+  menu_stats:(w,c,a)=>'Best wave: '+w+'   ✨ '+c+' chips   '+a+'/12 achievements',
+  play_btn:'▶  PLAY', fast_start_btn:(g)=>'⚡ START AT WAVE 10  (~'+g+' soap)',
+  free_crate_btn:'🎁  FREE SUPPLIES  +10 ✨', watch_ad:'watch short ad',
+  buy_gun:(c)=>'BUY CLEANER  '+c+' soap', last_stand_hud:(s)=>'⚡ LAST STAND '+s+'s',
+  grid_hint:'EMPTY=MOVE  SAME TIER=MERGE  DIFF=SWAP',
+  wave_hud:(n)=>'WAVE '+n,
+  start_wave_1:'▶  START  WAVE  1', next_wave:(n)=>'▶  NEXT  WAVE  '+n,
+  wave_progress:(w,d,tt)=>'WAVE '+w+'  '+d+'/'+tt, active_enemies:(n)=>n+' ACTIVE',
+  grid_full:'GRID FULL!', need_gold:(c)=>'NEED '+c+' SOAP', plus_gun:'+CLEANER', max_tier:'MAX TIER!',
+  wave_clear:(w,g)=>'WAVE '+w+' CLEAN!  +'+g+' soap', flawless:'✦ SPOTLESS!',
+  last_stand_float:'⚡ LAST STAND!', plus_hp:(n)=>'+'+n+' HP', minus_hp:'-1 HP',
+  resurrected:'⚡ REBOOTED!', crate_full:'🎁 GRID FULL — no room!',
+  crate_reward:'🎁 SUPPLIES!  +10 ✨ CHIPS', crate_open:'▶ OPEN',
+  ach_toast:(name,n)=>'🏆 '+name+'  +'+n+' chips',
+  tut_tap:'tap anywhere to continue', tut_lets_go:'▶  LETS GO!', tut_next:'NEXT  →',
+  tut_cores_hint:'✨ CHIPS → UPGRADES',
+  tut_buy_first:'Buy your first cleaner!', tut_buy_second:'Buy one more cleaner',
+  tut_merge:'Select a cleaner, then tap same tier → MERGE!', tut_start_wave:'Start the wave!',
+  run_complete:'RUN COMPLETE', wave_label:(n)=>'Wave '+n, score_label:(n)=>'Score '+n,
+  cores_earned:(n)=>'✨ +'+n+' CHIPS', new_ach:'NEW ACHIEVEMENTS:',
+  best_wave_stat:(w,a)=>'Best wave: '+w+'  ·  '+a+'/12 achievements',
+  kills_stat:(k,m)=>'Total cleaned: '+k+'  ·  Merges: '+m,
+  menu_btn:'MENU', upgrades_btn:'✨ UPGRADES', play_again_btn:'▶ PLAY AGAIN',
+  wall_breached:'FLOOR BREACHED!',
+  resurrect_desc:'Watch an ad to reboot and get a bonus cleaner',
+  resurrect_bonus:(n,tt)=>'Bonus: '+n+' (T'+tt+')  +1 HP',
+  resurrect_btn:'▶ REBOOT', watch_ad_small:'watch ad', give_up_btn:'✗ GIVE UP',
+  back_btn:'← BACK', upgrades_title:(c)=>'UPGRADES  ✨ '+c,
+  level_label:(c,m)=>'Lv '+c+'/'+m, maxed:'MAXED ✓',
+  achievements_title:(n)=>'ACHIEVEMENTS  '+n+'/12',
+  tut1_title:'① BUY CLEANERS',
+  tut1_body:['Click the blue BUY CLEANER button below the grid.','Each tool costs soap. Fill your grid to scrub harder!'],
+  tut2_title:'② MOVE & MERGE',
+  tut2_body:['Click a cleaner to SELECT (yellow border).','Empty cell → MOVE · Same tier → MERGE · Diff → SWAP'],
+  tut3_title:'③ DEFEND & UPGRADE',
+  tut3_body:['Press START WAVE — cleaners auto-scrub the grime.','Clear grime → earn soap & CHIPS (✨) → buy upgrades!'],
+  gun0:'Rag',gun1:'Sponge',gun2:'Brush',gun3:'Mop',gun4:'Vacuum',gun5:'Pressure Washer',gun6:'Steam Jet',gun7:'Laser Polish',
+  br_FIREPOWER:'SCRUB POWER', br_DEFENSE:'DEFENSE', br_ECONOMY:'ECONOMY',
+  u_dmg_boost_n:'Stronger Soap',    u_dmg_boost_d:'+15% cleaner power',
+  u_fire_rate_n:'Quick Wipe',       u_fire_rate_d:'-10% scrub cooldown',
+  u_bullet_spd_n:'Spray Velocity',  u_bullet_spd_d:'+15% beam speed',
+  u_crit_chance_n:'Deep Clean',     u_crit_chance_d:'+8% crit (2× power)',
+  u_max_hp_n:'Floor Plating',       u_max_hp_d:'+10 max HP',
+  u_hp_regen_n:'Auto-Repair',       u_hp_regen_d:'+2 HP per wave clear',
+  u_armor_n:'Rubber Lining',        u_armor_d:'First breach/wave = 0 dmg',
+  u_last_stand_n:'Last Stand',      u_last_stand_d:'1 HP → 2× scrub speed 10s',
+  u_gold_mult_n:'Soap Rush',        u_gold_mult_d:'+20% soap from cleans',
+  u_start_gold_n:'Head Start',      u_start_gold_d:'+30 starting soap',
+  u_buy_discount_n:'Bulk Supplier', u_buy_discount_d:'-15% cleaner cost',
+  u_wave_bonus_n:'Big Tip',         u_wave_bonus_d:'+30% wave clear bonus',
+  a_first_kill_n:'First Wipe',      a_first_kill_d:'Scrub your first dirt',
+  a_wave_5_n:'Janitor',             a_wave_5_d:'Survive to wave 5',
+  a_wave_10_n:'Shift Manager',      a_wave_10_d:'Survive to wave 10',
+  a_wave_20_n:'Cleaning Chief',     a_wave_20_d:'Survive to wave 20',
+  a_merge_10_n:'Forge Master',      a_merge_10_d:'Perform 10 merges total',
+  a_gun_t4_n:'Heavy Mop',           a_gun_t4_d:'Own a T4 Mop in a run',
+  a_gun_t6_n:'Pressure Boss',       a_gun_t6_d:'Own a T6 Pressure Washer',
+  a_gun_t8_n:'Laser Apex',          a_gun_t8_d:'Own a T8 Laser Polisher',
+  a_kills_100_n:'Sanitiser I',      a_kills_100_d:'Clean 100 dirts total',
+  a_kills_500_n:'Sanitiser II',     a_kills_500_d:'Clean 500 dirts total',
+  a_flawless_wave_n:'Spotless',     a_flawless_wave_d:'Complete a wave without damage',
+  a_full_grid_n:'Full Cart',        a_full_grid_d:'Fill all 20 grid slots',
+},
+ru: {
+  title:'Merge Cleaners', subtitle:'Объединяй уборщиков одного типа · Останови грязь',
+  menu_stats:(w,c,a)=>'Лучшая волна: '+w+'   ✨ '+c+' жетонов   '+a+'/12 достижений',
+  play_btn:'▶  ИГРАТЬ', fast_start_btn:(g)=>'⚡ НАЧАТЬ С ВОЛНЫ 10  (~'+g+' мыла)',
+  free_crate_btn:'🎁  НАБОР  +10 ✨', watch_ad:'смотреть рекламу',
+  buy_gun:(c)=>'КУПИТЬ УБОРЩИКА  '+c+' мыла', last_stand_hud:(s)=>'⚡ ПОСЛЕДНИЙ ШАНС '+s+'с',
+  grid_hint:'ПУСТО=ПЕРЕМЕСТИТЬ  ТОТ ЖЕ=СЛИЯНИЕ  ДРУГОЙ=ОБМЕН',
+  wave_hud:(n)=>'ВОЛНА '+n,
+  start_wave_1:'▶  НАЧАТЬ  ВОЛНУ  1', next_wave:(n)=>'▶  СЛЕДУЮЩАЯ  ВОЛНА  '+n,
+  wave_progress:(w,d,tt)=>'ВОЛНА '+w+'  '+d+'/'+tt, active_enemies:(n)=>n+' ГРЯЗИ',
+  grid_full:'СЕТКА ПОЛНА!', need_gold:(c)=>'НУЖНО '+c+' МЫЛА', plus_gun:'+УБОРЩИК', max_tier:'МАКС!',
+  wave_clear:(w,g)=>'ВОЛНА '+w+' ОЧИЩЕНА!  +'+g+' мыла', flawless:'✦ БЕЗУПРЕЧНО!',
+  last_stand_float:'⚡ ПОСЛЕДНИЙ ШАНС!', plus_hp:(n)=>'+'+n+' HP', minus_hp:'-1 HP',
+  resurrected:'⚡ ПЕРЕЗАПУСК!', crate_full:'🎁 СЕТКА ПОЛНА!',
+  crate_reward:'🎁 НАБОР!  +10 ✨ ЖЕТОНОВ', crate_open:'▶ ОТКРЫТЬ',
+  ach_toast:(name,n)=>'🏆 '+name+'  +'+n+' жетонов',
+  tut_tap:'нажмите, чтобы продолжить', tut_lets_go:'▶  ВПЕРЁД!', tut_next:'ДАЛЕЕ  →',
+  tut_cores_hint:'✨ ЖЕТОНЫ → УЛУЧШЕНИЯ',
+  tut_buy_first:'Купи первого уборщика!', tut_buy_second:'Купи ещё одного',
+  tut_merge:'Выбери уборщика, затем такого же — СЛИЯНИЕ!', tut_start_wave:'Начни волну!',
+  run_complete:'СМЕНА ЗАВЕРШЕНА', wave_label:(n)=>'Волна '+n, score_label:(n)=>'Очки '+n,
+  cores_earned:(n)=>'✨ +'+n+' ЖЕТОНОВ', new_ach:'НОВЫЕ ДОСТИЖЕНИЯ:',
+  best_wave_stat:(w,a)=>'Лучшая волна: '+w+'  ·  '+a+'/12 достижений',
+  kills_stat:(k,m)=>'Очищено: '+k+'  ·  Слияний: '+m,
+  menu_btn:'МЕНЮ', upgrades_btn:'✨ УЛУЧШЕНИЯ', play_again_btn:'▶ ИГРАТЬ СНОВА',
+  wall_breached:'ПОЛ ПРОРВАН!',
+  resurrect_desc:'Реклама — перезапуск и бонусный уборщик',
+  resurrect_bonus:(n,tt)=>'Бонус: '+n+' (Т'+tt+')  +1 HP',
+  resurrect_btn:'▶ ПЕРЕЗАПУСК', watch_ad_small:'реклама', give_up_btn:'✗ СДАТЬСЯ',
+  back_btn:'← НАЗАД', upgrades_title:(c)=>'УЛУЧШЕНИЯ  ✨ '+c,
+  level_label:(c,m)=>'Ур '+c+'/'+m, maxed:'МАКС ✓',
+  achievements_title:(n)=>'ДОСТИЖЕНИЯ  '+n+'/12',
+  tut1_title:'① ПОКУПКА УБОРЩИКОВ',
+  tut1_body:['Нажми синюю кнопку КУПИТЬ УБОРЩИКА под сеткой.','Каждый стоит мыло. Заполни сетку!'],
+  tut2_title:'② ПЕРЕМЕЩЕНИЕ И СЛИЯНИЕ',
+  tut2_body:['Нажми уборщика для ВЫБОРА (жёлтая рамка).','Пусто→ПЕРЕМЕСТИТЬ · Тот же→СЛИЯНИЕ · Другой→ОБМЕН'],
+  tut3_title:'③ ЗАЩИТА И УЛУЧШЕНИЯ',
+  tut3_body:['Нажми НАЧАТЬ ВОЛНУ — уборщики сами чистят грязь.','Чисти грязь → получай мыло и ЖЕТОНЫ (✨)!'],
+  gun0:'Тряпка',gun1:'Губка',gun2:'Щётка',gun3:'Швабра',gun4:'Пылесос',gun5:'Минимойка',gun6:'Парогенератор',gun7:'Лазер',
+  br_FIREPOWER:'СИЛА УБОРКИ', br_DEFENSE:'ЗАЩИТА', br_ECONOMY:'ЭКОНОМИКА',
+  u_dmg_boost_n:'Крепче мыло',       u_dmg_boost_d:'+15% сила уборки',
+  u_fire_rate_n:'Быстрее протирка',  u_fire_rate_d:'-10% перезарядка',
+  u_bullet_spd_n:'Скорость струи',   u_bullet_spd_d:'+15% скорость струи',
+  u_crit_chance_n:'Глубокая чистка', u_crit_chance_d:'+8% крит (2× урон)',
+  u_max_hp_n:'Бронепол',             u_max_hp_d:'+10 макс HP',
+  u_hp_regen_n:'Авторемонт',         u_hp_regen_d:'+2 HP за волну',
+  u_armor_n:'Резиновая прокладка',   u_armor_d:'Первый прорыв за волну = 0',
+  u_last_stand_n:'Последний шанс',   u_last_stand_d:'1 HP → ×2 скорость 10с',
+  u_gold_mult_n:'Мыльная лихорадка', u_gold_mult_d:'+20% мыло с уборки',
+  u_start_gold_n:'Фора',             u_start_gold_d:'+30 стартового мыла',
+  u_buy_discount_n:'Оптовик',        u_buy_discount_d:'-15% стоимость уборщика',
+  u_wave_bonus_n:'Большие чаевые',   u_wave_bonus_d:'+30% бонус за волну',
+  a_first_kill_n:'Первая протирка',  a_first_kill_d:'Очисти первую грязь',
+  a_wave_5_n:'Уборщик',              a_wave_5_d:'Выживи до волны 5',
+  a_wave_10_n:'Сменщик',             a_wave_10_d:'Выживи до волны 10',
+  a_wave_20_n:'Шеф уборки',          a_wave_20_d:'Выживи до волны 20',
+  a_merge_10_n:'Мастер слияния',     a_merge_10_d:'10 слияний всего',
+  a_gun_t4_n:'Тяжёлая швабра',       a_gun_t4_d:'Иметь швабру Т4 за забег',
+  a_gun_t6_n:'Король напора',        a_gun_t6_d:'Иметь минимойку Т6',
+  a_gun_t8_n:'Лазерный вершитель',   a_gun_t8_d:'Иметь лазер Т8 за забег',
+  a_kills_100_n:'Санитар I',         a_kills_100_d:'Очисти 100 грязи всего',
+  a_kills_500_n:'Санитар II',        a_kills_500_d:'Очисти 500 грязи всего',
+  a_flawless_wave_n:'Безупречный',   a_flawless_wave_d:'Пройти волну без урона',
+  a_full_grid_n:'Полная тележка',    a_full_grid_d:'Заполнить все 20 ячеек',
+},
+};
+
+function t(key, ...args) {
+    const s = STRINGS[lang] || STRINGS.en;
+    const val = (s[key] !== undefined) ? s[key] : (STRINGS.en[key] || key);
+    return typeof val === 'function' ? val(...args) : val;
+}
+function tierName(tier) { return t('gun' + tier); }
+function upgName(id)    { return t('u_' + id + '_n'); }
+function upgDesc(id)    { return t('u_' + id + '_d'); }
+function achName(id)    { return t('a_' + id + '_n'); }
+function achDesc(id)    { return t('a_' + id + '_d'); }
+
+function detectLang() {
+    if (ysdk && ysdk.environment && ysdk.environment.i18n && ysdk.environment.i18n.lang) {
+        const sl = ysdk.environment.i18n.lang;
+        lang = ['ru','be','kk','uk','uz'].includes(sl) ? 'ru' : 'en';
+        return; // must not fall through to navigator
+    }
+    const nl = (navigator.language || '').toLowerCase();
+    lang = (nl.startsWith('ru')||nl.startsWith('be')||nl.startsWith('kk')||nl.startsWith('uk')||nl.startsWith('uz')) ? 'ru' : 'en';
+}
+detectLang(); // initial guess from navigator; overridden after SDK init
+
+// ── Yandex SDK ────────────────────────────────────────────────────────────────
+function _yadCall(fn) { try { if (ysdk) fn(ysdk); } catch(e) {} }
+function yadGameplayStart() { _yadCall(s => s.features.GameplayAPI?.start()); }
+function yadGameplayStop()  { _yadCall(s => s.features.GameplayAPI?.stop());  }
+function yadLoadingReady()  { _yadCall(s => s.features.LoadingAPI?.ready());  }
+
+function showInterstitialAd(onDone) {
+    if (!ysdk) { if (onDone) onDone(); return; }
+    if (_adInProgress) { if (onDone) onDone(); return; }
+    _adInProgress = true;
+    yadGameplayStop();
+    const prevMuted = _muted; _muted = true;
+    try {
+        ysdk.adv.showFullscreenAdv({ callbacks: {
+            onClose: () => { _adInProgress = false; _muted = prevMuted; if (onDone) onDone(); },
+            onError: () => { _adInProgress = false; _muted = prevMuted; if (onDone) onDone(); },
+        }});
+    } catch(e) { _adInProgress = false; _muted = prevMuted; if (onDone) onDone(); }
+}
+
+function showRewardedAd(onRewarded, onClose) {
+    if (!ysdk) {
+        // Dev fallback — simulate watched ad so features are testable locally
+        if (onRewarded) onRewarded();
+        if (onClose) onClose(true);
+        return;
+    }
+    if (_adInProgress) { if (onClose) onClose(false); return; }
+    _adInProgress = true;
+    yadGameplayStop();
+    const prevMuted = _muted; _muted = true;
+    let rewarded = false;
+    try {
+        ysdk.adv.showRewardedVideo({ callbacks: {
+            onRewarded: () => { rewarded = true; if (onRewarded) onRewarded(); },
+            onClose:    () => { _adInProgress = false; _muted = prevMuted; if (STATE === 'play') yadGameplayStart(); if (onClose) onClose(rewarded); },
+            onError:    () => { _adInProgress = false; _muted = prevMuted; if (onClose) onClose(false); },
+        }});
+    } catch(e) { _adInProgress = false; _muted = prevMuted; if (onClose) onClose(false); }
+}
+
+// ── Base gun stats ────────────────────────────────────────────────────────────
+const BASE_TIERS = [
+    { color:'#95a5a6', glow:'#bdc3c7', damage:1,  rate:90,  range:320, bspeed:6,  name:'Rag'             },
+    { color:'#f39c12', glow:'#ffce54', damage:2,  rate:65,  range:340, bspeed:7,  name:'Sponge'          },
+    { color:'#16a085', glow:'#1abc9c', damage:4,  rate:50,  range:360, bspeed:7,  name:'Brush'           },
+    { color:'#2980b9', glow:'#3498db', damage:7,  rate:35,  range:390, bspeed:9,  name:'Mop'             },
+    { color:'#27ae60', glow:'#2ecc71', damage:5,  rate:18,  range:370, bspeed:8,  name:'Vacuum'          },
+    { color:'#0984e3', glow:'#48dbfb', damage:18, rate:55,  range:400, bspeed:10, name:'PressureWasher'  },
+    { color:'#00b894', glow:'#55efc4', damage:35, rate:40,  range:420, bspeed:10, name:'SteamJet'        },
+    { color:'#a78bfa', glow:'#e0aaff', damage:60, rate:30,  range:450, bspeed:12, name:'LaserPolish'     },
+];
+let TIERS = BASE_TIERS.map(t => ({...t})); // recomputed each run
+
+const COLS = 5, ROWS = 4;
+const CW = 68, CH = 68;
+const GRID_X = 18, GRID_Y = 130;
+const DIVIDER_X = GRID_X + COLS * (CW + 4) + 20;
+const LANE_X = DIVIDER_X + 10;
+const LANE_W = W - LANE_X;
+const BUY_COST_BASE = 15;
+const BUY_COST_SCALE = 1.18;
+
+// ── Meta — upgrades & achievements ───────────────────────────────────────────
+const UPGRADE_DEFS = {
+    // FIREPOWER
+    dmg_boost:    { branch:'FIREPOWER', name:'Damage Boost',    desc:'+15% gun damage',     maxLv:5, costs:[8,12,18,26,36] },
+    fire_rate:    { branch:'FIREPOWER', name:'Rapid Fire',      desc:'-10% fire cooldown',  maxLv:5, costs:[8,12,18,26,36] },
+    bullet_spd:   { branch:'FIREPOWER', name:'Velocity',        desc:'+15% bullet speed',   maxLv:3, costs:[10,16,24]       },
+    crit_chance:  { branch:'FIREPOWER', name:'Critical Hit',    desc:'+8% crit (2× damage)',maxLv:4, costs:[15,22,32,45]   },
+    // DEFENSE
+    max_hp:       { branch:'DEFENSE',   name:'Fortify',         desc:'+10 max HP',           maxLv:5, costs:[6,10,15,22,30] },
+    hp_regen:     { branch:'DEFENSE',   name:'Regen',           desc:'+2 HP per wave clear', maxLv:3, costs:[12,18,28]      },
+    armor:        { branch:'DEFENSE',   name:'Armor Plate',     desc:'First breach/wave = 0 damage', maxLv:1, costs:[30]  },
+    last_stand:   { branch:'DEFENSE',   name:'Last Stand',      desc:'At 1 HP → guns fire 2× faster 10s', maxLv:1, costs:[35] },
+    // ECONOMY
+    gold_mult:    { branch:'ECONOMY',   name:'Gold Rush',       desc:'+20% gold from kills', maxLv:5, costs:[6,10,15,22,30] },
+    start_gold:   { branch:'ECONOMY',   name:'Head Start',      desc:'+30 starting gold',    maxLv:3, costs:[8,14,22]      },
+    buy_discount: { branch:'ECONOMY',   name:'Arms Dealer',     desc:'-15% gun buy cost',    maxLv:3, costs:[10,18,30]     },
+    wave_bonus:   { branch:'ECONOMY',   name:'Plunder',         desc:'+30% wave clear bonus',maxLv:3, costs:[8,14,22]      },
+};
+
+const ACH_DEFS = [
+    { id:'first_kill',    name:'First Blood',      desc:'Kill your first enemy',          coreReward:1,  check: s => s.totalKills >= 1         },
+    { id:'wave_5',        name:'Veteran',          desc:'Survive to wave 5',              coreReward:3,  check: s => s.maxWaveRun >= 5         },
+    { id:'wave_10',       name:'Commander',        desc:'Survive to wave 10',             coreReward:6,  check: s => s.maxWaveRun >= 10        },
+    { id:'wave_20',       name:'Warlord',          desc:'Survive to wave 20',             coreReward:12, check: s => s.maxWaveRun >= 20        },
+    { id:'merge_10',      name:'Forge Master',     desc:'Perform 10 merges total',        coreReward:3,  check: s => s.totalMerges >= 10       },
+    { id:'gun_t4',        name:'Heavy Artillery',  desc:'Own a T4 Sniper in a run',       coreReward:3,  check: s => s.highestTierRun >= 3     },
+    { id:'gun_t6',        name:'War Machine',      desc:'Own a T6 Cannon in a run',       coreReward:6,  check: s => s.highestTierRun >= 5     },
+    { id:'gun_t8',        name:'Apex Predator',    desc:'Own a T8 Plasma in a run',       coreReward:12, check: s => s.highestTierRun >= 7     },
+    { id:'kills_100',     name:'Exterminator I',   desc:'Kill 100 enemies total',         coreReward:3,  check: s => s.totalKills >= 100       },
+    { id:'kills_500',     name:'Exterminator II',  desc:'Kill 500 enemies total',         coreReward:8,  check: s => s.totalKills >= 500       },
+    { id:'flawless_wave', name:'Untouchable',      desc:'Complete a wave without taking damage', coreReward:5, check: s => s.flawlessWaves >= 1 },
+    { id:'full_grid',     name:'Full Arsenal',     desc:'Fill all 20 grid slots',         coreReward:5,  check: s => s.fullGridAchieved        },
+];
+
+// ── Save / load ───────────────────────────────────────────────────────────────
+const SAVE_KEY = 'mergeCleaners_save';
+let saveData; // { cores, upgrades:{id:level}, achievements:[id,...], stats:{...} }
+
+function defaultSave() {
+    return {
+        cores: 0,
+        upgrades: Object.fromEntries(Object.keys(UPGRADE_DEFS).map(k => [k, 0])),
+        achievements: [],
+        tutorialDone: false,
+        stats: {
+            totalKills: 0, totalMerges: 0, maxWave: 0, gamesPlayed: 0,
+            totalKillsRun: 0, maxWaveRun: 0, highestTierRun: 0,
+            flawlessWaves: 0, fullGridAchieved: false,
+        },
+    };
+}
+
+function loadSave() {
+    try {
+        const raw = localStorage.getItem(SAVE_KEY);
+        if (raw) {
+            saveData = JSON.parse(raw);
+            // Ensure all upgrade keys exist
+            Object.keys(UPGRADE_DEFS).forEach(k => { if (!(k in saveData.upgrades)) saveData.upgrades[k] = 0; });
+            if (!saveData.stats) saveData.stats = defaultSave().stats;
+            if (!('tutorialDone' in saveData)) saveData.tutorialDone = false;
+        } else {
+            saveData = defaultSave();
+        }
+    } catch(e) { saveData = defaultSave(); }
+}
+
+function writeSave() {
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(saveData)); } catch(e) {}
+}
+
+loadSave();
+
+// ── Apply upgrades → compute TIERS ───────────────────────────────────────────
+function recomputeTiers() {
+    const u = saveData.upgrades;
+    TIERS = BASE_TIERS.map(t => {
+        const dmg = t.damage * Math.pow(1.15, u.dmg_boost);
+        const rate = t.rate   * Math.pow(0.90, u.fire_rate);
+        const bspd = t.bspeed * Math.pow(1.15, u.bullet_spd);
+        return { ...t, damage: dmg, rate: Math.max(8, rate), bspeed: bspd };
+    });
+}
+
+function getStartGold() {
+    return 60 + saveData.upgrades.start_gold * 30;
+}
+
+function getBuyCostBase() {
+    return BUY_COST_BASE * Math.pow(0.85, saveData.upgrades.buy_discount);
+}
+
+function getWaveBonus(w) {
+    return Math.round(w * 10 * Math.pow(1.30, saveData.upgrades.wave_bonus));
+}
+
+function getGoldMult() {
+    return Math.pow(1.20, saveData.upgrades.gold_mult);
+}
+
+function getMaxHp() {
+    return 20 + saveData.upgrades.max_hp * 10;
+}
+
+function getCritChance() {
+    return saveData.upgrades.crit_chance * 0.08;
+}
+
+function getFastStartGold(startWaveNum) {
+    // Simulate waves 1..(startWaveNum-1) gold: base + all wave bonuses + kills estimate
+    let g = getStartGold();
+    for (let w = 1; w < startWaveNum; w++) {
+        g += getWaveBonus(w);
+        // Estimate kill gold: ~half of enemies * average reward
+        const cfg = waveConfig(w);
+        g += Math.round(cfg.count * 0.65 * cfg.reward * getGoldMult());
+    }
+    return Math.round(g);
+}
+
+// ── Game state ────────────────────────────────────────────────────────────────
+let STATE = 'menu';  // menu | tutorial | play | results | upgrades
+let tutStep = 0;
+let gold, wave, hp, maxHp;
+let guns = [], enemies = [], bullets = [], particles = [], floats = [];
+let selected = null;
+let waveActive = false, waveEnemiesLeft = 0, spawnInterval = 0, spawnTimer = 0, waveEndTimer = 0;
+let buyCount = 0, score = 0;
+
+// Per-run tracking for achievements
+let runKills = 0, runMerges = 0, runHighestTier = 0, runWaveHpBefore = 0;
+let runFlawlessWaves = 0;
+let lastStandActive = false, lastStandTimer = 0;
+let armorUsedThisWave = false;
+let runResults = null;  // { wave, score, coresEarned, newAchievements }
+
+// Achievement toasts
+let achToasts = []; // { text, life }
+
+// Gameplay supply crate (rewarded ad drop)
+let crate = null;          // { x, y, life, maxLife, tier }
+let crateSpawnTimer = 0;
+let crateFirstSpawned = false;
+const CRATE_FIRST_INTERVAL  = 1800; // first crate after 30 s
+const CRATE_REPEAT_INTERVAL = 3600; // subsequent crates every 60 s
+const CRATE_LIFETIME = 720; // disappears after 12 s if not clicked
+
+// Resurrect offer state
+let resurrectOffered = false; // one offer per run
+
+function initGame() {
+    recomputeTiers();
+    gold = getStartGold();
+    maxHp = getMaxHp();
+    hp = maxHp;
+    wave = 0;
+    guns = []; enemies = []; bullets = []; particles = []; floats = [];
+    selected = null;
+    waveActive = false; waveEnemiesLeft = 0; spawnInterval = 0; spawnTimer = 0; waveEndTimer = 0;
+    buyCount = 0; score = 0;
+    runKills = 0; runMerges = 0; runHighestTier = 0; runFlawlessWaves = 0;
+    lastStandActive = false; lastStandTimer = 0; armorUsedThisWave = false;
+    achToasts = [];
+    crate = null; crateSpawnTimer = 0; crateFirstSpawned = false;
+    resurrectOffered = false;
+
+}
+
+const FAST_START_WAVE = 10;
+
+function initGameFastStart() {
+    initGame();
+    wave = FAST_START_WAVE - 1; // so next wave button starts wave 10
+    gold = getFastStartGold(FAST_START_WAVE);
+    // Pre-place a starter set of guns scaled to wave 10 strength
+    // Give 6 guns: mix of T2–T4 spread across the right columns
+    const starterTiers = [3, 2, 3, 2, 1, 2]; // T4,T3,T4,T3,T2,T3
+    starterTiers.forEach(tier => {
+        const cell = emptyCell();
+        if (cell) guns.push({ col: cell.col, row: cell.row, tier, cd: 0 });
+    });
+}
+
+// ── Results / achievements ────────────────────────────────────────────────────
+function computeResults() {
+    const coresEarned = Math.max(1, Math.floor(wave * 3 + score / 80));
+    saveData.cores += coresEarned;
+    saveData.stats.gamesPlayed++;
+    saveData.stats.totalKills += runKills;
+    saveData.stats.totalMerges += runMerges;
+    if (wave > saveData.stats.maxWave) saveData.stats.maxWave = wave;
+    saveData.stats.maxWaveRun = wave;
+    saveData.stats.highestTierRun = runHighestTier;
+    saveData.stats.flawlessWaves += runFlawlessWaves;
+    if (guns.length >= COLS * ROWS) saveData.stats.fullGridAchieved = true;
+
+    const newAch = [];
+    ACH_DEFS.forEach(def => {
+        if (!saveData.achievements.includes(def.id) && def.check(saveData.stats)) {
+            saveData.achievements.push(def.id);
+            saveData.cores += def.coreReward;
+            newAch.push(def);
+        }
+    });
+
+    writeSave();
+    runResults = { wave, score, coresEarned, newAchievements: newAch };
+}
+
+function checkAchievementsLive() {
+    ACH_DEFS.forEach(def => {
+        if (!saveData.achievements.includes(def.id) && def.check(saveData.stats)) {
+            saveData.achievements.push(def.id);
+            saveData.cores += def.coreReward;
+            achToasts.push({ text: t('ach_toast', achName(def.id), def.coreReward), life: 180 });
+            sfxAchievement();
+            writeSave();
+        }
+    });
+}
+
+// ── Floor / level themes ──────────────────────────────────────────────────────
+// 4 backgrounds based on current wave (kitchen → bathroom → hospital → spaceship)
+function getFloorTint() {
+    const w = wave || 0;
+    // L1: kitchen (warm beige), L2: bathroom (cool blue), L3: hospital (clinical),
+    // L4: spaceship deck (dark steel/violet)
+    if (w >= 30)      return { bg:'#161a30', tile:'#2a2f50', name:'spaceship' };
+    if (w >= 20)      return { bg:'#0e1e1e', tile:'#1a3a3a', name:'hospital'  };
+    if (w >= 10)      return { bg:'#0e1a26', tile:'#1a2e44', name:'bathroom'  };
+    return                   { bg:'#1a160d', tile:'#2e271a', name:'kitchen'   };
+}
+
+// ── Wave config ───────────────────────────────────────────────────────────────
+function waveConfig(w) {
+    const count  = 8  + w * 3;
+    const tier   = Math.min(3, Math.floor(w / 4));
+    const hpMult = 1  + w * 0.25;
+    const spd    = 0.55 + w * 0.04;
+    const reward = 4  + w * 2;
+    const interval = Math.max(40, 100 - w * 4);
+    return { count, tier, hpMult, spd, reward, interval };
+}
+
+function spawnEnemy(w) {
+    const cfg = waveConfig(w);
+    const type = Math.min(cfg.tier, 3);
+    const ETYPES = [
+        { color:'#b89968', glow:'#d4b886', baseHp:8  },  // Dust (sandy)
+        { color:'#8b5a2b', glow:'#a87341', baseHp:18 },  // Crumb (brown)
+        { color:'#6b8e23', glow:'#9acd32', baseHp:35 },  // Grime (olive/green)
+        { color:'#3d5a3d', glow:'#5a8a5a', baseHp:70 },  // Mold (dark green boss)
+    ];
+    const et = ETYPES[type];
+    const ehp = Math.round(et.baseHp * cfg.hpMult);
+    const y   = GRID_Y + 10 + Math.random() * (ROWS * (CH + 4) - 20);
+    enemies.push({
+        x: W + 30, y,
+        hp: ehp, maxHp: ehp,
+        spd: cfg.spd + Math.random() * 0.15,
+        reward: cfg.reward, type,
+        color: et.color, glow: et.glow, r: 14 + type * 3,
+    });
+}
+
+function _doStartWave() {
+    wave++;
+    waveActive = true;
+    yadGameplayStart();
+    const cfg = waveConfig(wave);
+    waveEnemiesLeft = cfg.count;
+    spawnInterval = cfg.interval;
+    spawnTimer = 0; waveEndTimer = 0;
+    runWaveHpBefore = hp;
+    armorUsedThisWave = false;
+}
+
+function startWave() {
+    if (STATE === 'tutorial') {
+        saveData.tutorialDone = true;
+        writeSave();
+        STATE = 'play';
+        showInterstitialAd(() => { _doStartWave(); });
+        return;
+    }
+    _doStartWave();
+}
+
+// ── Grid ──────────────────────────────────────────────────────────────────────
+function cellRect(col, row) {
+    return { x: GRID_X + col * (CW + 4), y: GRID_Y + row * (CH + 4), w: CW, h: CH };
+}
+function gunAt(col, row) { return guns.find(g => g.col === col && g.row === row) || null; }
+function emptyCell() {
+    for (let c = COLS - 1; c >= 0; c--)
+        for (let r = 0; r < ROWS; r++)
+            if (!gunAt(c, r)) return { col: c, row: r };
+    return null;
+}
+
+function buyGun() {
+    const cell = emptyCell();
+    if (!cell) { spawnFloat(GRID_X + COLS*(CW+4)/2, GRID_Y - 18, t('grid_full'), '#e74c3c'); return; }
+    const cost = Math.round(getBuyCostBase() * Math.pow(BUY_COST_SCALE, buyCount));
+    if (gold < cost) { spawnFloat(GRID_X + COLS*(CW+4)/2, GRID_Y - 18, t('need_gold', cost), '#e74c3c'); return; }
+    gold -= cost; buyCount++;
+    sfxBuy();
+    guns.push({ col: cell.col, row: cell.row, tier: 0, cd: 0 });
+    spawnFloat(cellRect(cell.col, cell.row).x + CW/2, cellRect(cell.col, cell.row).y, t('plus_gun'), '#2ecc71');
+    if (STATE === 'tutorial') { if (tutStep === 0) tutStep = 1; else if (tutStep === 1) tutStep = 2; }
+    if (guns.length >= COLS * ROWS) { saveData.stats.fullGridAchieved = true; checkAchievementsLive(); }
+}
+
+function tryMerge(col, row) {
+    if (!selected) return false;
+    if (selected.col === col && selected.row === row) { selected = null; return true; }
+    const a = gunAt(selected.col, selected.row);
+    const b = gunAt(col, row);
+    if (!a) { selected = null; return false; }
+    if (!b) {
+        a.col = col; a.row = row; selected = null; return true;
+    }
+    if (a.tier !== b.tier) {
+        const tc = b.col, tr = b.row;
+        b.col = a.col; b.row = a.row;
+        a.col = tc; a.row = tr;
+        selected = null; return true;
+    }
+    if (a.tier >= TIERS.length - 1) {
+        spawnFloat(cellRect(col, row).x + CW/2, cellRect(col, row).y, t('max_tier'), '#ffd700');
+        selected = null; return true;
+    }
+    guns = guns.filter(g => !(g.col === selected.col && g.row === selected.row));
+    b.tier = a.tier + 1; b.cd = 0;
+    if (b.tier > runHighestTier) { runHighestTier = b.tier; saveData.stats.highestTierRun = runHighestTier; }
+    spawnMergeParticles(cellRect(col, row).x + CW/2, cellRect(col, row).y + CH/2, TIERS[b.tier].glow);
+    spawnFloat(cellRect(col, row).x + CW/2, cellRect(col, row).y - 10, '▲ ' + tierName(b.tier), TIERS[b.tier].glow);
+    runMerges++; saveData.stats.totalMerges++;
+    sfxMerge();
+    if (STATE === 'tutorial' && tutStep === 2) tutStep = 3;
+    checkAchievementsLive();
+    selected = null; return true;
+}
+
+// ── Crate rewards ─────────────────────────────────────────────────────────────
+function openCrate() {
+    if (!crate || _adInProgress) return;
+    const c = crate;
+    crate = null;
+    showRewardedAd(
+        () => { // onRewarded
+            const cell = emptyCell();
+            if (!cell) { achToasts.push({ text: t('crate_full'), life: 160 }); return; }
+            guns.push({ col: cell.col, row: cell.row, tier: c.tier, cd: 0 });
+            if (c.tier > runHighestTier) { runHighestTier = c.tier; saveData.stats.highestTierRun = runHighestTier; }
+            spawnMergeParticles(cellRect(cell.col, cell.row).x + CW/2, cellRect(cell.col, cell.row).y + CH/2, TIERS[c.tier].glow);
+            spawnFloat(cellRect(cell.col, cell.row).x + CW/2, cellRect(cell.col, cell.row).y - 10, '🎁 ' + tierName(c.tier) + '!', TIERS[c.tier].glow);
+            sfxMerge();
+            checkAchievementsLive();
+        },
+        null
+    );
+}
+
+function openMenuCrate() {
+    if (_adInProgress) return;
+    showRewardedAd(
+        () => {
+            saveData.cores += 10;
+            writeSave();
+            achToasts.push({ text: t('crate_reward'), life: 240 });
+        },
+        null
+    );
+}
+
+function offerResurrect() {
+    // Called when hp hits 0 — offer one rewarded ad to continue
+    if (resurrectOffered || _adInProgress) { _finishRun(); return; }
+    resurrectOffered = true;
+    STATE = 'resurrect'; // special overlay state
+}
+
+function _finishRun() {
+    sfxGameOver();
+    yadGameplayStop();
+    computeResults();
+    STATE = 'results';
+    showInterstitialAd(null);
+}
+
+function acceptResurrect() {
+    showRewardedAd(
+        () => { // onRewarded
+            hp = 1;
+            // Bonus: add best_tier - 1 gun if space available
+            const cell = emptyCell();
+            if (cell && guns.length > 0) {
+                const bestTier = Math.max(...guns.map(g => g.tier));
+                const bonusTier = Math.max(0, bestTier - 1);
+                guns.push({ col: cell.col, row: cell.row, tier: bonusTier, cd: 0 });
+                spawnMergeParticles(cellRect(cell.col, cell.row).x + CW/2, cellRect(cell.col, cell.row).y + CH/2, TIERS[bonusTier].glow);
+                spawnFloat(cellRect(cell.col, cell.row).x + CW/2, cellRect(cell.col, cell.row).y - 10, '⚡ ' + tierName(bonusTier) + '!', '#ffd700');
+            }
+            spawnFloat(W/2, H/2, t('resurrected'), '#ffd700');
+            sfxWaveClear();
+            STATE = 'play';
+            yadGameplayStart();
+        },
+        (rewarded) => {
+            if (!rewarded) _finishRun(); // ad skipped / no reward
+        }
+    );
+}
+
+// ── Particles / floats ────────────────────────────────────────────────────────
+function spawnMergeParticles(x, y, color) {
+    for (let i = 0; i < 18; i++) {
+        const a = Math.random() * Math.PI * 2, s = 1.5 + Math.random() * 3;
+        particles.push({ x, y, dx: Math.cos(a)*s, dy: Math.sin(a)*s, life: 35, maxLife: 35, color, r: 2 + Math.random()*2 });
+    }
+}
+function spawnHitParticles(x, y, color) {
+    for (let i = 0; i < 5; i++) {
+        const a = Math.random() * Math.PI * 2;
+        particles.push({ x, y, dx: Math.cos(a)*(1+Math.random()*2), dy: Math.sin(a)*(1+Math.random()*2), life: 18, maxLife: 18, color, r: 1.5 });
+    }
+}
+function spawnFloat(x, y, text, color) { floats.push({ x, y, vy: -0.8, text, life: 60, color }); }
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+function getCanvasPos(e) {
+    const r = canvas.getBoundingClientRect();
+    const scaleX = W / r.width, scaleY = H / r.height;
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return { x: (cx - r.left) * scaleX, y: (cy - r.top) * scaleY };
+}
+
+function handleClick(px, py) {
+    if (STATE === 'menu') {
+        // Fast-start button (only when unlocked; H/2+168..204)
+        if (saveData.stats.maxWave >= FAST_START_WAVE &&
+            px >= W/2 - 120 && px <= W/2 + 120 && py >= H/2 + 168 && py <= H/2 + 204) {
+            showInterstitialAd(() => { initGameFastStart(); STATE = 'play'; });
+            return;
+        }
+        // Crate button (position shifts based on fast-start unlock)
+        const crateY = saveData.stats.maxWave >= FAST_START_WAVE ? H/2 + 212 : H/2 + 172;
+        if (px >= W/2 - 130 && px <= W/2 + 130 && py >= crateY && py <= crateY + 36) {
+            openMenuCrate(); return;
+        }
+        // Any other click = start normal game (show interstitial first)
+        showInterstitialAd(() => { initGame(); STATE = 'play'; });
+        return;
+    }
+    if (STATE === 'results')  { handleResultsClick(px, py); return; }
+    if (STATE === 'upgrades') { handleUpgradesClick(px, py); return; }
+    if (STATE === 'resurrect') {
+        // Buttons are drawn centered — watch ad or skip
+        const bcy = H/2 + 80;
+        if (px >= W/2 - 180 && px <= W/2 - 10 && py >= bcy && py <= bcy + 44) { acceptResurrect(); return; }
+        if (px >= W/2 + 10  && px <= W/2 + 180 && py >= bcy && py <= bcy + 44) { _finishRun(); return; }
+        return;
+    }
+
+    // Mute button (W-38, 58, 28, 18)
+    if (px >= W - 38 && px <= W - 10 && py >= 58 && py <= 76) { _muted = !_muted; return; }
+
+    // Buy button
+    const bx = GRID_X, by = 88, bw = COLS*(CW+4)-4, bh = 28;
+    if (px >= bx && px <= bx+bw && py >= by && py <= by+bh) { buyGun(); return; }
+
+    // Supply crate click
+    if (crate && Math.hypot(px - crate.x, py - crate.y) < 26) { openCrate(); return; }
+
+    // Start wave button
+    if (!waveActive) {
+        const wx2 = DIVIDER_X + 10, wy = H - 56, ww = LANE_W - 10, wh = 42;
+        if (px >= wx2 && px <= wx2+ww && py >= wy && py <= wy+wh) {
+            if (STATE === 'tutorial' && tutStep < 3) return;
+            startWave(); return;
+        }
+    }
+
+    // Grid click
+    for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+            const r = cellRect(col, row);
+            if (px >= r.x && px <= r.x+r.w && py >= r.y && py <= r.y+r.h) {
+                if (selected) { tryMerge(col, row); }
+                else if (gunAt(col, row)) { selected = { col, row }; }
+                return;
+            }
+        }
+    }
+    selected = null;
+}
+
+canvas.addEventListener('click',     e => { const p = getCanvasPos(e); handleClick(p.x, p.y); });
+canvas.addEventListener('touchstart', e => { e.preventDefault(); const p = getCanvasPos(e); handleClick(p.x, p.y); }, { passive: false });
+
+// ── Results screen clicks ─────────────────────────────────────────────────────
+const RES = { bx: W/2 - 200, by: H/2 - 170, bw: 400, bh: 340 };
+
+function handleResultsClick(px, py) {
+    const cx = W/2;
+    // UPGRADES button
+    if (px >= cx - 180 && px <= cx - 10 && py >= RES.by + RES.bh - 52 && py <= RES.by + RES.bh - 16) {
+        STATE = 'upgrades'; return;
+    }
+    // PLAY AGAIN button
+    if (px >= cx + 10 && px <= cx + 180 && py >= RES.by + RES.bh - 52 && py <= RES.by + RES.bh - 16) {
+        initGame(); STATE = 'play'; return;
+    }
+    // MENU button (top-right of card)
+    if (px >= RES.bx + RES.bw - 70 && px <= RES.bx + RES.bw - 5 && py >= RES.by + 8 && py <= RES.by + 30) {
+        STATE = 'menu'; return;
+    }
+}
+
+// ── Upgrades screen ───────────────────────────────────────────────────────────
+let upgScroll = 0;
+const BRANCH_ORDER = ['FIREPOWER','DEFENSE','ECONOMY'];
+const BRANCH_COLORS = { FIREPOWER:'#e74c3c', DEFENSE:'#3498db', ECONOMY:'#f1c40f' };
+
+function handleUpgradesClick(px, py) {
+    // BACK button
+    if (px >= 12 && px <= 120 && py >= 12 && py <= 42) { STATE = 'results'; return; }
+
+    // Purchase upgrade cards
+    const colW = (W - 24) / 3;
+    BRANCH_ORDER.forEach((branch, bi) => {
+        const bx = 12 + bi * colW;
+        const upgInBranch = Object.entries(UPGRADE_DEFS).filter(([,d]) => d.branch === branch);
+        upgInBranch.forEach(([id, def], ui) => {
+            const ux = bx + 8, uy = 58 + ui * 115;
+            const uw = colW - 16, uh = 108;
+            if (px >= ux && px <= ux+uw && py >= uy && py <= uy+uh) {
+                const curLv = saveData.upgrades[id];
+                if (curLv >= def.maxLv) return;
+                const cost = def.costs[curLv];
+                if (saveData.cores >= cost) {
+                    saveData.cores -= cost;
+                    saveData.upgrades[id]++;
+                    writeSave();
+                    recomputeTiers();
+                }
+            }
+        });
+    });
+}
+
+// ── Gun firing ────────────────────────────────────────────────────────────────
+function closestEnemy(gx, gy, range) {
+    let best = null, bestDist = range;
+    for (const en of enemies) {
+        const d = Math.hypot(en.x - gx, en.y - gy);
+        if (d < bestDist) { bestDist = d; best = en; }
+    }
+    return best;
+}
+
+function updateGuns() {
+    const rateBoost = lastStandActive ? 0.5 : 1.0;
+    for (const g of guns) {
+        if (g.cd > 0) { g.cd -= (lastStandActive ? 2 : 1); continue; }
+        const t = TIERS[g.tier];
+        const r = cellRect(g.col, g.row);
+        const gx = r.x + CW, gy = r.y + CH / 2;
+        const target = closestEnemy(gx, gy, t.range);
+        if (!target) continue;
+        const dx = target.x - gx, dy = target.y - gy;
+        const dist = Math.hypot(dx, dy) || 1;
+        const isCrit = Math.random() < getCritChance();
+        const dmg = isCrit ? t.damage * 2 : t.damage;
+        bullets.push({
+            x: gx, y: gy,
+            dx: (dx / dist) * t.bspeed, dy: (dy / dist) * t.bspeed,
+            dmg, color: isCrit ? '#fff' : t.glow, r: isCrit ? 5 : 3 + g.tier * 0.4,
+        });
+        g.cd = Math.round(t.rate * rateBoost);
+        _sfxShootThisFrame++; if (_sfxShootThisFrame <= 3) sfxShoot(g.tier);
+    }
+}
+
+function updateBullets() {
+    for (let i = bullets.length - 1; i >= 0; i--) {
+        const b = bullets[i];
+        b.x += b.dx; b.y += b.dy;
+        if (b.x > W + 20 || b.x < 0 || b.y < 0 || b.y > H) { bullets.splice(i, 1); continue; }
+        let hit = false;
+        for (let j = enemies.length - 1; j >= 0; j--) {
+            const en = enemies[j];
+            if (Math.hypot(b.x - en.x, b.y - en.y) < en.r + b.r) {
+                en.hp -= b.dmg;
+                spawnHitParticles(b.x, b.y, b.color);
+                bullets.splice(i, 1);
+                if (en.hp <= 0) {
+                    const reward = Math.round(en.reward * getGoldMult());
+                    gold += reward; score += reward; runKills++;
+                    saveData.stats.totalKills++;
+                    spawnFloat(en.x, en.y - en.r, '+' + reward + (lang==='ru'?' м':' s'), '#48dbfb');
+                    spawnHitParticles(en.x, en.y, en.glow);
+                    for (let k = 0; k < 8; k++) spawnHitParticles(en.x, en.y, en.color);
+                    enemies.splice(j, 1);
+                    checkAchievementsLive();
+                }
+                hit = true; break;
+            }
+        }
+        if (hit) continue;
+    }
+}
+
+function spawnWallExplosion(x, y, color, glow) {
+    for (let k = 0; k < 22; k++) {
+        const a = Math.random() * Math.PI * 2;
+        const s = 1.5 + Math.random() * 4;
+        particles.push({
+            x, y,
+            dx: Math.cos(a) * s, dy: Math.sin(a) * s,
+            life: 28 + Math.random() * 22, maxLife: 50,
+            color: Math.random() > 0.45 ? glow : color,
+            r: 1.5 + Math.random() * 3,
+        });
+    }
+    // Debris sparks toward base
+    for (let k = 0; k < 8; k++) {
+        particles.push({
+            x, y,
+            dx: -(1 + Math.random() * 3), dy: (Math.random() - 0.5) * 4,
+            life: 20, maxLife: 20, color: '#f39c12', r: 1.5,
+        });
+    }
+}
+
+function updateEnemies() {
+    for (let i = enemies.length - 1; i >= 0; i--) {
+        const en = enemies[i];
+        en.x -= en.spd;
+        if (en.x < DIVIDER_X - en.r) {
+            let dmg = 1;
+            if (saveData.upgrades.armor >= 1 && !armorUsedThisWave) { dmg = 0; armorUsedThisWave = true; }
+            spawnWallExplosion(DIVIDER_X - 4, en.y, en.color, en.glow);
+            sfxWallHit();
+            hp -= dmg;
+            if (dmg > 0) spawnFloat(DIVIDER_X - 40, en.y - 18, t('minus_hp'), '#e74c3c');
+            enemies.splice(i, 1);
+            if (hp <= 1 && saveData.upgrades.last_stand >= 1 && !lastStandActive) {
+                lastStandActive = true; lastStandTimer = 600;
+                spawnFloat(W/2, H/2 - 40, t('last_stand_float'), '#f1c40f');
+            }
+            if (hp <= 0) { hp = 0; endRun(); }
+        }
+    }
+}
+
+function endRun() {
+    offerResurrect();
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+let _sfxShootThisFrame = 0;
+function update() {
+    if (_gamePaused) return;
+    if (STATE !== 'play' && STATE !== 'resurrect' && STATE !== 'tutorial') return;
+    if (STATE === 'resurrect') return;
+    _sfxShootThisFrame = 0;
+    updateGuns();
+    updateBullets();
+    updateEnemies();
+
+    if (lastStandActive) {
+        lastStandTimer--;
+        if (lastStandTimer <= 0) lastStandActive = false;
+    }
+
+    if (waveActive && waveEnemiesLeft > 0) {
+        spawnTimer++;
+        if (spawnTimer >= spawnInterval) { spawnEnemy(wave); waveEnemiesLeft--; spawnTimer = 0; }
+    }
+
+    if (waveActive && waveEnemiesLeft === 0 && enemies.length === 0) {
+        waveEndTimer++;
+        if (waveEndTimer > 60) {
+            // Check flawless
+            if (hp === runWaveHpBefore) {
+                runFlawlessWaves++;
+                saveData.stats.flawlessWaves++;
+                spawnFloat(W/2, 120, t('flawless'), '#f1c40f');
+            }
+            // HP regen
+            const regen = saveData.upgrades.hp_regen * 2;
+            if (regen > 0) { hp = Math.min(maxHp, hp + regen); spawnFloat(DIVIDER_X - 40, 160, t('plus_hp', regen), '#2ecc71'); }
+            waveActive = false;
+            yadGameplayStop();
+            const bonus = getWaveBonus(wave);
+            gold += bonus; score += bonus;
+            sfxWaveClear();
+            spawnFloat(W/2, H/2 - 20, t('wave_clear', wave, bonus), '#f1c40f');
+            checkAchievementsLive();
+        }
+    }
+
+    // Supply crate spawning
+    if (waveActive) crateSpawnTimer++;
+    const _crateThreshold = crateFirstSpawned ? CRATE_REPEAT_INTERVAL : CRATE_FIRST_INTERVAL;
+    if (crateSpawnTimer >= _crateThreshold && !crate && guns.length > 0 && emptyCell()) {
+        const bestTier = Math.max(...guns.map(g => g.tier));
+        crate = {
+            x: LANE_X + 50 + Math.random() * (LANE_W - 120),
+            y: GRID_Y + 20 + Math.random() * (ROWS * (CH + 4) - 50),
+            life: CRATE_LIFETIME, maxLife: CRATE_LIFETIME,
+            tier: Math.max(0, Math.ceil(bestTier / 2)),
+        };
+        crateSpawnTimer = 0;
+        crateFirstSpawned = true;
+    }
+    if (crate) { crate.life--; if (crate.life <= 0) crate = null; }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.dx; p.y += p.dy; p.dx *= 0.93; p.dy *= 0.93; p.life--;
+        if (p.life <= 0) particles.splice(i, 1);
+    }
+    for (let i = floats.length - 1; i >= 0; i--) {
+        const f = floats[i]; f.y += f.vy; f.life--;
+        if (f.life <= 0) floats.splice(i, 1);
+    }
+    for (let i = achToasts.length - 1; i >= 0; i--) {
+        achToasts[i].life--;
+        if (achToasts[i].life <= 0) achToasts.splice(i, 1);
+    }
+}
+
+// ── Draw helpers ──────────────────────────────────────────────────────────────
+function drawRR(x, y, w, h, r, fill, stroke, lw) {
+    ctx.beginPath();
+    ctx.moveTo(x+r, y); ctx.lineTo(x+w-r, y);
+    ctx.arcTo(x+w, y, x+w, y+r, r); ctx.lineTo(x+w, y+h-r);
+    ctx.arcTo(x+w, y+h, x+w-r, y+h, r); ctx.lineTo(x+r, y+h);
+    ctx.arcTo(x, y+h, x, y+h-r, r); ctx.lineTo(x, y+r);
+    ctx.arcTo(x, y, x+r, y, r); ctx.closePath();
+    if (fill)  { ctx.fillStyle = fill; ctx.fill(); }
+    if (stroke){ ctx.strokeStyle = stroke; ctx.lineWidth = lw||1; ctx.stroke(); }
+}
+
+function drawGun(x, y, w, h, tier) {
+    const t = TIERS[tier];
+    const cx = x + w/2, cy = y + h/2;
+    const sid = GUN_SPRITES[tier];
+    ctx.save();
+    // Cell tint background
+    ctx.shadowColor = t.glow; ctx.shadowBlur = 14;
+    drawRR(x+3, y+3, w-6, h-6, 8, t.color + '22', t.glow + '99', 1.5);
+    ctx.shadowBlur = 0;
+
+    if (imgReady(sid)) {
+        // Per-tier padding: pistol smaller, rest snug but not cramped
+        const PAD = [16, 9, 9, 8, 9, 9, 8, 8];
+        const pad = PAD[tier] || 9;
+        const sz = w - pad * 2;
+        const ox = x + pad, oy = y + (h - sz) / 2; // vertically centred
+        ctx.shadowColor = t.glow; ctx.shadowBlur = 8;
+        ctx.drawImage(IMGS[sid], ox, oy, sz, sz);
+    } else {
+        // Canvas fallback
+        ctx.fillStyle = t.color;
+        ctx.fillRect(cx + 8, cy - 3, 18, 6);
+        ctx.shadowColor = t.glow; ctx.shadowBlur = 8;
+        ctx.fillStyle = t.color;
+        ctx.beginPath(); ctx.arc(cx, cy, 12 + tier, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = t.glow; ctx.lineWidth = 2; ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#fff'; ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('T' + (tier+1), cx, cy);
+    }
+    ctx.restore();
+}
+
+function drawGunName(x, y, w, tier) {
+    ctx.fillStyle = TIERS[tier].glow; ctx.font = '9px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText(tierName(tier), x + w/2, y + 4);
+}
+
+function drawEnemy(en) {
+    const sid = ENEMY_SPRITES[Math.min(en.type, ENEMY_SPRITES.length - 1)];
+    const sr  = en.r * 2.6; // sprite draw size
+    ctx.save();
+    if (imgReady(sid)) {
+        ctx.shadowColor = en.glow; ctx.shadowBlur = 14;
+        ctx.drawImage(IMGS[sid], en.x - sr/2, en.y - sr/2, sr, sr);
+    } else {
+        ctx.shadowColor = en.glow; ctx.shadowBlur = 12;
+        ctx.fillStyle = en.color;
+        ctx.beginPath(); ctx.arc(en.x, en.y, en.r, 0, Math.PI*2); ctx.fill();
+        ctx.strokeStyle = en.glow; ctx.lineWidth = 2; ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+    // HP bar always on top
+    const bw = sr, bh = 4, bx = en.x - sr/2, by = en.y - sr/2 - 7;
+    ctx.fillStyle = '#1a1a1a'; ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = en.color;  ctx.fillRect(bx, by, bw * (en.hp / en.maxHp), bh);
+    ctx.restore();
+}
+
+// ── Draw HUD ──────────────────────────────────────────────────────────────────
+function drawHUD() {
+    drawRR(0, 0, W, 82, 0, '#0e1e2e', null, 0);
+    ctx.fillStyle = '#48dbfb'; ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('💧 ' + gold, 12, 24);
+
+    // Polish chips
+    ctx.fillStyle = '#e0aaff'; ctx.font = 'bold 15px monospace';
+    ctx.fillText('✨ ' + saveData.cores, 12, 48);
+
+    const hpW = 170, hpH = 18, hpX = W/2 - hpW/2, hpY = 10;
+    ctx.fillStyle = '#1a1a2e'; ctx.fillRect(hpX, hpY, hpW, hpH);
+    const hpFrac = hp / maxHp;
+    ctx.fillStyle = hpFrac > 0.5 ? '#2ecc71' : hpFrac > 0.25 ? '#f39c12' : '#e74c3c';
+    if (lastStandActive) ctx.fillStyle = '#f1c40f';
+    ctx.fillRect(hpX, hpY, hpW * hpFrac, hpH);
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.strokeRect(hpX, hpY, hpW, hpH);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 11px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('HP ' + hp + '/' + maxHp, W/2, hpY + hpH/2);
+
+    ctx.fillStyle = '#aaa'; ctx.font = '14px monospace'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('wave_hud', wave), W - 12, 24);
+    ctx.fillStyle = '#666'; ctx.font = '11px monospace';
+    ctx.fillText(t('score_label', score), W - 12, 44);
+
+    if (lastStandActive) {
+        ctx.save(); ctx.shadowColor = '#f1c40f'; ctx.shadowBlur = 12;
+        ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 11px monospace'; ctx.textAlign = 'right';
+        // anchor LEFT of the mute button (its left edge is W-38) so the timer
+        // never prints over the speaker icon (reserved top-right control zone).
+        ctx.fillText(t('last_stand_hud', Math.ceil(lastStandTimer / 60)), W - 44, 62);
+        ctx.restore();
+    }
+
+    // Mute button (top-right corner)
+    const mx = W - 38, my = 58, mw = 28, mh = 18;
+    drawRR(mx, my, mw, mh, 4, '#1a1a2e', '#444', 1);
+    ctx.fillStyle = _muted ? '#888' : '#aaa'; ctx.font = '12px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(_muted ? '🔇' : '🔊', mx + mw/2, my + mh/2);
+
+    const cost = Math.round(getBuyCostBase() * Math.pow(BUY_COST_SCALE, buyCount));
+    const canBuy = gold >= cost && emptyCell();
+    drawRR(GRID_X, 88, COLS*(CW+4)-4, 28, 6, canBuy ? '#1a3a1a' : '#1a1a1a', canBuy ? '#2ecc71' : '#444', 1.5);
+    ctx.fillStyle = canBuy ? '#2ecc71' : '#666';
+    ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('buy_gun', cost), GRID_X + (COLS*(CW+4)-4)/2, 88 + 14);
+}
+
+// ── Draw grid ─────────────────────────────────────────────────────────────────
+function drawGrid() {
+    for (let row = 0; row < ROWS; row++) {
+        for (let col = 0; col < COLS; col++) {
+            const r = cellRect(col, row);
+            const g = gunAt(col, row);
+            const isSel = selected && selected.col === col && selected.row === row;
+            const selGun = selected ? gunAt(selected.col, selected.row) : null;
+            const canMerge = selGun && g && !isSel && g.tier === selGun.tier;
+            const isEmpty = !g && selected;
+            const border = isSel ? '#f1c40f' : canMerge ? '#2ecc71' : isEmpty ? '#4488ff' : g ? TIERS[g.tier].glow + '66' : '#1e1e2e';
+            drawRR(r.x, r.y, r.w, r.h, 8, '#111122', border, isSel || canMerge || isEmpty ? 2 : 1);
+            if (g) { drawGun(r.x, r.y, r.w, r.h, g.tier); drawGunName(r.x, r.y, r.w, g.tier); }
+        }
+    }
+    if (selected) {
+        const sg = gunAt(selected.col, selected.row);
+        if (sg) {
+            ctx.fillStyle = '#f1c40f88'; ctx.font = '10px monospace';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+            ctx.fillText(t('grid_hint'), GRID_X + COLS*(CW+4)/2, GRID_Y + ROWS*(CH+4) + 6);
+        }
+    }
+}
+
+// ── Draw wall ─────────────────────────────────────────────────────────────────
+function drawWall() {
+    const wx = DIVIDER_X - 10, ww = 14;
+    // Wall body
+    ctx.fillStyle = '#1c2a38'; ctx.fillRect(wx, 0, ww, H);
+    // Segment bricks
+    const segH = 48;
+    for (let y = 0; y < H; y += segH) {
+        // Battlement cap
+        ctx.fillStyle = '#253545';
+        ctx.fillRect(wx - 5, y, ww + 10, 26);
+        // Mortar line
+        ctx.fillStyle = '#111e28';
+        ctx.fillRect(wx, y + 26, ww, 2);
+        // Highlight edge
+        ctx.fillStyle = '#2e4a60';
+        ctx.fillRect(wx - 5, y, 2, 26);
+        // Shadow edge
+        ctx.fillStyle = '#0e1820';
+        ctx.fillRect(wx + ww + 3, y, 2, 26);
+    }
+    // Friendly glow on base side (clean teal)
+    const grad = ctx.createLinearGradient(wx - 28, 0, wx, 0);
+    grad.addColorStop(0, 'rgba(72,219,251,0)');
+    grad.addColorStop(1, 'rgba(72,219,251,0.14)');
+    ctx.fillStyle = grad; ctx.fillRect(wx - 28, 0, 28, H);
+    // Danger glow on dirt side (olive grime)
+    const grad2 = ctx.createLinearGradient(wx + ww, 0, wx + ww + 24, 0);
+    grad2.addColorStop(0, 'rgba(154,205,50,0.14)');
+    grad2.addColorStop(1, 'rgba(154,205,50,0)');
+    ctx.fillStyle = grad2; ctx.fillRect(wx + ww, 0, 24, H);
+}
+
+// ── Draw lane ─────────────────────────────────────────────────────────────────
+function drawLane() {
+    // Floor background tinted by current level (kitchen/bath/hospital/spaceship)
+    const floorTint = getFloorTint();
+    ctx.fillStyle = floorTint.bg; ctx.fillRect(LANE_X, 0, LANE_W, H);
+    // Tile grid lines
+    ctx.strokeStyle = floorTint.tile; ctx.lineWidth = 1;
+    for (let y = 0; y < H; y += 40) {
+        ctx.beginPath(); ctx.moveTo(LANE_X, y); ctx.lineTo(W, y); ctx.stroke();
+    }
+    for (let x = LANE_X; x < W; x += 50) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+    }
+    drawWall();
+    enemies.forEach(drawEnemy);
+    for (const b of bullets) {
+        ctx.save(); ctx.shadowColor = b.color; ctx.shadowBlur = 8;
+        ctx.fillStyle = b.color; ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+    }
+    // Supply crate
+    if (crate) {
+        const pulse = 0.75 + 0.25 * Math.sin(Date.now() / 180);
+        const cx = crate.x, cy = crate.y, sz = 40;
+        const fadeAlpha = Math.min(1, crate.life / 60);
+        ctx.save();
+        ctx.globalAlpha = fadeAlpha;
+        ctx.shadowColor = '#f39c12'; ctx.shadowBlur = 18 * pulse;
+        drawRR(cx - sz/2, cy - sz/2, sz, sz, 6, '#3a1f05', '#f39c12', 2.5);
+        // X-straps
+        ctx.strokeStyle = '#c07830'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(cx - sz/2 + 6, cy - sz/2 + 6); ctx.lineTo(cx + sz/2 - 6, cy + sz/2 - 6); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx + sz/2 - 6, cy - sz/2 + 6); ctx.lineTo(cx - sz/2 + 6, cy + sz/2 - 6); ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#ffd700'; ctx.font = 'bold 18px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('?', cx, cy);
+        ctx.fillStyle = '#ffd700'; ctx.font = 'bold 8px monospace';
+        ctx.fillText(t('crate_open'), cx, cy + sz/2 + 11);
+        // Tier badge
+        ctx.fillStyle = TIERS[crate.tier].glow; ctx.font = 'bold 8px monospace';
+        ctx.fillText('T' + (crate.tier + 1), cx, cy - sz/2 - 7);
+        ctx.restore();
+    }
+
+    if (!waveActive) {
+        const wx = DIVIDER_X + 10, wy = H - 56, ww = LANE_W - 10, wh = 42;
+        drawRR(wx, wy, ww, wh, 8, '#0a1a0a', '#2ecc71', 2);
+        ctx.fillStyle = '#2ecc71'; ctx.font = 'bold 16px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(wave === 0 ? t('start_wave_1') : t('next_wave', wave+1), wx + ww/2, wy + wh/2);
+    } else {
+        const cfg = waveConfig(wave);
+        const total = cfg.count, done = total - waveEnemiesLeft;
+        ctx.fillStyle = '#1a1a2e'; ctx.fillRect(DIVIDER_X + 10, H - 22, LANE_W - 10, 12);
+        ctx.fillStyle = '#2980b9'; ctx.fillRect(DIVIDER_X + 10, H - 22, (LANE_W - 10) * (done / total), 12);
+        ctx.fillStyle = '#aaa'; ctx.font = '9px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(t('wave_progress', wave, done, total), DIVIDER_X + 10 + (LANE_W-10)/2, H - 16);
+        ctx.fillStyle = '#555'; ctx.font = '11px monospace'; ctx.textAlign = 'right';
+        ctx.fillText(t('active_enemies', enemies.length), W - 8, H - 30);
+    }
+}
+
+// ── Draw particles / floats ───────────────────────────────────────────────────
+function drawParticles() {
+    for (const p of particles) {
+        ctx.save(); ctx.globalAlpha = p.life / p.maxLife;
+        ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI*2); ctx.fill();
+        ctx.restore();
+    }
+}
+
+function drawFloats() {
+    for (const f of floats) {
+        ctx.save(); ctx.globalAlpha = Math.min(1, f.life / 20);
+        ctx.shadowColor = f.color; ctx.shadowBlur = 6;
+        ctx.fillStyle = f.color; ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(f.text, f.x, f.y); ctx.restore();
+    }
+}
+
+function drawAchToasts() {
+    achToasts.forEach((t, i) => {
+        ctx.save();
+        const alpha = Math.min(1, t.life / 40);
+        ctx.globalAlpha = alpha;
+        const tx = DIVIDER_X + 10, ty = 80 + i * 32, tw = LANE_W - 20, th = 26;
+        drawRR(tx, ty, tw, th, 5, '#1a1a0a', '#f1c40f', 1.5);
+        ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(t.text, tx + tw/2, ty + th/2);
+        ctx.restore();
+    });
+}
+
+// ── Draw Menu ─────────────────────────────────────────────────────────────────
+function drawMenu() {
+    ctx.fillStyle = '#0d1a26'; ctx.fillRect(0, 0, W, H);
+    // Subtle tile pattern for menu BG
+    ctx.strokeStyle = '#13283d'; ctx.lineWidth = 1;
+    for (let y = 0; y < H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    for (let x = 0; x < W; x += 50) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    const anim = Date.now() / 1000;
+    ctx.save(); ctx.shadowColor = '#48dbfb'; ctx.shadowBlur = 20 + Math.sin(anim*2)*10;
+    ctx.fillStyle = '#48dbfb'; ctx.font = 'bold 52px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('title'), W/2, H/2 - 90);
+    ctx.restore();
+
+    ctx.fillStyle = '#aaa'; ctx.font = '16px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(t('subtitle'), W/2, H/2 - 30);
+
+    // Stats
+    ctx.fillStyle = '#444'; ctx.font = '12px monospace';
+    ctx.fillText(t('menu_stats', saveData.stats.maxWave, saveData.cores, saveData.achievements.length), W/2, H/2 + 10);
+
+    for (let i = 0; i < Math.min(TIERS.length, 6); i++) {
+        const px = W/2 - 150 + i * 60, py = H/2 + 48;
+        const t2 = BASE_TIERS[i];
+        const sid = GUN_SPRITES[i];
+        ctx.save(); ctx.shadowColor = t2.glow; ctx.shadowBlur = 12;
+        if (imgReady(sid)) {
+            const msz = i === 0 ? 30 : 38;
+            ctx.drawImage(IMGS[sid], px - msz/2, py - msz/2, msz, msz);
+        } else {
+            ctx.fillStyle = t2.color; ctx.beginPath(); ctx.arc(px, py, 16, 0, Math.PI*2); ctx.fill();
+            ctx.strokeStyle = t2.glow; ctx.lineWidth = 2; ctx.stroke(); ctx.shadowBlur = 0;
+            ctx.fillStyle = '#fff'; ctx.font = 'bold 10px monospace';
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillText('T'+(i+1), px, py);
+        }
+        ctx.restore();
+    }
+
+    drawRR(W/2 - 120, H/2 + 110, 240, 50, 10, '#0a2a0a', '#2ecc71', 2);
+    ctx.save(); ctx.shadowColor = '#2ecc71'; ctx.shadowBlur = 15;
+    ctx.fillStyle = '#2ecc71'; ctx.font = 'bold 22px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('play_btn'), W/2, H/2 + 135); ctx.restore();
+
+    // Fast-start button (unlocked once player reaches wave 10)
+    if (saveData.stats.maxWave >= FAST_START_WAVE) {
+        const goldEst = getFastStartGold(FAST_START_WAVE);
+        drawRR(W/2 - 120, H/2 + 168, 240, 36, 8, '#0a1a2e', '#4a90d9', 2);
+        ctx.fillStyle = '#4a90d9'; ctx.font = 'bold 13px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText(t('fast_start_btn', goldEst), W/2, H/2 + 186);
+    }
+
+    // Free crate (rewarded ad) — always shown, pushed down if fast-start is visible
+    const crateY = saveData.stats.maxWave >= FAST_START_WAVE ? H/2 + 212 : H/2 + 172;
+    const cratePulse = 0.85 + 0.15 * Math.sin(anim * 2);
+    drawRR(W/2 - 130, crateY, 260, 36, 10, '#0a1520', '#f39c12', 2);
+    ctx.save(); ctx.shadowColor = '#f39c12'; ctx.shadowBlur = 10 * cratePulse;
+    ctx.fillStyle = '#f39c12'; ctx.font = 'bold 14px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('free_crate_btn'), W/2, crateY + 18);
+    ctx.restore();
+    ctx.fillStyle = '#666'; ctx.font = '9px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('watch_ad'), W/2, crateY + 30);
+}
+
+// ── Tutorial (interactive spotlight) ─────────────────────────────────────────
+function drawTutorial() {
+    if (tutStep >= 4) return;
+    const pad     = 8;
+    const pulse   = 0.5 + 0.5 * Math.sin(Date.now() / 300);
+    const bounce  = Math.sin(Date.now() / 400) * 5;
+
+    // Target rects for each step (canvas coords)
+    const buyTr  = { x: GRID_X, y: 88, w: COLS*(CW+4)-4, h: 28 };
+    const gridTr = { x: GRID_X, y: GRID_Y, w: COLS*(CW+4)-4, h: ROWS*(CH+4)-4 };
+    const waveTr = { x: DIVIDER_X+10, y: H-56, w: LANE_W-10, h: 42 };
+    const trs    = [buyTr, buyTr, gridTr, waveTr];
+    const hints  = [t('tut_buy_first'), t('tut_buy_second'), t('tut_merge'), t('tut_start_wave')];
+
+    const tr   = trs[tutStep];
+    const hint = hints[tutStep];
+
+    // Expanded clear zone (target + padding)
+    let ex = tr.x - pad, ew = tr.w + pad*2;
+    let ey = tr.y - pad, eh = tr.h + pad*2;
+
+    // Hint pill placement: below for steps 0-2 (targets in upper area), above for step 3 (wave btn near bottom)
+    const hintBelow = tutStep < 3;
+    ctx.font = 'bold 13px monospace';
+    const hintPW = Math.ceil(ctx.measureText(hint).width) + 28;
+    const hintPH = 28;
+    let hintPY, arrowY, arrowGlyph;
+
+    if (hintBelow) {
+        arrowGlyph = '↑';
+        arrowY     = ey + eh + 8 + bounce;
+        hintPY     = ey + eh + 32;
+        eh         = hintPY + hintPH + 6 - ey;
+    } else {
+        arrowGlyph = '↓';
+        arrowY     = ey - 10 + bounce;
+        hintPY     = ey - 44;
+        const newEy = hintPY - 6;
+        eh = ey + eh - newEy;
+        ey = newEy;
+    }
+
+    // Dark overlay — 4 rects leaving [ex,ey,ew,eh] clear
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
+    if (ey > 0)        ctx.fillRect(0,     0,     W,           ey);
+    if (ey+eh < H)     ctx.fillRect(0,     ey+eh, W,           H - ey - eh);
+    if (ex > 0)        ctx.fillRect(0,     ey,    ex,          eh);
+    if (ex+ew < W)     ctx.fillRect(ex+ew, ey,    W - ex - ew, eh);
+
+    // Pulsing gold border on actual target
+    const tx = tr.x - pad, ty = tr.y - pad, tw2 = tr.w + pad*2, th2 = tr.h + pad*2;
+    ctx.save();
+    ctx.shadowColor = '#f1c40f'; ctx.shadowBlur = 18 * pulse;
+    drawRR(tx, ty, tw2, th2, 10, null, 'rgba(241,196,15,' + (0.55 + 0.45*pulse) + ')', 2.5);
+    ctx.restore();
+
+    // Bouncing arrow
+    ctx.save();
+    ctx.shadowColor = '#f1c40f'; ctx.shadowBlur = 6;
+    ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(arrowGlyph, ex + ew/2, arrowY);
+    ctx.restore();
+
+    // Hint pill
+    const hintX = Math.max(hintPW/2 + 4, Math.min(W - hintPW/2 - 4, ex + ew/2));
+    drawRR(hintX - hintPW/2, hintPY, hintPW, hintPH, 7, 'rgba(0,0,0,0.90)', '#f1c40f', 1.5);
+    ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(hint, hintX, hintPY + hintPH/2);
+
+    // Progress dots at very bottom
+    for (let i = 0; i < 4; i++) {
+        ctx.fillStyle = i < tutStep ? '#2ecc71' : i === tutStep ? '#f1c40f' : '#333';
+        ctx.beginPath(); ctx.arc(W/2 - 30 + i*20, H - 10, 4, 0, Math.PI*2); ctx.fill();
+    }
+}
+
+// ── Draw Results ──────────────────────────────────────────────────────────────
+function drawResults() {
+    ctx.fillStyle = 'rgba(0,0,0,0.82)'; ctx.fillRect(0, 0, W, H);
+    const { bx, by, bw, bh } = RES;
+    drawRR(bx, by, bw, bh, 16, '#0d0d20', '#a78bfa', 2);
+
+    // MENU button top-right
+    drawRR(bx + bw - 70, by + 8, 62, 24, 6, '#1a1a2e', '#555', 1);
+    ctx.fillStyle = '#888'; ctx.font = '11px monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(t('menu_btn'), bx + bw - 39, by + 20);
+
+    ctx.fillStyle = '#a78bfa'; ctx.font = 'bold 24px monospace'; ctx.textAlign='center';
+    ctx.fillText(t('run_complete'), W/2, by + 32);
+
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px monospace';
+    ctx.fillText(t('wave_label', runResults.wave), W/2 - 80, by + 66);
+    ctx.fillStyle = '#f1c40f';
+    ctx.fillText(t('score_label', runResults.score), W/2 + 60, by + 66);
+
+    // Cores earned
+    drawRR(W/2 - 90, by + 84, 180, 38, 8, '#1a1a3a', '#a78bfa', 2);
+    ctx.fillStyle = '#a78bfa'; ctx.font = 'bold 20px monospace';
+    ctx.fillText(t('cores_earned', runResults.coresEarned), W/2, by + 103);
+
+    // New achievements
+    if (runResults.newAchievements.length > 0) {
+        ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 12px monospace';
+        ctx.fillText(t('new_ach'), W/2, by + 138);
+        runResults.newAchievements.slice(0,3).forEach((a, i) => {
+            drawRR(W/2 - 170, by + 150 + i * 30, 340, 26, 5, '#1a1a0a', '#f1c40f', 1);
+            ctx.fillStyle = '#f1c40f'; ctx.font = '12px monospace';
+            ctx.fillText('🏆 ' + achName(a.id) + ' — ' + achDesc(a.id) + ' (+' + a.coreReward + '◈)', W/2, by + 163 + i * 30);
+        });
+    } else {
+        ctx.fillStyle = '#555'; ctx.font = '12px monospace';
+        const best = saveData.stats.maxWave;
+        ctx.fillText(t('best_wave_stat', best, saveData.achievements.length), W/2, by + 160);
+        ctx.fillStyle = '#444';
+        ctx.fillText(t('kills_stat', saveData.stats.totalKills, saveData.stats.totalMerges), W/2, by + 182);
+    }
+
+    // Buttons
+    const cy = W/2;
+    drawRR(cy - 180, by + bh - 52, 164, 36, 8, '#0a1a2e', '#a78bfa', 2);
+    ctx.fillStyle = '#a78bfa'; ctx.font = 'bold 14px monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(t('upgrades_btn'), cy - 98, by + bh - 34);
+
+    drawRR(cy + 16, by + bh - 52, 164, 36, 8, '#0a2a0a', '#2ecc71', 2);
+    ctx.fillStyle = '#2ecc71';
+    ctx.fillText(t('play_again_btn'), cy + 98, by + bh - 34);
+}
+
+// ── Draw Resurrect overlay ────────────────────────────────────────────────────
+function drawResurrect() {
+    ctx.fillStyle = 'rgba(0,0,0,0.88)'; ctx.fillRect(0, 0, W, H);
+    const bw = 420, bh = 280, bx = W/2 - bw/2, by = H/2 - bh/2;
+    drawRR(bx, by, bw, bh, 16, '#0d0d20', '#e74c3c', 2);
+
+    ctx.save();
+    ctx.shadowColor = '#e74c3c'; ctx.shadowBlur = 20;
+    ctx.fillStyle = '#e74c3c'; ctx.font = 'bold 28px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('wall_breached'), W/2, by + 42);
+    ctx.restore();
+
+    ctx.fillStyle = '#ccc'; ctx.font = '14px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('resurrect_desc'), W/2, by + 84);
+
+    const bestTier = guns.length > 0 ? Math.max(...guns.map(g => g.tier)) : 0;
+    const bonusTier = Math.max(0, bestTier - 1);
+    ctx.fillStyle = TIERS[bonusTier].glow; ctx.font = 'bold 13px monospace';
+    ctx.fillText(t('resurrect_bonus', tierName(bonusTier), bonusTier + 1), W/2, by + 112);
+
+    const bcy = by + bh - 80;
+    // Watch ad button
+    drawRR(W/2 - 180, bcy, 168, 44, 10, '#0a2a0a', '#2ecc71', 2.5);
+    ctx.save(); ctx.shadowColor = '#2ecc71'; ctx.shadowBlur = 10;
+    ctx.fillStyle = '#2ecc71'; ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('resurrect_btn'), W/2 - 96, bcy + 22);
+    ctx.restore();
+    ctx.fillStyle = '#555'; ctx.font = '9px monospace';
+    ctx.fillText(t('watch_ad_small'), W/2 - 96, bcy + 36);
+
+    // Skip button
+    drawRR(W/2 + 10, bcy, 168, 44, 10, '#1a0a0a', '#555', 1.5);
+    ctx.fillStyle = '#888'; ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t('give_up_btn'), W/2 + 94, bcy + 22);
+}
+
+// ── Draw Upgrades ─────────────────────────────────────────────────────────────
+function drawUpgrades() {
+    ctx.fillStyle = '#0a0a0f'; ctx.fillRect(0, 0, W, H);
+
+    drawRR(12, 12, 108, 30, 6, '#1a1a2e', '#555', 1);
+    ctx.fillStyle = '#aaa'; ctx.font = 'bold 13px monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(t('back_btn'), 66, 27);
+
+    ctx.fillStyle = '#a78bfa'; ctx.font = 'bold 18px monospace';
+    ctx.fillText(t('upgrades_title', saveData.cores), W/2, 30);
+
+    const colW = (W - 24) / 3;
+    BRANCH_ORDER.forEach((branch, bi) => {
+        const bx = 12 + bi * colW;
+        const bc = BRANCH_COLORS[branch];
+
+        ctx.fillStyle = bc; ctx.font = 'bold 13px monospace'; ctx.textAlign='center';
+        ctx.fillText(t('br_' + branch), bx + colW/2, 54);
+
+        const upgInBranch = Object.entries(UPGRADE_DEFS).filter(([,d]) => d.branch === branch);
+        upgInBranch.forEach(([id, def], ui) => {
+            const ux = bx + 8, uy = 62 + ui * 115;
+            const uw = colW - 16, uh = 108;
+            const curLv = saveData.upgrades[id];
+            const maxed = curLv >= def.maxLv;
+            const cost  = maxed ? 0 : def.costs[curLv];
+            const canAfford = !maxed && saveData.cores >= cost;
+
+            drawRR(ux, uy, uw, uh, 8,
+                canAfford ? '#0d1a0d' : '#0d0d18',
+                maxed ? '#f1c40f' : canAfford ? bc : '#333', 1.5);
+
+            ctx.fillStyle = maxed ? '#f1c40f' : '#fff';
+            ctx.font = 'bold 12px monospace'; ctx.textAlign='center'; ctx.textBaseline='top';
+            ctx.fillText(upgName(id), ux + uw/2, uy + 8);
+
+            ctx.fillStyle = '#888'; ctx.font = '10px monospace';
+            ctx.fillText(upgDesc(id), ux + uw/2, uy + 26);
+
+            // Level dots
+            const dotSpacing = Math.min(14, (uw - 16) / def.maxLv);
+            const dotsW = def.maxLv * dotSpacing - (dotSpacing - 10);
+            let dx = ux + uw/2 - dotsW/2;
+            for (let lv = 0; lv < def.maxLv; lv++) {
+                ctx.fillStyle = lv < curLv ? bc : '#333';
+                ctx.beginPath(); ctx.arc(dx + 5, uy + 48, 5, 0, Math.PI*2); ctx.fill();
+                dx += dotSpacing;
+            }
+
+            ctx.fillStyle = '#888'; ctx.font = '10px monospace'; ctx.textBaseline='middle';
+            ctx.fillText(t('level_label', curLv, def.maxLv), ux + uw/2, uy + 66);
+
+            if (!maxed) {
+                drawRR(ux + 8, uy + uh - 28, uw - 16, 22, 5,
+                    canAfford ? '#0a2a0a' : '#1a1a1a',
+                    canAfford ? '#2ecc71' : '#444', 1.5);
+                ctx.fillStyle = canAfford ? '#2ecc71' : '#555';
+                ctx.font = 'bold 11px monospace'; ctx.textBaseline='middle';
+                ctx.fillText('◈ ' + cost, ux + uw/2, uy + uh - 17);
+            } else {
+                ctx.fillStyle = '#f1c40f'; ctx.font = 'bold 11px monospace'; ctx.textBaseline='middle';
+                ctx.fillText(t('maxed'), ux + uw/2, uy + uh - 17);
+            }
+        });
+    });
+
+    // Achievements strip at bottom
+    ctx.fillStyle = '#a78bfa'; ctx.font = 'bold 11px monospace'; ctx.textAlign='left';
+    ctx.fillText(t('achievements_title', saveData.achievements.length), 16, H - 52);
+    ACH_DEFS.forEach((a, i) => {
+        const unlocked = saveData.achievements.includes(a.id);
+        const ax = 16 + i * 64, ay = H - 40;
+        drawRR(ax, ay, 58, 28, 4, unlocked ? '#1a1a0a' : '#0d0d0d', unlocked ? '#f1c40f' : '#222', 1);
+        ctx.fillStyle = unlocked ? '#f1c40f' : '#444'; ctx.font = '8px monospace';
+        ctx.textAlign='center'; ctx.textBaseline='middle';
+        ctx.fillText(achName(a.id).substring(0,8), ax + 29, ay + 10);
+        ctx.fillStyle = unlocked ? '#a78bfa' : '#333'; ctx.font = 'bold 9px monospace';
+        ctx.fillText(unlocked ? '+' + a.coreReward + '◈' : '?', ax + 29, ay + 22);
+    });
+}
+
+// ── Main draw ─────────────────────────────────────────────────────────────────
+function draw() {
+    ctx.clearRect(0, 0, W, H);
+    if (STATE === 'menu')     { drawMenu(); drawAchToasts(); return; }
+    if (STATE === 'upgrades') { drawUpgrades(); return; }
+
+    ctx.fillStyle = '#0d0d18'; ctx.fillRect(0, 0, W, H);
+    drawLane();
+    drawGrid();
+    drawParticles();
+    drawHUD();
+    drawAchToasts();
+    drawFloats();
+
+    if (STATE === 'tutorial')   drawTutorial();
+    if (STATE === 'results')    drawResults();
+    if (STATE === 'resurrect')  drawResurrect();
+}
+
+// ── Loop ──────────────────────────────────────────────────────────────────────
+function loop() {
+    try { update(); } catch(e) { _showGameError('update: ' + (e.message || e)); }
+    try { draw();   } catch(e) { _showGameError('draw: '   + (e.message || e)); }
+    requestAnimationFrame(loop);
+}
+
+// ── Startup (gate behind SDK init so LoadingAPI.ready fires before game loop) ─
+let _gameStarted = false;
+function _startGameLoop() {
+    if (_gameStarted) return;
+    _gameStarted = true;
+    yadLoadingReady();
+    if (!saveData.tutorialDone) {
+        initGame();
+        STATE = 'tutorial';
+        tutStep = 0;
+    } else if (window.__GF_AUTOSTART) {
+        // Platform builds (Yandex/CrazyGames) inject window.__GF_AUTOSTART → drop
+        // returning players STRAIGHT into a run instead of the menu landing
+        // (rule #9; first-run players still get the tutorial branch above). The
+        // gallery build doesn't set the flag, so it keeps its menu.
+        initGame();
+        STATE = 'play';
+    }
+    loop();
+}
+
+// Screenshot-only escape hatch — lets the take_screenshots.js puppeteer
+// driver land on a populated mid-wave state without needing to chain UI
+// clicks (which are flaky across viewport sizes). Safe to ship: never
+// invoked during normal play, no dev-only bundle gating needed.
+window._setupForScreenshot = function (waveTarget) {
+    if (typeof initGame === 'function') initGame();
+    STATE = 'play';
+    saveData.tutorialDone = true;
+    gold = 4000;
+    buyCount = 0;
+    // Seed grid with mixed tiers so screenshots show progression variety
+    // (rag → sponge → brush → mop), not 6 identical T1 rags.
+    const seedTiers = [3, 2, 3, 2, 1, 2, 0, 1, 0, 0]; // Mop, Brush, Mop, Brush, Sponge, Brush, Rag, Sponge, Rag, Rag
+    for (let i = 0; i < seedTiers.length; i++) {
+        const cell = emptyCell();
+        if (!cell) break;
+        guns.push({ col: cell.col, row: cell.row, tier: seedTiers[i], cd: 0 });
+        if (seedTiers[i] > runHighestTier) runHighestTier = seedTiers[i];
+    }
+    wave = Math.max(1, (waveTarget | 0) || 3);
+    if (typeof startWave === 'function') startWave();
+};
+window._setLang = function (l) { lang = (l === 'ru' ? 'ru' : 'en'); };
+
+// Promo recording mode — boots a deterministic 18s climax scene for the
+// headless capture (Shared/skills/promo-video). Never user-facing: the
+// trigger is `?promo=climax` only. Shipped builds with no query string
+// take the normal _startGameLoop path.
+function setupPromoClimax() {
+    if (typeof initGame !== 'function') return;
+    initGame();
+    saveData.tutorialDone = true;
+    STATE = 'play';
+    gold = 9999;
+    buyCount = 0;
+    _muted = true;
+    // Seed grid: mix of low + mid tiers so early merges read visually.
+    // Layout (col,row,tier): 5x4 grid (0..4 x 0..3 by default).
+    var seed = [
+        [0,0,0],[1,0,0],[2,0,1],[3,0,1],[4,0,2],
+        [0,1,0],[1,1,0],[2,1,1],[3,1,1],[4,1,2],
+        [0,2,0],[1,2,0],[2,2,1],[3,2,1],
+        [0,3,0],[1,3,0]
+    ];
+    guns = seed.map(function (s) { return { col: s[0], row: s[1], tier: s[2], cd: 0 }; });
+    wave = 4;
+    // Invincibility for the promo recording — bare reassignment hits the
+    // script-scope binding so other code paths calling endRun() / offerResurrect()
+    // see the no-ops. Without this the wall-breached modal appears late in the
+    // 18s capture and overlays gameplay frames.
+    maxHp = 20; hp = 20;
+    endRun = function () { hp = 20; };
+    offerResurrect = function () { hp = 20; };
+    var _hpPin = setInterval(function () { hp = 20; }, 16);
+    setTimeout(function () { clearInterval(_hpPin); }, 18000);
+    if (typeof startWave === 'function') startWave();
+    // Timeline of merge / buy / wave actions. Each tries to pick the
+    // first two adjacent guns of the named tier; if none exist, no-op.
+    var T0 = performance.now();
+    function findPair(tier) {
+        var a = null;
+        for (var i = 0; i < guns.length; i++) {
+            if (guns[i].tier === tier) {
+                if (!a) { a = guns[i]; }
+                else { return [a, guns[i]]; }
+            }
+        }
+        return null;
+    }
+    function doMerge(tier) {
+        var pair = findPair(tier);
+        if (!pair) return;
+        selected = { col: pair[0].col, row: pair[0].row };
+        try { tryMerge(pair[1].col, pair[1].row); } catch (e) {}
+    }
+    var TIMELINE = [
+        [1500, function () { doMerge(0); }],
+        [3000, function () { doMerge(0); }],
+        [4500, function () { doMerge(1); }],
+        [6000, function () { if (typeof buyGun === 'function') { gold = 9999; buyGun(); } }],
+        [7500, function () { doMerge(2); }],
+        [9000, function () { doMerge(0); }],
+        [10500, function () { doMerge(3); }],
+        [12000, function () { if (typeof buyGun === 'function') { gold = 9999; buyGun(); } }],
+        [13500, function () { doMerge(1); }],
+        [15000, function () { doMerge(4); }],
+        [16500, function () { doMerge(2); }],
+    ];
+    TIMELINE.forEach(function (entry) {
+        setTimeout(entry[1], entry[0]);
+    });
+    loop();
+}
+window._setupForPromo = setupPromoClimax;
+try {
+    var _promoQ = new URLSearchParams(location.search);
+    if (_promoQ.get('promo') === 'climax') {
+        setTimeout(setupPromoClimax, 50);
+    }
+} catch (_) {}
+
+const _sdkTimeout = setTimeout(_startGameLoop, 3000);
+try {
+    if (typeof YaGames !== 'undefined' && YaGames.init) {
+        YaGames.init().then(function(sdk) {
+            clearTimeout(_sdkTimeout);
+            ysdk = sdk; window.ysdk = sdk;
+            detectLang(); // override navigator guess with SDK language
+            try {
+                sdk.on('game_api_pause', function() {
+                    _gamePaused = true;
+                    _prePauseMuted = _muted; _muted = true;
+                });
+                sdk.on('game_api_resume', function() {
+                    _gamePaused = false;
+                    _muted = _prePauseMuted;
+                });
+            } catch(e) {}
+            _startGameLoop();
+        }).catch(function() {
+            clearTimeout(_sdkTimeout);
+            _startGameLoop();
+        });
+    } else {
+        clearTimeout(_sdkTimeout);
+        _startGameLoop();
+    }
+} catch(e) {
+    clearTimeout(_sdkTimeout);
+    _startGameLoop();
+}
+</script>
+</body>
+</html>

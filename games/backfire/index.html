@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>BACKFIRE</title>
+  <!-- PLATFORM_SDK -->
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a14; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ============================================================================
+//  BACKFIRE  -  jam theme "The enemy is you"
+//  You never stop firing. Bullets ricochet off the walls; once a bullet has
+//  bounced it turns hot and can kill YOU. Every upgrade multiplies your
+//  firehose. The stronger you get, the more of your own fire fills the arena
+//  until you drown in it. Your power is the enemy.
+// ============================================================================
+
+var STR = {
+  en: {
+    title: 'BACKFIRE',
+    sub: 'You cannot stop firing. Your own bullets can stop you.',
+    play: 'PLAY', retry: 'AGAIN',
+    score: 'SCORE', best: 'BEST', wave: 'WAVE', kills: 'KILLS',
+    cleared: 'WAVE CLEARED', choose: 'CHOOSE YOUR POWER',
+    paused: 'PAUSED', resume: 'RESUME', quit: 'QUIT',
+    over: 'YOU FRAGGED YOURSELF', overEnemy: 'OVERRUN',
+    selfline: 'of the damage was your OWN fire',
+    tip1: 'DRAG to move. You auto-fire on your own.',
+    tip2: 'Bullets turn PINK after a bounce - those hurt you.',
+    sage: ['"A bullet remembers every wall it kisses."',
+           '"Wisdom is measured in crumbs. Power, in ricochets."',
+           '"You will not die to them. You will die to you."',
+           '"More guns is always the answer. Until it is the problem."'],
+    fine: 'THIS IS FINE',
+    backfire: 'BACKFIRE!',
+    selfwave: 'self-inflicted',
+  },
+  ru: {
+    title: 'BACKFIRE',
+    sub: 'Ты не можешь перестать стрелять. А твои пули - могут тебя.',
+    play: 'ИГРАТЬ', retry: 'СНОВА',
+    score: 'ОЧКИ', best: 'РЕКОРД', wave: 'ВОЛНА', kills: 'УБИЙСТВ',
+    cleared: 'ВОЛНА ЗАЧИЩЕНА', choose: 'ВЫБЕРИ СИЛУ',
+    paused: 'ПАУЗА', resume: 'ПРОДОЛЖИТЬ', quit: 'ВЫХОД',
+    over: 'ТЫ УБИЛ СЕБЯ САМ', overEnemy: 'ТЕБЯ ЗАХЛЕСТНУЛО',
+    selfline: 'урона нанёс твой СОБСТВЕННЫЙ огонь',
+    tip1: 'ВЕДИ палец чтобы двигаться. Стрельба - сама.',
+    tip2: 'После отскока пуля РОЗОВЕЕТ - такая ранит тебя.',
+    sage: ['"Пуля помнит каждую стену, что целовала."',
+           '"Мудрость мерят крошками. Силу - рикошетами."',
+           '"Ты умрёшь не от них. Ты умрёшь от себя."',
+           '"Больше пушек - всегда ответ. Пока не станет бедой."'],
+    fine: 'ВСЁ В ПОРЯДКЕ',
+    backfire: 'РИКОШЕТ!',
+    selfwave: 'урона себе',
+  },
+};
+
+// ── STATE ───────────────────────────────────────────────────────────────
+var gs = 'MENU';                  // MENU | PLAYING | PAUSED | GAMEOVER
+var phase = 'FIGHT';              // FIGHT | UPGRADE (only while PLAYING)
+var score = 0, best = 0, wave = 0, kills = 0, runTime = 0;
+var selfDmg = 0, enemyDmg = 0, deathBySelf = true;
+var fineShown = false;
+
+var arena = { x:0, y:0, w:0, h:0 };
+var player = { x:0, y:0, vx:0, vy:0, r:13, hp:100, maxHp:100, iframe:0, hitFlash:0 };
+
+var bullets = [];                 // {x,y,vx,vy,r,armed,bounces,life,maxLife,hit,split}
+var enemies = [];                 // {x,y,vx,vy,r,hp,maxHp,type,crown,touch,score,bounce,cd}
+var pickups = [];                 // {x,y,vy,r,kind}
+var spawnQueue = [];              // staggered enemy drip for the current wave
+var spawnTimer = 0;
+var fireTimer = 0;
+var sfxShotT = 0;
+var redFlash = 0;                 // full-screen self-hit flash
+var BCAP = 300;                   // hard bullet cap (perf + fairness)
+var taughtBackfire = false;       // one-shot "BACKFIRE MOMENT" teach per run
+var slowmo = 0;                   // slow-mo timer for the teach beat
+
+// firehose loadout (mutated by upgrades)
+var S0;                            // base stat object, set in resetStats
+function resetStats() {
+  S0 = {
+    fireInterval: 0.42,
+    shots: 1,
+    spreadDeg: 15,
+    inacc: 0.075,        // base aim jitter (rad) so some shots MISS and ricochet
+    speed: 430,
+    bulletR: 5,
+    dmg: 1,
+    maxBounces: 3,
+    life: 4.0,
+    pierce: false,
+    splitOnBounce: false,
+    splitEvery: false,
+    omni: 0,
+    slow: 1,
+    vamp: 0,
+    ifr: 0.6,
+  };
+}
+
+// ── UPGRADES ────────────────────────────────────────────────────────────
+// rarity weights the draw; 'god' only after minWave. Every offence upgrade
+// also raises how much of your own fire fills the arena - that is the point.
+var UPGRADES = [
+  { id:'twin',  r:'common', mw:1, en:'TWIN SHOT',     ru:'СДВОЕНО',   de:'+1 projectile, fanned out',        dr:'+1 пуля веером',           hot:1, fn:function(){ S0.shots+=1; } },
+  { id:'rapid', r:'common', mw:1, en:'RAPID FIRE',    ru:'СКОРОСТРЕЛ', de:'fire 22% faster',                 dr:'стрельба на 22% быстрее',  hot:1, fn:function(){ S0.fireInterval*=0.78; } },
+  { id:'rico',  r:'common', mw:1, en:'RICOCHET',      ru:'РИКОШЕТ',    de:'+2 wall bounces',                 dr:'+2 отскока от стен',       hot:1, fn:function(){ S0.maxBounces+=2; } },
+  { id:'echo',  r:'common', mw:1, en:'LONG ECHO',     ru:'ДОЛГОЕ ЭХО', de:'bullets live 45% longer',         dr:'пули живут на 45% дольше', hot:1, fn:function(){ S0.life*=1.45; S0.maxBounces+=1; } },
+  { id:'heavy', r:'common', mw:1, en:'HEAVY ROUNDS',  ru:'ТЯЖЁЛЫЕ',    de:'+1 damage, bigger bullets',       dr:'+1 урон, пули крупнее',    hot:1, fn:function(){ S0.dmg+=1; S0.bulletR+=1.6; } },
+  { id:'pierce',r:'rare',   mw:2, en:'PIERCE',        ru:'ПРОБИВАНИЕ',  de:'bullets pass through foes',       dr:'пули проходят сквозь врагов', hot:1, fn:function(){ S0.pierce=true; } },
+  { id:'split', r:'rare',   mw:3, en:'SPLIT SHOT',    ru:'РАСКОЛ',      de:'bullets split on first bounce',   dr:'пуля делится при отскоке', hot:1, fn:function(){ S0.splitOnBounce=true; } },
+  { id:'patch', r:'common', mw:1, en:'PATCH UP',      ru:'ЗАПЛАТКА',    de:'heal 35 HP',                      dr:'+35 HP',                   hot:0, fn:function(){ heal(35); } },
+  { id:'armor', r:'common', mw:1, en:'ARMOR',         ru:'БРОНЯ',       de:'+30 max HP and heal it',          dr:'+30 макс. HP и лечит',     hot:0, fn:function(){ player.maxHp+=30; heal(30); } },
+  { id:'vamp',  r:'rare',   mw:2, en:'LIFESTEAL',     ru:'ВАМПИРИЗМ',   de:'heal 2 HP per kill',              dr:'+2 HP за убийство',        hot:0, fn:function(){ S0.vamp+=2; } },
+  { id:'slow',  r:'common', mw:2, en:'GRAVITY WELL',  ru:'ЗАМЕДЛЕНИЕ',  de:'enemies move 16% slower',         dr:'враги на 16% медленнее',   hot:0, fn:function(){ S0.slow*=0.84; } },
+  { id:'phase', r:'common', mw:2, en:'PHASE',         ru:'ФАЗА',        de:'longer mercy after a hit',        dr:'дольше неуязвимость',      hot:0, fn:function(){ S0.ifr+=0.45; } },
+  // god tier - "too powerful to control"
+  { id:'omni',  r:'god',    mw:5, en:'OMNIBURST',     ru:'ОМНИЗАЛП',    de:'+4 bullets sideways each shot',   dr:'+4 пули вбок при выстреле', hot:2, fn:function(){ S0.omni+=4; } },
+  { id:'over',  r:'god',    mw:5, en:'OVERLORD',      ru:'ПОВЕЛИТЕЛЬ',  de:'+2 projectiles at once',          dr:'+2 пули разом',            hot:2, fn:function(){ S0.shots+=2; } },
+  { id:'bang',  r:'god',    mw:6, en:'BIG BANG',      ru:'БОЛЬШОЙ ВЗРЫВ',de:'bullets split on EVERY bounce',  dr:'деление при КАЖДОМ отскоке', hot:2, fn:function(){ S0.splitOnBounce=true; S0.splitEvery=true; } },
+  { id:'inf',   r:'god',    mw:6, en:'INFINITY',      ru:'БЕСКОНЕЧНОСТЬ',de:'your bullets never fade',        dr:'пули никогда не гаснут',   hot:2, fn:function(){ S0.life=999; S0.maxBounces+=6; } },
+];
+var upChoices = [];               // current 3 cards
+var upRects = [];                 // hit-rects for the cards
+var sageIdx = 0;
+
+function pickUpgrades() {
+  var pool = UPGRADES.filter(function(u){ return wave >= u.mw && (u.r!=='god' || wave>=u.mw); });
+  // weight: common 6, rare 3, god 1
+  var bag = [];
+  pool.forEach(function(u){ var n = u.r==='common'?6:u.r==='rare'?3:1; for(var i=0;i<n;i++) bag.push(u); });
+  var out = [];
+  var guard = 0;
+  while (out.length < 3 && guard++ < 200) {
+    var u = bag[(Math.random()*bag.length)|0];
+    if (out.indexOf(u) === -1) out.push(u);
+  }
+  upChoices = out;
+  sageIdx = (Math.random()*4)|0;
+}
+
+// ── HELPERS ─────────────────────────────────────────────────────────────
+function heal(n) {
+  player.hp = Math.min(player.maxHp, player.hp + n);
+  GF.spawnFloat(player.x, player.y - player.r - 8*GF.S, '+' + n, '#5dffa6');
+}
+function nearestEnemy() {
+  var best = null, bd = 1e9;
+  for (var i=0;i<enemies.length;i++) {
+    var e = enemies[i];
+    var d = (e.x-player.x)*(e.x-player.x) + (e.y-player.y)*(e.y-player.y);
+    if (d < bd) { bd = d; best = e; }
+  }
+  return best;
+}
+function armedCount() {
+  var n = 0;
+  for (var i=0;i<bullets.length;i++) if (bullets[i].armed) n++;
+  return n;
+}
+
+// ── LIFECYCLE ───────────────────────────────────────────────────────────
+function startGame() {
+  resetStats();
+  score = 0; kills = 0; runTime = 0; selfDmg = 0; enemyDmg = 0; deathBySelf = true; fineShown = false;
+  taughtBackfire = false; slowmo = 0;
+  player.maxHp = 100; player.hp = 100; player.iframe = 0; player.hitFlash = 0;
+  player.vx = player.vy = 0;
+  bullets.length = 0; enemies.length = 0; pickups.length = 0; spawnQueue.length = 0;
+  fireTimer = 0; redFlash = 0;
+  gs = 'PLAYING';
+  layout();
+  player.x = arena.x + arena.w/2; player.y = arena.y + arena.h*0.7;
+  startWave(1);
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function startWave(n) {
+  wave = n;
+  phase = 'FIGHT';
+  bullets.length = 0;                    // fresh arena - density builds from YOUR loadout
+  pickups.length = 0;
+  spawnQueue = buildWave(n);
+  spawnTimer = 0;
+  player.iframe = Math.max(player.iframe, 0.8);   // brief spawn grace (no instakill after a god pick)
+  GF.saveRun();
+}
+
+// staggered spawn list for wave n
+function buildWave(n) {
+  var q = [];
+  var count = Math.min(3 + n, 22);
+  for (var i=0;i<count;i++) {
+    var roll = Math.random();
+    var type;
+    if (n <= 1)            type = 'drift';
+    else if (n === 2)      type = roll < 0.7 ? 'drift' : 'run';
+    else if (n === 3)      type = roll < 0.5 ? 'drift' : roll < 0.8 ? 'run' : 'tank';
+    else {
+      type = roll < 0.38 ? 'drift' : roll < 0.62 ? 'run' : roll < 0.8 ? 'tank' : 'split';
+    }
+    var crown = (n >= 3 && i === 0 && Math.random() < 0.85);  // ~one crowned elite/wave from w3
+    q.push({ type: type, crown: crown });
+  }
+  return q;
+}
+
+function spawnEnemy(spec) {
+  var S = GF.S;
+  // pick an edge point of the arena
+  var side = (Math.random()*4)|0, x, y;
+  if (side===0){ x=arena.x+Math.random()*arena.w; y=arena.y+8*S; }
+  else if (side===1){ x=arena.x+arena.w-8*S; y=arena.y+Math.random()*arena.h; }
+  else if (side===2){ x=arena.x+Math.random()*arena.w; y=arena.y+arena.h-8*S; }
+  else { x=arena.x+8*S; y=arena.y+Math.random()*arena.h; }
+  var base = {
+    drift: { hp:2, r:13, sp:55,  sc:10, touch:8,  bounce:false },
+    run:   { hp:1, r:10, sp:108, sc:12, touch:6,  bounce:false },
+    tank:  { hp:6, r:21, sp:34,  sc:26, touch:14, bounce:false },
+    split: { hp:3, r:15, sp:62,  sc:18, touch:9,  bounce:false },
+    mini:  { hp:1, r:8,  sp:96,  sc:5,  touch:5,  bounce:true  },
+  }[spec.type];
+  var hp = base.hp, sc = base.sc, r = base.r;
+  if (spec.crown) { hp = Math.round(hp*3 + 3); sc *= 5; r += 3; }
+  enemies.push({ x:x, y:y, vx:0, vy:0, r:r, hp:hp, maxHp:hp, type:spec.type,
+    crown:!!spec.crown, sp:base.sp, sc:sc, touch:base.touch, bounce:base.bounce, cd:0 });
+}
+
+function offerUpgrades() {
+  phase = 'UPGRADE';
+  pickUpgrades();
+  GF.sfx('reward');
+  GF.saveRun();
+}
+function chooseUpgrade(i) {
+  var u = upChoices[i];
+  if (!u) return;
+  u.fn();
+  GF.sfx('levelup');
+  GF.spawnFloat(GF.cx, GF.cy, (GF.lang==='ru'?u.ru:u.en), '#ffd23d');
+  startWave(wave + 1);
+}
+
+function gameOver() {
+  if (gs !== 'PLAYING') return;
+  gs = 'GAMEOVER';
+  var total = selfDmg + enemyDmg;
+  deathBySelf = total <= 0 ? true : (selfDmg >= enemyDmg);
+  if (score > best) { best = score; try { localStorage.setItem('backfire_best', best); } catch(e){} }
+  GF.setShake(1.4); redFlash = 1;
+  GF.sfx('lose');
+  GF.gameEnded();
+  GF.saveRun();
+}
+
+// ── DAMAGE ──────────────────────────────────────────────────────────────
+function damagePlayer(amt, isSelf) {
+  if (player.iframe > 0 || gs !== 'PLAYING') return;
+  player.hp -= amt;
+  player.iframe = S0.ifr;
+  player.hitFlash = 1;
+  if (isSelf) { selfDmg += amt; redFlash = Math.max(redFlash, 0.7); GF.setShake(0.9); }
+  else        { enemyDmg += amt; GF.setShake(0.5); }
+  GF.sfx('hurt');
+  GF.spawnParticles(player.x, player.y, isSelf ? '#ff3d8b' : '#ff7a3d', 10);
+  if (player.hp <= 0) { player.hp = 0; gameOver(); }
+}
+
+function killEnemy(e, idx) {
+  GF.spawnParticles(e.x, e.y, e.crown ? '#ffd23d' : '#ff6a4d', e.crown ? 22 : 12);
+  GF.spawnFloat(e.x, e.y, '+' + e.sc, e.crown ? '#ffd23d' : '#ffd9c2');
+  score += e.sc; kills++;
+  if (S0.vamp > 0) heal(S0.vamp);
+  GF.sfx(e.crown ? 'coin' : 'hit');
+  if (e.crown) { pickups.push({ x:e.x, y:e.y, vy:-0.4*GF.S, r:11*GF.S, kind:'heal' }); }
+  if (e.type === 'split') {
+    for (var k=0;k<2;k++) {
+      var a = Math.random()*Math.PI*2;
+      enemies.push({ x:e.x, y:e.y, vx:Math.cos(a), vy:Math.sin(a), r:8*GF.S, hp:1, maxHp:1,
+        type:'mini', crown:false, sp:96, sc:5, touch:5, bounce:true, cd:0 });
+    }
+  }
+  enemies.splice(idx, 1);
+}
+
+// ── FIRE ────────────────────────────────────────────────────────────────
+function fire(dt) {
+  fireTimer -= dt; sfxShotT -= dt;
+  if (fireTimer > 0) return;
+  fireTimer = S0.fireInterval;
+  var S = GF.S;
+  var tgt = nearestEnemy();
+  var baseA = tgt ? Math.atan2(tgt.y-player.y, tgt.x-player.x) : -Math.PI/2;
+  var spread = S0.spreadDeg * Math.PI/180;
+  var n = S0.shots;
+  for (var i=0;i<n;i++) {
+    var off = (n===1) ? 0 : (i/(n-1) - 0.5) * spread * (n-1);
+    spawnBullet(baseA + off + (Math.random()-0.5)*2*S0.inacc);   // jitter -> misses -> ricochets
+  }
+  if (S0.omni > 0) {
+    for (var j=0;j<S0.omni;j++) spawnBullet(baseA + (j+1)*(Math.PI*2/(S0.omni+1)) + (Math.random()-0.5)*2*S0.inacc);
+  }
+  // muzzle flash
+  GF.spawnParticles(player.x + Math.cos(baseA)*player.r, player.y + Math.sin(baseA)*player.r, '#9ff6ff', 2);
+  if (sfxShotT <= 0) { GF.tone(540 + Math.random()*80, 0.045, 'square', 0.035, 360); sfxShotT = 0.09; }
+}
+
+function spawnBullet(ang) {
+  if (bullets.length >= BCAP) bullets.shift();
+  var S = GF.S;
+  bullets.push({
+    x: player.x + Math.cos(ang)*(player.r+3*S),
+    y: player.y + Math.sin(ang)*(player.r+3*S),
+    vx: Math.cos(ang)*S0.speed*S, vy: Math.sin(ang)*S0.speed*S,
+    r: S0.bulletR*S, armed:false, bounces:0, life:S0.life, maxLife:S0.life,
+    hit:null, gen:0,
+  });
+}
+function childBullet(b, ang) {
+  if (bullets.length >= BCAP) return;
+  var S = GF.S, sp = Math.hypot(b.vx, b.vy);
+  bullets.push({
+    x:b.x, y:b.y, vx:Math.cos(ang)*sp, vy:Math.sin(ang)*sp,
+    r:b.r*0.85, armed:true, bounces:b.bounces, life:Math.min(b.life, 2.2), maxLife:b.maxLife,
+    hit:null, gen:(b.gen||0)+1,
+  });
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────
+function layout() {
+  var S = GF.S;
+  arena.x = 9*S;
+  arena.y = 58*S;
+  arena.w = GF.W - 18*S;
+  arena.h = GF.H - 67*S;
+}
+
+function update(dt) {
+  if (gs !== 'PLAYING' || phase !== 'FIGHT') return;
+  var S = GF.S;
+  layout();
+  if (slowmo > 0) { slowmo -= dt; dt *= 0.3; }   // BACKFIRE MOMENT slow-mo beat
+  runTime += dt;
+
+  // ----- movement (drag joystick + keyboard) -----
+  var ax=0, ay=0;
+  if (GF.keys['ArrowLeft']||GF.keys['KeyA']) ax-=1;
+  if (GF.keys['ArrowRight']||GF.keys['KeyD']) ax+=1;
+  if (GF.keys['ArrowUp']||GF.keys['KeyW']) ay-=1;
+  if (GF.keys['ArrowDown']||GF.keys['KeyS']) ay+=1;
+  if (GF.touch.active) { ax += GF.touch.dx; ay += GF.touch.dy; }
+  var al = Math.hypot(ax, ay); if (al>1) { ax/=al; ay/=al; }
+  var spd = 250*S;
+  player.vx += ((ax*spd) - player.vx) * Math.min(1, dt*14);
+  player.vy += ((ay*spd) - player.vy) * Math.min(1, dt*14);
+  player.x += player.vx*dt; player.y += player.vy*dt;
+  player.x = GF.clamp(player.x, arena.x+player.r, arena.x+arena.w-player.r);
+  player.y = GF.clamp(player.y, arena.y+player.r, arena.y+arena.h-player.r);
+  player.r = 13*S;
+  if (player.iframe>0) player.iframe -= dt;
+  if (player.hitFlash>0) player.hitFlash -= dt*3;
+
+  fire(dt);
+  updateBullets(dt);
+  updateEnemies(dt);
+  updatePickups(dt);
+
+  // "this is fine" easter-egg when your own fire gets out of hand
+  if (!fineShown && armedCount() > 55) {
+    fineShown = true;
+    GF.spawnFloat(GF.cx, arena.y + 40*S, GF.t('fine'), '#ff9d3d');
+  }
+
+  // wave clear -> upgrade pick
+  if (enemies.length === 0 && spawnQueue.length === 0 && gs==='PLAYING') {
+    score += 10 * wave;
+    offerUpgrades();
+    return;
+  }
+
+  // staggered spawns
+  if (spawnQueue.length) {
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) { spawnEnemy(spawnQueue.shift()); spawnTimer = 0.28; }
+  }
+
+  if (redFlash>0) redFlash -= dt*1.6;
+  GF.saveRun();
+}
+
+function updateBullets(dt) {
+  var S = GF.S, L = arena.x, R = arena.x+arena.w, T = arena.y, B = arena.y+arena.h;
+  for (var i=bullets.length-1;i>=0;i--) {
+    var b = bullets[i];
+    b.x += b.vx*dt; b.y += b.vy*dt;
+    b.life -= dt;
+    if (b.life <= 0) { bullets.splice(i,1); continue; }
+    var bounced = false;
+    if (b.x < L+b.r) { b.x=L+b.r; b.vx=Math.abs(b.vx); bounced=true; }
+    else if (b.x > R-b.r) { b.x=R-b.r; b.vx=-Math.abs(b.vx); bounced=true; }
+    if (b.y < T+b.r) { b.y=T+b.r; b.vy=Math.abs(b.vy); bounced=true; }
+    else if (b.y > B-b.r) { b.y=B-b.r; b.vy=-Math.abs(b.vy); bounced=true; }
+    if (bounced) {
+      b.bounces++;
+      var wasArmed = b.armed;
+      b.armed = true;
+      GF.spawnParticles(b.x, b.y, '#ff6ab0', 2);
+      if (sfxShotT <= 0) { GF.tone(220, 0.04, 'triangle', 0.04); }
+      // BACKFIRE MOMENT - teach the rule the first time a bullet arms (no text wall)
+      if (!wasArmed && !taughtBackfire && gs==='PLAYING') {
+        taughtBackfire = true; slowmo = 0.5; redFlash = Math.max(redFlash, 0.4);
+        GF.tone(900, 0.18, 'sawtooth', 0.13, 180); GF.setShake(0.6);
+        GF.spawnFloat(b.x, b.y - 14*GF.S, GF.t('backfire'), '#ff3d8b');
+      }
+      if (b.bounces > S0.maxBounces) { bullets.splice(i,1); continue; }
+      // split mechanic
+      if (S0.splitOnBounce && (S0.splitEvery || (!wasArmed && b.bounces===1)) && (b.gen||0) < 3) {
+        var a = Math.atan2(b.vy, b.vx);
+        childBullet(b, a + 0.42); childBullet(b, a - 0.42);
+      }
+    }
+    // enemy hits
+    for (var j=enemies.length-1;j>=0;j--) {
+      var e = enemies[j];
+      var rr = b.r + e.r;
+      if ((b.x-e.x)*(b.x-e.x) + (b.y-e.y)*(b.y-e.y) <= rr*rr) {
+        if (S0.pierce) {
+          if (b.hit === e) continue;       // one hit per enemy for piercing rounds
+          b.hit = e;
+        }
+        e.hp -= S0.dmg;
+        GF.spawnParticles(b.x, b.y, '#ffd9c2', 3);
+        if (e.hp <= 0) { killEnemy(e, j); }
+        if (!S0.pierce) { bullets.splice(i,1); break; }
+      }
+    }
+    if (i >= bullets.length) continue;
+    var bb = bullets[i];
+    if (!bb) continue;
+    // self hit (only once a bullet is armed and we are not in mercy frames)
+    if (bb.armed && player.iframe <= 0) {
+      var sr = bb.r + player.r*0.86;
+      if ((bb.x-player.x)*(bb.x-player.x) + (bb.y-player.y)*(bb.y-player.y) <= sr*sr) {
+        bullets.splice(i,1);
+        damagePlayer(10, true);
+      }
+    }
+  }
+}
+
+function updateEnemies(dt) {
+  var S = GF.S, L = arena.x, R = arena.x+arena.w, T = arena.y, B = arena.y+arena.h;
+  for (var i=enemies.length-1;i>=0;i--) {
+    var e = enemies[i];
+    if (e.bounce) {
+      // bouncer minis travel straight and ricochet off walls
+      e.x += e.vx*e.sp*S0.slow*dt; e.y += e.vy*e.sp*S0.slow*dt;
+      if (e.x<L+e.r||e.x>R-e.r) e.vx*=-1;
+      if (e.y<T+e.r||e.y>B-e.r) e.vy*=-1;
+      e.x = GF.clamp(e.x, L+e.r, R-e.r); e.y = GF.clamp(e.y, T+e.r, B-e.r);
+    } else {
+      var a = Math.atan2(player.y-e.y, player.x-e.x);
+      e.x += Math.cos(a)*e.sp*S0.slow*dt; e.y += Math.sin(a)*e.sp*S0.slow*dt;
+    }
+    if (e.cd > 0) e.cd -= dt;
+    var rr = e.r + player.r;
+    if ((e.x-player.x)*(e.x-player.x) + (e.y-player.y)*(e.y-player.y) <= rr*rr) {
+      if (player.iframe <= 0) {
+        damagePlayer(e.touch, false);
+        // knockback
+        var ka = Math.atan2(player.y-e.y, player.x-e.x);
+        player.vx += Math.cos(ka)*180*S; player.vy += Math.sin(ka)*180*S;
+      }
+    }
+  }
+}
+
+function updatePickups(dt) {
+  for (var i=pickups.length-1;i>=0;i--) {
+    var p = pickups[i];
+    p.y += p.vy; p.vy *= 0.96;
+    var rr = p.r + player.r;
+    if ((p.x-player.x)*(p.x-player.x) + (p.y-player.y)*(p.y-player.y) <= rr*rr) {
+      if (p.kind==='heal') heal(25);
+      GF.sfx('pickup');
+      pickups.splice(i,1);
+    }
+  }
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = '#0a0a14'; ctx.fillRect(0,0,W,H);
+  layout();
+
+  if (gs==='PLAYING' || gs==='PAUSED' || gs==='GAMEOVER') {
+    drawArena(ctx);
+    drawPickups(ctx);
+    drawEnemies(ctx);
+    drawBullets(ctx);
+    drawPlayer(ctx);
+    drawHUD(ctx);
+  }
+
+  if (gs==='PLAYING' && phase==='UPGRADE') drawUpgrade(ctx);
+  if (gs==='MENU')     drawMenu(ctx);
+  if (gs==='PAUSED')   drawPaused(ctx);
+  if (gs==='GAMEOVER') drawGameOver(ctx);
+
+  // self-hit red vignette flash, drawn last
+  if (redFlash > 0.01) {
+    ctx.save();
+    var g = ctx.createRadialGradient(GF.cx, GF.cy, Math.min(W,H)*0.2, GF.cx, GF.cy, Math.max(W,H)*0.62);
+    g.addColorStop(0, 'rgba(255,40,110,0)');
+    g.addColorStop(1, 'rgba(255,30,90,' + (0.5*Math.min(1,redFlash)).toFixed(3) + ')');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    ctx.restore();
+  }
+}
+
+function drawArena(ctx) {
+  var S = GF.S;
+  // danger heat on the frame, rising with armed-bullet count
+  var heat = Math.min(1, armedCount()/40);
+  ctx.save();
+  // faint grid inside arena
+  ctx.beginPath(); ctx.rect(arena.x, arena.y, arena.w, arena.h); ctx.clip();
+  ctx.strokeStyle = 'rgba(120,140,200,0.05)'; ctx.lineWidth = 1;
+  var step = 42*S;
+  for (var gx=arena.x; gx<arena.x+arena.w; gx+=step){ ctx.beginPath(); ctx.moveTo(gx,arena.y); ctx.lineTo(gx,arena.y+arena.h); ctx.stroke(); }
+  for (var gy=arena.y; gy<arena.y+arena.h; gy+=step){ ctx.beginPath(); ctx.moveTo(arena.x,gy); ctx.lineTo(arena.x+arena.w,gy); ctx.stroke(); }
+  ctx.restore();
+  // frame
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,60,120,' + (0.15+0.6*heat).toFixed(3) + ')';
+  ctx.shadowBlur = (6 + 22*heat)*S;
+  ctx.strokeStyle = 'rgba(' + (90+150*heat) + ',' + (110-40*heat) + ',' + (170-40*heat) + ',' + (0.35+0.5*heat).toFixed(3) + ')';
+  ctx.lineWidth = 2.5*S;
+  GF.rr(ctx, arena.x, arena.y, arena.w, arena.h, 10*S); ctx.stroke();
+  ctx.restore();
+}
+
+function drawPlayer(ctx) {
+  var S = GF.S, x=player.x, y=player.y, r=player.r;
+  if (gs==='GAMEOVER') return;
+  ctx.save();
+  var flash = player.iframe>0 && (((GF.W*0+performance.now())/80|0)%2===0);
+  ctx.globalAlpha = flash ? 0.45 : 1;
+  ctx.shadowColor = '#6ff0ff'; ctx.shadowBlur = 16*S;
+  // outer ring
+  ctx.strokeStyle = player.hitFlash>0 ? '#ffffff' : '#6ff0ff';
+  ctx.lineWidth = 3*S;
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+  // core
+  ctx.shadowBlur = 8*S;
+  ctx.fillStyle = '#eaffff';
+  ctx.beginPath(); ctx.arc(x,y,r*0.5,0,Math.PI*2); ctx.fill();
+  // aim tick toward nearest enemy
+  var tgt = nearestEnemy();
+  if (tgt) {
+    var a = Math.atan2(tgt.y-y, tgt.x-x);
+    ctx.strokeStyle = 'rgba(110,240,255,0.5)'; ctx.lineWidth = 2*S;
+    ctx.beginPath(); ctx.moveTo(x+Math.cos(a)*r, y+Math.sin(a)*r);
+    ctx.lineTo(x+Math.cos(a)*(r+9*S), y+Math.sin(a)*(r+9*S)); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawBullets(ctx) {
+  var S = GF.S;
+  for (var i=0;i<bullets.length;i++) {
+    var b = bullets[i];
+    var col = b.armed ? '#ff3d8b' : '#45e6ff';
+    var fade = b.maxLife>10 ? 1 : Math.min(1, b.life/0.5);
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.shadowColor = col; ctx.shadowBlur = (b.armed?10:7)*S;
+    // short trail
+    ctx.strokeStyle = col; ctx.lineWidth = b.r*1.1; ctx.lineCap='round';
+    ctx.globalAlpha = fade*0.4;
+    ctx.beginPath(); ctx.moveTo(b.x,b.y); ctx.lineTo(b.x-b.vx*0.018, b.y-b.vy*0.018); ctx.stroke();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle = b.armed ? '#ffd0e6' : '#d8fbff';
+    ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawEnemies(ctx) {
+  var S = GF.S;
+  for (var i=0;i<enemies.length;i++) {
+    var e = enemies[i];
+    var col = e.type==='tank' ? '#c1392b' : e.type==='run' ? '#ff8c2b' :
+              e.type==='split' ? '#ff5577' : e.type==='mini' ? '#ff6a4d' : '#ff5a4d';
+    ctx.save();
+    ctx.shadowColor = col; ctx.shadowBlur = 8*S;
+    ctx.fillStyle = col;
+    // body: rotated square for "enemy" read
+    ctx.translate(e.x, e.y);
+    ctx.rotate((performance.now()/600) + i);
+    var s = e.r*1.5;
+    GF.rr(ctx, -s/2, -s/2, s, s, 3*S); ctx.fill();
+    // inner eye
+    ctx.rotate(-((performance.now()/600)+i));
+    ctx.fillStyle = '#1a0a12';
+    ctx.beginPath(); ctx.arc(0,0,e.r*0.42,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(e.r*0.12,-e.r*0.05,e.r*0.16,0,Math.PI*2); ctx.fill();
+    // hp pip for tanks / crowned
+    if (e.maxHp>2) {
+      ctx.fillStyle = 'rgba(255,255,255,0.85)';
+      var bw = e.r*1.6, frac=e.hp/e.maxHp;
+      ctx.fillRect(-bw/2, -e.r-7*S, bw*frac, 3*S);
+    }
+    ctx.restore();
+    if (e.crown) drawCrown(ctx, e.x, e.y - e.r - 9*S, e.r*0.7);
+  }
+}
+
+// CARD: "Add a crown. Any object with a crown is important, even a seal."
+function drawCrown(ctx, x, y, w) {
+  var S = GF.S;
+  ctx.save();
+  ctx.shadowColor = '#ffd23d'; ctx.shadowBlur = 8*S;
+  ctx.fillStyle = '#ffd23d';
+  ctx.beginPath();
+  ctx.moveTo(x-w, y+w*0.5);
+  ctx.lineTo(x-w, y-w*0.4);
+  ctx.lineTo(x-w*0.5, y);
+  ctx.lineTo(x, y-w*0.7);
+  ctx.lineTo(x+w*0.5, y);
+  ctx.lineTo(x+w, y-w*0.4);
+  ctx.lineTo(x+w, y+w*0.5);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#ff5577';
+  ctx.beginPath(); ctx.arc(x, y+w*0.15, w*0.18, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function drawPickups(ctx) {
+  var S = GF.S;
+  for (var i=0;i<pickups.length;i++) {
+    var p = pickups[i];
+    ctx.save();
+    ctx.shadowColor = '#5dffa6'; ctx.shadowBlur = 12*S;
+    ctx.fillStyle = '#5dffa6';
+    var b = 1 + 0.12*Math.sin(performance.now()/200 + i);
+    var s = p.r*b;
+    ctx.fillRect(p.x-s*0.32, p.y-s, s*0.64, s*2);
+    ctx.fillRect(p.x-s, p.y-s*0.32, s*2, s*0.64);
+    ctx.restore();
+  }
+}
+
+// ── HUD ─────────────────────────────────────────────────────────────────
+var btnPause = {x:0,y:0,w:0,h:0}, btnMute = {x:0,y:0,r:0};
+function drawHUD(ctx) {
+  var S = GF.S, W = GF.W;
+  // pause button (top-left) - keeps the menu reachable in-game
+  var ps = 28*S;
+  btnPause = { x:9*S, y:7*S, w:ps, h:ps };
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  GF.rr(ctx, btnPause.x, btnPause.y, ps, ps, 6*S); ctx.fill();
+  ctx.fillStyle = '#cdd6ff';
+  ctx.fillRect(btnPause.x+ps*0.34, btnPause.y+ps*0.3, ps*0.1, ps*0.4);
+  ctx.fillRect(btnPause.x+ps*0.54, btnPause.y+ps*0.3, ps*0.1, ps*0.4);
+  ctx.restore();
+
+  // mute button (top-right)
+  btnMute = { x: W-22*S, y: 21*S, r: 14*S };
+  GF.drawMuteIcon(ctx, btnMute.x, btnMute.y, btnMute.r, GF.muted);
+
+  // wave + score (centered, stacked ABOVE the hp bar so nothing overlaps)
+  ctx.save();
+  ctx.textAlign='center'; ctx.textBaseline='top';
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(15*S,12,20) + 'px sans-serif';
+  ctx.fillText(GF.t('wave') + ' ' + wave, GF.cx, 6*S);
+  ctx.fillStyle = '#8ea0c8'; ctx.font = 'bold ' + GF.clamp(11*S,9,15) + 'px sans-serif';
+  ctx.fillText(GF.t('score') + ' ' + score, GF.cx, 26*S);
+  ctx.restore();
+
+  // HP bar (below the text, between the pause + mute icons)
+  var hx = 46*S, hw = W - 92*S, hy = 43*S, hh = 8*S;
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.1)';
+  GF.rr(ctx, hx, hy, hw, hh, hh/2); ctx.fill();
+  var frac = Math.max(0, player.hp/player.maxHp);
+  var hc = frac>0.5 ? '#5dffa6' : frac>0.25 ? '#ffd23d' : '#ff4d6d';
+  ctx.fillStyle = hc; ctx.shadowColor = hc; ctx.shadowBlur = 8*S;
+  if (frac>0) { GF.rr(ctx, hx, hy, hw*frac, hh, hh/2); ctx.fill(); }
+  ctx.restore();
+}
+
+// ── UPGRADE SCREEN ──────────────────────────────────────────────────────
+function drawUpgrade(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(8,8,18,0.9)'; ctx.fillRect(0,0,W,H);
+  // header
+  ctx.textAlign='center'; ctx.textBaseline='alphabetic';
+  ctx.fillStyle='#5dffa6'; ctx.font='bold '+GF.clamp(15*S,11,20)+'px sans-serif';
+  var _tot = selfDmg+enemyDmg, _sp = _tot>0 ? Math.round(selfDmg/_tot*100) : 0;
+  ctx.fillText(GF.t('cleared') + (_tot>0 ? '   ' + _sp + '% ' + GF.t('selfwave') : ''), GF.cx, 64*S);
+  ctx.fillStyle='#fff'; ctx.font='bold '+GF.clamp(26*S,18,38)+'px sans-serif';
+  ctx.shadowColor='rgba(46,224,122,0.4)'; ctx.shadowBlur=20*S;
+  ctx.fillText(GF.t('choose'), GF.cx, 96*S); ctx.shadowBlur=0;
+
+  // bearded sage + quip - CARD: "Add a bearded character" (face left, quip right, no overlap)
+  var cwq = Math.min(W - 40*S, 460*S), cleft = GF.cx - cwq/2;
+  drawSage(ctx, cleft + 18*S, 121*S, 16*S);
+  ctx.textAlign='left';
+  ctx.fillStyle='#9fb0d8'; ctx.font='italic '+GF.clamp(11*S,8,15)+'px sans-serif';
+  ctx.fillText(GF.t('sage')[sageIdx], cleft + 42*S, 125*S);
+  ctx.textAlign='center';
+
+  // cards stacked vertically (works portrait + wide)
+  upRects = [];
+  var n = upChoices.length;
+  var top = 150*S;
+  var avail = H - top - 24*S;
+  var ch = Math.min(avail/n - 10*S, 110*S);
+  var cw = Math.min(W - 40*S, 460*S);
+  var cx0 = GF.cx - cw/2;
+  for (var i=0;i<n;i++) {
+    var u = upChoices[i];
+    var y = top + i*(ch+10*S);
+    var god = u.r==='god', rare = u.r==='rare';
+    var ac = god ? '#ffd23d' : rare ? '#c08bff' : '#45e6ff';
+    ctx.save();
+    ctx.shadowColor = ac; ctx.shadowBlur = god?22*S:12*S;
+    ctx.fillStyle = 'rgba(20,22,38,0.96)';
+    GF.rr(ctx, cx0, y, cw, ch, 12*S); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.lineWidth = god?3*S:2*S; ctx.strokeStyle = ac;
+    GF.rr(ctx, cx0, y, cw, ch, 12*S); ctx.stroke();
+    // hot pips (how much this raises your own danger)
+    for (var h=0; h<u.hot; h++) {
+      ctx.fillStyle='#ff3d8b';
+      ctx.beginPath(); ctx.arc(cx0+cw-16*S-h*12*S, y+15*S, 4*S, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.textAlign='left';
+    ctx.fillStyle = ac; ctx.font='bold '+GF.clamp(18*S,13,24)+'px sans-serif';
+    ctx.fillText((GF.lang==='ru'?u.ru:u.en), cx0+16*S, y+ch*0.42);
+    ctx.fillStyle = '#c8d2ee'; ctx.font=''+GF.clamp(12.5*S,9,17)+'px sans-serif';
+    ctx.fillText((GF.lang==='ru'?u.dr:u.de), cx0+16*S, y+ch*0.72);
+    if (god) { ctx.fillStyle='#ffd23d'; ctx.font='bold '+GF.clamp(9*S,7,12)+'px sans-serif'; ctx.fillText('GOD', cx0+16*S, y+18*S); }
+    ctx.restore();
+    upRects.push({ x:cx0, y:y, w:cw, h:ch });
+  }
+  ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+}
+
+function drawSage(ctx, x, y, r) {
+  var S = GF.S;
+  ctx.save();
+  // face
+  ctx.fillStyle='#f2c79a'; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  // beard (wisdom in crumbs)
+  ctx.fillStyle='#c9c9d6';
+  ctx.beginPath();
+  ctx.moveTo(x-r*0.85, y+r*0.05);
+  ctx.quadraticCurveTo(x, y+r*1.9, x+r*0.85, y+r*0.05);
+  ctx.quadraticCurveTo(x, y+r*0.7, x-r*0.85, y+r*0.05);
+  ctx.fill();
+  // eyes
+  ctx.fillStyle='#3a2a1a';
+  ctx.beginPath(); ctx.arc(x-r*0.32,y-r*0.15,r*0.1,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x+r*0.32,y-r*0.15,r*0.1,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+// ── MENU / PAUSE / GAMEOVER ────────────────────────────────────────────
+var btnPlay = {x:0,y:0,w:0,h:0}, btnLang = {x:0,y:0,w:0,h:0};
+var btnResume = {x:0,y:0,w:0,h:0}, btnQuit = {x:0,y:0,w:0,h:0};
+
+function bigButton(ctx, label, cy, accent) {
+  var S = GF.S, wide = GF.W/GF.H > 1.1;
+  var bw = GF.clamp((wide?300:248)*S, 180, 380), bh = GF.clamp(58*S, 44, 76);
+  var bx = GF.cx-bw/2, by = cy;
+  var t = performance.now()/1000, k=Math.sin(t*2.2), p=1+0.04*k;
+  var w=bw*p, h=bh*p, x=GF.cx-w/2, yy=by+bh/2-h/2;
+  var g = ctx.createLinearGradient(x,yy,x,yy+h);
+  g.addColorStop(0, accent[0]); g.addColorStop(1, accent[1]);
+  ctx.save(); ctx.shadowColor=accent[2]; ctx.shadowBlur=(20+10*k)*S;
+  GF.rr(ctx,x,yy,w,h,h/2); ctx.fillStyle=g; ctx.fill(); ctx.restore();
+  ctx.fillStyle='#fff'; ctx.font='bold '+GF.clamp(20*S,15,28)+'px sans-serif';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(label, GF.cx, by+bh/2);
+  ctx.textBaseline='alphabetic';
+  return { x:bx, y:by, w:bw, h:bh };
+}
+
+function drawMenu(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle = 'rgba(8,8,18,0.9)'; ctx.fillRect(0,0,W,H);
+  // animated demo ring of bullets around the title
+  var t = performance.now()/1000;
+  for (var i=0;i<10;i++) {
+    var a = t*1.1 + i*Math.PI/5, rad = (70+8*Math.sin(t*2+i))*S;
+    var armed = i%3===0;
+    ctx.save(); ctx.globalAlpha=0.8; ctx.shadowColor=armed?'#ff3d8b':'#45e6ff'; ctx.shadowBlur=10*S;
+    ctx.fillStyle=armed?'#ff3d8b':'#45e6ff';
+    ctx.beginPath(); ctx.arc(GF.cx+Math.cos(a)*rad, GF.cy-72*S+Math.sin(a)*rad*0.5, 4.5*S,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.textAlign='center';
+  ctx.shadowColor='rgba(255,61,139,0.5)'; ctx.shadowBlur=30*S;
+  ctx.fillStyle='#fff'; ctx.font='bold '+GF.clamp(54*S,30,76)+'px sans-serif';
+  ctx.fillText(GF.t('title'), GF.cx, GF.cy-46*S);
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#9fb0d8'; ctx.font=''+GF.clamp(14*S,10,18)+'px sans-serif';
+  wrapText(ctx, GF.t('sub'), GF.cx, GF.cy-14*S, W-60*S, 18*S);
+
+  btnPlay = bigButton(ctx, GF.t('play'), GF.cy+30*S, ['#ff5a93','#d6286a','rgba(255,61,139,0.6)']);
+
+  if (best>0) {
+    ctx.fillStyle='#667'; ctx.font=''+GF.clamp(13*S,10,17)+'px sans-serif';
+    ctx.fillText(GF.t('best')+': '+best, GF.cx, GF.cy+120*S);
+  }
+  // language toggle (top-right under mute area)
+  ctx.font='bold '+GF.clamp(13*S,10,17)+'px sans-serif';
+  btnLang = { x: W-92*S, y: 8*S, w: 84*S, h: 26*S };
+  ctx.fillStyle='rgba(255,255,255,0.08)'; GF.rr(ctx, btnLang.x, btnLang.y, btnLang.w, btnLang.h, 6*S); ctx.fill();
+  ctx.fillStyle = GF.lang==='en' ? '#fff':'#667'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('EN', btnLang.x+btnLang.w*0.28, btnLang.y+btnLang.h/2);
+  ctx.fillStyle = GF.lang==='ru' ? '#fff':'#667';
+  ctx.fillText('RU', btnLang.x+btnLang.w*0.72, btnLang.y+btnLang.h/2);
+  ctx.fillStyle='#445'; ctx.fillText('|', btnLang.x+btnLang.w*0.5, btnLang.y+btnLang.h/2);
+  ctx.textBaseline='alphabetic';
+}
+
+function drawPaused(ctx) {
+  var S = GF.S;
+  ctx.fillStyle='rgba(8,8,18,0.86)'; ctx.fillRect(0,0,GF.W,GF.H);
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff'; ctx.font='bold '+GF.clamp(36*S,22,52)+'px sans-serif';
+  ctx.fillText(GF.t('paused'), GF.cx, GF.cy-50*S);
+  btnResume = bigButton(ctx, GF.t('resume'), GF.cy-6*S, ['#2ee07a','#23a657','rgba(46,224,122,0.6)']);
+  btnQuit = bigButton(ctx, GF.t('quit'), GF.cy+64*S, ['#556','#334','rgba(80,90,120,0.4)']);
+}
+
+function drawGameOver(ctx) {
+  var S = GF.S, W = GF.W, H = GF.H;
+  ctx.fillStyle='rgba(8,8,18,0.9)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  ctx.shadowColor='rgba(255,61,139,0.5)'; ctx.shadowBlur=24*S;
+  ctx.fillStyle = deathBySelf ? '#ff5a93' : '#ff8c2b';
+  ctx.font='bold '+GF.clamp(30*S,19,44)+'px sans-serif';
+  ctx.fillText(deathBySelf ? GF.t('over') : GF.t('overEnemy'), GF.cx, GF.cy-86*S);
+  ctx.shadowBlur=0;
+
+  // the theme payoff: how much of your death was your own fire
+  var total = selfDmg+enemyDmg, pct = total>0 ? Math.round(selfDmg/total*100) : 0;
+  ctx.fillStyle='#ffd23d'; ctx.font='bold '+GF.clamp(46*S,28,64)+'px sans-serif';
+  ctx.fillText(pct+'%', GF.cx, GF.cy-34*S);
+  ctx.fillStyle='#9fb0d8'; ctx.font=''+GF.clamp(13*S,10,17)+'px sans-serif';
+  wrapText(ctx, GF.t('selfline'), GF.cx, GF.cy-12*S, W-70*S, 17*S);
+
+  ctx.fillStyle='#cdd6ff'; ctx.font='bold '+GF.clamp(15*S,11,20)+'px sans-serif';
+  ctx.fillText(GF.t('wave')+' '+wave+'   '+GF.t('kills')+' '+kills+'   '+GF.t('score')+' '+score, GF.cx, GF.cy+24*S);
+
+  btnPlay = bigButton(ctx, GF.t('retry'), GF.cy+46*S, ['#ff5a93','#d6286a','rgba(255,61,139,0.6)']);
+  if (best>0) {
+    ctx.fillStyle='#667'; ctx.font=''+GF.clamp(12*S,9,16)+'px sans-serif';
+    ctx.fillText(GF.t('best')+': '+best, GF.cx, GF.cy+118*S);
+  }
+}
+
+function wrapText(ctx, text, cx, y, maxW, lh) {
+  var words = (text||'').split(' '), line='', lines=[];
+  for (var i=0;i<words.length;i++) {
+    var test = line ? line+' '+words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line=words[i]; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  for (var j=0;j<lines.length;j++) ctx.fillText(lines[j], cx, y + j*lh);
+}
+
+// ── INPUT ──────────────────────────────────────────────────────────────
+function hit(b, x, y) { return b && x>=b.x && x<=b.x+b.w && y>=b.y && y<=b.y+b.h; }
+function hitC(b, x, y) { return b && ((x-b.x)*(x-b.x)+(y-b.y)*(y-b.y)) <= (b.r*1.6)*(b.r*1.6); }
+
+function onPress(x, y) {
+  if (gs==='MENU') {
+    if (hit(btnLang, x, y)) { GF.lang = (x < btnLang.x+btnLang.w*0.5) ? 'en' : 'ru'; GF.sfx('tap'); return; }
+    if (hit(btnPlay, x, y)) { startGame(); return; }
+    return;
+  }
+  if (gs==='GAMEOVER') { if (hit(btnPlay, x, y)) startGame(); return; }
+  if (gs==='PAUSED') {
+    if (hit(btnResume, x, y)) { gs='PLAYING'; return; }
+    if (hit(btnQuit, x, y)) { gs='MENU'; GF.saveRun(); return; }
+    return;
+  }
+  if (gs==='PLAYING') {
+    if (hitC(btnMute, x, y)) { GF.toggleMute(); return; }
+    if (hit(btnPause, x, y)) { gs='PAUSED'; GF.sfx('tap'); return; }
+    if (phase==='UPGRADE') {
+      for (var i=0;i<upRects.length;i++) if (hit(upRects[i], x, y)) { chooseUpgrade(i); return; }
+    }
+  }
+}
+
+GF.canvas.addEventListener('pointerdown', function(e){ onPress(e.clientX, e.clientY); });
+document.addEventListener('keydown', function(e){
+  if (e.code==='Space'||e.code==='Enter') {
+    if (gs==='MENU'||gs==='GAMEOVER') startGame();
+    else if (gs==='PLAYING' && phase==='UPGRADE') chooseUpgrade(0);
+  }
+  if (e.code==='Escape'||e.code==='KeyP') {
+    if (gs==='PLAYING' && phase==='FIGHT') gs='PAUSED';
+    else if (gs==='PAUSED') gs='PLAYING';
+  }
+  if (gs==='PLAYING' && phase==='UPGRADE' && (e.code==='Digit1'||e.code==='Digit2'||e.code==='Digit3')) {
+    chooseUpgrade(parseInt(e.code.slice(5))-1);
+  }
+});
+
+// screenshot helper
+window._jumpLevel = function(){ startGame(); for (var i=0;i<3;i++) chooseUpgrade(0); };
+
+// ── BOOT ────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 600, designH: 900,
+  strings: STR,
+  saveKey: 'backfire',
+  onReady: function() {
+    try { best = parseInt(localStorage.getItem('backfire_best')||'0')||0; } catch(e){}
+    try { if ((navigator.language||'').toLowerCase().indexOf('ru')===0) GF.lang='ru'; } catch(e){}
+    resetStats();
+
+    GF.persist('backfire_run_v1',
+      function(){ return { gs:gs, phase:phase, score:score, wave:wave, kills:kills,
+        hp:player.hp, maxHp:player.maxHp, stats:S0, self:selfDmg, en:enemyDmg }; },
+      function(s){
+        if (!s) return;
+        if (s.gs==='PLAYING') {
+          // resume the run: same loadout + wave, fresh arena
+          S0 = s.stats || S0; score=s.score||0; kills=s.kills||0;
+          player.maxHp=s.maxHp||100; player.hp=s.hp||player.maxHp;
+          selfDmg=s.self||0; enemyDmg=s.en||0;
+          gs='PLAYING'; layout();
+          player.x=arena.x+arena.w/2; player.y=arena.y+arena.h*0.7;
+          startWave(s.wave||1);
+        }
+      }
+    );
+    if (gs==='PLAYING') { /* resumed above */ } else { gs='MENU'; }
+
+    GF.bgMusic({ file:'audio/bg_track.mp3', preset:'arcade', muted:GF.muted });
+
+    GF.exposeState(function(){ return { gs:gs, phase:phase, score:score, wave:wave, hp:Math.round(player.hp), kills:kills }; });
+
+    if (window.__GF_AUTOSTART && !window._silent) { startGame(); }
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

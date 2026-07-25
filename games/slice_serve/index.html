@@ -1,0 +1,913 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Slice Serve</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #2a1810; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS (Yandex 8.2.3 — both languages) ────────────────────
+var STRINGS = {
+  en: {
+    title: 'Slice Serve',
+    sub:   'Cut the exact slice the customer ordered',
+    play: 'START SHIFT', retry: 'NEW SHIFT',
+    cash: 'TIPS', best: 'BEST STREAK',
+    gameover: "YOU'RE FIRED",
+    won: 'SHIFT COMPLETE!',
+    fired_sub: 'Three customers walked out',
+    won_sub: 'You hit the tip target',
+    serve: 'Serve', leave: 'Leave', bigger: 'Bigger half', smaller: 'Smaller half',
+    onplate: 'on the plate',
+    cut2: 'Two slices', perfect: 'PERFECT!', good: 'SERVED', miss: 'TOO OFF!',
+    streak: 'TIP', target: 'TARGET',
+    help: 'How to play', close: 'GOT IT',
+    coach_cut: 'Drag a line across the food, then release to cut',
+    coach_match: 'Match the % the customer asked for',
+    tut_goal: 'Goal: Cut the food so the slice matches the customer’s exact %.',
+    tut_controls: 'Controls: Press and drag a straight line across the food, release to cut.',
+    tut_win: 'Win: Earn $100 in tips before three customers complain.',
+    tut_lose: 'Lose: Miss the asked size by too much three times - you are fired.',
+    tut_tip: 'Tip: Cuts in a row grow your tip multiplier; near-perfect cuts pay a bonus.',
+  },
+  ru: {
+    title: 'Точный Разрез',
+    sub:   'Отрежьте ровно такой кусок, как просит клиент',
+    play: 'НАЧАТЬ СМЕНУ', retry: 'НОВАЯ СМЕНА',
+    cash: 'ЧАЕВЫЕ', best: 'РЕКОРД СЕРИИ',
+    gameover: 'ВАС УВОЛИЛИ',
+    won: 'СМЕНА ЗАВЕРШЕНА!',
+    fired_sub: 'Три клиента ушли',
+    won_sub: 'Вы достигли цели по чаевым',
+    serve: 'Отрежь', leave: 'Оставь', bigger: 'Большая половина', smaller: 'Меньшая половина',
+    onplate: 'на тарелке',
+    cut2: 'Два куска', perfect: 'ИДЕАЛЬНО!', good: 'ГОТОВО', miss: 'МИМО!',
+    streak: 'ЧАЕВ.', target: 'ЦЕЛЬ',
+    help: 'Как играть', close: 'ПОНЯТНО',
+    coach_cut: 'Проведите линию по еде и отпустите',
+    coach_match: 'Попадите в процент, который просил клиент',
+    tut_goal: 'Цель: отрежьте кусок ровно того размера, что просит клиент.',
+    tut_controls: 'Управление: проведите прямую линию по еде и отпустите.',
+    tut_win: 'Победа: заработайте $100 чаевых, пока три клиента не пожаловались.',
+    tut_lose: 'Поражение: трижды сильно промахнитесь - и вас уволят.',
+    tut_tip: 'Совет: разрезы подряд растят множитель чаевых; почти идеальный рез даёт бонус.',
+  },
+};
+
+var SPRITE_NAMES = ['knife']; // food stays procedural (sliceable); knife cursor uses a sprite
+
+// ── TUNABLES (mirrored from DESIGN.md) ───────────────────────────────────
+var COMPLAINT_LIMIT      = 3;
+var EARNINGS_TARGET      = 100;
+var TOL_START            = 0.10;
+var TOL_MIN              = 0.045;
+var TOL_TIGHTEN_PER_CUST = 0.004;
+var PERFECT_BAND         = 0.025;
+var BASE_PAYOUT          = 6;
+var PERFECT_BONUS        = 5;
+var STREAK_STEP          = 0.25;
+var STREAK_MULT_MAX      = 3.0;
+var FOOD_RADIUS_FRAC     = 0.34;
+var ROTATE_SPEED         = 0.35;
+var DRIFT_SPEED          = 26;
+
+var FOOD_TYPES = ['pizza', 'cake', 'pie', 'melon'];
+
+// ── GAME STATE ───────────────────────────────────────────────────────────
+var gs = 'MENU';                 // MENU | PLAYING | GAMEOVER | WON
+var cashEarned = 0;
+var complaints = 0;
+var customerNo = 0;              // how many customers spawned this shift
+var streak = 0;                  // consecutive in-tolerance cuts
+var tipMult = 1;                 // current tip multiplier
+var tolerance = TOL_START;       // current accepted band (± fraction)
+var servedPct = 0;              // last computed served fraction (0..1)
+var bestStreak = 0;
+
+var order = null;                // current customer order (see spawnCustomer)
+var food = null;                 // current food polygon + motion
+
+// drag / cut line
+var dragging = false;
+var cutA = null, cutB = null;    // {x,y} canvas-space endpoints of the aim line
+var pendingPct = 0;             // live smaller-piece fraction while aiming
+
+var flying = [];                 // separated pieces animation
+var reaction = 0, reactionT = 0; // customer face: 0 neutral, 1 happy, -1 sad
+var resultFlash = null;          // {text, color, t}
+var cutLock = 0;                 // lockout after a cut before next spawns
+
+var seenTut = false;
+var coachStep = 0;               // 0 = "drag", 1 = "match", 2 = done
+var helpOpen = false;
+var helpBtn = { x:0, y:0, r:0 };
+var muteBtn = { x:0, y:0, r:0 };
+var _menuBtn = null;
+
+var LY = {};                     // layout cache
+
+// ── GEOMETRY ─────────────────────────────────────────────────────────────
+function polyArea(p) {
+  var a = 0;
+  for (var i = 0; i < p.length; i++) {
+    var j = (i + 1) % p.length;
+    a += p[i].x * p[j].y - p[j].x * p[i].y;
+  }
+  return Math.abs(a) / 2;
+}
+function sideOf(pt, a, b) {
+  return (b.x - a.x) * (pt.y - a.y) - (b.y - a.y) * (pt.x - a.x);
+}
+// Keep the part of poly on the `sign` side of the infinite line a->b.
+function clipHalf(poly, a, b, sign) {
+  var out = [], n = poly.length;
+  for (var i = 0; i < n; i++) {
+    var cur = poly[i], nxt = poly[(i + 1) % n];
+    var dc = sideOf(cur, a, b) * sign, dn = sideOf(nxt, a, b) * sign;
+    var curIn = dc >= -1e-9, nxtIn = dn >= -1e-9;
+    if (curIn) out.push(cur);
+    if (curIn !== nxtIn) {
+      var t = dc / (dc - dn);
+      out.push({ x: cur.x + t * (nxt.x - cur.x), y: cur.y + t * (nxt.y - cur.y) });
+    }
+  }
+  return out;
+}
+function splitPolygon(poly, a, b) {
+  return { left: clipHalf(poly, a, b, 1), right: clipHalf(poly, a, b, -1) };
+}
+function cutFraction(poly, a, b) {
+  var s = splitPolygon(poly, a, b);
+  var whole = polyArea(poly);
+  if (whole <= 0) return 0;
+  var small = Math.min(polyArea(s.left), polyArea(s.right));
+  return small / whole;
+}
+function isValidCut(poly, a, b) {
+  if (!a || !b) return false;
+  var dx = b.x - a.x, dy = b.y - a.y;
+  if (dx * dx + dy * dy < 25) return false;
+  var s = splitPolygon(poly, a, b);
+  var la = polyArea(s.left), ra = polyArea(s.right), whole = la + ra;
+  if (whole <= 0) return false;
+  return Math.min(la, ra) / whole > 0.005;
+}
+function poly2centroid(p) {
+  var cx = 0, cy = 0;
+  for (var i = 0; i < p.length; i++) { cx += p[i].x; cy += p[i].y; }
+  return { x: cx / p.length, y: cy / p.length };
+}
+
+// ── SHAPE TEMPLATES (unit coords, centered at 0,0) ───────────────────────
+function makeCircle(n) {
+  var v = [];
+  for (var i = 0; i < n; i++) { var a = (i / n) * Math.PI * 2; v.push({ x: Math.cos(a), y: Math.sin(a) }); }
+  return v;
+}
+function makeWedge(sweep) {
+  var v = [{ x: 0, y: 0 }], steps = 26, start = -sweep / 2 - Math.PI / 2;
+  for (var i = 0; i <= steps; i++) { var a = start + (i / steps) * sweep; v.push({ x: Math.cos(a), y: Math.sin(a) }); }
+  return v;
+}
+function makeBlob(seed) {
+  var n = 13, v = [], r = seed * 9301 + 49297;
+  function rnd() { r = (r * 9301 + 49297) % 233280; return r / 233280; }
+  for (var i = 0; i < n; i++) { var a = (i / n) * Math.PI * 2; var rad = 0.72 + rnd() * 0.42; v.push({ x: Math.cos(a) * rad, y: Math.sin(a) * rad }); }
+  return v;
+}
+function buildFoodVerts() {
+  var c = Math.cos(food.angle), s = Math.sin(food.angle), out = [];
+  for (var i = 0; i < food.tmpl.length; i++) {
+    var p = food.tmpl[i];
+    var rx = p.x * c - p.y * s, ry = p.x * s + p.y * c;
+    out.push({ x: food.cx + rx * food.radius, y: food.cy + ry * food.radius });
+  }
+  food.verts = out;
+  return out;
+}
+
+// ── LAYOUT ───────────────────────────────────────────────────────────────
+function layout() {
+  var W = GF.W, H = GF.H, m = Math.min(W, H);
+  LY.foodR = m * FOOD_RADIUS_FRAC;
+  LY.foodCX = W / 2;
+  LY.foodCY = H * 0.56;
+  LY.barY = Math.max(54 * GF.S, 46);
+  helpBtn.r = GF.clamp(16 * GF.S, 14, 22);
+  helpBtn.x = W - helpBtn.r - 12;
+  helpBtn.y = helpBtn.r + 12;
+  muteBtn.r = GF.clamp(16 * GF.S, 14, 22);
+  muteBtn.x = W - helpBtn.r * 2 - 12 - muteBtn.r - 14;
+  muteBtn.y = muteBtn.r + 12;
+}
+
+// ── ORDER / SHIFT GENERATION ─────────────────────────────────────────────
+function randPct(lo, hi) { var raw = lo + Math.random() * (hi - lo); return Math.round(raw * 20) / 20; }
+function pickFoodType() { return FOOD_TYPES[customerNo % FOOD_TYPES.length]; }
+
+function spawnCustomer() {
+  customerNo++;
+  tolerance = Math.max(TOL_MIN, TOL_START - (customerNo - 1) * TOL_TIGHTEN_PER_CUST);
+
+  var ftype = pickFoodType();
+  var tmpl;
+  if (customerNo < 3)      tmpl = makeCircle(48);
+  else if (customerNo < 6) tmpl = (Math.random() < 0.5 ? makeWedge(Math.PI) : makeWedge(Math.PI * 0.66));
+  else                     tmpl = (customerNo % 2 === 0 ? makeBlob(customerNo) : makeCircle(48));
+  if (customerNo >= 6 && customerNo % 4 === 0) tmpl = makeCircle(48);
+
+  var rotates = customerNo >= 8;
+  var drifts  = customerNo >= 12;
+  food = {
+    tmpl: tmpl, foodType: ftype,
+    cx: LY.foodCX, cy: LY.foodCY, radius: LY.foodR,
+    angle: Math.random() * Math.PI * 2,
+    rotSpeed: rotates ? (Math.random() < 0.5 ? 1 : -1) * ROTATE_SPEED : 0,
+    driftX: drifts ? (Math.random() < 0.5 ? 1 : -1) * DRIFT_SPEED : 0,
+    driftY: 0, verts: [],
+  };
+  buildFoodVerts();
+
+  // order type ladder
+  var type = 'exact';
+  if (customerNo >= 13 && customerNo % 3 === 0) type = 'multi';
+  else if (customerNo >= 10 && customerNo % 3 === 1) type = 'leave';
+  else if (customerNo >= 5 && customerNo % 4 === 0) type = (Math.random() < 0.5 ? 'bigger' : 'smaller');
+
+  var target, label, cutsNeeded = 1, pct;
+  if (type === 'exact')        { pct = randPct(0.15, 0.5);  target = pct; label = GF.t('serve') + ' ' + Math.round(pct*100) + '%'; }
+  else if (type === 'bigger')  { pct = randPct(0.55, 0.7);  target = pct; label = GF.t('bigger') + ' • ' + Math.round(pct*100) + '%'; }
+  else if (type === 'smaller') { pct = randPct(0.2, 0.4);   target = pct; label = GF.t('smaller') + ' • ' + Math.round(pct*100) + '%'; }
+  else if (type === 'leave')   { var keep = randPct(0.3, 0.55); target = 1 - keep; label = GF.t('leave') + ' ' + Math.round(keep*100) + '% ' + GF.t('onplate'); }
+  else                         { cutsNeeded = 2; pct = randPct(0.2, 0.35); target = pct; label = GF.t('cut2') + ' • ' + Math.round(pct*100) + '%'; }
+
+  order = { type: type, target: target, label: label, cutsNeeded: cutsNeeded, cutsDone: 0,
+            foodType: ftype, rotates: rotates, drifts: drifts };
+  reaction = 0; reactionT = 0; pendingPct = 0; servedPct = 0;
+}
+
+// ── LIFECYCLE ──────────────────────────────────────────────────────────────
+function startGame() {
+  cashEarned = 0; complaints = 0; customerNo = 0;
+  streak = 0; tipMult = 1; tolerance = TOL_START;
+  servedPct = 0; pendingPct = 0; flying = [];
+  reaction = 0; reactionT = 0; resultFlash = null; cutLock = 0;
+  dragging = false; cutA = null; cutB = null;
+  coachStep = seenTut ? 2 : 0;
+  layout();
+  spawnCustomer();
+  if (!seenTut) { food.rotSpeed = 0; food.driftX = 0; food.driftY = 0; } // hold still during coach
+  gs = 'PLAYING';
+  GF.gameStarted();
+  GF.saveRun();
+}
+
+function gameOver(won) {
+  if (streak > bestStreak) {
+    bestStreak = streak;
+    try { localStorage.setItem('slice_serve_best', bestStreak); } catch (e) {}
+  }
+  gs = won ? 'WON' : 'GAMEOVER';
+  GF.sfx(won ? 'win' : 'lose');
+  GF.gameEnded();
+  GF.saveRun();
+  if (won) GF.happytime();
+}
+
+// Screenshot / gate helper. n>=99 forces a terminal state; n>=2 jumps deeper.
+window._jumpLevel = function(n) {
+  n = n || 1;
+  if (n >= 99) { startGame(); complaints = COMPLAINT_LIMIT; gameOver(false); return; }
+  seenTut = true;
+  startGame();
+  var jumps = n >= 5 ? 9 : (n >= 3 ? 5 : 1);
+  for (var i = 0; i < jumps; i++) { cashEarned += BASE_PAYOUT; spawnCustomer(); }
+  streak = 3; tipMult = Math.min(STREAK_MULT_MAX, 1 + streak * STREAK_STEP);
+  buildFoodVerts();
+  var f = food;
+  cutA = { x: f.cx - LY.foodR * 1.15, y: f.cy - LY.foodR * 0.35 };
+  cutB = { x: f.cx + LY.foodR * 0.9,  y: f.cy + LY.foodR * 0.55 };
+  dragging = true;
+  pendingPct = cutFraction(food.verts, cutA, cutB);
+  GF.saveRun();
+};
+window._setupForScreenshot = function(n) { window._jumpLevel(n || 4); };
+window._setLang = function(l) { GF.lang = l; };
+window._setState = function(s) { gs = s; };
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'Inter, system-ui, sans-serif'; };
+
+// ── INPUT: DRAG-A-CUT (own pointer handlers; canvas coords == clientX/Y) ──
+var cv = document.getElementById('c');
+function pointerPos(e) {
+  if (e.touches && e.touches.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  if (e.changedTouches && e.changedTouches.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+  return { x: e.clientX, y: e.clientY };
+}
+function tappedCircle(p, b) { var dx = p.x - b.x, dy = p.y - b.y; return dx*dx + dy*dy <= (b.r + 8) * (b.r + 8); }
+
+function onDown(e) {
+  if (gs !== 'PLAYING') return;
+  var p = pointerPos(e);
+  if (tappedCircle(p, helpBtn)) { helpOpen = !helpOpen; GF.sfx('click'); e.preventDefault(); return; }
+  if (tappedCircle(p, muteBtn)) { var m = GF.toggleMute(); GF.setMusicMuted(m); e.preventDefault(); return; }
+  if (helpOpen) { helpOpen = false; e.preventDefault(); return; }
+  if (cutLock > 0) return;
+  dragging = true; cutA = { x: p.x, y: p.y }; cutB = { x: p.x, y: p.y }; pendingPct = 0;
+  e.preventDefault();
+}
+function onMove(e) {
+  if (!dragging || gs !== 'PLAYING') return;
+  var p = pointerPos(e); cutB = { x: p.x, y: p.y };
+  if (isValidCut(food.verts, cutA, cutB)) pendingPct = cutFraction(food.verts, cutA, cutB);
+  e.preventDefault();
+}
+function onUp(e) {
+  if (!dragging || gs !== 'PLAYING') return;
+  dragging = false;
+  var p = pointerPos(e); cutB = { x: p.x, y: p.y };
+  commitCut(cutA, cutB);
+  e.preventDefault();
+}
+cv.addEventListener('mousedown', onDown);
+cv.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onUp);
+cv.addEventListener('touchmove', onMove, { passive: false });
+cv.addEventListener('touchend', onUp, { passive: false });
+cv.addEventListener('touchcancel', function(){ dragging = false; }, { passive: false });
+
+// ── THE CUT ──────────────────────────────────────────────────────────────
+function commitCut(a, b) {
+  if (!order || gs !== 'PLAYING') return;
+  if (!isValidCut(food.verts, a, b)) { cutA = null; cutB = null; pendingPct = 0; GF.sfx('error'); return; }
+  var s = splitPolygon(food.verts, a, b);
+  var whole = polyArea(food.verts), la = polyArea(s.left), ra = polyArea(s.right);
+  var smallPoly, smallFrac, bigPoly, bigFrac;
+  if (la <= ra) { smallPoly = s.left; smallFrac = la / whole; bigPoly = s.right; bigFrac = ra / whole; }
+  else          { smallPoly = s.right; smallFrac = ra / whole; bigPoly = s.left;  bigFrac = la / whole; }
+
+  // serve the piece closest to the requested target
+  var servedPoly, servedFrac;
+  if (Math.abs(smallFrac - order.target) <= Math.abs(bigFrac - order.target)) { servedPoly = smallPoly; servedFrac = smallFrac; }
+  else { servedPoly = bigPoly; servedFrac = bigFrac; }
+  servedPct = servedFrac;
+
+  var err = Math.abs(servedFrac - order.target);
+  var perfect = err <= PERFECT_BAND, good = err <= tolerance;
+
+  GF.sfx('hit');
+  var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+  GF.spawnParticles(mx, my, foodAccent(food.foodType), 16);
+  launchPiece(servedPoly, a, b);
+
+  if (good) {
+    streak++;
+    tipMult = Math.min(STREAK_MULT_MAX, 1 + streak * STREAK_STEP);
+    var pay = Math.round((BASE_PAYOUT + (perfect ? PERFECT_BONUS : 0)) * tipMult);
+    cashEarned += pay;
+    reaction = 1; reactionT = 1.1;
+    resultFlash = { text: (perfect ? GF.t('perfect') : GF.t('good')) + '  +$' + pay, color: perfect ? '#ffd24a' : '#7CFC9A', t: 1.2 };
+    GF.spawnFloat(food.cx, food.cy - LY.foodR - 14, '+$' + pay, perfect ? '#ffd24a' : '#7CFC9A');
+    if (perfect) { GF.sfx('reward'); GF.setShake(4); } else GF.sfx('coin');
+    if (streak >= 2) GF.sfx('levelup');
+    order.cutsDone++;
+    if (order.cutsDone >= order.cutsNeeded) {
+      cutLock = 0.7;
+      if (!seenTut) { coachStep = 2; seenTut = true; try { localStorage.setItem('slice_serve_seen_tutorial', '1'); } catch (e) {} }
+    } else { cutLock = 0.5; }
+  } else {
+    streak = 0; tipMult = 1; complaints++;
+    reaction = -1; reactionT = 1.3;
+    resultFlash = { text: GF.t('miss') + '  ' + Math.round(servedFrac*100) + '%', color: '#ff6b6b', t: 1.3 };
+    GF.spawnFloat(food.cx, food.cy - LY.foodR - 14, '-1', '#ff6b6b');
+    GF.sfx('hurt'); GF.setShake(9);
+    cutLock = 0.8;
+  }
+  cutA = null; cutB = null; pendingPct = 0;
+  GF.saveRun();
+}
+
+function launchPiece(poly, a, b) {
+  if (!poly || poly.length < 3) return;
+  var c = poly2centroid(poly);
+  var nx = -(b.y - a.y), ny = (b.x - a.x), nl = Math.hypot(nx, ny) || 1; nx /= nl; ny /= nl;
+  var toC = (c.x - food.cx) * nx + (c.y - food.cy) * ny;
+  if (toC < 0) { nx = -nx; ny = -ny; }
+  flying.push({
+    verts: poly.map(function(p){ return { x: p.x, y: p.y }; }),
+    cx: c.x, cy: c.y,
+    vx: nx * 220 * GF.S, vy: ny * 220 * GF.S - 60 * GF.S,
+    color: foodFill(food.foodType), accent: foodAccent(food.foodType),
+    alpha: 1, rot: 0, rotSp: (Math.random() - 0.5) * 4,
+  });
+}
+
+function advanceAfterCut() {
+  if (gs !== 'PLAYING') return;
+  if (complaints >= COMPLAINT_LIMIT) { gameOver(false); return; }
+  if (cashEarned >= EARNINGS_TARGET) { gameOver(true); return; }
+  if (order && order.cutsDone < order.cutsNeeded) { pendingPct = 0; servedPct = 0; reaction = 0; return; }
+  spawnCustomer();
+  if (!seenTut && coachStep < 2) coachStep = 0;
+}
+
+// ── FOOD COLORS ────────────────────────────────────────────────────────────
+function foodFill(t)   { return t === 'pizza' ? '#e8a33d' : t === 'cake' ? '#ffd9e6' : t === 'pie' ? '#d9923f' : '#ff5b6e'; }
+function foodAccent(t) { return t === 'pizza' ? '#c0392b' : t === 'cake' ? '#ff9ec4' : t === 'pie' ? '#8a5a2b' : '#e7374d'; }
+function foodRim(t)    { return t === 'pizza' ? '#f0c27a' : t === 'cake' ? '#fff4f8' : t === 'pie' ? '#e7b878' : '#2e8b57'; }
+
+// ── UPDATE ───────────────────────────────────────────────────────────────
+function update(dt) {
+  layout();
+  for (var i = flying.length - 1; i >= 0; i--) {
+    var f = flying[i];
+    var ox = f.cx, oy = f.cy;
+    f.cx += f.vx * dt; f.cy += f.vy * dt; f.vy += 720 * GF.S * dt;
+    var dx = f.cx - ox, dy = f.cy - oy;
+    for (var k = 0; k < f.verts.length; k++) { f.verts[k].x += dx; f.verts[k].y += dy; }
+    f.alpha -= dt * 0.9; f.rot += f.rotSp * dt;
+    if (f.alpha <= 0) flying.splice(i, 1);
+  }
+  if (resultFlash) { resultFlash.t -= dt; if (resultFlash.t <= 0) resultFlash = null; }
+  if (reactionT > 0) reactionT -= dt;
+
+  if (gs !== 'PLAYING' || helpOpen) return;
+
+  if (food) {
+    if (food.rotSpeed) food.angle += food.rotSpeed * dt;
+    if (food.driftX) {
+      food.cx += food.driftX * GF.S * dt;
+      var lim = LY.foodR * 0.55;
+      if (food.cx < LY.foodCX - lim || food.cx > LY.foodCX + lim) food.driftX = -food.driftX;
+    }
+    buildFoodVerts();
+    if (dragging && cutA && cutB && isValidCut(food.verts, cutA, cutB)) pendingPct = cutFraction(food.verts, cutA, cutB);
+  }
+  if (cutLock > 0) { cutLock -= dt; if (cutLock <= 0) { cutLock = 0; advanceAfterCut(); } }
+}
+
+// ── DRAW ─────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var W = GF.W, H = GF.H;
+  var bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#3a2418'); bg.addColorStop(0.6, '#2a1810'); bg.addColorStop(1, '#1d100a');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,220,170,0.04)'; ctx.fillRect(0, H * 0.42, W, H * 0.5);
+
+  if (gs === 'PLAYING') {
+    drawPlate(ctx);
+    if (food) drawFood(ctx);
+    drawFlying(ctx);
+    drawCustomer(ctx);
+    drawAimLine(ctx);
+    drawHUD(ctx);
+    drawCoach(ctx);
+    drawResultFlash(ctx);
+    if (helpOpen) drawHelpCard(ctx);
+  } else if (gs === 'GAMEOVER' || gs === 'WON') {
+    drawPlate(ctx);
+    drawFlying(ctx);
+  }
+
+  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'GAMEOVER') GF.drawOverlay({
+    title: GF.t('gameover'), sub: GF.t('fired_sub'),
+    sub2: '$' + Math.round(cashEarned) + ' / $' + EARNINGS_TARGET,
+    btnText: GF.t('retry'), btnFn: startGame,
+    bestText: GF.t('best') + ': ' + Math.max(bestStreak, streak),
+  });
+  if (gs === 'WON') GF.drawOverlay({
+    title: GF.t('won'), sub: GF.t('won_sub'),
+    sub2: GF.t('cash') + ': $' + Math.round(cashEarned),
+    btnText: GF.t('retry'), btnFn: startGame,
+    bestText: GF.t('best') + ': ' + Math.max(bestStreak, streak),
+  });
+}
+
+function drawPlate(ctx) {
+  var x = LY.foodCX, y = LY.foodCY, r = LY.foodR * 1.28;
+  var g = ctx.createRadialGradient(x, y - r * 0.2, r * 0.2, x, y, r);
+  g.addColorStop(0, '#fbfbff'); g.addColorStop(0.82, '#e6e8ef'); g.addColorStop(1, '#c7cad6');
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = g; ctx.fill();
+  ctx.beginPath(); ctx.arc(x, y, r * 0.86, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(160,165,185,0.6)'; ctx.lineWidth = 2 * GF.S; ctx.stroke();
+}
+function pathPoly(ctx, verts) {
+  ctx.beginPath(); ctx.moveTo(verts[0].x, verts[0].y);
+  for (var i = 1; i < verts.length; i++) ctx.lineTo(verts[i].x, verts[i].y);
+  ctx.closePath();
+}
+function drawFood(ctx) {
+  var v = food.verts, t = food.foodType;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.35)'; ctx.shadowBlur = 18 * GF.S; ctx.shadowOffsetY = 6 * GF.S;
+  pathPoly(ctx, v);
+  var grd = ctx.createRadialGradient(food.cx, food.cy - food.radius * 0.3, food.radius * 0.2, food.cx, food.cy, food.radius);
+  grd.addColorStop(0, lighten(foodFill(t), 22)); grd.addColorStop(1, foodFill(t));
+  ctx.fillStyle = grd; ctx.fill();
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+  pathPoly(ctx, v);
+  ctx.lineWidth = Math.max(3, food.radius * 0.07); ctx.strokeStyle = foodRim(t); ctx.stroke();
+  ctx.save(); pathPoly(ctx, v); ctx.clip(); drawFoodDetail(ctx, t); ctx.restore();
+  ctx.globalAlpha = 0.18; ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.ellipse(food.cx - food.radius * 0.28, food.cy - food.radius * 0.34, food.radius * 0.42, food.radius * 0.22, -0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.globalAlpha = 1; ctx.restore();
+}
+function drawFoodDetail(ctx, t) {
+  var x = food.cx, y = food.cy, r = food.radius;
+  if (t === 'pizza') {
+    ctx.fillStyle = '#b8332a';
+    var pts = [[-0.3,-0.25],[0.32,-0.1],[0.05,0.3],[-0.35,0.28],[0.38,0.35],[-0.05,-0.45],[0.45,-0.4]];
+    for (var i=0;i<pts.length;i++){ ctx.beginPath(); ctx.arc(x+pts[i][0]*r, y+pts[i][1]*r, r*0.1, 0, Math.PI*2); ctx.fill(); }
+  } else if (t === 'cake') {
+    ctx.fillStyle = '#ff9ec4';
+    for (var b=0;b<3;b++) ctx.fillRect(x-r, y-r*0.5+b*r*0.42, r*2, r*0.12);
+    ctx.fillStyle = '#c0392b';
+    for (var c=0;c<5;c++){ ctx.beginPath(); ctx.arc(x+(c-2)*r*0.34, y-r*0.55, r*0.09, 0, Math.PI*2); ctx.fill(); }
+  } else if (t === 'pie') {
+    ctx.strokeStyle = 'rgba(120,70,30,0.55)'; ctx.lineWidth = Math.max(2, r*0.06);
+    for (var k=-2;k<=2;k++){ ctx.beginPath(); ctx.moveTo(x+k*r*0.38, y-r); ctx.lineTo(x+k*r*0.38, y+r); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x-r, y+k*r*0.38); ctx.lineTo(x+r, y+k*r*0.38); ctx.stroke(); }
+  } else {
+    ctx.fillStyle = '#2a1a10';
+    for (var s=0;s<10;s++){ var ang=s*0.63, rr=r*(0.3+0.4*((s%3)/3)); ctx.beginPath(); ctx.ellipse(x+Math.cos(ang)*rr, y+Math.sin(ang)*rr, r*0.04, r*0.07, ang, 0, Math.PI*2); ctx.fill(); }
+  }
+}
+function drawFlying(ctx) {
+  for (var i = 0; i < flying.length; i++) {
+    var f = flying[i];
+    ctx.save(); ctx.globalAlpha = Math.max(0, f.alpha);
+    ctx.translate(f.cx, f.cy); ctx.rotate(f.rot); ctx.translate(-f.cx, -f.cy);
+    pathPoly(ctx, f.verts); ctx.fillStyle = f.color; ctx.fill();
+    pathPoly(ctx, f.verts); ctx.lineWidth = Math.max(2, LY.foodR*0.06); ctx.strokeStyle = f.accent; ctx.stroke();
+    ctx.restore();
+  }
+}
+function drawAimLine(ctx) {
+  if (!dragging || !cutA || !cutB) return;
+  var dx = cutB.x - cutA.x, dy = cutB.y - cutA.y, len = Math.hypot(dx, dy);
+  if (len < 4) return;
+  var ux = dx / len, uy = dy / len, big = Math.hypot(GF.W, GF.H);
+  var x1 = cutA.x - ux * big, y1 = cutA.y - uy * big, x2 = cutB.x + ux * big, y2 = cutB.y + uy * big;
+  var valid = isValidCut(food.verts, cutA, cutB);
+  ctx.save();
+  ctx.setLineDash([10 * GF.S, 8 * GF.S]); ctx.lineWidth = 2.5 * GF.S;
+  ctx.strokeStyle = valid ? 'rgba(255,255,255,0.55)' : 'rgba(255,120,120,0.45)';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  ctx.setLineDash([]);
+  drawKnife(ctx, cutB.x, cutB.y, Math.atan2(dy, dx));
+  if (valid) {
+    var mx = (cutA.x + cutB.x) / 2, my = (cutA.y + cutB.y) / 2;
+    var pctTxt = Math.round(pendingPct * 100) + '%';
+    ctx.font = 'bold ' + GF.clamp(20 * GF.S, 15, 30) + 'px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    var tw = ctx.measureText(pctTxt).width;
+    var col = errToTarget(pendingPct) <= tolerance ? '#7CFC9A' : '#ffd24a';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    roundRect(ctx, mx - tw/2 - 10*GF.S, my - 18*GF.S, tw + 20*GF.S, 30*GF.S, 8*GF.S); ctx.fill();
+    ctx.fillStyle = col; ctx.fillText(pctTxt, mx, my - 2*GF.S);
+  }
+  ctx.restore();
+}
+function errToTarget(smallFrac) {
+  var big = 1 - smallFrac;
+  return Math.min(Math.abs(smallFrac - order.target), Math.abs(big - order.target));
+}
+function drawKnife(ctx, x, y, ang) {
+  var img = GF.sprites && GF.sprites['knife'];
+  if (img && img.complete && img.naturalWidth > 0) {
+    // sprite blade points up-right; rotate so the blade aligns with the cut.
+    var sz = GF.clamp(64 * GF.S, 44, 96);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang - Math.PI / 4);
+    ctx.drawImage(img, -sz * 0.78, -sz / 2, sz, sz); // tip near the pointer
+    ctx.restore();
+    return;
+  }
+  // procedural fallback
+  ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+  var s = GF.clamp(GF.S, 0.7, 2);
+  ctx.fillStyle = '#dfe6f2';
+  ctx.beginPath(); ctx.moveTo(-2*s, -5*s); ctx.lineTo(34*s, -4*s); ctx.lineTo(40*s, 0); ctx.lineTo(34*s, 4*s); ctx.lineTo(-2*s, 5*s); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#9aa3b5'; ctx.lineWidth = 1*s; ctx.stroke();
+  ctx.fillStyle = '#5a3a22'; roundRect(ctx, -22*s, -5*s, 22*s, 10*s, 3*s); ctx.fill();
+  ctx.restore();
+}
+function drawCustomer(ctx) {
+  var W = GF.W;
+  var bx = LY.foodCX, by = LY.foodCY - LY.foodR - GF.clamp(70*GF.S, 56, 110);
+  var fr = GF.clamp(26*GF.S, 20, 38);
+  var fx = bx - GF.clamp(96*GF.S, 70, 150), fy = by;
+  ctx.beginPath(); ctx.arc(fx, fy, fr, 0, Math.PI*2);
+  ctx.fillStyle = (reaction > 0 && reactionT > 0) ? '#ffe08a' : (reaction < 0 && reactionT > 0 ? '#ffb3b3' : '#ffd9a8'); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2*GF.S; ctx.stroke();
+  ctx.fillStyle = '#3a2a1a';
+  ctx.beginPath(); ctx.arc(fx - fr*0.32, fy - fr*0.18, fr*0.12, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(fx + fr*0.32, fy - fr*0.18, fr*0.12, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = '#3a2a1a'; ctx.lineWidth = 2.4*GF.S; ctx.beginPath();
+  if (reaction > 0 && reactionT > 0) ctx.arc(fx, fy + fr*0.12, fr*0.36, 0.15*Math.PI, 0.85*Math.PI);
+  else if (reaction < 0 && reactionT > 0) ctx.arc(fx, fy + fr*0.5, fr*0.36, 1.15*Math.PI, 1.85*Math.PI);
+  else { ctx.moveTo(fx - fr*0.3, fy + fr*0.3); ctx.lineTo(fx + fr*0.3, fy + fr*0.3); }
+  ctx.stroke();
+
+  var label = order ? order.label : '';
+  ctx.font = 'bold ' + GF.clamp(22*GF.S, 16, 32) + 'px Inter, system-ui, sans-serif';
+  var tw = ctx.measureText(label).width;
+  var padX = 18*GF.S, bw = tw + padX*2, bh = GF.clamp(46*GF.S, 38, 64);
+  var bxL = bx - bw/2 + GF.clamp(40*GF.S,28,70);
+  bxL = GF.clamp(bxL, 8, W - bw - 8);
+  var byT = by - bh/2;
+  ctx.fillStyle = '#fff'; roundRect(ctx, bxL, byT, bw, bh, 12*GF.S); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(bxL + 10*GF.S, byT + bh); ctx.lineTo(bxL - 6*GF.S, byT + bh + 14*GF.S); ctx.lineTo(bxL + 26*GF.S, byT + bh); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#222'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, bxL + bw/2, byT + bh/2);
+  var tolTxt = '±' + Math.round(tolerance*100) + '%';
+  ctx.font = 'bold ' + GF.clamp(12*GF.S,10,16) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#ffd9a8'; ctx.fillText(tolTxt, bxL + bw/2, byT - 10*GF.S);
+}
+function drawHUD(ctx) {
+  var W = GF.W, S = GF.S;
+  var barW = Math.min(W - 28, 520 * S), barX = (W - barW) / 2, barY = LY.barY, barH = GF.clamp(14*S, 11, 20);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)'; roundRect(ctx, barX, barY, barW, barH, barH/2); ctx.fill();
+  var frac = GF.clamp(cashEarned / EARNINGS_TARGET, 0, 1);
+  var g = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+  g.addColorStop(0, '#3ad07a'); g.addColorStop(1, '#7CFC9A');
+  ctx.fillStyle = g; roundRect(ctx, barX, barY, Math.max(barH, barW*frac), barH, barH/2); ctx.fill();
+  ctx.font = 'bold ' + GF.clamp(15*S,12,20) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff';
+  ctx.fillText('$' + Math.round(cashEarned), barX, barY - 14*S);
+  ctx.textAlign = 'right'; ctx.fillStyle = '#bfe9c9';
+  // Anchor the target text LEFT of the mute/help button cluster so it never
+  // collides with the top-right controls (was barX+barW, the exact corner the
+  // buttons sit in). muteBtn is the leftmost of the two top-right buttons.
+  var tgtR = Math.min(barX + barW, muteBtn.x - muteBtn.r - GF.clamp(8*S, 5, 12));
+  ctx.fillText(GF.t('target') + ' $' + EARNINGS_TARGET, tgtR, barY - 14*S);
+
+  ctx.textAlign = 'left';
+  var px = 14*S, py = barY + barH + 16*S, pr = GF.clamp(9*S, 7, 13);
+  for (var i = 0; i < COMPLAINT_LIMIT; i++) {
+    var cxp = px + pr + i * (pr*2 + 8*S);
+    ctx.beginPath(); ctx.arc(cxp, py, pr, 0, Math.PI*2);
+    if (i < complaints) { ctx.fillStyle = '#ff5b5b'; ctx.fill(); }
+    else { ctx.fillStyle = 'rgba(255,255,255,0.16)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1.5*S; ctx.stroke(); }
+  }
+
+  if (tipMult > 1.001) {
+    var pillTxt = 'x' + tipMult.toFixed(2).replace(/0$/,'') + ' ' + GF.t('streak');
+    ctx.font = 'bold ' + GF.clamp(13*S,11,18) + 'px Inter, system-ui, sans-serif';
+    var ptw = ctx.measureText(pillTxt).width;
+    var ppX = W - ptw - 26*S, ppY = barY + barH + 6*S;
+    ctx.fillStyle = 'rgba(255,210,74,0.92)'; roundRect(ctx, ppX, ppY, ptw + 18*S, 22*S, 11*S); ctx.fill();
+    ctx.fillStyle = '#3a2a00'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(pillTxt, ppX + (ptw+18*S)/2, ppY + 11*S);
+  }
+
+  drawCircleBtn(ctx, helpBtn, '?');
+  GF.drawMuteIcon(ctx, muteBtn.x, muteBtn.y, muteBtn.r, GF.muted);
+}
+function drawCircleBtn(ctx, b, glyph) {
+  ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,255,0.14)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)'; ctx.lineWidth = 1.5*GF.S; ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + (b.r*1.1) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(glyph, b.x, b.y + b.r*0.05);
+}
+function drawCoach(ctx) {
+  if (seenTut || coachStep >= 2) return;
+  var W = GF.W;
+  var txt = coachStep === 0 ? GF.t('coach_cut') : GF.t('coach_match');
+  ctx.save();
+  ctx.font = 'bold ' + GF.clamp(16*GF.S, 13, 22) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var lines = wrapLines(ctx, txt, Math.min(W - 40, 420*GF.S));
+  var lh = GF.clamp(22*GF.S, 18, 28);
+  var boxW = Math.min(W-30, 440*GF.S), boxH = lines.length * lh + 20*GF.S;
+  var boxY = LY.foodCY + LY.foodR + GF.clamp(28*GF.S, 20, 50);
+  var pulse = 0.5 + 0.5 * Math.sin(performance.now()/350);
+  ctx.fillStyle = 'rgba(0,0,0,' + (0.45 + 0.15*pulse) + ')';
+  roundRect(ctx, W/2 - boxW/2, boxY, boxW, boxH, 12*GF.S); ctx.fill();
+  ctx.fillStyle = '#ffe08a';
+  for (var i = 0; i < lines.length; i++) ctx.fillText(lines[i], W/2, boxY + 10*GF.S + lh/2 + i*lh);
+  ctx.globalAlpha = pulse; ctx.fillStyle = '#ffe08a';
+  var ax = LY.foodCX, ay = LY.foodCY - LY.foodR - 6*GF.S - 10*pulse*GF.S;
+  ctx.beginPath(); ctx.moveTo(ax, ay + 16*GF.S); ctx.lineTo(ax - 10*GF.S, ay); ctx.lineTo(ax + 10*GF.S, ay); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawResultFlash(ctx) {
+  if (!resultFlash) return;
+  var a = GF.clamp(resultFlash.t, 0, 1);
+  ctx.save(); ctx.globalAlpha = a;
+  ctx.font = 'bold ' + GF.clamp(30*GF.S, 22, 46) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = resultFlash.color;
+  ctx.fillText(resultFlash.text, GF.W/2, LY.foodCY - LY.foodR - GF.clamp(120*GF.S,96,170));
+  ctx.restore();
+}
+function drawMenu(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,6,4,0.9)'; ctx.fillRect(0,0,W,H);
+  drawMenuMotif(ctx);
+  ctx.textAlign = 'center';
+  ctx.shadowColor = 'rgba(255,180,80,0.45)'; ctx.shadowBlur = 26*S;
+  ctx.font = 'bold ' + GF.clamp(40*S, 26, 60) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textBaseline = 'alphabetic';
+  var titleY = H * 0.18;
+  ctx.fillText(GF.t('title'), W/2, titleY);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.font = GF.clamp(15*S,12,20) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#e8c89a'; ctx.fillText(GF.t('sub'), W/2, titleY + 26*S);
+
+  var lines = [ GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip') ];
+  var startY = titleY + 54*S, maxW = Math.min(W - 36, 460*S), lh = GF.clamp(19*S, 15, 24);
+  ctx.font = GF.clamp(13.5*S, 11, 18) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.fillStyle = '#d8d2c4';
+  var y = startY, leftX = W/2 - maxW/2;
+  for (var i = 0; i < lines.length; i++) {
+    var wl = wrapLines(ctx, lines[i], maxW);
+    for (var j = 0; j < wl.length; j++) { ctx.fillText(wl[j], leftX, y); y += lh; }
+    y += 4*S;
+  }
+
+  var btnW = GF.clamp(248*S, 180, 360), btnH = GF.clamp(56*S, 46, 74);
+  var btnX = W/2 - btnW/2, btnY = Math.min(H - btnH - 26*S, y + 16*S);
+  var t = performance.now()/1000, k = Math.sin(t*2.2), p = 1 + 0.05*k;
+  var bw = btnW*p, bh = btnH*p, bx = W/2 - bw/2, by = btnY + btnH/2 - bh/2;
+  var grad = ctx.createLinearGradient(bx, by, bx, by+bh);
+  grad.addColorStop(0, '#ff9d3d'); grad.addColorStop(1, '#e8732a');
+  ctx.save(); ctx.shadowColor = 'rgba(255,140,60,'+(0.4+0.28*k).toFixed(3)+')'; ctx.shadowBlur = (22+10*k)*S;
+  roundRect(ctx, bx, by, bw, bh, bh/2); ctx.fillStyle = grad; ctx.fill(); ctx.restore();
+  ctx.font = 'bold ' + GF.clamp(20*S,15,28) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('▶ ' + GF.t('play'), W/2, btnY + btnH/2);
+  ctx.textBaseline = 'alphabetic';
+  registerMenuButton(btnX, btnY, btnW, btnH);
+  if (bestStreak > 0) {
+    ctx.font = GF.clamp(13*S,10,17) + 'px Inter, system-ui, sans-serif';
+    ctx.fillStyle = '#9a8a6a'; ctx.fillText(GF.t('best') + ': ' + bestStreak, W/2, btnY + btnH + 22*S);
+  }
+}
+function drawMenuMotif(ctx) {
+  var x = GF.W/2, y = GF.H * 0.18, r = Math.min(GF.W,GF.H)*0.1;
+  ctx.save(); ctx.globalAlpha = 0.1;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fillStyle = '#ff9d3d'; ctx.fill();
+  ctx.restore();
+}
+function registerMenuButton(x, y, w, h) {
+  _menuBtn = { x: x, y: y, w: w, h: h };
+  window.__gfPlayRect = function () { return { cx: x + w/2, cy: y + h/2, x:x, y:y, w:w, h:h }; };
+}
+function tryMenuTap(p) {
+  if (gs !== 'MENU' || !_menuBtn) return false;
+  if (p.x >= _menuBtn.x && p.x <= _menuBtn.x + _menuBtn.w && p.y >= _menuBtn.y && p.y <= _menuBtn.y + _menuBtn.h) {
+    seenTut = true; try { localStorage.setItem('slice_serve_seen_tutorial','1'); } catch(_){}
+    coachStep = 2; startGame(); return true;
+  }
+  return false;
+}
+cv.addEventListener('click', function(e) { tryMenuTap({ x: e.clientX, y: e.clientY }); });
+cv.addEventListener('touchstart', function(e) {
+  // MENU button handled here; in-play drags also begin here.
+  if (gs === 'MENU') { var t0 = e.changedTouches[0]; if (tryMenuTap({ x: t0.clientX, y: t0.clientY })) { e.preventDefault(); return; } }
+  onDown(e);
+}, { passive: false });
+function drawHelpCard(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,6,4,0.86)'; ctx.fillRect(0,0,W,H);
+  var cw = Math.min(W - 30, 460*S);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + GF.clamp(24*S,18,34) + 'px Inter, system-ui, sans-serif';
+  ctx.fillStyle = '#ffd9a8';
+  var ty = H*0.22; ctx.fillText(GF.t('help'), W/2, ty);
+  var lines = [ GF.t('tut_goal'), GF.t('tut_controls'), GF.t('tut_win'), GF.t('tut_lose'), GF.t('tut_tip') ];
+  ctx.font = GF.clamp(14*S,11,19) + 'px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left'; ctx.fillStyle = '#e6ddcd';
+  var lh = GF.clamp(20*S,16,26), y = ty + 30*S, leftX = W/2 - cw/2;
+  for (var i = 0; i < lines.length; i++) {
+    var wl = wrapLines(ctx, lines[i], cw);
+    for (var j = 0; j < wl.length; j++) { ctx.fillText(wl[j], leftX, y); y += lh; }
+    y += 5*S;
+  }
+  ctx.textAlign = 'center'; ctx.fillStyle = '#9a8a6a';
+  ctx.font = GF.clamp(13*S,11,17) + 'px Inter, system-ui, sans-serif';
+  ctx.fillText('(' + GF.t('close') + ')', W/2, y + 14*S);
+}
+
+// ── HELPERS ──────────────────────────────────────────────────────────────
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath(); ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r); ctx.closePath();
+}
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(' '), lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var test = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(test).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = test;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+function lighten(hex, amt) {
+  var c = hex.replace('#',''); if (c.length === 3) c = c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
+  var r = Math.min(255, parseInt(c.substr(0,2),16) + amt);
+  var g = Math.min(255, parseInt(c.substr(2,2),16) + amt);
+  var b = Math.min(255, parseInt(c.substr(4,2),16) + amt);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+// Find a cut line (a chord at a fixed angle) yielding the requested fraction,
+// by scanning offsets and keeping the best. Used by the bot probe.
+function aimForTarget(targetFrac) {
+  buildFoodVerts();
+  var cxp = food.cx, cyp = food.cy, R = food.radius * 1.7;
+  var ang = food.angle + 0.6;
+  var dirx = Math.cos(ang), diry = Math.sin(ang);   // line direction
+  var nx = -diry, ny = dirx;                          // offset axis (normal)
+  var want = Math.min(targetFrac, 1 - targetFrac);    // smaller piece fraction
+  var bestOff = 0, bestErr = 1e9, steps = 60;
+  for (var i = 0; i <= steps; i++) {
+    var off = -food.radius + (i / steps) * (food.radius * 2);
+    var px = cxp + nx * off, py = cyp + ny * off;
+    var a = { x: px - dirx * R, y: py - diry * R }, b = { x: px + dirx * R, y: py + diry * R };
+    var fr = cutFraction(food.verts, a, b);
+    var err = Math.abs(fr - want);
+    if (err < bestErr) { bestErr = err; bestOff = off; }
+  }
+  var fpx = cxp + nx * bestOff, fpy = cyp + ny * bestOff;
+  return { a: { x: fpx - dirx * R, y: fpy - diry * R }, b: { x: fpx + dirx * R, y: fpy + diry * R } };
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 600,
+  designH: 900,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: 'slice_serve',
+  onReady: function() {
+    try { bestStreak = parseInt(localStorage.getItem('slice_serve_best') || '0') || 0; } catch (e) {}
+    try { seenTut = localStorage.getItem('slice_serve_seen_tutorial') === '1'; } catch (e) {}
+    layout();
+
+    GF.persist('slice_serve_run_v1',
+      function () { return {
+        gs: gs, cashEarned: cashEarned, complaints: complaints, customerNo: customerNo,
+        streak: streak, tipMult: tipMult, tolerance: tolerance, bestStreak: bestStreak,
+      }; },
+      function (s) {
+        if (!s) return;
+        cashEarned = s.cashEarned || 0; complaints = s.complaints || 0;
+        customerNo = s.customerNo || 0; streak = s.streak || 0;
+        tipMult = s.tipMult || 1; tolerance = s.tolerance || TOL_START;
+        bestStreak = s.bestStreak || bestStreak;
+        if (s.gs === 'PLAYING') { layout(); spawnCustomer(); gs = 'PLAYING'; }
+        else gs = 'MENU';
+      }
+    );
+    if (gs === 'PLAYING' && !order) spawnCustomer();
+    if (gs !== 'PLAYING') gs = 'MENU';
+
+    GF.startMusic({ preset: 'cozy', muted: GF.muted });
+
+    if (window.__GF_AUTOSTART && !window._silent) { seenTut = true; coachStep = 2; startGame(); }
+
+    GF.exposeState(function () {
+      return {
+        gs: gs, cashEarned: Math.round(cashEarned), complaints: complaints,
+        customerNo: customerNo, streak: streak, tipMult: +tipMult.toFixed(2),
+        tolerance: +tolerance.toFixed(3), servedPct: +servedPct.toFixed(3),
+        bestStreak: bestStreak, orderTarget: order ? order.target : null,
+        cutA: cutA, cutB: cutB, dragging: dragging,
+      };
+    });
+    GF.exposeBot(
+      function () { return (gs === 'PLAYING' && cutLock <= 0 && order) ? ['cut'] : []; },
+      function (action) {
+        if (action !== 'cut' || gs !== 'PLAYING' || !order || cutLock > 0) return;
+        var a = aimForTarget(order.target);
+        commitCut(a.a, a.b);
+      }
+    );
+    window.__gfStep = function (ms) { update(Math.min(0.05, (ms || 16) / 1000)); };
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+})();
+</script>
+</body>
+</html>

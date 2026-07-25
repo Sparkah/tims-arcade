@@ -1,0 +1,2162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Night Tank Forge</title>
+  <script src="/sdk.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070812;
+      --fg: #edf4ff;
+      --accent: #ffd166;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+      touch-action: none;
+    }
+
+    main {
+      width: 100vw;
+      height: 100dvh;
+      min-height: 100vh;
+      overflow: hidden;
+      background: #070812;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      outline: none;
+    }
+
+    canvas:focus-visible {
+      box-shadow: inset 0 0 0 3px var(--accent);
+    }
+
+    .visually-hidden:where(:not(:focus-within, :active)) {
+      position: absolute !important;
+      clip-path: inset(50%) !important;
+      overflow: hidden !important;
+      width: 1px !important;
+      height: 1px !important;
+      margin: -1px !important;
+      padding: 0 !important;
+      border: 0 !important;
+      white-space: nowrap !important;
+    }
+  </style>
+</head>
+<body>
+  <main id="game-shell" aria-labelledby="game-title">
+    <h1 id="game-title" class="visually-hidden">Night Tank Forge</h1>
+    <p id="sr-state" class="visually-hidden" aria-live="polite">Forge mode. Place tank blocks and start the wave.</p>
+    <canvas id="game" tabindex="0" aria-label="Night Tank Forge canvas game">
+      Night Tank Forge is a canvas game. Use keyboard or pointer controls to place tank blocks, start a wave, aim the light cone, and survive corrupted night creatures.
+    </canvas>
+  </main>
+
+  <script>
+  (() => {
+    "use strict";
+
+    const shell = document.getElementById("game-shell");
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const srState = document.getElementById("sr-state");
+    let yandexLoadingReady = false;
+
+    function notifyLoadingReady() {
+      if (yandexLoadingReady) return;
+      yandexLoadingReady = true;
+      try {
+        const loading = window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI;
+        if (loading && typeof loading.ready === "function") loading.ready();
+      } catch (_) {}
+    }
+
+    function initYandexSdk() {
+      if (!window.YaGames || typeof window.YaGames.init !== "function") return Promise.resolve(null);
+      return window.YaGames.init()
+        .then((ysdk) => {
+          window.ysdk = ysdk;
+          notifyLoadingReady();
+          return ysdk;
+        })
+        .catch(() => null);
+    }
+
+    const platformInit = initYandexSdk();
+
+    const GRID_W = 6;
+    const GRID_H = 5;
+    const BLOCKS = [
+      {
+        id: "armor",
+        name: "Armor",
+        short: "AR",
+        color: "#93a4b7",
+        dark: "#465262",
+        hp: 4,
+        cells: [[0, 0], [1, 0], [0, 1], [1, 1]]
+      },
+      {
+        id: "cannon",
+        name: "Cannon",
+        short: "CN",
+        color: "#f1b44c",
+        dark: "#79521e",
+        hp: 2,
+        cells: [[0, 0], [1, 0], [2, 0]]
+      },
+      {
+        id: "engine",
+        name: "Engine",
+        short: "EN",
+        color: "#62c49f",
+        dark: "#27604e",
+        hp: 2,
+        cells: [[0, 0], [0, 1], [0, 2]]
+      },
+      {
+        id: "lamp",
+        name: "Lamp",
+        short: "LP",
+        color: "#f7ed9b",
+        dark: "#82773d",
+        hp: 2,
+        cells: [[0, 0], [1, 0]]
+      }
+    ];
+
+    const SAVE_KEY = "night-tank-forge-v2";
+    const saved = loadMeta();
+
+    const state = {
+      mode: "forge",
+      scrap: saved.scrap ?? 28,
+      wave: saved.wave ?? 1,
+      bestWave: saved.bestWave ?? 0,
+      dread: saved.dread ?? 0,
+      muted: saved.muted ?? false,
+      selected: 0,
+      ghost: { x: 0, y: 0 },
+      status: saved.wave > 1 ? "Saved forge found. Place blocks, shop, then push the next night." : "Place three blocks, then start the night wave.",
+      result: null,
+      rng: 9217,
+      lampLevel: saved.lampLevel ?? 0,
+      cannonLevel: saved.cannonLevel ?? 0,
+      engineLevel: saved.engineLevel ?? 0,
+      hullLevel: saved.hullLevel ?? 0,
+      pieces: BLOCKS.map((def) => ({ id: def.id, rot: 0, placed: false })),
+      cells: [],
+      player: {
+        x: 0,
+        y: 0,
+        vx: 0,
+        vy: 0,
+        aim: -Math.PI / 2,
+        fire: 0,
+        hitFlash: 0
+      },
+      enemies: [],
+      bullets: [],
+      particles: [],
+      runKills: 0,
+      runScrap: 0,
+      runDamage: 0,
+      waveQuota: 0,
+      waveSpawned: 0,
+      spawnTimer: 0,
+      nightPulse: 0,
+      flareCooldown: 0,
+      sparkClock: 0.35
+    };
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext || null;
+    const audio = {
+      ctx: null,
+      master: null,
+      music: null,
+      sfx: null,
+      drone: null,
+      harmony: null,
+      droneGain: null,
+      harmonyGain: null,
+      filter: null,
+      noise: null,
+      pulseClock: 0
+    };
+
+    const view = {
+      w: 1,
+      h: 1,
+      px: 1,
+      py: 1,
+      scale: 1,
+      narrow: true
+    };
+
+    function platformSafeInsets() {
+      const raw = window.__GF_SAFE_INSETS || window.safeAreaInsets || {};
+      const num = (value) => Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0;
+      return {
+        top: num(raw.top),
+        right: num(raw.right),
+        bottom: num(raw.bottom),
+        left: num(raw.left)
+      };
+    }
+
+    const pointer = {
+      id: null,
+      down: false,
+      x: 0,
+      y: 0,
+      hoverGrid: null,
+      moved: false
+    };
+
+    const keys = Object.create(null);
+    let buttons = [];
+    let zones = [];
+    let lastTime = 0;
+    let srClock = 0;
+
+    function loadMeta() {
+      try {
+        const raw = localStorage.getItem(SAVE_KEY);
+        if (!raw) return {};
+        const data = JSON.parse(raw);
+        return data && data.version === 2 ? data : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function saveMeta() {
+      try {
+        localStorage.setItem(SAVE_KEY, JSON.stringify({
+          version: 2,
+          scrap: state.scrap,
+          wave: state.wave,
+          bestWave: state.bestWave,
+          dread: Math.round(state.dread),
+          lampLevel: state.lampLevel,
+          cannonLevel: state.cannonLevel,
+          engineLevel: state.engineLevel,
+          hullLevel: state.hullLevel,
+          muted: state.muted
+        }));
+      } catch (_) {
+        /* localStorage can be unavailable in restricted browser modes. */
+      }
+    }
+
+    function clamp(v, lo, hi) {
+      return v < lo ? lo : v > hi ? hi : v;
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function dist(ax, ay, bx, by) {
+      const dx = ax - bx;
+      const dy = ay - by;
+      return Math.hypot(dx, dy);
+    }
+
+    function angleDiff(a, b) {
+      let d = (a - b + Math.PI) % (Math.PI * 2);
+      if (d < 0) d += Math.PI * 2;
+      return d - Math.PI;
+    }
+
+    function rand() {
+      state.rng = (state.rng * 1664525 + 1013904223) >>> 0;
+      return state.rng / 4294967296;
+    }
+
+    function makeNoiseBuffer(ac) {
+      const buffer = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < data.length; i += 1) {
+        data[i] = rand() * 2 - 1;
+      }
+      return buffer;
+    }
+
+    function createAudio() {
+      if (!AudioContextCtor || audio.ctx) return !!audio.ctx;
+      try {
+        const ac = new AudioContextCtor();
+        const master = ac.createGain();
+        const music = ac.createGain();
+        const sfx = ac.createGain();
+        const filter = ac.createBiquadFilter();
+        const drone = ac.createOscillator();
+        const harmony = ac.createOscillator();
+        const droneGain = ac.createGain();
+        const harmonyGain = ac.createGain();
+
+        master.gain.value = state.muted ? 0 : 0.35;
+        music.gain.value = 0.32;
+        sfx.gain.value = 0.72;
+        filter.type = "lowpass";
+        filter.frequency.value = 620;
+        filter.Q.value = 0.7;
+        drone.type = "sine";
+        harmony.type = "triangle";
+        drone.frequency.value = 58;
+        harmony.frequency.value = 116;
+        droneGain.gain.value = 0;
+        harmonyGain.gain.value = 0;
+
+        drone.connect(droneGain);
+        harmony.connect(harmonyGain);
+        droneGain.connect(filter);
+        harmonyGain.connect(filter);
+        filter.connect(music);
+        music.connect(master);
+        sfx.connect(master);
+        master.connect(ac.destination);
+        drone.start();
+        harmony.start();
+
+        audio.ctx = ac;
+        audio.master = master;
+        audio.music = music;
+        audio.sfx = sfx;
+        audio.filter = filter;
+        audio.drone = drone;
+        audio.harmony = harmony;
+        audio.droneGain = droneGain;
+        audio.harmonyGain = harmonyGain;
+        audio.noise = makeNoiseBuffer(ac);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function ensureAudio() {
+      if (state.muted || !createAudio()) return false;
+      if (audio.ctx.state === "suspended") {
+        audio.ctx.resume().catch(() => {});
+      }
+      audio.master.gain.setTargetAtTime(0.35, audio.ctx.currentTime, 0.025);
+      return true;
+    }
+
+    function audioReady() {
+      return audio.ctx && !state.muted && audio.ctx.state !== "closed";
+    }
+
+    function toggleMute() {
+      state.muted = !state.muted;
+      if (state.muted) {
+        if (audio.master) {
+          audio.master.gain.setTargetAtTime(0.0001, audio.ctx.currentTime, 0.02);
+        }
+        state.status = "Audio muted.";
+      } else {
+        ensureAudio();
+        playSfx("upgrade");
+        state.status = "Audio armed. The forge is humming.";
+      }
+      saveMeta();
+    }
+
+    function playTone(freq, duration, gain, type, slide, delay) {
+      if (!audioReady() && !ensureAudio()) return;
+      if (!audioReady()) return;
+      const ac = audio.ctx;
+      const t = ac.currentTime + (delay || 0);
+      const osc = ac.createOscillator();
+      const env = ac.createGain();
+      osc.type = type || "sine";
+      osc.frequency.setValueAtTime(freq, t);
+      if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + duration);
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.linearRampToValueAtTime(gain, t + 0.012);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+      osc.connect(env);
+      env.connect(audio.sfx);
+      osc.start(t);
+      osc.stop(t + duration + 0.03);
+    }
+
+    function playNoise(duration, gain, freq, delay) {
+      if (!audioReady() && !ensureAudio()) return;
+      if (!audioReady() || !audio.noise) return;
+      const ac = audio.ctx;
+      const t = ac.currentTime + (delay || 0);
+      const src = ac.createBufferSource();
+      const filter = ac.createBiquadFilter();
+      const env = ac.createGain();
+      src.buffer = audio.noise;
+      filter.type = "bandpass";
+      filter.frequency.value = freq || 700;
+      filter.Q.value = 0.9;
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.linearRampToValueAtTime(gain, t + 0.01);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+      src.connect(filter);
+      filter.connect(env);
+      env.connect(audio.sfx);
+      src.start(t);
+      src.stop(t + duration + 0.02);
+    }
+
+    function playSfx(name) {
+      const drift = 1 + (rand() - 0.5) * 0.08;
+      if (name === "place") {
+        playTone(165 * drift, 0.08, 0.09, "square", 220 * drift);
+        playTone(330 * drift, 0.06, 0.04, "triangle", 390 * drift, 0.025);
+      } else if (name === "rotate") {
+        playTone(260 * drift, 0.055, 0.06, "triangle", 190 * drift);
+      } else if (name === "start") {
+        playTone(95, 0.18, 0.11, "sawtooth", 145);
+        playTone(255, 0.16, 0.07, "triangle", 340, 0.08);
+      } else if (name === "shot") {
+        playTone(520 * drift, 0.055, 0.07, "square", 210 * drift);
+        playNoise(0.045, 0.035, 1800);
+      } else if (name === "hit") {
+        playNoise(0.065, 0.06, 960);
+      } else if (name === "kill") {
+        playNoise(0.11, 0.08, 620);
+        playTone(180 * drift, 0.13, 0.06, "sawtooth", 90 * drift);
+      } else if (name === "damage") {
+        playNoise(0.16, 0.1, 320);
+        playTone(84 * drift, 0.18, 0.08, "sawtooth", 54 * drift);
+      } else if (name === "repair") {
+        playTone(230, 0.08, 0.055, "triangle", 310);
+        playTone(350, 0.09, 0.055, "triangle", 480, 0.07);
+      } else if (name === "upgrade") {
+        playTone(310, 0.08, 0.055, "triangle", 420);
+        playTone(470, 0.09, 0.05, "triangle", 640, 0.075);
+        playTone(710, 0.12, 0.04, "sine", 840, 0.15);
+      } else if (name === "flare") {
+        playNoise(0.28, 0.12, 1800);
+        playTone(220, 0.24, 0.09, "triangle", 520);
+      } else if (name === "victory") {
+        playTone(250, 0.12, 0.06, "triangle", 330);
+        playTone(390, 0.14, 0.06, "triangle", 520, 0.1);
+        playTone(620, 0.18, 0.05, "sine", 740, 0.22);
+      } else if (name === "defeat") {
+        playTone(170, 0.22, 0.08, "sawtooth", 82);
+        playNoise(0.32, 0.08, 220, 0.04);
+      }
+    }
+
+    function updateAudio(dt) {
+      if (!audioReady()) return;
+      const ac = audio.ctx;
+      const battle = state.mode === "battle";
+      const outcome = state.mode === "outcome";
+      const dread = state.dread / 100;
+      const droneTarget = battle ? 0.085 + dread * 0.04 : outcome ? 0.05 : 0.038;
+      const harmonyTarget = battle ? 0.034 + dread * 0.02 : 0.02;
+      audio.droneGain.gain.setTargetAtTime(droneTarget, ac.currentTime, 0.12);
+      audio.harmonyGain.gain.setTargetAtTime(harmonyTarget, ac.currentTime, 0.18);
+      audio.filter.frequency.setTargetAtTime(battle ? 520 + dread * 620 : 760, ac.currentTime, 0.2);
+      audio.drone.frequency.setTargetAtTime(battle ? 48 + dread * 18 : 58, ac.currentTime, 0.2);
+      audio.harmony.frequency.setTargetAtTime(battle ? 96 + dread * 34 : 116, ac.currentTime, 0.2);
+      audio.pulseClock -= dt;
+      if (audio.pulseClock <= 0) {
+        if (battle) {
+          playTone(72 + state.wave * 2, 0.09, 0.025 + dread * 0.025, "triangle", 58);
+          audio.pulseClock = Math.max(0.34, 0.86 - dread * 0.32);
+        } else if (state.mode === "forge") {
+          playTone(145, 0.055, 0.018, "sine", 152);
+          audio.pulseClock = 2.6;
+        } else {
+          audio.pulseClock = 1.4;
+        }
+      }
+    }
+
+    function pick(arr) {
+      return arr[Math.floor(rand() * arr.length)];
+    }
+
+    function roundRect(c, x, y, w, h, r) {
+      r = Math.max(0, Math.min(r, w / 2, h / 2));
+      c.beginPath();
+      c.moveTo(x + r, y);
+      c.arcTo(x + w, y, x + w, y + h, r);
+      c.arcTo(x + w, y + h, x, y + h, r);
+      c.arcTo(x, y + h, x, y, r);
+      c.arcTo(x, y, x + r, y, r);
+      c.closePath();
+    }
+
+    function fillTextFit(text, x, y, maxW, size, weight, align) {
+      ctx.textAlign = align || "left";
+      ctx.textBaseline = "middle";
+      let s = size;
+      ctx.font = `${weight || "700"} ${s}px system-ui, sans-serif`;
+      while (s > 9 && ctx.measureText(text).width > maxW) {
+        s -= 1;
+        ctx.font = `${weight || "700"} ${s}px system-ui, sans-serif`;
+      }
+      ctx.fillText(text, x, y);
+    }
+
+    function defById(id) {
+      for (const def of BLOCKS) {
+        if (def.id === id) return def;
+      }
+      return BLOCKS[0];
+    }
+
+    function selectedPiece() {
+      return state.pieces[state.selected] || null;
+    }
+
+    function selectedDef() {
+      const piece = selectedPiece();
+      return piece ? defById(piece.id) : BLOCKS[0];
+    }
+
+    function rotatedCells(def, rot) {
+      const raw = def.cells.map(([x, y]) => {
+        if (rot === 1) return [-y, x];
+        if (rot === 2) return [-x, -y];
+        if (rot === 3) return [y, -x];
+        return [x, y];
+      });
+      let minX = Infinity;
+      let minY = Infinity;
+      for (const [x, y] of raw) {
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+      }
+      return raw.map(([x, y]) => [x - minX, y - minY]);
+    }
+
+    function occupied(gx, gy) {
+      return state.cells.some((cell) => !cell.dead && cell.gx === gx && cell.gy === gy);
+    }
+
+    function canPlace(def, rot, gx, gy) {
+      const cells = rotatedCells(def, rot);
+      for (const [cx, cy] of cells) {
+        const x = gx + cx;
+        const y = gy + cy;
+        if (x < 0 || y < 0 || x >= GRID_W || y >= GRID_H || occupied(x, y)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    function findFit(piece) {
+      const def = defById(piece.id);
+      for (let y = 0; y < GRID_H; y += 1) {
+        for (let x = 0; x < GRID_W; x += 1) {
+          if (canPlace(def, piece.rot, x, y)) {
+            return { x, y };
+          }
+        }
+      }
+      return { x: 0, y: 0 };
+    }
+
+    function chooseNextUnplaced() {
+      for (let i = 0; i < state.pieces.length; i += 1) {
+        if (!state.pieces[i].placed) {
+          state.selected = i;
+          state.ghost = findFit(state.pieces[i]);
+          return;
+        }
+      }
+    }
+
+    function placedCount() {
+      return state.pieces.filter((piece) => piece.placed).length;
+    }
+
+    function aliveCells(type) {
+      return state.cells.filter((cell) => !cell.dead && (!type || cell.type === type)).length;
+    }
+
+    function infectedCells() {
+      return state.cells.filter((cell) => !cell.dead && cell.infected).length;
+    }
+
+    function damagedCells() {
+      return state.cells.filter((cell) => cell.dead || cell.hp < cell.maxHp || cell.infected).length;
+    }
+
+    function repairCost() {
+      return Math.max(0, damagedCells() * 5 + infectedCells() * 3);
+    }
+
+    function lampCost() {
+      return 18 + state.lampLevel * 12;
+    }
+
+    function cannonCost() {
+      return 22 + state.cannonLevel * 16;
+    }
+
+    function engineCost() {
+      return 20 + state.engineLevel * 14;
+    }
+
+    function hullCost() {
+      return 16 + state.hullLevel * 13;
+    }
+
+    function partCost() {
+      return 24 + Math.max(0, state.pieces.length - BLOCKS.length) * 10;
+    }
+
+    function placeSelectedAt(gx, gy) {
+      const piece = selectedPiece();
+      if (!piece || piece.placed) return false;
+      const def = defById(piece.id);
+      if (!canPlace(def, piece.rot, gx, gy)) {
+        state.status = "That block will not fit there.";
+        return false;
+      }
+      for (const [cx, cy] of rotatedCells(def, piece.rot)) {
+        state.cells.push({
+          gx: gx + cx,
+          gy: gy + cy,
+          type: def.id,
+          blockId: def.id,
+          hp: def.hp,
+          maxHp: def.hp,
+          infected: false,
+          dead: false
+        });
+      }
+      piece.placed = true;
+      state.status = `${def.name} locked into the hull.`;
+      playSfx("place");
+      spawnBuildDust(gx, gy, def.color);
+      chooseNextUnplaced();
+      return true;
+    }
+
+    function addStarterModule(index, gx, gy) {
+      const piece = state.pieces[index];
+      if (!piece || piece.placed) return;
+      const def = defById(piece.id);
+      for (const [cx, cy] of rotatedCells(def, piece.rot)) {
+        state.cells.push({
+          gx: gx + cx,
+          gy: gy + cy,
+          type: def.id,
+          blockId: def.id,
+          hp: def.hp,
+          maxHp: def.hp,
+          infected: false,
+          dead: false
+        });
+      }
+      piece.placed = true;
+    }
+
+    function seedStarterTank() {
+      if (state.cells.length || placedCount() > 0) return;
+      addStarterModule(0, 0, 0);
+      addStarterModule(1, 2, 0);
+      addStarterModule(2, 5, 0);
+      state.selected = 3;
+      state.ghost = { x: 2, y: 2 };
+      state.status = "Starter hull is built. Add the lamp, then start the first wave.";
+    }
+
+    function autoPlaceSelected() {
+      const piece = selectedPiece();
+      if (!piece || piece.placed) {
+        chooseNextUnplaced();
+        return false;
+      }
+      const fit = findFit(piece);
+      state.ghost = fit;
+      return placeSelectedAt(fit.x, fit.y);
+    }
+
+    function rotateSelected() {
+      const piece = selectedPiece();
+      if (!piece || piece.placed) return;
+      piece.rot = (piece.rot + 1) % 4;
+      const hover = pointer.hoverGrid;
+      if (hover && canPlace(defById(piece.id), piece.rot, hover.x, hover.y)) {
+        state.ghost = { x: hover.x, y: hover.y };
+      } else {
+        state.ghost = findFit(piece);
+      }
+      state.status = "Block rotated.";
+      playSfx("rotate");
+    }
+
+    function repairAll() {
+      const cost = repairCost();
+      if (cost <= 0) {
+        state.status = "The tank is already clean.";
+        return;
+      }
+      if (state.scrap < cost) {
+        state.status = "Not enough scrap to repair the infected blocks.";
+        return;
+      }
+      state.scrap -= cost;
+      for (const cell of state.cells) {
+        cell.dead = false;
+        cell.infected = false;
+        cell.hp = cell.maxHp;
+      }
+      state.dread = Math.max(0, state.dread - 22);
+      state.status = "Repairs complete. The purple cracks are gone.";
+      playSfx("repair");
+      saveMeta();
+    }
+
+    function upgradeLamp() {
+      const cost = lampCost();
+      if (state.scrap < cost) {
+        state.status = "Not enough scrap for a stronger lamp.";
+        return;
+      }
+      state.scrap -= cost;
+      state.lampLevel += 1;
+      state.status = "Lamp upgraded. The cone cuts deeper into the fog.";
+      playSfx("upgrade");
+      saveMeta();
+    }
+
+    function upgradeCannon() {
+      const cost = cannonCost();
+      if (state.scrap < cost) {
+        state.status = "Not enough scrap to tune the cannon.";
+        return;
+      }
+      state.scrap -= cost;
+      state.cannonLevel += 1;
+      state.status = "Cannon tuned. Lit enemies crack faster.";
+      playSfx("upgrade");
+      saveMeta();
+    }
+
+    function upgradeEngine() {
+      const cost = engineCost();
+      if (state.scrap < cost) {
+        state.status = "Not enough scrap for engine teeth.";
+        return;
+      }
+      state.scrap -= cost;
+      state.engineLevel += 1;
+      state.status = "Engine teeth replaced. The hull can kite longer.";
+      playSfx("upgrade");
+      saveMeta();
+    }
+
+    function hardenHull() {
+      const cost = hullCost();
+      if (state.scrap < cost) {
+        state.status = "Not enough scrap to harden the hull.";
+        return;
+      }
+      state.scrap -= cost;
+      state.hullLevel += 1;
+      state.status = "Hull hardened. Night bites lose force.";
+      playSfx("upgrade");
+      saveMeta();
+    }
+
+    function buyExtraPart() {
+      const cost = partCost();
+      if (state.scrap < cost) {
+        state.status = "Not enough scrap for another module.";
+        return;
+      }
+      const source = selectedPiece();
+      const id = source ? source.id : BLOCKS[state.pieces.length % BLOCKS.length].id;
+      state.scrap -= cost;
+      state.pieces.push({ id, rot: 0, placed: false });
+      state.selected = state.pieces.length - 1;
+      state.ghost = findFit(state.pieces[state.selected]);
+      state.status = `Extra ${defById(id).name} module forged.`;
+      playSfx("place");
+      saveMeta();
+    }
+
+    function startWave() {
+      if (placedCount() < 3) {
+        state.status = "Place at least three tank blocks before the wave.";
+        return;
+      }
+      if (aliveCells("cannon") <= 0) {
+        state.status = "Repair a cannon block before starting.";
+        return;
+      }
+      const arena = getArena();
+      state.mode = "battle";
+      state.result = null;
+      state.player.x = arena.x + arena.w / 2;
+      state.player.y = arena.y + arena.h / 2;
+      state.player.vx = 0;
+      state.player.vy = 0;
+      state.player.aim = -Math.PI / 2;
+      state.player.fire = 0.2;
+      state.enemies.length = 0;
+      state.bullets.length = 0;
+      state.waveSpawned = 0;
+      state.waveQuota = 4 + state.wave * 2;
+      state.spawnTimer = 0.1;
+      state.nightPulse = 0;
+      state.flareCooldown = 0;
+      state.runKills = 0;
+      state.runScrap = 0;
+      state.runDamage = 0;
+      state.status = "Aim the lamp. The cannon only trusts what it can see.";
+      playSfx("start");
+      canvas.focus();
+    }
+
+    function finishWave(victory, reason) {
+      state.mode = "outcome";
+      state.result = victory ? "victory" : "defeat";
+      state.bestWave = Math.max(state.bestWave, state.wave);
+      if (victory) {
+        const reward = 10 + state.wave * 5;
+        state.scrap += reward;
+        state.runScrap += reward;
+        state.status = `Wave ${state.wave} cleared. Recovered ${reward} scrap.`;
+        state.wave += 1;
+        state.dread = Math.max(0, state.dread - 18);
+        playSfx("victory");
+      } else {
+        const salvage = 8 + Math.floor(state.wave * 2);
+        state.scrap += salvage;
+        state.runScrap += salvage;
+        state.status = `${reason || "The night broke the hull."} Salvaged ${salvage} scrap.`;
+        state.dread = Math.min(85, state.dread + 12);
+        playSfx("defeat");
+      }
+      saveMeta();
+    }
+
+    function continueToForge() {
+      state.mode = "forge";
+      state.result = null;
+      chooseNextUnplaced();
+      state.status = "Repair, upgrade, or start the next wave.";
+      playSfx("rotate");
+    }
+
+    function getArena() {
+      const safe = platformSafeInsets();
+      const top = Math.max(74 + safe.top, view.h * 0.1 + safe.top);
+      const bottom = Math.max(70 + safe.bottom, view.h * 0.11 + safe.bottom);
+      const side = Math.max(14, view.w * 0.025, safe.left + 14, safe.right + 14);
+      return {
+        x: side,
+        y: top,
+        w: view.w - side * 2,
+        h: view.h - top - bottom
+      };
+    }
+
+    function getLightStats() {
+      const lamp = aliveCells("lamp");
+      const range = 170 + lamp * 18 + state.lampLevel * 34;
+      const width = 0.42 + lamp * 0.055 + state.lampLevel * 0.035;
+      return { range, width };
+    }
+
+    function isLit(x, y) {
+      const dx = x - state.player.x;
+      const dy = y - state.player.y;
+      const d = Math.hypot(dx, dy);
+      const light = getLightStats();
+      if (d > light.range) return false;
+      const a = Math.atan2(dy, dx);
+      return Math.abs(angleDiff(a, state.player.aim)) <= light.width;
+    }
+
+    function nearestLitEnemy() {
+      let best = null;
+      let bestD = Infinity;
+      for (const enemy of state.enemies) {
+        if (!isLit(enemy.x, enemy.y)) continue;
+        const d = dist(state.player.x, state.player.y, enemy.x, enemy.y);
+        if (d < bestD) {
+          best = enemy;
+          bestD = d;
+        }
+      }
+      return best;
+    }
+
+    function spawnEnemy() {
+      const arena = getArena();
+      const side = Math.floor(rand() * 4);
+      let x = arena.x;
+      let y = arena.y;
+      if (side === 0) {
+        x = arena.x + rand() * arena.w;
+        y = arena.y - 20;
+      } else if (side === 1) {
+        x = arena.x + arena.w + 20;
+        y = arena.y + rand() * arena.h;
+      } else if (side === 2) {
+        x = arena.x + rand() * arena.w;
+        y = arena.y + arena.h + 20;
+      } else {
+        x = arena.x - 20;
+        y = arena.y + rand() * arena.h;
+      }
+      const hard = state.wave > 2 && rand() < 0.28;
+      const infect = state.wave > 1 && rand() < 0.34;
+      state.enemies.push({
+        id: state.waveSpawned + 1,
+        x,
+        y,
+        vx: 0,
+        vy: 0,
+        r: hard ? 18 : 14,
+        hp: hard ? 3 + Math.floor(state.wave / 2) : 2 + Math.floor(state.wave / 3),
+        maxHp: hard ? 3 + Math.floor(state.wave / 2) : 2 + Math.floor(state.wave / 3),
+        speed: hard ? 42 + state.wave * 3 : 58 + state.wave * 4,
+        infect,
+        phase: rand() * Math.PI * 2
+      });
+      state.waveSpawned += 1;
+    }
+
+    function fireAt(enemy) {
+      const cannon = aliveCells("cannon");
+      if (cannon <= 0) return;
+      const a = Math.atan2(enemy.y - state.player.y, enemy.x - state.player.x);
+      state.bullets.push({
+        x: state.player.x + Math.cos(a) * 20,
+        y: state.player.y + Math.sin(a) * 20,
+        vx: Math.cos(a) * 430,
+        vy: Math.sin(a) * 430,
+        life: 0.95,
+        dmg: 1 + Math.floor(cannon / 2) + state.cannonLevel
+      });
+      state.player.fire = Math.max(0.18, 0.62 - cannon * 0.08 - state.cannonLevel * 0.05);
+      playSfx("shot");
+    }
+
+    function damageTank(amount, forceInfect) {
+      const alive = state.cells.filter((cell) => !cell.dead);
+      if (!alive.length) {
+        finishWave(false, "The tank was consumed.");
+        return;
+      }
+      const cell = pick(alive);
+      const mitigated = Math.max(0.45, amount - state.hullLevel * 0.13);
+      state.runDamage += 1;
+      cell.hp -= mitigated;
+      if (forceInfect || rand() < Math.max(0.16, 0.38 - state.hullLevel * 0.035)) {
+        cell.infected = true;
+      }
+      state.player.hitFlash = 0.25;
+      state.dread = Math.min(100, state.dread + Math.max(4.5, 8 - state.hullLevel * 0.45));
+      playSfx("damage");
+      const tx = state.player.x + (cell.gx - (GRID_W - 1) / 2) * 15;
+      const ty = state.player.y + (cell.gy - (GRID_H - 1) / 2) * 15;
+      spawnParticles(tx, ty, cell.infected ? "#9c4dcc" : "#c7d2df", 12, 2.7);
+      if (cell.hp <= 0) {
+        cell.dead = true;
+        cell.infected = false;
+        spawnParticles(tx, ty, "#354050", 18, 4.5);
+      }
+      if (aliveCells() <= 2) {
+        finishWave(false, "Too many blocks sheared off.");
+      } else if (aliveCells("cannon") <= 0) {
+        finishWave(false, "The cannon block went dark.");
+      }
+    }
+
+    function useFlare() {
+      if (state.flareCooldown > 0) return;
+      state.flareCooldown = 8;
+      state.dread = Math.max(0, state.dread - 24);
+      for (const enemy of state.enemies) {
+        const d = dist(state.player.x, state.player.y, enemy.x, enemy.y);
+        if (d < 135) enemy.hp -= 1;
+      }
+      spawnParticles(state.player.x, state.player.y, "#fff1a8", 32, 3.8);
+      state.status = "Emergency flare burned the fog back.";
+      playSfx("flare");
+    }
+
+    function updateBattle(dt) {
+      const arena = getArena();
+      state.spawnTimer -= dt * (1 + state.dread / 160);
+      if (state.waveSpawned < state.waveQuota && state.spawnTimer <= 0) {
+        spawnEnemy();
+        state.spawnTimer = Math.max(0.45, 1.18 - state.wave * 0.06);
+      }
+
+      const move = { x: 0, y: 0 };
+      if (keys.ArrowLeft || keys.KeyA) move.x -= 1;
+      if (keys.ArrowRight || keys.KeyD) move.x += 1;
+      if (keys.ArrowUp || keys.KeyW) move.y -= 1;
+      if (keys.ArrowDown || keys.KeyS) move.y += 1;
+      if (move.x || move.y) {
+        const len = Math.hypot(move.x, move.y);
+        move.x /= len;
+        move.y /= len;
+        state.player.aim = Math.atan2(move.y, move.x);
+      } else if (pointer.down) {
+        const dx = pointer.x - state.player.x;
+        const dy = pointer.y - state.player.y;
+        const d = Math.hypot(dx, dy);
+        if (d > 18) {
+          move.x = dx / d;
+          move.y = dy / d;
+        }
+        state.player.aim = Math.atan2(dy, dx);
+      } else if (pointer.moved) {
+        state.player.aim = Math.atan2(pointer.y - state.player.y, pointer.x - state.player.x);
+      }
+
+      const engine = aliveCells("engine");
+      const speed = 92 + engine * 19 + state.engineLevel * 8;
+      state.player.vx = lerp(state.player.vx, move.x * speed, 1 - Math.pow(0.001, dt));
+      state.player.vy = lerp(state.player.vy, move.y * speed, 1 - Math.pow(0.001, dt));
+      const tankMargin = view.narrow ? 64 : 54;
+      state.player.x = clamp(state.player.x + state.player.vx * dt, arena.x + tankMargin, arena.x + arena.w - tankMargin);
+      state.player.y = clamp(state.player.y + state.player.vy * dt, arena.y + tankMargin, arena.y + arena.h - tankMargin);
+      state.player.fire = Math.max(0, state.player.fire - dt);
+      state.player.hitFlash = Math.max(0, state.player.hitFlash - dt);
+      state.flareCooldown = Math.max(0, state.flareCooldown - dt);
+
+      let litCount = 0;
+      let pressure = 0;
+      for (let i = state.enemies.length - 1; i >= 0; i -= 1) {
+        const enemy = state.enemies[i];
+        const dx = state.player.x - enemy.x;
+        const dy = state.player.y - enemy.y;
+        const d = Math.max(1, Math.hypot(dx, dy));
+        const lit = isLit(enemy.x, enemy.y);
+        if (lit) litCount += 1;
+        const dreadBoost = state.dread > 70 ? 1.18 : 1;
+        const speedMod = lit ? 0.72 : 1.05 + state.dread / 260;
+        enemy.vx = (dx / d) * enemy.speed * speedMod * dreadBoost;
+        enemy.vy = (dy / d) * enemy.speed * speedMod * dreadBoost;
+        enemy.x += enemy.vx * dt;
+        enemy.y += enemy.vy * dt;
+        enemy.phase += dt * 4;
+        if (!lit && d < 285) pressure += (1 - d / 285) * 1.8;
+        if (d < 92) pressure += 1.1;
+        if (d < enemy.r + 24) {
+          state.enemies.splice(i, 1);
+          damageTank(enemy.infect ? 1.2 : 1, enemy.infect);
+          continue;
+        }
+        if (enemy.hp <= 0) {
+          state.enemies.splice(i, 1);
+          const reward = enemy.infect ? 5 : 4;
+          state.scrap += reward;
+          state.runKills += 1;
+          state.runScrap += reward;
+          playSfx("kill");
+          spawnParticles(enemy.x, enemy.y, enemy.infect ? "#ac5cff" : "#ff6978", 18, 3.2);
+        }
+      }
+
+      if (state.player.fire <= 0) {
+        const target = nearestLitEnemy();
+        if (target) fireAt(target);
+      }
+
+      for (let i = state.bullets.length - 1; i >= 0; i -= 1) {
+        const bullet = state.bullets[i];
+        bullet.x += bullet.vx * dt;
+        bullet.y += bullet.vy * dt;
+        bullet.life -= dt;
+        let hit = false;
+        for (const enemy of state.enemies) {
+          if (dist(bullet.x, bullet.y, enemy.x, enemy.y) < enemy.r + 5) {
+            enemy.hp -= bullet.dmg;
+            hit = true;
+            playSfx("hit");
+            spawnParticles(bullet.x, bullet.y, "#ffd166", 5, 1.7);
+            break;
+          }
+        }
+        if (hit || bullet.life <= 0) {
+          state.bullets.splice(i, 1);
+        }
+      }
+
+      state.nightPulse += dt;
+      if (state.dread > 92 && state.nightPulse > 1.25) {
+        state.nightPulse = 0;
+        const targets = state.cells.filter((cell) => !cell.dead && !cell.infected);
+        if (targets.length) {
+          pick(targets).infected = true;
+          state.status = "The fog infected a block. Aim the lamp into the pressure.";
+        }
+      }
+
+      const drift = pressure * 20 + state.enemies.length * 0.9 - litCount * 7 - 4;
+      state.dread = clamp(state.dread + drift * dt, 0, 100);
+      if (state.dread >= 100) {
+        damageTank(1, true);
+        state.dread = 82;
+      }
+
+      for (const cell of state.cells) {
+        if (!cell.dead && cell.infected) {
+          cell.hp -= dt * 0.035;
+          if (cell.hp <= 0) {
+            cell.dead = true;
+            cell.infected = false;
+          }
+        }
+      }
+
+      if (state.waveSpawned >= state.waveQuota && state.enemies.length === 0 && state.mode === "battle") {
+        finishWave(true);
+      }
+    }
+
+    function spawnParticles(x, y, color, count, size) {
+      for (let i = 0; i < count; i += 1) {
+        const a = rand() * Math.PI * 2;
+        const sp = (30 + rand() * 120) * (size / 3);
+        state.particles.push({
+          x,
+          y,
+          vx: Math.cos(a) * sp,
+          vy: Math.sin(a) * sp,
+          life: 0.35 + rand() * 0.55,
+          maxLife: 0.9,
+          size: size * (0.55 + rand() * 0.9),
+          color
+        });
+      }
+    }
+
+    function spawnBuildDust(gx, gy, color) {
+      const layout = getForgeLayout();
+      spawnParticles(layout.gridX + (gx + 0.5) * layout.cell, layout.gridY + (gy + 0.5) * layout.cell, color, 10, 2.5);
+    }
+
+    function updateForgeAmbience(dt) {
+      if (state.mode !== "forge") return;
+      state.sparkClock -= dt;
+      if (state.sparkClock > 0) return;
+      const layout = getForgeLayout();
+      const count = view.narrow ? 1 : 2;
+      for (let i = 0; i < count; i += 1) {
+        const x = layout.gridX - 8 + rand() * (layout.gridW + 16);
+        const y = layout.gridY - 20 + rand() * 14;
+        spawnParticles(x, y, rand() > 0.35 ? "#ffbd66" : "#6ee7d8", 1, 1.35);
+      }
+      state.sparkClock = 0.26 + rand() * 0.5;
+    }
+
+    function updateParticles(dt) {
+      for (let i = state.particles.length - 1; i >= 0; i -= 1) {
+        const p = state.particles[i];
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 120 * dt;
+        p.life -= dt;
+        if (p.life <= 0) state.particles.splice(i, 1);
+      }
+    }
+
+    function update(dt) {
+      dt = Math.min(0.05, Math.max(0, dt));
+      if (state.mode === "battle") updateBattle(dt);
+      updateForgeAmbience(dt);
+      updateParticles(dt);
+      updateAudio(dt);
+      srClock += dt;
+      if (srClock > 0.7) {
+        srClock = 0;
+        srState.textContent = textSummary();
+      }
+    }
+
+    function getForgeLayout() {
+      const safe = platformSafeInsets();
+      view.narrow = view.w < 760 || view.h > view.w * 1.12;
+      const compact = view.narrow && view.h < 720;
+      const top = (view.narrow ? (compact ? 106 : 104) : 104) + safe.top;
+      const cardH = view.narrow ? (compact ? 42 : 54) : 64;
+      const gap = view.narrow ? (compact ? 7 : 10) : 10;
+      const cols = view.narrow ? 2 : 1;
+      const rows = Math.max(1, Math.ceil(state.pieces.length / cols));
+      const reserve = view.narrow ? rows * cardH + Math.max(0, rows - 1) * gap + 274 : 0;
+      const widthCell = view.narrow ? (view.w - 44) / GRID_W : (view.w * 0.42) / GRID_W;
+      const heightCell = view.narrow ? (view.h - top - reserve) / GRID_H : (view.h * 0.5) / GRID_H;
+      const cell = view.narrow
+        ? Math.floor(clamp(Math.min(widthCell, heightCell), compact ? 30 : 34, compact ? 48 : 54))
+        : Math.floor(clamp(Math.min(widthCell, heightCell), 42, 68));
+      const gridW = cell * GRID_W;
+      const gridH = cell * GRID_H;
+      const gridX = view.narrow ? (view.w - gridW) / 2 : Math.max(34, view.w * 0.08);
+      const gridY = top;
+      const trayX = view.narrow ? 18 : gridX + gridW + 42;
+      const trayY = view.narrow ? gridY + gridH + 22 : gridY;
+      const trayW = view.narrow ? view.w - 36 : Math.min(320, view.w - trayX - 28);
+      const previewX = trayX + trayW + 34;
+      const previewY = gridY;
+      const previewW = view.narrow ? 0 : Math.max(0, view.w - previewX - 38);
+      const previewH = view.narrow ? 0 : Math.min(gridH, view.h - previewY - 92);
+      const hasPreview = !view.narrow && previewW >= 260 && previewH >= 260;
+      const buttonH = view.narrow ? (compact ? 34 : 38) : 42;
+      return { cell, gridX, gridY, gridW, gridH, trayX, trayY, trayW, cardH, gap, buttonH, compact, previewX, previewY, previewW, previewH, hasPreview, safe };
+    }
+
+    function addButton(label, x, y, w, h, fn, enabled) {
+      const active = enabled !== false;
+      buttons.push({ label, x, y, w, h, fn, active });
+      ctx.save();
+      roundRect(ctx, x, y, w, h, 8);
+      ctx.fillStyle = active ? "#20283a" : "#151a25";
+      ctx.fill();
+      ctx.lineWidth = active ? 2 : 1;
+      ctx.strokeStyle = active ? "#6ee7d8" : "#394255";
+      ctx.stroke();
+      ctx.fillStyle = active ? "#f3f7ff" : "#7f8794";
+      fillTextFit(label, x + w / 2, y + h / 2, w - 16, Math.min(16, h * 0.34), "800", "center");
+      ctx.restore();
+    }
+
+    function hitButton(x, y) {
+      for (let i = buttons.length - 1; i >= 0; i -= 1) {
+        const b = buttons[i];
+        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+          if (b.active) b.fn();
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function drawHeader() {
+      const safe = platformSafeInsets();
+      const basePad = Math.max(14, view.w * 0.024);
+      const pad = basePad + safe.left;
+      const headerH = Math.max(68 + safe.top, view.h * 0.085 + safe.top);
+      const header = ctx.createLinearGradient(0, 0, view.w, headerH);
+      header.addColorStop(0, "#070a14");
+      header.addColorStop(0.6, "#0b1020");
+      header.addColorStop(1, "#0a0c16");
+      ctx.fillStyle = header;
+      ctx.fillRect(0, 0, view.w, headerH);
+      ctx.fillStyle = "rgba(110, 231, 216, 0.08)";
+      ctx.fillRect(0, headerH - 2, view.w, 2);
+      const soundW = view.narrow ? (view.w < 370 ? 64 : 72) : 84;
+      const soundX = view.w - soundW - basePad - safe.right;
+      const meterW = Math.min(view.narrow ? (view.w < 370 ? 90 : 118) : 210, view.w * (view.narrow ? 0.29 : 0.34));
+      const x = soundX - meterW - 10;
+      const titleMax = Math.max(106, Math.min(view.narrow ? view.w * 0.39 : 300, x - pad - 10));
+      ctx.fillStyle = "#f4f7ff";
+      fillTextFit("NIGHT TANK FORGE", pad, 26 + safe.top, titleMax, view.narrow ? 17 : 23, "900", "left");
+      ctx.fillStyle = "#9fb0c9";
+      fillTextFit(`Wave ${state.wave}  Scrap ${state.scrap}`, pad, 52 + safe.top, Math.min(view.narrow ? 150 : 260, view.w * 0.52), 13, "700", "left");
+      const y = 24 + safe.top;
+      ctx.fillStyle = "#161b28";
+      roundRect(ctx, x, y, meterW, 14, 7);
+      ctx.fill();
+      ctx.fillStyle = state.dread > 75 ? "#e64872" : "#8e5cff";
+      roundRect(ctx, x, y, meterW * (state.dread / 100), 14, 7);
+      ctx.fill();
+      ctx.fillStyle = "#dfe7ff";
+      fillTextFit("DREAD", x + meterW / 2, y + 28, meterW, 11, "800", "center");
+      addButton(state.muted ? "SOUND" : "MUTE", soundX, 16 + safe.top, soundW, 34, toggleMute, true);
+    }
+
+    function drawForgeBackdrop(layout) {
+      const bg = ctx.createLinearGradient(0, 0, 0, view.h);
+      bg.addColorStop(0, "#070812");
+      bg.addColorStop(0.48, "#0d1421");
+      bg.addColorStop(1, "#11101b");
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, view.w, view.h);
+
+      const benchY = layout.gridY + layout.gridH + (view.narrow ? 10 : 22);
+      ctx.fillStyle = "#171522";
+      ctx.fillRect(0, benchY, view.w, Math.max(80, view.h - benchY));
+      ctx.strokeStyle = "rgba(255, 209, 102, 0.14)";
+      ctx.lineWidth = 1;
+      for (let x = -40; x < view.w + 80; x += 48) {
+        ctx.beginPath();
+        ctx.moveTo(x, benchY);
+        ctx.lineTo(x + 80, view.h);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "rgba(110, 231, 216, 0.06)";
+      for (let i = 0; i < 5; i += 1) {
+        const x = layout.gridX - 28 + i * (layout.gridW + 56) / 4;
+        roundRect(ctx, x, layout.gridY - 24, 18, layout.gridH + 48, 6);
+        ctx.fill();
+      }
+
+      ctx.strokeStyle = "rgba(180, 76, 255, 0.18)";
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 4; i += 1) {
+        const y = 78 + i * 34 + Math.sin(state.nightPulse + i) * 3;
+        ctx.beginPath();
+        ctx.moveTo(view.w * 0.58, y);
+        ctx.bezierCurveTo(view.w * 0.72, y - 18, view.w * 0.78, y + 24, view.w + 18, y - 4);
+        ctx.stroke();
+      }
+    }
+
+    function drawForgeGuide(layout) {
+      const firstRun = state.wave <= 1 && placedCount() < 3;
+      const guideH = view.narrow ? 24 : 30;
+      const guideX = view.narrow ? 18 : layout.gridX;
+      const guideW = view.narrow ? view.w - 36 : Math.min(layout.gridW + layout.trayW + 42, view.w - guideX - 28);
+      const guideY = (view.narrow ? 73 : 72) + layout.safe.top;
+      roundRect(ctx, guideX, guideY, guideW, guideH, 8);
+      ctx.fillStyle = firstRun ? "rgba(255, 209, 102, 0.13)" : "rgba(110, 231, 216, 0.08)";
+      ctx.fill();
+      ctx.strokeStyle = firstRun ? "rgba(255, 209, 102, 0.42)" : "rgba(110, 231, 216, 0.25)";
+      ctx.stroke();
+      ctx.fillStyle = firstRun ? "#ffe2a0" : "#b8c9df";
+      const text = firstRun
+        ? "Place 3 modules. Aim the lamp to fire. Repair purple cracks."
+        : "Forge, survive, repair, upgrade.";
+      fillTextFit(text, guideX + guideW / 2, guideY + guideH / 2, guideW - 18, view.narrow ? 11 : 13, "800", "center");
+    }
+
+    function drawForgePreview(layout) {
+      if (!layout.hasPreview) return;
+      const x = layout.previewX;
+      const y = layout.previewY;
+      const w = layout.previewW;
+      const h = layout.previewH;
+      roundRect(ctx, x, y, w, h, 10);
+      ctx.fillStyle = "rgba(8, 13, 24, 0.88)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(110, 231, 216, 0.28)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      const glow = ctx.createRadialGradient(x + w * 0.58, y + h * 0.46, 10, x + w * 0.58, y + h * 0.46, w * 0.58);
+      glow.addColorStop(0, "rgba(255, 209, 102, 0.16)");
+      glow.addColorStop(0.55, "rgba(114, 76, 190, 0.08)");
+      glow.addColorStop(1, "rgba(4, 5, 12, 0)");
+      ctx.fillStyle = glow;
+      ctx.fillRect(x, y, w, h);
+
+      ctx.fillStyle = "#f2f6ff";
+      fillTextFit("NIGHT TEST", x + 18, y + 28, w - 36, 17, "900", "left");
+      ctx.fillStyle = "#8fa2bd";
+      fillTextFit(`Wave ${state.wave}  Blocks ${aliveCells()}  Repair ${repairCost()}`, x + 18, y + 52, w - 36, 12, "750", "left");
+
+      ctx.save();
+      ctx.beginPath();
+      roundRect(ctx, x + 14, y + 70, w - 28, h - 88, 8);
+      ctx.clip();
+      ctx.fillStyle = "#0a1020";
+      ctx.fillRect(x + 14, y + 70, w - 28, h - 88);
+      ctx.strokeStyle = "rgba(255, 209, 102, 0.1)";
+      ctx.lineWidth = 1;
+      for (let tx = x + 20; tx < x + w; tx += 34) {
+        ctx.beginPath();
+        ctx.moveTo(tx, y + 74);
+        ctx.lineTo(tx - 24, y + h - 22);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = "rgba(180, 76, 255, 0.2)";
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 3; i += 1) {
+        const yy = y + 102 + i * 70 + Math.sin(state.nightPulse + i) * 5;
+        ctx.beginPath();
+        ctx.moveTo(x + 24, yy);
+        ctx.bezierCurveTo(x + w * 0.28, yy - 28, x + w * 0.6, yy + 26, x + w - 20, yy - 8);
+        ctx.stroke();
+      }
+
+      const cx = x + w * 0.46;
+      const cy = y + h * 0.58;
+      const beam = ctx.createRadialGradient(cx, cy, 4, cx, cy, w * 0.5);
+      beam.addColorStop(0, "rgba(255, 236, 169, 0.33)");
+      beam.addColorStop(0.48, "rgba(255, 209, 102, 0.15)");
+      beam.addColorStop(1, "rgba(255, 209, 102, 0)");
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(x + w - 32, y + h * 0.34);
+      ctx.lineTo(x + w - 42, y + h * 0.78);
+      ctx.closePath();
+      ctx.clip();
+      ctx.fillStyle = beam;
+      ctx.fillRect(x, y + 60, w, h - 70);
+      ctx.restore();
+
+      const cell = clamp(Math.min((w - 110) / GRID_W, (h - 150) / GRID_H), 13, 22);
+      const ox = cx - (GRID_W * cell) / 2;
+      const oy = cy - (GRID_H * cell) / 2;
+      for (const cellObj of state.cells) {
+        if (cellObj.dead) continue;
+        const cdef = defById(cellObj.type);
+        const sx = ox + cellObj.gx * cell;
+        const sy = oy + cellObj.gy * cell;
+        ctx.fillStyle = cellObj.infected ? "#9c4dcc" : cdef.color;
+        ctx.fillRect(sx, sy, cell - 2, cell - 2);
+        ctx.strokeStyle = "#060912";
+        ctx.strokeRect(sx + 0.5, sy + 0.5, cell - 2, cell - 2);
+      }
+      ctx.fillStyle = "#f3df8a";
+      ctx.fillRect(cx + 24, cy - 6, 16, 16);
+
+      const enemies = [
+        [x + w * 0.78, y + h * 0.38, "#ff5d73"],
+        [x + w * 0.73, y + h * 0.72, "#9c4dcc"],
+        [x + w * 0.28, y + h * 0.78, "#ff5d73"]
+      ];
+      for (const enemy of enemies) {
+        const [ex, ey, color] = enemy;
+        ctx.save();
+        ctx.translate(ex, ey);
+        ctx.rotate(Math.sin(state.nightPulse + ex) * 0.08);
+        roundRect(ctx, -15, -15, 30, 30, 4);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.strokeStyle = "rgba(255,255,255,0.22)";
+        ctx.stroke();
+        ctx.fillStyle = "#0a0d16";
+        ctx.fillRect(-6, -3, 4, 4);
+        ctx.fillRect(4, -3, 4, 4);
+        ctx.restore();
+      }
+      ctx.restore();
+    }
+
+    function drawForge() {
+      buttons = [];
+      zones = [];
+      const layout = getForgeLayout();
+      drawForgeBackdrop(layout);
+      drawHeader();
+      drawForgeGuide(layout);
+      drawForgePreview(layout);
+      const piece = selectedPiece();
+      const def = selectedDef();
+      const gridPad = 9;
+
+      ctx.fillStyle = "#101521";
+      roundRect(ctx, layout.gridX - gridPad, layout.gridY - gridPad, layout.gridW + gridPad * 2, layout.gridH + gridPad * 2, 8);
+      ctx.fill();
+      ctx.strokeStyle = "#253047";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      for (let y = 0; y < GRID_H; y += 1) {
+        for (let x = 0; x < GRID_W; x += 1) {
+          const sx = layout.gridX + x * layout.cell;
+          const sy = layout.gridY + y * layout.cell;
+          ctx.fillStyle = (x + y) % 2 ? "#151d2c" : "#111827";
+          ctx.fillRect(sx, sy, layout.cell - 2, layout.cell - 2);
+          ctx.strokeStyle = "#26324a";
+          ctx.strokeRect(sx + 0.5, sy + 0.5, layout.cell - 2, layout.cell - 2);
+        }
+      }
+
+      if (piece && !piece.placed) {
+        const ghost = pointer.hoverGrid || state.ghost;
+        const ok = canPlace(def, piece.rot, ghost.x, ghost.y);
+        ctx.globalAlpha = ok ? 0.54 : 0.28;
+        ctx.fillStyle = ok ? def.color : "#ff5d73";
+        for (const [cx, cy] of rotatedCells(def, piece.rot)) {
+          const gx = ghost.x + cx;
+          const gy = ghost.y + cy;
+          if (gx < 0 || gy < 0 || gx >= GRID_W || gy >= GRID_H) continue;
+          ctx.fillRect(layout.gridX + gx * layout.cell + 4, layout.gridY + gy * layout.cell + 4, layout.cell - 10, layout.cell - 10);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      for (const cell of state.cells) {
+        const cdef = defById(cell.type);
+        const sx = layout.gridX + cell.gx * layout.cell + 4;
+        const sy = layout.gridY + cell.gy * layout.cell + 4;
+        const size = layout.cell - 10;
+        ctx.fillStyle = cell.dead ? "#242a35" : cdef.color;
+        ctx.fillRect(sx, sy, size, size);
+        ctx.fillStyle = cell.dead ? "#151821" : cdef.dark;
+        ctx.fillRect(sx, sy + size * clamp(cell.hp / cell.maxHp, 0, 1), size, size * (1 - clamp(cell.hp / cell.maxHp, 0, 1)));
+        ctx.strokeStyle = cell.infected ? "#c66bff" : "#090d16";
+        ctx.lineWidth = cell.infected ? 3 : 2;
+        ctx.strokeRect(sx, sy, size, size);
+        ctx.fillStyle = cell.dead ? "#596171" : "#111827";
+        fillTextFit(cdef.short, sx + size / 2, sy + size / 2, size - 4, Math.max(10, size * 0.26), "900", "center");
+        if (cell.infected) {
+          ctx.strokeStyle = "#b44cff";
+          ctx.beginPath();
+          ctx.moveTo(sx + size * 0.18, sy + size * 0.25);
+          ctx.lineTo(sx + size * 0.56, sy + size * 0.48);
+          ctx.lineTo(sx + size * 0.38, sy + size * 0.78);
+          ctx.stroke();
+        }
+      }
+
+      const cols = view.narrow ? 2 : 1;
+      const cardW = view.narrow ? (layout.trayW - layout.gap) / 2 : layout.trayW;
+      for (let i = 0; i < state.pieces.length; i += 1) {
+        const pc = state.pieces[i];
+        const pdef = defById(pc.id);
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = layout.trayX + col * (cardW + layout.gap);
+        const y = layout.trayY + row * (layout.cardH + layout.gap);
+        zones.push({ kind: "piece", index: i, x, y, w: cardW, h: layout.cardH });
+        roundRect(ctx, x, y, cardW, layout.cardH, 8);
+        ctx.fillStyle = i === state.selected ? "#273247" : "#151c2a";
+        ctx.fill();
+        ctx.strokeStyle = pc.placed ? "#455066" : i === state.selected ? "#ffd166" : "#31405d";
+        ctx.lineWidth = i === state.selected ? 3 : 2;
+        ctx.stroke();
+        ctx.fillStyle = pc.placed ? "#6f7888" : pdef.color;
+        ctx.fillRect(x + 12, y + 13, 24, 24);
+        ctx.fillStyle = "#f2f6ff";
+        fillTextFit(pc.placed ? `${pdef.name} placed` : pdef.name, x + 48, y + layout.cardH / 2 - 8, cardW - 58, 15, "850", "left");
+        ctx.fillStyle = "#96a6be";
+        fillTextFit(pc.placed ? "locked" : "tap grid or Space", x + 48, y + layout.cardH / 2 + 12, cardW - 58, 11, "700", "left");
+      }
+
+      const panelTop = view.narrow
+        ? layout.trayY + Math.ceil(state.pieces.length / cols) * (layout.cardH + layout.gap) + 8
+        : layout.gridY + layout.gridH + 24;
+      const buttonH = layout.buttonH;
+      const gap = layout.gap;
+      const bw = view.narrow ? (view.w - 46) / 2 : 142;
+      const bx = view.narrow ? 18 : layout.gridX;
+      const row = (n) => by + n * (buttonH + gap);
+      const by = view.narrow
+        ? Math.min(view.h - buttonH * 4 - gap * 3 - 72, panelTop)
+        : Math.min(view.h - buttonH * 4 - gap * 3 - 72, panelTop);
+      addButton("PLACE", bx, by, bw, buttonH, autoPlaceSelected, !!piece && !piece.placed);
+      addButton("ROTATE", bx + bw + gap, by, bw, buttonH, rotateSelected, !!piece && !piece.placed);
+      const rCost = repairCost();
+      addButton(rCost ? `REPAIR ${rCost}` : "REPAIR", bx, row(1), bw, buttonH, repairAll, rCost > 0 && state.scrap >= rCost);
+      addButton(`LAMP ${lampCost()}`, bx + bw + gap, row(1), bw, buttonH, upgradeLamp, state.scrap >= lampCost());
+      addButton(`CANNON ${cannonCost()}`, bx, row(2), bw, buttonH, upgradeCannon, state.scrap >= cannonCost());
+      addButton(`ENGINE ${engineCost()}`, bx + bw + gap, row(2), bw, buttonH, upgradeEngine, state.scrap >= engineCost());
+      addButton(`HULL ${hullCost()}`, bx, row(3), bw, buttonH, hardenHull, state.scrap >= hullCost());
+      addButton(`PART ${partCost()}`, bx + bw + gap, row(3), bw, buttonH, buyExtraPart, state.scrap >= partCost() && state.pieces.length < 10);
+
+      const startW = view.narrow ? view.w - 36 : 210;
+      const startX = view.narrow ? 18 : layout.trayX;
+      const startH = layout.compact ? 44 : 50;
+      const startY = view.narrow ? Math.min(view.h - layout.safe.bottom - (layout.compact ? 52 : 62), row(4) + 68) : by + buttonH + gap;
+      addButton("START WAVE", startX, startY, startW, startH, startWave, placedCount() >= 3 && aliveCells("cannon") > 0);
+
+      ctx.fillStyle = "#c7d2e6";
+      if (layout.compact) {
+        fillTextFit(state.status, view.w / 2, startY - 16, view.w - 32, 11, "750", "center");
+      } else {
+        const statusY = view.narrow
+          ? Math.min(row(4) + 16, startY - 38)
+          : Math.min(view.h - 48, layout.trayY + Math.ceil(state.pieces.length / cols) * (layout.cardH + layout.gap) + 26);
+        fillTextFit(`Upgrades L${state.lampLevel} C${state.cannonLevel} E${state.engineLevel} H${state.hullLevel}`, view.narrow ? view.w / 2 : layout.trayX, statusY, view.narrow ? view.w - 32 : layout.trayW, 12, "800", view.narrow ? "center" : "left");
+        fillTextFit(state.status, view.narrow ? view.w / 2 : layout.trayX, statusY + 18, view.narrow ? view.w - 32 : layout.trayW, 13, "700", view.narrow ? "center" : "left");
+      }
+
+      drawParticles();
+    }
+
+    function drawArenaEnvironment(arena) {
+      ctx.fillStyle = "#070812";
+      ctx.fillRect(0, 0, view.w, view.h);
+
+      const glow = ctx.createRadialGradient(view.w * 0.5, arena.y - 20, 20, view.w * 0.5, arena.y, Math.max(view.w, view.h) * 0.62);
+      glow.addColorStop(0, "rgba(110, 231, 216, 0.1)");
+      glow.addColorStop(0.5, "rgba(74, 48, 122, 0.08)");
+      glow.addColorStop(1, "rgba(4, 5, 12, 0)");
+      ctx.fillStyle = glow;
+      ctx.fillRect(0, 0, view.w, view.h);
+
+      roundRect(ctx, arena.x, arena.y, arena.w, arena.h, 8);
+      ctx.fillStyle = "#0b1120";
+      ctx.fill();
+      ctx.strokeStyle = "#2b3754";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      const tile = view.narrow ? 32 : 38;
+      for (let y = arena.y; y < arena.y + arena.h; y += tile) {
+        for (let x = arena.x; x < arena.x + arena.w; x += tile) {
+          const odd = (Math.floor(x / tile) + Math.floor(y / tile)) % 2;
+          ctx.fillStyle = odd ? "#10172a" : "#0d1423";
+          ctx.fillRect(x, y, tile - 2, tile - 2);
+        }
+      }
+
+      ctx.strokeStyle = "rgba(255, 209, 102, 0.12)";
+      ctx.lineWidth = 2;
+      for (let x = arena.x + 24; x < arena.x + arena.w; x += 84) {
+        ctx.beginPath();
+        ctx.moveTo(x, arena.y + 8);
+        ctx.lineTo(x - 30, arena.y + arena.h - 8);
+        ctx.stroke();
+      }
+
+      for (let i = 0; i < 7; i += 1) {
+        const px = arena.x + 30 + ((i * 97 + state.wave * 23) % Math.max(60, arena.w - 60));
+        const py = arena.y + 46 + ((i * 61 + state.wave * 17) % Math.max(80, arena.h - 90));
+        ctx.fillStyle = i % 2 ? "rgba(156, 77, 204, 0.16)" : "rgba(110, 231, 216, 0.09)";
+        roundRect(ctx, px, py, 18 + (i % 3) * 7, 8 + (i % 2) * 7, 3);
+        ctx.fill();
+      }
+
+      ctx.strokeStyle = "rgba(180, 76, 255, 0.18)";
+      ctx.lineWidth = 2;
+      for (let i = 0; i < 5; i += 1) {
+        const y = arena.y + 35 + i * (arena.h / 5) + Math.sin(state.nightPulse * 0.8 + i) * 8;
+        ctx.beginPath();
+        ctx.moveTo(arena.x + 14, y);
+        ctx.bezierCurveTo(arena.x + arena.w * 0.25, y - 25, arena.x + arena.w * 0.58, y + 24, arena.x + arena.w - 12, y - 8);
+        ctx.stroke();
+      }
+    }
+
+    function drawLightCone(light) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.moveTo(state.player.x, state.player.y);
+      ctx.arc(state.player.x, state.player.y, light.range, state.player.aim - light.width, state.player.aim + light.width);
+      ctx.closePath();
+      ctx.clip();
+      const beam = ctx.createRadialGradient(state.player.x, state.player.y, 8, state.player.x, state.player.y, light.range);
+      beam.addColorStop(0, "rgba(255, 235, 168, 0.36)");
+      beam.addColorStop(0.42, "rgba(255, 209, 102, 0.18)");
+      beam.addColorStop(1, "rgba(255, 209, 102, 0)");
+      ctx.fillStyle = beam;
+      ctx.fillRect(state.player.x - light.range, state.player.y - light.range, light.range * 2, light.range * 2);
+      ctx.strokeStyle = "rgba(255, 238, 190, 0.28)";
+      ctx.lineWidth = 2;
+      for (let r = 52; r < light.range; r += 58) {
+        ctx.beginPath();
+        ctx.arc(state.player.x, state.player.y, r, state.player.aim - light.width, state.player.aim + light.width);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      ctx.strokeStyle = "rgba(255, 232, 166, 0.48)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(state.player.x, state.player.y);
+      ctx.lineTo(state.player.x + Math.cos(state.player.aim - light.width) * light.range, state.player.y + Math.sin(state.player.aim - light.width) * light.range);
+      ctx.moveTo(state.player.x, state.player.y);
+      ctx.lineTo(state.player.x + Math.cos(state.player.aim + light.width) * light.range, state.player.y + Math.sin(state.player.aim + light.width) * light.range);
+      ctx.stroke();
+    }
+
+    function drawBattle() {
+      buttons = [];
+      zones = [];
+      const arena = getArena();
+      drawArenaEnvironment(arena);
+      const light = getLightStats();
+      drawLightCone(light);
+
+      for (const enemy of state.enemies) {
+        drawEnemy(enemy);
+      }
+      for (const bullet of state.bullets) {
+        ctx.fillStyle = "#ffd166";
+        ctx.fillRect(bullet.x - 3, bullet.y - 3, 6, 6);
+      }
+      drawTank();
+      drawParticles();
+      drawFog(arena);
+      drawHeader();
+
+      const bottomY = view.narrow ? view.h - 82 : view.h - 52;
+      ctx.fillStyle = "#c8d3e5";
+      fillTextFit(state.status, 18, bottomY, view.w - 36, 13, "700", "left");
+      if (state.flareCooldown <= 0) {
+        addButton("FLARE", view.w - 106, view.h - 58, 88, 42, useFlare, true);
+      } else {
+        addButton(`FLARE ${Math.ceil(state.flareCooldown)}`, view.w - 120, view.h - 58, 102, 42, useFlare, false);
+      }
+    }
+
+    function drawEnemy(enemy) {
+      const lit = isLit(enemy.x, enemy.y);
+      const jitter = Math.sin(enemy.phase) * 2;
+      ctx.save();
+      ctx.translate(enemy.x, enemy.y);
+      ctx.fillStyle = lit ? "rgba(0, 0, 0, 0.28)" : "rgba(0, 0, 0, 0.42)";
+      ctx.beginPath();
+      ctx.ellipse(0, enemy.r + 6, enemy.r * 1.15, enemy.r * 0.35, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.rotate(Math.sin(enemy.phase * 0.7) * 0.08);
+      ctx.fillStyle = lit ? (enemy.infect ? "#a85cff" : "#d74763") : "#17101f";
+      ctx.fillRect(-enemy.r, -enemy.r + jitter, enemy.r * 2, enemy.r * 2);
+      ctx.fillStyle = lit ? "rgba(255, 255, 255, 0.14)" : "rgba(156, 77, 204, 0.1)";
+      ctx.fillRect(-enemy.r + 3, -enemy.r + 3 + jitter, enemy.r * 2 - 6, 5);
+      ctx.fillStyle = lit ? "#ff9fb0" : "#512a65";
+      ctx.fillRect(-enemy.r * 0.55, -enemy.r * 0.25 + jitter, enemy.r * 0.38, enemy.r * 0.28);
+      ctx.fillRect(enemy.r * 0.18, -enemy.r * 0.25 + jitter, enemy.r * 0.38, enemy.r * 0.28);
+      ctx.strokeStyle = lit ? "#ffd1dc" : "#6a3b82";
+      ctx.lineWidth = lit ? 2 : 1;
+      ctx.strokeRect(-enemy.r, -enemy.r + jitter, enemy.r * 2, enemy.r * 2);
+      const hpW = enemy.r * 2;
+      ctx.fillStyle = "#351722";
+      ctx.fillRect(-enemy.r, enemy.r + 5, hpW, 4);
+      ctx.fillStyle = "#ff6978";
+      ctx.fillRect(-enemy.r, enemy.r + 5, hpW * clamp(enemy.hp / enemy.maxHp, 0, 1), 4);
+      ctx.restore();
+    }
+
+    function drawTank() {
+      const unit = view.narrow ? 13 : 15;
+      ctx.save();
+      ctx.translate(state.player.x, state.player.y);
+      ctx.fillStyle = "rgba(0, 0, 0, 0.34)";
+      ctx.beginPath();
+      ctx.ellipse(0, 14, GRID_W * unit * 0.46, GRID_H * unit * 0.34, 0, 0, Math.PI * 2);
+      ctx.fill();
+      if (state.player.hitFlash > 0) {
+        ctx.globalAlpha = 0.78 + Math.sin(state.player.hitFlash * 80) * 0.2;
+      }
+      for (const cell of state.cells) {
+        const cdef = defById(cell.type);
+        const x = (cell.gx - (GRID_W - 1) / 2) * unit;
+        const y = (cell.gy - (GRID_H - 1) / 2) * unit;
+        if (cell.dead) {
+          ctx.fillStyle = "#151922";
+          ctx.fillRect(x - unit / 2, y - unit / 2, unit - 2, unit - 2);
+          continue;
+        }
+        ctx.fillStyle = cdef.color;
+        ctx.fillRect(x - unit / 2, y - unit / 2, unit - 2, unit - 2);
+        const hurt = 1 - clamp(cell.hp / cell.maxHp, 0, 1);
+        if (hurt > 0) {
+          ctx.fillStyle = `rgba(13, 18, 28, ${0.25 + hurt * 0.5})`;
+          ctx.fillRect(x - unit / 2, y - unit / 2, unit - 2, unit - 2);
+        }
+        ctx.strokeStyle = cell.infected ? "#c66bff" : "#060913";
+        ctx.lineWidth = cell.infected ? 2 : 1;
+        ctx.strokeRect(x - unit / 2, y - unit / 2, unit - 2, unit - 2);
+      }
+      ctx.strokeStyle = "#ffe9a5";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(state.player.aim) * 34, Math.sin(state.player.aim) * 34);
+      ctx.stroke();
+      ctx.fillStyle = "#ffdf78";
+      ctx.fillRect(Math.cos(state.player.aim) * 30 - 4, Math.sin(state.player.aim) * 30 - 4, 8, 8);
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawFog(arena) {
+      const grd = ctx.createRadialGradient(state.player.x, state.player.y, 80, state.player.x, state.player.y, Math.max(view.w, view.h) * 0.75);
+      grd.addColorStop(0, "rgba(5, 7, 13, 0)");
+      grd.addColorStop(0.55, `rgba(8, 6, 18, ${0.18 + state.dread / 420})`);
+      grd.addColorStop(1, `rgba(3, 2, 8, ${0.62 + state.dread / 360})`);
+      ctx.fillStyle = grd;
+      ctx.fillRect(arena.x, arena.y, arena.w, arena.h);
+      ctx.strokeStyle = state.dread > 76 ? "rgba(218, 74, 117, 0.55)" : "rgba(117, 85, 184, 0.35)";
+      ctx.lineWidth = 4;
+      ctx.strokeRect(arena.x + 2, arena.y + 2, arena.w - 4, arena.h - 4);
+    }
+
+    function drawOutcomeMetric(label, value, x, y, w, h, accent) {
+      roundRect(ctx, x, y, w, h, 8);
+      ctx.fillStyle = "#171f30";
+      ctx.fill();
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = "#91a2b8";
+      fillTextFit(label, x + w / 2, y + h * 0.34, w - 12, 10, "850", "center");
+      ctx.fillStyle = "#f5f8ff";
+      fillTextFit(String(value), x + w / 2, y + h * 0.68, w - 12, 18, "950", "center");
+    }
+
+    function drawOutcome() {
+      buttons = [];
+      zones = [];
+      drawBattleBackdropForOutcome();
+      ctx.fillStyle = "rgba(4, 6, 12, 0.72)";
+      ctx.fillRect(0, 0, view.w, view.h);
+      addButton(state.muted ? "SOUND" : "MUTE", view.w - (view.narrow ? 90 : 108), 16, view.narrow ? 72 : 88, 36, toggleMute, true);
+      const w = Math.min(480, view.w - 36);
+      const h = Math.min(430, view.h - 54);
+      const x = (view.w - w) / 2;
+      const y = (view.h - h) / 2;
+      roundRect(ctx, x, y, w, h, 8);
+      ctx.fillStyle = "#111827";
+      ctx.fill();
+      ctx.strokeStyle = state.result === "victory" ? "#6ee7d8" : "#e95b7c";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = "#f4f7ff";
+      fillTextFit(state.result === "victory" ? "WAVE CLEARED" : "TANK BROKEN", x + w / 2, y + 44, w - 40, 26, "950", "center");
+      ctx.fillStyle = "#b8c5db";
+      fillTextFit(state.status, x + w / 2, y + 86, w - 42, 14, "700", "center");
+      ctx.fillStyle = "#dfe8ff";
+      fillTextFit(`Scrap ${state.scrap}   Dread ${Math.round(state.dread)}   Best ${state.bestWave}`, x + w / 2, y + 122, w - 42, 15, "800", "center");
+      ctx.fillStyle = "#97a8bf";
+      fillTextFit(`Forge levels: Lamp ${state.lampLevel}  Cannon ${state.cannonLevel}  Engine ${state.engineLevel}  Hull ${state.hullLevel}`, x + w / 2, y + 148, w - 42, 12, "750", "center");
+
+      const metricGap = 8;
+      const metricW = (w - 36 - metricGap * 2) / 3;
+      const metricY = y + 166;
+      drawOutcomeMetric("KILLS", state.runKills, x + 18, metricY, metricW, 48, "#e95b7c");
+      drawOutcomeMetric("SCRAP", `+${state.runScrap}`, x + 18 + metricW + metricGap, metricY, metricW, 48, "#ffd166");
+      drawOutcomeMetric("REPAIR", repairCost(), x + 18 + (metricW + metricGap) * 2, metricY, metricW, 48, "#9c6bff");
+
+      const rCost = repairCost();
+      const bw = Math.min(190, (w - 54) / 2);
+      const shopY = y + h - 206;
+      addButton(rCost ? `REPAIR ${rCost}` : "REPAIR", x + 18, shopY, bw, 42, repairAll, rCost > 0 && state.scrap >= rCost);
+      addButton(`LAMP ${lampCost()}`, x + w - 18 - bw, shopY, bw, 42, upgradeLamp, state.scrap >= lampCost());
+      addButton(`CANNON ${cannonCost()}`, x + 18, shopY + 50, bw, 42, upgradeCannon, state.scrap >= cannonCost());
+      addButton(`ENGINE ${engineCost()}`, x + w - 18 - bw, shopY + 50, bw, 42, upgradeEngine, state.scrap >= engineCost());
+      addButton(`HULL ${hullCost()}`, x + 18, shopY + 100, bw, 42, hardenHull, state.scrap >= hullCost());
+      addButton(`PART ${partCost()}`, x + w - 18 - bw, shopY + 100, bw, 42, buyExtraPart, state.scrap >= partCost() && state.pieces.length < 10);
+      addButton("BACK TO FORGE", x + 18, y + h - 58, w - 36, 46, continueToForge, true);
+    }
+
+    function drawBattleBackdropForOutcome() {
+      const arena = getArena();
+      drawArenaEnvironment(arena);
+      drawLightCone(getLightStats());
+      drawTank();
+      drawFog(arena);
+    }
+
+    function drawParticles() {
+      for (const p of state.particles) {
+        const a = clamp(p.life / p.maxLife, 0, 1);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function render() {
+      ctx.setTransform(view.px, 0, 0, view.py, 0, 0);
+      ctx.imageSmoothingEnabled = false;
+      if (state.mode === "forge") drawForge();
+      else if (state.mode === "battle") drawBattle();
+      else drawOutcome();
+    }
+
+    function textSummary() {
+      if (state.mode === "forge") {
+        return `Forge mode. Wave ${state.wave}. Scrap ${state.scrap}. Placed ${placedCount()} blocks. ${damagedCells()} damaged or infected cells. ${state.status}`;
+      }
+      if (state.mode === "battle") {
+        return `Battle mode. Wave ${state.wave}. Enemies ${state.enemies.length}. Dread ${Math.round(state.dread)}. Alive tank cells ${aliveCells()}. Scrap ${state.scrap}. ${state.status}`;
+      }
+      return `Outcome ${state.result}. Wave ${state.wave}. Scrap ${state.scrap}. Repair cost ${repairCost()}. ${state.status}`;
+    }
+
+    function renderGameToText() {
+      const visibleEnemies = state.enemies.slice(0, 8).map((enemy) => ({
+        x: Math.round(enemy.x),
+        y: Math.round(enemy.y),
+        hp: Math.round(enemy.hp * 10) / 10,
+        lit: isLit(enemy.x, enemy.y),
+        infects: !!enemy.infect
+      }));
+      const payload = {
+        coordinateSystem: "CSS pixels, origin top-left, x right, y down",
+        mode: state.mode,
+        wave: state.wave,
+        scrap: state.scrap,
+        dread: Math.round(state.dread),
+        status: state.status,
+        audioMuted: state.muted,
+        placedBlocks: placedCount(),
+        selectedBlock: selectedPiece() ? selectedPiece().id : null,
+        repairCost: repairCost(),
+        lampUpgradeCost: lampCost(),
+        cannonUpgradeCost: cannonCost(),
+        engineUpgradeCost: engineCost(),
+        hullUpgradeCost: hullCost(),
+        partCost: partCost(),
+        upgrades: {
+          lamp: state.lampLevel,
+          cannon: state.cannonLevel,
+          engine: state.engineLevel,
+          hull: state.hullLevel
+        },
+        run: {
+          kills: state.runKills,
+          scrapGained: state.runScrap,
+          damageEvents: state.runDamage
+        },
+        player: {
+          x: Math.round(state.player.x),
+          y: Math.round(state.player.y),
+          aimRadians: Math.round(state.player.aim * 100) / 100,
+          aliveCells: aliveCells(),
+          cannonCells: aliveCells("cannon"),
+          engineCells: aliveCells("engine"),
+          lampCells: aliveCells("lamp"),
+          infectedCells: infectedCells()
+        },
+        enemies: visibleEnemies,
+        bullets: state.bullets.length,
+        buttons: buttons.filter((b) => b.active).map((b) => b.label)
+      };
+      return JSON.stringify(payload);
+    }
+
+    function pointerPos(evt) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (evt.clientX - rect.left) * (view.w / Math.max(1, rect.width)),
+        y: (evt.clientY - rect.top) * (view.h / Math.max(1, rect.height))
+      };
+    }
+
+    function updateForgeHover() {
+      const layout = getForgeLayout();
+      const gx = Math.floor((pointer.x - layout.gridX) / layout.cell);
+      const gy = Math.floor((pointer.y - layout.gridY) / layout.cell);
+      if (gx >= 0 && gy >= 0 && gx < GRID_W && gy < GRID_H) {
+        pointer.hoverGrid = { x: gx, y: gy };
+      } else {
+        pointer.hoverGrid = null;
+      }
+    }
+
+    function handleZone(x, y) {
+      for (let i = zones.length - 1; i >= 0; i -= 1) {
+        const z = zones[i];
+        if (x >= z.x && x <= z.x + z.w && y >= z.y && y <= z.y + z.h) {
+          if (z.kind === "piece") {
+            state.selected = z.index;
+            const piece = selectedPiece();
+            if (piece && !piece.placed) state.ghost = findFit(piece);
+            state.status = `${defById(state.pieces[z.index].id).name} selected.`;
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    function handlePointerDown(evt) {
+      evt.preventDefault();
+      canvas.focus();
+      ensureAudio();
+      const p = pointerPos(evt);
+      pointer.id = evt.pointerId;
+      pointer.down = true;
+      pointer.x = p.x;
+      pointer.y = p.y;
+      pointer.moved = true;
+      if (canvas.setPointerCapture) canvas.setPointerCapture(evt.pointerId);
+      if (hitButton(pointer.x, pointer.y)) return;
+      if (state.mode === "forge") {
+        updateForgeHover();
+        if (handleZone(pointer.x, pointer.y)) return;
+        if (pointer.hoverGrid) {
+          placeSelectedAt(pointer.hoverGrid.x, pointer.hoverGrid.y);
+        }
+      }
+    }
+
+    function handlePointerMove(evt) {
+      evt.preventDefault();
+      if (pointer.id !== null && evt.pointerId !== pointer.id && pointer.down) return;
+      const p = pointerPos(evt);
+      pointer.x = p.x;
+      pointer.y = p.y;
+      pointer.moved = true;
+      if (state.mode === "forge") updateForgeHover();
+    }
+
+    function handlePointerUp(evt) {
+      evt.preventDefault();
+      if (pointer.id !== null && evt.pointerId !== pointer.id) return;
+      pointer.down = false;
+      pointer.id = null;
+      if (canvas.releasePointerCapture) {
+        try {
+          canvas.releasePointerCapture(evt.pointerId);
+        } catch (_) {}
+      }
+    }
+
+    function adjustGhost(dx, dy) {
+      const piece = selectedPiece();
+      if (!piece || piece.placed) return;
+      state.ghost.x = clamp(state.ghost.x + dx, 0, GRID_W - 1);
+      state.ghost.y = clamp(state.ghost.y + dy, 0, GRID_H - 1);
+      pointer.hoverGrid = null;
+    }
+
+    function toggleFullscreen() {
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else if (shell.requestFullscreen) {
+        shell.requestFullscreen();
+      }
+    }
+
+    function handleKeyDown(evt) {
+      ensureAudio();
+      keys[evt.code] = true;
+      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space"].includes(evt.code)) {
+        evt.preventDefault();
+      }
+      if (evt.code === "KeyM") {
+        toggleMute();
+      }
+      if (evt.code === "KeyF") {
+        toggleFullscreen();
+      }
+      if (state.mode === "forge") {
+        if (evt.code === "Digit1") state.selected = 0;
+        if (evt.code === "Digit2") state.selected = 1;
+        if (evt.code === "Digit3") state.selected = 2;
+        if (evt.code === "Digit4") state.selected = 3;
+        if (evt.code === "KeyR") rotateSelected();
+        if (evt.code === "ArrowLeft") adjustGhost(-1, 0);
+        if (evt.code === "ArrowRight") adjustGhost(1, 0);
+        if (evt.code === "ArrowUp") adjustGhost(0, -1);
+        if (evt.code === "ArrowDown") adjustGhost(0, 1);
+        if (evt.code === "Space") {
+          if (!autoPlaceSelected() && placedCount() >= 3) startWave();
+        }
+        if (evt.code === "Enter") startWave();
+      } else if (state.mode === "battle") {
+        if (evt.code === "Space") useFlare();
+      } else if (state.mode === "outcome") {
+        if (evt.code === "Enter" || evt.code === "Space") continueToForge();
+      }
+    }
+
+    function handleKeyUp(evt) {
+      keys[evt.code] = false;
+    }
+
+    function resizeFromEntry(entry) {
+      const rect = entry && entry.contentRect ? entry.contentRect : shell.getBoundingClientRect();
+      const cssW = Math.max(1, Math.round(rect.width));
+      const cssH = Math.max(1, Math.round(rect.height));
+      const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+      let pixelW = Math.round(cssW * dpr);
+      let pixelH = Math.round(cssH * dpr);
+      if (entry && entry.devicePixelContentBoxSize && entry.devicePixelContentBoxSize.length) {
+        pixelW = entry.devicePixelContentBoxSize[0].inlineSize;
+        pixelH = entry.devicePixelContentBoxSize[0].blockSize;
+      }
+      if (canvas.width !== pixelW || canvas.height !== pixelH) {
+        canvas.width = pixelW;
+        canvas.height = pixelH;
+      }
+      view.w = cssW;
+      view.h = cssH;
+      view.px = pixelW / cssW;
+      view.py = pixelH / cssH;
+      view.scale = Math.min(cssW / 800, cssH / 600);
+      if (state.mode === "forge") chooseNextUnplaced();
+      render();
+    }
+
+    function tick(now) {
+      if (!lastTime) lastTime = now;
+      const dt = (now - lastTime) / 1000;
+      lastTime = now;
+      update(dt);
+      render();
+      requestAnimationFrame(tick);
+    }
+
+    canvas.addEventListener("pointerdown", handlePointerDown, { passive: false });
+    canvas.addEventListener("pointermove", handlePointerMove, { passive: false });
+    canvas.addEventListener("pointerup", handlePointerUp, { passive: false });
+    canvas.addEventListener("pointercancel", handlePointerUp, { passive: false });
+    canvas.addEventListener("contextmenu", (evt) => evt.preventDefault());
+    window.addEventListener("keydown", handleKeyDown, { passive: false });
+    window.addEventListener("keyup", handleKeyUp);
+    document.addEventListener("visibilitychange", () => {
+      lastTime = performance.now();
+    });
+    document.addEventListener("fullscreenchange", () => {
+      setTimeout(() => resizeFromEntry(null), 80);
+    });
+
+    const observer = new ResizeObserver((entries) => {
+      resizeFromEntry(entries[0]);
+    });
+    const canUseDevicePixelBox = typeof ResizeObserverEntry !== "undefined" &&
+      "devicePixelContentBoxSize" in ResizeObserverEntry.prototype;
+    if (canUseDevicePixelBox) {
+      observer.observe(shell, { box: "device-pixel-content-box" });
+    } else {
+      observer.observe(shell);
+    }
+    window.addEventListener("resize", () => resizeFromEntry(null));
+    window.addEventListener("orientationchange", () => resizeFromEntry(null));
+
+    seedStarterTank();
+    chooseNextUnplaced();
+    if (window.__GF_AUTOSTART && !window._silent) {
+      state.status = "Starter hull is built. Add the lamp, then start the first wave.";
+    }
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = (ms) => {
+      const steps = Math.max(1, Math.ceil(ms / (1000 / 60)));
+      const dt = ms / steps / 1000;
+      for (let i = 0; i < steps; i += 1) {
+        update(dt);
+      }
+      render();
+    };
+    window.__gfReach = () => ({
+      screen: state.mode,
+      viewportW: view.w,
+      viewportH: view.h,
+      screenH: view.h,
+      scrollMaxY: 0,
+      items: buttons.map((button, index) => ({
+        id: `${state.mode}_${index}_${button.label.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`,
+        x: button.x,
+        y: button.y,
+        w: button.w,
+        h: button.h,
+        active: button.active !== false,
+        pinned: true
+      }))
+    });
+    platformInit.then(() => notifyLoadingReady()).catch(() => {});
+    requestAnimationFrame(tick);
+  })();
+  </script>
+</body>
+</html>

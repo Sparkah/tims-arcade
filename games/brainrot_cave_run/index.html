@@ -1,0 +1,1111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Brainrot Cave Run</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f7f2dc;
+      --focus: #ffe66f;
+      --bg: #10121f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      height: 100dvh;
+      margin: 0;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    main {
+      position: fixed;
+      inset: 0;
+      overflow: hidden;
+      background: #11131e;
+      touch-action: none;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      outline: none;
+      image-rendering: auto;
+    }
+
+    canvas:focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: -6px;
+    }
+
+    .visually-hidden:where(:not(:focus-within, :active)) {
+      position: absolute !important;
+      clip-path: inset(50%) !important;
+      overflow: hidden !important;
+      width: 1px !important;
+      height: 1px !important;
+      margin: -1px !important;
+      padding: 0 !important;
+      border: 0 !important;
+      white-space: nowrap !important;
+    }
+  </style>
+</head>
+<body>
+  <main id="gameRoot" tabindex="-1" aria-labelledby="gameTitle" aria-describedby="gameHelp">
+    <h1 id="gameTitle" class="visually-hidden">Brainrot Cave Run prototype</h1>
+    <p id="gameHelp" class="visually-hidden">
+      Move the blocky hero through the cave, rescue original mascots, smash luck cubes,
+      and return to base before the pressure wave reaches the player.
+    </p>
+    <canvas id="game" tabindex="0" aria-label="Brainrot Cave Run canvas game">
+      This game needs canvas support. Use a current browser to play.
+    </canvas>
+    <div id="srStatus" class="visually-hidden" aria-live="polite"></div>
+  </main>
+
+  <script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const srStatus = document.getElementById('srStatus');
+
+  const BASE_Y = 0;
+  const MAX_DEPTH = 62;
+  const STEP = 1 / 60;
+  const TAU = Math.PI * 2;
+  const COLORS = {
+    cream: '#fff1c2',
+    ink: '#f8f0d4',
+    caveBack: '#12152a',
+    caveDeep: '#0b1021',
+    pathTop: '#3d3446',
+    pathLeft: '#2c2637',
+    pathRight: '#514056',
+    base: '#64f0b6',
+    baseDark: '#1d987d',
+    warning: '#ff5d78',
+    waveA: '#59e4ff',
+    waveB: '#d866ff',
+    gold: '#ffca4d',
+    goldSide: '#d67a25',
+    stone: '#776d83',
+    stoneDark: '#474154',
+    panel: 'rgba(13, 17, 31, 0.76)'
+  };
+
+  const MASCOTS = [
+    { name: 'Bloopi Bango', top: '#7df4ff', side: '#1494c3', accent: '#ffef63', value: 55, face: 0 },
+    { name: 'Noodlo Nibbi', top: '#ffd36d', side: '#d75e57', accent: '#7cf07e', value: 65, face: 1 },
+    { name: 'Grumplet Zaza', top: '#b7ff7b', side: '#3caa5f', accent: '#ff75cf', value: 80, face: 2 },
+    { name: 'Wobbo Crankini', top: '#b58cff', side: '#7154c9', accent: '#5af0ff', value: 95, face: 3 },
+    { name: 'Fizzle Plonk', top: '#ff89a3', side: '#c74177', accent: '#fff36b', value: 120, face: 0 },
+    { name: 'Mondo Blippo', top: '#79ffa9', side: '#188d75', accent: '#ffa64d', value: 145, face: 1 },
+    { name: 'Squibby Lumo', top: '#8fd2ff', side: '#3b62c5', accent: '#ffec8a', value: 170, face: 2 },
+    { name: 'Plinko Droob', top: '#f7a6ff', side: '#9a42a6', accent: '#7effd7', value: 210, face: 3 }
+  ];
+
+  let W = 1;
+  let H = 1;
+  let DPR = 1;
+  let scale = 1;
+  let tileX = 40;
+  let tileY = 17;
+  let lastFrame = 0;
+  let lastSrUpdate = 0;
+  let rafId = 0;
+  let seed = 2;
+  const keys = Object.create(null);
+  const buttons = [];
+  const pointer = {
+    active: false,
+    id: null,
+    x: 0,
+    y: 0,
+    startedOnUi: false
+  };
+
+  const state = {
+    mode: 'play',
+    run: 1,
+    coins: 0,
+    score: 0,
+    bestDepth: 0,
+    upgrades: { boots: 0, pack: 0 },
+    hero: { x: 0, y: 1.1, vx: 0, vy: 0, swing: 0, facing: 1 },
+    time: 0,
+    waveY: 72,
+    waveSpeed: 3.7,
+    actionCooldown: 0,
+    hintTimer: 6,
+    carriedLoot: 0,
+    carriedMascots: [],
+    blocks: [],
+    mascots: [],
+    particles: [],
+    floats: [],
+    end: null,
+    cameraY: 0
+  };
+
+  function rand() {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  }
+
+  function clamp(v, min, max) {
+    return v < min ? min : v > max ? max : v;
+  }
+
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+
+  function dist(ax, ay, bx, by) {
+    const dx = ax - bx;
+    const dy = ay - by;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function roundRect(x, y, w, h, r) {
+    const rr = Math.min(r, w * 0.5, h * 0.5);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h - rr);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+    ctx.lineTo(x + rr, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+  }
+
+  function capacity() {
+    return 6 + state.upgrades.pack * 2;
+  }
+
+  function carriedSlots() {
+    return state.carriedLoot + state.carriedMascots.length;
+  }
+
+  function project(x, y, z = 0) {
+    return {
+      x: W * 0.5 + x * tileX,
+      y: H * 0.72 - (y - state.cameraY) * tileY - z * tileY
+    };
+  }
+
+  function addParticle(x, y, color, amount, lift = 1) {
+    for (let i = 0; i < amount; i++) {
+      const a = rand() * TAU;
+      const speed = (0.7 + rand() * 2.2) * scale;
+      state.particles.push({
+        x,
+        y,
+        vx: Math.cos(a) * speed,
+        vy: Math.sin(a) * speed - lift * scale,
+        size: (2 + rand() * 5) * scale,
+        color,
+        life: 0.65 + rand() * 0.45
+      });
+    }
+  }
+
+  function addFloat(worldX, worldY, text, color) {
+    const p = project(worldX, worldY, 1.2);
+    state.floats.push({
+      x: p.x,
+      y: p.y,
+      text,
+      color,
+      life: 1.1,
+      vy: -22 * scale
+    });
+  }
+
+  function resizeCanvas(entry) {
+    const rect = canvas.getBoundingClientRect();
+    const cssW = Math.max(1, entry ? entry.contentRect.width : rect.width);
+    const cssH = Math.max(1, entry ? entry.contentRect.height : rect.height);
+    const dpc = entry && entry.devicePixelContentBoxSize ? entry.devicePixelContentBoxSize[0] : null;
+    const nextDpr = dpc ? Math.max(1, dpc.inlineSize / cssW) : Math.min(2, window.devicePixelRatio || 1);
+    const pixelW = dpc ? dpc.inlineSize : Math.round(cssW * nextDpr);
+    const pixelH = dpc ? dpc.blockSize : Math.round(cssH * nextDpr);
+
+    W = cssW;
+    H = cssH;
+    DPR = nextDpr;
+    scale = clamp(Math.min(W / 560, H / 760), 0.68, 1.24);
+    tileX = 43 * scale;
+    tileY = 18 * scale;
+
+    if (canvas.width !== pixelW || canvas.height !== pixelH) {
+      canvas.width = pixelW;
+      canvas.height = pixelH;
+    }
+    draw();
+  }
+
+  const supportsDevicePixelBox = typeof ResizeObserverEntry !== 'undefined' &&
+    'devicePixelContentBoxSize' in ResizeObserverEntry.prototype;
+  const resizeObserver = new ResizeObserver((entries) => resizeCanvas(entries[0]));
+  resizeObserver.observe(canvas, supportsDevicePixelBox ? { box: 'device-pixel-content-box' } : undefined);
+  window.addEventListener('resize', () => resizeCanvas());
+  window.addEventListener('orientationchange', () => resizeCanvas());
+
+  function generateRun() {
+    seed = 2000 + state.run * 97;
+    state.blocks = [];
+    state.mascots = [];
+    state.carriedLoot = 0;
+    state.carriedMascots = [];
+    state.hero.x = 0;
+    state.hero.y = 1.1;
+    state.hero.vx = 0;
+    state.hero.vy = 0;
+    state.time = 0;
+    state.waveY = 70 + Math.min(10, state.run * 1.4);
+    state.waveSpeed = 3.65 + Math.min(1.2, state.run * 0.08);
+    state.actionCooldown = 0;
+    state.hintTimer = 6;
+    state.end = null;
+    state.mode = 'play';
+
+    const blockPositions = [
+      [0.05, 5.6], [-0.3, 9.8], [0.45, 14.2], [-1.5, 19.5],
+      [1.4, 24.6], [-0.6, 30.2], [1.9, 36.4], [-2.0, 43.5],
+      [0.7, 51.5], [-1.0, 58.0]
+    ];
+    for (let i = 0; i < blockPositions.length; i++) {
+      const bp = blockPositions[i];
+      state.blocks.push({
+        id: 'cube-' + i,
+        x: bp[0],
+        y: bp[1],
+        hp: 1,
+        broken: false,
+        value: 18 + i * 8,
+        wobble: rand() * TAU
+      });
+    }
+
+    const mascotPositions = [
+      [0.45, 4.2], [-0.55, 8.0], [0.62, 12.4], [-1.8, 18.1],
+      [1.55, 25.1], [-0.85, 32.2], [1.95, 41.0], [-1.35, 53.5]
+    ];
+    for (let i = 0; i < mascotPositions.length; i++) {
+      const mp = mascotPositions[i];
+      const data = MASCOTS[i % MASCOTS.length];
+      state.mascots.push({
+        id: 'mascot-' + i,
+        name: data.name,
+        x: mp[0],
+        y: mp[1],
+        top: data.top,
+        side: data.side,
+        accent: data.accent,
+        value: data.value + Math.floor(mp[1] * 1.7),
+        face: data.face,
+        rescued: false
+      });
+    }
+  }
+
+  function bankRun(success, reason) {
+    if (state.mode !== 'play') return;
+    const rescuedValue = state.carriedMascots.reduce((sum, m) => sum + m.value, 0);
+    const lootValue = state.carriedLoot * 22;
+    const depthValue = Math.floor(state.bestDepth * 1.5);
+    let reward = rescuedValue + lootValue + depthValue;
+    if (success) reward += 45 + state.run * 8;
+    if (!success) reward = Math.floor(reward * 0.22);
+    state.coins += reward;
+    state.score += reward;
+    state.end = {
+      success,
+      reason,
+      reward,
+      rescued: state.carriedMascots.map((m) => m.name),
+      loot: state.carriedLoot,
+      depth: Math.floor(state.bestDepth)
+    };
+    state.mode = 'runEnd';
+    updateSrStatus(true);
+  }
+
+  function startNextRun() {
+    state.run += 1;
+    generateRun();
+  }
+
+  function upgradeCost(kind) {
+    const level = kind === 'boots' ? state.upgrades.boots : state.upgrades.pack;
+    return (kind === 'boots' ? 95 : 120) + level * (kind === 'boots' ? 70 : 85);
+  }
+
+  function buyUpgrade(kind) {
+    const cost = upgradeCost(kind);
+    if (state.coins < cost) return;
+    state.coins -= cost;
+    state.upgrades[kind] += 1;
+    updateSrStatus(true);
+  }
+
+  function toCanvasPoint(event) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (event.clientX - rect.left) * (W / Math.max(1, rect.width)),
+      y: (event.clientY - rect.top) * (H / Math.max(1, rect.height))
+    };
+  }
+
+  function hitButton(x, y) {
+    for (let i = buttons.length - 1; i >= 0; i--) {
+      const b = buttons[i];
+      if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b;
+    }
+    return null;
+  }
+
+  function pointerDown(event) {
+    const p = toCanvasPoint(event);
+    canvas.focus({ preventScroll: true });
+    const b = hitButton(p.x, p.y);
+    if (b) {
+      pointer.startedOnUi = true;
+      b.action();
+      event.preventDefault();
+      return;
+    }
+    pointer.active = true;
+    pointer.id = event.pointerId;
+    pointer.x = p.x;
+    pointer.y = p.y;
+    pointer.startedOnUi = false;
+    canvas.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+
+  function pointerMove(event) {
+    if (!pointer.active || pointer.id !== event.pointerId) return;
+    const p = toCanvasPoint(event);
+    pointer.x = p.x;
+    pointer.y = p.y;
+    event.preventDefault();
+  }
+
+  function pointerUp(event) {
+    if (pointer.id === event.pointerId) {
+      pointer.active = false;
+      pointer.id = null;
+    }
+    event.preventDefault();
+  }
+
+  canvas.addEventListener('pointerdown', pointerDown);
+  canvas.addEventListener('pointermove', pointerMove);
+  canvas.addEventListener('pointerup', pointerUp);
+  canvas.addEventListener('pointercancel', pointerUp);
+  document.addEventListener('contextmenu', (event) => event.preventDefault());
+
+  function toggleFullscreen() {
+    const root = document.documentElement;
+    if (!document.fullscreenElement && root.requestFullscreen) {
+      root.requestFullscreen().catch(() => {});
+    } else if (document.exitFullscreen) {
+      document.exitFullscreen().catch(() => {});
+    }
+  }
+
+  window.addEventListener('keydown', (event) => {
+    if (event.code === 'KeyF') {
+      toggleFullscreen();
+      event.preventDefault();
+      return;
+    }
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'Enter', 'Digit1', 'Digit2'].includes(event.code)) {
+      keys[event.code] = true;
+      event.preventDefault();
+      if (state.mode === 'runEnd') {
+        if (event.code === 'Space' || event.code === 'Enter') startNextRun();
+        if (event.code === 'Digit1') buyUpgrade('boots');
+        if (event.code === 'Digit2') buyUpgrade('pack');
+      }
+    }
+  }, { passive: false });
+
+  window.addEventListener('keyup', (event) => {
+    keys[event.code] = false;
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'Enter'].includes(event.code)) {
+      event.preventDefault();
+    }
+  }, { passive: false });
+
+  function smashNearest() {
+    if (state.mode !== 'play' || state.actionCooldown > 0) return;
+    state.hero.swing = 0.22;
+    state.actionCooldown = 0.22;
+    let nearest = null;
+    let nearestD = 99;
+    for (const block of state.blocks) {
+      if (block.broken) continue;
+      const d = dist(state.hero.x, state.hero.y, block.x, block.y);
+      if (d < nearestD) {
+        nearest = block;
+        nearestD = d;
+      }
+    }
+    if (!nearest || nearestD > 1.45) {
+      const p = project(state.hero.x + state.hero.facing * 0.55, state.hero.y, 0.65);
+      addParticle(p.x, p.y, '#ffef63', 5, 0.5);
+      return;
+    }
+    nearest.broken = true;
+    const free = Math.max(0, capacity() - carriedSlots());
+    const loot = Math.min(free, 1 + Math.floor(nearest.value / 34));
+    state.carriedLoot += loot;
+    const p = project(nearest.x, nearest.y, 0.8);
+    addParticle(p.x, p.y, COLORS.gold, 18, 2);
+    addParticle(p.x, p.y, '#e5f7ff', 8, 1.5);
+    addFloat(nearest.x, nearest.y, loot > 0 ? '+' + loot + ' loot' : 'pack full', loot > 0 ? COLORS.gold : COLORS.warning);
+  }
+
+  function collectMascots() {
+    for (const mascot of state.mascots) {
+      if (mascot.rescued) continue;
+      if (carriedSlots() >= capacity()) continue;
+      if (dist(state.hero.x, state.hero.y, mascot.x, mascot.y) <= 0.92) {
+        mascot.rescued = true;
+        state.carriedMascots.push(mascot);
+        const p = project(mascot.x, mascot.y, 1);
+        addParticle(p.x, p.y, mascot.accent, 16, 2);
+        addFloat(mascot.x, mascot.y, mascot.name, mascot.accent);
+      }
+    }
+  }
+
+  function updateParticles(dt) {
+    for (let i = state.particles.length - 1; i >= 0; i--) {
+      const p = state.particles[i];
+      p.life -= dt;
+      p.x += p.vx * 60 * dt;
+      p.y += p.vy * 60 * dt;
+      p.vy += 3.8 * dt * scale;
+      if (p.life <= 0) state.particles.splice(i, 1);
+    }
+    for (let i = state.floats.length - 1; i >= 0; i--) {
+      const f = state.floats[i];
+      f.life -= dt;
+      f.y += f.vy * dt;
+      if (f.life <= 0) state.floats.splice(i, 1);
+    }
+  }
+
+  function updatePlay(dt) {
+    state.time += dt;
+    state.actionCooldown = Math.max(0, state.actionCooldown - dt);
+    state.hero.swing = Math.max(0, state.hero.swing - dt);
+    state.hintTimer = Math.max(0, state.hintTimer - dt);
+
+    let mx = 0;
+    let my = 0;
+    if (keys.ArrowLeft || keys.KeyA) mx -= 1;
+    if (keys.ArrowRight || keys.KeyD) mx += 1;
+    if (keys.ArrowUp || keys.KeyW) my += 1;
+    if (keys.ArrowDown || keys.KeyS) my -= 1;
+
+    if (pointer.active && !pointer.startedOnUi) {
+      const heroScreen = project(state.hero.x, state.hero.y, 0.7);
+      const dx = pointer.x - heroScreen.x;
+      const dy = pointer.y - heroScreen.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 16) {
+        mx += clamp(dx / 90, -1, 1);
+        my += clamp(-dy / 80, -1, 1);
+      }
+    }
+
+    if (keys.Space || keys.Enter) smashNearest();
+
+    const len = Math.sqrt(mx * mx + my * my);
+    if (len > 0.01) {
+      mx /= len;
+      my /= len;
+      state.hero.facing = mx < -0.05 ? -1 : mx > 0.05 ? 1 : state.hero.facing;
+    }
+
+    const loadDrag = carriedSlots() * 0.07;
+    const speed = Math.max(4.1, 7.8 + state.upgrades.boots * 0.65 - loadDrag);
+    state.hero.vx = lerp(state.hero.vx, mx * speed, 0.24);
+    state.hero.vy = lerp(state.hero.vy, my * speed, 0.24);
+    state.hero.x += state.hero.vx * dt;
+    state.hero.y += state.hero.vy * dt;
+    state.hero.x = clamp(state.hero.x, -3.75, 3.75);
+    state.hero.y = clamp(state.hero.y, BASE_Y + 0.75, MAX_DEPTH);
+    state.bestDepth = Math.max(state.bestDepth, state.hero.y);
+
+    state.waveY -= state.waveSpeed * dt;
+    state.cameraY = lerp(state.cameraY, state.hero.y - 9.0, 0.09);
+
+    collectMascots();
+
+    if (state.hero.y <= 1.15 && carriedSlots() > 0 && state.time > 1.0) {
+      bankRun(true, 'returned to base');
+    } else if (state.waveY <= state.hero.y + 0.35 && state.hero.y > 1.25) {
+      bankRun(false, 'pressure wave caught the crew');
+    }
+  }
+
+  function update(dt) {
+    const safeDt = Math.min(0.05, Math.max(0, dt || STEP));
+    if (state.mode === 'play') updatePlay(safeDt);
+    updateParticles(safeDt);
+    updateSrStatus(false);
+  }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, COLORS.caveDeep);
+    g.addColorStop(0.48, COLORS.caveBack);
+    g.addColorStop(1, '#201a2d');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.globalAlpha = 0.5;
+    for (let i = 0; i < 28; i++) {
+      const x = ((i * 173) % 997) / 997 * W;
+      const y = ((i * 89) % 701) / 701 * H * 0.52;
+      const s = (10 + (i % 5) * 7) * scale;
+      ctx.fillStyle = i % 3 === 0 ? '#2b294a' : '#1b213c';
+      roundRect(x - s * 0.5, y - s * 0.5, s, s, 3 * scale);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawFloor() {
+    const start = Math.floor(state.cameraY + 42);
+    const end = Math.floor(state.cameraY - 8);
+    for (let y = start; y >= end; y--) {
+      if (y < -2 || y > MAX_DEPTH + 8) continue;
+      const p0 = project(-4.4, y, 0);
+      const p1 = project(4.4, y, 0);
+      const p2 = project(4.15, y + 1, 0);
+      const p3 = project(-4.15, y + 1, 0);
+      ctx.fillStyle = y % 2 === 0 ? COLORS.pathTop : '#45364e';
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.lineTo(p2.x, p2.y);
+      ctx.lineTo(p3.x, p3.y);
+      ctx.closePath();
+      ctx.fill();
+
+      if (y % 4 === 0) {
+        ctx.strokeStyle = 'rgba(255, 232, 150, 0.12)';
+        ctx.lineWidth = Math.max(1, scale);
+        ctx.beginPath();
+        ctx.moveTo(p0.x, p0.y);
+        ctx.lineTo(p1.x, p1.y);
+        ctx.stroke();
+      }
+
+      const leftA = project(-5.35, y, 0);
+      const leftB = project(-4.45, y, 0);
+      const leftC = project(-4.2, y + 1, 0);
+      const leftD = project(-5.7, y + 1, 0);
+      ctx.fillStyle = y % 2 === 0 ? COLORS.pathLeft : '#241f31';
+      ctx.beginPath();
+      ctx.moveTo(leftA.x, leftA.y);
+      ctx.lineTo(leftB.x, leftB.y);
+      ctx.lineTo(leftC.x, leftC.y);
+      ctx.lineTo(leftD.x, leftD.y);
+      ctx.closePath();
+      ctx.fill();
+
+      const rightA = project(4.45, y, 0);
+      const rightB = project(5.35, y, 0);
+      const rightC = project(5.7, y + 1, 0);
+      const rightD = project(4.2, y + 1, 0);
+      ctx.fillStyle = y % 2 === 0 ? COLORS.pathRight : '#5f4d63';
+      ctx.beginPath();
+      ctx.moveTo(rightA.x, rightA.y);
+      ctx.lineTo(rightB.x, rightB.y);
+      ctx.lineTo(rightC.x, rightC.y);
+      ctx.lineTo(rightD.x, rightD.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function drawCubeScreen(x, y, w, h, d, top, left, right) {
+    const hw = w * 0.5;
+    const topY = y - h;
+    ctx.fillStyle = left;
+    ctx.beginPath();
+    ctx.moveTo(x - hw, topY + d * 0.45);
+    ctx.lineTo(x, topY + d);
+    ctx.lineTo(x, y + d * 0.2);
+    ctx.lineTo(x - hw, y - d * 0.3);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = right;
+    ctx.beginPath();
+    ctx.moveTo(x, topY + d);
+    ctx.lineTo(x + hw, topY + d * 0.45);
+    ctx.lineTo(x + hw, y - d * 0.3);
+    ctx.lineTo(x, y + d * 0.2);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = top;
+    ctx.beginPath();
+    ctx.moveTo(x - hw, topY + d * 0.45);
+    ctx.lineTo(x, topY);
+    ctx.lineTo(x + hw, topY + d * 0.45);
+    ctx.lineTo(x, topY + d);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawShadow(p, width, alpha) {
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#050814';
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y + 8 * scale, width, width * 0.28, 0, 0, TAU);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawBase() {
+    const p = project(0, BASE_Y, 0);
+    const w = 8.2 * tileX;
+    drawCubeScreen(p.x, p.y + 12 * scale, w, 18 * scale, 16 * scale, '#74ffd3', '#227f70', '#47c2a4');
+    ctx.fillStyle = '#dbfff1';
+    ctx.font = '800 ' + Math.round(18 * scale) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('BASE', p.x, p.y - 13 * scale);
+
+    const beam = ctx.createLinearGradient(0, p.y - 190 * scale, 0, p.y);
+    beam.addColorStop(0, 'rgba(117, 255, 211, 0)');
+    beam.addColorStop(1, 'rgba(117, 255, 211, 0.22)');
+    ctx.fillStyle = beam;
+    ctx.beginPath();
+    ctx.moveTo(p.x - 38 * scale, p.y);
+    ctx.lineTo(p.x + 38 * scale, p.y);
+    ctx.lineTo(p.x + 10 * scale, p.y - 185 * scale);
+    ctx.lineTo(p.x - 10 * scale, p.y - 185 * scale);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function drawPressureWave() {
+    const p = project(0, state.waveY, 0);
+    if (p.y < -120 || p.y > H + 160) return;
+    const span = Math.max(W * 0.86, 420 * scale);
+    const waveH = 90 * scale;
+    const grad = ctx.createLinearGradient(0, p.y - waveH, 0, p.y + waveH);
+    grad.addColorStop(0, 'rgba(216, 102, 255, 0.05)');
+    grad.addColorStop(0.45, 'rgba(89, 228, 255, 0.78)');
+    grad.addColorStop(1, 'rgba(255, 93, 120, 0.5)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.5 - span * 0.5, p.y - waveH * 0.35);
+    ctx.lineTo(W * 0.5 + span * 0.5, p.y - waveH * 0.15);
+    ctx.lineTo(W * 0.5 + span * 0.58, p.y + waveH * 0.8);
+    ctx.lineTo(W * 0.5 - span * 0.58, p.y + waveH * 0.62);
+    ctx.closePath();
+    ctx.fill();
+
+    for (let i = 0; i < 16; i++) {
+      const x = W * 0.5 - span * 0.48 + ((i * 97) % 16) / 15 * span;
+      const y = p.y - waveH * 0.26 + Math.sin(state.time * 4 + i) * 16 * scale;
+      const s = (10 + (i % 4) * 5) * scale;
+      ctx.fillStyle = i % 2 ? COLORS.waveA : COLORS.waveB;
+      ctx.globalAlpha = 0.7;
+      drawCubeScreen(x, y, s, s, s * 0.5, ctx.fillStyle, 'rgba(30, 90, 130, 0.8)', 'rgba(135, 53, 170, 0.8)');
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#210d25';
+    const eyeY = p.y + 10 * scale;
+    roundRect(W * 0.5 - 46 * scale, eyeY, 28 * scale, 18 * scale, 3 * scale);
+    ctx.fill();
+    roundRect(W * 0.5 + 18 * scale, eyeY, 28 * scale, 18 * scale, 3 * scale);
+    ctx.fill();
+    ctx.fillStyle = '#fff0a6';
+    ctx.fillRect(W * 0.5 - 39 * scale, eyeY + 5 * scale, 9 * scale, 8 * scale);
+    ctx.fillRect(W * 0.5 + 26 * scale, eyeY + 5 * scale, 9 * scale, 8 * scale);
+  }
+
+  function drawLuckBlock(block) {
+    const p = project(block.x, block.y, 0.5);
+    const bob = Math.sin(state.time * 3 + block.wobble) * 2.5 * scale;
+    drawShadow(project(block.x, block.y, 0), 22 * scale, 0.26);
+    drawCubeScreen(p.x, p.y + bob, 40 * scale, 36 * scale, 22 * scale, '#ffe66a', COLORS.goldSide, '#f5a43d');
+    ctx.fillStyle = '#fff7c1';
+    ctx.font = '900 ' + Math.round(20 * scale) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('?', p.x, p.y - 10 * scale + bob);
+  }
+
+  function drawMascot(mascot, x, y, z, carriedIndex) {
+    const p = project(x, y, z);
+    const s = carriedIndex >= 0 ? 0.72 : 0.88;
+    const bodyW = 34 * scale * s;
+    const bodyH = 36 * scale * s;
+    drawShadow(project(x, y, 0), 18 * scale * s, carriedIndex >= 0 ? 0.16 : 0.22);
+    drawCubeScreen(p.x, p.y, bodyW, bodyH, 18 * scale * s, mascot.top, mascot.side, shade(mascot.side, 1.28));
+
+    ctx.fillStyle = '#111725';
+    const eyeW = 5 * scale * s;
+    const eyeY = p.y - bodyH * 0.52;
+    ctx.fillRect(p.x - 8 * scale * s, eyeY, eyeW, eyeW);
+    ctx.fillRect(p.x + 4 * scale * s, eyeY, eyeW, eyeW);
+    ctx.fillStyle = mascot.accent;
+    if (mascot.face === 0) {
+      ctx.fillRect(p.x - 16 * scale * s, p.y - bodyH - 6 * scale * s, 10 * scale * s, 10 * scale * s);
+      ctx.fillRect(p.x + 6 * scale * s, p.y - bodyH - 6 * scale * s, 10 * scale * s, 10 * scale * s);
+    } else if (mascot.face === 1) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y - bodyH - 3 * scale * s, 9 * scale * s, 0, TAU);
+      ctx.fill();
+    } else if (mascot.face === 2) {
+      ctx.fillRect(p.x - 18 * scale * s, p.y - bodyH * 0.45, 8 * scale * s, 18 * scale * s);
+      ctx.fillRect(p.x + 10 * scale * s, p.y - bodyH * 0.45, 8 * scale * s, 18 * scale * s);
+    } else {
+      ctx.fillRect(p.x - 14 * scale * s, p.y - bodyH - 3 * scale * s, 28 * scale * s, 6 * scale * s);
+      ctx.fillRect(p.x - 4 * scale * s, p.y - bodyH - 15 * scale * s, 8 * scale * s, 16 * scale * s);
+    }
+
+    if (carriedIndex < 0) {
+      const labelY = p.y - bodyH - 18 * scale;
+      ctx.fillStyle = 'rgba(8, 10, 18, 0.64)';
+      roundRect(p.x - 58 * scale, labelY - 13 * scale, 116 * scale, 22 * scale, 5 * scale);
+      ctx.fill();
+      ctx.fillStyle = COLORS.ink;
+      ctx.font = '800 ' + Math.round(10 * scale) + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(mascot.name, p.x, labelY - 2 * scale);
+    }
+  }
+
+  function shade(hex, amount) {
+    const clean = hex.replace('#', '');
+    const r = clamp(Math.round(parseInt(clean.slice(0, 2), 16) * amount), 0, 255);
+    const g = clamp(Math.round(parseInt(clean.slice(2, 4), 16) * amount), 0, 255);
+    const b = clamp(Math.round(parseInt(clean.slice(4, 6), 16) * amount), 0, 255);
+    return '#' + [r, g, b].map((n) => n.toString(16).padStart(2, '0')).join('');
+  }
+
+  function drawHero() {
+    const p = project(state.hero.x, state.hero.y, 0.62);
+    const walk = Math.sin(state.time * 10) * (Math.abs(state.hero.vx) + Math.abs(state.hero.vy) > 0.3 ? 1 : 0);
+    drawShadow(project(state.hero.x, state.hero.y, 0), 24 * scale, 0.34);
+
+    ctx.fillStyle = '#24293d';
+    ctx.fillRect(p.x - 17 * scale, p.y + 2 * scale, 10 * scale, 20 * scale + walk * 2 * scale);
+    ctx.fillRect(p.x + 7 * scale, p.y + 2 * scale, 10 * scale, 20 * scale - walk * 2 * scale);
+    drawCubeScreen(p.x, p.y, 42 * scale, 42 * scale, 20 * scale, '#79e7c6', '#287b80', '#3ca9a5');
+    drawCubeScreen(p.x, p.y - 38 * scale, 33 * scale, 30 * scale, 16 * scale, '#ffd69b', '#a45f54', '#d4866d');
+    ctx.fillStyle = '#111625';
+    ctx.fillRect(p.x - 8 * scale, p.y - 54 * scale, 6 * scale, 6 * scale);
+    ctx.fillRect(p.x + 5 * scale, p.y - 54 * scale, 6 * scale, 6 * scale);
+    ctx.fillStyle = '#ffd84d';
+    ctx.fillRect(p.x - 17 * scale, p.y - 72 * scale, 34 * scale, 10 * scale);
+    ctx.fillStyle = '#24314a';
+    ctx.fillRect(p.x - 13 * scale, p.y - 77 * scale, 26 * scale, 8 * scale);
+
+    const hammerX = p.x + state.hero.facing * (28 + state.hero.swing * 120) * scale;
+    const hammerY = p.y - 30 * scale + state.hero.swing * 36 * scale;
+    ctx.strokeStyle = '#b7a47b';
+    ctx.lineWidth = 5 * scale;
+    ctx.beginPath();
+    ctx.moveTo(p.x + state.hero.facing * 18 * scale, p.y - 20 * scale);
+    ctx.lineTo(hammerX, hammerY);
+    ctx.stroke();
+    drawCubeScreen(hammerX + state.hero.facing * 8 * scale, hammerY, 20 * scale, 14 * scale, 8 * scale, '#aab2c5', '#657087', '#d5dae8');
+
+    for (let i = 0; i < state.carriedMascots.length; i++) {
+      const m = state.carriedMascots[i];
+      const side = i % 2 === 0 ? -1 : 1;
+      const tx = state.hero.x + side * (0.52 + i * 0.04);
+      const ty = state.hero.y - 0.42 - i * 0.18;
+      drawMascot(m, tx, ty, 1.0 + i * 0.1, i);
+    }
+  }
+
+  function drawEntities() {
+    const drawables = [];
+    for (const block of state.blocks) {
+      if (!block.broken) drawables.push({ y: block.y, type: 'block', item: block });
+    }
+    for (const mascot of state.mascots) {
+      if (!mascot.rescued) drawables.push({ y: mascot.y, type: 'mascot', item: mascot });
+    }
+    drawables.push({ y: state.hero.y, type: 'hero' });
+    drawables.sort((a, b) => b.y - a.y);
+    for (const d of drawables) {
+      if (d.type === 'block') drawLuckBlock(d.item);
+      else if (d.type === 'mascot') drawMascot(d.item, d.item.x, d.item.y, 0.52, -1);
+      else drawHero();
+    }
+  }
+
+  function drawParticlesAndFloats() {
+    for (const p of state.particles) {
+      ctx.globalAlpha = clamp(p.life, 0, 1);
+      ctx.fillStyle = p.color;
+      ctx.fillRect(p.x - p.size * 0.5, p.y - p.size * 0.5, p.size, p.size);
+    }
+    ctx.globalAlpha = 1;
+    for (const f of state.floats) {
+      ctx.globalAlpha = clamp(f.life, 0, 1);
+      ctx.fillStyle = f.color;
+      ctx.font = '900 ' + Math.round(14 * scale) + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(f.text, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawPanel(x, y, w, h) {
+    ctx.fillStyle = COLORS.panel;
+    roundRect(x, y, w, h, 8 * scale);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 241, 194, 0.16)';
+    ctx.lineWidth = 1 * scale;
+    ctx.stroke();
+  }
+
+  function addButton(x, y, w, h, label, action, disabled) {
+    buttons.push({ x, y, w, h, action, disabled: !!disabled });
+    ctx.fillStyle = disabled ? 'rgba(70, 76, 92, 0.86)' : 'rgba(255, 202, 77, 0.94)';
+    roundRect(x, y, w, h, 8 * scale);
+    ctx.fill();
+    ctx.strokeStyle = disabled ? 'rgba(255, 255, 255, 0.16)' : '#fff1a8';
+    ctx.lineWidth = 2 * scale;
+    ctx.stroke();
+    ctx.fillStyle = disabled ? '#c8c2ad' : '#271b10';
+    ctx.font = '900 ' + Math.round(14 * scale) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + w * 0.5, y + h * 0.5);
+  }
+
+  function drawHud() {
+    buttons.length = 0;
+    drawPanel(12 * scale, 12 * scale, 210 * scale, 98 * scale);
+    ctx.fillStyle = COLORS.ink;
+    ctx.font = '900 ' + Math.round(15 * scale) + 'px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Run ' + state.run + '  Score ' + state.score, 24 * scale, 24 * scale);
+    ctx.fillStyle = '#ffe07e';
+    ctx.fillText('Coins ' + state.coins, 24 * scale, 45 * scale);
+    ctx.fillStyle = '#bfffe6';
+    ctx.fillText('Carry ' + carriedSlots() + '/' + capacity(), 24 * scale, 66 * scale);
+    ctx.fillStyle = '#d6d9ff';
+    ctx.fillText('Depth ' + Math.floor(state.hero.y), 24 * scale, 87 * scale);
+
+    const waveGap = Math.max(0, state.waveY - state.hero.y);
+    const barX = W - 220 * scale;
+    drawPanel(barX, 12 * scale, 205 * scale, 64 * scale);
+    ctx.fillStyle = COLORS.ink;
+    ctx.font = '900 ' + Math.round(13 * scale) + 'px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('Pressure gap', barX + 14 * scale, 22 * scale);
+    ctx.fillStyle = '#2c2030';
+    roundRect(barX + 14 * scale, 45 * scale, 176 * scale, 14 * scale, 7 * scale);
+    ctx.fill();
+    ctx.fillStyle = waveGap > 16 ? COLORS.base : waveGap > 7 ? COLORS.gold : COLORS.warning;
+    roundRect(barX + 14 * scale, 45 * scale, clamp(waveGap / 34, 0, 1) * 176 * scale, 14 * scale, 7 * scale);
+    ctx.fill();
+
+    const actionSize = clamp(86 * scale, 68, 92);
+    const actionX = W - actionSize - 18 * scale;
+    const actionY = H - actionSize - 18 * scale;
+    addButton(actionX, actionY, actionSize, actionSize, '', smashNearest, false);
+    ctx.fillStyle = '#261713';
+    ctx.fillRect(actionX + actionSize * 0.36, actionY + actionSize * 0.18, actionSize * 0.28, actionSize * 0.15);
+    ctx.fillRect(actionX + actionSize * 0.47, actionY + actionSize * 0.31, actionSize * 0.08, actionSize * 0.20);
+    ctx.fillStyle = '#261713';
+    ctx.font = '900 ' + Math.round(12 * scale) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SMASH', actionX + actionSize * 0.5, actionY + actionSize * 0.72);
+
+    if (state.hintTimer > 0 && H > 430) {
+      const alpha = Math.min(1, state.hintTimer / 1.4);
+      ctx.globalAlpha = alpha;
+      const hx = W * 0.5 - 185 * scale;
+      const hy = H - 74 * scale;
+      drawPanel(hx, hy, 260 * scale, 44 * scale);
+      ctx.fillStyle = COLORS.ink;
+      ctx.font = '800 ' + Math.round(12 * scale) + 'px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Rescue mascots. Break cubes. Bank at BASE.', hx + 130 * scale, hy + 23 * scale);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  function drawRunEnd() {
+    const boxW = Math.min(W - 28 * scale, 410 * scale);
+    const boxH = 310 * scale;
+    const x = (W - boxW) * 0.5;
+    const y = Math.max(42 * scale, (H - boxH) * 0.5);
+    ctx.fillStyle = 'rgba(8, 10, 20, 0.78)';
+    ctx.fillRect(0, 0, W, H);
+    drawPanel(x, y, boxW, boxH);
+
+    const title = state.end && state.end.success ? 'Base return!' : 'Wave caught you';
+    ctx.fillStyle = state.end && state.end.success ? COLORS.base : COLORS.warning;
+    ctx.font = '900 ' + Math.round(28 * scale) + 'px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(title, W * 0.5, y + 22 * scale);
+
+    ctx.fillStyle = COLORS.ink;
+    ctx.font = '800 ' + Math.round(14 * scale) + 'px sans-serif';
+    const lines = [
+      'Reward +' + state.end.reward + ' coins',
+      'Rescued ' + state.end.rescued.length + ' mascots, loot ' + state.end.loot,
+      'Best depth ' + state.end.depth + ', total score ' + state.score
+    ];
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], W * 0.5, y + (72 + i * 26) * scale);
+    }
+    if (state.end.rescued.length) {
+      ctx.fillStyle = '#ffe07e';
+      ctx.font = '800 ' + Math.round(11 * scale) + 'px sans-serif';
+      ctx.fillText(state.end.rescued.slice(0, 3).join(' + '), W * 0.5, y + 151 * scale);
+    }
+
+    const bw = boxW - 54 * scale;
+    const bx = x + 27 * scale;
+    addButton(bx, y + 178 * scale, bw, 42 * scale, 'NEXT RUN', startNextRun, false);
+    const bootsCost = upgradeCost('boots');
+    const packCost = upgradeCost('pack');
+    addButton(bx, y + 229 * scale, (bw - 10 * scale) * 0.5, 40 * scale, 'BOOTS ' + bootsCost, () => buyUpgrade('boots'), state.coins < bootsCost);
+    addButton(bx + (bw + 10 * scale) * 0.5, y + 229 * scale, (bw - 10 * scale) * 0.5, 40 * scale, 'PACK ' + packCost, () => buyUpgrade('pack'), state.coins < packCost);
+    ctx.fillStyle = '#bfffe6';
+    ctx.font = '700 ' + Math.round(11 * scale) + 'px sans-serif';
+    ctx.fillText('Space starts. 1 buys boots. 2 buys pack.', W * 0.5, y + 280 * scale);
+  }
+
+  function draw() {
+    if (!ctx) return;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    buttons.length = 0;
+    state.cameraY = state.cameraY || state.hero.y - 9.0;
+    drawBackground();
+    drawFloor();
+    drawBase();
+    drawPressureWave();
+    drawEntities();
+    drawParticlesAndFloats();
+    if (state.mode === 'play') drawHud();
+    if (state.mode === 'runEnd' && state.end) drawRunEnd();
+  }
+
+  function updateSrStatus(force) {
+    const now = state.time;
+    if (!force && now - lastSrUpdate < 1) return;
+    lastSrUpdate = now;
+    const payload = JSON.parse(renderGameToText());
+    srStatus.textContent = state.mode + '. Hero depth ' + payload.hero.y +
+      '. Carry ' + payload.carry.slots + ' of ' + payload.carry.capacity +
+      '. Pressure gap ' + payload.wave.gap + '. Score ' + state.score + '.';
+  }
+
+  function renderGameToText() {
+    const nearBlocks = state.blocks
+      .filter((b) => !b.broken)
+      .sort((a, b) => dist(state.hero.x, state.hero.y, a.x, a.y) - dist(state.hero.x, state.hero.y, b.x, b.y))
+      .slice(0, 5)
+      .map((b) => ({ id: b.id, x: round1(b.x), y: round1(b.y), distance: round1(dist(state.hero.x, state.hero.y, b.x, b.y)) }));
+    const visibleMascots = state.mascots
+      .filter((m) => !m.rescued)
+      .sort((a, b) => dist(state.hero.x, state.hero.y, a.x, a.y) - dist(state.hero.x, state.hero.y, b.x, b.y))
+      .slice(0, 6)
+      .map((m) => ({ name: m.name, x: round1(m.x), y: round1(m.y), value: m.value, distance: round1(dist(state.hero.x, state.hero.y, m.x, m.y)) }));
+    return JSON.stringify({
+      note: 'World origin is BASE center. x is left/right. y increases deeper into cave. Pressure wave y decreases toward base; caught when wave.y <= hero.y.',
+      mode: state.mode,
+      run: state.run,
+      score: state.score,
+      coins: state.coins,
+      hero: { x: round1(state.hero.x), y: round1(state.hero.y), speedUpgrade: state.upgrades.boots },
+      wave: { y: round1(state.waveY), gap: round1(Math.max(0, state.waveY - state.hero.y)), speed: round1(state.waveSpeed) },
+      carry: {
+        slots: carriedSlots(),
+        capacity: capacity(),
+        loot: state.carriedLoot,
+        mascots: state.carriedMascots.map((m) => m.name)
+      },
+      nearestBlocks: nearBlocks,
+      availableMascots: visibleMascots,
+      bestDepth: round1(state.bestDepth),
+      end: state.end
+    });
+  }
+
+  function round1(n) {
+    return Math.round(n * 10) / 10;
+  }
+
+  function frame(now) {
+    if (!lastFrame) lastFrame = now;
+    const dt = Math.min(0.05, (now - lastFrame) / 1000);
+    lastFrame = now;
+    update(dt);
+    draw();
+    rafId = requestAnimationFrame(frame);
+  }
+
+  window.render_game_to_text = renderGameToText;
+  window.advanceTime = (ms) => {
+    const steps = Math.max(1, Math.min(360, Math.round(ms / (1000 / 60))));
+    for (let i = 0; i < steps; i++) update(STEP);
+    draw();
+    return Promise.resolve(renderGameToText());
+  };
+
+  generateRun();
+  resizeCanvas();
+  canvas.focus({ preventScroll: true });
+  rafId = requestAnimationFrame(frame);
+
+  window.addEventListener('pagehide', () => {
+    if (rafId) cancelAnimationFrame(rafId);
+  });
+})();
+  </script>
+</body>
+</html>

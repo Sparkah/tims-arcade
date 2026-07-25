@@ -1,0 +1,1130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Wave Ledger</title>
+  <script src="/sdk.js"></script>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0e1a; position: fixed; touch-action: none; overscroll-behavior: none; }
+    canvas { display: block; touch-action: none; }
+    *::-webkit-scrollbar { display: none; }
+    * { scrollbar-width: none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="./gf-lib.js"></script>
+<script>
+(function() {
+'use strict';
+
+// ── LOCALISED STRINGS ──────────────────────────────────────────────────────
+var STRINGS = {
+  en: {
+    title: 'Wave Ledger',
+    sub:   'Read the next 3 waves. Reposition. Resolve.',
+    play: 'PLAY', retry: 'RETRY',
+    resolve: 'RESOLVE WAVE', resolving: 'RESOLVING...',
+    wave: 'WAVE', tokens: 'TOKENS', base: 'BASE',
+    now: 'NOW', next: 'NEXT', later: 'AFTER',
+    gameover: 'BASE FELL', won: 'CAMPAIGN SURVIVED!',
+    fell_at: 'Fell at wave', cleared: 'Waves cleared',
+    best: 'Best wave', perfect: 'PERFECT! +2',
+    no_tokens: 'No tokens left',
+    back: 'MENU', resume: 'RESUME',
+    tut_goal: 'Goal: survive 16 enemy waves by positioning defenders before each wave hits.',
+    tut_controls: 'Controls: drag defenders between cells (1 token each), then tap RESOLVE to run the wave.',
+    tut_win: 'Win: clear all 16 waves.',
+    tut_lose: 'Lose: base HP reaches 0 from enemies that leak past the right edge.',
+    tut_tip: 'Tip: a zero-leak wave refunds +2 tokens - perfect defense pays for itself.',
+    c_drag: 'Drag a defender to the glowing cell',
+    c_cards: 'These are the next 3 waves. Tap to continue',
+    c_resolve: 'Tap RESOLVE to run the wave',
+    c_done: 'Zero leaks refund +2 tokens. Survive all 16 waves!',
+    help: 'HOW TO PLAY',
+    d_cannon: 'Cannon', d_mage: 'Mage', d_archer: 'Archer', d_frost: 'Frost', d_chain: 'Chain',
+  },
+  ru: {
+    title: 'Журнал Волн',
+    sub:   'Прочти 3 волны. Переставь. В бой.',
+    play: 'ИГРАТЬ', retry: 'ЕЩЁ РАЗ',
+    resolve: 'В БОЙ', resolving: 'БОЙ ИДЁТ...',
+    wave: 'ВОЛНА', tokens: 'ЖЕТОНЫ', base: 'БАЗА',
+    now: 'СЕЙЧАС', next: 'ДАЛЕЕ', later: 'ПОТОМ',
+    gameover: 'БАЗА ПАЛА', won: 'КАМПАНИЯ ПРОЙДЕНА!',
+    fell_at: 'Пали на волне', cleared: 'Волн пройдено',
+    best: 'Рекорд волн', perfect: 'ИДЕАЛЬНО! +2',
+    no_tokens: 'Жетоны кончились',
+    back: 'МЕНЮ', resume: 'ПРОДОЛЖИТЬ',
+    tut_goal: 'Цель: пережить 16 волн врагов, расставляя защитников перед каждой атакой.',
+    tut_controls: 'Управление: перетаскивайте защитников между клетками (1 жетон за ход), затем жмите «В БОЙ».',
+    tut_win: 'Победа: очистите все 16 волн.',
+    tut_lose: 'Поражение: HP базы падает до 0 от врагов, прорвавшихся за правый край.',
+    tut_tip: 'Совет: волна без потерь возвращает +2 жетона - идеальная защита окупается.',
+    c_drag: 'Перетащите защитника на светящуюся клетку',
+    c_cards: 'Это следующие 3 волны. Нажмите, чтобы продолжить',
+    c_resolve: 'Нажмите «В БОЙ», чтобы запустить волну',
+    c_done: 'Без потерь +2 жетона. Переживите все 16 волн!',
+    help: 'КАК ИГРАТЬ',
+    d_cannon: 'Пушка', d_mage: 'Маг', d_archer: 'Лучник', d_frost: 'Мороз', d_chain: 'Цепь',
+  },
+};
+
+var SPRITE_NAMES = ['cannon','mage','archer','frost','chain','grunt','brute','swarm','wisp','mender','boss'];
+
+// ── TUNABLES (mirror DESIGN.md) ─────────────────────────────────────────────
+var GRID_COLS = 8;
+var GRID_ROWS = 5;
+var BASE_HP_START = 20;
+var TOKENS_START = 6;
+var PERFECT_REFUND = 2;
+var TOTAL_WAVES = 16;
+var MOVE_COST = 1;
+var ENEMY_STEP_COLS = 1;
+var COMBAT_TICKS = 12;
+var CELL_MAX_DEFENDERS = 1;
+var SAVE_KEY = 'wave_ledger';
+
+// ── ENEMY / DEFENDER DEFINITIONS ────────────────────────────────────────────
+var ETYPES = {
+  grunt:  { key:'grunt',  hp:3,  leak:1, armor:0, flying:false, regen:0, col:'#7fd1ff', sz:0.62 },
+  brute:  { key:'brute',  hp:12, leak:3, armor:2, flying:false, regen:0, col:'#ff9d5c', sz:0.78 },
+  swarm:  { key:'swarm',  hp:1,  leak:1, armor:0, flying:false, regen:0, col:'#b7ff7a', sz:0.46 },
+  wisp:   { key:'wisp',   hp:4,  leak:2, armor:0, flying:true,  regen:0, col:'#d49bff', sz:0.56 },
+  mender: { key:'mender', hp:7,  leak:2, armor:0, flying:false, regen:3, col:'#7affd6', sz:0.66 },
+  boss:   { key:'boss',   hp:90, leak:6, armor:3, flying:false, regen:0, col:'#ff5c7a', sz:0.95 },
+};
+
+var DTYPES = {
+  cannon: { key:'cannon', col:'#ffcf4d', dmg:4, range:3, kind:'single' },
+  mage:   { key:'mage',   col:'#9b6cff', dmg:2, range:4, kind:'aoe'    },
+  archer: { key:'archer', col:'#5ad17a', dmg:2, range:5, kind:'line'   },
+  frost:  { key:'frost',  col:'#5ad0ff', dmg:1, range:1, kind:'frost'  },
+  chain:  { key:'chain',  col:'#ff7ad0', dmg:3, range:4, kind:'chain'  },
+};
+var DEF_KEYS = ['cannon','mage','archer','frost','chain'];
+
+// ── WAVE DEFINITIONS (16-wave campaign, telegraphed escalation) ─────────────
+function buildCampaign() {
+  return [
+    /* 1  */ [ {t:'grunt',n:5} ],
+    /* 2  */ [ {t:'grunt',n:8} ],
+    /* 3  */ [ {t:'grunt',n:4}, {t:'brute',n:3} ],
+    /* 4  */ [ {t:'grunt',n:4}, {t:'swarm',n:8} ],
+    /* 5  */ [ {t:'swarm',n:12}, {t:'brute',n:2} ],
+    /* 6  */ [ {t:'grunt',n:4}, {t:'wisp',n:5} ],
+    /* 7  */ [ {t:'mender',n:4}, {t:'grunt',n:5} ],
+    /* 8  */ [ {t:'boss',n:1}, {t:'grunt',n:6} ],
+    /* 9  */ [ {t:'brute',n:5}, {t:'wisp',n:5} ],
+    /* 10 */ [ {t:'swarm',n:14}, {t:'mender',n:3} ],
+    /* 11 */ [ {t:'wisp',n:6}, {t:'brute',n:4}, {t:'grunt',n:4} ],
+    /* 12 */ [ {t:'mender',n:5}, {t:'swarm',n:10}, {t:'wisp',n:3} ],
+    /* 13 */ [ {t:'brute',n:6}, {t:'mender',n:4}, {t:'wisp',n:3} ],
+    /* 14 */ [ {t:'swarm',n:16}, {t:'wisp',n:6}, {t:'brute',n:3} ],
+    /* 15 */ [ {t:'brute',n:6}, {t:'mender',n:6}, {t:'wisp',n:6} ],
+    /* 16 */ [ {t:'boss',n:1}, {t:'brute',n:6}, {t:'wisp',n:6}, {t:'mender',n:3} ],
+  ];
+}
+
+// Defenders placed at campaign start. c=col(0=left), r=row. Deliberately
+// leaves rows 0 and 4 thin so the player MUST reposition to cover threats.
+function startingLoadout() {
+  return [
+    { key:'cannon', c:2, r:1 },
+    { key:'cannon', c:2, r:3 },
+    { key:'archer', c:1, r:2 },
+    { key:'mage',   c:3, r:2 },
+    { key:'frost',  c:1, r:1 },
+    { key:'chain',  c:3, r:3 },
+  ];
+}
+
+// ── GAME STATE ──────────────────────────────────────────────────────────────
+var gs = 'MENU';
+var phase = 'PLAN';
+var wave = 1;
+var baseHP = BASE_HP_START;
+var tokens = TOKENS_START;
+var bestWave = 0;
+var board = [];
+var campaign = buildCampaign();
+var enemies = [];
+var combatTick = 0;
+var tickTimer = 0;
+var leakedThisWave = 0;
+var dmgThisWave = 0;
+var resolveDoneT = 0;
+var seenTut = false;
+var coachActive = false;
+var coachStep = 0;
+var drag = null;
+var pauseOpen = false;
+var noTokT = 0;
+var beams = [];
+
+// layout
+var L = { boardX:0, boardY:0, boardW:0, boardH:0, cellW:0, cellH:0,
+          cardsY:0, cardsH:0, topH:0, resolveBtn:null, helpBtn:null, muteBtn:null,
+          legendY:0, legendH:0 };
+
+// ── HELPERS ─────────────────────────────────────────────────────────────────
+function deepDef(key, c, r) { return { key:key, c:c, r:r }; }
+function cellRect(r, c) { return { x: L.boardX + c * L.cellW, y: L.boardY + r * L.cellH, w: L.cellW, h: L.cellH }; }
+function cellAt(px, py) {
+  if (px < L.boardX || px > L.boardX + L.boardW || py < L.boardY || py > L.boardY + L.boardH) return null;
+  var c = Math.floor((px - L.boardX) / L.cellW);
+  var r = Math.floor((py - L.boardY) / L.cellH);
+  if (c < 0 || c >= GRID_COLS || r < 0 || r >= GRID_ROWS) return null;
+  return { r:r, c:c };
+}
+function emptyBoard() {
+  var b = [];
+  for (var r = 0; r < GRID_ROWS; r++) { b.push([]); for (var c = 0; c < GRID_COLS; c++) b[r].push(null); }
+  return b;
+}
+function clampCol(c) { return Math.max(0, Math.min(GRID_COLS-1, c)); }
+function clampF(v, lo, hi) { return Math.round(GF.clamp(v, lo, hi)); }
+function hit(b, x, y) { return b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h; }
+function roundRect(c, x, y, w, h, r) { if (GF.rr) { GF.rr(c, x, y, w, h, r); } else { c.beginPath(); c.rect(x, y, w, h); } }
+
+// ── GAME LIFECYCLE ──────────────────────────────────────────────────────────
+function startGame() {
+  gs = 'PLAYING';
+  phase = 'PLAN';
+  wave = 1;
+  baseHP = BASE_HP_START;
+  tokens = TOKENS_START;
+  campaign = buildCampaign();
+  board = emptyBoard();
+  var lo = startingLoadout();
+  for (var i = 0; i < lo.length; i++) { var d = lo[i]; if (!board[d.r][d.c]) board[d.r][d.c] = deepDef(d.key, d.c, d.r); }
+  enemies = [];
+  combatTick = 0; tickTimer = 0; leakedThisWave = 0; dmgThisWave = 0; resolveDoneT = 0;
+  drag = null; pauseOpen = false; beams = [];
+  GF.gameStarted();
+  GF.saveRun();
+  if (!seenTut && !window.__GF_AUTOSTART) startCoach();
+  else coachActive = false;
+}
+function gameOver() {
+  if (wave - 1 > bestWave) { bestWave = wave - 1; persistBest(); }
+  gs = 'GAMEOVER'; GF.sfx('lose'); GF.setShake(1.2); GF.gameEnded(); GF.saveRun();
+}
+function gameWon() {
+  if (TOTAL_WAVES > bestWave) { bestWave = TOTAL_WAVES; persistBest(); }
+  gs = 'WON'; GF.sfx('win'); GF.happytime(); GF.gameEnded(); GF.saveRun();
+}
+function persistBest() { try { localStorage.setItem(SAVE_KEY + '_best', bestWave); } catch (e) {} }
+
+// ── COACH (interactive, action-gated tutorial) ──────────────────────────────
+function startCoach() { coachActive = true; coachStep = 0; }
+function coachAdvance() {
+  coachStep++;
+  if (coachStep >= 4) {
+    coachActive = false; seenTut = true;
+    try { localStorage.setItem(SAVE_KEY + '_seen_tutorial', '1'); } catch (e) {}
+  }
+}
+function coachTargetCell() {
+  for (var c = 4; c < GRID_COLS; c++) for (var r = 0; r < GRID_ROWS; r++) if (!board[r][c]) return { r:r, c:c };
+  return { r:2, c:5 };
+}
+function coachSourceCell() {
+  for (var r = 0; r < GRID_ROWS; r++) for (var c = 0; c < GRID_COLS; c++) if (board[r][c]) return { r:r, c:c };
+  return { r:1, c:1 };
+}
+
+// ── REPOSITION ──────────────────────────────────────────────────────────────
+function tryReposition(fromR, fromC, toR, toC) {
+  if (fromR === toR && fromC === toC) return false;
+  if (tokens < MOVE_COST) { flashNoTokens(); return false; }
+  var src = board[fromR][fromC];
+  if (!src) return false;
+  var dst = board[toR][toC];
+  board[toR][toC] = src; src.r = toR; src.c = toC;
+  board[fromR][fromC] = dst || null;
+  if (dst) { dst.r = fromR; dst.c = fromC; }
+  tokens -= MOVE_COST;
+  GF.sfx('click');
+  var rc = cellRect(toR, toC);
+  GF.spawnParticles(rc.x + rc.w/2, rc.y + rc.h/2, DTYPES[src.key].col, 10);
+  GF.saveRun();
+  if (coachActive && coachStep === 0) coachAdvance();
+  return true;
+}
+function flashNoTokens() { noTokT = 1.1; GF.sfx('hit'); GF.setShake(0.3); }
+
+// ── RESOLVE (deterministic combat) ──────────────────────────────────────────
+function beginResolve() {
+  if (phase !== 'PLAN' || gs !== 'PLAYING') return;
+  if (coachActive && coachStep < 2) return;
+  phase = 'RESOLVE';
+  combatTick = 0; tickTimer = 0; leakedThisWave = 0; dmgThisWave = 0; resolveDoneT = 0;
+  enemies = spawnWave(campaign[wave - 1] || []);
+  GF.sfx('spawn');
+  if (coachActive && coachStep === 2) coachAdvance();
+  GF.saveRun();
+}
+
+function spawnWave(spec) {
+  var list = [];
+  var rowCursor = 0;
+  for (var g = 0; g < spec.length; g++) {
+    var grp = spec[g];
+    var et = ETYPES[grp.t];
+    for (var i = 0; i < grp.n; i++) {
+      var row = grp.row != null ? grp.row : (rowCursor % GRID_ROWS);
+      rowCursor++;
+      var entryCol = -1 - (list.length % 3);
+      list.push({
+        type: et.key, hp: et.hp, maxhp: et.hp, leak: et.leak, armor: et.armor,
+        flying: et.flying, regen: et.regen, col: et.col, sz: et.sz,
+        r: row, c: entryCol, alive: true, hitThisTick: false, slowedNext: false,
+      });
+    }
+  }
+  return list;
+}
+
+function combatStep() {
+  var i, e, d, r, c;
+  for (i = 0; i < enemies.length; i++) enemies[i].hitThisTick = false;
+  // 1) defenders fire
+  for (r = 0; r < GRID_ROWS; r++) for (c = 0; c < GRID_COLS; c++) { d = board[r][c]; if (d) fireDefender(d, r, c); }
+  // 2) regen
+  for (i = 0; i < enemies.length; i++) { e = enemies[i]; if (e.alive && e.regen > 0 && !e.hitThisTick && e.hp < e.maxhp) e.hp = Math.min(e.maxhp, e.hp + e.regen); }
+  // 3) remove dead
+  for (i = enemies.length - 1; i >= 0; i--) {
+    if (!enemies[i].alive || enemies[i].hp <= 0) {
+      if (enemies[i].alive && enemies[i].hp <= 0) killEnemy(enemies[i]);
+      enemies.splice(i, 1);
+    }
+  }
+  // 4) advance
+  for (i = 0; i < enemies.length; i++) {
+    e = enemies[i]; if (!e.alive) continue;
+    if (e.slowedNext) { e.slowedNext = false; continue; }
+    e.c += ENEMY_STEP_COLS;
+  }
+  // 5) leaks
+  for (i = enemies.length - 1; i >= 0; i--) {
+    e = enemies[i];
+    if (e.c >= GRID_COLS) {
+      baseHP -= e.leak; leakedThisWave++; dmgThisWave += e.leak;
+      var br = cellRect(Math.min(e.r, GRID_ROWS-1), GRID_COLS-1);
+      GF.spawnParticles(L.boardX + L.boardW, br.y + br.h/2, '#ff5c7a', 14);
+      GF.setShake(e.type === 'boss' ? 0.9 : 0.35);
+      GF.sfx('hit');
+      enemies.splice(i, 1);
+    }
+  }
+  if (baseHP < 0) baseHP = 0;
+}
+
+function fireDefender(d, r, c) {
+  var t = DTYPES[d.key]; var i, e;
+  if (t.kind === 'single' || t.kind === 'chain') {
+    var target = nearestEnemy(r, c, t.range, false);
+    if (!target) return;
+    dealDamage(target, t.dmg, false);
+    fxBeam(c, r, target, t.col);
+    if (t.kind === 'chain') {
+      var arcs = 0;
+      for (i = 0; i < enemies.length && arcs < 2; i++) {
+        e = enemies[i];
+        if (e === target || !e.alive) continue;
+        if (Math.abs(e.r - target.r) <= 2 && Math.abs(e.c - target.c) <= 2) { dealDamage(e, 2, false); arcs++; }
+      }
+    }
+  } else if (t.kind === 'line') {
+    for (i = 0; i < enemies.length; i++) { e = enemies[i]; if (e.alive && e.r === r && e.c >= c && e.c < c + t.range) dealDamage(e, t.dmg, true); }
+  } else if (t.kind === 'aoe') {
+    var focus = nearestEnemy(r, c, t.range, true);
+    if (!focus) return;
+    for (i = 0; i < enemies.length; i++) { e = enemies[i]; if (e.alive && Math.abs(e.r - focus.r) <= 1 && Math.abs(e.c - focus.c) <= 1) dealDamage(e, t.dmg, true); }
+    fxBeam(c, r, focus, t.col);
+  } else if (t.kind === 'frost') {
+    var any = false;
+    for (i = 0; i < enemies.length; i++) {
+      e = enemies[i]; if (!e.alive) continue;
+      if (Math.abs(e.r - r) <= t.range && e.c >= c - 1 && e.c <= c + t.range) { dealDamage(e, t.dmg, false); if (!e.flying) e.slowedNext = true; any = true; }
+    }
+    if (any) fxFrost(c, r);
+  }
+}
+
+function nearestEnemy(r, c, range, canAir) {
+  var best = null, bestD = 1e9, i, e;
+  for (i = 0; i < enemies.length; i++) {
+    e = enemies[i];
+    if (!e.alive) continue;
+    if (e.flying && !canAir) continue;
+    if (e.r !== r && !canAir) continue;
+    if (e.c < c || e.c >= c + range) continue;
+    var dd = (e.c - c) + Math.abs(e.r - r) * 0.5;
+    if (dd < bestD) { bestD = dd; best = e; }
+  }
+  return best;
+}
+function dealDamage(e, amount, isAoe) {
+  if (!e.alive) return;
+  var dmg = amount;
+  if (!isAoe && e.armor > 0) dmg = Math.max(1, dmg - e.armor);
+  e.hp -= dmg; e.hitThisTick = true;
+}
+function killEnemy(e) {
+  e.alive = false; GF.sfx('coin');
+  var rc = cellRect(Math.min(e.r, GRID_ROWS-1), clampCol(e.c));
+  GF.spawnParticles(rc.x + rc.w/2, rc.y + rc.h/2, e.col, e.type === 'boss' ? 26 : 12);
+}
+
+function fxBeam(fc, fr, target, col) {
+  var a = cellRect(fr, fc), b = cellRect(target.r, clampCol(target.c));
+  beams.push({ x1:a.x+a.w/2, y1:a.y+a.h/2, x2:b.x+b.w/2, y2:b.y+b.h/2, col:col, life:0.18 });
+}
+function fxFrost(c, r) { var a = cellRect(r, c); beams.push({ frost:true, x:a.x+a.w/2, y:a.y+a.h/2, col:'#5ad0ff', life:0.25, rad: L.cellW*2 }); }
+function updateBeams(dt) { for (var i = beams.length - 1; i >= 0; i--) { beams[i].life -= dt; if (beams[i].life <= 0) beams.splice(i, 1); } }
+
+function finishWave() {
+  if (baseHP <= 0) { gameOver(); return; }
+  if (dmgThisWave === 0) {
+    tokens += PERFECT_REFUND; GF.sfx('reward');
+    GF.spawnFloat(L.boardX + L.boardW/2, L.boardY + L.boardH/2, GF.t('perfect'), '#7affd6');
+  } else { GF.sfx('wave-clear'); }
+  wave++;
+  if (wave > TOTAL_WAVES) { gameWon(); return; }
+  phase = 'PLAN'; enemies = []; GF.saveRun();
+}
+
+// ── UPDATE ──────────────────────────────────────────────────────────────────
+function update(dt) {
+  if (noTokT > 0) noTokT -= dt;
+  updateBeams(dt);
+  if (gs !== 'PLAYING') return;
+  if (phase !== 'RESOLVE') return;
+  tickTimer += dt;
+  var tickDur = 0.34;
+  if (tickTimer >= tickDur) {
+    tickTimer -= tickDur;
+    if (combatTick < COMBAT_TICKS && (enemies.length > 0 || combatTick === 0)) { combatStep(); combatTick++; }
+  }
+  if ((enemies.length === 0 && combatTick > 0) || combatTick >= COMBAT_TICKS) {
+    resolveDoneT += dt;
+    if (resolveDoneT >= 0.45) finishWave();
+  }
+}
+
+// ── INPUT (drag to reposition + tap UI; unified pointer events so BOTH mouse
+// AND touch work — gf-lib's touchstart preventDefaults so no synthetic click
+// fires on touch; we therefore route every button through pointer up-as-tap). ─
+function onDown(px, py) {
+  // Only the board starts a drag; UI buttons resolve on tap (onUp).
+  if (gs !== 'PLAYING' || pauseOpen) return;
+  if (coachActive && (coachStep === 1 || coachStep === 3)) return; // advance on tap-up
+  if (phase !== 'PLAN') return;
+  // don't start a drag if the press is on a HUD button
+  if (hit(L.helpBtn, px, py) || hit(L.muteBtn, px, py) || hit(L.resolveBtn, px, py)) return;
+  var cell = cellAt(px, py);
+  if (!cell) return;
+  var d = board[cell.r][cell.c];
+  if (!d) return;
+  if (tokens < MOVE_COST) { flashNoTokens(); return; }
+  drag = { def:d, fromR:cell.r, fromC:cell.c, x:px, y:py };
+}
+function onMove(px, py) { if (drag) { drag.x = px; drag.y = py; } }
+function onUp(px, py) {
+  if (drag) {
+    var cell = cellAt(px, py);
+    if (cell) tryReposition(drag.fromR, drag.fromC, cell.r, cell.c);
+    drag = null;
+    return;
+  }
+}
+
+// Tap = pointerdown + pointerup with little movement. Handles ALL UI buttons
+// + overlay RETRY + coach tap-advance, on mouse and touch alike.
+function handleTap(x, y) {
+  if (gs === 'MENU') {
+    if (hit(GF._menuPlay, x, y)) { GF.startMusic({ preset:'arcade', muted: GF.muted }); startGame(); }
+    return;
+  }
+  if (gs === 'GAMEOVER' || gs === 'WON') {
+    if (hit(GF._overlayBtn, x, y)) { GF.startMusic({ preset:'arcade', muted: GF.muted }); startGame(); }
+    return;
+  }
+  if (gs === 'PLAYING') {
+    if (pauseOpen) {
+      if (hit(GF._pauseResume, x, y)) { pauseOpen = false; }
+      else if (hit(GF._pauseMenu, x, y)) { pauseOpen = false; gs = 'MENU'; GF.saveRun(); }
+      return;
+    }
+    // coach tap-advance steps (cards / done)
+    if (coachActive && (coachStep === 1 || coachStep === 3)) { coachAdvance(); return; }
+    if (hit(L.helpBtn, x, y)) { pauseOpen = true; return; }
+    if (hit(L.muteBtn, x, y)) { GF.toggleMute(); GF.setMusicMuted(GF.muted); GF.saveRun(); return; }
+    if (phase === 'PLAN' && hit(L.resolveBtn, x, y)) { beginResolve(); return; }
+  }
+}
+
+(function wirePointer() {
+  var cv = GF.canvas, downId = null, downX = 0, downY = 0, moved = 0;
+  cv.addEventListener('pointerdown', function(e) {
+    downId = e.pointerId; downX = e.clientX; downY = e.clientY; moved = 0;
+    try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+    onDown(e.clientX, e.clientY);
+  });
+  cv.addEventListener('pointermove', function(e) {
+    if (downId !== null && e.pointerId !== downId) return;
+    moved = Math.max(moved, Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY));
+    onMove(e.clientX, e.clientY);
+  });
+  cv.addEventListener('pointerup', function(e) {
+    if (downId !== null && e.pointerId !== downId) return;
+    onUp(e.clientX, e.clientY);
+    if (moved < 12) handleTap(e.clientX, e.clientY); // it was a tap, not a drag
+    downId = null;
+  });
+  cv.addEventListener('pointercancel', function() { drag = null; downId = null; });
+})();
+
+// ── LAYOUT ──────────────────────────────────────────────────────────────────
+function layout() {
+  var W = GF.W, H = GF.H, S = GF.S;
+  var pad = Math.max(8, 10 * S);
+  L.topH = Math.max(44, 52 * S);
+  L.cardsH = Math.max(58, 74 * S);
+  L.cardsY = L.topH + pad * 0.5;
+  var btnH = Math.max(48, 58 * S);
+  var btnY = H - btnH - pad;
+  L.legendH = Math.max(30, 38 * S);
+  L.legendY = btnY - L.legendH - pad * 0.6;
+  var boardTop = L.cardsY + L.cardsH + pad * 0.6;
+  var boardBottom = L.legendY - pad * 0.6;
+  var availW = W - pad * 2;
+  var availH = boardBottom - boardTop;
+  // width drives cell size (8 cols must fit); allow cells to be up to 1.45x
+  // taller than wide so a tall portrait board fills vertical space instead of
+  // leaving big empty gaps, but never stretch beyond that ratio.
+  L.cellW = availW / GRID_COLS;
+  L.cellH = Math.min(L.cellW * 1.45, availH / GRID_ROWS);
+  L.boardW = L.cellW * GRID_COLS;
+  L.boardH = L.cellH * GRID_ROWS;
+  L.boardX = (W - L.boardW) / 2;
+  L.boardY = boardTop + Math.max(0, (availH - L.boardH) / 2);
+  var rbW = Math.min(W - pad * 2, 520 * S);
+  L.resolveBtn = { x: (W - rbW) / 2, y: btnY, w: rbW, h: btnH };
+  var ic = Math.max(30, 34 * S);
+  L.muteBtn = { x: W - pad - ic, y: (L.topH - ic) / 2, w: ic, h: ic };
+  L.helpBtn = { x: W - pad - ic * 2 - 8 * S, y: (L.topH - ic) / 2, w: ic, h: ic };
+}
+
+// ── DRAW ────────────────────────────────────────────────────────────────────
+function draw(ctx) {
+  var W = GF.W, H = GF.H;
+  layout();
+  var g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0c1224'); g.addColorStop(0.5, '#0a0e1a'); g.addColorStop(1, '#080a14');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  if (gs === 'PLAYING') {
+    drawBoard(ctx);
+    drawEnemies(ctx);
+    drawBeams(ctx);
+    drawDragGhost(ctx);
+    drawTopBar(ctx);
+    drawCards(ctx);
+    drawLegend(ctx);
+    drawResolveBtn(ctx);
+    drawHelpMute(ctx);
+    if (noTokT > 0) drawNoTokens(ctx);
+    if (coachActive) drawCoach(ctx);
+    if (pauseOpen) drawPause(ctx);
+  }
+  if (gs === 'MENU') drawMenu(ctx);
+  if (gs === 'GAMEOVER') drawEndOverlay(ctx, GF.t('gameover'), GF.t('fell_at') + ' ' + wave + ' / ' + TOTAL_WAVES, '#ff5c7a');
+  if (gs === 'WON') drawEndOverlay(ctx, GF.t('won'), GF.t('cleared') + ': ' + TOTAL_WAVES, '#2ee07a');
+}
+
+// Custom end overlay (own input via GF._overlayBtn so RETRY works on touch).
+function drawEndOverlay(ctx, title, sub, glow) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,10,20,0.9)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.save();
+  ctx.shadowColor = glow; ctx.shadowBlur = 28*S;
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clampF(34*S,22,50) + 'px sans-serif';
+  ctx.fillText(title, W/2, H*0.36);
+  ctx.restore();
+  ctx.fillStyle = '#b8c6dc'; ctx.font = clampF(16*S,12,22) + 'px sans-serif';
+  ctx.fillText(sub, W/2, H*0.36 + clampF(34*S,22,44));
+  ctx.fillStyle = '#8895ad'; ctx.font = clampF(13*S,10,17) + 'px sans-serif';
+  ctx.fillText(GF.t('best') + ': ' + bestWave, W/2, H*0.36 + clampF(60*S,40,76));
+  // RETRY button
+  var btnW = Math.min(W*0.7, 280*S), btnH = clampF(56*S,44,72);
+  var btnX = W/2 - btnW/2, btnY = H*0.56;
+  var t = Date.now()/1000, k = Math.sin(t*2.2), p = 1 + 0.04*k;
+  var bw = btnW*p, bx2 = W/2 - bw/2, bh = btnH*p, by2 = btnY + btnH/2 - bh/2;
+  ctx.save();
+  var grad = ctx.createLinearGradient(bx2, by2, bx2, by2+bh);
+  grad.addColorStop(0, '#2ee07a'); grad.addColorStop(1, '#23a657');
+  ctx.shadowColor = 'rgba(46,224,122,0.5)'; ctx.shadowBlur = (20+8*k)*S;
+  roundRect(ctx, bx2, by2, bw, bh, bh/2); ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clampF(20*S,15,28) + 'px sans-serif';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('▶ ' + GF.t('retry'), W/2, btnY + btnH/2);
+  ctx.textBaseline = 'alphabetic';
+  GF._overlayBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawBoard(ctx) {
+  var wallX = L.boardX + L.boardW;
+  ctx.fillStyle = 'rgba(255,92,122,0.08)';
+  ctx.fillRect(wallX, L.boardY, Math.max(6, 8 * GF.S), L.boardH);
+  for (var r = 0; r < GRID_ROWS; r++) for (var c = 0; c < GRID_COLS; c++) {
+    var rc = cellRect(r, c);
+    var x = rc.x + 1.5, y = rc.y + 1.5, w = rc.w - 3, h = rc.h - 3;
+    ctx.fillStyle = ((r + c) % 2 === 0) ? 'rgba(255,255,255,0.035)' : 'rgba(255,255,255,0.015)';
+    roundRect(ctx, x, y, w, h, 4); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,160,220,0.10)'; ctx.lineWidth = 1; ctx.strokeRect(x, y, w, h);
+  }
+  if (drag) {
+    for (var rr2 = 0; rr2 < GRID_ROWS; rr2++) for (var cc = 0; cc < GRID_COLS; cc++) {
+      var rc2 = cellRect(rr2, cc);
+      ctx.strokeStyle = 'rgba(46,224,122,0.35)'; ctx.lineWidth = 2;
+      ctx.strokeRect(rc2.x + 2, rc2.y + 2, rc2.w - 4, rc2.h - 4);
+    }
+  }
+  for (var r3 = 0; r3 < GRID_ROWS; r3++) for (var c3 = 0; c3 < GRID_COLS; c3++) {
+    var d = board[r3][c3];
+    if (!d) continue;
+    if (drag && drag.fromR === r3 && drag.fromC === c3) continue;
+    drawDefender(ctx, d, cellRect(r3, c3));
+  }
+}
+
+function drawDefender(ctx, d, rc) {
+  var size = Math.min(rc.w, rc.h) * 0.82;
+  GF.drawSprite(d.key, rc.x + rc.w/2, rc.y + rc.h/2, size, function(c, x, y, s) { drawDefenderVec(c, d.key, x, y, s); });
+}
+
+function drawDefenderVec(c, key, x, y, s) {
+  var t = DTYPES[key]; var col = t.col; var h = s * 0.5;
+  c.save();
+  c.fillStyle = 'rgba(0,0,0,0.30)';
+  c.beginPath(); c.ellipse(x, y + h*0.55, h*0.85, h*0.4, 0, 0, Math.PI*2); c.fill();
+  if (key === 'cannon') {
+    c.fillStyle = col; roundRect(c, x - h*0.55, y - h*0.2, h*1.1, h*0.9, h*0.2); c.fill();
+    c.fillStyle = '#2a2a3a'; roundRect(c, x - h*0.18, y - h*0.7, h*0.36, h*0.7, h*0.12); c.fill();
+    c.fillStyle = col; c.beginPath(); c.arc(x, y - h*0.7, h*0.22, 0, Math.PI*2); c.fill();
+  } else if (key === 'mage') {
+    c.fillStyle = col; c.beginPath(); c.moveTo(x, y - h*0.9); c.lineTo(x + h*0.55, y + h*0.4); c.lineTo(x - h*0.55, y + h*0.4); c.closePath(); c.fill();
+    c.fillStyle = '#fff'; c.globalAlpha = 0.9; c.beginPath(); c.arc(x, y - h*0.1, h*0.2, 0, Math.PI*2); c.fill(); c.globalAlpha = 1;
+  } else if (key === 'archer') {
+    c.strokeStyle = col; c.lineWidth = Math.max(2, h*0.18); c.lineCap = 'round';
+    c.beginPath(); c.arc(x - h*0.1, y, h*0.7, -Math.PI*0.6, Math.PI*0.6); c.stroke();
+    c.beginPath(); c.moveTo(x - h*0.5, y - h*0.5); c.lineTo(x + h*0.7, y); c.lineTo(x - h*0.5, y + h*0.5); c.stroke();
+  } else if (key === 'frost') {
+    c.strokeStyle = col; c.lineWidth = Math.max(2, h*0.16); c.lineCap = 'round';
+    for (var i = 0; i < 6; i++) { var a = i * Math.PI/3; c.beginPath(); c.moveTo(x, y); c.lineTo(x + Math.cos(a)*h*0.8, y + Math.sin(a)*h*0.8); c.stroke(); }
+    c.fillStyle = col; c.beginPath(); c.arc(x, y, h*0.22, 0, Math.PI*2); c.fill();
+  } else if (key === 'chain') {
+    c.strokeStyle = col; c.lineWidth = Math.max(2, h*0.16);
+    c.beginPath(); c.moveTo(x - h*0.6, y + h*0.4); c.lineTo(x - h*0.2, y - h*0.4); c.lineTo(x + h*0.2, y + h*0.3); c.lineTo(x + h*0.6, y - h*0.5); c.stroke();
+    c.fillStyle = col; c.beginPath(); c.arc(x + h*0.6, y - h*0.5, h*0.18, 0, Math.PI*2); c.fill();
+  }
+  c.restore();
+}
+
+function drawDragGhost(ctx) {
+  if (!drag) return;
+  var size = Math.min(L.cellW, L.cellH) * 0.9;
+  ctx.globalAlpha = 0.9;
+  GF.drawSprite(drag.def.key, drag.x, drag.y, size, function(c, x, y, s) { drawDefenderVec(c, drag.def.key, x, y, s); });
+  ctx.globalAlpha = 1;
+}
+
+function drawEnemies(ctx) {
+  for (var i = 0; i < enemies.length; i++) {
+    var e = enemies[i];
+    if (!e.alive) continue;
+    var col = clampCol(e.c);
+    var cellX = (e.c < 0) ? (L.boardX + (e.c + 0.5) * L.cellW) : (L.boardX + (col + 0.5) * L.cellW);
+    var cellY = L.boardY + (e.r + 0.5) * L.cellH;
+    var size = Math.min(L.cellW, L.cellH) * e.sz;
+    (function(en, cx, cy, sz) {
+      GF.drawSprite(en.type, cx, cy, sz, function(c, x, y, s) { drawEnemyVec(c, en.type, x, y, s, en.flying); });
+      if (en.hp < en.maxhp) {
+        var bw = sz * 0.9, bh = Math.max(3, 4 * GF.S);
+        var bx = cx - bw/2, by = cy - sz*0.62;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(bx, by, bw, bh);
+        ctx.fillStyle = en.hp / en.maxhp > 0.4 ? '#7aff7a' : '#ff7a7a';
+        ctx.fillRect(bx, by, bw * (en.hp / en.maxhp), bh);
+      }
+    })(e, cellX, cellY, size);
+  }
+}
+
+function drawEnemyVec(c, key, x, y, s, flying) {
+  var col = ETYPES[key].col; var h = s * 0.5;
+  c.save();
+  if (flying) c.globalAlpha = 0.95;
+  if (key === 'grunt') {
+    c.fillStyle = col; c.beginPath(); c.arc(x, y, h*0.7, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#0a0e1a'; c.beginPath(); c.arc(x - h*0.22, y - h*0.1, h*0.12, 0, Math.PI*2); c.arc(x + h*0.22, y - h*0.1, h*0.12, 0, Math.PI*2); c.fill();
+  } else if (key === 'brute') {
+    c.fillStyle = col; roundRect(c, x - h*0.7, y - h*0.7, h*1.4, h*1.4, h*0.25); c.fill();
+    c.strokeStyle = '#3a2010'; c.lineWidth = Math.max(2, h*0.18); c.strokeRect(x - h*0.7, y - h*0.7, h*1.4, h*1.4);
+    c.fillStyle = '#0a0e1a'; c.fillRect(x - h*0.35, y - h*0.18, h*0.7, h*0.16);
+  } else if (key === 'swarm') {
+    c.fillStyle = col; c.beginPath(); c.moveTo(x, y - h*0.7); c.lineTo(x + h*0.6, y + h*0.5); c.lineTo(x - h*0.6, y + h*0.5); c.closePath(); c.fill();
+  } else if (key === 'wisp') {
+    c.fillStyle = col; c.beginPath(); c.arc(x, y, h*0.6, 0, Math.PI*2); c.fill();
+    c.globalAlpha = 0.4; c.beginPath(); c.arc(x, y, h*0.95, 0, Math.PI*2); c.fill(); c.globalAlpha = flying?0.95:1;
+    c.strokeStyle = '#fff'; c.lineWidth = Math.max(1.5, h*0.1);
+    c.beginPath(); c.moveTo(x - h*0.6, y); c.lineTo(x - h*1.0, y - h*0.3); c.moveTo(x + h*0.6, y); c.lineTo(x + h*1.0, y - h*0.3); c.stroke();
+  } else if (key === 'mender') {
+    c.fillStyle = col; c.beginPath(); c.arc(x, y, h*0.7, 0, Math.PI*2); c.fill();
+    c.strokeStyle = '#0a0e1a'; c.lineWidth = Math.max(2, h*0.16);
+    c.beginPath(); c.moveTo(x, y - h*0.4); c.lineTo(x, y + h*0.4); c.moveTo(x - h*0.4, y); c.lineTo(x + h*0.4, y); c.stroke();
+  } else if (key === 'boss') {
+    c.fillStyle = col; roundRect(c, x - h*0.95, y - h*0.95, h*1.9, h*1.9, h*0.3); c.fill();
+    c.strokeStyle = '#5a0010'; c.lineWidth = Math.max(3, h*0.2); c.strokeRect(x - h*0.95, y - h*0.95, h*1.9, h*1.9);
+    c.fillStyle = '#ffd24d';
+    c.beginPath(); c.arc(x - h*0.4, y - h*0.2, h*0.16, 0, Math.PI*2); c.arc(x + h*0.4, y - h*0.2, h*0.16, 0, Math.PI*2); c.fill();
+    c.fillStyle = '#0a0e1a'; c.fillRect(x - h*0.5, y + h*0.3, h*1.0, h*0.18);
+  }
+  c.restore();
+}
+
+function drawBeams(ctx) {
+  for (var i = 0; i < beams.length; i++) {
+    var b = beams[i];
+    ctx.globalAlpha = Math.max(0, b.life * 4);
+    if (b.frost) {
+      ctx.strokeStyle = b.col; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.rad * (1 - b.life*2), 0, Math.PI*2); ctx.stroke();
+    } else {
+      ctx.strokeStyle = b.col; ctx.lineWidth = Math.max(2, 3 * GF.S); ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(b.x1, b.y1); ctx.lineTo(b.x2, b.y2); ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawTopBar(ctx) {
+  var W = GF.W, S = GF.S;
+  var hpW = Math.min(W * 0.34, 160 * S), hpH = Math.max(14, 18 * S);
+  var hpX = Math.max(8, 10 * S), hpY = (L.topH - hpH) / 2;
+  ctx.fillStyle = 'rgba(255,255,255,0.08)'; roundRect(ctx, hpX, hpY, hpW, hpH, hpH/2); ctx.fill();
+  var frac = baseHP / BASE_HP_START;
+  var lowPulse = (baseHP <= 5) ? (0.6 + 0.4 * Math.sin(Date.now()/180)) : 1;
+  var hpGrad = ctx.createLinearGradient(hpX, 0, hpX + hpW, 0);
+  if (frac > 0.5) { hpGrad.addColorStop(0, '#3ee07a'); hpGrad.addColorStop(1, '#2aa657'); }
+  else if (frac > 0.25) { hpGrad.addColorStop(0, '#ffd24d'); hpGrad.addColorStop(1, '#ff9d3d'); }
+  else { hpGrad.addColorStop(0, '#ff5c7a'); hpGrad.addColorStop(1, '#d61f4a'); }
+  ctx.globalAlpha = lowPulse;
+  roundRect(ctx, hpX, hpY, Math.max(0, hpW * frac), hpH, hpH/2); ctx.fillStyle = hpGrad; ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clampF(11*S,9,15) + 'px sans-serif';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(GF.t('base') + ' ' + baseHP + '/' + BASE_HP_START, hpX + 8*S, hpY + hpH/2);
+
+  ctx.textAlign = 'center'; ctx.fillStyle = '#cfe2ff'; ctx.font = 'bold ' + clampF(16*S,12,22) + 'px sans-serif';
+  ctx.fillText(GF.t('wave') + ' ' + wave + '/' + TOTAL_WAVES, W/2, L.topH/2);
+
+  var tx = L.helpBtn.x - 12 * S;
+  ctx.font = 'bold ' + clampF(14*S,11,20) + 'px sans-serif';
+  ctx.textAlign = 'right';
+  var tw = ctx.measureText(String(tokens)).width;
+  drawTokenIcon(ctx, tx - tw - 12*S, L.topH/2, Math.max(7, 8*S));
+  ctx.fillStyle = '#ffd24d';
+  ctx.fillText(String(tokens), tx, L.topH/2);
+  ctx.textBaseline = 'alphabetic';
+}
+function drawTokenIcon(c, x, y, r) {
+  c.save(); c.fillStyle = '#ffd24d'; c.strokeStyle = '#a8791a'; c.lineWidth = 1.5;
+  c.beginPath(); c.moveTo(x, y - r); c.lineTo(x + r, y); c.lineTo(x, y + r); c.lineTo(x - r, y); c.closePath();
+  c.fill(); c.stroke(); c.restore();
+}
+
+function drawCards(ctx) {
+  var W = GF.W, S = GF.S;
+  var pad = Math.max(6, 8 * S), gap = pad;
+  var cardW = (Math.min(W, 560*S) - pad*2 - gap*2) / 3;
+  var startX = (W - (cardW*3 + gap*2)) / 2;
+  var labels = [GF.t('now'), GF.t('next'), GF.t('later')];
+  for (var k = 0; k < 3; k++) {
+    var wn = wave + k;
+    var x = startX + k * (cardW + gap);
+    var spec = (wn <= TOTAL_WAVES) ? campaign[wn - 1] : null;
+    drawWaveCard(ctx, x, L.cardsY, cardW, L.cardsH, labels[k], wn, spec, k === 0);
+  }
+}
+function drawWaveCard(ctx, x, y, w, h, label, wn, spec, isNow) {
+  var S = GF.S;
+  ctx.save();
+  ctx.fillStyle = isNow ? 'rgba(46,224,122,0.14)' : 'rgba(255,255,255,0.05)';
+  roundRect(ctx, x, y, w, h, 8); ctx.fill();
+  ctx.strokeStyle = isNow ? 'rgba(46,224,122,0.7)' : 'rgba(150,180,230,0.25)';
+  ctx.lineWidth = isNow ? 2 : 1; roundRect(ctx, x, y, w, h, 8); ctx.stroke();
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillStyle = isNow ? '#9affc0' : '#9ab4d6';
+  ctx.font = 'bold ' + clampF(9*S,8,12) + 'px sans-serif';
+  ctx.fillText(label + (spec ? ' W' + wn : ''), x + 6*S, y + 4*S);
+  if (!spec) {
+    ctx.fillStyle = '#556'; ctx.font = clampF(9*S,8,12) + 'px sans-serif';
+    ctx.fillText('-', x + 6*S, y + h/2);
+    ctx.restore(); return;
+  }
+  var iconR = Math.max(5, 7 * S);
+  var ix = x + 8*S, iy = y + 20*S, rowH = Math.max(15, 18*S);
+  var perRow = Math.max(1, Math.floor((w - 10*S) / (iconR*2 + 22*S)));
+  var idx = 0;
+  for (var g = 0; g < spec.length; g++) {
+    var grp = spec[g];
+    var col = idx % perRow, rw = Math.floor(idx / perRow);
+    var px = ix + col * (iconR*2 + 22*S);
+    var py = iy + rw * rowH;
+    if (py + iconR > y + h - 2) break;
+    drawMiniEnemy(ctx, grp.t, px + iconR, py + iconR*0.6, iconR);
+    ctx.fillStyle = '#dfe8f5'; ctx.font = 'bold ' + clampF(10*S,8,13) + 'px sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('x' + grp.n, px + iconR*2 + 2*S, py + iconR*0.6);
+    idx++;
+  }
+  ctx.restore();
+}
+function drawMiniEnemy(c, key, x, y, r) {
+  var col = ETYPES[key].col; c.fillStyle = col;
+  if (key === 'boss') { roundRect(c, x - r, y - r, r*2, r*2, r*0.4); c.fill(); c.strokeStyle='#5a0010'; c.lineWidth=1.5; c.stroke(); }
+  else if (key === 'brute') { roundRect(c, x - r*0.85, y - r*0.85, r*1.7, r*1.7, r*0.3); c.fill(); }
+  else if (key === 'swarm') { c.beginPath(); c.moveTo(x, y-r); c.lineTo(x+r, y+r*0.8); c.lineTo(x-r, y+r*0.8); c.closePath(); c.fill(); }
+  else if (key === 'wisp') { c.beginPath(); c.arc(x, y, r*0.85, 0, Math.PI*2); c.fill(); c.globalAlpha=0.4; c.beginPath(); c.arc(x,y,r*1.2,0,Math.PI*2); c.fill(); c.globalAlpha=1; }
+  else { c.beginPath(); c.arc(x, y, r*0.9, 0, Math.PI*2); c.fill(); }
+}
+
+function drawLegend(ctx) {
+  var W = GF.W, S = GF.S;
+  var n = DEF_KEYS.length;
+  var pad = Math.max(6, 8*S), cellGap = pad;
+  var cw = (Math.min(W, 560*S) - pad*2 - cellGap*(n-1)) / n;
+  var startX = (W - (cw*n + cellGap*(n-1))) / 2;
+  var y = L.legendY, h = L.legendH;
+  for (var i = 0; i < n; i++) {
+    var key = DEF_KEYS[i];
+    var x = startX + i * (cw + cellGap);
+    ctx.fillStyle = 'rgba(255,255,255,0.04)'; roundRect(ctx, x, y, cw, h, 6); ctx.fill();
+    drawDefenderVec(ctx, key, x + h*0.55, y + h/2, h*0.7);
+    ctx.fillStyle = '#aebfd6'; ctx.font = 'bold ' + clampF(9*S,7,12) + 'px sans-serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    var nm = GF.t('d_' + key);
+    var avail = cw - h - 4*S;
+    while (ctx.measureText(nm).width > avail && nm.length > 3) nm = nm.slice(0, -1);
+    ctx.fillText(nm, x + h + 2*S, y + h/2);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawResolveBtn(ctx) {
+  var b = L.resolveBtn, S = GF.S;
+  var enabled = (phase === 'PLAN');
+  var t = Date.now()/1000;
+  var pulse = enabled ? (1 + 0.03 * Math.sin(t*2.4)) : 1;
+  var bw = b.w * pulse, bx = b.x + (b.w - bw)/2;
+  ctx.save();
+  var grad = ctx.createLinearGradient(bx, b.y, bx, b.y + b.h);
+  if (enabled) { grad.addColorStop(0, '#ff7a3d'); grad.addColorStop(1, '#e0431f'); ctx.shadowColor = 'rgba(255,92,40,0.5)'; ctx.shadowBlur = 18*S; }
+  else { grad.addColorStop(0, '#3a4255'); grad.addColorStop(1, '#2a3040'); }
+  roundRect(ctx, bx, b.y, bw, b.h, b.h/2); ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clampF(18*S,14,26) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(enabled ? GF.t('resolve') : GF.t('resolving'), GF.W/2, b.y + b.h/2);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawHelpMute(ctx) {
+  var b = L.helpBtn, S = GF.S;
+  ctx.fillStyle = 'rgba(255,255,255,0.10)'; roundRect(ctx, b.x, b.y, b.w, b.h, b.w*0.3); ctx.fill();
+  ctx.fillStyle = '#cfe2ff'; ctx.font = 'bold ' + clampF(16*S,12,22) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('?', b.x + b.w/2, b.y + b.h/2 + 1);
+  ctx.textBaseline = 'alphabetic';
+  var m = L.muteBtn;
+  GF.drawMuteIcon(ctx, m.x + m.w/2, m.y + m.h/2, m.w*0.42, GF.muted);
+}
+
+function drawNoTokens(ctx) {
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, noTokT);
+  ctx.fillStyle = '#ff6c6c'; ctx.font = 'bold ' + clampF(16*GF.S,12,22) + 'px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(GF.t('no_tokens'), GF.W/2, L.resolveBtn.y - 16*GF.S);
+  ctx.restore();
+}
+
+// ── COACH OVERLAY ───────────────────────────────────────────────────────────
+function drawCoach(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(0,0,0,0.30)'; ctx.fillRect(0, 0, W, H);
+  var txt, target;
+  if (coachStep === 0) {
+    txt = GF.t('c_drag');
+    var tc = coachTargetCell(); var rc = cellRect(tc.r, tc.c);
+    var sc = coachSourceCell(); var sr = cellRect(sc.r, sc.c);
+    pulseRing(ctx, sr.x + sr.w/2, sr.y + sr.h/2, Math.min(sr.w,sr.h)*0.5, '#ffd24d');
+    pulseRing(ctx, rc.x + rc.w/2, rc.y + rc.h/2, Math.min(rc.w,rc.h)*0.5, '#2ee07a');
+    target = { x: rc.x + rc.w/2, y: rc.y + rc.h/2 };
+  } else if (coachStep === 1) {
+    txt = GF.t('c_cards');
+    pulseRect(ctx, W*0.5, L.cardsY + L.cardsH/2, W*0.9, L.cardsH + 8*S, '#7fd1ff');
+    target = { x: W/2, y: L.cardsY + L.cardsH + 30*S };
+  } else if (coachStep === 2) {
+    txt = GF.t('c_resolve');
+    var b = L.resolveBtn;
+    pulseRing(ctx, W/2, b.y + b.h/2, b.w*0.5, '#ff7a3d');
+    target = { x: W/2, y: b.y - 30*S };
+  } else {
+    txt = GF.t('c_done');
+    target = { x: W/2, y: H*0.5 };
+  }
+  drawCoachCaption(ctx, txt, target);
+}
+function pulseRing(ctx, x, y, r, col) {
+  var p = 0.5 + 0.5 * Math.sin(Date.now()/250);
+  ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = 3; ctx.globalAlpha = 0.85;
+  ctx.shadowColor = col; ctx.shadowBlur = 14;
+  ctx.beginPath(); ctx.arc(x, y, r + p * 8 * GF.S, 0, Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+function pulseRect(ctx, cxp, cyp, w, h, col) {
+  var p = 0.5 + 0.5 * Math.sin(Date.now()/250);
+  ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = 2.5; ctx.globalAlpha = 0.8;
+  ctx.shadowColor = col; ctx.shadowBlur = 12;
+  roundRect(ctx, cxp - w/2, cyp - h/2 - p*3, w, h + p*6, 10); ctx.stroke();
+  ctx.restore();
+}
+function drawCoachCaption(ctx, txt, target) {
+  var S = GF.S;
+  var fs = clampF(14*S, 12, 18);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  var maxW = Math.min(GF.W * 0.86, 460 * S);
+  var lines = wrapLines(ctx, txt, maxW);
+  var lineH = fs * 1.3, padX = 14*S, padY = 10*S;
+  var blockH = lines.length * lineH + padY*2, blockW = 0;
+  for (var i = 0; i < lines.length; i++) blockW = Math.max(blockW, ctx.measureText(lines[i]).width);
+  blockW += padX*2;
+  var bx = GF.clamp(target.x - blockW/2, 8*S, GF.W - blockW - 8*S);
+  var by = GF.clamp(target.y, L.topH + 4*S, GF.H - blockH - 8*S);
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 10;
+  ctx.fillStyle = 'rgba(14,18,30,0.94)'; roundRect(ctx, bx, by, blockW, blockH, 10); ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (var j = 0; j < lines.length; j++) ctx.fillText(lines[j], bx + blockW/2, by + padY + j*lineH);
+  ctx.textBaseline = 'alphabetic';
+}
+function wrapLines(ctx, text, maxW) {
+  var words = String(text).split(/\s+/), lines = [], cur = '';
+  for (var i = 0; i < words.length; i++) {
+    var probe = cur ? cur + ' ' + words[i] : words[i];
+    if (ctx.measureText(probe).width > maxW && cur) { lines.push(cur); cur = words[i]; }
+    else cur = probe;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// ── MENU + PAUSE OVERLAYS ───────────────────────────────────────────────────
+function drawMenu(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,10,20,0.92)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.save();
+  ctx.shadowColor = 'rgba(255,92,40,0.5)'; ctx.shadowBlur = 26*S;
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clampF(36*S,24,52) + 'px sans-serif';
+  ctx.fillText(GF.t('title'), W/2, H*0.13);
+  ctx.restore();
+  ctx.fillStyle = '#9ab4d6'; ctx.font = clampF(14*S,11,19) + 'px sans-serif';
+  ctx.fillText(GF.t('sub'), W/2, H*0.13 + clampF(28*S,18,38));
+
+  var blockTop = H * 0.24;
+  var fs = clampF(13*S, 11, 17);
+  ctx.font = fs + 'px sans-serif';
+  var maxW = Math.min(W * 0.86, 480 * S);
+  var bx = (W - maxW) / 2, lineH = fs * 1.32, y = blockTop;
+  var rows = [
+    { k:'help', bold:true, col:'#ffd24d' },
+    { k:'tut_goal' }, { k:'tut_controls' }, { k:'tut_win' }, { k:'tut_lose' }, { k:'tut_tip', col:'#9affc0' },
+  ];
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    ctx.fillStyle = row.col || '#c5d3e6';
+    ctx.font = (row.bold ? 'bold ' : '') + fs + 'px sans-serif';
+    var lines = wrapLines(ctx, GF.t(row.k), maxW);
+    ctx.textAlign = 'left';
+    for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], bx, y); y += lineH; }
+    y += lineH * 0.18;
+  }
+
+  var btnW = Math.min(W * 0.7, 280 * S), btnH = clampF(56*S, 44, 72);
+  var btnX = (W - btnW)/2, btnY = Math.min(H - btnH - 20*S, y + 14*S);
+  var t = Date.now()/1000, k = Math.sin(t*2.2), p = 1 + 0.04*k;
+  var bw = btnW*p, bx2 = W/2 - bw/2, bh = btnH*p, by2 = btnY + btnH/2 - bh/2;
+  ctx.save();
+  var grad = ctx.createLinearGradient(bx2, by2, bx2, by2+bh);
+  grad.addColorStop(0, '#2ee07a'); grad.addColorStop(1, '#23a657');
+  ctx.shadowColor = 'rgba(46,224,122,0.5)'; ctx.shadowBlur = (20+8*k)*S;
+  roundRect(ctx, bx2, by2, bw, bh, bh/2); ctx.fillStyle = grad; ctx.fill();
+  ctx.restore();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clampF(20*S,15,28) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('▶ ' + GF.t('play'), W/2, btnY + btnH/2);
+  ctx.textBaseline = 'alphabetic';
+  if (bestWave > 0) {
+    ctx.fillStyle = '#667'; ctx.font = clampF(13*S,10,17) + 'px sans-serif';
+    ctx.fillText(GF.t('best') + ': ' + bestWave, W/2, btnY + btnH + 22*S);
+  }
+  GF._menuPlay = { x: btnX, y: btnY, w: btnW, h: btnH };
+}
+
+function drawPause(ctx) {
+  var W = GF.W, H = GF.H, S = GF.S;
+  ctx.fillStyle = 'rgba(8,10,20,0.9)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd24d'; ctx.font = 'bold ' + clampF(22*S,16,30) + 'px sans-serif';
+  ctx.fillText(GF.t('help'), W/2, H*0.13);
+  var fs = clampF(14*S, 12, 18);
+  var maxW = Math.min(W*0.86, 480*S), bx = (W - maxW)/2, lineH = fs*1.34, y = H*0.19;
+  var rows = ['tut_goal','tut_controls','tut_win','tut_lose','tut_tip'];
+  for (var i = 0; i < rows.length; i++) {
+    ctx.fillStyle = rows[i] === 'tut_tip' ? '#9affc0' : '#c5d3e6';
+    ctx.font = fs + 'px sans-serif';
+    ctx.textAlign = 'left';
+    var lines = wrapLines(ctx, GF.t(rows[i]), maxW);
+    for (var j = 0; j < lines.length; j++) { ctx.fillText(lines[j], bx, y); y += lineH; }
+    y += lineH * 0.2;
+  }
+  var btnW = Math.min(W*0.62, 260*S), btnH = clampF(52*S,42,66);
+  var rbY = Math.min(H - btnH*2 - 36*S, y + 16*S);
+  drawPauseBtn(ctx, W/2 - btnW/2, rbY, btnW, btnH, GF.t('resume'), '#2ee07a', '#23a657');
+  drawPauseBtn(ctx, W/2 - btnW/2, rbY + btnH + 14*S, btnW, btnH, GF.t('back'), '#3a4255', '#2a3040');
+  GF._pauseResume = { x: W/2 - btnW/2, y: rbY, w: btnW, h: btnH };
+  GF._pauseMenu = { x: W/2 - btnW/2, y: rbY + btnH + 14*S, w: btnW, h: btnH };
+}
+function drawPauseBtn(ctx, x, y, w, h, label, c1, c2) {
+  var grad = ctx.createLinearGradient(x, y, x, y+h);
+  grad.addColorStop(0, c1); grad.addColorStop(1, c2);
+  roundRect(ctx, x, y, w, h, h/2); ctx.fillStyle = grad; ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + clampF(17*GF.S,13,24) + 'px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + w/2, y + h/2);
+  ctx.textBaseline = 'alphabetic';
+}
+
+// ── BOOT ────────────────────────────────────────────────────────────────────
+GF.init({
+  designW: 480,
+  designH: 820,
+  strings: STRINGS,
+  sprites: SPRITE_NAMES,
+  saveKey: SAVE_KEY,
+  onReady: function() {
+    try { bestWave = parseInt(localStorage.getItem(SAVE_KEY + '_best') || '0') || 0; } catch (e) {}
+    try { seenTut = !!localStorage.getItem(SAVE_KEY + '_seen_tutorial'); } catch (e) {}
+
+    GF.persist(SAVE_KEY + '_run_v1',
+      function() {
+        if (gs !== 'PLAYING') return { gs: gs, bestWave: bestWave };
+        var defs = [];
+        for (var r = 0; r < GRID_ROWS; r++) for (var c = 0; c < GRID_COLS; c++) if (board[r][c]) defs.push({ k: board[r][c].key, r:r, c:c });
+        return { gs:'PLAYING', wave:wave, baseHP:baseHP, tokens:tokens, bestWave:bestWave, defs:defs };
+      },
+      function(s) {
+        if (!s) return;
+        bestWave = s.bestWave || bestWave;
+        if (s.gs === 'PLAYING' && s.defs) {
+          wave = s.wave || 1;
+          baseHP = (typeof s.baseHP === 'number') ? s.baseHP : BASE_HP_START;
+          tokens = (typeof s.tokens === 'number') ? s.tokens : TOKENS_START;
+          campaign = buildCampaign();
+          board = emptyBoard();
+          for (var i = 0; i < s.defs.length; i++) { var d = s.defs[i]; if (DTYPES[d.k] && !board[d.r][d.c]) board[d.r][d.c] = deepDef(d.k, d.c, d.r); }
+          enemies = []; phase = 'PLAN'; combatTick = 0; gs = 'PLAYING'; coachActive = false;
+        } else { gs = 'MENU'; }
+      }
+    );
+    if (gs === 'PLAYING' && (!board || !board.length)) gs = 'MENU';
+
+    GF.startMusic({ preset: 'arcade', muted: GF.muted });
+
+    if (window.__GF_AUTOSTART && !window._silent) { seenTut = true; startGame(); }
+
+    GF.exposeState(function() {
+      var defCount = 0;
+      if (board && board.length) for (var r = 0; r < GRID_ROWS; r++) for (var c = 0; c < GRID_COLS; c++) if (board[r][c]) defCount++;
+      return {
+        gs: gs, phase: phase, wave: wave, bestWave: bestWave,
+        baseHP: baseHP, tokens: tokens,
+        BASE_HP_START: BASE_HP_START, TOKENS_START: TOKENS_START,
+        TOTAL_WAVES: TOTAL_WAVES, PERFECT_REFUND: PERFECT_REFUND,
+        MOVE_COST: MOVE_COST, GRID_COLS: GRID_COLS, GRID_ROWS: GRID_ROWS,
+        ENEMY_STEP_COLS: ENEMY_STEP_COLS, COMBAT_TICKS: COMBAT_TICKS,
+        CELL_MAX_DEFENDERS: CELL_MAX_DEFENDERS,
+        enemiesAlive: enemies.length, defendersOnBoard: defCount,
+        leakedThisWave: leakedThisWave, combatTick: combatTick,
+        score: bestWave,
+      };
+    });
+
+    GF.exposeBot(
+      function() {
+        if (gs !== 'PLAYING' || phase === 'RESOLVE') return [];
+        var acts = ['resolve'];
+        if (tokens >= MOVE_COST) acts.push('reposition');
+        return acts;
+      },
+      function(a) {
+        if (gs !== 'PLAYING') return;
+        if (a === 'resolve') { if (coachActive) { coachActive = false; seenTut = true; } beginResolve(); return; }
+        if (a === 'reposition' && phase === 'PLAN' && tokens >= MOVE_COST) {
+          var from = null;
+          for (var r = 0; r < GRID_ROWS && !from; r++) for (var c = 0; c < GRID_COLS; c++) if (board[r][c]) { from = { r:r, c:c }; break; }
+          if (!from) return;
+          var to = null;
+          for (var rr2 = 0; rr2 < GRID_ROWS && !to; rr2++) for (var cc = 0; cc < GRID_COLS; cc++) if (!board[rr2][cc] && !(rr2===from.r&&cc===from.c)) { to = { r:rr2, c:cc }; break; }
+          if (!to) to = { r: from.r, c: Math.min(GRID_COLS-1, from.c+1) };
+          tryReposition(from.r, from.c, to.r, to.c);
+        }
+      }
+    );
+  },
+  onUpdate: update,
+  onDraw: draw,
+});
+
+// ── SCREENSHOT / TEST HOOKS ─────────────────────────────────────────────────
+window._setupForScreenshot = function(level) {
+  seenTut = true; coachActive = false;
+  startGame();
+  var w = Math.max(1, Math.min(TOTAL_WAVES, level || 9));
+  wave = w; baseHP = Math.max(8, BASE_HP_START - 4); tokens = 4;
+  var extra = [ {k:'mage',r:4,c:4}, {k:'chain',r:0,c:3}, {k:'frost',r:3,c:5}, {k:'archer',r:1,c:5} ];
+  for (var i = 0; i < extra.length; i++) { var e = extra[i]; if (!board[e.r][e.c] && DTYPES[e.k]) board[e.r][e.c] = deepDef(e.k, e.c, e.r); }
+  phase = 'RESOLVE';
+  enemies = spawnWave(campaign[wave - 1] || []);
+  for (var t = 0; t < 4; t++) { combatStep(); combatTick++; }
+};
+window._jumpLevel = function(n) { window._setupForScreenshot(n || 9); };
+window._setLang = function(l) { GF.lang = (l === 'ru' ? 'ru' : 'en'); };
+window._setState = function(s) { gs = s; };
+window._getI18N = function() { return STRINGS; };
+window._getFontBody = function() { return 'sans-serif'; };
+
+})();
+</script>
+</body>
+</html>

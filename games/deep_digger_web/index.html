@@ -1,0 +1,1645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Deep Digger Web</title>
+  <!-- PLATFORM_SDK -->
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #12100c;
+      --ink: #fff1cf;
+    }
+
+    html,
+    body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+
+    #game {
+      display: block;
+      width: 100vw;
+      height: 100dvh;
+      background: #12100c;
+      touch-action: none;
+    }
+
+    #sr-state {
+      position: fixed;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" aria-label="Deep Digger Web game canvas"></canvas>
+  <div id="sr-state" aria-live="polite"></div>
+
+  <script>
+  (() => {
+    "use strict";
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d", { alpha: false });
+    const srState = document.getElementById("sr-state");
+
+    const W = 900;
+    const H = 1200;
+    const SAVE_KEY = "deep-digger-web-v1";
+    const COLS = 17;
+    const ROWS = 22;
+    const TILE = 40;
+    const BOARD_W = COLS * TILE;
+    const BOARD_H = ROWS * TILE;
+    const BOARD_X = Math.floor((W - BOARD_W) / 2);
+    const BOARD_Y = 180;
+    const START_X = Math.floor(COLS / 2);
+    const START_Y = 2;
+    const PROFIT = {
+      GEM_1: 5,
+      GEM_2: 20,
+      GEM_3: 50,
+      GEM_4: 100,
+      GEM_5: 250,
+      THORN_ENEMY: 30,
+      SNAKE_ENEMY: 60,
+      BAT_ENEMY: 60,
+      SPIDER_ENEMY: 80,
+      CHEST_1: 120,
+      CHEST_STORY: 220,
+      TOTEM_SILVER: 90,
+      TOTEM_GOLD: 180,
+    };
+    const ENERGY_BY_CAVE = [30, 36, 40, 50, 60, 70, 80, 90, 100, 120, 150, 160, 200];
+    const FALLING_TYPES = new Set(["STONE", "GEM_1", "GEM_2", "GEM_3", "GEM_4", "GEM_5", "BOX", "CHEST_1", "TNT_BOX"]);
+
+    const COLORS = {
+      NOTHING: "#17130d",
+      GROUND: "#7a5733",
+      STONE: "#6f7379",
+      OBSIDIAN: "#24212a",
+      GEM_1: "#5cd0ff",
+      GEM_2: "#5dff9e",
+      GEM_3: "#ffd65c",
+      GEM_4: "#ff8c5a",
+      GEM_5: "#ff60d0",
+      GEM_ENERGY: "#78f76a",
+      TNT_BOX: "#d74634",
+      BOX: "#aa7138",
+      CHEST_1: "#d49a37",
+      CHEST_STORY: "#f5c35b",
+      THORN_ENEMY: "#7dff8e",
+      SNAKE_ENEMY: "#59d36a",
+      BAT_ENEMY: "#8f79ff",
+      SPIDER_ENEMY: "#c76bff",
+      TOTEM_SILVER: "#c8d1d8",
+      TOTEM_GOLD: "#f3c84e",
+      START_POSITION: "#17130d",
+    };
+
+    const LABELS = {
+      GEM_1: "g1",
+      GEM_2: "g2",
+      GEM_3: "g3",
+      GEM_4: "g4",
+      GEM_5: "g5",
+      GEM_ENERGY: "+E",
+      TNT_BOX: "TNT",
+      BOX: "?",
+      CHEST_1: "$",
+      CHEST_STORY: "SC",
+      THORN_ENEMY: "^",
+      SNAKE_ENEMY: "S",
+      BAT_ENEMY: "B",
+      SPIDER_ENEMY: "P",
+      TOTEM_SILVER: "2",
+      TOTEM_GOLD: "3",
+    };
+
+    const LOCAL_APK_ASSETS = window.DEEP_DIGGER_APK_ASSETS || null;
+    const spritePack = {
+      enabled: Boolean(LOCAL_APK_ASSETS && LOCAL_APK_ASSETS.map),
+      images: {},
+      total: 0,
+      loaded: 0,
+    };
+    if (spritePack.enabled) loadSpritePack(LOCAL_APK_ASSETS);
+
+    const BUTTONS = [];
+    const keys = new Set();
+    let dpr = 1;
+    let scale = 1;
+    let ox = 0;
+    let oy = 0;
+    let lastTs = 0;
+    let audioCtx = null;
+
+    const DEFAULT_SAVE = {
+      coins: 0,
+      runs: 0,
+      bestDepth: 0,
+      totalGems: 0,
+      totalEnergy: 0,
+      totalEnemies: 0,
+      achievements: {},
+      upgrades: { pick: 1, satchel: 1, lamp: 1 },
+      lastSeen: Date.now(),
+    };
+
+    const state = {
+      mode: "menu",
+      keyMoveT: 0,
+      save: loadSave(),
+      run: null,
+      pointer: { down: false, x: 0, y: 0, sx: 0, sy: 0 },
+      effects: [],
+      pulse: 0,
+      toast: "",
+      toastT: 0,
+      summary: null,
+    };
+
+    function clone(v) {
+      return JSON.parse(JSON.stringify(v));
+    }
+
+    function loadSave() {
+      try {
+        const raw = localStorage.getItem(SAVE_KEY);
+        if (!raw) return clone(DEFAULT_SAVE);
+        const parsed = JSON.parse(raw);
+        return {
+          ...clone(DEFAULT_SAVE),
+          ...parsed,
+          upgrades: { ...DEFAULT_SAVE.upgrades, ...(parsed.upgrades || {}) },
+          achievements: parsed.achievements || {},
+        };
+      } catch {
+        return clone(DEFAULT_SAVE);
+      }
+    }
+
+    function saveGame() {
+      state.save.lastSeen = Date.now();
+      try {
+        localStorage.setItem(SAVE_KEY, JSON.stringify(state.save));
+      } catch {}
+    }
+
+    function loadSpritePack(source) {
+      const base = source.base || "";
+      const entries = Object.entries(source.map || {});
+      spritePack.total = entries.length;
+      for (const [key, file] of entries) {
+        const img = new Image();
+        img.onload = () => {
+          spritePack.loaded += 1;
+        };
+        img.onerror = () => {
+          spritePack.images[key] = null;
+        };
+        img.src = base + file;
+        spritePack.images[key] = img;
+      }
+    }
+
+    function seeded(seed) {
+      let s = seed >>> 0;
+      return () => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return s / 4294967296;
+      };
+    }
+
+    function resize() {
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+      canvas.height = Math.max(1, Math.floor(window.innerHeight * dpr));
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+      ox = (window.innerWidth - W * scale) / 2;
+      oy = (window.innerHeight - H * scale) / 2;
+    }
+
+    function toGamePoint(e) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.clientX - rect.left - ox) / scale,
+        y: (e.clientY - rect.top - oy) / scale,
+      };
+    }
+
+    function cell(t, hp = 0) {
+      return { t, hp };
+    }
+
+    function caveEnergy(cave) {
+      const index = Math.min(ENERGY_BY_CAVE.length - 1, Math.max(0, cave - 1));
+      return ENERGY_BY_CAVE[index];
+    }
+
+    function caveProfile(cave) {
+      const location = clamp(Math.ceil(cave / 3), 1, 5);
+      return {
+        cave,
+        location,
+        energy: caveEnergy(cave),
+        gems: 9 + cave * 2,
+        enemies: 4 + cave,
+        boxes: 3 + Math.floor(cave / 2),
+        tnt: 1 + Math.floor(cave / 3),
+        chests: cave > 6 && cave % 5 === 0 ? 1 : 0,
+        energyGems: 2 + Math.floor(cave / 4),
+      };
+    }
+
+    function makeMine(levelSeed, cave) {
+      const rng = seeded(levelSeed);
+      const profile = caveProfile(cave);
+      const grid = Array.from({ length: ROWS }, () => Array.from({ length: COLS }, () => cell("GROUND")));
+
+      for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+          if (x === 0 || x === COLS - 1 || y === 0 || y === ROWS - 1) {
+            grid[y][x] = cell("OBSIDIAN");
+            continue;
+          }
+          const depth = y / ROWS;
+          const edgeBias = Math.min(x, COLS - 1 - x) <= 2 ? 0.08 : 0;
+          const r = rng();
+          if (r < 0.13 + depth * 0.05 + edgeBias) grid[y][x] = cell("OBSIDIAN");
+          else if (r < 0.27 + depth * 0.06) grid[y][x] = cell("STONE");
+          else if (r < 0.5) grid[y][x] = cell("NOTHING");
+        }
+      }
+
+      const side = rng() < 0.5 ? -1 : 1;
+      const goalX = clamp(START_X + side * (5 + Math.floor(rng() * 3)), 2, COLS - 3);
+      const goalY = ROWS - 3 - Math.floor(rng() * 2);
+      carvePocket(grid, START_X, START_Y, 3, 2, rng, 0.78);
+      grid[START_Y][START_X] = cell("START_POSITION");
+
+      let pathX = START_X;
+      for (let y = START_Y + 1; y < ROWS - 1; y++) {
+        if (Math.abs(y - goalY) <= 2 && pathX !== goalX) pathX += Math.sign(goalX - pathX);
+        else if (rng() < 0.45) pathX += rng() < 0.5 ? -1 : 1;
+        pathX = clamp(pathX, 2, COLS - 3);
+        grid[y][pathX] = cell(rng() < 0.22 ? "NOTHING" : "GROUND");
+        if (rng() < 0.46) grid[y][clamp(pathX + (rng() < 0.5 ? -1 : 1), 1, COLS - 2)] = cell("GROUND");
+      }
+      carvePocket(grid, goalX, goalY, 2, 1, rng, 0.42);
+
+      const pocketCount = 4 + Math.min(4, Math.floor(cave / 2));
+      for (let i = 0; i < pocketCount; i++) {
+        const cx = 2 + Math.floor(rng() * (COLS - 4));
+        const cy = 5 + Math.floor(rng() * (ROWS - 8));
+        carvePocket(grid, cx, cy, 2 + Math.floor(rng() * 3), 1 + Math.floor(rng() * 2), rng, 0.58);
+      }
+
+      scatterTile(grid, profile.gems, rng, (x, y) => gemCell(y / ROWS, rng, cave));
+      scatterTile(grid, profile.energyGems, rng, () => cell("GEM_ENERGY"));
+      scatterTile(grid, profile.enemies, rng, (x, y) => enemyCell(y / ROWS, rng, cave));
+      scatterTile(grid, profile.boxes, rng, () => cell("BOX"));
+      scatterTile(grid, profile.tnt, rng, () => cell("TNT_BOX"));
+      scatterTile(grid, profile.chests, rng, () => cell("CHEST_1"));
+      scatterTile(grid, cave > 2 ? 1 + Math.floor(cave / 5) : 0, rng, () => cell(rng() < 0.75 ? "TOTEM_SILVER" : "TOTEM_GOLD", rng() < 0.75 ? 2 : 3));
+
+      grid[goalY][goalX] = cell("CHEST_STORY");
+      grid[START_Y][START_X] = cell("START_POSITION");
+      return { grid, startX: START_X, startY: START_Y, goalX, goalY, profile };
+    }
+
+    function carvePocket(grid, cx, cy, rx, ry, rng, emptyChance) {
+      for (let y = cy - ry; y <= cy + ry; y++) {
+        for (let x = cx - rx; x <= cx + rx; x++) {
+          if (x <= 0 || x >= COLS - 1 || y <= 0 || y >= ROWS - 1) continue;
+          const nx = (x - cx) / Math.max(1, rx);
+          const ny = (y - cy) / Math.max(1, ry);
+          if (nx * nx + ny * ny <= 1.15) grid[y][x] = cell(rng() < emptyChance ? "NOTHING" : "GROUND");
+        }
+      }
+    }
+
+    function scatterTile(grid, count, rng, factory) {
+      for (let i = 0; i < count; i++) {
+        for (let tries = 0; tries < 80; tries++) {
+          const x = 1 + Math.floor(rng() * (COLS - 2));
+          const y = 3 + Math.floor(rng() * (ROWS - 6));
+          const t = grid[y][x].t;
+          if (t === "OBSIDIAN" || t === "START_POSITION" || t === "CHEST_STORY") continue;
+          if (Math.abs(x - START_X) + Math.abs(y - START_Y) < 4) continue;
+          grid[y][x] = factory(x, y);
+          break;
+        }
+      }
+    }
+
+    function gemCell(depth, rng, cave = 1) {
+      const roll = rng();
+      const reach = depth + cave * 0.065;
+      if (reach > 0.88 && roll > 0.86) return cell("GEM_5");
+      if (reach > 0.68 && roll > 0.76) return cell("GEM_4");
+      if (reach > 0.48 && roll > 0.58) return cell("GEM_3");
+      if (reach > 0.28 && roll > 0.38) return cell("GEM_2");
+      return cell("GEM_1");
+    }
+
+    function enemyCell(depth, rng, cave = 1) {
+      const reach = depth + cave * 0.04;
+      if (reach > 0.62 && rng() < 0.34) return cell("SPIDER_ENEMY");
+      if (reach > 0.42 && rng() < 0.38) return cell("BAT_ENEMY");
+      if (reach > 0.22 && rng() < 0.46) return cell("SNAKE_ENEMY");
+      return cell("THORN_ENEMY");
+    }
+
+    function startRun() {
+      ensureAudio();
+      const seed = (Date.now() ^ (state.save.runs * 2654435761)) >>> 0;
+      const lamp = state.save.upgrades.lamp;
+      const cave = state.save.runs + 1;
+      const mine = makeMine(seed, cave);
+      const energy = mine.profile.energy + Math.max(0, lamp - 1) * 3;
+      state.run = {
+        seed,
+        cave,
+        location: mine.profile.location,
+        profile: mine.profile,
+        grid: mine.grid,
+        x: mine.startX,
+        y: mine.startY,
+        goalX: mine.goalX,
+        goalY: mine.goalY,
+        cameraY: 0,
+        energy,
+        maxEnergy: energy,
+        coins: 0,
+        gems: 0,
+        enemies: 0,
+        blasts: 0,
+        falls: 0,
+        storyFound: false,
+        moves: 0,
+        deepest: START_Y,
+        ended: false,
+        log: [],
+      };
+      state.mode = "run";
+      state.summary = null;
+      state.effects.length = 0;
+      state.toast = `Cave ${cave}: find the story chest`;
+      state.toastT = 1.2;
+      saveGame();
+    }
+
+    function endRun(reason) {
+      const r = state.run;
+      if (!r || r.ended) return;
+      r.ended = true;
+      const depthBonus = reason === "story_chest" ? Math.floor(r.maxEnergy * 1.5) : 0;
+      const payout = r.coins + depthBonus;
+      state.save.coins += payout;
+      state.save.runs += 1;
+      state.save.bestDepth = Math.max(state.save.bestDepth, r.deepest);
+      state.save.totalGems += r.gems;
+      state.save.totalEnergy += r.maxEnergy - Math.max(0, r.energy);
+      state.save.totalEnemies += r.enemies;
+      updateAchievements(r);
+      state.summary = { reason, payout, depthBonus, coins: r.coins, cave: r.cave, depth: r.deepest, gems: r.gems, enemies: r.enemies, blasts: r.blasts, falls: r.falls };
+      state.mode = "summary";
+      saveGame();
+    }
+
+    function updateAchievements(r) {
+      claimAch("depth_30", r.deepest >= 30, 25);
+      claimAch("depth_55", r.deepest >= 55, 50);
+      claimAch("gems_12", r.gems >= 12, 25);
+      claimAch("coins_1000", r.coins >= 1000, 50);
+      claimAch("enemies_6", r.enemies >= 6, 25);
+    }
+
+    function claimAch(id, ok, reward) {
+      if (!ok || state.save.achievements[id]) return;
+      state.save.achievements[id] = true;
+      state.save.coins += reward;
+      state.toast = `Achievement +${reward}`;
+      state.toastT = 1.8;
+    }
+
+    function tileCost(type) {
+      const pick = state.save.upgrades.pick;
+      if (type === "GROUND") return 1;
+      if (type === "STONE") return Math.max(2, 6 - pick);
+      if (type === "OBSIDIAN") return 999;
+      if (type === "THORN_ENEMY") return 3;
+      if (type === "SNAKE_ENEMY") return 5;
+      if (type === "BAT_ENEMY") return 5;
+      if (type === "SPIDER_ENEMY") return 7;
+      if (type === "TOTEM_SILVER" || type === "TOTEM_GOLD") return 3;
+      return 1;
+    }
+
+    function actOnCell(tx, ty) {
+      const r = state.run;
+      if (!r || state.mode !== "run") return;
+      if (tx < 0 || tx >= COLS || ty < 0 || ty >= ROWS) return;
+      const dist = Math.abs(tx - r.x) + Math.abs(ty - r.y);
+      if (dist !== 1) return;
+
+      const c = r.grid[ty][tx];
+      const type = c.t;
+      if (type === "OBSIDIAN") {
+        nudge("Black rock blocks the route");
+        ping(90, 0.08, "sawtooth");
+        return;
+      }
+      const cost = tileCost(type);
+      if (cost > r.energy) {
+        nudge("No energy");
+        return;
+      }
+
+      spend(cost);
+      let moved = true;
+
+      if (type === "NOTHING" || type === "START_POSITION") {
+        ping(180, 0.03, "sine");
+      } else if (type === "GROUND" || type === "STONE" || type === "OBSIDIAN") {
+        c.t = "NOTHING";
+        c.hp = 0;
+        ping(type === "STONE" ? 120 : 150, 0.05, "triangle");
+      } else if (type.startsWith("GEM_") && type !== "GEM_ENERGY") {
+        const gain = Math.floor((PROFIT[type] || 5) * (1 + (state.save.upgrades.satchel - 1) * 0.18));
+        r.coins += gain;
+        r.gems += 1;
+        c.t = "NOTHING";
+        emitBurst(tx, ty, COLORS[type] || "#75d6ff", 9);
+        nudge(`+${gain}`);
+        ping(430 + r.gems * 9, 0.06, "sine");
+      } else if (type === "GEM_ENERGY") {
+        const gain = 8 + state.save.upgrades.lamp * 2;
+        r.energy = Math.min(r.maxEnergy + 18, r.energy + gain);
+        c.t = "NOTHING";
+        emitBurst(tx, ty, "#78f76a", 11);
+        nudge(`Energy +${gain}`);
+        ping(520, 0.05, "sine");
+      } else if (type === "TNT_BOX") {
+        c.t = "NOTHING";
+        detonate(tx, ty);
+        ping(70, 0.14, "sawtooth");
+      } else if (type === "BOX") {
+        openBox(c);
+        moved = false;
+      } else if (type === "CHEST_1") {
+        const gain = Math.floor(120 * (1 + (state.save.upgrades.satchel - 1) * 0.18));
+        r.coins += gain;
+        c.t = "NOTHING";
+        emitBurst(tx, ty, "#f3c84e", 14);
+        nudge(`Chest +${gain}`);
+        ping(650, 0.07, "triangle");
+      } else if (type === "CHEST_STORY") {
+        const gain = Math.floor(220 * (1 + (state.save.upgrades.satchel - 1) * 0.18));
+        r.coins += gain;
+        r.storyFound = true;
+        c.t = "NOTHING";
+        emitBurst(tx, ty, "#ffd765", 24);
+        nudge(`Story chest +${gain}`);
+        ping(720, 0.1, "triangle");
+      } else if (type === "TOTEM_SILVER" || type === "TOTEM_GOLD") {
+        c.hp -= 1;
+        if (c.hp <= 0) {
+          const gain = PROFIT[type];
+          r.coins += gain;
+          c.t = "NOTHING";
+          emitBurst(tx, ty, COLORS[type] || "#f3c84e", 12);
+          nudge(`Totem +${gain}`);
+          ping(300, 0.08, "triangle");
+        } else {
+          moved = false;
+          nudge(`${c.hp} hits`);
+          ping(100, 0.06, "square");
+        }
+      } else if (PROFIT[type]) {
+        const gain = PROFIT[type];
+        r.coins += gain;
+        r.enemies += 1;
+        c.t = "NOTHING";
+        emitBurst(tx, ty, "#ff6b54", 10);
+        nudge(`Risk +${gain}`);
+        ping(210, 0.07, "sawtooth");
+      }
+
+      if (moved && c.t === "NOTHING") {
+        r.x = tx;
+        r.y = ty;
+        r.moves += 1;
+        r.deepest = Math.max(r.deepest, ty);
+        r.cameraY = 0;
+      }
+      if (!r.ended && !r.storyFound) applyTurnPressure();
+      if (r.energy <= 0) endRun("energy");
+      if (!r.ended && r.storyFound) endRun("story_chest");
+    }
+
+    function openBox(c) {
+      const r = state.run;
+      const rng = seeded((r.seed ^ (r.moves * 1103515245) ^ (r.x * 97) ^ (r.y * 131)) >>> 0);
+      const roll = rng();
+      if (roll < 0.28) {
+        c.t = "GEM_ENERGY";
+        nudge("Box: energy");
+      } else if (roll < 0.58) {
+        c.t = gemCell(r.y / ROWS, rng, r.cave).t;
+        nudge("Box: gem");
+      } else if (roll < 0.78) {
+        c.t = "CHEST_1";
+        nudge("Box: chest");
+      } else {
+        c.t = enemyCell(r.y / ROWS, rng, r.cave).t;
+        nudge("Box: danger");
+      }
+      ping(260, 0.06, "triangle");
+    }
+
+    function detonate(cx, cy) {
+      const r = state.run;
+      r.blasts += 1;
+      let gain = 0;
+      emitBurst(cx, cy, "#ff7048", 28);
+      for (let y = cy - 1; y <= cy + 1; y++) {
+        for (let x = cx - 1; x <= cx + 1; x++) {
+          if (x < 1 || x >= COLS - 1 || y < 0 || y >= ROWS) continue;
+          const c = r.grid[y][x];
+          if (c.t === "OBSIDIAN") continue;
+          if (c.t === "CHEST_STORY") {
+            gain += PROFIT.CHEST_STORY;
+            r.storyFound = true;
+          } else if (PROFIT[c.t]) {
+            gain += Math.floor((PROFIT[c.t] || 0) * 0.8);
+            if (c.t.includes("ENEMY")) r.enemies += 1;
+            if (c.t.startsWith("GEM_")) r.gems += 1;
+          }
+          if (c.t !== "START_POSITION") {
+            c.t = "NOTHING";
+            c.hp = 0;
+          }
+        }
+      }
+      r.coins += gain;
+      nudge(gain ? `Blast +${gain}` : "Blast");
+    }
+
+    function applyTurnPressure() {
+      const r = state.run;
+      if (!r || r.ended) return;
+      const falls = applyGravity();
+      if (!r || r.ended) return;
+      const damage = adjacentEnemyPressure();
+      if (damage > 0) {
+        spend(damage);
+        nudge(`Threat -${damage} energy`);
+        ping(130, 0.08, "sawtooth");
+      } else if (falls > 0) {
+        nudge(falls === 1 ? "Rock shifted" : `${falls} rocks shifted`);
+      }
+    }
+
+    function applyGravity() {
+      const r = state.run;
+      let moved = 0;
+      for (let y = ROWS - 2; y >= 1; y--) {
+        for (let x = 1; x < COLS - 1; x++) {
+          const c = r.grid[y][x];
+          if (!FALLING_TYPES.has(c.t)) continue;
+          if (r.x === x && r.y === y + 1) {
+            endRun("crushed");
+            return moved;
+          }
+          const below = r.grid[y + 1][x];
+          if (below.t === "NOTHING" || below.t === "START_POSITION") {
+            r.grid[y + 1][x] = c;
+            r.grid[y][x] = cell("NOTHING");
+            moved += 1;
+          }
+        }
+      }
+      r.falls += moved;
+      return moved;
+    }
+
+    function adjacentEnemyPressure() {
+      const r = state.run;
+      let damage = 0;
+      const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+      for (const [dx, dy] of dirs) {
+        const x = r.x + dx;
+        const y = r.y + dy;
+        if (x < 0 || x >= COLS || y < 0 || y >= ROWS) continue;
+        const t = r.grid[y][x].t;
+        if (t === "SNAKE_ENEMY" || t === "BAT_ENEMY") damage += 1;
+        else if (t === "SPIDER_ENEMY") damage += 2;
+      }
+      return Math.min(3, damage);
+    }
+
+    function spend(n) {
+      const r = state.run;
+      r.energy = Math.max(0, r.energy - n);
+    }
+
+    function emitBurst(tx, ty, color, count) {
+      const cx = BOARD_X + tx * TILE + TILE / 2;
+      const cy = BOARD_Y + ty * TILE + TILE / 2;
+      for (let i = 0; i < count; i++) {
+        const a = (i / Math.max(1, count)) * Math.PI * 2 + state.pulse;
+        const speed = 34 + ((i * 19) % 46);
+        state.effects.push({
+          x: cx,
+          y: cy,
+          vx: Math.cos(a) * speed,
+          vy: Math.sin(a) * speed - 12,
+          life: 0.45 + ((i * 7) % 18) / 100,
+          t: 0,
+          r: 2 + (i % 3),
+          color,
+        });
+      }
+      if (state.effects.length > 180) state.effects.splice(0, state.effects.length - 180);
+    }
+
+    function buyUpgrade(kind) {
+      const lvl = state.save.upgrades[kind] || 1;
+      const cost = upgradeCost(kind, lvl);
+      if (state.save.coins < cost) {
+        nudge("Need coins");
+        ping(95, 0.08, "sawtooth");
+        return;
+      }
+      state.save.coins -= cost;
+      state.save.upgrades[kind] = lvl + 1;
+      saveGame();
+      nudge("Upgraded");
+      ping(500, 0.08, "triangle");
+    }
+
+    function upgradeCost(kind, lvl) {
+      const base = kind === "pick" ? 120 : kind === "satchel" ? 160 : 140;
+      return Math.floor(base * Math.pow(lvl, 1.72));
+    }
+
+    function clamp(v, a, b) {
+      return Math.max(a, Math.min(b, v));
+    }
+
+    function nudge(text) {
+      state.toast = text;
+      state.toastT = 1.1;
+    }
+
+    function ensureAudio() {
+      if (!audioCtx) {
+        try {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        } catch {}
+      }
+      if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+    }
+
+    function ping(freq, dur, type) {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type || "sine";
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.045, audioCtx.currentTime + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + dur + 0.02);
+    }
+
+    function update(dt) {
+      state.pulse += dt;
+      state.toastT = Math.max(0, state.toastT - dt);
+      state.keyMoveT = Math.max(0, state.keyMoveT - dt);
+      for (let i = state.effects.length - 1; i >= 0; i--) {
+        const e = state.effects[i];
+        e.t += dt;
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+        e.vy += 120 * dt;
+        if (e.t >= e.life) state.effects.splice(i, 1);
+      }
+      if (state.mode === "run" && state.keyMoveT <= 0) {
+        const r = state.run;
+        let moved = false;
+        if (keys.has("ArrowLeft") || keys.has("KeyA")) { actOnCell(r.x - 1, r.y); moved = true; }
+        else if (keys.has("ArrowRight") || keys.has("KeyD")) { actOnCell(r.x + 1, r.y); moved = true; }
+        else if (keys.has("ArrowUp") || keys.has("KeyW")) { actOnCell(r.x, r.y - 1); moved = true; }
+        else if (keys.has("ArrowDown") || keys.has("KeyS")) { actOnCell(r.x, r.y + 1); moved = true; }
+        if (moved) state.keyMoveT = 0.14;
+      }
+    }
+
+    function draw() {
+      ctx.save();
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(dpr * scale, 0, 0, dpr * scale, ox * dpr, oy * dpr);
+      drawBackground();
+      BUTTONS.length = 0;
+      if (state.mode === "menu") drawMenu();
+      else if (state.mode === "run") drawRun();
+      else drawSummary();
+      if (state.toastT > 0) drawToast();
+      ctx.restore();
+      srState.textContent = renderGameToText();
+    }
+
+    function drawBackground() {
+      const g = ctx.createLinearGradient(0, 0, 0, H);
+      g.addColorStop(0, "#18212a");
+      g.addColorStop(0.34, "#2e271b");
+      g.addColorStop(1, "#100c09");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, H);
+      for (let i = 0; i < 70; i++) {
+        const x = (i * 137) % W;
+        const y = 150 + ((i * 83) % 950);
+        ctx.fillStyle = i % 3 === 0 ? "rgba(255,210,92,.08)" : "rgba(255,255,255,.035)";
+        ctx.fillRect(x, y, 2 + (i % 3), 2 + (i % 2));
+      }
+    }
+
+    function drawMenu() {
+      drawTitle("Deep Digger Web", "compact APK-style cave blocks");
+      drawStatsBand();
+      drawMinePreview(88, 380, 724, 220);
+      button("Start cave", 90, 650, 330, 74, startRun, "#f3c84e", "#1d1507");
+      button("New layout", 480, 650, 330, 74, () => startRun(), "#5ad0ff", "#07151d");
+      drawUpgrade("pick", "Pickaxe", "cheaper stone digging", 95, 772);
+      drawUpgrade("satchel", "Satchel", "better gem and chest payout", 95, 886);
+      drawUpgrade("lamp", "Lamp", "small bonus energy and refill value", 95, 1000);
+    }
+
+    function drawTitle(title, sub) {
+      ctx.fillStyle = "#fff1cf";
+      ctx.font = "800 58px Inter, system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(title, W / 2, 92);
+      ctx.font = "500 22px Inter, system-ui";
+      ctx.fillStyle = "#bda679";
+      ctx.fillText(sub, W / 2, 130);
+    }
+
+    function drawStatsBand() {
+      const s = state.save;
+      panel(70, 168, 760, 162, "#1f1a14", "#4e3b26");
+      stat("Coins", s.coins, 124, 225, "#f3c84e");
+      stat("Best row", s.bestDepth, 334, 225, "#75d6ff");
+      stat("Runs", s.runs, 552, 225, "#d9b98e");
+      stat("Gems", s.totalGems, 728, 225, "#ff75cf");
+      const ach = Object.keys(s.achievements).length;
+      ctx.font = "700 24px Inter, system-ui";
+      ctx.fillStyle = "#fff1cf";
+      ctx.textAlign = "center";
+      ctx.fillText(`${ach}/5 achievements`, W / 2, 294);
+    }
+
+    function stat(label, value, x, y, color) {
+      ctx.fillStyle = color;
+      ctx.font = "800 32px Inter, system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(String(value), x, y);
+      ctx.fillStyle = "#bda679";
+      ctx.font = "500 15px Inter, system-ui";
+      ctx.fillText(label, x, y + 28);
+    }
+
+    function drawMinePreview(x, y, w, h) {
+      panel(x, y, w, h, "#17130d", "#4e3b26");
+      ctx.save();
+      ctx.beginPath();
+      roundedRect(x, y, w, h, 8);
+      ctx.clip();
+      const tw = 28;
+      for (let yy = 0; yy < Math.ceil(h / tw); yy++) {
+        for (let xx = 0; xx < Math.ceil(w / tw); xx++) {
+          const px = x + xx * tw;
+          const py = y + yy * tw;
+          const r = cellRand(xx, yy, 3);
+          const fake = r < 0.22 ? "OBSIDIAN" : r < 0.38 ? "STONE" : r < 0.56 ? "NOTHING" : "GROUND";
+          drawTinyTile(fake, px, py, tw, xx, yy);
+        }
+      }
+      drawTinyTile("START_POSITION", x + 84, y + 28, tw, 1, 1);
+      drawTinyTile("GEM_2", x + 206, y + 118, tw, 2, 2);
+      drawTinyTile("GEM_5", x + 506, y + 78, tw, 3, 3);
+      drawTinyTile("TNT_BOX", x + 610, y + 150, tw, 4, 4);
+      drawTinyTile("CHEST_STORY", x + 672, y + 126, tw, 5, 5);
+      const rg = ctx.createRadialGradient(x + 470, y + 120, 30, x + 470, y + 120, 420);
+      rg.addColorStop(0, "rgba(255,205,92,.12)");
+      rg.addColorStop(1, "rgba(0,0,0,.42)");
+      ctx.fillStyle = rg;
+      ctx.fillRect(x, y, w, h);
+      ctx.restore();
+    }
+
+    function drawTinyTile(type, x, y, size, gx, gy) {
+      const oldTile = TILE;
+      const inset = 1;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(size / oldTile, size / oldTile);
+      drawCellArt(type, gx, gy, inset, inset, { hp: 0 }, oldTile);
+      ctx.restore();
+    }
+
+    function drawUpgrade(kind, name, desc, x, y) {
+      const lvl = state.save.upgrades[kind] || 1;
+      const cost = upgradeCost(kind, lvl);
+      panel(x, y, 710, 88, "#1f1a14", "#4e3b26");
+      ctx.fillStyle = "#fff1cf";
+      ctx.font = "800 24px Inter, system-ui";
+      ctx.textAlign = "left";
+      ctx.fillText(`${name} ${lvl}`, x + 24, y + 34);
+      ctx.fillStyle = "#bda679";
+      ctx.font = "500 15px Inter, system-ui";
+      ctx.fillText(desc, x + 24, y + 61);
+      button(`Buy ${cost}`, x + 520, y + 18, 160, 52, () => buyUpgrade(kind), "#312718", "#f3c84e");
+    }
+
+    function drawRun() {
+      const r = state.run;
+      drawRunHud(r);
+      drawCaveFrame();
+      const visibleRows = Math.floor(BOARD_H / TILE);
+      ctx.save();
+      ctx.beginPath();
+      roundedRect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H, 8);
+      ctx.clip();
+      for (let yy = 0; yy <= visibleRows; yy++) {
+        const gy = r.cameraY + yy;
+        if (gy < 0 || gy >= ROWS) continue;
+        for (let x = 0; x < COLS; x++) {
+          drawCell(x, gy, BOARD_X + x * TILE, BOARD_Y + yy * TILE, r.grid[gy][x]);
+        }
+      }
+      drawEffects();
+      drawMiner(BOARD_X + r.x * TILE + TILE / 2, BOARD_Y + (r.y - r.cameraY) * TILE + TILE / 2);
+      drawLighting(r);
+      ctx.restore();
+
+      button("Surface", 612, 1090, 228, 64, () => endRun("surface"), "#312718", "#f3c84e");
+    }
+
+    function drawCaveFrame() {
+      ctx.save();
+      const g = ctx.createLinearGradient(BOARD_X, BOARD_Y, BOARD_X + BOARD_W, BOARD_Y + BOARD_H);
+      g.addColorStop(0, "#30231a");
+      g.addColorStop(0.5, "#5b422c");
+      g.addColorStop(1, "#1c1721");
+      ctx.fillStyle = g;
+      roundedFill(BOARD_X - 14, BOARD_Y - 14, BOARD_W + 28, BOARD_H + 28, 10);
+      ctx.strokeStyle = "#9b7341";
+      ctx.lineWidth = 3;
+      roundedStroke(BOARD_X - 9, BOARD_Y - 9, BOARD_W + 18, BOARD_H + 18, 8);
+      ctx.fillStyle = "rgba(0,0,0,.28)";
+      roundedFill(BOARD_X - 2, BOARD_Y - 2, BOARD_W + 4, BOARD_H + 4, 8);
+      for (let i = 0; i < 18; i++) {
+        const px = BOARD_X - 10 + i * 42;
+        const h = 10 + (i * 13) % 24;
+        ctx.fillStyle = i % 2 ? "#3a2a20" : "#59402a";
+        ctx.beginPath();
+        ctx.moveTo(px, BOARD_Y - 13);
+        ctx.lineTo(px + 16, BOARD_Y - 13);
+        ctx.lineTo(px + 6, BOARD_Y - 13 + h);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawRunHud(r) {
+      panel(48, 28, 804, 124, "#1d1812", "#4e3b26");
+      stat("Energy", `${r.energy}/${r.maxEnergy}`, 150, 82, "#78f76a");
+      stat("Coins", r.coins, 330, 82, "#f3c84e");
+      stat("Cave", r.cave, 520, 82, "#75d6ff");
+      stat("Gems", r.gems, 704, 82, "#ff75cf");
+      const p = clamp(r.energy / r.maxEnergy, 0, 1);
+      ctx.fillStyle = "#392818";
+      roundedFill(92, 124, 716, 12, 5);
+      ctx.fillStyle = p > 0.25 ? "#78f76a" : "#e45b48";
+      roundedFill(92, 124, 716 * p, 12, 5);
+    }
+
+    function drawCell(x, y, sx, sy, c) {
+      drawCellArt(c.t, x, y, sx, sy, c, TILE);
+      if (c.hp > 0) {
+        ctx.fillStyle = "rgba(0,0,0,.45)";
+        roundedFill(sx + 8, sy + 7, 36, 6, 3);
+        ctx.fillStyle = "#f3c84e";
+        roundedFill(sx + 8, sy + 7, 12 * c.hp, 6, 3);
+      }
+      if (state.run && Math.abs(x - state.run.x) + Math.abs(y - state.run.y) === 1) {
+        ctx.strokeStyle = "rgba(255,241,207,.12)";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(sx + 2, sy + 2, TILE - 5, TILE - 5);
+      }
+    }
+
+    function drawCellArt(t, x, y, sx, sy, c, size) {
+      drawFloor(sx, sy, size, x, y);
+      if (t === "NOTHING") return;
+      if (drawApkSpriteCell(t, x, y, sx, sy, size)) return;
+      if (t === "START_POSITION") return drawStartTile(sx, sy, size);
+      if (t === "GROUND") return drawDirt(sx, sy, size, x, y);
+      if (t === "STONE") return drawStone(sx, sy, size, x, y);
+      if (t === "OBSIDIAN") return drawObsidian(sx, sy, size, x, y);
+      if (t.startsWith("GEM_") && t !== "GEM_ENERGY") return drawGem(sx + size / 2, sy + size / 2, size * 0.32, COLORS[t]);
+      if (t === "GEM_ENERGY") return drawEnergyGem(sx, sy, size);
+      if (t === "TNT_BOX") return drawDynamite(sx, sy, size);
+      if (t === "BOX") return drawCrate(sx, sy, size);
+      if (t === "CHEST_1") return drawChest(sx, sy, size, false);
+      if (t === "CHEST_STORY") return drawChest(sx, sy, size, true);
+      if (t === "THORN_ENEMY") return drawThorns(sx, sy, size);
+      if (t === "SNAKE_ENEMY") return drawSnake(sx, sy, size);
+      if (t === "BAT_ENEMY") return drawBat(sx, sy, size);
+      if (t === "SPIDER_ENEMY") return drawSpider(sx, sy, size);
+      if (t === "TOTEM_SILVER" || t === "TOTEM_GOLD") return drawTotem(sx, sy, size, t === "TOTEM_GOLD");
+    }
+
+    function cellRand(x, y, salt) {
+      const n = (x * 73856093) ^ (y * 19349663) ^ (salt * 83492791);
+      return ((n >>> 0) % 1000) / 1000;
+    }
+
+    function variant(keys, x, y, salt) {
+      if (!keys.length) return "";
+      return keys[Math.floor(cellRand(x, y, salt) * keys.length) % keys.length];
+    }
+
+    function drawApkSpriteCell(t, x, y, sx, sy, size) {
+      if (!spritePack.enabled) return false;
+      const ground = variant(["ground0", "ground1", "ground2"], x, y, 3);
+      const drawGround = () => drawSpriteImage(ground, sx, sy, size, size, "cover");
+      if (t === "START_POSITION") {
+        drawGround();
+        return false;
+      }
+      if (t === "GROUND") return drawGround();
+      if (t === "STONE" || t === "FLY_STONE") {
+        return drawSpriteImage(variant(["stone0", "stone1", "stone2", "stone3"], x, y, 5), sx + 2, sy + 2, size - 4, size - 4, "contain");
+      }
+      if (t === "OBSIDIAN" || t === "OBSIDIAN_INDESTRUCTIBLE") {
+        return drawSpriteImage(variant(["obsidian0", "obsidian1", "obsidian2"], x, y, 7), sx, sy, size, size, "cover");
+      }
+      if (t.startsWith("GEM_") && t !== "GEM_ENERGY") {
+        drawGround();
+        return drawSpriteImage(t.toLowerCase(), sx + 1, sy + 1, size - 2, size - 2, "contain");
+      }
+      if (t === "GEM_ENERGY") {
+        drawGround();
+        return drawSpriteImage("gem_energy", sx + 1, sy + 1, size - 2, size - 2, "contain");
+      }
+      if (t === "TNT_BOX") {
+        drawGround();
+        return drawSpriteImage("tnt", sx + 1, sy + 1, size - 2, size - 2, "contain");
+      }
+      if (t === "BOX") {
+        drawGround();
+        return drawSpriteImage("box", sx + 2, sy + 3, size - 4, size - 5, "contain");
+      }
+      if (t === "CHEST_1" || t === "CHEST_STORY") {
+        drawGround();
+        return drawSpriteImage(t === "CHEST_STORY" ? "story_chest" : "chest", sx + 1, sy + 2, size - 2, size - 4, "contain");
+      }
+      if (t === "SNAKE_ENEMY") {
+        drawGround();
+        return drawSpriteImage("snake", sx + 1, sy + 1, size - 2, size - 2, "contain");
+      }
+      if (t === "BAT_ENEMY") {
+        drawGround();
+        return drawSpriteImage("bat", sx - 2, sy + 3, size + 4, size - 2, "contain");
+      }
+      if (t === "SPIDER_ENEMY") {
+        drawGround();
+        return drawSpriteImage("spider", sx + 1, sy + 1, size - 2, size - 2, "contain");
+      }
+      if (t === "TOTEM_SILVER" || t === "TOTEM_GOLD") {
+        drawGround();
+        return drawSpriteImage(t === "TOTEM_GOLD" ? "totem_gold" : "totem", sx + 2, sy + 2, size - 4, size - 4, "contain");
+      }
+      return false;
+    }
+
+    function drawSpriteImage(key, x, y, w, h, mode) {
+      const img = spritePack.images[key];
+      if (!img || !img.complete || !img.naturalWidth) return false;
+      let dx = x;
+      let dy = y;
+      let dw = w;
+      let dh = h;
+      if (mode === "contain") {
+        const ratio = Math.min(w / img.naturalWidth, h / img.naturalHeight);
+        dw = img.naturalWidth * ratio;
+        dh = img.naturalHeight * ratio;
+        dx = x + (w - dw) / 2;
+        dy = y + (h - dh) / 2;
+      }
+      ctx.save();
+      ctx.shadowColor = "rgba(0,0,0,.4)";
+      ctx.shadowBlur = Math.max(2, w * 0.08);
+      ctx.shadowOffsetY = Math.max(1, h * 0.04);
+      ctx.drawImage(img, dx, dy, dw, dh);
+      ctx.restore();
+      return true;
+    }
+
+    function drawFloor(x, y, size, gx, gy) {
+      const g = ctx.createLinearGradient(x, y, x, y + size);
+      g.addColorStop(0, "#16110d");
+      g.addColorStop(1, "#090806");
+      ctx.fillStyle = g;
+      ctx.fillRect(x, y, size - 1, size - 1);
+      for (let i = 0; i < 3; i++) {
+        ctx.fillStyle = i % 2 ? "rgba(255,211,133,.035)" : "rgba(0,0,0,.18)";
+        ctx.fillRect(x + 4 + cellRand(gx, gy, i) * (size - 10), y + 5 + cellRand(gy, gx, i + 7) * (size - 12), 2 + i, 2);
+      }
+    }
+
+    function drawDirt(x, y, size, gx, gy) {
+      const g = ctx.createLinearGradient(x, y, x, y + size);
+      g.addColorStop(0, "#8d6539");
+      g.addColorStop(0.58, "#704b2d");
+      g.addColorStop(1, "#4c311f");
+      ctx.fillStyle = g;
+      ctx.fillRect(x + 1, y + 1, size - 2, size - 2);
+      ctx.fillStyle = "rgba(255,221,143,.14)";
+      ctx.fillRect(x + 3, y + 3, size - 6, 3);
+      ctx.fillStyle = "rgba(0,0,0,.22)";
+      ctx.fillRect(x + 2, y + size - 7, size - 4, 5);
+      for (let i = 0; i < 5; i++) {
+        const px = x + 4 + cellRand(gx, gy, i + 11) * (size - 10);
+        const py = y + 7 + cellRand(gx, gy, i + 21) * (size - 14);
+        ctx.fillStyle = i % 2 ? "#9a7044" : "#3e2a1d";
+        ctx.fillRect(px, py, 3 + (i % 2), 2);
+      }
+    }
+
+    function drawStone(x, y, size, gx, gy) {
+      ctx.fillStyle = "#5d636c";
+      ctx.beginPath();
+      ctx.moveTo(x + 3, y + 12);
+      ctx.lineTo(x + 12, y + 3);
+      ctx.lineTo(x + size - 8, y + 5);
+      ctx.lineTo(x + size - 3, y + 18);
+      ctx.lineTo(x + size - 9, y + size - 4);
+      ctx.lineTo(x + 8, y + size - 5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#87909b";
+      ctx.beginPath();
+      ctx.moveTo(x + 11, y + 7);
+      ctx.lineTo(x + size - 10, y + 8);
+      ctx.lineTo(x + size - 16, y + 18);
+      ctx.lineTo(x + 13, y + 18);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(25,24,26,.5)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(x + 10 + cellRand(gx, gy, 1) * 12, y + 22);
+      ctx.lineTo(x + 22, y + size - 8);
+      ctx.stroke();
+    }
+
+    function drawObsidian(x, y, size, gx, gy) {
+      ctx.fillStyle = "#171621";
+      ctx.fillRect(x, y, size - 1, size - 1);
+      ctx.fillStyle = "#27283b";
+      ctx.beginPath();
+      ctx.moveTo(x + 4, y + 5);
+      ctx.lineTo(x + size - 6, y + 3);
+      ctx.lineTo(x + size - 2, y + size - 10);
+      ctx.lineTo(x + 9, y + size - 3);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(142,119,255,.32)";
+      ctx.lineWidth = 1.5;
+      for (let i = 0; i < 2; i++) {
+        ctx.beginPath();
+        ctx.moveTo(x + 8 + cellRand(gx, gy, i) * 18, y + 5);
+        ctx.lineTo(x + 16 + cellRand(gx, gy, i + 8) * 12, y + size - 8);
+        ctx.stroke();
+      }
+    }
+
+    function drawStartTile(x, y, size) {
+      drawFloor(x, y, size, 0, 0);
+      ctx.strokeStyle = "#a67b42";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(x + 13, y + 5);
+      ctx.lineTo(x + 13, y + size - 5);
+      ctx.moveTo(x + size - 13, y + 5);
+      ctx.lineTo(x + size - 13, y + size - 5);
+      ctx.stroke();
+      ctx.lineWidth = 2;
+      for (let yy = 11; yy < size - 4; yy += 8) {
+        ctx.beginPath();
+        ctx.moveTo(x + 12, y + yy);
+        ctx.lineTo(x + size - 12, y + yy - 2);
+        ctx.stroke();
+      }
+    }
+
+    function drawGem(x, y, r, color) {
+      ctx.save();
+      const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, 2, x, y, r * 1.35);
+      g.addColorStop(0, "#ffffff");
+      g.addColorStop(0.18, color);
+      g.addColorStop(1, "#17202b");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.moveTo(x, y - r);
+      ctx.lineTo(x + r, y);
+      ctx.lineTo(x, y + r);
+      ctx.lineTo(x - r, y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,.55)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,.45)";
+      ctx.beginPath();
+      ctx.moveTo(x - r * 0.35, y - r * 0.35);
+      ctx.lineTo(x + r * 0.1, y - r * 0.55);
+      ctx.lineTo(x - r * 0.05, y - r * 0.05);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawEnergyGem(x, y, size) {
+      const cx = x + size / 2;
+      const cy = y + size / 2;
+      ctx.fillStyle = "rgba(120,247,106,.18)";
+      ctx.beginPath();
+      ctx.arc(cx, cy, size * 0.36 + Math.sin(state.pulse * 6) * 2, 0, Math.PI * 2);
+      ctx.fill();
+      drawGem(cx, cy, size * 0.27, "#78f76a");
+      ctx.fillStyle = "#e6ffd9";
+      ctx.beginPath();
+      ctx.moveTo(cx + 1, cy - 11);
+      ctx.lineTo(cx - 6, cy + 1);
+      ctx.lineTo(cx + 1, cy + 1);
+      ctx.lineTo(cx - 2, cy + 12);
+      ctx.lineTo(cx + 8, cy - 2);
+      ctx.lineTo(cx + 1, cy - 2);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawDynamite(x, y, size) {
+      ctx.save();
+      ctx.translate(x + size / 2, y + size / 2);
+      ctx.rotate(-0.18);
+      for (let i = -1; i <= 1; i++) {
+        ctx.fillStyle = i === 0 ? "#e9543e" : "#c73731";
+        roundedFill(-15 + i * 10, -11, 9, 24, 3);
+        ctx.fillStyle = "rgba(255,202,132,.28)";
+        ctx.fillRect(-13 + i * 10, -8, 2, 17);
+      }
+      ctx.strokeStyle = "#33221a";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(10, -10);
+      ctx.quadraticCurveTo(19, -20, 25, -12);
+      ctx.stroke();
+      ctx.fillStyle = "#ffd65c";
+      ctx.beginPath();
+      ctx.arc(27, -11, 3 + Math.sin(state.pulse * 9), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawCrate(x, y, size) {
+      ctx.fillStyle = "#8b5b31";
+      roundedFill(x + 7, y + 8, size - 14, size - 13, 4);
+      ctx.fillStyle = "#b47b3d";
+      ctx.fillRect(x + 10, y + 11, size - 20, 5);
+      ctx.strokeStyle = "#4b2c19";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(x + 8, y + 9, size - 16, size - 15);
+      ctx.beginPath();
+      ctx.moveTo(x + 9, y + 11);
+      ctx.lineTo(x + size - 9, y + size - 8);
+      ctx.moveTo(x + size - 9, y + 11);
+      ctx.lineTo(x + 9, y + size - 8);
+      ctx.stroke();
+    }
+
+    function drawChest(x, y, size, story) {
+      const cx = x + size / 2;
+      const cy = y + size / 2;
+      if (story) {
+        ctx.fillStyle = `rgba(255,214,92,${0.18 + Math.sin(state.pulse * 5) * 0.05})`;
+        ctx.beginPath();
+        ctx.arc(cx, cy, size * 0.52, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.fillStyle = story ? "#8b462f" : "#71401f";
+      roundedFill(x + 6, y + 14, size - 12, size - 13, 5);
+      ctx.fillStyle = story ? "#f0b94f" : "#c99243";
+      roundedFill(x + 7, y + 9, size - 14, size * 0.34, 7);
+      ctx.strokeStyle = "#392416";
+      ctx.lineWidth = 3;
+      roundedStroke(x + 6, y + 10, size - 12, size - 10, 5);
+      ctx.fillStyle = "#f8d36d";
+      ctx.fillRect(cx - 5, y + 19, 10, 9);
+      if (story) {
+        ctx.strokeStyle = "#fff1cf";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(cx - 15, y + 19);
+        ctx.lineTo(cx + 15, y + 19);
+        ctx.stroke();
+      }
+    }
+
+    function drawThorns(x, y, size) {
+      ctx.strokeStyle = "#54df68";
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      for (let i = 0; i < 4; i++) {
+        const bx = x + 8 + i * 8;
+        ctx.beginPath();
+        ctx.moveTo(bx, y + size - 9);
+        ctx.quadraticCurveTo(bx + (i % 2 ? 8 : -7), y + 21, bx + 2, y + 9);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#d7ffcc";
+      for (let i = 0; i < 5; i++) {
+        ctx.beginPath();
+        ctx.arc(x + 8 + i * 6, y + 20 + (i % 2) * 4, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function drawSnake(x, y, size) {
+      ctx.strokeStyle = "#55c966";
+      ctx.lineWidth = 8;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(x + 8, y + 26);
+      ctx.quadraticCurveTo(x + 18, y + 12, x + 29, y + 24);
+      ctx.quadraticCurveTo(x + 34, y + 31, x + 25, y + 33);
+      ctx.stroke();
+      ctx.fillStyle = "#17210e";
+      ctx.beginPath();
+      ctx.arc(x + 29, y + 23, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawBat(x, y, size) {
+      const flap = Math.sin(state.pulse * 8) * 4;
+      ctx.fillStyle = "#7664e8";
+      ctx.beginPath();
+      ctx.moveTo(x + size / 2, y + 18);
+      ctx.lineTo(x + 7, y + 10 + flap);
+      ctx.lineTo(x + 12, y + 27);
+      ctx.lineTo(x + size / 2, y + 24);
+      ctx.lineTo(x + size - 12, y + 27);
+      ctx.lineTo(x + size - 7, y + 10 - flap);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#23182e";
+      ctx.beginPath();
+      ctx.arc(x + size / 2, y + 22, 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#ffe36a";
+      ctx.fillRect(x + size / 2 - 3, y + 20, 2, 2);
+      ctx.fillRect(x + size / 2 + 2, y + 20, 2, 2);
+    }
+
+    function drawSpider(x, y, size) {
+      const cx = x + size / 2;
+      const cy = y + size / 2 + 2;
+      ctx.strokeStyle = "#c76bff";
+      ctx.lineWidth = 3;
+      for (let i = -1; i <= 1; i += 2) {
+        for (let j = 0; j < 3; j++) {
+          ctx.beginPath();
+          ctx.moveTo(cx + i * 5, cy + j * 2 - 4);
+          ctx.lineTo(cx + i * (13 + j * 2), cy + j * 7 - 8);
+          ctx.stroke();
+        }
+      }
+      ctx.fillStyle = "#2b1731";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#f2d6ff";
+      ctx.fillRect(cx - 4, cy - 3, 3, 3);
+      ctx.fillRect(cx + 2, cy - 3, 3, 3);
+    }
+
+    function drawTotem(x, y, size, gold) {
+      ctx.fillStyle = gold ? "#d9a936" : "#aeb7bd";
+      roundedFill(x + 12, y + 6, size - 24, size - 10, 6);
+      ctx.fillStyle = gold ? "#ffdf71" : "#dfe6e9";
+      ctx.fillRect(x + 15, y + 10, size - 30, 6);
+      ctx.fillStyle = "#22170f";
+      ctx.fillRect(x + 16, y + 21, 3, 3);
+      ctx.fillRect(x + size - 19, y + 21, 3, 3);
+      ctx.fillRect(x + 17, y + 30, size - 34, 3);
+    }
+
+    function drawMiner(x, y) {
+      const bob = Math.sin(state.pulse * 8) * 1.5;
+      ctx.save();
+      ctx.translate(x, y + bob);
+      ctx.fillStyle = "rgba(0,0,0,.45)";
+      ctx.beginPath();
+      ctx.ellipse(0, 15, 15, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#314457";
+      roundedFill(-11, -1, 22, 24, 6);
+      ctx.fillStyle = "#e8bc85";
+      ctx.beginPath();
+      ctx.arc(0, -11, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#f3c84e";
+      ctx.beginPath();
+      ctx.moveTo(-13, -13);
+      ctx.quadraticCurveTo(0, -27, 13, -13);
+      ctx.lineTo(11, -8);
+      ctx.lineTo(-11, -8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = "#fff7bf";
+      ctx.beginPath();
+      ctx.arc(0, -14, 4 + Math.sin(state.pulse * 9), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#a8733d";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.moveTo(9, 3);
+      ctx.lineTo(22, -9);
+      ctx.stroke();
+      ctx.strokeStyle = "#c4c9d1";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(21, -11);
+      ctx.lineTo(30, -7);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawEffects() {
+      for (const e of state.effects) {
+        const a = clamp(1 - e.t / e.life, 0, 1);
+        ctx.globalAlpha = a;
+        ctx.fillStyle = e.color;
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, e.r * (0.6 + a), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawLighting(r) {
+      const px = BOARD_X + r.x * TILE + TILE / 2;
+      const py = BOARD_Y + (r.y - r.cameraY) * TILE + TILE / 2;
+      const gx = BOARD_X + r.goalX * TILE + TILE / 2;
+      const gy = BOARD_Y + (r.goalY - r.cameraY) * TILE + TILE / 2;
+      const pg = ctx.createRadialGradient(px, py, 45, px, py, 250);
+      pg.addColorStop(0, "rgba(255,230,150,0)");
+      pg.addColorStop(1, "rgba(0,0,0,.46)");
+      ctx.fillStyle = pg;
+      ctx.fillRect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H);
+      const cg = ctx.createRadialGradient(gx, gy, 8, gx, gy, 92);
+      cg.addColorStop(0, "rgba(255,214,92,.24)");
+      cg.addColorStop(1, "rgba(255,214,92,0)");
+      ctx.fillStyle = cg;
+      ctx.fillRect(BOARD_X, BOARD_Y, BOARD_W, BOARD_H);
+    }
+
+    function drawSummary() {
+      const reasonText = state.summary.reason === "story_chest" ? "story chest found" : state.summary.reason === "crushed" ? "crushed by falling rock" : "mine cashed out";
+      drawTitle("Cave Complete", reasonText);
+      panel(96, 210, 708, 570, "#1f1a14", "#4e3b26");
+      const s = state.summary;
+      summaryLine("Payout", `+${s.payout}`, 294, "#f3c84e");
+      summaryLine("Mine coins", s.coins, 364, "#fff1cf");
+      summaryLine("Chest bonus", s.depthBonus, 434, "#75d6ff");
+      summaryLine("Cave", s.cave, 504, "#75d6ff");
+      summaryLine("Gems", s.gems, 574, "#ff75cf");
+      summaryLine("Threats cleared", s.enemies, 644, "#d9b98e");
+      button("Next cave", 98, 840, 320, 76, startRun, "#f3c84e", "#1d1507");
+      button("Upgrades", 482, 840, 320, 76, () => { state.mode = "menu"; }, "#312718", "#f3c84e");
+    }
+
+    function summaryLine(label, value, y, color) {
+      ctx.fillStyle = "#bda679";
+      ctx.font = "600 22px Inter, system-ui";
+      ctx.textAlign = "left";
+      ctx.fillText(label, 154, y);
+      ctx.fillStyle = color;
+      ctx.font = "800 30px Inter, system-ui";
+      ctx.textAlign = "right";
+      ctx.fillText(String(value), 744, y);
+    }
+
+    function drawToast() {
+      const w = Math.min(520, 150 + state.toast.length * 15);
+      const x = W / 2 - w / 2;
+      const y = 1042;
+      ctx.globalAlpha = Math.min(1, state.toastT * 2);
+      panel(x, y, w, 54, "#211812", "#f3c84e");
+      ctx.fillStyle = "#fff1cf";
+      ctx.font = "800 20px Inter, system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(state.toast, W / 2, y + 35);
+      ctx.globalAlpha = 1;
+    }
+
+    function button(text, x, y, w, h, action, fill, ink) {
+      BUTTONS.push({ x, y, w, h, action });
+      ctx.fillStyle = fill || "#2a2218";
+      roundedFill(x, y, w, h, 8);
+      ctx.strokeStyle = "rgba(255,241,207,.22)";
+      ctx.lineWidth = 2;
+      roundedStroke(x, y, w, h, 8);
+      ctx.fillStyle = ink || "#fff1cf";
+      ctx.font = "800 22px Inter, system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(text, x + w / 2, y + h / 2 + 8);
+    }
+
+    function panel(x, y, w, h, fill, stroke) {
+      ctx.fillStyle = fill;
+      roundedFill(x, y, w, h, 8);
+      ctx.strokeStyle = stroke || "rgba(255,241,207,.18)";
+      ctx.lineWidth = 2;
+      roundedStroke(x, y, w, h, 8);
+    }
+
+    function roundedRect(x, y, w, h, r) {
+      const rr = Math.min(r, w / 2, h / 2);
+      ctx.beginPath();
+      ctx.moveTo(x + rr, y);
+      ctx.arcTo(x + w, y, x + w, y + h, rr);
+      ctx.arcTo(x + w, y + h, x, y + h, rr);
+      ctx.arcTo(x, y + h, x, y, rr);
+      ctx.arcTo(x, y, x + w, y, rr);
+      ctx.closePath();
+    }
+
+    function roundedFill(x, y, w, h, r) {
+      roundedRect(x, y, w, h, r);
+      ctx.fill();
+    }
+
+    function roundedStroke(x, y, w, h, r) {
+      roundedRect(x, y, w, h, r);
+      ctx.stroke();
+    }
+
+    function handleTap(gx, gy) {
+      for (let i = BUTTONS.length - 1; i >= 0; i--) {
+        const b = BUTTONS[i];
+        if (gx >= b.x && gx <= b.x + b.w && gy >= b.y && gy <= b.y + b.h) {
+          b.action();
+          return;
+        }
+      }
+      if (state.mode !== "run") return;
+      const tx = Math.floor((gx - BOARD_X) / TILE);
+      const ty = Math.floor((gy - BOARD_Y) / TILE) + state.run.cameraY;
+      actOnCell(tx, ty);
+    }
+
+    canvas.addEventListener("pointerdown", (e) => {
+      ensureAudio();
+      const p = toGamePoint(e);
+      state.pointer = { down: true, x: p.x, y: p.y, sx: p.x, sy: p.y };
+      canvas.setPointerCapture(e.pointerId);
+      handleTap(p.x, p.y);
+    });
+
+    canvas.addEventListener("pointermove", (e) => {
+      if (!state.pointer.down || state.mode !== "run") return;
+      const p = toGamePoint(e);
+      const dx = p.x - state.pointer.x;
+      const dy = p.y - state.pointer.y;
+      if (Math.max(Math.abs(dx), Math.abs(dy)) < 42) return;
+      const r = state.run;
+      if (Math.abs(dx) > Math.abs(dy)) actOnCell(r.x + (dx > 0 ? 1 : -1), r.y);
+      else actOnCell(r.x, r.y + (dy > 0 ? 1 : -1));
+      state.pointer.x = p.x;
+      state.pointer.y = p.y;
+    });
+
+    canvas.addEventListener("pointerup", () => {
+      state.pointer.down = false;
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "KeyF") {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+        else document.exitFullscreen?.();
+        return;
+      }
+      keys.add(e.code);
+    });
+
+    window.addEventListener("keyup", (e) => keys.delete(e.code));
+    window.addEventListener("resize", resize);
+
+    function renderGameToText() {
+      const payload = {
+        mode: state.mode,
+        save: {
+          coins: state.save.coins,
+          bestDepth: state.save.bestDepth,
+          runs: state.save.runs,
+          upgrades: state.save.upgrades,
+        },
+      };
+      if (state.run) {
+        const r = state.run;
+        const visible = [];
+        for (let y = Math.max(0, r.y - 3); y <= Math.min(ROWS - 1, r.y + 5); y++) {
+          for (let x = Math.max(0, r.x - 3); x <= Math.min(COLS - 1, r.x + 3); x++) {
+            visible.push({ x, y, t: r.grid[y][x].t, hp: r.grid[y][x].hp || 0 });
+          }
+        }
+        payload.run = {
+          player: { x: r.x, y: r.y },
+          cave: r.cave,
+          goal: { x: r.goalX, y: r.goalY, type: "CHEST_STORY" },
+          origin: "grid origin top-left; y increases downward",
+          energy: r.energy,
+          coins: r.coins,
+          deepest: r.deepest,
+          gems: r.gems,
+          enemies: r.enemies,
+          fallingObjectsMoved: r.falls,
+          storyFound: r.storyFound,
+          visible,
+        };
+      }
+      if (state.summary) payload.summary = state.summary;
+      return JSON.stringify(payload);
+    }
+
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = (ms) => {
+      const steps = Math.max(1, Math.round(ms / (1000 / 60)));
+      for (let i = 0; i < steps; i++) update(1 / 60);
+      draw();
+    };
+    window.__deepDiggerDebug = {
+      startRun,
+      endRun,
+      actOnCell,
+      get state() { return state; },
+      get spritePack() { return spritePack; },
+      grantCoins(n) { state.save.coins += n; saveGame(); },
+    };
+
+    function frame(ts) {
+      const dt = Math.min(0.05, (ts - lastTs) / 1000 || 0.016);
+      lastTs = ts;
+      update(dt);
+      draw();
+      requestAnimationFrame(frame);
+    }
+
+    resize();
+    requestAnimationFrame(frame);
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,1361 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Pistachio Kofte Rush</title>
+  <style>
+    @layer base, layout, a11y;
+
+    @layer base {
+      :root {
+        color-scheme: light;
+        --surface: #f8efd9;
+        --ink: #243033;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: var(--surface);
+        color: var(--ink);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-touch-callout: none;
+        touch-action: none;
+        overscroll-behavior: none;
+      }
+
+      body {
+        position: fixed;
+        inset: 0;
+      }
+    }
+
+    @layer layout {
+      #game-root {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100dvh;
+        min-height: 100vh;
+        overflow: hidden;
+        background: var(--surface);
+      }
+
+      #game {
+        display: block;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        cursor: none;
+      }
+    }
+
+    @layer a11y {
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main id="game-root" aria-label="Pistachio Kofte Rush canvas game">
+    <canvas id="game" tabindex="0" role="img" aria-label="A cooking timing game. Move the chef cursor and process each kofte through crust, grill, and plate stations."></canvas>
+    <p id="instructions" class="sr-only">
+      Move with arrow keys or WASD. Press space near a kofte to process it. On touch devices, tap the kofte as it reaches each station.
+    </p>
+    <p id="status" class="sr-only" role="status" aria-live="polite"></p>
+  </main>
+
+  <script>
+  (function () {
+    "use strict";
+
+    var root = document.getElementById("game-root");
+    var canvas = document.getElementById("game");
+    var ctx = canvas.getContext("2d");
+    var statusEl = document.getElementById("status");
+    var cssW = 1;
+    var cssH = 1;
+    var dpr = 1;
+    var lastTs = 0;
+    var rafId = 0;
+    var statusTimer = 0;
+    var SAVE_KEY = "pistachio-kofte-rush-v1";
+
+    var STAGES = ["raw", "crusted", "grilled", "scorched"];
+    var STATION_DEFS = [
+      { id: "crust", label: "CRUST", icon: "P", color: "#5f9f50", dark: "#2f6c37" },
+      { id: "grill", label: "GRILL", icon: "G", color: "#f59d34", dark: "#954c21" },
+      { id: "plate", label: "PLATE", icon: "O", color: "#4d9ecf", dark: "#235c78" }
+    ];
+    var FX_TIERS = [
+      { name: "common", weight: 16 },
+      { name: "uncommon", weight: 8 },
+      { name: "rare", weight: 4 },
+      { name: "epic", weight: 2 },
+      { name: "legendary", weight: 1 }
+    ];
+    var FX_TOTAL = FX_TIERS.reduce(function (sum, tier) { return sum + tier.weight; }, 0);
+
+    var meta = loadMeta();
+    var keys = Object.create(null);
+    var layout = makeLayout();
+    var pointer = { active: false, x: 0, y: 0 };
+    var cursor = { x: 0, y: 0, r: 28, pulse: 0, cool: 0 };
+    var startButton = { x: 0, y: 0, w: 0, h: 0 };
+    var audio = {
+      ctx: null,
+      master: null,
+      muted: !!meta.muted,
+      nextBeat: 0,
+      beat: 0
+    };
+    var state = makeState("menu");
+
+    function makeLayout() {
+      return {
+        stations: [],
+        laneY: 0,
+        beltTop: 0,
+        beltH: 0,
+        itemR: 20,
+        uiTop: 12,
+        playTop: 0,
+        playBottom: 0
+      };
+    }
+
+    function defaultMeta() {
+      return {
+        best: 0,
+        totalServed: 0,
+        muted: false
+      };
+    }
+
+    function loadMeta() {
+      try {
+        var raw = localStorage.getItem(SAVE_KEY);
+        if (!raw) return defaultMeta();
+        var data = JSON.parse(raw);
+        return {
+          best: Math.max(0, Number(data.best) || 0),
+          totalServed: Math.max(0, Number(data.totalServed) || 0),
+          muted: !!data.muted
+        };
+      } catch (_) {
+        return defaultMeta();
+      }
+    }
+
+    function saveMeta() {
+      try {
+        localStorage.setItem(SAVE_KEY, JSON.stringify({
+          version: 1,
+          best: meta.best,
+          totalServed: meta.totalServed,
+          muted: !!audio.muted
+        }));
+      } catch (_) {
+        /* localStorage can be unavailable in restricted browser modes. */
+      }
+    }
+
+    function makeState(mode) {
+      return {
+        mode: mode || "menu",
+        score: 0,
+        best: meta.best,
+        combo: 0,
+        maxCombo: 0,
+        served: 0,
+        missed: 0,
+        patience: 4,
+        level: 1,
+        target: 8,
+        time: 0,
+        timeLeft: 78,
+        spawnTimer: 0.35,
+        spawnGap: 1.55,
+        nextId: 1,
+        items: [],
+        particles: [],
+        floaters: [],
+        message: "Crust, grill, plate.",
+        lastAction: "ready",
+        fever: 0,
+        shake: 0,
+        overReason: ""
+      };
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function lerp(a, b, t) {
+      return a + (b - a) * t;
+    }
+
+    function dist(ax, ay, bx, by) {
+      var dx = ax - bx;
+      var dy = ay - by;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function rollFxTier() {
+      var r = Math.random() * FX_TOTAL;
+      for (var i = 0; i < FX_TIERS.length; i++) {
+        r -= FX_TIERS[i].weight;
+        if (r <= 0) return FX_TIERS[i].name;
+      }
+      return FX_TIERS[0].name;
+    }
+
+    function resize() {
+      cssW = Math.max(1, Math.floor(window.innerWidth || root.clientWidth || 1));
+      cssH = Math.max(1, Math.floor(window.innerHeight || root.clientHeight || 1));
+      dpr = clamp(window.devicePixelRatio || 1, 1, 3);
+      canvas.width = Math.max(1, Math.floor(cssW * dpr));
+      canvas.height = Math.max(1, Math.floor(cssH * dpr));
+      canvas.style.width = cssW + "px";
+      canvas.style.height = cssH + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      computeLayout();
+      if (!cursor.x || !cursor.y) {
+        cursor.x = cssW * 0.22;
+        cursor.y = layout.laneY;
+      }
+      cursor.x = clamp(cursor.x, 18, cssW - 18);
+      cursor.y = clamp(cursor.y, 54, cssH - 18);
+    }
+
+    function computeLayout() {
+      var minSide = Math.min(cssW, cssH);
+      layout.uiTop = clamp(cssH * 0.02, 10, 18);
+      var portrait = cssH > cssW * 1.18;
+      layout.beltH = clamp(cssH * 0.25, 122, 184);
+      layout.laneY = clamp(cssH * (portrait ? 0.54 : 0.58), 250, cssH - 118);
+      layout.beltTop = layout.laneY - layout.beltH * 0.5;
+      layout.playTop = Math.max(82, layout.beltTop - 58);
+      layout.playBottom = Math.min(cssH - 38, layout.beltTop + layout.beltH + 76);
+      layout.itemR = clamp(minSide * 0.035, 15, 25);
+      cursor.r = clamp(minSide * 0.045, 22, 34);
+      var stationW = clamp(cssW * 0.18, 96, 190);
+      var xs = [cssW * 0.27, cssW * 0.54, cssW * 0.81];
+      layout.stations = [];
+      for (var i = 0; i < STATION_DEFS.length; i++) {
+        layout.stations.push({
+          id: STATION_DEFS[i].id,
+          label: STATION_DEFS[i].label,
+          icon: STATION_DEFS[i].icon,
+          color: STATION_DEFS[i].color,
+          dark: STATION_DEFS[i].dark,
+          x: xs[i],
+          y: layout.laneY,
+          w: stationW,
+          h: layout.beltH + 28
+        });
+      }
+      startButton.w = clamp(cssW * 0.34, 180, 320);
+      startButton.h = 52;
+      startButton.x = cssW * 0.5 - startButton.w * 0.5;
+      startButton.y = cssH * 0.68;
+    }
+
+    function stationAt(x, y) {
+      for (var i = 0; i < layout.stations.length; i++) {
+        var s = layout.stations[i];
+        if (Math.abs(x - s.x) <= s.w * 0.5 && Math.abs(y - s.y) <= s.h * 0.5) {
+          return s;
+        }
+      }
+      return null;
+    }
+
+    function stationForItem(item) {
+      return stationAt(item.x, item.y);
+    }
+
+    function stageName(stage) {
+      return STAGES[stage] || "unknown";
+    }
+
+    function nextAction(item) {
+      if (item.stage === 0) return "crust";
+      if (item.stage === 1) return "grill";
+      if (item.stage === 2) return "plate";
+      return "discard";
+    }
+
+    function startGame() {
+      state = makeState("play");
+      cursor.x = layout.stations[0] ? layout.stations[0].x : cssW * 0.28;
+      cursor.y = layout.laneY;
+      ensureAudio();
+      spawnItem();
+      state.spawnTimer = 0.9;
+      canvas.focus({ preventScroll: true });
+    }
+
+    function finishRun(reason) {
+      if (state.mode === "gameover") return;
+      state.mode = "gameover";
+      state.overReason = reason || "rush complete";
+      state.message = state.overReason;
+      if (state.score > meta.best) {
+        meta.best = state.score;
+      }
+      meta.totalServed += state.served;
+      state.best = meta.best;
+      saveMeta();
+      playFx("end", "rare");
+    }
+
+    function spawnItem() {
+      var row = state.nextId % 3;
+      var laneOffset = (row - 1) * clamp(layout.beltH * 0.22, 24, 40);
+      var speed = (88 + state.level * 9 + Math.random() * 16) * (state.fever > 0 ? 0.86 : 1);
+      state.items.push({
+        id: state.nextId++,
+        x: -layout.itemR * 2.4,
+        y: layout.laneY + laneOffset + (Math.random() * 10 - 5),
+        r: layout.itemR,
+        vx: speed,
+        stage: 0,
+        age: 0,
+        heat: Math.random(),
+        wobble: Math.random() * Math.PI * 2,
+        quality: 0,
+        flash: 0,
+        bad: false
+      });
+    }
+
+    function update(dt) {
+      dt = clamp(dt || 0, 0, 0.06);
+      cursor.pulse += dt;
+      cursor.cool = Math.max(0, cursor.cool - dt);
+      state.shake = Math.max(0, state.shake - dt * 12);
+      updateCursor(dt);
+      updateParticles(dt);
+      updateFloaters(dt);
+      updateMusic();
+
+      if (state.mode !== "play") {
+        updateStatus(dt);
+        return;
+      }
+
+      state.time += dt;
+      state.timeLeft = Math.max(0, state.timeLeft - dt);
+      state.fever = Math.max(0, state.fever - dt);
+      state.spawnTimer -= dt;
+      var gap = Math.max(0.76, state.spawnGap - state.level * 0.06 - (state.fever > 0 ? 0.14 : 0));
+      while (state.spawnTimer <= 0) {
+        spawnItem();
+        state.spawnTimer += gap;
+      }
+
+      for (var i = state.items.length - 1; i >= 0; i--) {
+        var item = state.items[i];
+        item.age += dt;
+        item.heat = (item.heat + dt * (0.31 + state.level * 0.025)) % 1;
+        item.flash = Math.max(0, item.flash - dt * 6);
+        var speedMult = state.fever > 0 ? 0.82 : 1;
+        item.x += item.vx * speedMult * dt;
+        item.y += Math.sin(item.age * 4 + item.wobble) * dt * 5;
+        if (item.x > cssW + item.r * 2.5) {
+          missItem(i, item);
+        }
+      }
+
+      if (state.served >= state.target) {
+        state.level += 1;
+        state.target += 6;
+        state.timeLeft += 15;
+        state.patience = Math.min(5, state.patience + 1);
+        state.message = "Rush level " + state.level + ".";
+        addFloater(cssW * 0.5, layout.beltTop - 26, "+15s", "#27875a");
+        burst(cssW * 0.5, layout.beltTop, "#63b95b", 22, 1.1);
+        playFx("level", "epic");
+      }
+
+      if (state.patience <= 0) {
+        finishRun("orders ran out");
+      } else if (state.timeLeft <= 0) {
+        finishRun("timer finished");
+      }
+      updateStatus(dt);
+    }
+
+    function updateCursor(dt) {
+      var speed = 430;
+      var ax = 0;
+      var ay = 0;
+      if (keys.ArrowLeft || keys.KeyA || keys.a) ax -= 1;
+      if (keys.ArrowRight || keys.KeyD || keys.d) ax += 1;
+      if (keys.ArrowUp || keys.KeyW || keys.w) ay -= 1;
+      if (keys.ArrowDown || keys.KeyS || keys.s) ay += 1;
+      if (ax || ay) {
+        var len = Math.sqrt(ax * ax + ay * ay);
+        ax /= len;
+        ay /= len;
+        cursor.x += ax * speed * dt;
+        cursor.y += ay * speed * dt;
+      } else if (pointer.active) {
+        cursor.x = lerp(cursor.x, pointer.x, 0.45);
+        cursor.y = lerp(cursor.y, pointer.y, 0.45);
+      }
+      cursor.x = clamp(cursor.x, 14, cssW - 14);
+      cursor.y = clamp(cursor.y, 46, cssH - 14);
+    }
+
+    function missItem(index, item) {
+      state.items.splice(index, 1);
+      if (item.stage === 3) return;
+      state.missed += 1;
+      state.patience -= 1;
+      state.combo = 0;
+      state.message = item.stage === 2 ? "A grilled kofte missed the plate." : "An order rolled away.";
+      state.lastAction = "missed " + stageName(item.stage);
+      state.shake = 7;
+      addFloater(cssW - 80, item.y, "-1", "#be453d");
+      burst(item.x, item.y, "#be453d", 14, 0.8);
+      playFx("miss", "common");
+    }
+
+    function processAt(x, y) {
+      if (state.mode === "menu" || state.mode === "gameover") {
+        startGame();
+        return;
+      }
+      if (state.mode === "pause") {
+        state.mode = "play";
+        return;
+      }
+      if (state.mode !== "play") return;
+      cursor.x = x;
+      cursor.y = y;
+      cursor.cool = 0.16;
+
+      var stationUnderPointer = stationAt(x, y);
+      var item = nearestItem(x, y);
+      if (!item && stationUnderPointer) {
+        item = nearestItemInStation(stationUnderPointer);
+      }
+      if (!item) {
+        wrongAction("air chop", x, y);
+        return;
+      }
+
+      var station = stationForItem(item);
+      var want = nextAction(item);
+      if (!station) {
+        wrongAction("wait for a station", item.x, item.y);
+        return;
+      }
+
+      if (station.id !== want) {
+        wrongAction(want + " needed", item.x, item.y);
+        return;
+      }
+
+      if (want === "crust") {
+        item.stage = 1;
+        item.flash = 1;
+        item.vx *= 0.96;
+        goodAction(item, "pistachio crust", 9, "#62a84f", "crust");
+      } else if (want === "grill") {
+        item.stage = 2;
+        item.flash = 1;
+        if (item.heat > 0.42 && item.heat < 0.74) {
+          item.quality = 2;
+          goodAction(item, "perfect grill", 22, "#e38b2d", "perfect");
+        } else {
+          item.quality = 1;
+          goodAction(item, "grilled", 13, "#c46d31", "grill");
+        }
+      } else if (want === "plate") {
+        plateItem(item);
+      }
+    }
+
+    function nearestItem(x, y) {
+      var best = null;
+      var bestD = Infinity;
+      var grab = cursor.r + layout.itemR * 1.25;
+      for (var i = 0; i < state.items.length; i++) {
+        var item = state.items[i];
+        var d = dist(x, y, item.x, item.y);
+        if (d < bestD && d <= grab + item.r) {
+          best = item;
+          bestD = d;
+        }
+      }
+      return best;
+    }
+
+    function nearestItemInStation(station) {
+      var best = null;
+      var bestD = Infinity;
+      for (var i = 0; i < state.items.length; i++) {
+        var item = state.items[i];
+        var itemStation = stationForItem(item);
+        if (!itemStation || itemStation.id !== station.id || nextAction(item) !== station.id) continue;
+        var d = Math.abs(item.x - station.x) + Math.abs(item.y - station.y) * 0.35;
+        if (d < bestD) {
+          best = item;
+          bestD = d;
+        }
+      }
+      return best;
+    }
+
+    function goodAction(item, label, baseScore, color, sound) {
+      var tier = rollFxTier();
+      var mult = state.fever > 0 ? 2 : 1;
+      state.combo += 1;
+      state.maxCombo = Math.max(state.maxCombo, state.combo);
+      var comboBonus = Math.floor(Math.max(0, state.combo - 1) * 1.5);
+      var scoreGain = (baseScore + comboBonus) * mult;
+      state.score += scoreGain;
+      state.message = label;
+      state.lastAction = label + " on item " + item.id;
+      addFloater(item.x, item.y - item.r - 8, "+" + scoreGain, color);
+      burst(item.x, item.y, color, tier === "legendary" ? 26 : tier === "epic" ? 20 : 13, tier === "common" ? 0.8 : 1.2);
+      if (state.combo > 0 && state.combo % 9 === 0) {
+        state.fever = 5;
+        state.message = "pistachio fever";
+        addFloater(item.x, item.y - 46, "FEVER", "#d2a632");
+      }
+      playFx(sound, tier);
+    }
+
+    function plateItem(item) {
+      var tier = rollFxTier();
+      var mult = state.fever > 0 ? 2 : 1;
+      var qualityBonus = item.quality === 2 ? 18 : 8;
+      var comboBonus = state.combo * 2;
+      var scoreGain = (34 + qualityBonus + comboBonus) * mult;
+      state.score += scoreGain;
+      state.combo += 1;
+      state.maxCombo = Math.max(state.maxCombo, state.combo);
+      state.served += 1;
+      state.message = item.quality === 2 ? "perfect plate" : "served";
+      state.lastAction = "plated item " + item.id;
+      addFloater(item.x, item.y - item.r - 10, "+" + scoreGain, item.quality === 2 ? "#d2a632" : "#2c8a68");
+      burst(item.x, item.y, item.quality === 2 ? "#d2a632" : "#67b66a", tier === "legendary" ? 34 : 22, 1.3);
+      for (var i = state.items.length - 1; i >= 0; i--) {
+        if (state.items[i] === item) {
+          state.items.splice(i, 1);
+          break;
+        }
+      }
+      playFx("plate", tier);
+    }
+
+    function wrongAction(reason, x, y) {
+      state.combo = 0;
+      state.timeLeft = Math.max(0, state.timeLeft - 0.75);
+      state.message = reason;
+      state.lastAction = "mistake: " + reason;
+      state.shake = 4;
+      addFloater(x, y - 18, "-time", "#bb4b4b");
+      burst(x, y, "#bb4b4b", 8, 0.55);
+      playFx("wrong", "common");
+    }
+
+    function addFloater(x, y, text, color) {
+      state.floaters.push({
+        x: x,
+        y: y,
+        text: text,
+        color: color,
+        life: 1,
+        vy: -36 - Math.random() * 18
+      });
+    }
+
+    function burst(x, y, color, count, power) {
+      for (var i = 0; i < count; i++) {
+        var a = Math.random() * Math.PI * 2;
+        var s = (36 + Math.random() * 92) * power;
+        state.particles.push({
+          x: x,
+          y: y,
+          vx: Math.cos(a) * s,
+          vy: Math.sin(a) * s - 26,
+          r: 2 + Math.random() * 4,
+          color: color,
+          life: 0.5 + Math.random() * 0.42
+        });
+      }
+    }
+
+    function updateParticles(dt) {
+      for (var i = state.particles.length - 1; i >= 0; i--) {
+        var p = state.particles[i];
+        p.life -= dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy += 140 * dt;
+        if (p.life <= 0) state.particles.splice(i, 1);
+      }
+    }
+
+    function updateFloaters(dt) {
+      for (var i = state.floaters.length - 1; i >= 0; i--) {
+        var f = state.floaters[i];
+        f.life -= dt;
+        f.y += f.vy * dt;
+        if (f.life <= 0) state.floaters.splice(i, 1);
+      }
+    }
+
+    function ensureAudio() {
+      var AudioCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtor) return false;
+      if (!audio.ctx) {
+        audio.ctx = new AudioCtor();
+        audio.master = audio.ctx.createGain();
+        audio.master.gain.value = audio.muted ? 0 : 0.42;
+        audio.master.connect(audio.ctx.destination);
+        audio.nextBeat = audio.ctx.currentTime + 0.08;
+      }
+      if (audio.ctx.state === "suspended" && audio.ctx.resume) {
+        audio.ctx.resume().catch(function () {});
+      }
+      return true;
+    }
+
+    function playFx(kind, tier) {
+      if (audio.muted || !ensureAudio() || !audio.ctx || !audio.master) return;
+      var t = audio.ctx.currentTime;
+      var pitchJitter = Math.pow(2, (Math.random() * 10 - 5) / 1200);
+      var rareBoost = tier === "legendary" ? 1.35 : tier === "epic" ? 1.2 : tier === "rare" ? 1.1 : 1;
+      if (kind === "crust") {
+        tone(420 * pitchJitter, 0.045, "triangle", 0.065 * rareBoost, t);
+        tone(690 * pitchJitter, 0.055, "sine", 0.04 * rareBoost, t + 0.03);
+      } else if (kind === "grill") {
+        noiseBurst(0.06, 0.035 * rareBoost, t);
+        tone(210 * pitchJitter, 0.08, "sawtooth", 0.03 * rareBoost, t);
+      } else if (kind === "perfect") {
+        tone(520 * pitchJitter, 0.05, "triangle", 0.06 * rareBoost, t);
+        tone(780 * pitchJitter, 0.07, "triangle", 0.05 * rareBoost, t + 0.045);
+        tone(1040 * pitchJitter, 0.08, "sine", 0.04 * rareBoost, t + 0.09);
+      } else if (kind === "plate") {
+        tone(360 * pitchJitter, 0.045, "triangle", 0.05 * rareBoost, t);
+        tone(610 * pitchJitter, 0.05, "triangle", 0.05 * rareBoost, t + 0.05);
+        tone(910 * pitchJitter, 0.06, "sine", 0.035 * rareBoost, t + 0.1);
+      } else if (kind === "level") {
+        tone(480, 0.08, "triangle", 0.06, t);
+        tone(720, 0.08, "triangle", 0.06, t + 0.08);
+        tone(960, 0.1, "sine", 0.055, t + 0.16);
+      } else if (kind === "wrong" || kind === "miss") {
+        tone(150 * pitchJitter, 0.12, "sawtooth", 0.04, t);
+      } else if (kind === "end") {
+        tone(310, 0.12, "triangle", 0.05, t);
+        tone(220, 0.18, "triangle", 0.04, t + 0.1);
+      }
+    }
+
+    function tone(freq, dur, type, gain, start) {
+      var osc = audio.ctx.createOscillator();
+      var g = audio.ctx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0, start);
+      g.gain.linearRampToValueAtTime(gain, start + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+      osc.connect(g);
+      g.connect(audio.master);
+      osc.start(start);
+      osc.stop(start + dur + 0.02);
+    }
+
+    function noiseBurst(dur, gain, start) {
+      var size = Math.max(1, Math.floor(audio.ctx.sampleRate * dur));
+      var buffer = audio.ctx.createBuffer(1, size, audio.ctx.sampleRate);
+      var data = buffer.getChannelData(0);
+      for (var i = 0; i < size; i++) {
+        data[i] = (Math.random() * 2 - 1) * (1 - i / size);
+      }
+      var src = audio.ctx.createBufferSource();
+      var g = audio.ctx.createGain();
+      g.gain.value = gain;
+      src.buffer = buffer;
+      src.connect(g);
+      g.connect(audio.master);
+      src.start(start);
+    }
+
+    function updateMusic() {
+      if (audio.muted || !audio.ctx || state.mode !== "play") return;
+      var now = audio.ctx.currentTime;
+      if (now < audio.nextBeat) return;
+      var scale = [196, 247, 294, 330, 392, 494];
+      var note = scale[audio.beat % scale.length];
+      var gain = audio.beat % 4 === 0 ? 0.024 : 0.015;
+      tone(note, 0.08, audio.beat % 3 === 0 ? "triangle" : "sine", gain, now);
+      if (audio.beat % 4 === 2) tone(note * 1.5, 0.05, "sine", 0.011, now + 0.035);
+      audio.beat += 1;
+      audio.nextBeat = now + (state.fever > 0 ? 0.22 : 0.31);
+    }
+
+    function updateStatus(dt) {
+      statusTimer -= dt;
+      if (statusTimer > 0) return;
+      statusTimer = 0.8;
+      statusEl.textContent = "Mode " + state.mode + ". Score " + state.score + ". Served " + state.served + ". " + state.message;
+    }
+
+    function render() {
+      ctx.save();
+      if (state.shake > 0) {
+        var sx = (Math.random() * 2 - 1) * state.shake;
+        var sy = (Math.random() * 2 - 1) * state.shake;
+        ctx.translate(sx, sy);
+      }
+      drawBackground();
+      drawStations();
+      drawItems();
+      drawParticles();
+      drawCursor();
+      drawHud();
+      if (state.mode === "menu") drawMenu();
+      if (state.mode === "pause") drawPause();
+      if (state.mode === "gameover") drawGameOver();
+      ctx.restore();
+    }
+
+    function drawBackground() {
+      var g = ctx.createLinearGradient(0, 0, 0, cssH);
+      g.addColorStop(0, "#fff6e1");
+      g.addColorStop(0.46, "#f7e4bd");
+      g.addColorStop(1, "#d88456");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, cssW, cssH);
+
+      ctx.save();
+      ctx.globalAlpha = 0.16;
+      ctx.strokeStyle = "#77a4a5";
+      ctx.lineWidth = 1;
+      var tile = clamp(Math.min(cssW, cssH) * 0.07, 32, 54);
+      for (var x = -tile; x < cssW + tile; x += tile) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x + cssH * 0.3, layout.beltTop - 34);
+        ctx.stroke();
+      }
+      for (var y = 0; y < layout.beltTop - 16; y += tile) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(cssW, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      ctx.fillStyle = "#b85f45";
+      ctx.fillRect(0, layout.beltTop + layout.beltH * 0.45, cssW, cssH);
+      ctx.fillStyle = "rgba(255, 236, 199, 0.3)";
+      for (var i = -2; i < 18; i++) {
+        ctx.beginPath();
+        ctx.moveTo(i * 110, cssH);
+        ctx.lineTo(i * 110 + 86, layout.beltTop + layout.beltH * 0.46);
+        ctx.lineTo(i * 110 + 124, layout.beltTop + layout.beltH * 0.46);
+        ctx.lineTo(i * 110 + 38, cssH);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      roundRect(20, layout.beltTop - 18, cssW - 40, layout.beltH + 36, 24);
+      ctx.fillStyle = "#77625a";
+      ctx.fill();
+      roundRect(32, layout.beltTop - 6, cssW - 64, layout.beltH + 12, 18);
+      ctx.fillStyle = "#4e5b59";
+      ctx.fill();
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle = "#d8d0b9";
+      ctx.lineWidth = 3;
+      var roller = (state.time * 44) % 56;
+      for (var rx = -60 + roller; rx < cssW + 80; rx += 56) {
+        ctx.beginPath();
+        ctx.moveTo(rx, layout.beltTop + 2);
+        ctx.lineTo(rx - 52, layout.beltTop + layout.beltH + 8);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawStations() {
+      for (var i = 0; i < layout.stations.length; i++) {
+        var s = layout.stations[i];
+        var x = s.x - s.w * 0.5;
+        var y = s.y - s.h * 0.5;
+        ctx.save();
+        ctx.globalAlpha = 0.28;
+        roundRect(x, y, s.w, s.h, 18);
+        ctx.fillStyle = s.color;
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
+        ctx.strokeStyle = s.dark;
+        ctx.lineWidth = 3;
+        ctx.setLineDash([8, 9]);
+        roundRect(x + 5, y + 5, s.w - 10, s.h - 10, 14);
+        ctx.stroke();
+        ctx.restore();
+
+        roundRect(s.x - 48, y - 24, 96, 28, 10);
+        ctx.fillStyle = "#fff9e8";
+        ctx.fill();
+        ctx.strokeStyle = s.dark;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        drawText(s.label, s.x, y - 9, 13, s.dark, "center", "middle", 800);
+
+        if (s.id === "crust") drawPistachioBowl(s.x, y + s.h + 18, 0.72);
+        if (s.id === "grill") drawGrill(s.x, y + s.h + 15, 0.72);
+        if (s.id === "plate") drawPlate(s.x, y + s.h + 15, 0.74);
+      }
+    }
+
+    function drawItems() {
+      for (var i = 0; i < state.items.length; i++) {
+        drawKofte(state.items[i]);
+      }
+    }
+
+    function drawKofte(item) {
+      var r = item.r;
+      ctx.save();
+      ctx.translate(item.x, item.y);
+      ctx.rotate(Math.sin(item.age * 2.1 + item.wobble) * 0.08);
+      if (item.flash > 0) {
+        ctx.globalAlpha = 0.18 * item.flash;
+        ctx.fillStyle = "#ffffff";
+        ctx.beginPath();
+        ctx.ellipse(0, 0, r * 1.85, r * 1.3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      var base = item.stage === 0 ? "#8b4b35" : item.stage === 1 ? "#6fa64e" : "#8b4b35";
+      var edge = item.stage === 0 ? "#5f3128" : item.stage === 1 ? "#315f34" : "#3d261f";
+      ctx.fillStyle = "rgba(45, 31, 25, 0.28)";
+      ctx.beginPath();
+      ctx.ellipse(4, r * 0.44, r * 1.28, r * 0.52, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = base;
+      ctx.strokeStyle = edge;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * 1.22, r * 0.82, -0.08, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      if (item.stage >= 1) {
+        ctx.fillStyle = item.stage === 1 ? "#d0d46a" : "#7fbf56";
+        for (var i = 0; i < 11; i++) {
+          var a = i * 2.39 + item.wobble;
+          var px = Math.cos(a) * r * (0.18 + (i % 4) * 0.18);
+          var py = Math.sin(a * 1.7) * r * 0.44;
+          ctx.beginPath();
+          ctx.ellipse(px, py, r * 0.1, r * 0.055, a, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      if (item.stage >= 2) {
+        ctx.strokeStyle = item.quality === 2 ? "#2b1a15" : "#46271c";
+        ctx.lineWidth = item.quality === 2 ? 3 : 2;
+        for (var g = -1; g <= 1; g++) {
+          ctx.beginPath();
+          ctx.moveTo(-r * 0.68, g * r * 0.28);
+          ctx.lineTo(r * 0.68, g * r * 0.28 - r * 0.18);
+          ctx.stroke();
+        }
+      }
+
+      var station = stationForItem(item);
+      if (station && nextAction(item) === station.id) {
+        ctx.strokeStyle = station.color;
+        ctx.lineWidth = 3;
+        ctx.globalAlpha = 0.75 + Math.sin(cursor.pulse * 8) * 0.15;
+        ctx.beginPath();
+        ctx.arc(0, 0, r * 1.65, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      if (item.stage === 1) {
+        drawHeatMeter(item, r);
+      }
+      ctx.restore();
+    }
+
+    function drawHeatMeter(item, r) {
+      var w = r * 2.3;
+      var h = 5;
+      var y = -r * 1.35;
+      roundRect(-w * 0.5, y, w, h, 3);
+      ctx.fillStyle = "#4b3a2e";
+      ctx.fill();
+      ctx.fillStyle = "#71b85f";
+      ctx.fillRect(-w * 0.5 + w * 0.42, y, w * 0.32, h);
+      ctx.fillStyle = "#fff3cf";
+      ctx.fillRect(-w * 0.5 + item.heat * w - 2, y - 2, 4, h + 4);
+    }
+
+    function drawParticles() {
+      for (var i = 0; i < state.particles.length; i++) {
+        var p = state.particles[i];
+        ctx.globalAlpha = clamp(p.life * 2, 0, 1);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      for (var j = 0; j < state.floaters.length; j++) {
+        var f = state.floaters[j];
+        ctx.globalAlpha = clamp(f.life, 0, 1);
+        drawText(f.text, f.x, f.y, 18, f.color, "center", "middle", 900);
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    function drawCursor() {
+      if (state.mode === "menu" || state.mode === "gameover") return;
+      var pulse = 1 + Math.sin(cursor.pulse * 10) * 0.08;
+      ctx.save();
+      ctx.translate(cursor.x, cursor.y);
+      ctx.strokeStyle = cursor.cool > 0 ? "#d2a632" : "#203237";
+      ctx.lineWidth = 3;
+      ctx.globalAlpha = 0.92;
+      ctx.beginPath();
+      ctx.arc(0, 0, cursor.r * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.strokeStyle = "#f4f0e1";
+      ctx.beginPath();
+      ctx.moveTo(-cursor.r * 0.46, -cursor.r * 0.18);
+      ctx.lineTo(cursor.r * 0.46, cursor.r * 0.18);
+      ctx.moveTo(-cursor.r * 0.46, cursor.r * 0.18);
+      ctx.lineTo(cursor.r * 0.46, -cursor.r * 0.18);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawHud() {
+      var pad = clamp(cssW * 0.018, 10, 16);
+      var topH = clamp(cssH * 0.075, 46, 62);
+      roundRect(pad, pad, Math.min(430, cssW - pad * 2), topH, 14);
+      ctx.fillStyle = "rgba(255, 249, 232, 0.88)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(53, 66, 57, 0.22)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      drawText("Score " + state.score, pad + 16, pad + 17, 18, "#243033", "left", "middle", 850);
+      drawText("Best " + meta.best, pad + 164, pad + 17, 14, "#47605f", "left", "middle", 700);
+      drawText("Combo " + state.combo, pad + 16, pad + 40, 13, state.combo >= 9 ? "#b58420" : "#47605f", "left", "middle", 800);
+      drawText("Served " + state.served + "/" + state.target, pad + 164, pad + 40, 13, "#47605f", "left", "middle", 800);
+
+      var rightW = Math.min(330, cssW - pad * 2);
+      var rightX = Math.max(pad, cssW - rightW - pad);
+      if (cssW > 760) {
+        roundRect(rightX, pad, rightW, topH, 14);
+        ctx.fillStyle = "rgba(255, 249, 232, 0.88)";
+        ctx.fill();
+        ctx.strokeStyle = "rgba(53, 66, 57, 0.22)";
+        ctx.stroke();
+        drawText("Time " + Math.ceil(state.timeLeft), rightX + 16, pad + 18, 18, "#243033", "left", "middle", 850);
+        drawHearts(rightX + 16, pad + 38);
+        drawText(audio.muted ? "Muted" : "Sound", rightX + rightW - 18, pad + 31, 13, "#47605f", "right", "middle", 800);
+      } else {
+        drawText(Math.ceil(state.timeLeft) + "s", cssW - pad - 10, pad + 20, 17, "#243033", "right", "middle", 850);
+        drawHearts(cssW - pad - 122, pad + 40);
+      }
+
+      var msgW = Math.min(cssW - pad * 2, 520);
+      var msgX = cssW * 0.5 - msgW * 0.5;
+      var msgY = cssH - clamp(cssH * 0.078, 42, 58);
+      roundRect(msgX, msgY, msgW, 34, 12);
+      ctx.fillStyle = state.fever > 0 ? "rgba(255, 236, 164, 0.9)" : "rgba(255, 249, 232, 0.78)";
+      ctx.fill();
+      drawText(state.fever > 0 ? "PISTACHIO FEVER - double score" : state.message, cssW * 0.5, msgY + 17, 14, "#283331", "center", "middle", 850);
+    }
+
+    function drawHearts(x, y) {
+      for (var i = 0; i < 5; i++) {
+        ctx.fillStyle = i < state.patience ? "#c84d43" : "rgba(81, 78, 70, 0.25)";
+        drawHeart(x + i * 21, y, 8);
+      }
+    }
+
+    function drawHeart(x, y, s) {
+      ctx.beginPath();
+      ctx.moveTo(x, y + s * 0.55);
+      ctx.bezierCurveTo(x - s * 1.25, y - s * 0.2, x - s * 0.58, y - s * 1.1, x, y - s * 0.48);
+      ctx.bezierCurveTo(x + s * 0.58, y - s * 1.1, x + s * 1.25, y - s * 0.2, x, y + s * 0.55);
+      ctx.fill();
+    }
+
+    function drawMenu() {
+      var portrait = cssH > cssW * 1.18;
+      drawOverlayBase();
+      var titleSize = portrait ? clamp(cssW * 0.09, 32, 46) : clamp(cssW * 0.065, 36, 74);
+      var subTitleSize = portrait ? clamp(cssW * 0.07, 26, 38) : clamp(cssW * 0.049, 30, 58);
+      drawText("PISTACHIO", cssW * 0.5, cssH * 0.22, titleSize, "#243033", "center", "middle", 950);
+      drawText("KOFTE RUSH", cssW * 0.5, cssH * (portrait ? 0.31 : 0.31), subTitleSize, "#5f8e44", "center", "middle", 950);
+      drawText(portrait ? "Crust. Grill. Plate." : "Crust. Grill. Plate. Keep the conveyor moving.", cssW * 0.5, cssH * (portrait ? 0.36 : 0.41), clamp(cssW * 0.018, 15, 20), "#47605f", "center", "middle", 750);
+      drawMiniRecipe(cssW * 0.5, cssH * 0.52);
+      drawButton("START RUSH", startButton.x, startButton.y, startButton.w, startButton.h);
+      drawText(portrait ? "Drag/tap or arrows/space" : "Arrows or drag move - Space or tap acts - M mutes - F fullscreen", cssW * 0.5, Math.min(cssH - 28, startButton.y + startButton.h + 36), portrait ? 12 : 13, "#47605f", "center", "middle", 650);
+      if (meta.best > 0) {
+        drawText("Best score " + meta.best, cssW * 0.5, startButton.y - 28, 14, "#7d552d", "center", "middle", 800);
+      }
+    }
+
+    function drawPause() {
+      drawOverlayBase();
+      drawText("PAUSED", cssW * 0.5, cssH * 0.42, 48, "#243033", "center", "middle", 950);
+      drawText("Press P, Space, or tap to continue.", cssW * 0.5, cssH * 0.52, 16, "#47605f", "center", "middle", 750);
+    }
+
+    function drawGameOver() {
+      drawOverlayBase();
+      drawText("RUSH COMPLETE", cssW * 0.5, cssH * 0.23, clamp(cssW * 0.055, 34, 64), "#243033", "center", "middle", 950);
+      drawText(state.overReason, cssW * 0.5, cssH * 0.32, 17, "#47605f", "center", "middle", 800);
+      drawText(String(state.score), cssW * 0.5, cssH * 0.45, clamp(cssW * 0.09, 58, 96), "#5f8e44", "center", "middle", 950);
+      drawText("served " + state.served + "  combo " + state.maxCombo + "  best " + meta.best, cssW * 0.5, cssH * 0.56, 16, "#47605f", "center", "middle", 750);
+      drawButton("RESTART", startButton.x, startButton.y, startButton.w, startButton.h);
+    }
+
+    function drawOverlayBase() {
+      ctx.fillStyle = "rgba(255, 248, 224, 0.78)";
+      ctx.fillRect(0, 0, cssW, cssH);
+      ctx.save();
+      ctx.globalAlpha = 0.96;
+      drawPlate(cssW * 0.18, cssH * 0.38, 1.25);
+      drawPistachioBowl(cssW * 0.82, cssH * 0.36, 1.08);
+      drawGrill(cssW * 0.24, cssH * 0.74, 1.0);
+      ctx.restore();
+    }
+
+    function drawButton(label, x, y, w, h) {
+      roundRect(x, y, w, h, 16);
+      ctx.fillStyle = "#243033";
+      ctx.fill();
+      ctx.strokeStyle = "#d2a632";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      drawText(label, x + w * 0.5, y + h * 0.52, 18, "#fff7df", "center", "middle", 900);
+    }
+
+    function drawMiniRecipe(cx, cy) {
+      var gap = clamp(cssW * 0.09, 62, 104);
+      var labels = ["CRUST", "GRILL", "PLATE"];
+      var colors = ["#63a64e", "#e28b32", "#4f9aca"];
+      for (var i = 0; i < 3; i++) {
+        var x = cx + (i - 1) * gap;
+        ctx.fillStyle = colors[i];
+        ctx.beginPath();
+        ctx.arc(x, cy, 24, 0, Math.PI * 2);
+        ctx.fill();
+        drawText(labels[i], x, cy + 42, 12, "#243033", "center", "middle", 850);
+      }
+      ctx.strokeStyle = "#47605f";
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+      ctx.globalAlpha = 0.52;
+      ctx.beginPath();
+      ctx.moveTo(cx - gap + 31, cy);
+      ctx.lineTo(cx - 31, cy);
+      ctx.moveTo(cx + 31, cy);
+      ctx.lineTo(cx + gap - 31, cy);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
+    function drawPistachioBowl(x, y, scale) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      ctx.fillStyle = "rgba(44, 34, 27, 0.22)";
+      ctx.beginPath();
+      ctx.ellipse(5, 18, 50, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#4d9ecf";
+      ctx.beginPath();
+      ctx.ellipse(0, 8, 48, 24, 0, 0, Math.PI);
+      ctx.lineTo(-48, 8);
+      ctx.fill();
+      ctx.fillStyle = "#d0d46a";
+      for (var i = 0; i < 16; i++) {
+        var px = -34 + (i % 8) * 10 + Math.sin(i) * 2;
+        var py = -4 + Math.floor(i / 8) * 10 + Math.cos(i) * 2;
+        ctx.beginPath();
+        ctx.ellipse(px, py, 6, 3, i, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    function drawGrill(x, y, scale) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      roundRect(-50, -18, 100, 34, 10);
+      ctx.fillStyle = "#353f3e";
+      ctx.fill();
+      ctx.strokeStyle = "#222b2c";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      for (var i = -3; i <= 3; i++) {
+        ctx.strokeStyle = i % 2 ? "#e88930" : "#f5b24c";
+        ctx.beginPath();
+        ctx.moveTo(i * 14, -15);
+        ctx.lineTo(i * 14 - 8, 15);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function drawPlate(x, y, scale) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      ctx.fillStyle = "rgba(44, 34, 27, 0.2)";
+      ctx.beginPath();
+      ctx.ellipse(6, 12, 48, 12, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#f7f8ed";
+      ctx.strokeStyle = "#8ca7a6";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 50, 25, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.strokeStyle = "#c6d8d1";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 30, 13, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function roundRect(x, y, w, h, r) {
+      r = Math.min(r, w * 0.5, h * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+
+    function drawText(text, x, y, size, color, align, baseline, weight) {
+      ctx.fillStyle = color;
+      ctx.font = String(weight || 700) + " " + size + "px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+      ctx.textAlign = align || "left";
+      ctx.textBaseline = baseline || "alphabetic";
+      ctx.fillText(text, x, y);
+    }
+
+    function pointFromEvent(e) {
+      var rect = canvas.getBoundingClientRect();
+      return {
+        x: (e.clientX - rect.left) * (cssW / Math.max(1, rect.width)),
+        y: (e.clientY - rect.top) * (cssH / Math.max(1, rect.height))
+      };
+    }
+
+    function setPointer(e, active) {
+      var p = pointFromEvent(e);
+      pointer.x = p.x;
+      pointer.y = p.y;
+      pointer.active = active;
+      cursor.x = p.x;
+      cursor.y = p.y;
+      return p;
+    }
+
+    function pointerDown(e) {
+      e.preventDefault();
+      canvas.focus({ preventScroll: true });
+      ensureAudio();
+      if (canvas.setPointerCapture) {
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+      }
+      var p = setPointer(e, true);
+      processAt(p.x, p.y);
+    }
+
+    function pointerMove(e) {
+      e.preventDefault();
+      var p = pointFromEvent(e);
+      pointer.x = p.x;
+      pointer.y = p.y;
+      if (pointer.active) {
+        cursor.x = p.x;
+        cursor.y = p.y;
+      }
+    }
+
+    function pointerUp(e) {
+      e.preventDefault();
+      setPointer(e, false);
+    }
+
+    function keyDown(e) {
+      var code = e.code || e.key;
+      keys[code] = true;
+      keys[e.key] = true;
+      if (code === "ArrowLeft" || code === "ArrowRight" || code === "ArrowUp" || code === "ArrowDown" || code === "Space") {
+        e.preventDefault();
+      }
+      if (code === "Enter") {
+        if (state.mode === "menu" || state.mode === "gameover") startGame();
+      } else if (code === "Space") {
+        if (!e.repeat) {
+          ensureAudio();
+          if (state.mode === "menu" || state.mode === "gameover") startGame();
+          else if (state.mode === "pause") state.mode = "play";
+          else processAt(cursor.x, cursor.y);
+        }
+      } else if (code === "KeyP") {
+        if (state.mode === "play") state.mode = "pause";
+        else if (state.mode === "pause") state.mode = "play";
+      } else if (code === "KeyM") {
+        audio.muted = !audio.muted;
+        if (audio.master) audio.master.gain.value = audio.muted ? 0 : 0.42;
+        meta.muted = audio.muted;
+        saveMeta();
+      } else if (code === "KeyF") {
+        toggleFullscreen();
+      }
+    }
+
+    function keyUp(e) {
+      var code = e.code || e.key;
+      keys[code] = false;
+      keys[e.key] = false;
+    }
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement && root.requestFullscreen) {
+        root.requestFullscreen().catch(function () {});
+      } else if (document.fullscreenElement && document.exitFullscreen) {
+        document.exitFullscreen().catch(function () {});
+      }
+    }
+
+    function renderGameToText() {
+      var visible = [];
+      for (var i = 0; i < Math.min(8, state.items.length); i++) {
+        var item = state.items[i];
+        var station = stationForItem(item);
+        visible.push({
+          id: item.id,
+          x: Math.round(item.x),
+          y: Math.round(item.y),
+          stage: stageName(item.stage),
+          station: station ? station.id : "belt",
+          next: nextAction(item),
+          heat: Math.round(item.heat * 100) / 100
+        });
+      }
+      return JSON.stringify({
+        mode: state.mode,
+        coordinates: "CSS pixels, origin top-left, x right, y down",
+        score: state.score,
+        best: meta.best,
+        combo: state.combo,
+        served: state.served,
+        target: state.target,
+        patience: state.patience,
+        level: state.level,
+        timeLeft: Math.round(state.timeLeft * 10) / 10,
+        fever: Math.round(state.fever * 10) / 10,
+        cursor: { x: Math.round(cursor.x), y: Math.round(cursor.y), r: Math.round(cursor.r) },
+        stations: layout.stations.map(function (s) {
+          return { id: s.id, x: Math.round(s.x), y: Math.round(s.y), w: Math.round(s.w), h: Math.round(s.h) };
+        }),
+        items: visible,
+        message: state.message,
+        lastAction: state.lastAction
+      });
+    }
+
+    function advanceTime(ms) {
+      var steps = Math.max(1, Math.round((ms || 16) / (1000 / 60)));
+      for (var i = 0; i < steps; i++) {
+        update(1 / 60);
+      }
+      render();
+      return renderGameToText();
+    }
+
+    function frame(ts) {
+      var dt = lastTs ? (ts - lastTs) / 1000 : 0;
+      lastTs = ts;
+      update(dt);
+      render();
+      rafId = requestAnimationFrame(frame);
+    }
+
+    canvas.addEventListener("pointerdown", pointerDown, { passive: false });
+    canvas.addEventListener("pointermove", pointerMove, { passive: false });
+    canvas.addEventListener("pointerup", pointerUp, { passive: false });
+    canvas.addEventListener("pointercancel", pointerUp, { passive: false });
+    canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    window.addEventListener("keydown", keyDown, { passive: false });
+    window.addEventListener("keyup", keyUp);
+    window.addEventListener("resize", resize);
+    window.addEventListener("blur", function () {
+      keys = Object.create(null);
+      pointer.active = false;
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden && state.mode === "play") state.mode = "pause";
+      lastTs = 0;
+    });
+
+    window.render_game_to_text = renderGameToText;
+    window.advanceTime = advanceTime;
+    window._jumpLevel = function () {
+      startGame();
+      state.timeLeft = 90;
+      return renderGameToText();
+    };
+    window._pistachioKofte = {
+      start: startGame,
+      act: processAt,
+      stateText: renderGameToText
+    };
+
+    resize();
+    render();
+    rafId = requestAnimationFrame(frame);
+  }());
+  </script>
+</body>
+</html>
