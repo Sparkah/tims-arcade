@@ -12,9 +12,9 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "url": "https://yandex.com/games/app/525693",
+          "url": null,
           "approvedOn": "2026-03-20",
-          "status": "live"
+          "status": "removed"
         },
         "crazygames": {
           "url": "https://www.crazygames.com/game/battle-merge",
@@ -124,10 +124,10 @@ export default {
       "engagement": null,
       "platforms": {
         "yandex": {
-          "url": "https://yandex.com/games/app/528397",
+          "url": null,
           "approvedOn": "2026-06-06",
           "rejectedOn": "2026-05-22",
-          "status": "live"
+          "status": "removed"
         },
         "crazygames": {
           "status": "not_started"
@@ -886,4 +886,5 @@ export default {
       "built": 2
     }
   }
-};
+}
+;
