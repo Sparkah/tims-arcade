@@ -103,7 +103,15 @@ while IFS=$'\t' read -r slug gameDir published external hosting; do
   fi
   total=$((total + 1))
 
-  game_root="$ROOT/$gameDir"
+  # A gameDir under Gallery/ (a gallery-hosted game like bloodtread_mobile)
+  # belongs to the tree being checked, so resolve it against GALLERY_DIR rather
+  # than AGENTS_ROOT. Resolving it against AGENTS_ROOT always reads the primary
+  # Gallery checkout, so running from a worktree checked the WRONG tree and
+  # reported art missing that was present in the commit being pushed.
+  case "$gameDir" in
+    Gallery/*) game_root="$GALLERY_DIR/${gameDir#Gallery/}" ;;
+    *)         game_root="$ROOT/$gameDir" ;;
+  esac
   # Two layouts: flat (yandex_promo/cover_800x470.png) and per-language
   # (yandex_promo/en/cover_800x470.png). Accept either.
   cover=$(first_real_png \

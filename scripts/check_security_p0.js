@@ -662,7 +662,10 @@ function testPublicDomSinksAvoidCatalogHtml() {
   assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(hiddenPanel), 'admin hidden panel still uses dangerous HTML sinks');
   assert(/action\.dataset\.slug\s*=\s*slug/.test(hiddenPanel), 'admin hidden actions do not assign data-slug through dataset');
   assert(/appendAdminCell\(row,\s*slug,\s*\{\s*className:\s*'slug'\s*\}\)/.test(hiddenPanel), 'admin hidden slugs do not render through a DOM text cell');
-  assert(/el\.replaceChildren\(summary,\s*table\)/.test(hiddenPanel), 'admin hidden panel does not render via DOM replacement');
+  // Assert the security property (the panel is replaced with DOM nodes), not
+  // the exact node list — the panel now renders summary + sub-tab bar + body,
+  // and pinning the old two-argument shape failed a safe refactor.
+  assert(/el\.replaceChildren\(\s*summary\s*,/.test(hiddenPanel), 'admin hidden panel does not render via DOM replacement');
 
   const uploadsPanel = adminSection('async function loadUploads()', "document.addEventListener('click', async (e) =>", 'admin uploads panel');
   assert(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(uploadsPanel), 'admin uploads panel still uses dangerous HTML sinks');
