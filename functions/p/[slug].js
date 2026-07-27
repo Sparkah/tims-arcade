@@ -35,7 +35,12 @@ export async function onRequest({ params, env, request }) {
   if (!slug) return new Response('not found', { status: 404 });
 
   if (Object.prototype.hasOwnProperty.call(RETIRED_SLUGS, slug)) {
-    return Response.redirect(new URL(`/p/${RETIRED_SLUGS[slug]}`, request.url).toString(), 301);
+    // Carry the query string across. These pages take ?lang= (the sitemap
+    // publishes ?lang=ru hreflang alternates), so dropping it would silently
+    // send a Russian visitor following a retired link back to English.
+    const target = new URL(`/p/${RETIRED_SLUGS[slug]}`, request.url);
+    target.search = new URL(request.url).search;
+    return Response.redirect(target.toString(), 301);
   }
 
   // Fetch games.json from the same deployment via ASSETS binding (works

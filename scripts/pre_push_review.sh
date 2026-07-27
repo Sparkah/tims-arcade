@@ -73,25 +73,41 @@ if [[ "${REVIEW_WORKTREE:-0}" == "1" ]]; then
     exit 0
   fi
 else
-  # Deleted files are listed by path instead of dumping their old contents.
-  # Removing N game folders is a legitimate, routine deploy (retiring a game,
-  # de-duplicating the manifest) and the removed source can be megabytes — the
-  # 2026-07-27 dedupe was 2.38MB of deletions against 106KB of real change, so
-  # the size ceiling tripped on content that carries nothing to review. There is
-  # no code to score in a deletion; the only question is whether the removal was
-  # intended, which the path list answers. Nothing is hidden: every deleted path
-  # is still shown, so the reviewer can still object to a removal. Added and
-  # modified files are still diffed in full — the no-truncation rule holds where
-  # it means something.
-  DELETED="$(git diff --diff-filter=D --name-only "$BASE_REF"...HEAD 2>/dev/null || true)"
+  # Retiring a game deletes a whole published folder, which can be megabytes of
+  # bundled source and assets: the 2026-07-27 manifest dedupe was 2.38MB of
+  # deletions against 106KB of real change, so the size ceiling tripped on
+  # content carrying nothing to review. Deleted GAME ASSETS are therefore listed
+  # by path rather than dumped — the only question about them is whether the
+  # removal was intended, which a path list answers.
+  #
+  # This is deliberately narrow. A deleted Function, script or config CAN hide
+  # something a path does not reveal (a removed export, an auth check, a route),
+  # so those keep their full diff. Only the bulk asset trees below are
+  # summarised, and every deleted path is listed either way.
+  BULK_DELETE_RE='^(games|thumbs|previews|tg|tg-[a-z]+|disc-arcade)/'
+  DELETED_ALL="$(git diff --diff-filter=D --name-only "$BASE_REF"...HEAD 2>/dev/null || true)"
+  DELETED_BULK="$(printf '%s\n' "$DELETED_ALL" | grep -E "$BULK_DELETE_RE" || true)"
+  DELETED_REVIEW="$(printf '%s\n' "$DELETED_ALL" | grep -vE "$BULK_DELETE_RE" || true)"
+
+  # Additions + modifications, always in full.
   DIFF="$(git diff --diff-filter=d "$BASE_REF"...HEAD 2>/dev/null || git diff --diff-filter=d HEAD~1 2>/dev/null || true)"
-  if [[ -n "$DELETED" ]]; then
+
+  # Deletions outside the bulk asset trees keep their full diff.
+  DELETED_REVIEW_PATHS=()
+  while IFS= read -r _p; do [[ -n "$_p" ]] && DELETED_REVIEW_PATHS+=("$_p"); done <<< "$DELETED_REVIEW"
+  if (( ${#DELETED_REVIEW_PATHS[@]} > 0 )); then
+    DIFF="${DIFF}
+$(git diff "$BASE_REF"...HEAD -- "${DELETED_REVIEW_PATHS[@]}" 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$DELETED_BULK" ]]; then
     DIFF="${DIFF}
 
-# Files DELETED by this push (contents omitted — nothing to review in a
-# removal; flag any path here that should not be going away):
-$(printf '%s' "$DELETED" | sed 's/^/  D /')"
+# Game assets DELETED by this push (contents omitted — bulk asset trees only;
+# flag any path here that should not be going away):
+$(printf '%s' "$DELETED_BULK" | sed 's/^/  D /')"
   fi
+
   if [[ -z "$DIFF" ]]; then
     echo "pre-push-review: no diff vs $BASE_REF, skipping" >&2
     exit 0
