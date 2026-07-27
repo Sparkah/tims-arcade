@@ -317,65 +317,88 @@ function adminFetch(url, options = {}) {
 }
 
 async function load() {
-  setContentMessage('Loading...');
+  setContentMessage('Loading…');
   lastLoadAt = Date.now();
   try {
-    const [statsRes, gamesRes, publishRes] = await Promise.all([
-      adminFetch('/api/admin/stats', { cache: 'no-store' }),
+    // Fast path: games.json + a cheap authed probe (hidden) + publish. We deliberately
+    // do NOT block on /api/admin/stats here — that endpoint does multi-prefix KV walks
+    // (votes:/plays:/comment:/daily:) that now take ~10s cold and were freezing the whole
+    // dashboard. Painting from games.json first makes the shell + hide/test panel appear
+    // in ~1s; the stats numbers fill in a moment later.
+    const [gamesRes, hidRes, publishRes] = await Promise.all([
       fetch('/games.json', { cache: 'no-store' }),
+      adminFetch('/api/admin/hidden', { cache: 'no-store' }),
       adminFetch('/api/admin/publish-status', { cache: 'no-store' }),
     ]);
-    if (statsRes.status === 403) {
+    if (hidRes.status === 403) {
       showLogin('Sign in with an allowed admin email.');
       return;
     }
-    if (!statsRes.ok) {
-      const err = await statsRes.json().catch(() => ({error: 'http ' + statsRes.status}));
-      setContentMessage(`Error: ${err.error || statsRes.status}`, { error: true });
-      return;
-    }
     adminSignedIn = true;
-    const stats = await statsRes.json();
     const games = gamesRes.ok ? await gamesRes.json() : [];
     adminTitleBySlug = Object.create(null);
     for (const g of games) adminTitleBySlug[g.slug] = g.title || g.slug;
+    const publishStatus = (publishRes && publishRes.ok) ? await publishRes.json().catch(() => null) : null;
 
-    // Use games.json as the canonical list of slugs, merging in stats
-    const statsBySlug = Object.create(null);
-    for (const g of stats.perGame) statsBySlug[g.slug] = g;
+    // First paint from games only. render() guards every stats field, so a zero-stats
+    // object renders the full shell (pulse/table show 0 until real stats arrive).
+    const zeroPerGame = games.map(g => ({
+      slug: g.slug, title: g.title, plays: 0, seconds: 0, likes: 0, dislikes: 0,
+      thumbCount: g.thumbCount || 1, variants: {},
+    }));
+    paintDashboard({
+      totals: {}, perDay: {}, highlights: {}, publishStatus,
+      abGames: zeroPerGame.filter(g => g.thumbCount > 1),
+      perGame: zeroPerGame, statsPending: true,
+    }, { light: true });
 
-    const merged = games.map(g => {
-      const s = statsBySlug[g.slug] || { plays: 0, seconds: 0, likes: 0, dislikes: 0 };
-      return {
-        slug: g.slug, title: g.title,
-        plays: s.plays, seconds: s.seconds, likes: s.likes, dislikes: s.dislikes,
-        thumbCount: g.thumbCount || 1,
-        variants: s.variants || {},
-      };
-    });
-    stats.abGames = merged.filter(g => g.thumbCount > 1);
-    // Sort by total seconds (desc), then plays
-    merged.sort((a, b) => (b.seconds - a.seconds) || (b.plays - a.plays));
+    // Background: the slow KV-walk stats. Repaint with real numbers when it returns.
+    // If it fails or is slow, the zero-shell stays fully usable (hide/test already works).
+    (async () => {
+      try {
+        const statsRes = await adminFetch('/api/admin/stats', { cache: 'no-store' });
+        if (!statsRes.ok) return;
+        const stats = await statsRes.json();
+        const statsBySlug = Object.create(null);
+        for (const g of (stats.perGame || [])) statsBySlug[g.slug] = g;
+        const merged = games.map(g => {
+          const s = statsBySlug[g.slug] || { plays: 0, seconds: 0, likes: 0, dislikes: 0 };
+          return {
+            slug: g.slug, title: g.title,
+            plays: s.plays, seconds: s.seconds, likes: s.likes, dislikes: s.dislikes,
+            thumbCount: g.thumbCount || 1, variants: s.variants || {},
+          };
+        });
+        merged.sort((a, b) => (b.seconds - a.seconds) || (b.plays - a.plays));
+        stats.abGames = merged.filter(g => g.thumbCount > 1);
+        stats.publishStatus = publishStatus;
+        stats.perGame = merged;
+        paintDashboard(stats, { light: false });
+      } catch (e) { console.error('stats:', e); }
+    })();
+  } catch (e) {
+    setContentMessage(`Network error: ${e.message}`, { error: true });
+  }
+}
 
-    stats.publishStatus = (publishRes && publishRes.ok) ? await publishRes.json().catch(() => null) : null;
-    stats.perGame = merged;
-    render(stats);
-    tabifyContent();
-    hydrateFeedbackImages();
-
-    // Lazy-load user digests after stats render so the page paints immediately.
+// Render the dashboard and (re)fire the panel loaders. `light` = first (stats-less)
+// paint: only the cheap panels fire (hide/test works instantly). The full paint also
+// fires the heavy KV-walk analytics — exactly once — so those scans never double-run.
+function paintDashboard(stats, { light } = {}) {
+  render(stats);
+  tabifyContent();
+  hydrateFeedbackImages();
+  loadHidden().catch(e => console.error('hidden:', e));
+  loadUploads().catch(e => console.error('uploads:', e));
+  loadSuggestions().catch(e => console.error('suggestions:', e));
+  if (!light) {
     loadUserDigests().catch(e => console.error('user-digests:', e));
-    loadSuggestions().catch(e => console.error('suggestions:', e));
-    loadUploads().catch(e => console.error('uploads:', e));
-    loadHidden().catch(e => console.error('hidden:', e));
     loadRetention().catch(e => console.error('retention:', e));
     { const rb = document.getElementById('refresh-retention'); if (rb) rb.onclick = () => loadRetention(); }
     loadFunnel().catch(e => console.error('funnel:', e));
     { const fb = document.getElementById('refresh-funnel'); if (fb) fb.onclick = () => loadFunnel(); }
     loadLeastAttention().catch(e => console.error('least-attention:', e));
     { const lb = document.getElementById('refresh-least'); if (lb) lb.onclick = () => loadLeastAttention({ force: true }); }
-  } catch (e) {
-    setContentMessage(`Network error: ${e.message}`, { error: true });
   }
 }
 
