@@ -14,9 +14,29 @@
 //   one HTML per game at sync time would also work, but a function lets us
 //   reuse the same code for new games without a build step.
 
+// Retired slugs -> the canonical entry they duplicated. The 2026-07-25 bulk
+// publish keyed new manifest entries off the DIRECTORY name, so seven games
+// that had been renamed since launch got a second entry pointing at the same
+// gameDir (running_away + creature_hunt both = Games/10_running_away). The
+// dupes are gone from games.json, but they sat in the sitemap for two days —
+// 301 them to the real game so Google consolidates instead of logging a 404.
+const RETIRED_SLUGS = {
+  running_away: 'creature_hunt',
+  apartment: 'apartment_cleaner',
+  rail_sorter: 'rail_tycoon',
+  dodge_run: 'daily_dodge',
+  'satisfying-spill': 'satisfying_spill',
+  '85_shader_chip_loadout': 'shader_chip_loadout',
+  nubik_2048: 'brainrot_2048',
+};
+
 export async function onRequest({ params, env, request }) {
   const slug = String(params.slug || '').replace(/[^a-z0-9_-]/gi, '');
   if (!slug) return new Response('not found', { status: 404 });
+
+  if (Object.prototype.hasOwnProperty.call(RETIRED_SLUGS, slug)) {
+    return Response.redirect(new URL(`/p/${RETIRED_SLUGS[slug]}`, request.url).toString(), 301);
+  }
 
   // Fetch games.json from the same deployment via ASSETS binding (works
   // regardless of which preview/production we're on).

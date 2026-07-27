@@ -206,11 +206,16 @@ load();
 // Auto-refresh when the tab comes back into focus, but only if data
 // has been on screen for >30s. Server-side cache is 5 min anyway, so
 // frequent tab-switches don't actually re-walk KV.
+//
+// SOFT refresh (Tim 2026-07-27): opening a game from here and coming back used
+// to blank the dashboard to "Loading…" and repaint from the top, losing your
+// scroll position mid-triage. Soft mode leaves the current dashboard on screen
+// while the new data is fetched, and paintDashboard restores the scroll offset.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if (!adminSignedIn) return;
   if (Date.now() - lastLoadAt < MIN_REFRESH_MS) return;
-  load();
+  load({ soft: true });
 });
 
 function showLogin(message = '') {
@@ -316,8 +321,11 @@ function adminFetch(url, options = {}) {
   });
 }
 
-async function load() {
-  setContentMessage('Loading…');
+async function load({ soft = false } = {}) {
+  // soft = a background re-fetch (tab regained focus). Keep the dashboard that
+  // is already on screen instead of blanking it, so the page doesn't collapse
+  // to one line and reset the scroll offset before the new data arrives.
+  if (!soft) setContentMessage('Loading…');
   lastLoadAt = Date.now();
   try {
     // Fast path: games.json + a cheap authed probe (hidden) + publish. We deliberately
@@ -385,8 +393,18 @@ async function load() {
 // paint: only the cheap panels fire (hide/test works instantly). The full paint also
 // fires the heavy KV-walk analytics — exactly once — so those scans never double-run.
 function paintDashboard(stats, { light } = {}) {
+  // render() replaces #content wholesale, which drops the page height to zero
+  // for a beat and scrolls you back to the top. Every paint therefore captures
+  // the offset first and puts it back — once synchronously (the new DOM is in
+  // place by then) and once on the next frame, after the async panel loaders
+  // have had a chance to fill in and the layout has settled.
+  const scrollY = window.scrollY;
+  const restoreScroll = () => { if (scrollY > 0) window.scrollTo(0, scrollY); };
+
   render(stats);
   tabifyContent();
+  restoreScroll();
+  requestAnimationFrame(restoreScroll);
   hydrateFeedbackImages();
   loadHidden().catch(e => console.error('hidden:', e));
   loadUploads().catch(e => console.error('uploads:', e));
@@ -888,6 +906,17 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+// Which sub-tab of the Hidden panel is showing. Survives the panel reloads that
+// follow a hide/unhide and the focus-refresh repaint; resets with the session.
+const HIDDEN_VIEW_KEY = 'adminHiddenView';
+function readHiddenView() {
+  try {
+    return sessionStorage.getItem(HIDDEN_VIEW_KEY) === 'visible' ? 'visible' : 'hidden';
+  } catch (e) {
+    return 'hidden';
+  }
+}
+
 // Hidden games — hide/unhide a game from the public grid (KV-backed, instant).
 async function loadHidden() {
   const el = document.getElementById('hidden-panel');
@@ -910,52 +939,89 @@ async function loadHidden() {
     const allGames = Array.isArray(gamesJson) ? gamesJson.filter(Boolean) : [];
     const hset = new Set(hiddenList);
     const btn = 'font-size:11px;padding:4px 12px;border:1px solid var(--rule);background:transparent;color:var(--ink-soft);cursor:pointer;border-radius:4px;';
-    // hidden first, then newest by num
-    const list = [...allGames].sort((a, b) => {
-      const ah = hset.has(String((a && a.slug) || '')), bh = hset.has(String((b && b.slug) || ''));
-      if (ah !== bh) return ah ? -1 : 1;
-      return (parseInt(b && b.num, 10) || 0) - (parseInt(a && a.num, 10) || 0);
-    });
+    const isHidden = (g) => hset.has(String((g && g.slug) || ''));
+    const byNumDesc = (a, b) => (parseInt(b && b.num, 10) || 0) - (parseInt(a && a.num, 10) || 0);
+    const hiddenGames = allGames.filter(isHidden).sort(byNumDesc);
+    const visibleGames = allGames.filter((g) => !isHidden(g)).sort(byNumDesc);
+
     const summary = document.createElement('p');
     summary.style.cssText = 'opacity:0.7;font-size:12px;margin:0 0 14px;';
     const hiddenCount = document.createElement('b');
     hiddenCount.textContent = String(hiddenList.length);
     summary.append(hiddenCount, ' hidden of ', String(allGames.length), '. Hidden games drop off the public grid instantly and are recorded as a low-quality signal for the factory.');
 
-    const { table, tbody } = makeAdminTable(['Game', 'Slug', '', 'Open', '']);
-    list.forEach((g) => {
-      const slug = String((g && g.slug) || '');
-      const h = hset.has(slug);
-      const row = document.createElement('tr');
-      if (h) row.style.cssText = 'opacity:0.5;';
-      appendAdminCell(row, (g && (g.title || g.slug)) || '');
-      appendAdminCell(row, slug, { className: 'slug' });
-      const statusCell = appendAdminCell(row, null);
-      if (h) {
-        const status = document.createElement('span');
-        status.style.cssText = 'color:#f7768e;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;';
-        status.textContent = 'hidden';
-        statusCell.appendChild(status);
-      }
-      const playCell = appendAdminCell(row, null);
-      const playLink = document.createElement('a');
-      playLink.href = `/games/${encodeURIComponent(slug)}/`;
-      playLink.target = '_blank';
-      playLink.rel = 'noopener';
-      playLink.textContent = '▶ open';
-      playLink.style.cssText = 'font-size:11px;color:#7aa2f7;text-decoration:none;white-space:nowrap;';
-      playCell.appendChild(playLink);
-      const actionCell = appendAdminCell(row, null, { style: 'text-align:right;' });
-      const action = document.createElement('button');
-      action.className = 'hide-act';
-      action.dataset.slug = slug;
-      action.dataset.act = h ? 'unhide' : 'hide';
-      action.style.cssText = btn;
-      action.textContent = h ? 'unhide' : 'hide';
-      actionCell.appendChild(action);
-      tbody.appendChild(row);
+    const buildTable = (games) => {
+      const { table, tbody } = makeAdminTable(['Game', 'Slug', '', 'Open', '']);
+      games.forEach((g) => {
+        const slug = String((g && g.slug) || '');
+        const h = hset.has(slug);
+        const row = document.createElement('tr');
+        if (h) row.style.cssText = 'opacity:0.5;';
+        appendAdminCell(row, (g && (g.title || g.slug)) || '');
+        appendAdminCell(row, slug, { className: 'slug' });
+        const statusCell = appendAdminCell(row, null);
+        if (h) {
+          const status = document.createElement('span');
+          status.style.cssText = 'color:#f7768e;font-size:11px;text-transform:uppercase;letter-spacing:0.05em;';
+          status.textContent = 'hidden';
+          statusCell.appendChild(status);
+        }
+        const playCell = appendAdminCell(row, null);
+        const playLink = document.createElement('a');
+        playLink.href = `/games/${encodeURIComponent(slug)}/`;
+        playLink.target = '_blank';
+        playLink.rel = 'noopener';
+        playLink.textContent = '▶ open';
+        playLink.style.cssText = 'font-size:11px;color:#7aa2f7;text-decoration:none;white-space:nowrap;';
+        playCell.appendChild(playLink);
+        const actionCell = appendAdminCell(row, null, { style: 'text-align:right;' });
+        const action = document.createElement('button');
+        action.className = 'hide-act';
+        action.dataset.slug = slug;
+        action.dataset.act = h ? 'unhide' : 'hide';
+        action.style.cssText = btn;
+        action.textContent = h ? 'unhide' : 'hide';
+        actionCell.appendChild(action);
+        tbody.appendChild(row);
+      });
+      return table;
+    };
+
+    // Hidden / Visible sub-tabs (Tim 2026-07-27). One flat list meant the few
+    // hidden games sat above ~250 visible ones, so checking what was curated
+    // out — or finding a game to hide — was a scroll. The chosen sub-tab is
+    // kept in sessionStorage so hide/unhide (which reloads this panel) and the
+    // focus-refresh both land you back where you were.
+    const views = [
+      { key: 'hidden', label: `Hidden (${hiddenGames.length})`, games: hiddenGames, empty: 'Nothing is hidden — the whole grid is public.' },
+      { key: 'visible', label: `Visible (${visibleGames.length})`, games: visibleGames, empty: 'No visible games.' },
+    ];
+    const subTabStyle = (on) => `font-family:var(--font-mono,monospace);font-size:11px;padding:6px 14px;border:1px solid ${on ? '#4dd0e1' : 'var(--rule)'};background:${on ? '#4dd0e1' : 'transparent'};color:${on ? '#0e0e12' : 'var(--ink-soft)'};cursor:pointer;border-radius:4px;letter-spacing:0.06em;text-transform:uppercase;font-weight:${on ? '700' : '500'};`;
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;gap:6px;margin:0 0 14px;';
+    const body = document.createElement('div');
+    const buttons = [];
+    const showView = (key) => {
+      const view = views.find((v) => v.key === key) || views[0];
+      views.forEach((v, i) => {
+        const on = v.key === view.key;
+        buttons[i].style.cssText = subTabStyle(on);
+        buttons[i].setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      body.replaceChildren(view.games.length ? buildTable(view.games) : adminPanelMessage(view.empty));
+      try { sessionStorage.setItem(HIDDEN_VIEW_KEY, view.key); } catch (e) {}
+    };
+    views.forEach((v) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = v.label;
+      b.addEventListener('click', () => showView(v.key));
+      buttons.push(b);
+      bar.appendChild(b);
     });
-    el.replaceChildren(summary, table);
+
+    el.replaceChildren(summary, bar, body);
+    showView(readHiddenView());
   } catch (e) {
     setAdminPanelMessage(el, `Failed to load hidden: ${e.message}`, { error: true });
   }
