@@ -286,9 +286,37 @@ fi
 SITE="https://game-factory.tech"
 NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# robots.txt — let everyone in, point at sitemap
+# robots.txt — welcome search AND AI answer-engine crawlers (Tim wants the
+# gallery surfaced in AI overviews / chat recommendations). Several AI bots
+# (Google-Extended, Applebot-Extended) are opt-in for AI use and only grant it
+# when named; Claude-SearchBot (not ClaudeBot, which is training-only) is the
+# one that matters for Claude citations. Points at sitemap + /llms.txt.
 cat > "$GALLERY/robots.txt" <<EOF
+# Tim's Game Lab ($SITE)
+# We WELCOME AI answer engines and search crawlers: the games are free to crawl,
+# summarize, and recommend. Machine-readable index for assistants: /llms.txt
+
 User-agent: *
+Allow: /
+Disallow: /admin.html
+Disallow: /api/
+Disallow: /dissertation/
+
+User-agent: GPTBot
+User-agent: OAI-SearchBot
+User-agent: ChatGPT-User
+User-agent: ClaudeBot
+User-agent: Claude-SearchBot
+User-agent: Claude-User
+User-agent: anthropic-ai
+User-agent: Claude-Web
+User-agent: PerplexityBot
+User-agent: Perplexity-User
+User-agent: Google-Extended
+User-agent: Applebot-Extended
+User-agent: CCBot
+User-agent: Amazonbot
+User-agent: Meta-ExternalAgent
 Allow: /
 Disallow: /admin.html
 Disallow: /api/
@@ -297,14 +325,25 @@ Disallow: /dissertation/
 Sitemap: $SITE/sitemap.xml
 EOF
 
-# sitemap.xml — index + per-game share pages
+# sitemap.xml — index + per-game share pages, each annotated with hreflang
+# alternates (en / ru?lang=ru / x-default) so Google + Yandex discover the
+# localized versions. The per-page <link rel=alternate> tags are the primary
+# signal; these are the supplementary sitemap-level annotation.
 {
   printf '<?xml version="1.0" encoding="UTF-8"?>\n'
-  printf '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
-  printf '  <url><loc>%s/</loc><lastmod>%s</lastmod><priority>1.0</priority></url>\n' "$SITE" "$NOW"
+  printf '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
+  printf '  <url><loc>%s/</loc>' "$SITE"
+  printf '<xhtml:link rel="alternate" hreflang="en" href="%s/"/>' "$SITE"
+  printf '<xhtml:link rel="alternate" hreflang="ru" href="%s/?lang=ru"/>' "$SITE"
+  printf '<xhtml:link rel="alternate" hreflang="x-default" href="%s/"/>' "$SITE"
+  printf '<lastmod>%s</lastmod><priority>1.0</priority></url>\n' "$NOW"
   jq -r --arg site "$SITE" \
     '.[] | select(.published != false and (.external != true)) |
-      "  <url><loc>" + $site + "/p/" + .slug + "</loc><lastmod>" + .addedDate + "T00:00:00Z</lastmod><priority>0.8</priority></url>"' \
+      "  <url><loc>" + $site + "/p/" + .slug + "</loc>" +
+      "<xhtml:link rel=\"alternate\" hreflang=\"en\" href=\"" + $site + "/p/" + .slug + "\"/>" +
+      "<xhtml:link rel=\"alternate\" hreflang=\"ru\" href=\"" + $site + "/p/" + .slug + "?lang=ru\"/>" +
+      "<xhtml:link rel=\"alternate\" hreflang=\"x-default\" href=\"" + $site + "/p/" + .slug + "\"/>" +
+      "<lastmod>" + .addedDate + "T00:00:00Z</lastmod><priority>0.8</priority></url>"' \
     "$OUT_MANIFEST"
   printf '</urlset>\n'
 } > "$GALLERY/sitemap.xml"
@@ -359,6 +398,11 @@ if (( ${#missing_webp[@]} > 0 )); then
   exit 1
 fi
 
+# Regenerate the SEO/GEO surface (llms.txt + homepage JSON-LD ItemList + static
+# crawlable game cards) from the freshly-built games.json. Runs BEFORE cachebust
+# so the hash pass sees the final index.html. See scripts/gen_seo.py.
+python3 "$(dirname "$0")/gen_seo.py"
+
 # Inject content-hash version strings on <link>/<script> references so
 # returning visitors get fresh CSS/JS the moment we change them, instead of
 # the 4-hour CF Pages cache window. Idempotent — no-op when nothing changed.
@@ -371,4 +415,5 @@ echo "Done. Manifest: $OUT_MANIFEST"
 echo "        sitemap: $GALLERY/sitemap.xml"
 echo "        rss:     $GALLERY/rss.xml"
 echo "        robots:  $GALLERY/robots.txt"
+echo "        llms:    $GALLERY/llms.txt"
 echo "Total Gallery/ size: $TOTAL_SIZE"

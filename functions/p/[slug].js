@@ -47,11 +47,15 @@ export async function onRequest({ params, env, request }) {
     );
   }
 
-  // Pick language from Accept-Language; ru-* gets Russian copy, else English.
-  // Yandex's crawlers honour Accept-Language so this gives clean per-language
-  // OG meta when shared in Russian / English contexts.
+  // Pick language: explicit ?lang= wins (so the hreflang'd ?lang=ru URL actually
+  // serves Russian to a neutral crawler - Google/Yandex fetch it with no ru
+  // Accept-Language and would otherwise get English at the RU URL, breaking the
+  // hreflang pair). Fall back to Accept-Language (Yandex honours it on share).
+  const qLang = String(new URL(request.url).searchParams.get('lang') || '').toLowerCase().slice(0, 2);
   const acceptLang = (request.headers.get('Accept-Language') || '').toLowerCase();
-  const lang = acceptLang.split(',')[0].startsWith('ru') ? 'ru' : 'en';
+  const lang = qLang === 'ru' ? 'ru'
+             : qLang === 'en' ? 'en'
+             : acceptLang.split(',')[0].startsWith('ru') ? 'ru' : 'en';
 
   const site = trustedStaticOrigin(request);
   const titleEn = game.title;
@@ -65,6 +69,10 @@ export async function onRequest({ params, env, request }) {
 
   const img   = `${site}/thumbs/${slug}.png`;
   const url   = `${site}/p/${slug}`;
+  // The RU page must self-canonicalize to ?lang=ru; otherwise Google folds it
+  // into the EN URL as a duplicate and the Russian page never ranks. EN (bare
+  // or ?lang=en) canonicalizes to the clean param-free URL.
+  const canonicalUrl = qLang === 'ru' ? `${url}?lang=ru` : url;
   // Forward the ?band=<code> share param (Bandlings view-only concert links,
   // 2026-06-11) so /p/bandlings?band=X carries through to the play surface.
   // Strictly sanitized (band codes are [0-9a-zA-Z-]); canonical/og:url stay
@@ -123,14 +131,14 @@ export async function onRequest({ params, env, request }) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(pageTitle)}</title>
 <meta name="description" content="${escapeHtml(ogHook)}">
-<link rel="canonical" href="${url}">
+<link rel="canonical" href="${canonicalUrl}">
 <link rel="alternate" hreflang="en" href="${url}">
 <link rel="alternate" hreflang="ru" href="${url}?lang=ru">
 <link rel="alternate" hreflang="x-default" href="${url}">
 
 <!-- Open Graph (language-aware) -->
 <meta property="og:type" content="website">
-<meta property="og:url" content="${url}">
+<meta property="og:url" content="${canonicalUrl}">
 <meta property="og:title" content="${escapeHtml(ogTitle)}">
 <meta property="og:description" content="${escapeHtml(ogHook)}">
 <meta property="og:image" content="${img}">
