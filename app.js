@@ -993,7 +993,7 @@ function renderFeatured() {
 // comments*5, ascending, 48h grace for new games) get a shelf of their own
 // below the grid so they can earn the impressions the Top feed never gives
 // them. Lazy: the fetch fires only when the visitor nears the footer.
-const GEMS_LIMIT = 12;
+const GEMS_LIMIT = 3;
 let gemsGames = null;      // game objects resolved from /api/least-attention
 let gemsRequested = false; // fetch-once guard
 
