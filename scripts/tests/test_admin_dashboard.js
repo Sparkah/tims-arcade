@@ -208,6 +208,50 @@ const check = (name, pass, detail = '') => {
   check('active main tab preserved', after.tab === before.tab, `${before.tab} -> ${after.tab}`);
   check('hidden sub-tab preserved', after.hiddenView === before.hiddenView, `${before.hiddenView} -> ${after.hiddenView}`);
   check('tab bar rebuilt intact', after.tabs === tabCount, `${tabCount} -> ${after.tabs}`);
+
+  // --- Fix 3b: the same, on a tab whose content arrives ASYNCHRONOUSLY -------
+  // The Games tab above is built synchronously by render(), so full page height
+  // exists the instant the scroll is restored. The Hidden panel is fetched, so
+  // at restore time it is still a "Loading…" placeholder and the document can
+  // be SHORTER than the saved offset — scrollTo then clamps and the restore
+  // silently fails. Caught exactly that: scrollY dipped 1200 -> 30 for half a
+  // second before recovering. Sampling ACROSS the refresh, not just after it,
+  // is what makes this visible; the fix pins the old height during the repaint.
+  await page.evaluate(() => {
+    const bar = document.querySelector('[data-tabbar="1"]');
+    const i = [...bar.children].findIndex(b => /hidden/i.test(b.textContent));
+    if (i >= 0) bar.children[i].click();
+  });
+  await new Promise(r => setTimeout(r, 400));
+  await page.evaluate(() => {
+    const el = document.getElementById('hidden-panel');
+    const tabs = [...el.querySelectorAll('button')].filter(b => !b.className.includes('hide-act'));
+    if (tabs[1]) tabs[1].click();     // Visible: 57 rows, comfortably tall
+  });
+  await new Promise(r => setTimeout(r, 300));
+  await page.evaluate(() => window.scrollTo(0, 1200));
+  await new Promise(r => setTimeout(r, 200));
+  const asyncBefore = await page.evaluate(() => window.scrollY);
+
+  await page.evaluate(() => {
+    lastLoadAt = 0;
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  const dips = [];
+  for (const at of [150, 400, 700, 1200, 2000, 3200]) {
+    await new Promise(r => setTimeout(r, at - (dips.length ? dips[dips.length - 1].at : 0)));
+    dips.push({ at, y: await page.evaluate(() => window.scrollY) });
+  }
+  const worst = Math.min(...dips.map(d => d.y));
+  check('async-tab scroll never dips mid-refresh', worst >= asyncBefore - 2,
+        `saved=${asyncBefore} samples=${dips.map(d => `${d.at}ms:${d.y}`).join(' ')}`);
+  check('async-tab scroll preserved', Math.abs(dips[dips.length - 1].y - asyncBefore) <= 2,
+        `${asyncBefore} -> ${dips[dips.length - 1].y}`);
+  // The height pin must be temporary, or the page stays padded forever.
+  const pinned = await page.evaluate(() => document.getElementById('content').style.minHeight);
+  check('height pin released after repaint', !pinned, `minHeight="${pinned}"`);
+
   check('no uncaught page errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 
   await browser.close();
