@@ -606,6 +606,11 @@ function musTone(freq, t, dur, type, gain, slideTo) {
   o.connect(g); g.connect(MUS.master); o.start(t); o.stop(t + dur + 0.03);
 }
 function musSchedule() {
+  // The real track took over: stop scheduling oscillators and stop re-applying
+  // the 0.16 procedural gain, which would otherwise fight the file's level.
+  // Needed as well as clearing MUS.timer, because a tick already queued when the
+  // file lands would re-arm the loop.
+  if (MUS.fileSrc) { MUS.timer = null; return; }
   if (!MUS.ctx) { MUS.timer = setTimeout(musSchedule, 60); return; }
   // gentle bed; mute mirrors the SFX mute flag
   MUS.master.gain.value = SFX.isMuted() ? 0 : 0.16;
@@ -644,11 +649,36 @@ function musSchedule() {
 // runs, so a build is never silent.
 var MUS_FILE = 'audio/bg_loop.mp3';
 var MUS_FILE_GAIN = 0.45;   // mastered track needs less attenuation than raw oscillators
+var MUS_FETCH_TIMEOUT_MS = 15000;
 function musGainNow() { return SFX.isMuted() ? 0 : (MUS.fileSrc ? MUS_FILE_GAIN : 0.16); }
-function musStartFile(done) {
-  if (!MUS.ctx || MUS.fileTried) { done(!!MUS.fileSrc); return; }
+function musApplyGain() {
+  if (!MUS.master || !MUS.ctx) return;
+  // Ramp rather than assign: a one-sample jump from 0.45 to 0 clicks audibly.
+  try { MUS.master.gain.setTargetAtTime(musGainNow(), MUS.ctx.currentTime, 0.015); }
+  catch (e) { MUS.master.gain.value = musGainNow(); }
+}
+// Start the procedural bed IMMEDIATELY and swap to the file when it is ready.
+//
+// The first cut waited for the fetch and only started the fallback from the
+// failure callback. That is silent for however long the download takes - a
+// throttled mobile connection measured 13.7 SECONDS of silence after the
+// player's first tap, with no failure involved at all. Worse, a request that
+// never settles fires neither branch, and because MUS.on was already true no
+// later gesture could retry: permanently silent for the whole session.
+//
+// So: music starts on the first gesture, always. The file quietly replaces the
+// oscillators once decoded, and a timeout + abort stops a hung request leaking.
+function musStartFile() {
+  if (!MUS.ctx || MUS.fileTried) return;
   MUS.fileTried = true;
-  fetch(MUS_FILE)
+  var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  var timedOut = false;
+  var timer = setTimeout(function () {
+    timedOut = true;
+    if (ctrl) { try { ctrl.abort(); } catch (e) {} }   // stop a hung request
+  }, MUS_FETCH_TIMEOUT_MS);
+
+  fetch(MUS_FILE, ctrl ? { signal: ctrl.signal } : undefined)
     .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
     .then(function (buf) {
       return new Promise(function (res, rej) {
@@ -657,30 +687,28 @@ function musStartFile(done) {
       });
     })
     .then(function (audio) {
+      clearTimeout(timer);
+      if (timedOut || !MUS.on) return;           // gave up already; keep the bed
       var s = MUS.ctx.createBufferSource();
       s.buffer = audio; s.loop = true; s.connect(MUS.master);
       s.start(0);
       MUS.fileSrc = s;
-      MUS.master.gain.value = musGainNow();
-      // Keep honouring the mute toggle: the procedural scheduler used to re-apply
-      // gain on every tick, and nothing does that in file mode.
-      if (!MUS.gainTimer) MUS.gainTimer = setInterval(function () {
-        if (MUS.master) MUS.master.gain.value = musGainNow();
-      }, 250);
-      done(true);
+      // Hand over: stop scheduling oscillators now that the real track is on.
+      if (MUS.timer) { clearTimeout(MUS.timer); MUS.timer = null; }
+      musApplyGain();
+      // The scheduler used to re-apply gain every tick; nothing does in file mode.
+      if (!MUS.gainTimer) MUS.gainTimer = setInterval(musApplyGain, 120);
     })
-    .catch(function () { done(false); });
+    .catch(function () { clearTimeout(timer); });  // procedural bed is already playing
 }
 function startMusic() {
   musEnsure(); if (!MUS.ctx) return;
   if (MUS.ctx.state === 'suspended' && !MUS.held) { try { MUS.ctx.resume(); } catch(e){} }
   if (MUS.on) return;
   MUS.on = true;
-  musStartFile(function (ok) {
-    if (ok) return;                                    // real track playing
-    MUS.step = 0; MUS.bar = 0; MUS.nextT = MUS.ctx.currentTime + 0.08;
-    musSchedule();                                     // fallback: never silent
-  });
+  MUS.step = 0; MUS.bar = 0; MUS.nextT = MUS.ctx.currentTime + 0.08;
+  musSchedule();        // audible from the first gesture, whatever the network does
+  musStartFile();       // swaps in when decoded
 }
 // pauseAudio / resumeAudio - used by ad callbacks (4.7) + tab-hide (1.3). One
 // audioHeld guard so a tab-hide during an ad doesn't double-resume.
