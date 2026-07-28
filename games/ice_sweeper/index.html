@@ -6,7 +6,7 @@
   <title>Ice Sweeper</title>
   <script src="/sdk.js"></script>
   <style>
-    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #0a1530; position: fixed; touch-action: none; overscroll-behavior: none; }
     canvas { display: block; touch-action: none; }
     *::-webkit-scrollbar { display: none; }
@@ -630,12 +630,57 @@ function musSchedule() {
   }
   MUS.timer = setTimeout(musSchedule, 40);
 }
+// ── Music bed: real track first, procedural fallback ────────────────────────
+// audio/bg_loop.mp3 is a 30s Suno loop (see audio/audio_manifest.json for the
+// source + licence). It is decoded into the SAME MUS.ctx and routed through the
+// SAME MUS.master gain as the old oscillator bed, which means mute, the ad
+// pause and the tab-hide suspend all keep working with no extra wiring.
+//
+// Deliberately NOT a media element: an Audio()/<audio> registers an OS MediaSession,
+// which Yandex rejects (1.6.2.5 desktop / 1.6.1.6 mobile) and which is the root
+// of audio-over-ads (4.7). decodeAudioData keeps it inside Web Audio.
+//
+// If the file is missing or will not decode, the procedural scheduler still
+// runs, so a build is never silent.
+var MUS_FILE = 'audio/bg_loop.mp3';
+var MUS_FILE_GAIN = 0.45;   // mastered track needs less attenuation than raw oscillators
+function musGainNow() { return SFX.isMuted() ? 0 : (MUS.fileSrc ? MUS_FILE_GAIN : 0.16); }
+function musStartFile(done) {
+  if (!MUS.ctx || MUS.fileTried) { done(!!MUS.fileSrc); return; }
+  MUS.fileTried = true;
+  fetch(MUS_FILE)
+    .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
+    .then(function (buf) {
+      return new Promise(function (res, rej) {
+        var p = MUS.ctx.decodeAudioData(buf, res, rej);
+        if (p && p.then) p.then(res, rej);       // promise-style implementations
+      });
+    })
+    .then(function (audio) {
+      var s = MUS.ctx.createBufferSource();
+      s.buffer = audio; s.loop = true; s.connect(MUS.master);
+      s.start(0);
+      MUS.fileSrc = s;
+      MUS.master.gain.value = musGainNow();
+      // Keep honouring the mute toggle: the procedural scheduler used to re-apply
+      // gain on every tick, and nothing does that in file mode.
+      if (!MUS.gainTimer) MUS.gainTimer = setInterval(function () {
+        if (MUS.master) MUS.master.gain.value = musGainNow();
+      }, 250);
+      done(true);
+    })
+    .catch(function () { done(false); });
+}
 function startMusic() {
   musEnsure(); if (!MUS.ctx) return;
   if (MUS.ctx.state === 'suspended' && !MUS.held) { try { MUS.ctx.resume(); } catch(e){} }
   if (MUS.on) return;
-  MUS.on = true; MUS.step = 0; MUS.bar = 0; MUS.nextT = MUS.ctx.currentTime + 0.08;
-  musSchedule();
+  MUS.on = true;
+  musStartFile(function (ok) {
+    if (ok) return;                                    // real track playing
+    MUS.step = 0; MUS.bar = 0; MUS.nextT = MUS.ctx.currentTime + 0.08;
+    musSchedule();                                     // fallback: never silent
+  });
 }
 // pauseAudio / resumeAudio - used by ad callbacks (4.7) + tab-hide (1.3). One
 // audioHeld guard so a tab-hide during an ad doesn't double-resume.
@@ -1356,6 +1401,21 @@ function adResumeAudio(){ adAudioHeld = false; resumeAudio(); }
 function showInterstitial(onDone) {
   var now = performance.now();
   if (now - lastInterstitialMs < INTERSTITIAL_GAP_MS) { onDone && onDone(); return; }
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showFullscreen === 'function') {
+    lastInterstitialMs = now;
+    var gpSettled = false;
+    function gpDone() {
+      if (gpSettled) return; gpSettled = true;
+      adResumeAudio();
+      onDone && onDone();
+    }
+    try {
+      adPauseAudio();
+      window.gp.ads.showFullscreen().then(gpDone).catch(gpDone);
+      setTimeout(gpDone, 30000);
+    } catch(e) { gpDone(); }
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showFullscreenAdv) { onDone && onDone(); return; }
   lastInterstitialMs = now;
   // no-fill watchdog: if the ad never opens/closes (no fill, as in any preview),
@@ -1376,6 +1436,23 @@ function showInterstitial(onDone) {
 function showRewardedExtraTime() {
   if (extraTimeUsed || extraTimeLoading) return;
   extraTimeLoading = true;
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showRewardedVideo === 'function') {
+    var gpSettled = false;
+    function gpSettle(grant) {
+      if (gpSettled) return; gpSettled = true;
+      extraTimeLoading = false;
+      adResumeAudio();
+      if (grant) grantExtraTime();
+    }
+    try {
+      adPauseAudio();
+      window.gp.ads.showRewardedVideo()
+        .then(function(success) { gpSettle(!!success); })
+        .catch(function() { gpSettle(true); });
+      setTimeout(function() { gpSettle(true); }, 30000);
+    } catch(e) { gpSettle(true); }
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) {
     extraTimeLoading = false; grantExtraTime(); return;
   }
@@ -1412,6 +1489,23 @@ function grantExtraTime() {
 // recovery, Yandex 1.15). No-fill watchdog grants the double so the button
 // never sticks dead (matches the EXTRA TIME pattern).
 function showRewardedDoubleIdle(baseAmount, onDone) {
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showRewardedVideo === 'function') {
+    var gpSettled = false;
+    function gpSettle(grantDouble) {
+      if (gpSettled) return; gpSettled = true;
+      adResumeAudio();
+      collectIdle(grantDouble ? 2 : 1);
+      onDone && onDone();
+    }
+    try {
+      adPauseAudio();
+      window.gp.ads.showRewardedVideo()
+        .then(function(success) { gpSettle(!!success); })
+        .catch(function() { gpSettle(true); });
+      setTimeout(function() { gpSettle(true); }, 30000);
+    } catch(e) { gpSettle(true); }
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) {
     collectIdle(2); onDone && onDone(); return;
   }
