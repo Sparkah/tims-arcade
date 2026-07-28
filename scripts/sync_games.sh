@@ -102,6 +102,21 @@ for ((i = 0; i < COUNT; i++)); do
     continue
   fi
 
+  # A game whose gameDir already IS its published directory (bloodtread_mobile
+  # lives at Gallery/games/bloodtread_mobile) has source == destination. Copying
+  # it onto itself aborts the whole sync — `cp -R dir dir` errors, and under
+  # `set -e` that killed the run partway through the manifest, silently leaving
+  # every game after it unsynced. Worse, the `rm -rf assets/*_raw` prune below
+  # would delete from the SOURCE. Nothing needs copying in that case, so skip
+  # straight to the thumbnail + manifest bookkeeping, which write elsewhere.
+  mkdir -p "$OUT_GAMES/$SLUG"
+  SELF_HOSTED=0
+  if [[ "$(cd "$GAME_DIR" && pwd -P)" == "$(cd "$OUT_GAMES/$SLUG" && pwd -P)" ]]; then
+    SELF_HOSTED=1
+    echo "  = $SLUG (already in the gallery tree — no copy)"
+  fi
+
+  if (( ! SELF_HOSTED )); then
   # Copy index.html. If the source uses the multi-platform placeholder
   # (<!-- PLATFORM_SDK -->), substitute the gallery's SDK stub so the game
   # boots inside the iframe without hitting Yandex's real /sdk.js.
@@ -123,10 +138,49 @@ for ((i = 0; i < COUNT; i++)); do
     publish_atomic "$OUT_GAMES/$SLUG/index.html" < "$GAME_DIR/index.html"
   fi
 
-  # Copy optional asset folders if they exist
-  for sub in fonts sounds audio data images assets sprites; do
-    [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
-  done
+  # A game may ship an explicit file list (gallery_ship.txt: one relative path
+  # per line, # comments allowed). When present it REPLACES the folder sweep
+  # below and is the complete published payload.
+  #
+  # Two cases the sweep cannot handle. ES-module games keep their code in
+  # core/ render/ lib/ plus root .js modules, none of which the sweep copies, so
+  # they reach the CDN unbootable. And a game whose assets/ holds generation
+  # history (bomzhara: 137MB of candidates behind 24MB of shipped art) would push
+  # the whole lot to the CDN. An explicit list fixes both while keeping the
+  # "never sweep development helpers into public" rule this file is built on.
+  SHIP_LIST="$GAME_DIR/gallery_ship.txt"
+  if [[ -f "$SHIP_LIST" ]]; then
+    ship_missing=0
+    while IFS= read -r ship_path || [[ -n "$ship_path" ]]; do
+      ship_path="${ship_path%%#*}"
+      ship_path="$(printf '%s' "$ship_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+      [[ -z "$ship_path" ]] && continue
+      # index.html is published above, with <!-- PLATFORM_SDK --> swapped for the
+      # gallery SDK tag. Copying it verbatim here would overwrite that and ship a
+      # game with no SDK (which the Yandex gate fails on), so never let the ship
+      # list clobber it — a boot-probe-derived list will always contain it.
+      [[ "$ship_path" == "index.html" ]] && continue
+      case "$ship_path" in
+        /*|*..*) echo "  ⚠ $SLUG: unsafe ship path '$ship_path' — skipped"; continue ;;
+      esac
+      if [[ -d "$GAME_DIR/$ship_path" ]]; then
+        mkdir -p "$OUT_GAMES/$SLUG/$(dirname "$ship_path")"
+        cp -R "$GAME_DIR/$ship_path" "$OUT_GAMES/$SLUG/$(dirname "$ship_path")/"
+      elif [[ -f "$GAME_DIR/$ship_path" ]]; then
+        mkdir -p "$OUT_GAMES/$SLUG/$(dirname "$ship_path")"
+        cp "$GAME_DIR/$ship_path" "$OUT_GAMES/$SLUG/$ship_path"
+      else
+        echo "  ⚠ $SLUG: gallery_ship.txt lists missing path '$ship_path'"
+        ship_missing=$((ship_missing + 1))
+      fi
+    done < "$SHIP_LIST"
+    (( ship_missing > 0 )) && echo "  ⚠ $SLUG: $ship_missing ship-list path(s) missing — game may not boot"
+  else
+    # Copy optional asset folders if they exist
+    for sub in fonts sounds audio data images assets sprites; do
+      [[ -d "$GAME_DIR/$sub" ]] && cp -R "$GAME_DIR/$sub" "$OUT_GAMES/$SLUG/"
+    done
+  fi
 
   # Vendored root libraries + runtime data files the game loads directly. Phaser
   # games bundle phaser.min.js locally (CLAUDE.md: no external CDN for Yandex/CG);
@@ -181,6 +235,7 @@ for ((i = 0; i < COUNT; i++)); do
   for journal in genesis.json iterations.log; do
     [[ -f "$GAME_DIR/$journal" ]] && cp "$GAME_DIR/$journal" "$OUT_GAMES/$SLUG/$journal"
   done
+  fi   # end: not SELF_HOSTED
 
   # Copy thumbnail. Layouts supported (in order of preference):
   #   1. Flat gameplay screenshots:     yandex_promo/desktop_en_1.png
