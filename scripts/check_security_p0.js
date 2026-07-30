@@ -42,6 +42,27 @@ function makeKv(initial = {}) {
   };
 }
 
+function makeGalleryDb(hidden = []) {
+  const updatedAt = '2026-07-30T12:00:00.000Z';
+  return {
+    prepare() {
+      return {
+        async all() {
+          return {
+            results: [{
+              hidden_json: JSON.stringify([...hidden].sort()),
+              updated_at: updatedAt,
+              revision: 1,
+              ready: 1,
+              write_enabled: 1,
+            }],
+          };
+        },
+      };
+    },
+  };
+}
+
 function makeEnv(extra = {}) {
   return {
     AUTH_SECRET: 'auth-secret',
@@ -51,6 +72,7 @@ function makeEnv(extra = {}) {
     GAME_FACTORY_ADMIN_SESSION_SECRET: 'admin-session-secret',
     GAME_FACTORY_RELAY_TOKEN: 'relay-secret',
     VOTES: makeKv(),
+    GALLERY_DB: makeGalleryDb(),
     ...extra,
   };
 }
@@ -752,6 +774,10 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
           return gamesResponse();
         },
       },
+      VOTES: {
+        get: async (key) => key === 'hidden:set' ? [] : '',
+      },
+      GALLERY_DB: makeGalleryDb(),
     };
     globalThis.fetch = async () => {
       networkCalled = true;
@@ -788,10 +814,9 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
       env: {},
       request: req('https://attacker.invalid/p/safe_game'),
     });
-    assert(res.status === 200, `share page rejected allowlisted fallback catalogue: ${res.status}`);
-    assert(fetchedUrl === 'https://game-factory.tech/games.json', `share page fetched untrusted catalogue URL: ${fetchedUrl}`);
-    html = await res.text();
-    assert(html.includes('https://game-factory.tech/p/safe_game'), 'share page fallback metadata used untrusted host');
+    assert(res.status === 503, `share page did not fail closed without catalogue bindings: ${res.status}`);
+    assert(fetchedUrl === '', `share page made a network fallback fetch: ${fetchedUrl}`);
+    assert(res.headers.get('x-robots-tag')?.includes('noindex'), 'failed-closed share page is indexable');
 
     globalThis.fetch = async (url) => {
       fetchedUrl = String(url);
@@ -802,8 +827,8 @@ async function testSharePageCatalogueFetchIsHostAllowlisted() {
       env: {},
       request: req('https://aa716bef.tims-arcade.pages.dev/p/safe_game'),
     });
-    assert(res.status === 200, `share page rejected Pages preview catalogue: ${res.status}`);
-    assert(fetchedUrl === 'https://aa716bef.tims-arcade.pages.dev/games.json', `share page did not preserve trusted Pages preview URL: ${fetchedUrl}`);
+    assert(res.status === 503, `share page did not fail closed on unbound Pages preview: ${res.status}`);
+    assert(fetchedUrl === '', `share page made a preview network fallback fetch: ${fetchedUrl}`);
   } finally {
     globalThis.fetch = oldFetch;
   }
@@ -919,7 +944,7 @@ async function testPublicFunctionFetchesUseTrustedOrigins() {
       res = await leastAttention.onRequestGet({
         request: req('https://attacker.invalid/api/least-attention?limit=2'),
         env: makeEnv({
-          VOTES: makeKv(),
+          VOTES: makeKv({ 'hidden:set': '[]' }),
           ASSETS: {
             fetch: async (request) => {
               assetFetched.push(String(request.url));

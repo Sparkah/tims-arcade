@@ -13,10 +13,10 @@
 #     [--allow-dup]     # override the mechanic-dedup block (intentional clone/replace)
 #
 # Behaviour:
-#   - If a game with the same slug already exists, the entry is REPLACED
-#     (so re-running for the same slug is safe).
+#   - If a game with the same slug already exists, core fields are updated while
+#     extra metadata (platforms, external, flagship, etc.) is preserved.
 #   - Otherwise the entry is appended to the end of the array.
-#   - addedDate is set to today's date in YYYY-MM-DD.
+#   - addedDate is immutable; updatedDate records a genuine public update.
 
 set -euo pipefail
 
@@ -101,15 +101,22 @@ NEW_ENTRY=$(jq -n \
   --arg hook      "$HOOK" \
   --arg hook_ru   "$HOOK_RU" \
   --arg genre     "$GENRE" \
-  --arg date      "$ADDED_DATE" \
   --argjson pub   "$PUBLISHED" \
-  '{slug:$slug, gameDir:$gd, title:$title, title_ru:$title_ru, hook:$hook, hook_ru:$hook_ru, genre:$genre, addedDate:$date, published:$pub}')
+  '{slug:$slug, gameDir:$gd, title:$title, title_ru:$title_ru, hook:$hook, hook_ru:$hook_ru, genre:$genre, published:$pub}')
 
 TMP="$(mktemp)"
-jq --argjson new "$NEW_ENTRY" \
+jq --argjson new "$NEW_ENTRY" --arg date "$ADDED_DATE" \
   'if any(.[]; .slug == $new.slug)
-   then map(if .slug == $new.slug then $new else . end)
-   else . + [$new]
+   then map(
+     if .slug == $new.slug
+     then . + $new + {
+       addedDate: (.addedDate // $date),
+       updatedDate: $date
+     }
+     else .
+     end
+   )
+   else . + [$new + {addedDate: $date, updatedDate: $date}]
    end' \
   "$SRC" > "$TMP" && mv "$TMP" "$SRC"
 

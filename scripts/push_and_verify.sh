@@ -31,13 +31,14 @@
 #   --timeout-min N      max minutes to wait per deploy attempt (default 8).
 #   --push-retries N     max push attempts on ref-race (default 3).
 #   --site URL           default https://game-factory.tech
+#   --indexnow-from SHA  explicit pre-deploy base for the post-live IndexNow diff
 #
 # Exit 0 = committed AND live. Non-zero = could not get it live (caller should alert).
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"      # Gallery/
 SITE="https://game-factory.tech"
-URLPATH="" MARKER="" DO_PUSH=0 RETRIGGER=0 TIMEOUT_MIN=8 PUSH_RETRIES=3
+URLPATH="" MARKER="" INDEXNOW_FROM="" DO_PUSH=0 RETRIGGER=0 TIMEOUT_MIN=8 PUSH_RETRIES=3
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --url)          URLPATH="$2"; shift 2 ;;
@@ -47,11 +48,25 @@ while [[ $# -gt 0 ]]; do
     --timeout-min)  TIMEOUT_MIN="$2"; shift 2 ;;
     --push-retries) PUSH_RETRIES="$2"; shift 2 ;;
     --site)         SITE="$2"; shift 2 ;;
+    --indexnow-from) INDEXNOW_FROM="$2"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 cd "$ROOT"
 log() { echo "[push_and_verify] $*"; }
+
+notify_indexnow() {
+  # IndexNow is a freshness hint, not the deploy authority. Only submit after
+  # the production marker proves this commit is live; warn without relabelling
+  # a successful deployment if the external endpoint is temporarily down.
+  if [[ "$SITE" != "https://game-factory.tech" ]]; then return 0; fi
+  if [[ ! -f "$ROOT/scripts/indexnow_notify.py" ]]; then return 0; fi
+  local args=(--submit --to HEAD)
+  [[ -n "$INDEXNOW_FROM" ]] && args+=(--from "$INDEXNOW_FROM")
+  if ! python3 "$ROOT/scripts/indexnow_notify.py" "${args[@]}"; then
+    log "⚠ IndexNow notification failed; deployment is live and the next verified push will retry."
+  fi
+}
 
 # ── Phase 1: ensure HEAD is on the remote ────────────────────────────────────
 ensure_pushed() {
@@ -60,7 +75,7 @@ ensure_pushed() {
     git fetch origin main -q 2>/dev/null
     [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] && { log "remote == HEAD ($(git rev-parse --short HEAD))"; return 0; }
     n=$((n+1)); log "push attempt $n/$PUSH_RETRIES ..."
-    git push 2>&1 | tail -3 || true
+    git push origin HEAD:main 2>&1 | tail -3 || true
     git fetch origin main -q 2>/dev/null
     [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] && { log "push landed on remote"; return 0; }
     if ! git merge-base --is-ancestor origin/main HEAD 2>/dev/null; then
@@ -73,7 +88,15 @@ ensure_pushed() {
   [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]]
 }
 
-if (( DO_PUSH )); then ensure_pushed || { log "PUSH did not land"; exit 1; }
+if (( DO_PUSH )); then
+  # Capture the remote base before the push so a first-ever IndexNow run covers
+  # every commit in a multi-commit rollout, not only HEAD^. Later runs use the
+  # durable last-success state maintained by indexnow_notify.py.
+  if [[ -z "$INDEXNOW_FROM" ]]; then
+    git fetch origin main -q 2>/dev/null || true
+    INDEXNOW_FROM="$(git rev-parse origin/main 2>/dev/null || true)"
+  fi
+  ensure_pushed || { log "PUSH did not land"; exit 1; }
 else git fetch origin main -q 2>/dev/null; fi
 
 # ── Phase 2: prove the LIVE site serves the new deploy ───────────────────────
@@ -88,7 +111,9 @@ while :; do
   # which makes a found marker report as stale on large HTML pages.
   body="$(curl -sL --max-time 15 "$SITE/$URLPATH?cb=$RANDOM$(date +%s)" || true)"
   if grep -qE "$MARKER" <<<"$body"; then
-    log "✅ DEPLOY LANDED — live $URLPATH contains /$MARKER/."; exit 0
+    log "✅ DEPLOY LANDED — live $URLPATH contains /$MARKER/."
+    notify_indexnow
+    exit 0
   fi
   now=$(date +%s)
   if (( now >= deadline )); then

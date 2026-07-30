@@ -5,14 +5,16 @@
 //   POST /api/admin/hidden  {slug, hide}    -> { hidden:[...], slug, hidden_now, count }
 //        hide defaults to true; pass {hide:false} to unhide.
 //
-// Source of truth = KV key `hidden:set` in the VOTES namespace (same store the
-// votes/featured endpoints use), so a toggle is INSTANT (no redeploy). The
-// public /api/hidden endpoint reads the same key for the homepage grid filter.
-
-const KEY = 'hidden:set';
-const LEGACY_WRITE_KEY = 'curation:legacy-write-enabled';
+// Source of truth = per-slug rows in the GALLERY_DB D1 binding, so concurrent
+// dashboards cannot overwrite one another's read-modify-write array. The
+// public /api/hidden endpoint reads the same transactionally updated table.
 
 import { requireAdmin } from '../../_lib/adminAuth.js';
+import {
+  mutateHiddenState,
+  readHiddenState,
+} from '../../_lib/publicCatalogue.js';
+import { indexNowUrlsForCuration, notifyIndexNow } from '../../_lib/indexNow.js';
 
 function json(body, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -21,43 +23,36 @@ function json(body, status = 200) {
   });
 }
 
-async function readSet(env) {
-  const value = await env.VOTES.get(KEY, 'json');
-  if (
-    !Array.isArray(value)
-    || value.some(slug => typeof slug !== 'string' || !/^[a-z0-9_-]{1,64}$/.test(slug))
-  ) {
-    throw new Error('legacy curation set is unavailable');
-  }
-  const normalized = [...new Set(value)].sort();
-  if (JSON.stringify(value) !== JSON.stringify(normalized)) {
-    throw new Error('legacy curation set is malformed');
-  }
-  return normalized;
-}
-
-async function legacyWritesEnabled(env) {
-  try {
-    return (await env.VOTES.get(LEGACY_WRITE_KEY)) !== '0';
-  } catch (_) {
-    return false;
-  }
+function mutationHostAllowed(request) {
+  const host = new URL(request.url).hostname.toLowerCase();
+  return (
+    host === 'game-factory.tech'
+    || host === 'www.game-factory.tech'
+    || host === 'localhost'
+    || host === '127.0.0.1'
+  );
 }
 
 export async function onRequestGet({ request, env }) {
   const fail = await requireAdmin(request, env);
   if (fail) return fail;
   try {
-    const hidden = await readSet(env);
+    const { hidden } = await readHiddenState(env);
     return json({ hidden, count: hidden.length });
   } catch (_) {
     return json({ error: 'curation_store_unavailable' }, 503);
   }
 }
 
-export async function onRequestPost({ request, env }) {
+export async function onRequestPost(context) {
+  const { request, env } = context;
   const fail = await requireAdmin(request, env);
   if (fail) return fail;
+  // Pages previews share configured production bindings. Never let an
+  // authenticated preview deployment mutate the production curation DB.
+  if (!mutationHostAllowed(request)) {
+    return json({ error: 'production_host_required' }, 403);
+  }
 
   let body;
   try { body = await request.json(); } catch (e) { return json({ error: 'bad_json' }, 400); }
@@ -67,28 +62,22 @@ export async function onRequestPost({ request, env }) {
   if (!slug || !/^[a-z0-9_-]{1,64}$/.test(slug)) return json({ error: 'invalid_slug' }, 400);
   const hide = body.hide !== false; // default true
 
-  // Parse the complete request before observing the lock, then check it again
-  // immediately before the write. --prepare waits through KV propagation, so
-  // a slow-body or delayed read cannot escape into the D1 authority window.
-  if (!(await legacyWritesEnabled(env))) {
-    return json({ error: 'curation_cutover_in_progress' }, 503);
-  }
-  let set;
+  const updatedAt = new Date().toISOString();
+  let updated;
   try {
-    set = new Set(await readSet(env));
+    updated = await mutateHiddenState(env, slug, hide, updatedAt);
   } catch (_) {
     return json({ error: 'curation_store_unavailable' }, 503);
   }
-  if (hide) set.add(slug); else set.delete(slug);
-  const arr = [...set].sort();
-  if (!(await legacyWritesEnabled(env))) {
-    return json({ error: 'curation_cutover_in_progress' }, 503);
-  }
-  try {
-    await env.VOTES.put(KEY, JSON.stringify(arr));
-  } catch (_) {
-    return json({ error: 'curation_store_unavailable' }, 503);
+  if (typeof context.waitUntil === 'function') {
+    context.waitUntil(notifyIndexNow(indexNowUrlsForCuration(slug)));
   }
 
-  return json({ hidden: arr, slug, hidden_now: hide, count: arr.length });
+  return json({
+    hidden: updated.hidden,
+    slug,
+    hidden_now: hide,
+    count: updated.hidden.length,
+    updated_at: updated.updatedAt,
+  });
 }

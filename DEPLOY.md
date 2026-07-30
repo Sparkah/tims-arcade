@@ -1,6 +1,8 @@
 # Tim's Game Lab — Deploy Guide
 
-Static gallery + serverless vote API hosted on Cloudflare Pages with Pages Functions and a KV namespace. Free tier is plenty for a personal site.
+Static gallery + serverless APIs hosted on Cloudflare Pages with Pages
+Functions, KV for engagement data, and an isolated D1 database for transactional
+gallery curation.
 
 ## What's in this folder
 
@@ -114,6 +116,84 @@ For Pages Functions running locally:
 cd Gallery
 wrangler pages dev . --kv VOTES
 ```
+
+## Gallery curation database
+
+`GALLERY_DB` is the authoritative hidden-game store. It uses one row per slug,
+so concurrent hide/unhide actions cannot overwrite the complete set. Git/Pages
+deploys do not apply D1 migrations; apply them before deploying code that needs
+a new schema:
+
+```bash
+cd Gallery
+npx wrangler d1 migrations apply gallery-curation --remote
+```
+
+The initial cutover also requires seeding the exact live `/api/hidden` set,
+building the singleton `hidden_json` snapshot, and setting
+`gallery_curation_state.ready = 1` only after the row set, snapshot, count, and
+sorted hash all match. Runtime reads fail closed while `ready != 1`. Pages
+preview deployments may read this production binding, but the admin mutation
+route rejects preview hosts.
+
+The commit immediately before the D1 cutover is the short-lived `legacy-v2`
+launch bridge. Its admin route validates the complete hidden set, honors and
+rechecks the `curation:legacy-write-enabled` KV lock, and its public hidden
+endpoint returns `x-gallery-curation: legacy-v2`. Start the legacy→D1 cutover
+with:
+
+```bash
+bash scripts/sync_legacy_kv_to_curation_d1.sh --prepare
+```
+
+That command proves `legacy-v2` is live, freezes D1 first, locks legacy
+mutations, waits through KV propagation, copies the stable set into D1, and
+leaves both authorities frozen. Freezing D1 first means a D1 deployment raced
+during the propagation window cannot accept a write. The command also requires
+both `origin/main` and Cloudflare's latest production source to be the audited
+bridge commit `fafdc26`.
+Deploy D1 code and prove `/api/hidden` returns
+`x-gallery-curation: d1-v1`; then finish the authority handoff:
+
+```bash
+bash scripts/sync_legacy_kv_to_curation_d1.sh --finalize
+```
+
+Finalization re-reads the still-locked KV set, installs it transactionally,
+requires exact D1 row/snapshot parity with that set, and enables D1 writes.
+Never enable D1 writes before the `d1-v1` marker is live. Finalization requires
+Cloudflare's production source to match the current `origin/main`, not only a
+sampled HTTP marker. If the D1 commit has not been accepted by GitHub and the
+cutover must be abandoned, restore the bridge with:
+
+```bash
+bash scripts/sync_legacy_kv_to_curation_d1.sh --abort
+```
+
+Abort refuses to unlock unless both `origin/main` and Cloudflare production
+still equal `fafdc26` and `legacy-v2` is live. After any D1 push attempt, recover
+forward and run `--finalize`; never abort a queued deployment.
+
+The bridge is not a rollback target: its pre-D1 manifest, static SEO files, and
+share pages can expose curated-hidden games to crawlers. `scripts/rollback.sh`
+therefore refuses any revert whose target lacks D1-authoritative discovery.
+Repair the first D1 release forward. Once another D1 commit exists,
+D1-to-D1 rollback is supported and proves both the exact Cloudflare deployment
+source and the `d1-v1` marker before declaring success.
+
+### Initial D1 cutover receipt — 2026-07-30
+
+- Audited bridge: `fafdc26d5371c2e424c29031824bc3056551ddf0`,
+  confirmed as both `origin/main` and the Cloudflare production source with
+  `x-gallery-curation: legacy-v2`.
+- Remote migrations: `0001` through `0005` applied; Wrangler reported no
+  migrations pending immediately before the release.
+- Prepared hidden set: 119 sorted unique slugs, SHA-256
+  `fb228c9d1d48163e5e9946d32aba82d477038047cd39e67a30fe9aa8d4d783a8`.
+- Frozen handoff state: D1 `ready=1`, D1 `write_enabled=0`, legacy write
+  lock `0`; D1 rows, singleton snapshot, and legacy KV match exactly.
+- Independent cutover and release-gate reviews passed on candidate
+  `ab119db2eafd0a4c9c7396f12c5474e154c8450a`.
 
 ## Dissertation service-evaluation database
 

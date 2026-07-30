@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
-"""Generate SEO/GEO artifacts from games.json.
+"""Generate fail-closed static SEO/GEO fallbacks.
 
-Three outputs, all derived from the single source of truth (games.json) so they
-never drift from the live catalogue:
+Production Pages Functions render the public catalogue at request time from
+games.json plus the authoritative D1 hidden set. A build-time process cannot
+read that live curation state safely, so these static assets intentionally
+contain no game entries. If Functions are unavailable, hidden games must not
+leak from a stale generated fallback.
 
-  1. llms.txt          - the AI-crawler / GEO index. LLM-facing assistants read
-                         this to answer "recommend a site with browser games"
-                         style prompts. Plain markdown, one link per game.
-  2. Homepage JSON-LD  - a CollectionPage + ItemList of every published game as a
-                         VideoGame, injected into index.html <head> between
-                         markers. Consumed by Google (rich results) AND the AI
-                         search crawlers that parse structured data.
-  3. Static grid       - real <a> game cards injected into <main id="grid">.
-                         app.js clears #grid (innerHTML='') then repaints on
-                         load, so JS visitors get the dynamic grid while no-JS
-                         crawlers (most AI bots) still read the actual game list
-                         as visible HTML text - the strongest GEO signal.
+The live equivalents share functions/_lib/seoSurface.js and are injected by
+functions/index.js plus the /llms.txt, /sitemap.xml, and /rss.xml routes.
 
 Idempotent: re-running replaces the marked regions in place. Wire it into
 sync_games.sh so every catalogue change refreshes the SEO surface.
@@ -48,13 +41,13 @@ JSONLD_LIMIT = 40
 
 
 def load_games():
+    # Validate that the manifest remains readable, but never project it into a
+    # static crawl surface: live D1 is the only authoritative hidden-game set.
     with open(GAMES_JSON, encoding="utf-8") as f:
         data = json.load(f)
-    games = data if isinstance(data, list) else data.get("games", [])
-    pub = [g for g in games if g.get("published") is not False and g.get("slug")]
-    # Newest first - matches the site's "new specimen most days" framing.
-    pub.sort(key=lambda g: (g.get("addedDate") or ""), reverse=True)
-    return pub
+    if not isinstance(data, list):
+        raise ValueError("games.json must be an array")
+    return []
 
 
 def esc(s):
@@ -75,21 +68,21 @@ def build_llms(games):
     lines.append("# Tim's Game Lab (game-factory.tech)")
     lines.append("")
     lines.append(
-        "> A daily-updated collection of small, original browser games you can "
-        "play instantly - no install, no signup. Think \"TikTok for games\": "
-        "short, distinctive, one-more-go loops, a fresh game most days. Each "
-        "game is rapidly prototyped and refined with AI coding agents, then "
-        "shipped and shaped by player like/dislike feedback."
+        "> A curated collection of small, original browser games and official "
+        "platform releases. New experiments arrive regularly and player "
+        "feedback shapes what gets improved."
     )
     lines.append("")
     lines.append("## About")
     lines.append("- Free to play in any browser (desktop or mobile). No download, no account.")
-    lines.append("- Every entry is a self-contained HTML5 game built around a tight ~10-minute core loop.")
+    lines.append("- Some games run here; official releases open on their verified distribution platform.")
     lines.append("- Interface and game copy are available in English and Russian (plus Spanish, Portuguese, Turkish, Arabic) via `?lang=`.")
     lines.append("- New games are added most days; players vote to shape what gets built next.")
     lines.append(f"- Browse everything: {SITE}/  -  Russian: {SITE}/?lang=ru")
     lines.append("")
-    lines.append(f"## Games ({len(games)} published, newest first)")
+    lines.append("## Curated games")
+    if not games:
+        lines.append(f"- Live curated index: {SITE}/")
     for g in games:
         url = f"{SITE}/p/{g['slug']}"
         title = g.get("title") or g["slug"]
@@ -130,9 +123,9 @@ def build_jsonld(games):
         "name": "Tim's Game Lab - free browser games",
         "url": SITE + "/",
         "description": (
-            f"A daily-updated collection of {len(games)} small, original browser "
-            "games you can play instantly - no install, no signup. A fresh game "
-            "most days; the newest are listed here."
+            "A curated collection of small, original browser games and official "
+            "platform releases. The live edge-rendered catalogue supplies the "
+            "current public ItemList."
         ),
         "inLanguage": ["en", "ru"],
         "isPartOf": {"@type": "WebSite", "name": "Tim's Game Lab", "url": SITE + "/"},
@@ -175,10 +168,9 @@ def build_static_cards(games):
         "color:#6a6a82;text-transform:uppercase;letter-spacing:.05em}</style>"
     )
     intro = (
-        '<p class="seo-intro">Free browser games you can play instantly - no install, '
-        'no signup. A fresh game most days. '
-        f'Showing the {min(STATIC_CARD_LIMIT, len(games))} newest of {len(games)} games; '
-        '<a href="/llms.txt">full index</a>.</p>'
+        '<p class="seo-intro">Free browser games and official platform releases. '
+        'The current curated list is loaded at the edge; '
+        '<a href="/llms.txt">machine-readable index</a>.</p>'
     )
     return style + "\n" + intro + "\n" + "\n".join(cards)
 
@@ -237,7 +229,7 @@ def main():
     with open(LLMS_TXT, "w", encoding="utf-8") as f:
         f.write(llms)
 
-    print(f"gen_seo: {len(games)} published games")
+    print("gen_seo: fail-closed static fallback (live catalogue is edge-rendered)")
     print(f"  llms.txt         -> {len(llms)} bytes")
     print(f"  JSON-LD ItemList -> {min(JSONLD_LIMIT, len(games))} newest VideoGame items in index.html <head>")
     print(f"  static grid      -> {min(STATIC_CARD_LIMIT, len(games))} crawlable cards in #grid")

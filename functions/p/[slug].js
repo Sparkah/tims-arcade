@@ -14,6 +14,11 @@
 //   one HTML per game at sync time would also work, but a function lets us
 //   reuse the same code for new games without a build step.
 
+import { readPublicCatalogue, unavailableResponse } from '../_lib/publicCatalogue.js';
+import { platformEntries, primaryExternalEntry } from '../_lib/seoSurface.js';
+
+const SITE = 'https://game-factory.tech';
+
 // Retired slugs -> the canonical entry they duplicated. The 2026-07-25 bulk
 // publish keyed new manifest entries off the DIRECTORY name, so seven games
 // that had been renamed since launch got a second entry pointing at the same
@@ -43,14 +48,16 @@ export async function onRequest({ params, env, request }) {
     return Response.redirect(target.toString(), 301);
   }
 
-  // Fetch games.json from the same deployment via ASSETS binding (works
-  // regardless of which preview/production we're on).
-  let games = [];
+  // Catalogue visibility comes from the same production D1 set used by every
+  // discovery surface. If that state cannot be established, fail closed.
+  let catalogue;
   try {
-    games = await readGamesJson(env, request);
-  } catch (e) { /* fall through to 404 */ }
+    catalogue = await readPublicCatalogue(env);
+  } catch (_) {
+    return unavailableResponse('html');
+  }
 
-  const game = games.find(g => g.slug === slug);
+  const game = catalogue.games.find(g => g.slug === slug);
   if (!game) {
     return new Response(
       `<!DOCTYPE html><meta charset="utf-8"><title>Not found</title>
@@ -64,11 +71,18 @@ export async function onRequest({ params, env, request }) {
   // not-found so /p/<slug> can't be used to reach the game. (Tim 2026-05-31:
   // critter_keep shipped as a template stub, was unpublished, but /p/ kept
   // serving it because this page rendered any slug found in games.json.)
-  if (game.published === false) {
+  if (game.published === false || catalogue.hiddenSet.has(slug)) {
     return new Response(
-      `<!DOCTYPE html><meta charset="utf-8"><title>Unavailable</title>
-       <p>This game is no longer available. <a href="/">Back to gallery →</a></p>`,
-      { status: 404, headers: { 'content-type': 'text/html; charset=utf-8' } }
+      `<!DOCTYPE html><meta charset="utf-8"><meta name="robots" content="noindex,nofollow,noarchive"><title>Unavailable</title>
+       <p>This game is not in the public gallery. <a href="/">Back to gallery →</a></p>`,
+      {
+        status: 404,
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-robots-tag': 'noindex, nofollow, noarchive',
+        },
+      }
     );
   }
 
@@ -82,7 +96,6 @@ export async function onRequest({ params, env, request }) {
              : qLang === 'en' ? 'en'
              : acceptLang.split(',')[0].startsWith('ru') ? 'ru' : 'en';
 
-  const site = trustedStaticOrigin(request);
   const titleEn = game.title;
   const titleRu = game.title_ru || game.title;
   const hookEn  = game.hook || 'A small browser game from Tim\'s Game Lab.';
@@ -92,8 +105,8 @@ export async function onRequest({ params, env, request }) {
   const ogHook  = lang === 'ru' ? hookRu : hookEn;
   const pageTitle = `${ogTitle} — Tim's Game Lab`;
 
-  const img   = `${site}/thumbs/${slug}.png`;
-  const url   = `${site}/p/${slug}`;
+  const img   = `${SITE}/thumbs/${slug}.png`;
+  const url   = `${SITE}/p/${slug}`;
   // The RU page must self-canonicalize to ?lang=ru; otherwise Google folds it
   // into the EN URL as a duplicate and the Russian page never ranks. EN (bare
   // or ?lang=en) canonicalizes to the clean param-free URL.
@@ -103,7 +116,18 @@ export async function onRequest({ params, env, request }) {
   // Strictly sanitized (band codes are [0-9a-zA-Z-]); canonical/og:url stay
   // param-free so shared links don't fragment SEO.
   const bandCode = String(new URL(request.url).searchParams.get('band') || '').replace(/[^0-9a-zA-Z-]/g, '').slice(0, 80);
-  const playUrl = `/play.html?slug=${encodeURIComponent(slug)}${bandCode ? `&band=${bandCode}` : ''}`;
+  const localPlayUrl = `/play.html?slug=${encodeURIComponent(slug)}${bandCode ? `&band=${bandCode}` : ''}`;
+  const platforms = platformEntries(game.platforms);
+  const externalPrimary = primaryExternalEntry(game);
+  if (game.external === true && !externalPrimary) {
+    // An external-only entry must never fall through to a nonexistent local
+    // /games/<slug>/ frame when its platform URL is missing or unsafe.
+    return unavailableResponse('html');
+  }
+  const playUrl = externalPrimary ? externalPrimary.href : localPlayUrl;
+  const playLabel = externalPrimary
+    ? (lang === 'ru' ? `▶ Играть на ${externalPrimary.label}` : `▶ Play on ${externalPrimary.label}`)
+    : (lang === 'ru' ? '▶ Играть' : '▶ Play now');
   const builtWithUrl = safeHttpUrl(game.builtWith && game.builtWith.url);
 
   const genre = (game.genre || '').trim();
@@ -112,7 +136,7 @@ export async function onRequest({ params, env, request }) {
 
   // Pick up to 3 related games for internal linking. Same-genre first
   // (Google rewards topic clusters), then most-recent as fallback.
-  const others = games.filter(g => g.slug !== slug && g.published !== false);
+  const others = catalogue.publicGames.filter(g => g.slug !== slug);
   const sameGenre = others.filter(g => g.genre === genre && genre);
   const relatedPool = sameGenre.length >= 3
     ? sameGenre
@@ -130,15 +154,24 @@ export async function onRequest({ params, env, request }) {
     url,
     inLanguage: lang === 'ru' ? 'ru' : 'en',
     datePublished: game.addedDate,
+    dateModified: game.updatedDate || game.addedDate,
     genre: genreLabel || undefined,
     playMode,
     applicationCategory: 'Game',
     operatingSystem: 'Web Browser',
     browserRequirements: 'Requires JavaScript and HTML5 canvas',
+    sameAs: platforms.length ? platforms.map(entry => entry.href) : undefined,
+    gamePlatform: externalPrimary
+      ? platforms.map(entry => entry.label)
+      : ['Web Browser', ...platforms.map(entry => entry.label)],
+    potentialAction: {
+      '@type': 'PlayAction',
+      target: externalPrimary ? externalPrimary.href : `${SITE}${localPlayUrl}`,
+    },
     publisher: {
       '@type': 'Organization',
       name: "Tim's Game Lab",
-      url: site,
+      url: SITE,
     },
     offers: {
       '@type': 'Offer',
@@ -199,7 +232,7 @@ a.btn:hover{filter:brightness(1.1)}
 small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
 .alt{margin-top:8px;font-size:13px;color:#6a6a82}
 .alt p{font-size:13px;margin-bottom:0}
-.meta{font-size:13px;color:#6a6a82;margin-bottom:14px;letter-spacing:0.01em}
+.meta{font-size:13px;color:#a7a7b6;margin-bottom:14px;letter-spacing:0.01em}
 .related{margin-top:22px;padding-top:18px;border-top:1px solid #1f1f2c;text-align:left}
 .related h2{font-size:13px;color:#8a8aa0;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;margin-bottom:10px}
 .related ul{list-style:none;display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
@@ -210,13 +243,15 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
 @media (max-width:600px){.related ul{grid-template-columns:repeat(3,1fr);gap:6px}.related a{padding:6px;font-size:12px}}
 .sg-link{background:none;border:none;color:#8a8aa0;font-size:13px;cursor:pointer;padding:0;margin-top:12px;text-decoration:underline}
 .sg-link:hover{color:#e7e7ee}
-.sg-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.65);z-index:50;padding:20px}
-.sg-modal.on{display:flex}
-.sg-panel{background:#161622;border:1px solid #2a2a35;border-radius:10px;max-width:440px;width:100%;padding:18px;text-align:left}
+.sg-modal{border:0;background:transparent;padding:20px;max-width:none;max-height:none;width:100%;height:100%;color:inherit}
+.sg-modal[open]{display:grid;place-items:center}
+.sg-modal::backdrop{background:rgba(0,0,0,0.65)}
+.sg-panel{position:relative;background:#161622;border:1px solid #2a2a35;border-radius:10px;max-width:440px;width:100%;padding:18px;text-align:left}
 .sg-panel h3{font-size:16px;margin-bottom:6px;color:#f7f7fa}
 .sg-panel p{font-size:13px;color:#8a8aa0;margin-bottom:10px;line-height:1.4}
+.sg-field-label{display:block;color:#c5c5d0;font-size:13px;font-weight:600;margin-bottom:6px}
 .sg-panel textarea{width:100%;background:#0a0a14;color:#e7e7ee;border:1px solid #2a2a35;border-radius:6px;padding:8px 10px;font:inherit;font-size:14px;resize:vertical;min-height:80px}
-.sg-actions{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:#5a5a72}
+.sg-actions{display:flex;justify-content:space-between;align-items:center;margin-top:10px;font-size:12px;color:#a7a7b6}
 .sg-actions button{background:#4dd0e1;color:#0a0a14;border:none;border-radius:6px;padding:6px 14px;font-weight:700;cursor:pointer;font-size:13px}
 .sg-actions button:disabled{opacity:0.4;cursor:not-allowed}
 .sg-status{font-size:12px;margin-top:8px;min-height:16px;color:#8a8aa0}
@@ -233,36 +268,40 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
 	</style>
 </head>
 <body>
-<div class="wrap">
+<main class="wrap">
   <img src="${img}" alt="${escapeHtml(ogTitle)}">
   <h1>${escapeHtml(ogTitle)}</h1>
   <p>${escapeHtml(ogHook)}</p>
   ${genreLabel || game.addedDate ? `<p class="meta">${[
     genreLabel ? `${lang === 'ru' ? 'Жанр' : 'Genre'}: ${escapeHtml(genreLabel)}` : '',
     game.addedDate ? `${lang === 'ru' ? 'Добавлено' : 'Added'} ${escapeHtml(game.addedDate)}` : '',
-    lang === 'ru' ? 'Играй в браузере, без установки' : 'Play in-browser, no install',
+    externalPrimary
+      ? (lang === 'ru' ? `Официальный релиз на ${escapeHtml(externalPrimary.label)}` : `Official release on ${escapeHtml(externalPrimary.label)}`)
+      : (lang === 'ru' ? 'Играй в браузере, без установки' : 'Play in-browser, no install'),
   ].filter(Boolean).join(' · ')}</p>` : ''}
-  <a class="btn" href="${playUrl}">${lang === 'ru' ? '▶ Играть' : '▶ Play now'}</a>
+  <a class="btn" href="${escapeHtml(playUrl)}"${externalPrimary ? ' target="_blank" rel="noopener external"' : ''}>${escapeHtml(playLabel)}</a>
+  ${!externalPrimary && platforms.length ? `<p class="alt">${lang === 'ru' ? 'Также доступно' : 'Also available'}: ${platforms.map(entry => `<a href="${escapeHtml(entry.href)}" target="_blank" rel="noopener external" style="color:#8a8aa0">${escapeHtml(entry.label)}</a>`).join(' · ')}</p>` : ''}
   ${builtWithUrl ? `<p class="alt"><a href="${escapeHtml(builtWithUrl)}" style="color:#8a8aa0">${escapeHtml((lang === 'ru' && game.builtWith.label_ru) || game.builtWith.label || 'Built with our engine')} →</a></p>` : ''}
   <small><a href="/" style="color:#8a8aa0">${lang === 'ru' ? '← все игры' : '← browse all games'}</a></small>
   ${related.length ? `<nav class="related" aria-label="${lang === 'ru' ? 'Похожие игры' : 'Related games'}">
     <h2>${lang === 'ru' ? 'Похожие игры' : 'More games'}</h2>
     <ul>${related.map(r => {
       const rTitle = lang === 'ru' ? (r.title_ru || r.title) : r.title;
-      return `<li><a href="/p/${encodeURIComponent(r.slug)}"><img src="${site}/thumbs/${encodeURIComponent(r.slug)}.png" alt="" loading="lazy">${escapeHtml(rTitle)}</a></li>`;
+      return `<li><a href="/p/${encodeURIComponent(r.slug)}"><img src="${SITE}/thumbs/${encodeURIComponent(r.slug)}.png" alt="" loading="lazy">${escapeHtml(rTitle)}</a></li>`;
     }).join('')}</ul>
   </nav>` : ''}
   <div><button class="sg-link" id="sg-open" type="button">${lang === 'ru' ? '💡 Предложить игру' : '💡 Suggest a game'}</button></div>
-</div>
+</main>
 
-<div class="sg-modal" id="sg-modal" role="dialog" aria-hidden="true">
-  <div class="sg-panel" style="position:relative">
-    <button class="sg-close" id="sg-close" aria-label="Close">×</button>
-    <h3>${lang === 'ru' ? 'Предложить игру' : 'Suggest a game'}</h3>
+<dialog class="sg-modal" id="sg-modal" aria-labelledby="sg-title">
+  <div class="sg-panel">
+    <button class="sg-close" id="sg-close" type="button" aria-label="${lang === 'ru' ? 'Закрыть' : 'Close'}">×</button>
+    <h3 id="sg-title">${lang === 'ru' ? 'Предложить игру' : 'Suggest a game'}</h3>
     <p>${lang === 'ru'
       ? 'Что должна построить фабрика дальше? Одна механика, один поворот, или описание игры, которую вы хотите.'
       : 'What should the factory build next? One mechanic, one twist, or a description of the game you want.'}</p>
     <form id="sg-form" autocomplete="off">
+      <label class="sg-field-label" for="sg-text">${lang === 'ru' ? 'Ваша идея игры' : 'Your game idea'}</label>
       <textarea id="sg-text" maxlength="500" placeholder="${lang === 'ru' ? 'Физическая игра, где...' : 'A merge game where each level adds a new...'}"></textarea>
       <div class="sg-actions">
         <span id="sg-count">0 / 500</span>
@@ -271,7 +310,7 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
       <div class="sg-status" id="sg-status" aria-live="polite"></div>
     </form>
   </div>
-</div>
+</dialog>
 
 <script>
 (function(){
@@ -279,12 +318,13 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
       close=document.getElementById('sg-close'), text=document.getElementById('sg-text'),
       count=document.getElementById('sg-count'), send=document.getElementById('sg-send'),
       form=document.getElementById('sg-form'), status=document.getElementById('sg-status');
-  function show(){ modal.classList.add('on'); modal.setAttribute('aria-hidden','false'); setTimeout(function(){text.focus();},50); }
-  function hide(){ modal.classList.remove('on'); modal.setAttribute('aria-hidden','true'); status.textContent=''; status.className='sg-status'; text.value=''; count.textContent='0 / 500'; send.disabled=true; send.textContent='${lang === 'ru' ? 'Отправить' : 'Send'}'; }
+  function show(){ if(!modal.open) modal.showModal(); text.focus(); }
+  function hide(){ if(modal.open) modal.close(); status.textContent=''; status.className='sg-status'; text.value=''; count.textContent='0 / 500'; send.disabled=true; send.textContent='${lang === 'ru' ? 'Отправить' : 'Send'}'; }
   open.addEventListener('click', show);
   close.addEventListener('click', hide);
   modal.addEventListener('click', function(e){ if(e.target===modal) hide(); });
-  document.addEventListener('keydown', function(e){ if(e.key==='Escape' && modal.classList.contains('on')) hide(); });
+  modal.addEventListener('cancel', function(e){ e.preventDefault(); hide(); });
+  modal.addEventListener('close', function(){ open.focus(); });
   text.addEventListener('input', function(){ var n=text.value.length; count.textContent=n+' / 500'; send.disabled=n<3; });
   form.addEventListener('submit', async function(e){
     e.preventDefault();
@@ -321,39 +361,10 @@ small{display:block;color:#5a5a72;margin-top:24px;font-size:12px}
   return new Response(html, {
     headers: {
       'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'public, max-age=300',
+      'cache-control': 'public, max-age=0, must-revalidate',
       'vary': 'Accept-Language',
     },
   });
-}
-
-async function readGamesJson(env, request) {
-  if (env && env.ASSETS && typeof env.ASSETS.fetch === 'function') {
-    const r = await env.ASSETS.fetch(new Request('https://assets.local/games.json'));
-    if (r.ok) return await r.json();
-  }
-
-  const r = await fetch(`${trustedStaticOrigin(request)}/games.json`, { cf: { cacheTtl: 60 } });
-  return r.ok ? await r.json() : [];
-}
-
-function trustedStaticOrigin(request) {
-  const url = new URL(request.url);
-  const host = url.hostname.toLowerCase();
-  // Trust boundary: never use an arbitrary request Host for outbound fetches
-  // or emitted metadata; keep both on known origins to prevent Host-header
-  // injection and SSRF-style catalogue fetches.
-  if (
-    host === 'game-factory.tech'
-    || host === 'www.game-factory.tech'
-    || host.endsWith('.tims-arcade.pages.dev')
-  ) {
-    return `https://${url.host}`;
-  }
-  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0') {
-    return url.origin;
-  }
-  return 'https://game-factory.tech';
 }
 
 function safeHttpUrl(value) {

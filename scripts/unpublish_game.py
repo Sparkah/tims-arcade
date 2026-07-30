@@ -14,8 +14,9 @@ This tool:
   2. deletes the slug's @timsgamelab post(s) via the announce-reconciler's
      message-aware retractor (it NEVER deletes a shared digest post that still
      announces a live game — those are reported for a manual edit instead),
-  3. optionally runs sync_games.sh, and reminds you to commit + push (the delist
-     only goes live on a Cloudflare deploy).
+  3. optionally runs sync_games.sh, and prints the verified deploy command (the
+     delist only goes live after Cloudflare serves the changed landing page;
+     IndexNow is notified only after that proof).
 
 Usage:
   unpublish_game.py <slug> [--reason "..."] [--sync] [--dry-run]
@@ -30,6 +31,7 @@ Notes:
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -86,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
               + (f"   reason: {args.reason}" if args.reason else ""))
         if not args.dry_run:
             entry["published"] = target
+            entry["updatedDate"] = dt.date.today().isoformat()
             write_source(games)
 
     # Retract the announcement when unpublishing (not on republish / --no-retract).
@@ -123,9 +126,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.dry_run:
         nxt = "republish" if args.republish else "delist"
-        print(f"\nNext: commit + push Gallery to {nxt} on the live site:")
+        marker = (
+            f"/p/{args.slug}"
+            if args.republish
+            else "This game is not in the public gallery"
+        )
+        print(f"\nNext: commit, push, verify, and notify IndexNow to {nxt} on the live site:")
         print("  (cd Gallery && git add games.source.json games.json && "
-              f"git commit -m '{verb} {args.slug}' && git push)")
+              f"git commit -m '{verb} {args.slug}' && "
+              "bash scripts/push_and_verify.sh --push --retrigger "
+              f"--url 'p/{args.slug}' --marker '{marker}')")
     return 0
 
 

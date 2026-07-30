@@ -307,6 +307,7 @@ jq --argjson meta "$META_JSON" '
     hook_ar: .hook_ar,
     genre: (.genre // "other"),
     addedDate,
+    updatedDate: .updatedDate,
     published: (.published != false),   # != false, NOT // true: jq // treats false as empty, so // true would coerce an explicit published:false back to true (unpublish never worked before this)
     num: ((.gameDir | capture("/(?<n>[0-9]+)[_-]")? | .n) // ""),
     thumbCount: ($meta[.slug].thumbCount // .thumbCount // 1),
@@ -339,7 +340,6 @@ fi
 # Generated at sync-time so they're static (cached by CF edge, instant serve).
 
 SITE="https://game-factory.tech"
-NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # robots.txt — welcome search AND AI answer-engine crawlers (Tim wants the
 # gallery surfaced in AI overviews / chat recommendations). Several AI bots
@@ -380,10 +380,9 @@ Disallow: /dissertation/
 Sitemap: $SITE/sitemap.xml
 EOF
 
-# sitemap.xml — index + per-game share pages, each annotated with hreflang
-# alternates (en / ru?lang=ru / x-default) so Google + Yandex discover the
-# localized versions. The per-page <link rel=alternate> tags are the primary
-# signal; these are the supplementary sitemap-level annotation.
+# sitemap.xml — fail-closed static fallback. The live /sitemap.xml Pages
+# Function injects the KV-curated game URLs. Build-time code cannot know the
+# production hidden set, so it must never publish the raw manifest here.
 {
   printf '<?xml version="1.0" encoding="UTF-8"?>\n'
   printf '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
@@ -391,19 +390,11 @@ EOF
   printf '<xhtml:link rel="alternate" hreflang="en" href="%s/"/>' "$SITE"
   printf '<xhtml:link rel="alternate" hreflang="ru" href="%s/?lang=ru"/>' "$SITE"
   printf '<xhtml:link rel="alternate" hreflang="x-default" href="%s/"/>' "$SITE"
-  printf '<lastmod>%s</lastmod><priority>1.0</priority></url>\n' "$NOW"
-  jq -r --arg site "$SITE" \
-    '.[] | select(.published != false and (.external != true)) |
-      "  <url><loc>" + $site + "/p/" + .slug + "</loc>" +
-      "<xhtml:link rel=\"alternate\" hreflang=\"en\" href=\"" + $site + "/p/" + .slug + "\"/>" +
-      "<xhtml:link rel=\"alternate\" hreflang=\"ru\" href=\"" + $site + "/p/" + .slug + "?lang=ru\"/>" +
-      "<xhtml:link rel=\"alternate\" hreflang=\"x-default\" href=\"" + $site + "/p/" + .slug + "\"/>" +
-      "<lastmod>" + .addedDate + "T00:00:00Z</lastmod><priority>0.8</priority></url>"' \
-    "$OUT_MANIFEST"
+  printf '<priority>1.0</priority></url>\n'
   printf '</urlset>\n'
 } > "$GALLERY/sitemap.xml"
 
-# rss.xml — newest games first
+# rss.xml — fail-closed static fallback; the live route renders curated items.
 {
   printf '<?xml version="1.0" encoding="UTF-8"?>\n'
   printf '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">\n'
@@ -413,21 +404,6 @@ EOF
   printf '  <description>Daily HTML5 browser games. New build most days.</description>\n'
   printf '  <language>en</language>\n'
   printf '  <atom:link href="%s/rss.xml" rel="self" type="application/rss+xml"/>\n' "$SITE"
-  printf '  <lastBuildDate>%s</lastBuildDate>\n' "$(date -u +'%a, %d %b %Y %H:%M:%S +0000')"
-  jq -r --arg site "$SITE" '
-    sort_by(.addedDate) | reverse | .[] | select(.published != false and (.external != true)) |
-    "  <item>\n" +
-    "    <title>" + (.title | @html) + "</title>\n" +
-    "    <link>" + $site + "/p/" + .slug + "</link>\n" +
-    "    <guid isPermaLink=\"true\">" + $site + "/p/" + .slug + "</guid>\n" +
-    "    <description>" + (.hook // "" | @html) + "</description>\n" +
-    # RSS 2.0 requires RFC-822 dates; .addedDate is YYYY-MM-DD, so convert
-    # (mktime|gmtime round-trip recomputes the weekday for %a). try/catch so a
-    # malformed date degrades to a still-parseable string instead of aborting
-    # the whole feed.
-    "    <pubDate>" + (try (.addedDate + "T00:00:00Z" | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime | gmtime | strftime("%a, %d %b %Y %H:%M:%S +0000")) catch (.addedDate + " 00:00:00 +0000")) + "</pubDate>\n" +
-    "  </item>"
-  ' "$OUT_MANIFEST"
   printf '</channel>\n</rss>\n'
 } > "$GALLERY/rss.xml"
 

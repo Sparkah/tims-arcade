@@ -19,7 +19,7 @@
 //
 // Exclusions:
 //   - games younger than 48h (they belong on the NEW shelf, not this one)
-//   - hidden slugs (KV `hidden:set`, the admin curation list)
+//   - hidden slugs (GALLERY_DB, the admin curation list)
 //   - unpublished games (games.json `published: false`)
 //   - external link-out games (no local play tracking - they would camp the
 //     bottom of the list forever on numbers that are not actually measured)
@@ -38,6 +38,7 @@
 
 import { edgeCached } from '../_lib/edgecache.js';
 import { isAdminRequest } from '../_lib/adminAuth.js';
+import { readHiddenState, unavailableResponse } from '../_lib/publicCatalogue.js';
 import { readGamesCatalogue } from '../_lib/staticOrigin.js';
 
 const NEW_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -52,11 +53,23 @@ export async function onRequestGet({ request, env }) {
   const noCache = url.searchParams.get('nocache') === '1'
     && await isAdminRequest(request, env);
 
-  return edgeCached(`/least-attention?limit=${limit}`, { bypass: noCache },
-    () => buildLeastAttention(request, env, limit));
+  let curation;
+  try {
+    curation = await readHiddenState(env);
+  } catch (_) {
+    // This public discovery endpoint must fail closed too; treating a failed
+    // hidden-set read as empty would enumerate curated-out games.
+    return unavailableResponse('json');
+  }
+  const revision = hiddenRevision(curation.hidden, curation.revision);
+  return edgeCached(
+    `/least-attention?limit=${limit}&curation=${revision}`,
+    { bypass: noCache },
+    () => buildLeastAttention(request, env, limit, curation.hiddenSet),
+  );
 }
 
-async function buildLeastAttention(request, env, limit) {
+async function buildLeastAttention(request, env, limit, hidden) {
   // Catalogue - prefer this deployment's ASSETS binding, then allowlisted
   // production / Pages-preview / local origins. Never use arbitrary Host as a
   // server-side fetch target.
@@ -64,13 +77,6 @@ async function buildLeastAttention(request, env, limit) {
   try {
     catalogue = await readGamesCatalogue(request, env, { cacheTtl: 60 });
   } catch (e) { /* origin hiccup - fall through to empty list */ }
-
-  // Admin-hidden slugs - same source /api/hidden reads.
-  let hidden = new Set();
-  try {
-    const h = await env.VOTES.get('hidden:set', 'json');
-    if (Array.isArray(h)) hidden = new Set(h);
-  } catch (e) { /* treat as none hidden */ }
 
   const now = Date.now();
   const eligible = catalogue.filter(g => {
@@ -162,4 +168,16 @@ async function buildLeastAttention(request, env, limit) {
       'cache-control': 'public, max-age=300, stale-while-revalidate=600',
     },
   });
+}
+
+function hiddenRevision(hidden, revision) {
+  // Cache entries are keyed by the complete authoritative visibility set, so a
+  // hide/unhide cannot replay the previous five-minute least-attention result.
+  let hash = 2166136261;
+  const input = hidden.join('\0');
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${revision}-${(hash >>> 0).toString(16)}`;
 }

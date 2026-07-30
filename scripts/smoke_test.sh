@@ -111,6 +111,60 @@ else
   fi
 fi
 
+# 5. Public discovery surfaces must agree with the live KV curation set.
+# Hidden games may remain deployed as direct assets, but they must not appear
+# in the public manifest, homepage HTML/JSON-LD, llms, sitemap, RSS, or /p page.
+discovery_tmp="$(mktemp -d "${TMPDIR:-/tmp}/gallery-discovery-smoke.XXXXXX")"
+trap 'rm -rf "$discovery_tmp"' EXIT
+curl -s "$SITE/api/hidden?b=$(date +%s%N)" > "$discovery_tmp/hidden.json"
+curl -s "$SITE/games.json?b=$(date +%s%N)" > "$discovery_tmp/games.json"
+curl -s "$SITE/?b=$(date +%s%N)" > "$discovery_tmp/home.html"
+curl -s "$SITE/llms.txt?b=$(date +%s%N)" > "$discovery_tmp/llms.txt"
+curl -s "$SITE/sitemap.xml?b=$(date +%s%N)" > "$discovery_tmp/sitemap.xml"
+curl -s "$SITE/rss.xml?b=$(date +%s%N)" > "$discovery_tmp/rss.xml"
+raw_source_headers="$(curl -sSI "$SITE/games.source.json?b=$(date +%s%N)")"
+raw_source_status="$(printf '%s' "$raw_source_headers" | awk 'NR==1 {print $2}')"
+raw_source_robots="$(printf '%s' "$raw_source_headers" | awk -F': *' 'tolower($1)=="x-robots-tag" {print tolower($2)}' | tr -d '\r')"
+if [[ "$raw_source_status" == "404" && "$raw_source_robots" == *noindex* ]]; then
+  pass "authoring manifest → private 404 + noindex"
+else
+  fail "authoring manifest → /games.source.json returned $raw_source_status with x-robots-tag='$raw_source_robots'"
+fi
+if python3 - "$discovery_tmp" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+hidden_doc = json.loads((root / "hidden.json").read_text())
+games = json.loads((root / "games.json").read_text())
+hidden = set(hidden_doc.get("hidden") or [])
+if not isinstance(games, list):
+    raise SystemExit("games.json is not an array")
+leaked_manifest = sorted(hidden & {g.get("slug") for g in games if isinstance(g, dict)})
+if leaked_manifest:
+    raise SystemExit("hidden in games.json: " + ", ".join(leaked_manifest[:10]))
+for name in ("home.html", "llms.txt", "sitemap.xml", "rss.xml"):
+    text = (root / name).read_text(errors="replace")
+    leaked = [slug for slug in hidden if f"/p/{slug}" in text]
+    if leaked:
+        raise SystemExit(f"hidden in {name}: " + ", ".join(sorted(leaked)[:10]))
+PY
+then
+  first_hidden="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next(iter(sorted(d.get("hidden") or [])), ""))' "$discovery_tmp/hidden.json")"
+  if [[ -n "$first_hidden" ]]; then
+    hidden_headers="$(curl -sSI "$SITE/p/$first_hidden?b=$(date +%s%N)")"
+    hidden_status="$(printf '%s' "$hidden_headers" | awk 'NR==1 {print $2}')"
+    hidden_robots="$(printf '%s' "$hidden_headers" | awk -F': *' 'tolower($1)=="x-robots-tag" {print tolower($2)}' | tr -d '\r')"
+    if [[ "$hidden_status" == "404" && "$hidden_robots" == *noindex* ]]; then
+      pass "curation parity → hidden pages excluded + noindex 404"
+    else
+      fail "curation parity → /p/$first_hidden returned $hidden_status with x-robots-tag='$hidden_robots'"
+    fi
+  else
+    pass "curation parity → no hidden games configured"
+  fi
+else
+  fail "curation parity → hidden slug leaked into a public discovery surface"
+fi
+
 if $ok; then
   (( QUIET )) || echo "✅ All smoke tests passed"
   exit 0

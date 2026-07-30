@@ -114,7 +114,7 @@ function makeServer() {
           hasPreview: true,
           platforms: {
             yandex: 'javascript:window.__xss=4',
-            crazygames: 'https://example.com/play?name=<script>',
+            crazygames: 'https://www.crazygames.com/game/safe?name=<script>',
           },
         },
         {
@@ -123,6 +123,16 @@ function makeServer() {
           hook: 'Keeps the hero candidate pool above one item.',
           genre: 'arcade',
           addedDate: '2026-06-29',
+        },
+        {
+          slug: 'lookalike_platform',
+          title: 'Lookalike Platform',
+          hook: 'A deceptive HTTPS host must not become a platform chip.',
+          genre: 'arcade',
+          addedDate: '2026-06-28',
+          platforms: {
+            crazygames: 'https://www.crazygames.com.evil.test/game/nope',
+          },
         },
         {
           slug: 'relative_platform',
@@ -151,6 +161,7 @@ function makeServer() {
           [maliciousSlug]: { likes: 7, dislikes: 1, plays: 9, comments: 3, seconds: 120 },
           safe_reference: { likes: 1, dislikes: 0, plays: 1, comments: 0, seconds: 30 },
           relative_platform: { likes: 1, dislikes: 0, plays: 1, comments: 0, seconds: 20 },
+          lookalike_platform: { likes: 1, dislikes: 0, plays: 1, comments: 0, seconds: 20 },
           [pathShapedSlug]: { likes: 1, dislikes: 0, plays: 1, comments: 0, seconds: 10 },
         },
         trending: { games: { [maliciousHeroSlug]: { score: 999 } } },
@@ -216,7 +227,7 @@ async function main() {
     assert(result.relativeLinks === 0, `card contains relative platform links: ${JSON.stringify(result)}`);
     assert(result.imgSrcs.some(src => src && src.includes(encodeURIComponent(pathShapedSlug))), `path-shaped slug thumbnail was not encoded: ${JSON.stringify(result)}`);
     assert(result.yandexLinks === 0, `unsafe yandex link was retained: ${JSON.stringify(result)}`);
-    assert(result.cgLinks.length === 1 && result.cgLinks[0].startsWith('https://example.com/play'), `safe external link missing: ${JSON.stringify(result)}`);
+    assert(result.cgLinks.length === 1 && result.cgLinks[0].startsWith('https://www.crazygames.com/game/safe'), `safe external link missing: ${JSON.stringify(result)}`);
     console.log('PASS app card XSS smoke');
   } finally {
     await browser.close().catch(() => {});

@@ -1,3 +1,5 @@
+import { onRequest as renderPublicGames } from './games.json.js';
+
 const HSTS = 'max-age=31536000';
 const CLOUDFLARE_ANALYTICS_SNIPPET = /<!--\s*Cloudflare (?:Pages|Web) Analytics\s*-->\s*<script\b[^>]*\bsrc=(['"])https:\/\/static\.cloudflareinsights\.com\/beacon\.min\.js(?:[/?][^'"]*)?\1[^>]*>\s*<\/script>\s*<!--\s*(?:End\s+)?Cloudflare (?:Pages|Web) Analytics\s*-->/giu;
 
@@ -71,15 +73,82 @@ function isCspExcluded(pathname) {
     || pathname.startsWith('/tg-');
 }
 
-function shouldApplyCsp(context, headers) {
+function shouldApplyCsp(context, headers, pathname) {
   if (!context.request || !isHtml(headers) || headers.has('content-security-policy')) return false;
-  const pathname = new URL(context.request.url).pathname;
   return !isCspExcluded(pathname);
+}
+
+export function normalizeProtectedPathname(value) {
+  let pathname = String(value || '');
+  try {
+    // Decode repeatedly so a double-encoded dot or slash cannot become a
+    // different static-asset path after an upstream normalization pass.
+    for (let pass = 0; pass < 4; pass += 1) {
+      const decoded = decodeURIComponent(pathname);
+      if (decoded === pathname) break;
+      pathname = decoded;
+    }
+  } catch (_) {
+    return null;
+  }
+  if (/%[0-9a-f]{2}/i.test(pathname) || /[\u0000-\u001f\u007f]/.test(pathname)) {
+    return null;
+  }
+  pathname = pathname.replace(/\\/g, '/').replace(/\/+/g, '/');
+  const segments = [];
+  for (const segment of pathname.split('/')) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+  return `/${segments.join('/')}`.toLowerCase();
+}
+
+function protectedError(status, message) {
+  return new Response(`${message}\n`, {
+    status,
+    headers: {
+      'Cache-Control': 'no-store',
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Strict-Transport-Security': HSTS,
+      'X-Content-Type-Options': 'nosniff',
+      'X-Robots-Tag': 'noindex, nofollow, noarchive',
+    },
+  });
+}
+
+function withHsts(response) {
+  const headers = new Headers(response.headers);
+  headers.set('Strict-Transport-Security', HSTS);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 export async function onRequest(context) {
   const pathname = context.request ? new URL(context.request.url).pathname : '';
-  if (pathname === '/migrations' || pathname.startsWith('/migrations/')) {
+  const normalizedPathname = normalizeProtectedPathname(pathname);
+  if (normalizedPathname === null) {
+    return protectedError(400, 'Bad request');
+  }
+  if (normalizedPathname === '/games.source.json') {
+    return protectedError(404, 'Not found');
+  }
+  if (normalizedPathname === '/games.json') {
+    return withHsts(await renderPublicGames({
+      request: context.request,
+      env: context.env,
+    }));
+  }
+  if (
+    normalizedPathname === '/migrations'
+    || normalizedPathname.startsWith('/migrations/')
+  ) {
     return new Response('Not found', {
       status: 404,
       headers: {
@@ -94,8 +163,11 @@ export async function onRequest(context) {
   const headers = new Headers(response.headers);
   let body = response.body;
   headers.set('Strict-Transport-Security', HSTS);
-  if (pathname === '/dissertation' || pathname.startsWith('/dissertation/')
-      || pathname.startsWith('/api/dissertation/')) {
+  if (
+    normalizedPathname === '/dissertation'
+    || normalizedPathname.startsWith('/dissertation/')
+    || normalizedPathname.startsWith('/api/dissertation/')
+  ) {
     headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     headers.set('Referrer-Policy', 'no-referrer');
     headers.set('X-Content-Type-Options', 'nosniff');
@@ -107,20 +179,23 @@ export async function onRequest(context) {
       headers.set('Cache-Control', 'public, max-age=0, must-revalidate, no-transform');
     }
   }
-  if (pathname.startsWith('/api/dissertation/')) {
+  if (normalizedPathname.startsWith('/api/dissertation/')) {
     headers.set('Cache-Control', 'no-store');
   }
-  if (shouldApplyCsp(context, headers)) {
-    const isCplay = pathname === '/cplay' || pathname === '/cplay.html';
-    if (pathname.startsWith('/dissertation/g/')) {
+  if (shouldApplyCsp(context, headers, normalizedPathname)) {
+    const isCplay = normalizedPathname === '/cplay' || normalizedPathname === '/cplay.html';
+    if (normalizedPathname.startsWith('/dissertation/g/')) {
       headers.set('Content-Security-Policy', DISSERTATION_GAME_CSP);
-    } else if (pathname === '/dissertation' || pathname.startsWith('/dissertation/')) {
+    } else if (
+      normalizedPathname === '/dissertation'
+      || normalizedPathname.startsWith('/dissertation/')
+    ) {
       headers.set('Content-Security-Policy', DISSERTATION_SHELL_CSP);
     } else {
       headers.set('Content-Security-Policy', isCplay ? CPLAY_CSP : APP_CSP);
     }
   }
-  if ((pathname === '/dissertation' || pathname.startsWith('/dissertation/'))
+  if ((normalizedPathname === '/dissertation' || normalizedPathname.startsWith('/dissertation/'))
       && isHtml(headers)) {
     // Pages one-click analytics modifies static HTML before Functions run.
     // Remove only its explicitly marked beacon; no-transform above prevents

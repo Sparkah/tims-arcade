@@ -1,6 +1,5 @@
 // ── State ─────────────────────────────────────────────────────────────────
 let games = [];   // from games.json
-let hiddenSlugs = new Set();   // admin-hidden slugs (low-quality, curated out of the grid)
 let counts = {};  // from /api/counts (cumulative all-time)
 let todayScores = {}; // from /api/trending — { slug: {seconds, comments, score} }
 let myVotes = JSON.parse(localStorage.getItem('myVotes') || '{}');
@@ -100,11 +99,19 @@ async function init() {
   // Degradation ladder: boot slow → paint without it, apply when it lands
   // (one refinement render, the pre-2026-06-12 behavior). Boot failed →
   // fall back to the individual counts/trending/featured endpoints.
-  // Independent either way: /api/me + /api/me/meta (auth/meta pills),
-  // /api/hidden (curation filter, fail-closed via localStorage).
+  // Independent either way: /api/me + /api/me/meta (auth/meta pills).
+  // games.json is already filtered by the authoritative curation reader, so
+  // the client must not issue a second curation request or trust stale storage.
   const BOOT_WAIT_MS = 1500;
+  let catalogueRequestOk = false;
   const gamesP    = fetch('/games.json', { cache: 'no-store' })
-                      .then(r => r.ok ? r.json() : [])
+                      .then(async (r) => {
+                        if (!r.ok) return [];
+                        const data = await r.json();
+                        if (!Array.isArray(data)) return [];
+                        catalogueRequestOk = true;
+                        return data;
+                      })
                       .catch(() => []);
   const bootP     = fetch('/api/boot', { cache: 'no-store' })
                       .then(r => r.ok ? r.json() : null)
@@ -115,33 +122,15 @@ async function init() {
   const metaP     = fetch('/api/me/meta', { cache: 'no-store', credentials: 'same-origin' })
                       .then(r => r.ok ? r.json() : null)
                       .catch(() => null);
-  // Admin-hidden (low-quality) slugs curated out of the public grid. Fetched in
-  // parallel so the filter below rarely adds latency and never blocks paint.
-  const hiddenP   = fetch('/api/hidden', { cache: 'no-store' })
-                      .then(r => r.ok ? r.json() : null)
-                      .catch(() => null);
-
   // FIRST PAINT — block only on the catalogue.
   games = await gamesP;
-
-  // Drop hidden games from the public catalogue before anything renders, so the
-  // grid, search, and genre counts all operate on the visible set. The set is
-  // cached to localStorage so a transient /api/hidden failure FAILS CLOSED (uses
-  // the last known hidden set) instead of resurfacing hidden games.
-  try {
-    let list = null;
-    const hid = await hiddenP;
-    if (hid && Array.isArray(hid.hidden)) {
-      list = hid.hidden;
-      try { localStorage.setItem('gf_hidden', JSON.stringify(list)); } catch (e) { /* private mode */ }
-    } else {
-      try { const c = JSON.parse(localStorage.getItem('gf_hidden') || '[]'); if (Array.isArray(c)) list = c; } catch (e) { /* ignore */ }
-    }
-    if (list && list.length) {
-      hiddenSlugs = new Set(list);
-      games = games.filter(g => !hiddenSlugs.has(g.slug));
-    }
-  } catch (e) { /* hidden filter is best-effort — never block the grid */ }
+  const catalogueStatus = document.getElementById('catalogue-status');
+  if (catalogueRequestOk) {
+    if (catalogueStatus) catalogueStatus.remove();
+    if (document.body) delete document.body.dataset.catalogueDegraded;
+  } else if (document.body) {
+    document.body.dataset.catalogueDegraded = 'true';
+  }
 
   attachEvents();
   renderGenres();
@@ -220,7 +209,7 @@ function applyBoot(b) {
   counts = mergeFreshVoteState((b && b.counts) || {});
   todayScores = (b && b.trending && b.trending.games) || {};
   const f = b && b.featured;
-  if (f && !hiddenSlugs.has(f)) todaysFeaturedSlug = f;  // hidden wins over featured
+  if (f && games.some(game => game.slug === f)) todaysFeaturedSlug = f;
 }
 
 // Featured Challenge — /api/featured returns today's 2× tokens slug (and
@@ -233,7 +222,7 @@ function fetchFeaturedAsync() {
     .catch(() => null)
     .then(f => {
       if (!f || !f.slug) return;
-      if (hiddenSlugs.has(f.slug)) return;   // hidden wins over featured — never badge a hidden game
+      if (!games.some(game => game.slug === f.slug)) return;
       if (todaysFeaturedSlug === f.slug) return;
       todaysFeaturedSlug = f.slug;
       render();
@@ -721,8 +710,12 @@ function render() {
   grid.innerHTML = '';
 
   if (list.length === 0) {
-    empty.classList.remove('hidden');
-    empty.innerHTML = emptyMessage();
+    if (document.getElementById('catalogue-status')) {
+      empty.classList.add('hidden');
+    } else {
+      empty.classList.remove('hidden');
+      empty.innerHTML = emptyMessage();
+    }
     renderPagination(0);
     renderGems();
     return;
@@ -926,7 +919,12 @@ function renderFeatured() {
 
   const c = counts[game.slug] || { likes: 0, dislikes: 0, plays: 0, seconds: 0 };
   const minutes = Math.round((c.seconds || 0) / 60);
-  const playUrl = `/play.html?slug=${encodeURIComponent(game.slug)}`;
+  const heroPlatforms = platformEntries(game.platforms);
+  const heroExternal = game.external === true;
+  const heroExternalEntry = heroExternal ? (heroPlatforms[0] || null) : null;
+  const playUrl = heroExternal
+    ? (heroExternalEntry ? heroExternalEntry.href : `/p/${encodeURIComponent(game.slug)}`)
+    : `/play.html?slug=${encodeURIComponent(game.slug)}`;
 
   // Badge: if today's daily-featured slug (2× tokens) matches the hero
   // pick, surface the FEATURED TODAY marker right here instead of running
@@ -973,7 +971,13 @@ function renderFeatured() {
   const cta = document.createElement('a');
   cta.className = 'hero-cta';
   cta.href = playUrl;
-  cta.textContent = '▶ Play featured game';
+  cta.textContent = heroExternalEntry
+    ? `▶ Play on ${heroExternalEntry.label}`
+    : (heroExternal ? 'View game' : '▶ Play featured game');
+  if (heroExternalEntry) {
+    cta.target = '_blank';
+    cta.rel = 'noopener external';
+  }
 
   content.appendChild(badge);
   content.appendChild(title);
@@ -1055,6 +1059,9 @@ function renderGems() {
 }
 
 function emptyMessage() {
+  if (document.body && document.body.dataset.catalogueDegraded === 'true') {
+    return '<h2>Catalogue temporarily unavailable.</h2><p>The curated game list is retrying. Please reload in a moment.</p>';
+  }
   if (activeTab === 'liked')    return '<h2>No liked games yet.</h2><p>Tap 👍 on something you enjoyed.</p>';
   if (activeTab === 'myplayed') return '<h2>No play history yet.</h2><p>Open any game and it\'ll show up here. Up to your last 50 plays are remembered locally on this device.</p>';
   if (activeTab === 'recent')   return '<h2>No new games this week.</h2><p>Check back tomorrow — the factory builds one most days.</p>';
@@ -1097,32 +1104,43 @@ function imageSetBackground(slug) {
   return `image-set(url("${webp}") type("image/webp"), url("${png}") type("image/png"))`;
 }
 
-function safeExternalHref(raw) {
+function safeExternalHref(raw, allowedHosts) {
   if (!raw) return '';
   const value = String(raw).trim();
-  if (!/^https:\/\//i.test(value)) return '';
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' ? url.href : '';
+    const hostname = url.hostname.toLowerCase();
+    return (
+      url.protocol === 'https:'
+      && !url.username
+      && !url.password
+      && !url.port
+      && Array.isArray(allowedHosts)
+      && allowedHosts.includes(hostname)
+    ) ? url.href : '';
   } catch (_) {
     return '';
   }
 }
 
+// This classic-script copy is parity-checked against the Worker allowlist in
+// scripts/tests/test_discovery_surfaces.mjs on every push.
+const GF_PLATFORM_SPECS = Object.freeze([
+  { key: 'yandex', label: 'Yandex', badge: 'Yandex', hosts: ['yandex.com'] },
+  { key: 'crazygames', label: 'CrazyGames', badge: 'CG', hosts: ['www.crazygames.com'] },
+  { key: 'gamepix', label: 'GamePix', badge: 'GamePix', hosts: ['www.gamepix.com'] },
+  { key: 'playgama', label: 'Playgama', badge: 'Playgama', hosts: ['playgama.com'] },
+  { key: 'gamepush', label: 'GamePush', badge: 'GamePush', hosts: ['gamepush.com', 'html5.gamedistribution.com'] },
+  { key: 'gamedistribution', label: 'GameDistribution', badge: 'GD', hosts: ['gamedistribution.com', 'html5.gamedistribution.com'] },
+  { key: 'youtube', label: 'YouTube Playables', badge: 'YT', hosts: ['www.youtube.com', 'youtube.com'] },
+  { key: 'roblox', label: 'Roblox', badge: 'Roblox', hosts: ['www.roblox.com', 'roblox.com'] },
+]);
+
 function platformEntries(platforms) {
   if (!platforms) return [];
-  const specs = [
-    { key: 'yandex', label: 'Yandex', badge: 'Yandex' },
-    { key: 'crazygames', label: 'CrazyGames', badge: 'CG' },
-    { key: 'gamepix', label: 'GamePix', badge: 'GamePix' },
-    { key: 'playgama', label: 'Playgama', badge: 'Playgama' },
-    { key: 'gamepush', label: 'GamePush', badge: 'GamePush' },
-    { key: 'gamedistribution', label: 'GameDistribution', badge: 'GD' },
-    { key: 'youtube', label: 'YouTube Playables', badge: 'YT' },
-  ];
   const out = [];
-  for (const spec of specs) {
-    const href = safeExternalHref(platforms[spec.key]);
+  for (const spec of GF_PLATFORM_SPECS) {
+    const href = safeExternalHref(platforms[spec.key], spec.hosts);
     if (href) out.push(Object.assign({ href }, spec));
   }
   return out;
@@ -1172,6 +1190,7 @@ function card(g, opts) {
   const platformsSafe = platformEntries(platforms);
   const isExternal = !!g.external;
   const primaryExtUrl = platformsSafe.length ? platformsSafe[0].href : null;
+  const externalLandingUrl = `/p/${encodeURIComponent(g.slug)}`;
   // Badge text reflects the ACTUAL platforms this game links to — never hardcode
   // "Yandex / CG" (a Yandex-only game must not claim CG, and vice versa).
   const platLabel = platformsSafe.map(p => p.badge).join(' / ');
@@ -1312,6 +1331,10 @@ function card(g, opts) {
       const plat = platformsSafe[0] ? platformsSafe[0].key : null;
       if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: 'thumbnail_external', platform: plat });
       window.open(primaryExtUrl, '_blank', 'noopener');
+      return;
+    }
+    if (isExternal) {
+      location.href = externalLandingUrl;
       return;
     }
     if (window.posthog) posthog.capture('game_card_clicked', { slug: g.slug, game_title: gameTitle(g), source: opts.from || 'thumbnail' });

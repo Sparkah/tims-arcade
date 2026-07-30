@@ -1,48 +1,107 @@
 #!/usr/bin/env bash
-# Rollback last Gallery commit if production smoke fails after deploy.
+# Revert the latest Gallery commit only when the target remains on the
+# D1-authoritative discovery architecture.
 #
-# Why this approach: Cloudflare Pages doesn't expose a true "rollback"
-# CLI command — `wrangler pages deployment` lacks a promote/restore.
-# The dashboard has a "Restore" button but it's not scriptable.
-#
-# Cleanest scriptable path: revert the offending commit and push. CF
-# auto-deploys the revert, restoring the previous serving state in
-# ~30-60s. Pre-push hooks still run on the revert (Yandex check, /review)
-# but with --no-verify since the original commit already passed.
-#
-# Usage:
-#   bash Gallery/scripts/rollback.sh           # revert HEAD, push, smoke-check
-#   bash Gallery/scripts/rollback.sh --dry-run # show what would happen
-#
-# Auto-invoked by run_factory.sh when post-deploy smoke fails.
+# The pre-D1 Gallery exposes curated-hidden games in server-visible manifests
+# and share pages. Crossing that boundary would republish them, so this script
+# refuses such a rollback and requires a forward repair instead.
 
 set -uo pipefail
 
 DRY_RUN=0
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+RB_TOKEN=""
 
 cd "$(git rev-parse --show-toplevel)"
-BAD_HASH=$(git log -1 --pretty=%h)
-BAD_SUBJ=$(git log -1 --pretty='%s')
+BAD_FULL="$(git rev-parse HEAD)"
+BAD_HASH="$(git log -1 --pretty=%h)"
+BAD_SUBJ="$(git log -1 --pretty='%s')"
+TARGET_USES_D1=0
+if git show HEAD^:functions/_lib/publicCatalogue.js 2>/dev/null \
+    | grep -q 'GALLERY_DB'; then
+  TARGET_USES_D1=1
+fi
 
 echo "⚠️  Rolling back last commit on $(git rev-parse --abbrev-ref HEAD)"
 echo "    Bad commit: $BAD_HASH — $BAD_SUBJ"
+if [[ "$TARGET_USES_D1" != "1" ]]; then
+  echo "    Target: pre-D1 discovery (automatic rollback forbidden)"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "(dry-run; would refuse because hidden games would be republished)"
+    exit 0
+  fi
+  echo "❌ cross-cutover rollback refused: the target republishes curated-hidden games." >&2
+  echo "   Keep D1 authoritative and repair forward." >&2
+  exit 8
+fi
+echo "    Target: D1-authoritative discovery"
 
-if [[ $DRY_RUN -eq 1 ]]; then
+if [[ "$DRY_RUN" == "1" ]]; then
   echo "(dry-run; not reverting)"
   exit 0
 fi
 
-if ! git revert --no-edit HEAD; then
-  echo "❌ revert failed (merge conflict?). Manual intervention needed." >&2
-  exit 2
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOCK="$SCRIPT_DIR/push_lock.sh"
+for required in curl jq npx; do
+  if ! command -v "$required" >/dev/null 2>&1; then
+    echo "❌ rollback requires $required" >&2
+    exit 2
+  fi
+done
+
+cleanup_rollback() {
+  local original_status=$?
+  local cleanup_failed=0
+  if [[ -n "$RB_TOKEN" && -x "$LOCK" ]]; then
+    if ! bash "$LOCK" release "$RB_TOKEN" 2>/dev/null; then
+      echo "⚠️  rollback push lock could not be released cleanly." >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [[ "$cleanup_failed" == "1" ]]; then original_status=6; fi
+  trap - EXIT
+  exit "$original_status"
+}
+trap cleanup_rollback EXIT
+
+read_live_curation_marker() {
+  curl -fsS -D - -o /dev/null \
+    "https://game-factory.tech/api/hidden?rollback-check=$(date +%s%N)" \
+    | awk -F': *' 'tolower($1)=="x-gallery-curation" {print tolower($2)}' \
+    | tr -d '\r\n'
+}
+
+push_main_verified() {
+  if git push --no-verify origin HEAD:main; then return 0; fi
+  echo "⚠️  push reported failure; verifying the remote ref." >&2
+  if ! git fetch origin main -q; then return 2; fi
+  [[ "$(git rev-parse origin/main)" == "$(git rev-parse HEAD)" ]]
+}
+
+wait_for_deployed_commit() {
+  local expected="$1"
+  local deadline source marker
+  deadline=$(( $(date +%s) + 480 ))
+  while (( $(date +%s) < deadline )); do
+    source="$(npx --yes wrangler pages deployment list \
+      --project-name=tims-arcade --json 2>/dev/null \
+      | jq -r '.[] | select(.Environment == "Production") | .Source' \
+      | head -1 || true)"
+    marker="$(read_live_curation_marker || true)"
+    if [[ "$source" == "$expected" && "$marker" == "d1-v1" ]]; then return 0; fi
+    echo "   waiting for D1 rollback deploy (source=${source:-unknown}, marker=${marker:-none})..."
+    sleep 15
+  done
+  return 1
+}
+
+# A D1→D1 revert is only valid while D1 is actually authoritative.
+if [[ "$(read_live_curation_marker || true)" != "d1-v1" ]]; then
+  echo "❌ cannot prove d1-v1 is currently authoritative; rollback refused." >&2
+  exit 7
 fi
 
-# --no-verify skips the pre-push hook (the original commit already passed the
-# gates) - but that ALSO skips the hook's push lock. Acquire it manually here so a
-# rollback can't SILENTLY race a concurrent agent push (Tim 2026-06-01). Defer if
-# another agent holds it, unless ROLLBACK_FORCE=1 (the intentional emergency steal).
-LOCK="$(cd "$(dirname "$0")" && pwd)/push_lock.sh"
 if [[ -x "$LOCK" ]]; then
   if [[ "${ROLLBACK_FORCE:-0}" == "1" ]]; then
     bash "$LOCK" release "" >/dev/null 2>&1
@@ -50,25 +109,48 @@ if [[ -x "$LOCK" ]]; then
     echo "⚠️  ROLLBACK_FORCE=1 - stole the Gallery push lock (intentional override)"
   else
     RB_TOKEN="$(bash "$LOCK" acquire "rollback" "$BAD_HASH" $$)" || {
-      echo "🔒 Gallery push lock held by another agent - rollback DEFERRED (not racing):" >&2
+      echo "🔒 Gallery push lock held by another agent - rollback deferred:" >&2
       bash "$LOCK" holder 2>/dev/null | sed 's/^/     /' >&2
-      echo "   Wait, then re-run; or force NOW: ROLLBACK_FORCE=1 bash rollback.sh" >&2
       exit 3
     }
   fi
-  trap 'bash "$LOCK" release "$RB_TOKEN" 2>/dev/null' EXIT
 fi
 
-# We hold the lock manually (above), so this push still cannot race a concurrent one.
-git push --no-verify
+# The local lock cannot stop GitHub UI or another machine, so verify main again
+# immediately before creating the revert.
+if ! git fetch origin main -q \
+   || [[ "$(git rev-parse origin/main)" != "$BAD_FULL" ]]; then
+  echo "❌ origin/main changed before rollback; refusing to revert." >&2
+  exit 3
+fi
 
-echo "✓ revert pushed. CF will rebuild ~45-90s. Smoke-checking in 60s..."
-sleep 60
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if ! git revert --no-edit HEAD; then
+  echo "❌ revert failed (merge conflict?). Manual intervention needed." >&2
+  exit 2
+fi
+
+PUSH_STATUS=0
+push_main_verified || PUSH_STATUS=$?
+if [[ "$PUSH_STATUS" != "0" ]]; then
+  echo "❌ rollback push was not verified; production authority was not changed." >&2
+  exit 5
+fi
+
+EXPECTED_SOURCE="$(git rev-parse --short=7 HEAD)"
+echo "✓ revert pushed. Waiting for Cloudflare source $EXPECTED_SOURCE..."
+if ! wait_for_deployed_commit "$EXPECTED_SOURCE"; then
+  echo "🚨 rollback commit did not become the proven D1 production deployment." >&2
+  exit 6
+fi
+
 if bash "$SCRIPT_DIR/smoke_test.sh" --quiet; then
+  if [[ -f "$SCRIPT_DIR/indexnow_notify.py" ]] \
+      && ! python3 "$SCRIPT_DIR/indexnow_notify.py" --submit; then
+    echo "⚠️  rollback is live, but IndexNow notification failed; next verified deploy will retry."
+  fi
   echo "✅ rollback healthy"
   exit 0
-else
-  echo "🚨 rollback ALSO failing — likely a deeper issue. Manual intervention needed." >&2
-  exit 1
 fi
+
+echo "🚨 rollback deployed but production smoke failed; repair forward." >&2
+exit 1

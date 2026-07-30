@@ -36,6 +36,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const childProcess = require('child_process');
+const { pathToFileURL } = require('url');
 
 const GALLERY = path.resolve(process.env.GALLERY_ROOT || path.resolve(__dirname, '..'));
 function hasPuppeteer(root) {
@@ -85,13 +86,10 @@ const quiet = process.argv.includes('--quiet');
 const log = (...a) => { if (!quiet) console.log(...a); };
 
 async function loadPageFunction() {
-  // functions/ has no package.json, so the ESM source can't be import()ed
-  // under its .js name — stage a temp .mjs copy and import that.
-  const src = fs.readFileSync(path.join(GALLERY, 'functions', 'p', '[slug].js'), 'utf8');
-  const tmp = path.join(os.tmpdir(), `p_slug_gate_${process.pid}.mjs`);
-  fs.writeFileSync(tmp, src);
-  const mod = await import('file://' + tmp);
-  fs.unlinkSync(tmp);
+  // Import in place so relative shared-helper imports resolve exactly as they
+  // do in Pages. Modern Node detects ESM syntax in this .js module.
+  const source = path.join(GALLERY, 'functions', 'p', '[slug].js');
+  const mod = await import(`${pathToFileURL(source).href}?gate=${process.pid}`);
   if (typeof mod.onRequest !== 'function') throw new Error('functions/p/[slug].js exports no onRequest');
   return mod.onRequest;
 }
@@ -99,12 +97,36 @@ async function loadPageFunction() {
 // NB: the caller installs the games.json fetch stub ONCE around the whole
 // worker pool (a per-call swap/restore interleaves across concurrent workers
 // and can leave the stub installed process-wide).
-async function renderPage(onRequest, slug) {
+async function renderPage(onRequest, slug, gamesJson) {
   const request = {
     url: `https://game-factory.tech/p/${slug}`,
     headers: new Headers({ 'Accept-Language': 'en-US,en;q=0.9' }),
   };
-  const res = await onRequest({ params: { slug }, env: {}, request });
+  const env = {
+    ASSETS: {
+      fetch: async () => new Response(gamesJson, {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    },
+    VOTES: {
+      get: async key => key === 'hidden:set' ? [] : '',
+    },
+    GALLERY_DB: {
+      prepare: () => ({
+        all: async () => ({
+          results: [{
+            hidden_json: '[]',
+            updated_at: '2026-07-30T12:00:00.000Z',
+            revision: 1,
+            ready: 1,
+            write_enabled: 1,
+          }],
+        }),
+      }),
+    },
+  };
+  const res = await onRequest({ params: { slug }, env, request });
   if (res.status !== 200) return { error: `function returned ${res.status}` };
   return { html: await res.text() };
 }
@@ -186,15 +208,11 @@ async function checkOne(browser, html, slug) {
   const infraFails = []; // render/check errors after retry → exit 1 (fail closed)
   let done = 0;
   const queue = slugs.slice();
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async (url) => String(url).includes('/games.json')
-    ? new Response(gamesJson, { status: 200, headers: { 'content-type': 'application/json' } })
-    : new Response('not found', { status: 404 });
   try {
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
       while (queue.length) {
         const slug = queue.shift();
-        const { html, error } = await renderPage(onRequest, slug);
+        const { html, error } = await renderPage(onRequest, slug, gamesJson);
         if (error) { infraFails.push(`${slug}: render error — ${error}`); done++; continue; }
         // Retry once on infrastructure errors (page crash, protocol hiccup) so a
         // transient flake can't abort a push; a REAL visibility fail is
@@ -213,7 +231,6 @@ async function checkOne(browser, html, slug) {
       }
     }));
   } finally {
-    globalThis.fetch = realFetch;
     await browser.close();
   }
 

@@ -3,7 +3,7 @@
 
 This is the CLI path for "hide game X": it POSTs to the LIVE admin API
 (/api/admin/hidden, CLI-only legacy ADMIN_TOKEN) so the game drops off the
-homepage INSTANTLY (KV-backed, no redeploy), then mirrors the current hidden
+homepage INSTANTLY (D1-backed, no redeploy), then mirrors the current hidden
 list to Shared/data/hidden-games.json so the factory + digest can treat hidden
 games as a low-quality signal.
 
@@ -93,7 +93,7 @@ def write_mirror(hidden: list[str]) -> None:
         "updated": dt.date.today().isoformat(),
         "note": "Games hidden from the public gallery grid = a LOW-QUALITY signal. "
                 "The factory/digest should avoid re-suggesting or iterating these. "
-                "Source of truth is the VOTES KV `hidden:set`; this file is a mirror "
+                "Source of truth is the Gallery D1 curation table; this file is a mirror "
                 "written by Gallery/scripts/hide_game.py.",
     }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     verb = "hidden" if hide else "unhidden"
     print(f"{args.slug}: {verb}.  now {len(hidden)} hidden: {', '.join(hidden) if hidden else '(none)'}")
     print(f"mirror: {MIRROR}")
-    print("(live now on game-factory.tech — KV-backed, no redeploy)")
+    print("(live now on game-factory.tech — D1-backed, no redeploy)")
     return 0
 
 
