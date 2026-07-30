@@ -10,6 +10,7 @@
 // public /api/hidden endpoint reads the same key for the homepage grid filter.
 
 const KEY = 'hidden:set';
+const LEGACY_WRITE_KEY = 'curation:legacy-write-enabled';
 
 import { requireAdmin } from '../../_lib/adminAuth.js';
 
@@ -36,6 +37,19 @@ export async function onRequestGet({ request, env }) {
 export async function onRequestPost({ request, env }) {
   const fail = await requireAdmin(request, env);
   if (fail) return fail;
+
+  // D1 cutovers and rollbacks publish this lock before switching readers.
+  // Fail closed on KV errors so an in-flight authority handoff cannot accept a
+  // last legacy mutation that the new D1 snapshot never sees.
+  let legacyWrites;
+  try {
+    legacyWrites = await env.VOTES.get(LEGACY_WRITE_KEY);
+  } catch (_) {
+    return json({ error: 'curation_store_unavailable' }, 503);
+  }
+  if (legacyWrites === '0') {
+    return json({ error: 'curation_cutover_in_progress' }, 503);
+  }
 
   let body;
   try { body = await request.json(); } catch (e) { return json({ error: 'bad_json' }, 400); }

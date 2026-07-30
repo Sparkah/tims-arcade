@@ -18,6 +18,10 @@ export async function onRequestGet({ env }) {
     hidden = [];
   }
   return new Response(JSON.stringify({ hidden, count: hidden.length }), {
-    headers: { 'content-type': 'application/json', 'cache-control': 'public, max-age=30' },
+    headers: {
+      'content-type': 'application/json',
+      'cache-control': 'public, max-age=30',
+      'x-gallery-curation': 'legacy-v1',
+    },
   });
 }
