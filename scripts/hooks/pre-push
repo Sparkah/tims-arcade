@@ -4,6 +4,7 @@
 #   Stage 0.5: webp-sibling gate        (inline below)
 #   Stage 0.6: security P0 regressions  (Gallery/scripts/check_security_p0.js)
 #   Stage 0.65: public discovery parity (Gallery/scripts/tests/test_discovery_surfaces.mjs)
+#               temp cleanup on TERM    (Gallery/scripts/tests/test_pre_push_temp_cleanup.sh)
 #   Stage 0.7: play-button visibility   (Gallery/scripts/check_play_visible.js)
 #   Stage 0.75: dissertation mobile fit (Gallery/scripts/check_dissertation_mobile.js)
 #   Stage 0.85: manifest dupe guard      (Gallery/scripts/check_manifest_dupes.sh)
@@ -24,21 +25,78 @@ else
   CANONICAL_GALLERY_ROOT="$GALLERY_ROOT"
 fi
 AGENTS_ROOT="${AGENTS_ROOT:-$(cd "$CANONICAL_GALLERY_ROOT/.." 2>/dev/null && pwd)}"
+# Git exports repository-local variables (notably GIT_DIR and GIT_INDEX_FILE)
+# to hooks. Nested test repositories must not inherit them: on 2026-07-30 the
+# updatedDate/IndexNow fixture commits otherwise targeted Gallery's real branch
+# and index instead of their temporary directories. Resolve our paths first,
+# then clear only Git's documented local variables and pin the hook cwd.
+while IFS= read -r _git_local_var; do
+  [[ -n "$_git_local_var" ]] && unset "$_git_local_var"
+done < <(git -C "$GALLERY_ROOT" rev-parse --local-env-vars 2>/dev/null)
+cd "$GALLERY_ROOT" || {
+  echo "pre-push: cannot enter Gallery worktree $GALLERY_ROOT" >&2
+  exit 1
+}
 REMOTE_NAME="${1:-origin}"
 PUSH_REFS=()
 while read -r local_ref local_oid remote_ref remote_oid; do
   [[ -n "${local_ref:-}" ]] || continue
   PUSH_REFS+=("$local_ref $local_oid $remote_ref $remote_oid")
 done
-YANDEX_TMP_ROOTS=()
-cleanup_yandex_tmp_roots() {
-  local d
-  (( ${#YANDEX_TMP_ROOTS[@]} == 0 )) && return 0
-  for d in "${YANDEX_TMP_ROOTS[@]}"; do
-    [[ -n "$d" ]] && rm -rf "$d"
+if (( ${#PUSH_REFS[@]} > 0 )); then
+  _has_branch_ref=0
+  for _push_line in "${PUSH_REFS[@]}"; do
+    IFS=' ' read -r _local_ref _local_oid _remote_ref _remote_oid <<< "$_push_line"
+    [[ "$_remote_ref" == refs/heads/* ]] && _has_branch_ref=1
   done
+  if (( _has_branch_ref == 0 )); then
+    echo "pre-push: tag-only push has no Pages deployment tree; release gates skipped." >&2
+    exit 0
+  fi
+fi
+HOOK_TMP_BASE="${TMPDIR:-/tmp}"
+case "$HOOK_TMP_BASE" in
+  /*) ;;
+  *)
+    echo "pre-push: TMPDIR must be absolute." >&2
+    exit 1
+    ;;
+esac
+HOOK_TMP_ROOT="$HOOK_TMP_BASE/gallery-prepush.$$.$RANDOM$RANDOM"
+HOOK_TMP_OWNED=0
+cleanup_hook_tmp_root() {
+  case "$HOOK_TMP_ROOT" in
+    "$HOOK_TMP_BASE"/gallery-prepush.*)
+      (( HOOK_TMP_OWNED == 1 )) && [[ -d "$HOOK_TMP_ROOT" ]] \
+        && rm -rf -- "$HOOK_TMP_ROOT"
+      ;;
+  esac
 }
-trap cleanup_yandex_tmp_roots EXIT
+trap cleanup_hook_tmp_root EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! (umask 077 && mkdir "$HOOK_TMP_ROOT"); then
+  echo "pre-push: could not create owned temp root." >&2
+  exit 1
+fi
+HOOK_TMP_OWNED=1
+PYTHON_CACHE_ROOT="$HOOK_TMP_ROOT/pycache"
+if ! mkdir -m 700 "$PYTHON_CACHE_ROOT"; then
+  echo "pre-push: could not create isolated Python cache." >&2
+  exit 1
+fi
+export PYTHONPYCACHEPREFIX="$PYTHON_CACHE_ROOT"
+
+# Failure-only test seam: prove TERM still reaches the parent EXIT cleanup
+# after a temp tree contains the same classes of files as a Yandex extraction.
+if [[ "${GALLERY_PREPUSH_TEST_INTERRUPT_AFTER_TEMP:-0}" == "1" ]]; then
+  mkdir -p "$HOOK_TMP_ROOT/yandex-interrupt-probe/yandex_promo"
+  : > "$HOOK_TMP_ROOT/yandex-interrupt-probe/YANDEX_REJECTIONS.live.json"
+  : > "$HOOK_TMP_ROOT/yandex-interrupt-probe/yandex_promo/cover_800x470.png"
+  kill -TERM "$$"
+  exit 143
+fi
 
 is_zero_oid() {
   [[ -z "${1:-}" || "$1" == "$ZERO_OID" ]]
@@ -93,7 +151,7 @@ pushed_changed_files() {
   if (( ${#PUSH_REFS[@]} == 0 )); then
     return 0
   fi
-  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-files.XXXXXX")" || return 2
+  tmp="$(mktemp "$HOOK_TMP_ROOT/files.XXXXXX")" || return 2
   status=0
   for line in "${PUSH_REFS[@]}"; do
     IFS=' ' read -r local_ref local_oid remote_ref remote_oid <<< "$line"
@@ -135,17 +193,113 @@ pushed_prefix_changed() {
   return 1
 }
 
-hook_helper_path() {
-  local rel="$1" rc
-  if pushed_path_changed "$rel"; then
-    printf '%s/%s\n' "$GALLERY_ROOT" "$rel"
-  else
-    rc=$?
-    if (( rc != 1 )); then
-      echo "pre-push: could not determine whether $rel changed; using canonical helper and later gates will fail closed if needed." >&2
-    fi
-    printf '%s/%s\n' "$CANONICAL_GALLERY_ROOT" "$rel"
+is_release_gate_input() {
+  local f="$1"
+  # Local editor, dependency and report artefacts are neither imported by the
+  # release helpers nor served from the committed Pages tree.
+  case "$f" in
+    .wrangler/*|*/.DS_Store|.DS_Store|*~|*.swp|*.swo|\
+    node_modules/*|*/node_modules/*|coverage/*|*/coverage/*|\
+    .idea/*|*/.idea/*|.vscode/*|*/.vscode/*|\
+    .pytest_cache/*|*/.pytest_cache/*|.mypy_cache/*|*/.mypy_cache/*|\
+    .ruff_cache/*|*/.ruff_cache/*|.venv/*|*/.venv/*|\
+    venv/*|*/venv/*|scripts/__pycache__/*|scripts/tests/__pycache__/*|*.pyc)
+      return 1
+      ;;
+    # Store-listing assets are deliberately checked by check_art.sh but are
+    # not Pages inputs. They are allowed to remain outside the Gallery commit.
+    games/*/yandex_promo/*)
+      return 1
+      ;;
+    # These trees are imported, globbed or opened by a blocking release gate.
+    functions/*|scripts/*|games/*|thumbs/*|previews/*|migrations/*|\
+    dissertation/*|fonts/*)
+      return 0
+      ;;
+  esac
+  # Blocking helpers also read root web/config/discovery files. Restrict this
+  # extension allowlist to root paths so unrelated ignored report directories
+  # cannot block a push merely because they contain HTML/JS output.
+  if [[ "$f" != */* ]]; then
+    case "$f" in
+      *.html|*.js|*.mjs|*.cjs|*.css|*.json|*.xml|*.txt|*.toml|\
+      *.png|*.webp|*.svg|*.ico|_headers|_redirects)
+        return 0
+        ;;
+    esac
   fi
+  return 1
+}
+
+collect_untracked_gate_inputs() {
+  local output="$1" raw="$HOOK_TMP_ROOT/untracked.raw" f
+  : > "$output" || return 2
+  if ! git -C "$GALLERY_ROOT" ls-files -z --others --exclude-standard > "$raw"; then
+    return 2
+  fi
+  if ! git -C "$GALLERY_ROOT" ls-files -z --others --ignored --exclude-standard >> "$raw"; then
+    return 2
+  fi
+  while IFS= read -r -d '' f; do
+    [[ -n "$f" ]] || continue
+    is_release_gate_input "$f" || continue
+    printf '%s\0' "$f" >> "$output" || return 2
+  done < "$raw"
+}
+
+helper_target_oid() {
+  local line local_ref local_oid remote_ref remote_oid oid tree
+  local -a deploy_oids=() branch_oids=() candidates=()
+  for line in "${PUSH_REFS[@]}"; do
+    IFS=' ' read -r local_ref local_oid remote_ref remote_oid <<< "$line"
+    is_zero_oid "$local_oid" && continue
+    case "$remote_ref" in
+      refs/heads/main|refs/heads/master)
+        deploy_oids+=("$local_oid")
+        ;;
+      refs/heads/*)
+        branch_oids+=("$local_oid")
+        ;;
+    esac
+  done
+  if (( ${#deploy_oids[@]} > 0 )); then
+    candidates=("${deploy_oids[@]}")
+  else
+    candidates=("${branch_oids[@]}")
+  fi
+  if (( ${#candidates[@]} == 0 )); then
+    echo "pre-push: no non-deletion branch target requires release helpers." >&2
+    return 2
+  fi
+  oid="${candidates[0]}"
+  tree="$(git -C "$GALLERY_ROOT" rev-parse "$oid^{tree}" 2>/dev/null)" || return 2
+  for local_oid in "${candidates[@]:1}"; do
+    if [[ "$(git -C "$GALLERY_ROOT" rev-parse "$local_oid^{tree}" 2>/dev/null)" != "$tree" ]]; then
+      echo "pre-push: pushed deployment refs contain distinct Gallery trees; split this push." >&2
+      return 2
+    fi
+  done
+  printf '%s\n' "$oid"
+}
+
+hook_helper_path() {
+  local rel="$1" local_oid
+  # Helper-driven gates import sibling modules and read manifest/assets from the
+  # invoking worktree. Require its tracked tree to match the pushed object; the
+  # pre-stage untracked-input gate separately rejects every untracked/ignored
+  # file that could affect Pages code or rendering. Tags and non-deploy branches
+  # alongside main do not affect the production tree; multiple relevant branch
+  # refs are accepted only when their Gallery trees are byte-identical.
+  local_oid="$(helper_target_oid)" || return 2
+  if is_zero_oid "$local_oid" || [[ ! -f "$GALLERY_ROOT/$rel" ]]; then
+    echo "pre-push: pushed helper is unavailable: $rel" >&2
+    return 2
+  fi
+  if ! git -C "$GALLERY_ROOT" diff --quiet "$local_oid" --; then
+    echo "pre-push: worktree differs from pushed object ${local_oid:0:12}; refusing inexact helper execution." >&2
+    return 2
+  fi
+  printf '%s/%s\n' "$GALLERY_ROOT" "$rel"
 }
 
 changed_game_pairs() {
@@ -153,7 +307,7 @@ changed_game_pairs() {
   if (( ${#PUSH_REFS[@]} == 0 )); then
     return 0
   fi
-  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-games.XXXXXX")" || return 2
+  tmp="$(mktemp "$HOOK_TMP_ROOT/games.XXXXXX")" || return 2
   status=0
   for line in "${PUSH_REFS[@]}"; do
     IFS=' ' read -r local_ref local_oid remote_ref remote_oid <<< "$line"
@@ -179,8 +333,8 @@ manifest_publish_pairs_for_ref() {
     base="$(remote_ref_base "$local_oid" "$remote_ref" 2>/dev/null || true)"
   fi
   [[ -n "$base" ]] || return 0
-  old_manifest="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-old-manifest.XXXXXX")" || return 2
-  new_manifest="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-new-manifest.XXXXXX")" || {
+  old_manifest="$(mktemp "$HOOK_TMP_ROOT/old-manifest.XXXXXX")" || return 2
+  new_manifest="$(mktemp "$HOOK_TMP_ROOT/new-manifest.XXXXXX")" || {
     rm -f "$old_manifest"
     return 2
   }
@@ -222,7 +376,7 @@ manifest_publish_pairs() {
   if (( ${#PUSH_REFS[@]} == 0 )); then
     return 0
   fi
-  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-publish.XXXXXX")" || return 2
+  tmp="$(mktemp "$HOOK_TMP_ROOT/publish.XXXXXX")" || return 2
   status=0
   for line in "${PUSH_REFS[@]}"; do
     IFS=' ' read -r local_ref local_oid remote_ref remote_oid <<< "$line"
@@ -240,7 +394,7 @@ manifest_publish_pairs() {
 
 stage1_game_pairs() {
   local tmp rc
-  tmp="$(mktemp "${TMPDIR:-/tmp}/gallery-prepush-stage1.XXXXXX")" || return 2
+  tmp="$(mktemp "$HOOK_TMP_ROOT/stage1.XXXXXX")" || return 2
   if ! changed_game_pairs >> "$tmp"; then
     rm -f "$tmp"
     return 2
@@ -340,8 +494,7 @@ extract_game_tree_for_oid() {
     return 1
   fi
 
-  tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/gallery-yandex-prepush.XXXXXX")" || return 1
-  YANDEX_TMP_ROOTS+=("$tmp_root")
+  tmp_root="$(mktemp -d "$HOOK_TMP_ROOT/yandex.XXXXXX")" || return 1
   tmp_extract="$tmp_root/_archive"
   status_rel="$(source_game_dir_at_oid "$oid" "$rel")"
   if ! safe_relative_path "$status_rel"; then
@@ -583,6 +736,26 @@ run_yandex_stage1() {
   return 0
 }
 
+UNTRACKED_GATE_INPUTS_FILE="$HOOK_TMP_ROOT/untracked-gate-inputs"
+if ! collect_untracked_gate_inputs "$UNTRACKED_GATE_INPUTS_FILE"; then
+  echo "pre-push: could not enumerate untracked gate inputs; failing closed." >&2
+  exit 1
+fi
+if [[ -s "$UNTRACKED_GATE_INPUTS_FILE" ]]; then
+  echo "pre-push: untracked or ignored files could influence release gates:" >&2
+  while IFS= read -r -d '' _gate_file; do
+    printf '  - %q\n' "$_gate_file" >&2
+  done < "$UNTRACKED_GATE_INPUTS_FILE"
+  echo "Commit, move, or remove those files before pushing." >&2
+  exit 1
+fi
+# Failure-only test seam: a safe-input regression must prove it reached this
+# point without continuing into the push lock or any expensive release gate.
+if [[ "${GALLERY_PREPUSH_TEST_UNTRACKED_SAFE_MARKER:-0}" == "1" ]]; then
+  echo "pre-push: untracked-input safe marker reached" >&2
+  exit 86
+fi
+
 # Stage -1: Gallery push lock - serialise concurrent pushes (scripts + agents) so
 # they stop racing on the working tree / the main ref (the 2026-05-30/31 collisions:
 # one agent's commit swallowing another's files; two pushes fighting refs/heads/main).
@@ -602,11 +775,14 @@ if [[ -x "$PUSH_LOCK" ]]; then
       echo "   Retry shortly; the holder releases when its push finishes." >&2
       exit 1
     }
-    trap 'bash "$PUSH_LOCK" release "$_hooktok" 2>/dev/null; cleanup_yandex_tmp_roots' EXIT
+    trap 'bash "$PUSH_LOCK" release "$_hooktok" 2>/dev/null; cleanup_hook_tmp_root' EXIT
   fi
 fi
 
-ART_CHECK="$(hook_helper_path scripts/check_art.sh)"
+if ! ART_CHECK="$(hook_helper_path scripts/check_art.sh)"; then
+  echo "🚫 Push aborted: stage-0 helper could not be resolved from the exact pushed tree." >&2
+  exit 1
+fi
 if [[ -x "$ART_CHECK" ]]; then
   if ! AGENTS_ROOT="$AGENTS_ROOT" GALLERY_ROOT="$GALLERY_ROOT" "$ART_CHECK" --quiet; then
     echo "" >&2
@@ -660,6 +836,26 @@ fi
 DISCOVERY_GATE="$GALLERY_ROOT/scripts/tests/test_discovery_surfaces.mjs"
 INDEXNOW_GATE="$GALLERY_ROOT/scripts/tests/test_indexnow_notify.py"
 UPDATED_DATE_UNIT_GATE="$GALLERY_ROOT/scripts/tests/test_updated_dates.py"
+TEMP_CLEANUP_GATE="$GALLERY_ROOT/scripts/tests/test_pre_push_temp_cleanup.sh"
+UNTRACKED_GATE_TEST="$GALLERY_ROOT/scripts/tests/test_pre_push_untracked_gate.sh"
+if [[ -f "$TEMP_CLEANUP_GATE" ]]; then
+  if ! bash "$TEMP_CLEANUP_GATE"; then
+    echo "🚫 Push aborted by stage-0.65 temp-cleanup regression gate." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: $TEMP_CLEANUP_GATE missing; failing closed." >&2
+  exit 1
+fi
+if [[ -f "$UNTRACKED_GATE_TEST" ]]; then
+  if ! bash "$UNTRACKED_GATE_TEST"; then
+    echo "🚫 Push aborted by stage-0.65 untracked-input regression gate." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: $UNTRACKED_GATE_TEST missing; failing closed." >&2
+  exit 1
+fi
 if [[ -f "$DISCOVERY_GATE" ]] && command -v node >/dev/null 2>&1; then
   if ! node "$DISCOVERY_GATE"; then
     echo "" >&2
@@ -690,7 +886,10 @@ fi
 # every desktop window (crash_buggy + 18 others) — desktop visitors saw a
 # giant phone screenshot and no button. Tim's hard rule: a game whose play
 # button is invisible at desktop resolution must NOT ship.
-PLAY_GATE="$(hook_helper_path scripts/check_play_visible.js)"
+if ! PLAY_GATE="$(hook_helper_path scripts/check_play_visible.js)"; then
+  echo "🚫 Push aborted: stage-0.7 helper could not be resolved from the exact pushed tree." >&2
+  exit 1
+fi
 if [[ -f "$PLAY_GATE" ]] && command -v node >/dev/null 2>&1; then
   AGENTS_ROOT="$AGENTS_ROOT" GALLERY_ROOT="$GALLERY_ROOT" node "$PLAY_GATE" --quiet
   _play_rc=$?

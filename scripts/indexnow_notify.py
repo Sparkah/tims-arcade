@@ -40,6 +40,19 @@ GENRE_PATHS = (
     "/genre/tycoon",
 )
 MAX_URLS = 10_000
+PRIMARY_ENDPOINT = "https://api.indexnow.org/indexnow"
+APPROVED_FALLBACK_ENDPOINTS = frozenset({
+    "https://yandex.com/indexnow",
+})
+
+
+def clean_git_env() -> dict[str, str]:
+    """Prevent an enclosing Git hook from redirecting nested local commands."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
 
 
 def git(*args: str, check: bool = True) -> str:
@@ -50,6 +63,7 @@ def git(*args: str, check: bool = True) -> str:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=clean_git_env(),
     )
     if check and result.returncode:
         raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")
@@ -66,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_config() -> dict[str, str]:
+def load_config() -> dict[str, Any]:
     raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     required = ("host", "keyFile", "endpoint")
     if not isinstance(raw, dict) or any(not isinstance(raw.get(key), str) for key in required):
@@ -74,13 +88,23 @@ def load_config() -> dict[str, str]:
     host = raw["host"].lower()
     if host != "game-factory.tech":
         raise RuntimeError("IndexNow host must be exactly game-factory.tech")
-    if raw["endpoint"] != "https://api.indexnow.org/indexnow":
-        raise RuntimeError("IndexNow endpoint is not approved")
+    if raw["endpoint"] != PRIMARY_ENDPOINT:
+        raise RuntimeError("IndexNow primary endpoint must be the global endpoint")
+    fallbacks = raw.get("fallbackEndpoints", [])
+    if (
+        not isinstance(fallbacks, list)
+        or any(not isinstance(endpoint, str) for endpoint in fallbacks)
+        or any(endpoint not in APPROVED_FALLBACK_ENDPOINTS for endpoint in fallbacks)
+        or raw["endpoint"] in fallbacks
+        or len(fallbacks) != len(set(fallbacks))
+    ):
+        raise RuntimeError("IndexNow fallbackEndpoints are malformed or not approved")
     initial_base = raw.get("initialBaseCommit", "")
     if initial_base and not re.fullmatch(r"[0-9a-f]{40}", initial_base):
         raise RuntimeError("IndexNow initialBaseCommit must be a full git SHA")
-    key_path = (ROOT / raw["keyFile"]).resolve()
-    if key_path.parent != ROOT or not re.fullmatch(r"[a-z0-9-]{8,128}\.txt", key_path.name):
+    root = ROOT.resolve()
+    key_path = (root / raw["keyFile"]).resolve()
+    if key_path.parent != root or not re.fullmatch(r"[a-z0-9-]{8,128}\.txt", key_path.name):
         raise RuntimeError("IndexNow keyFile must be a root .txt file")
     return raw
 
@@ -122,7 +146,7 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 def resolve_range(
     args: argparse.Namespace,
     state: dict[str, Any],
-    config: dict[str, str],
+    config: dict[str, Any],
 ) -> tuple[str, str]:
     target = git("rev-parse", args.to_ref)
     if args.from_ref:
@@ -140,6 +164,7 @@ def resolve_range(
                 ["git", "merge-base", "--is-ancestor", candidate, target],
                 cwd=ROOT,
                 check=False,
+                env=clean_git_env(),
             )
             base = candidate if result.returncode == 0 else ""
         else:
@@ -261,7 +286,7 @@ def request_bytes(request: urllib.request.Request, timeout: float) -> tuple[int,
         return error.code, error.read(), dict(error.headers.items())
 
 
-def verify_live_key(config: dict[str, str], timeout: float) -> tuple[str, str]:
+def verify_live_key(config: dict[str, Any], timeout: float) -> tuple[str, str]:
     key_path = ROOT / config["keyFile"]
     key = key_path.read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"[a-z0-9-]{8,128}", key) or key_path.name != f"{key}.txt":
@@ -275,12 +300,13 @@ def verify_live_key(config: dict[str, str], timeout: float) -> tuple[str, str]:
 
 
 def submit_chunk(
-    config: dict[str, str],
+    config: dict[str, Any],
     key: str,
     key_location: str,
     urls: list[str],
     timeout: float,
     retries: int,
+    endpoint: str,
 ) -> int:
     payload = json.dumps({
         "host": config["host"],
@@ -289,7 +315,7 @@ def submit_chunk(
         "urlList": urls,
     }).encode("utf-8")
     request = urllib.request.Request(
-        config["endpoint"],
+        endpoint,
         data=payload,
         method="POST",
         headers={
@@ -300,7 +326,7 @@ def submit_chunk(
     retryable = {429, 500, 502, 503, 504}
     for attempt in range(retries + 1):
         try:
-            status, _body, headers = request_bytes(request, timeout)
+            status, body, headers = request_bytes(request, timeout)
         except (OSError, urllib.error.URLError) as error:
             if attempt >= retries:
                 raise RuntimeError(f"IndexNow transport failed: {error}") from error
@@ -309,11 +335,52 @@ def submit_chunk(
         if status in (200, 202):
             return status
         if status not in retryable or attempt >= retries:
-            raise RuntimeError(f"IndexNow rejected URL batch with HTTP {status}")
+            detail = body.decode("utf-8", "replace").strip()
+            if len(detail) > 500:
+                detail = f"{detail[:497]}..."
+            suffix = f": {detail}" if detail else ""
+            raise RuntimeError(
+                f"IndexNow endpoint {endpoint} rejected URL batch "
+                f"with HTTP {status}{suffix}"
+            )
         retry_after = headers.get("Retry-After", "")
         delay = min(30.0, float(retry_after)) if retry_after.isdigit() else min(8.0, 2.0 ** attempt)
         time.sleep(delay)
     raise RuntimeError("IndexNow retry loop exhausted")
+
+
+def submit_urls(
+    config: dict[str, Any],
+    key: str,
+    key_location: str,
+    urls: list[str],
+    timeout: float,
+    retries: int,
+) -> tuple[list[int], str]:
+    endpoints = [config["endpoint"], *config.get("fallbackEndpoints", [])]
+    for endpoint_index, endpoint in enumerate(endpoints):
+        statuses: list[int] = []
+        try:
+            for offset in range(0, len(urls), MAX_URLS):
+                statuses.append(submit_chunk(
+                    config,
+                    key,
+                    key_location,
+                    urls[offset:offset + MAX_URLS],
+                    timeout,
+                    retries,
+                    endpoint,
+                ))
+        except RuntimeError as error:
+            if endpoint_index + 1 >= len(endpoints):
+                raise
+            print(
+                f"[indexnow] endpoint failed; trying approved fallback: {error}",
+                file=sys.stderr,
+            )
+            continue
+        return statuses, endpoint
+    raise RuntimeError("IndexNow endpoints exhausted without acceptance")
 
 
 def main() -> int:
@@ -340,23 +407,25 @@ def main() -> int:
         return 0
 
     key, key_location = verify_live_key(config, args.timeout)
-    statuses = []
-    for offset in range(0, len(urls), MAX_URLS):
-        statuses.append(submit_chunk(
-            config,
-            key,
-            key_location,
-            urls[offset:offset + MAX_URLS],
-            args.timeout,
-            max(0, args.retries),
-        ))
+    statuses, accepted_endpoint = submit_urls(
+        config,
+        key,
+        key_location,
+        urls,
+        args.timeout,
+        max(0, args.retries),
+    )
     atomic_write_json(state_path(), {
         "last_success_commit": target,
         "last_success_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "url_count": len(urls),
         "statuses": statuses,
+        "endpoint": accepted_endpoint,
     })
-    print(f"[indexnow] accepted {len(urls)} URL(s): {statuses}")
+    print(
+        f"[indexnow] accepted {len(urls)} URL(s) via "
+        f"{accepted_endpoint}: {statuses}"
+    )
     return 0
 
 

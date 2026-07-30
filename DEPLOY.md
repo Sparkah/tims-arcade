@@ -117,6 +117,20 @@ cd Gallery
 wrangler pages dev . --kv VOTES
 ```
 
+## IndexNow notifications
+
+`scripts/push_and_verify.sh` submits changed public URLs only after its
+production marker is live. The notifier verifies the root key file, keeps its
+last accepted commit in the shared Git state, and advances that state only when
+every URL batch receives HTTP 200 or 202.
+
+The global endpoint is primary. A strict allowlist permits Yandex's official
+`https://yandex.com/indexnow` endpoint as the only fallback because IndexNow
+participants share accepted submissions. Rejection output includes the remote
+response body (capped at 500 characters) so key-verification failures are
+actionable. Do not rotate a live, matching key solely because one participant
+has a temporary ownership-verification failure.
+
 ## Gallery curation database
 
 `GALLERY_DB` is the authoritative hidden-game store. It uses one row per slug,

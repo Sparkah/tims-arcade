@@ -99,7 +99,11 @@ export function genreGroups(games) {
   const groups = [];
   for (const [slug, meta] of Object.entries(GENRE_PAGES)) {
     const matching = sortNewest(games.filter(game => game.genre === slug));
-    if (matching.length) groups.push({ slug, ...meta, games: matching });
+    // Keep configured collection URLs stable even when curation temporarily
+    // hides every game in one genre. Omitting the route makes the directory,
+    // sitemap, and LLM index disagree with the promised collection set; an
+    // honest zero-game page is safer than exposing a hidden title to fill it.
+    groups.push({ slug, ...meta, games: matching });
   }
   return groups.sort((a, b) => b.games.length - a.games.length || a.title.localeCompare(b.title));
 }

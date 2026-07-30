@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -27,6 +28,15 @@ PUBLIC_FIELDS = (
 )
 
 
+def clean_git_env() -> dict[str, str]:
+    """Prevent an enclosing Git hook from redirecting nested local commands."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+    }
+
+
 def git(*args: str, check: bool = True) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -35,6 +45,7 @@ def git(*args: str, check: bool = True) -> str:
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=clean_git_env(),
     )
     if check and result.returncode:
         raise RuntimeError(result.stderr.strip() or f"git {' '.join(args)} failed")

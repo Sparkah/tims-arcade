@@ -265,7 +265,10 @@ assert.deepEqual(bizLd.sameAs, ['https://www.crazygames.com/game/biz-tycoon-vqm'
 assert.equal(bizLd.potentialAction.target, 'https://www.crazygames.com/game/biz-tycoon-vqm');
 const genreDirectory = renderGenreDirectory(catalogue.publicGames);
 const arcadePage = renderGenrePage(catalogue.publicGames, 'arcade');
+const simulationPage = renderGenrePage(catalogue.publicGames, 'simulation');
 assert.match(genreDirectory, /href="\/genre\/arcade"/);
+assert.match(genreDirectory, /href="\/genre\/simulation"/);
+assert.match(simulationPage, /No public games in this collection yet/);
 assert.match(arcadePage, /Visible Arcade/);
 assert.doesNotMatch(`${genreDirectory}${arcadePage}`, /Hidden Game|hidden_game/);
 assert.match(sitemap, /<loc>https:\/\/game-factory\.tech\/genres<\/loc>/);
@@ -685,6 +688,45 @@ assert.match(
 assert.match(
   handoffSource,
   /read_kv_state[\s\S]*verify_exact_state 0[\s\S]*reconcile_d1 1/,
+);
+
+const prePushHookSource = await readFile(
+  new URL('../../scripts/hooks/pre-push', import.meta.url),
+  'utf8',
+);
+assert.match(
+  prePushHookSource,
+  /helper_target_oid\(\)[\s\S]*refs\/heads\/main\|refs\/heads\/master[\s\S]*refs\/heads\/\*[\s\S]*rev-parse "\$local_oid\^\{tree\}"[\s\S]*distinct Gallery trees[\s\S]*hook_helper_path\(\)[\s\S]*local_oid="\$\(helper_target_oid\)"[\s\S]*git -C "\$GALLERY_ROOT" diff --quiet "\$local_oid" --;[\s\S]*refusing inexact helper execution[\s\S]*printf '%s\/%s\\n' "\$GALLERY_ROOT"/,
+);
+assert.match(
+  prePushHookSource,
+  /while IFS= read -r _git_local_var[\s\S]*unset "\$_git_local_var"[\s\S]*done < <\(git -C "\$GALLERY_ROOT" rev-parse --local-env-vars[\s\S]*cd "\$GALLERY_ROOT"/,
+);
+assert.match(
+  prePushHookSource,
+  /_has_branch_ref=0[\s\S]*refs\/heads\/\*[\s\S]*tag-only push has no Pages deployment tree; release gates skipped/,
+);
+assert.match(
+  prePushHookSource,
+  /HOOK_TMP_ROOT="\$HOOK_TMP_BASE\/gallery-prepush\.\$\$\.\$RANDOM\$RANDOM[\s\S]*trap cleanup_hook_tmp_root EXIT[\s\S]*PYTHONPYCACHEPREFIX="\$PYTHON_CACHE_ROOT"[\s\S]*GALLERY_PREPUSH_TEST_INTERRUPT_AFTER_TEMP[\s\S]*is_release_gate_input\(\)[\s\S]*node_modules\/\*[\s\S]*functions\/\*\|scripts\/\*\|games\/\*\|thumbs\/\*\|previews\/\*\|migrations\/\*[\s\S]*dissertation\/\*\|fonts\/\*[\s\S]*collect_untracked_gate_inputs\(\)[\s\S]*ls-files -z --others --exclude-standard[\s\S]*ls-files -z --others --ignored --exclude-standard[\s\S]*printf '%s\\0' "\$f" >> "\$output"[\s\S]*collect_untracked_gate_inputs "\$UNTRACKED_GATE_INPUTS_FILE"[\s\S]*if \[\[ -s "\$UNTRACKED_GATE_INPUTS_FILE" \]\][\s\S]*GALLERY_PREPUSH_TEST_UNTRACKED_SAFE_MARKER[\s\S]*ART_CHECK=/,
+);
+assert.match(
+  prePushHookSource,
+  /TEMP_CLEANUP_GATE=.*test_pre_push_temp_cleanup\.sh[\s\S]*bash "\$TEMP_CLEANUP_GATE"[\s\S]*temp-cleanup regression gate/,
+);
+assert.match(
+  prePushHookSource,
+  /UNTRACKED_GATE_TEST=.*test_pre_push_untracked_gate\.sh[\s\S]*bash "\$UNTRACKED_GATE_TEST"[\s\S]*untracked-input regression gate/,
+);
+const hookMktempCalls = [...prePushHookSource.matchAll(/mktemp(?: -d)? "([^"]+)"/g)];
+assert.ok(hookMktempCalls.length > 0);
+assert.ok(
+  hookMktempCalls.every(([, template]) => template.startsWith('$HOOK_TMP_ROOT/')),
+  'every hook temp file must live below the parent-owned cleanup root',
+);
+assert.doesNotMatch(
+  prePushHookSource.match(/hook_helper_path\(\) \{[\s\S]*?^\}/m)?.[0] || '',
+  /pushed_path_changed|CANONICAL_GALLERY_ROOT|PUSH_REFS\[@\].*!= 1/,
 );
 
 console.log('discovery surfaces: PASS');

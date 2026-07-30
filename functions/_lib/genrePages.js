@@ -88,6 +88,14 @@ export function renderGenrePage(games, genreSlug) {
       + '</a></article>'
     );
   }).join('');
+  const collectionBody = cards || (
+    '<section class="empty-collection" aria-live="polite">'
+    + '<h2>No public games in this collection yet</h2>'
+    + '<p>The catalogue is curated live. Hidden experiments stay private, and '
+    + 'this page will fill automatically when a game in this genre is ready to recommend.</p>'
+    + '<a href="/">Browse all public games →</a>'
+    + '</section>'
+  );
   return shell({
     title,
     description: meta.description,
@@ -96,7 +104,7 @@ export function renderGenrePage(games, genreSlug) {
     eyebrow: `${selected.games.length} curated ${selected.games.length === 1 ? 'game' : 'games'}`,
     heading: meta.title,
     intro: meta.description,
-    body: `<div class="games">${cards}</div>`,
+    body: `<div class="games">${collectionBody}</div>`,
   });
 }
 
@@ -131,6 +139,7 @@ function shell({ title, description, canonical, ld, eyebrow, heading, intro, bod
     .games{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
     .games img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#1b1b28}
     .games div{padding:14px 16px 17px}.games h2{font-size:20px;margin:0 0 6px}.games p{color:#a7a7b6;margin:0 0 12px}.games span{color:#4dd0e1;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em}
+    .empty-collection{grid-column:1/-1;padding:24px;background:#13131f;border:1px solid #262637;border-radius:14px}.empty-collection h2{margin:0 0 8px}.empty-collection p{max-width:680px;color:#a7a7b6}.empty-collection a{display:inline;color:#4dd0e1;background:none;border:0}.empty-collection a:hover{transform:none}
     footer{margin-top:42px;color:#77778d}footer a{color:#a7a7b6}
   </style>
 </head>

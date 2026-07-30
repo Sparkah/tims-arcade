@@ -20,13 +20,37 @@ updated_dates = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(updated_dates)
 
 
+def git_env(**extra: str) -> dict[str, str]:
+    env = updated_dates.clean_git_env()
+    env.update(extra)
+    return env
+
+
+def git_run(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env=git_env(),
+        check=True,
+    )
+
+
+def git_output(repo: Path, *args: str) -> str:
+    return subprocess.check_output(
+        ["git", *args],
+        cwd=repo,
+        env=git_env(),
+        text=True,
+    ).strip()
+
+
 class UpdatedDateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.repo = Path(self.temp.name)
-        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
-        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo, check=True)
-        subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo, check=True)
+        git_run(self.repo, "init", "-q")
+        git_run(self.repo, "config", "user.email", "test@example.com")
+        git_run(self.repo, "config", "user.name", "Test")
         self.row = {
             "slug": "test_game",
             "title": "Test Game",
@@ -48,14 +72,14 @@ class UpdatedDateTests(unittest.TestCase):
         )
 
     def _commit(self, message: str, date: str) -> str:
-        subprocess.run(["git", "add", "games.source.json"], cwd=self.repo, check=True)
-        env = {**os.environ, "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
-        subprocess.run(["git", "commit", "-qm", message], cwd=self.repo, env=env, check=True)
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
+        git_run(self.repo, "add", "games.source.json")
+        subprocess.run(
+            ["git", "commit", "-qm", message],
             cwd=self.repo,
-            text=True,
-        ).strip()
+            env=git_env(GIT_AUTHOR_DATE=date, GIT_COMMITTER_DATE=date),
+            check=True,
+        )
+        return git_output(self.repo, "rev-parse", "HEAD")
 
     def _run(self, target: str) -> tuple[int, str]:
         output = StringIO()
@@ -99,6 +123,19 @@ class UpdatedDateTests(unittest.TestCase):
         status, output = self._run(target)
         self.assertEqual(status, 1)
         self.assertIn("after target commit date", output)
+
+    def test_git_helper_ignores_poisoned_hook_environment(self) -> None:
+        poison = {
+            "GIT_DIR": str(self.repo / "wrong-git-dir"),
+            "GIT_WORK_TREE": str(self.repo / "wrong-work-tree"),
+            "GIT_INDEX_FILE": str(self.repo / "wrong-index"),
+        }
+        with mock.patch.dict(os.environ, poison, clear=False), mock.patch.object(
+            updated_dates,
+            "ROOT",
+            self.repo,
+        ):
+            self.assertEqual(updated_dates.git("rev-parse", "HEAD").strip(), self.base)
 
 
 if __name__ == "__main__":
