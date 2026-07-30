@@ -22,34 +22,42 @@ function json(body, status = 200) {
 }
 
 async function readSet(env) {
-  let s = [];
-  try { s = (await env.VOTES.get(KEY, 'json')) || []; } catch (e) { s = []; }
-  return Array.isArray(s) ? s : [];
+  const value = await env.VOTES.get(KEY, 'json');
+  if (
+    !Array.isArray(value)
+    || value.some(slug => typeof slug !== 'string' || !/^[a-z0-9_-]{1,64}$/.test(slug))
+  ) {
+    throw new Error('legacy curation set is unavailable');
+  }
+  const normalized = [...new Set(value)].sort();
+  if (JSON.stringify(value) !== JSON.stringify(normalized)) {
+    throw new Error('legacy curation set is malformed');
+  }
+  return normalized;
+}
+
+async function legacyWritesEnabled(env) {
+  try {
+    return (await env.VOTES.get(LEGACY_WRITE_KEY)) !== '0';
+  } catch (_) {
+    return false;
+  }
 }
 
 export async function onRequestGet({ request, env }) {
   const fail = await requireAdmin(request, env);
   if (fail) return fail;
-  const hidden = await readSet(env);
-  return json({ hidden, count: hidden.length });
+  try {
+    const hidden = await readSet(env);
+    return json({ hidden, count: hidden.length });
+  } catch (_) {
+    return json({ error: 'curation_store_unavailable' }, 503);
+  }
 }
 
 export async function onRequestPost({ request, env }) {
   const fail = await requireAdmin(request, env);
   if (fail) return fail;
-
-  // D1 cutovers and rollbacks publish this lock before switching readers.
-  // Fail closed on KV errors so an in-flight authority handoff cannot accept a
-  // last legacy mutation that the new D1 snapshot never sees.
-  let legacyWrites;
-  try {
-    legacyWrites = await env.VOTES.get(LEGACY_WRITE_KEY);
-  } catch (_) {
-    return json({ error: 'curation_store_unavailable' }, 503);
-  }
-  if (legacyWrites === '0') {
-    return json({ error: 'curation_cutover_in_progress' }, 503);
-  }
 
   let body;
   try { body = await request.json(); } catch (e) { return json({ error: 'bad_json' }, 400); }
@@ -59,10 +67,28 @@ export async function onRequestPost({ request, env }) {
   if (!slug || !/^[a-z0-9_-]{1,64}$/.test(slug)) return json({ error: 'invalid_slug' }, 400);
   const hide = body.hide !== false; // default true
 
-  const set = new Set(await readSet(env));
+  // Parse the complete request before observing the lock, then check it again
+  // immediately before the write. --prepare waits through KV propagation, so
+  // a slow-body or delayed read cannot escape into the D1 authority window.
+  if (!(await legacyWritesEnabled(env))) {
+    return json({ error: 'curation_cutover_in_progress' }, 503);
+  }
+  let set;
+  try {
+    set = new Set(await readSet(env));
+  } catch (_) {
+    return json({ error: 'curation_store_unavailable' }, 503);
+  }
   if (hide) set.add(slug); else set.delete(slug);
   const arr = [...set].sort();
-  await env.VOTES.put(KEY, JSON.stringify(arr));
+  if (!(await legacyWritesEnabled(env))) {
+    return json({ error: 'curation_cutover_in_progress' }, 503);
+  }
+  try {
+    await env.VOTES.put(KEY, JSON.stringify(arr));
+  } catch (_) {
+    return json({ error: 'curation_store_unavailable' }, 503);
+  }
 
   return json({ hidden: arr, slug, hidden_now: hide, count: arr.length });
 }

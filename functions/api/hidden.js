@@ -10,18 +10,31 @@
 //   { hidden: ["slug", ...], count: N }
 
 export async function onRequestGet({ env }) {
-  let hidden = [];
   try {
-    hidden = (await env.VOTES.get('hidden:set', 'json')) || [];
-    if (!Array.isArray(hidden)) hidden = [];
-  } catch (e) {
-    hidden = [];
+    const hidden = await env.VOTES.get('hidden:set', 'json');
+    if (
+      !Array.isArray(hidden)
+      || hidden.some(slug => typeof slug !== 'string' || !/^[a-z0-9_-]{1,64}$/.test(slug))
+      || JSON.stringify(hidden) !== JSON.stringify([...new Set(hidden)].sort())
+    ) {
+      throw new Error('legacy curation set is malformed');
+    }
+    return new Response(JSON.stringify({ hidden, count: hidden.length }), {
+      headers: {
+        'content-type': 'application/json',
+        'cache-control': 'public, max-age=30',
+        'x-gallery-curation': 'legacy-v2',
+      },
+    });
+  } catch (_) {
+    return new Response(JSON.stringify({ error: 'curation_store_unavailable' }), {
+      status: 503,
+      headers: {
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+        'x-robots-tag': 'noindex, nofollow, noarchive',
+        'x-gallery-curation': 'legacy-v2',
+      },
+    });
   }
-  return new Response(JSON.stringify({ hidden, count: hidden.length }), {
-    headers: {
-      'content-type': 'application/json',
-      'cache-control': 'public, max-age=30',
-      'x-gallery-curation': 'legacy-v1',
-    },
-  });
 }
