@@ -1,4 +1,8 @@
-import * as THREE from "./three.module.js";
+// Bare "three" specifier resolved by the index.html import map so game code
+// and the vendored GLTFLoader share ONE three.js module instance (a second
+// path-based import would double-load the library and break instanceof
+// checks between loader output and scene objects).
+import * as THREE from "three";
 import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBalance } from "./balance-data.js?v=20260708_market_storefront";
 
 (() => {
@@ -94,10 +98,16 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   const audio = {
     ctx: null,
     master: null,
+    musicGain: null,
     musicTimer: 0,
     musicStep: 0,
+    musicBuffer: null,
+    musicSource: null,
+    musicRequested: false,
     muted: false,
   };
+
+  const MUSIC_URL = "./audio/bg_loop.mp3";
 
   function ensureAudio() {
     if (audio.muted) return null;
@@ -108,12 +118,38 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
       audio.master = audio.ctx.createGain();
       audio.master.gain.value = 0.18;
       audio.master.connect(audio.ctx.destination);
+      audio.musicGain = audio.ctx.createGain();
+      audio.musicGain.gain.value = 1;
+      audio.musicGain.connect(audio.master);
     }
     if (audio.ctx.state === "suspended") {
       audio.ctx.resume().catch(() => {});
     }
+    loadMusic();
     startMusic();
     return audio.ctx;
+  }
+
+  // Fetched only after the first gesture has built the context, so nothing is
+  // decoded for a player who never interacts. If the file is missing the
+  // procedural bed in startMusic() keeps playing, so audio never goes silent.
+  function loadMusic() {
+    if (audio.musicRequested || !audio.ctx) return;
+    audio.musicRequested = true;
+    fetch(MUSIC_URL)
+      .then((response) => (response.ok ? response.arrayBuffer() : Promise.reject(new Error("no track"))))
+      .then((bytes) => audio.ctx.decodeAudioData(bytes))
+      .then((buffer) => {
+        audio.musicBuffer = buffer;
+        if (audio.musicTimer) {
+          window.clearInterval(audio.musicTimer);
+          audio.musicTimer = 0;
+        }
+        startMusic();
+      })
+      .catch(() => {
+        // Keep the procedural bed; a missing or undecodable track is not fatal.
+      });
   }
 
   function playTone(freq, duration = 0.12, type = "sine", gain = 0.04) {
@@ -140,7 +176,18 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   }
 
   function startMusic() {
-    if (audio.musicTimer || !audio.ctx || !audio.master) return;
+    if (!audio.ctx || !audio.master) return;
+    if (audio.musicBuffer) {
+      if (audio.musicSource) return;
+      const source = audio.ctx.createBufferSource();
+      source.buffer = audio.musicBuffer;
+      source.loop = true;
+      source.connect(audio.musicGain || audio.master);
+      source.start(0);
+      audio.musicSource = source;
+      return;
+    }
+    if (audio.musicTimer) return;
     // Guard before the first background music note so playTone() cannot re-enter startup.
     audio.musicTimer = -1;
     const notes = [196, 247, 294, 330, 247, 220, 262, 330];
@@ -163,6 +210,32 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   function resumeAudio() {
     if (!document.hidden && audio.ctx && audio.ctx.state === "suspended") {
       audio.ctx.resume().catch(() => {});
+    }
+  }
+
+  function toggleMute() {
+    audio.muted = !audio.muted;
+    if (audio.muted) {
+      pauseAudio();
+    } else if (audio.ctx) {
+      resumeAudio();
+      startMusic();
+    } else {
+      ensureAudio();
+    }
+    try {
+      window.localStorage.setItem(`${STORAGE_KEY}-muted`, audio.muted ? "1" : "0");
+    } catch (_) {
+      // Private-mode storage failures must not break the toggle.
+    }
+    state.message = audio.muted ? "Sound off." : "Sound on.";
+  }
+
+  function restoreMutePreference() {
+    try {
+      audio.muted = window.localStorage.getItem(`${STORAGE_KEY}-muted`) === "1";
+    } catch (_) {
+      audio.muted = false;
     }
   }
 
@@ -313,6 +386,128 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   function clearThreeGroup(group) {
     while (group.children.length) {
       group.remove(group.children[group.children.length - 1]);
+    }
+  }
+
+  // Decorative Meshy-sourced props (barrel + parrot GLBs) living in the SAME
+  // live scene as the gameplay meshes. Purely ambient: a load failure or a
+  // missing file must never touch gameplay, so everything here is one-shot,
+  // try/caught, and additive to three.world only.
+  const decor = {
+    attempted: false,
+    parrot: null,
+    perches: [],
+    perchIndex: 0,
+    idleT: 0,
+    flightT: 0,
+    flightDur: 0,
+    nextFlightIn: 14,
+    from: null,
+    to: null,
+  };
+  // Debug surface, same convention as __gameFactoryLevelState: lets headless
+  // QA confirm the props actually mounted instead of trusting a silent catch.
+  if (typeof window !== "undefined") window.__ghDecor = decor;
+
+  function fitDecorModel(root, targetHeight) {
+    const box = new THREE.Box3().setFromObject(root);
+    const size = box.getSize(new THREE.Vector3());
+    const scale = targetHeight / Math.max(0.0001, size.y);
+    root.scale.setScalar(scale);
+    box.setFromObject(root);
+    const center = box.getCenter(new THREE.Vector3());
+    root.position.x -= center.x;
+    root.position.z -= center.z;
+    root.position.y -= box.min.y;
+    const holder = new THREE.Group();
+    holder.add(root);
+    holder.traverse((o) => {
+      if (o.isMesh) {
+        o.castShadow = true;
+        o.receiveShadow = true;
+      }
+    });
+    return holder;
+  }
+
+  async function loadDecorProps() {
+    if (decor.attempted || !three.initialized) return;
+    decor.attempted = true;
+    try {
+      const { GLTFLoader } = await import("./vendor/GLTFLoader.js");
+      const loader = new GLTFLoader();
+      const [barrelGltf, parrotGltf] = await Promise.all([
+        loader.loadAsync("./assets/models/barrel.glb"),
+        loader.loadAsync("./assets/models/parrot.glb"),
+      ]);
+      // The game CLEARS AND REBUILDS three.world on state changes (line
+      // ~2242), which evicted the first integration attempt right after its
+      // async load landed. Decor therefore lives in its own scene-level
+      // group - never cleared - and mirrors world's layout offset per frame.
+      decor.group = new THREE.Group();
+      decor.group.name = "decorGroup";
+      three.scene.add(decor.group);
+      const edgeX = ((COLS - 1) / 2) * CELL_3D;
+      const edgeZ = ((ROWS - 1) / 2) * CELL_3D;
+      // Front-left corner and mid-left rim: in the camera's clear view. The
+      // back-right corner is occupied by the rooftop hut (first placement
+      // attempt vanished inside it), and the right half sits under the DOM
+      // planning panel on desktop.
+      const spots = [
+        new THREE.Vector3(-edgeX - 0.22, 0, -edgeZ * 0.25),
+        new THREE.Vector3(-edgeX - 0.2, 0, edgeZ - 0.55),
+      ];
+      for (const spot of spots) {
+        const barrel = fitDecorModel(barrelGltf.scene.clone(true), 0.56);
+        barrel.name = "decorBarrel";
+        barrel.position.copy(spot);
+        barrel.rotation.y = spot.x > 0 ? -0.5 : 0.6;
+        decor.group.add(barrel);
+        decor.perches.push(new THREE.Vector3(spot.x, 0.56, spot.z));
+      }
+      const parrot = fitDecorModel(parrotGltf.scene.clone(true), 0.3);
+      parrot.name = "decorParrot";
+      parrot.position.copy(decor.perches[0]);
+      parrot.rotation.y = 2.6;
+      decor.group.add(parrot);
+      decor.parrot = parrot;
+      decor.ready = true;
+    } catch (e) {
+      decor.parrot = null;   // props are optional; the roof carries on bare
+      decor.error = String(e && e.message ? e.message : e).slice(0, 200);
+    }
+  }
+
+  function updateDecor(dt) {
+    if (!decor.parrot) return;
+    decor.group.position.copy(three.world.position);
+    decor.idleT += dt;
+    if (decor.from) {
+      decor.flightT += dt;
+      const k = Math.min(1, decor.flightT / decor.flightDur);
+      const ease = k * k * (3 - 2 * k);
+      const p = decor.parrot.position;
+      p.lerpVectors(decor.from, decor.to, ease);
+      p.y += Math.sin(k * Math.PI) * 0.9;
+      decor.parrot.rotation.y = decor.to.x > decor.from.x ? 1.1 : -2.1;
+      decor.parrot.rotation.z = Math.sin(decor.idleT * 22) * 0.16;
+      if (k >= 1) {
+        decor.parrot.position.copy(decor.to);
+        decor.parrot.rotation.z = 0;
+        decor.parrot.rotation.y = decor.to.x > 0 ? 2.6 : 0.6;
+        decor.from = null;
+        decor.nextFlightIn = 16 + (decor.idleT * 7919) % 22;
+      }
+      return;
+    }
+    decor.parrot.position.y = decor.perches[decor.perchIndex].y + Math.abs(Math.sin(decor.idleT * 2.1)) * 0.015;
+    decor.nextFlightIn -= dt;
+    if (decor.nextFlightIn <= 0 && decor.perches.length > 1) {
+      decor.from = decor.parrot.position.clone();
+      decor.perchIndex = (decor.perchIndex + 1) % decor.perches.length;
+      decor.to = decor.perches[decor.perchIndex].clone();
+      decor.flightT = 0;
+      decor.flightDur = 2.6;
     }
   }
 
@@ -2806,14 +3001,22 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
     ctx.fillStyle = "#4b5b56";
     ctx.fillText(`Week ${state.absoluteWeek} - ${phaseLabel()} - ${formatTime(state.minutes)}`, pad + 16, y + 38);
 
+    const muteW = view.width < 820 ? 52 : 62;
+    const muteX = view.width - pad - 14 - muteW;
+    const textRight = muteX - 14;
+
     ctx.textAlign = "right";
     ctx.fillStyle = "#1e2b29";
     ctx.font = "700 17px ui-sans-serif, system-ui";
-    ctx.fillText(formatMoney(state.money), view.width - pad - 18, y + 18);
+    ctx.fillText(formatMoney(state.money), textRight, y + 18);
     ctx.font = "13px ui-sans-serif, system-ui";
     ctx.fillStyle = "#4b5b56";
     const loadPercent = Math.round((roofLoad() / state.roofLimit) * 100);
-    ctx.fillText(`Roof load ${loadPercent}%`, view.width - pad - 18, y + 38);
+    ctx.fillText(`Roof load ${loadPercent}%`, textRight, y + 38);
+
+    addButton("mute", muteX, y + 12, muteW, 30, audio.muted ? "Muted" : "Sound", toggleMute, {
+      selected: !audio.muted,
+    });
   }
 
   function drawPanel() {
@@ -3915,7 +4118,9 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   function loop(now) {
     const dt = Math.min(0.1, (now - lastFrame) / 1000);
     lastFrame = now;
+    if (three.initialized && !decor.attempted) loadDecorProps();
     update(dt);
+    updateDecor(dt);
     draw();
     requestAnimationFrame(loop);
   }
@@ -4126,6 +4331,7 @@ import { BALANCE_STORAGE_KEY, DEFAULT_CROP_DEFS, DEFAULT_GAME_SETTINGS, cloneBal
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
   registerPlatformAudioPause();
+  restoreMutePreference();
   hydrateState();
   state.prices = generatePrices();
   maybeAutostart();
