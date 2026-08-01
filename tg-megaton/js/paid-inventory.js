@@ -69,7 +69,11 @@ export function mergePaidGachaReceipt(state, receipt, verifiedRolls) {
     var newDuplicates = Math.max(0, paidDelta - (localCopies > 0 ? 0 : 1));
 
     if (state.ownedSkins.indexOf(skin.id) < 0) state.ownedSkins.push(skin.id);
-    setCopyCount(state, skin.id, Math.max(entry.paidCopiesAfter, localCopies + paidDelta, 1));
+    // paidSkinCopies is a cumulative server-grant watermark, while skinCopies
+    // is the current local balance after legitimate duplicate sales. Merge
+    // only the newly granted delta so reconciliation cannot resurrect a copy
+    // that the player already sold.
+    setCopyCount(state, skin.id, Math.max(localCopies + paidDelta, 1));
     if (newDuplicates > 0) {
       state.gachaStats.duplicates += newDuplicates;
       state.gachaStats.shards += newDuplicates * (DUPLICATE_SHARDS[skin.rarity] || 0);
@@ -109,7 +113,7 @@ export function mergePaidInventorySnapshot(state, verifiedItems) {
     var newDuplicates = Math.max(0, paidDelta - (localCopies > 0 ? 0 : 1));
 
     if (state.ownedSkins.indexOf(skin.id) < 0) state.ownedSkins.push(skin.id);
-    setCopyCount(state, skin.id, Math.max(entry.paidCopies, localCopies + paidDelta, 1));
+    setCopyCount(state, skin.id, Math.max(localCopies + paidDelta, 1));
     if (newDuplicates > 0) {
       state.gachaStats.duplicates += newDuplicates;
       state.gachaStats.shards += newDuplicates * (DUPLICATE_SHARDS[skin.rarity] || 0);

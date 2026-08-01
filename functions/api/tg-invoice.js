@@ -10,6 +10,7 @@ import {
   megatonPaidGachaCheckoutIsLive,
 } from '../_lib/tgProducts.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
+import { assertMegatonPaidGachaStorageReady } from '../_lib/megatonPaidGacha.js';
 import {
   recordTelegramPurchase,
   supabaseIsConfigured,
@@ -63,12 +64,23 @@ export async function onRequestPost({ request, env }) {
   if (paidGachaCheckout && !megatonPaidGachaCheckoutIsLive(env)) {
     return jsonError('Megaton paid-gacha checkout is not live', 503);
   }
+  if (paidGachaCheckout && !supabaseIsConfigured(env)) {
+    return jsonError('Paid-gacha purchase storage is not configured', 503);
+  }
 
   const initData = String(body.initData || '');
   const auth = await verifyTelegramInitData(initData, env.TELEGRAM_GAMEBOT_TOKEN);
   if (!auth.ok) return jsonError(auth.error, 401);
 
   const userId = String(auth.user.id);
+  if (paidGachaCheckout) {
+    try {
+      await assertMegatonPaidGachaStorageReady(env, userId);
+    } catch (error) {
+      console.error('tg-invoice paid-gacha storage readiness failed', error && error.message);
+      return jsonError('Paid-gacha purchase storage is not ready', 503);
+    }
+  }
   const nonce = crypto.randomUUID
     ? crypto.randomUUID()
     : String(Date.now()) + Math.random().toString(16).slice(2);
@@ -97,9 +109,6 @@ export async function onRequestPost({ request, env }) {
   // pending row is already durable. Otherwise Telegram can charge successfully
   // while neither direct redemption nor reconciliation can find the purchase.
   if (paidGachaCheckout) {
-    if (!supabaseIsConfigured(env)) {
-      return jsonError('Paid-gacha purchase storage is not configured', 503);
-    }
     try {
       await persistPendingPurchase(env, auth, pendingPurchase);
     } catch (error) {

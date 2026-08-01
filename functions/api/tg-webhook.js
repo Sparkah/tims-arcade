@@ -11,10 +11,14 @@ import {
 import {
   PRODUCTS_BY_GAME,
   getProduct,
+  hasHistoricalStarsPrice,
+  hasMegatonPaidGachaCheckoutProtocol,
   hasStarsPrice,
   isMegatonPaidGachaProduct,
+  megatonPaidGachaCheckoutIsLive,
   parsePaymentPayload,
 } from '../_lib/tgProducts.js';
+import { assertMegatonPaidGachaStorageReady } from '../_lib/megatonPaidGacha.js';
 import { validateVerifiedPurchase } from '../_lib/tgVerifiedPurchase.js';
 import {
   recordTelegramPurchase,
@@ -307,10 +311,13 @@ function productLines(gameId) {
   }).join('\n');
 }
 
-function validateStarsPaymentEnvelope(payment, payer) {
+function validateStarsPaymentEnvelope(payment, payer, options = {}) {
   const parsed = parsePaymentPayload(payment && payment.invoice_payload);
   const product = parsed && getProduct(parsed.game, parsed.productId);
-  if (!parsed || !product || !hasStarsPrice(product)) {
+  const hasPrice = options.allowDisabled
+    ? hasHistoricalStarsPrice(product)
+    : hasStarsPrice(product);
+  if (!parsed || !product || !hasPrice) {
     return { ok: false, error: 'unknown_product', parsed, product };
   }
   if (String(payer && payer.id || '') !== parsed.telegramUserId) {
@@ -383,7 +390,15 @@ async function sendInvoice(env, profile, chatId, productId, userId, gameId = 'me
 function paymentRecordFromMessage(msg) {
   const payment = msg && msg.successful_payment;
   if (!payment) return null;
-  const validation = validateStarsPaymentEnvelope(payment, msg.from || {});
+  // A product can be retired between pre-checkout approval and Telegram's
+  // successful_payment delivery. Never create a fresh invoice for a disabled
+  // item, but always validate and durably record an already-charged receipt
+  // against its immutable historical catalog amount.
+  const validation = validateStarsPaymentEnvelope(
+    payment,
+    msg.from || {},
+    { allowDisabled: true },
+  );
   if (!validation.ok) {
     throw webhookError(
       `Invalid Telegram successful_payment: ${validation.error}`,
@@ -484,7 +499,22 @@ async function onSuccessfulPayment(env, profile, msg) {
 }
 
 async function onPreCheckoutQuery(env, profile, query) {
-  const validation = validateStarsPaymentEnvelope(query, query.from || {});
+  let validation = validateStarsPaymentEnvelope(query, query.from || {});
+  if (
+    validation.ok
+    && validation.parsed
+    && hasMegatonPaidGachaCheckoutProtocol(validation.parsed.checkoutProtocol)
+  ) {
+    try {
+      if (!supabaseIsConfigured(env) || !megatonPaidGachaCheckoutIsLive(env)) {
+        throw new Error('Megaton paid-gacha checkout storage is not live');
+      }
+      await assertMegatonPaidGachaStorageReady(env, validation.parsed.telegramUserId);
+    } catch (error) {
+      console.error('tg-webhook paid-gacha pre-checkout readiness failed', error && error.message);
+      validation = { ...validation, ok: false, error: 'storage_not_ready' };
+    }
+  }
   await callBot(env, profile, 'answerPreCheckoutQuery', {
     pre_checkout_query_id: query.id,
     ok: validation.ok,

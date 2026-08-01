@@ -91,6 +91,9 @@ async function withCheckoutBackend(run) {
     if (parsed.hostname === 'api.telegram.org') {
       return jsonResponse({ ok: true, result: 'https://t.me/$invoice-test' });
     }
+    if (parsed.pathname.endsWith('/rpc/list_unredeemed_megaton_paid_gacha')) {
+      return jsonResponse([]);
+    }
     if (parsed.pathname.endsWith('/telegram_players')) {
       return jsonResponse([{ telegram_user_id: USER_ID }]);
     }
@@ -224,6 +227,43 @@ test('TON paid gacha requires checkoutProtocol and emits an mgp1 memo lineage', 
   });
 });
 
+test('TON paid-gacha order is not exposed before its pending row is durable', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ url: parsed, body });
+    if (parsed.pathname.endsWith('/rpc/list_unredeemed_megaton_paid_gacha')) {
+      return jsonResponse([]);
+    }
+    if (parsed.pathname.endsWith('/telegram_players')) {
+      return jsonResponse([{ telegram_user_id: USER_ID }]);
+    }
+    if (parsed.pathname.endsWith('/telegram_purchases')) return jsonResponse([]);
+    throw new Error(`Unexpected TON durability request: ${parsed}`);
+  };
+  try {
+    const response = await tonOrderPost({
+      request: request('/api/tg-ton-order', {
+        game: 'megaton',
+        productId: 'arsenal_payload',
+        initData: signedInitData(),
+        checkoutProtocol: MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL,
+      }),
+      env: ENV,
+    });
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).error, /storage is unavailable/i);
+    assert.equal(
+      calls.some((call) => call.url.pathname.endsWith('/telegram_purchases')),
+      true,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('paid-gacha checkout creation stays closed before the configured cutover', async () => {
   let fetchCalled = false;
   const originalFetch = globalThis.fetch;
@@ -244,6 +284,63 @@ test('paid-gacha checkout creation stays closed before the configured cutover', 
     assert.equal(response.status, 503);
     assert.match((await response.json()).error, /not live/i);
     assert.equal(fetchCalled, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('paid-gacha checkout fails closed before exposing payment when its schema is unavailable', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const answers = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ url: parsed, body });
+    if (parsed.pathname.endsWith('/rpc/list_unredeemed_megaton_paid_gacha')) {
+      return jsonResponse({ code: 'PGRST202', message: 'schema cache missing function' }, 404);
+    }
+    if (parsed.pathname.endsWith('/answerPreCheckoutQuery')) {
+      answers.push(body);
+      return jsonResponse({ ok: true, result: true });
+    }
+    throw new Error(`checkout continued after failed schema readiness: ${parsed}`);
+  };
+  try {
+    for (const [handler, path] of [
+      [invoicePost, '/api/tg-invoice'],
+      [tonOrderPost, '/api/tg-ton-order'],
+    ]) {
+      const response = await handler({
+        request: request(path, {
+          game: 'megaton',
+          productId: 'arsenal_payload',
+          initData: signedInitData(),
+          checkoutProtocol: MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL,
+        }),
+        env: ENV,
+      });
+      assert.equal(response.status, 503);
+      assert.match((await response.json()).error, /storage is not ready/i);
+    }
+
+    const preCheckout = await webhookPost({
+      request: webhookRequest({
+        update_id: 9,
+        pre_checkout_query: {
+          id: 'precheckout-schema-missing',
+          from: { id: Number(USER_ID), first_name: 'Checkout' },
+          ...starsPayment(),
+        },
+      }),
+      env: webhookEnv(),
+    });
+    assert.equal(preCheckout.status, 200);
+    assert.equal(answers.at(-1).ok, false);
+    assert.match(answers.at(-1).error_message, /no longer matches/i);
+    assert.equal(calls.some((call) => call.url.hostname === 'api.telegram.org'
+      && !call.url.pathname.endsWith('/answerPreCheckoutQuery')), false);
+    assert.equal(calls.some((call) => call.url.pathname.endsWith('/telegram_purchases')), false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -289,6 +386,9 @@ test('Stars paid-gacha invoice is never exposed before its pending row is durabl
       calls.push({ url: parsed, body: requestBody });
       if (parsed.pathname.endsWith('/telegram_players')) {
         return jsonResponse([{ telegram_user_id: USER_ID }]);
+      }
+      if (parsed.pathname.endsWith('/rpc/list_unredeemed_megaton_paid_gacha')) {
+        return jsonResponse([]);
       }
       if (parsed.pathname.endsWith('/telegram_purchases')) return persistenceResponse.clone();
       if (parsed.hostname === 'api.telegram.org') {
@@ -358,6 +458,9 @@ test('Telegram pre_checkout_query binds payer, XTR currency, and exact catalog a
     const parsed = new URL(String(url));
     const body = init.body ? JSON.parse(init.body) : null;
     if (!parsed.pathname.endsWith('/answerPreCheckoutQuery')) {
+      if (parsed.pathname.endsWith('/rpc/list_unredeemed_megaton_paid_gacha')) {
+        return jsonResponse([]);
+      }
       throw new Error(`Unexpected pre-checkout request: ${parsed}`);
     }
     answers.push(body);
@@ -384,6 +487,10 @@ test('Telegram pre_checkout_query binds payer, XTR currency, and exact catalog a
       queryFor(starsPayment(), 999999),
       queryFor(starsPayment({ currency: 'USD' })),
       queryFor(starsPayment({ total_amount: 24 })),
+      queryFor(starsPayment({
+        invoice_payload: `megaton:welcome_x8:${USER_ID}:1754048000000:retired-invoice`,
+        total_amount: 10,
+      })),
     ]) {
       const response = await webhookPost({
         request: webhookRequest(scenario),
@@ -437,6 +544,48 @@ test('successful_payment is validated again and recorded before acknowledgement'
     assert.equal(paid.total_amount, 25);
     assert.equal(paid.status, 'paid');
     assert.equal(paid.telegram_payment_charge_id, 'telegram-stars-charge-checkout-test');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('successful_payment still records an already-charged disabled catalog item', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const parsed = new URL(String(url));
+    const body = init.body ? JSON.parse(init.body) : null;
+    calls.push({ url: parsed, body });
+    if (parsed.pathname.endsWith('/telegram_players')) {
+      return jsonResponse([{ telegram_user_id: USER_ID }]);
+    }
+    if (parsed.pathname.endsWith('/telegram_purchases')) return jsonResponse(body);
+    if (parsed.pathname.endsWith('/sendMessage')) return jsonResponse({ ok: true, result: true });
+    throw new Error(`Unexpected disabled-payment request: ${parsed}`);
+  };
+  try {
+    const payload = `megaton:welcome_x8:${USER_ID}:1754048000000:retired-invoice`;
+    const response = await webhookPost({
+      request: webhookRequest({
+        update_id: 21,
+        message: {
+          message_id: 21,
+          chat: { id: Number(USER_ID), type: 'private' },
+          from: { id: Number(USER_ID), first_name: 'Checkout' },
+          successful_payment: starsPayment({
+            invoice_payload: payload,
+            total_amount: 10,
+            telegram_payment_charge_id: 'telegram-stars-charge-retired-test',
+          }),
+        },
+      }),
+      env: webhookEnv(),
+    });
+    assert.equal(response.status, 200);
+    const purchase = calls.find((call) => call.url.pathname.endsWith('/telegram_purchases'));
+    assert.equal(purchase.body[0].product_id, 'welcome_x8');
+    assert.equal(purchase.body[0].total_amount, 10);
+    assert.equal(purchase.body[0].status, 'paid');
   } finally {
     globalThis.fetch = originalFetch;
   }

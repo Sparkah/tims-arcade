@@ -106,6 +106,27 @@ const PAID_PRODUCT_SPECS = Object.freeze({
 export const MEGATON_PAID_GACHA_PRODUCT_IDS = Object.freeze(Object.keys(PAID_PRODUCT_SPECS));
 export const MEGATON_PAID_RECONCILE_LIMIT = 100;
 
+export async function assertMegatonPaidGachaStorageReady(env, telegramUserId) {
+  // The paid-gacha schema is installed in one explicit SQL transaction. A
+  // successful call to its read-only RPC therefore proves that the tables,
+  // trigger, RPCs, grants, and PostgREST schema cache are ready before we
+  // expose any payable checkout.
+  const rawCutover = String(env && env.MEGATON_PAID_GACHA_CUTOVER_AT || '').trim();
+  const cutoverMs = Date.parse(rawCutover);
+  if (!rawCutover || !Number.isFinite(cutoverMs)) {
+    const error = new Error('Megaton paid-gacha storage readiness check failed');
+    error.code = 'megaton_paid_gacha_storage_not_ready';
+    throw error;
+  }
+  await listPaidMegatonGachaPurchases(
+    env,
+    telegramUserId,
+    new Date(cutoverMs).toISOString(),
+    1,
+  );
+  return true;
+}
+
 const DROP_TABLES = Object.freeze({
   premium: Object.freeze([
     ['rare', 780000],

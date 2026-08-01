@@ -9,6 +9,7 @@ import {
 } from '../_lib/tgProducts.js';
 import { buildTonOrder } from '../_lib/tonPayments.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
+import { assertMegatonPaidGachaStorageReady } from '../_lib/megatonPaidGacha.js';
 import {
   recordTelegramPurchase,
   supabaseIsConfigured,
@@ -52,8 +53,16 @@ export async function onRequestPost({ request, env }) {
   const auth = await verifyTelegramInitData(String(body.initData || ''), env.TELEGRAM_GAMEBOT_TOKEN);
   if (!auth.ok) return jsonError(auth.error, 401);
 
-  await upsertTelegramPlayer(env, auth.user);
-  await recordTelegramPurchase(env, {
+  if (paidGachaCheckout) {
+    try {
+      await assertMegatonPaidGachaStorageReady(env, auth.user.id);
+    } catch (error) {
+      console.error('tg-ton-order paid-gacha storage readiness failed', error && error.message);
+      return jsonError('Paid-gacha purchase storage is not ready', 503);
+    }
+  }
+
+  const pendingPurchase = {
     payload: order.payload,
     game,
     product_id: productId,
@@ -73,7 +82,29 @@ export async function onRequestPost({ request, env }) {
         checkoutLineage: MEGATON_PAID_GACHA_LINEAGE,
       } : {}),
     },
-  });
+  };
+
+  let saved;
+  try {
+    await upsertTelegramPlayer(env, auth.user);
+    const rows = await recordTelegramPurchase(env, pendingPurchase);
+    saved = Array.isArray(rows) && rows.length ? rows[0] : null;
+  } catch (error) {
+    console.error('tg-ton-order pending purchase write failed', error && error.message);
+    return jsonError('TON purchase storage is unavailable', 503);
+  }
+  if (
+    !saved
+    || saved.payload !== pendingPurchase.payload
+    || saved.game !== pendingPurchase.game
+    || saved.product_id !== pendingPurchase.product_id
+    || String(saved.telegram_user_id || '') !== String(pendingPurchase.telegram_user_id)
+    || saved.currency !== 'TON'
+    || String(saved.total_amount || '') !== String(pendingPurchase.total_amount)
+    || saved.status !== 'pending'
+  ) {
+    return jsonError('TON purchase storage is unavailable', 503);
+  }
 
   return json(
     {

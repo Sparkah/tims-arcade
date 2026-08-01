@@ -248,6 +248,13 @@ export function hasStarsPrice(product) {
   return Boolean(
     product
     && product.disabled !== true
+    && hasHistoricalStarsPrice(product),
+  );
+}
+
+export function hasHistoricalStarsPrice(product) {
+  return Boolean(
+    product
     && Number.isFinite(Number(product.amount))
     && Number(product.amount) > 0,
   );
