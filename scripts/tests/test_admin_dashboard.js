@@ -40,6 +40,7 @@ const VISIBLE_COUNT = TOTAL - HIDDEN.length;
 
 const STUBS = {
   '/games.json': GAMES,
+  '/api/admin/catalogue': GAMES,
   '/api/admin/hidden': { hidden: HIDDEN },
   '/api/admin/publish-status': { games: {}, core_platforms: [] },
   '/api/admin/stats': {
