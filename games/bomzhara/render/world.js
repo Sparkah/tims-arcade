@@ -1,10 +1,10 @@
 // WebGL world render: builds the GL instance buffer each frame (Bloodtread procedural pipeline) and
 // draws it in one batch. Shapes: 0 disc, 1 box, 2 diamond, 3 ring (fat glow), 4 thin ring. Colors are 0..1.
-import { gl, addInst, addLineInst, drawInstances, resetSpriteBatches, queueSpriteRot, flushSprites } from './context.js?v=20260704a';
-import { screenLen } from './camera.js?v=20260704a';
-import { player, bullets, enemies, parts, pickups, puddles, squirrel, tapok, view, state, sprites, cam } from '../state.js?v=20260704a';
-import { TAU } from '../lib/math.js?v=20260704a';
-import { arena, mapColliders, stairHorrorExit } from '../update.js?v=20260704a';
+import { gl, addInst, addLineInst, drawInstances, resetSpriteBatches, queueSpriteRot, flushSprites } from './context.js?v=20260801a';
+import { screenLen } from './camera.js?v=20260801a';
+import { player, bullets, enemies, parts, pickups, puddles, squirrel, tapok, view, state, sprites, cam } from '../state.js?v=20260801a';
+import { TAU } from '../lib/math.js?v=20260801a';
+import { arena, mapColliders, stairHorrorExit } from '../update.js?v=20260801a';
 
 var PCOL = [[1,0.72,0.24],[0.85,0.12,0.12],[0.95,0.25,0.72],[1,1,1],[0.55,0.85,0.35],[1,0.34,0.08],[0.18,0.12,0.08]];
 var ENEMY_SPRITES = ['enemy_beer_imp', 'enemy_wine_wretch', 'enemy_champagne_shard', 'enemy_cognac_brute'];

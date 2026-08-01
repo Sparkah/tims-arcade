@@ -1,5 +1,5 @@
-import { uploadSpriteTexture } from './context.js?v=20260704a';
-import { sprites } from '../state.js?v=20260704a';
+import { uploadSpriteTexture } from './context.js?v=20260801a';
+import { sprites } from '../state.js?v=20260801a';
 
 var SPRITE_BASE = '../assets/generated/';
 var SPRITE_FILES = {
@@ -72,5 +72,5 @@ function loadOne(key, file) {
     gameSpriteArtStatus.error++;
     settle();
   };
-  img.src = new URL(SPRITE_BASE + file, import.meta.url).href + '?v=20260704a';
+  img.src = new URL(SPRITE_BASE + file, import.meta.url).href + '?v=20260801a';
 }

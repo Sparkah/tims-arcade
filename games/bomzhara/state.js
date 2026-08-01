@@ -1,6 +1,6 @@
 // Centralized mutable state: SoA pools + singletons (Bloodtread idiom).
 // Typed arrays allocated ONCE; reset by zeroing .count. context.js imports player/view/sprites/enemies/cam.
-import { MAX_BULLETS, MAX_FOES, MAX_PARTS, MAX_PICKUPS, MAX_PUDDLES, BAL } from './config.js?v=20260704a';
+import { MAX_BULLETS, MAX_FOES, MAX_PARTS, MAX_PICKUPS, MAX_PUDDLES, BAL } from './config.js?v=20260801a';
 
 var HORROR_STORE = 'bomzhara:horrors_seen';
 function loadHorrorSeen() {

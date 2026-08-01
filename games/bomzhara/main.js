@@ -1,16 +1,17 @@
 // Boot + frame loop. Sizes the GL + HUD canvases to the viewport (DPR-aware), wires input, and runs
 // a fixed-timestep accumulator (Bloodtread loop idiom): step update(STEP), then renderWorld + renderHud.
-import { gl, glCanvas, hudCanvas } from './render/context.js?v=20260704a';
-import { view, cam, state, sprites, tapok } from './state.js?v=20260704a';
-import { STEP, MAX_STEPS } from './config.js?v=20260704a';
-import { updateCameraMetrics } from './render/camera.js?v=20260704a';
-import { update, startRun, arena, chooseUpgrade, mapColliders, mapSolids, mapEnemyHoles, mapTapokSpots, mapEnemyEntrances, mapCircleBlocked, reloadMapSolidDefs, mapSolidSource, eventTuning } from './update.js?v=20260704a';
-import { renderWorld, playerAnimationDebug, enemyFacingDebug } from './render/world.js?v=20260704a';
-import { renderHud, hudRects, upRects, bomzharaArtStatus } from './render/hud.js?v=20260704a';
-import { loadGameSprites, gameSpriteArtStatus } from './render/assets.js?v=20260704a';
-import { initInput, onPress } from './input.js?v=20260704a';
-import { player, bullets, enemies, parts, pickups, puddles, squirrel, input } from './state.js?v=20260704a';
-import { unlockGameAudio, toggleGameAudioMuted, audioDebug, setWindLevel } from './audio.js?v=20260704a';
+import { gl, glCanvas, hudCanvas } from './render/context.js?v=20260801a';
+import { view, cam, state, sprites, tapok } from './state.js?v=20260801a';
+import { STEP, MAX_STEPS } from './config.js?v=20260801a';
+import { updateCameraMetrics } from './render/camera.js?v=20260801a';
+import { update, startRun, arena, chooseUpgrade, mapColliders, mapSolids, mapEnemyHoles, mapTapokSpots, mapEnemyEntrances, mapCircleBlocked, reloadMapSolidDefs, mapSolidSource, eventTuning } from './update.js?v=20260801a';
+import { renderWorld, playerAnimationDebug, enemyFacingDebug } from './render/world.js?v=20260801a';
+import { renderHud, hudRects, upRects, bomzharaArtStatus, resetHelpPage, moveHelpPage, getHelpPage } from './render/hud.js?v=20260801a';
+import { loadGameSprites, gameSpriteArtStatus } from './render/assets.js?v=20260801a';
+import { initInput, onPress } from './input.js?v=20260801a';
+import { player, bullets, enemies, parts, pickups, puddles, squirrel, input } from './state.js?v=20260801a';
+import { unlockGameAudio, toggleGameAudioMuted, audioDebug, setWindLevel } from './audio.js?v=20260801a';
+import { T, getLocale, setLocale } from './texts.js?v=20260801a';
 
 var DIFF_STORE = 'bomzhara:difficulty';
 try {
@@ -22,8 +23,11 @@ function setDifficulty(d) {
   try { window.localStorage && window.localStorage.setItem(DIFF_STORE, d); } catch (e) {}
 }
 
-// debug/QA hook (experiment prototype): lets a headless test read run state
-window.__BZ = {
+// Mutation-capable diagnostics are available only to the local browser harness.
+// The public build keeps the read-only render_game_to_text snapshot below, but
+// exposes no start/upgrade/time/map controls through the console.
+var localQaHost = window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost';
+if (localQaHost) window.__BZ = {
   state: state, player: player, bullets: bullets, enemies: enemies, parts: parts, pickups: pickups, puddles: puddles, tapok: tapok, squirrel: squirrel, input: input,
   start: function () { startRun(); },
   chooseUpgrade: function (i) { chooseUpgrade(i); },
@@ -64,6 +68,9 @@ window.render_game_to_text = function () {
   return JSON.stringify({
     coords: 'origin top-left, +x right, +y down, CSS pixels',
     mode: state.mode,
+    endReason: state.endReason,
+    language: getLocale(),
+    ui: { menuPlay: T.menuPlay, pauseTitle: T.pauseTitle, helpTitle: T.helpTitle, vodkaLabel: T.barVodka, helpPage: getHelpPage() },
     difficulty: state.difficulty,
     timeLeft: Math.max(0, Math.ceil(state.goalTime - state.survived)),
     objective: 'survive until ambulance arrives',
@@ -74,6 +81,7 @@ window.render_game_to_text = function () {
     animation: { spriteOverlays: true, projectileSpin: true, enemySpriteFacing: true, legacyEnemyShapes: false, fizzSnowFire: true },
     weird: { kind: state.weirdKind, t: +state.weirdT.toFixed(2), siren: +state.sirenPulse.toFixed(2), blackout: +state.blackoutPulse.toFixed(2), window: +state.windowPulse.toFixed(2), possessed: [state.possessedX, state.possessedY] },
     horrorSeen: state.horrorSeen,
+    tutorial: { step: state.tutorStep, timer: +state.tutorT.toFixed(2) },
     input: { moveX: +input.moveX.toFixed(2), moveY: +input.moveY.toFixed(2) },
     player: { x: Math.round(player.x), y: Math.round(player.y), hp: +player.hp.toFixed(1), vodka: +player.vodka.toFixed(1), belochka: +player.belochka.toFixed(2) },
     playerAnimation: playerAnimationDebug(),
@@ -85,6 +93,9 @@ window.render_game_to_text = function () {
     puddles: puddles.count,
     visibleEnemies: visibleEnemies,
     kills: state.kills,
+    phantoms: state.phantoms,
+    xp: +state.xp.toFixed(2),
+    xpNext: +state.xpNext.toFixed(2),
     level: state.level,
   });
 };
@@ -113,6 +124,11 @@ function press(x, y, isKey) {
     if (state.mode === 'HELP') { state.mode = state.helpFrom === 'PAUSE' ? 'PAUSE' : 'PLAY'; return true; }
     return false;
   }
+  if (state.mode === 'MENU' || state.mode === 'PAUSE') {
+    for (var li = 0; li < hudRects.languages.length; li++) {
+      if (inRect(hudRects.languages[li], x, y)) { setLocale(hudRects.languages[li].id); return true; }
+    }
+  }
   if (state.mode === 'MENU') {
     for (var di = 0; di < hudRects.diff.length; di++) {
       if (inRect(hudRects.diff[di], x, y)) { setDifficulty(hudRects.diff[di].id); return true; }
@@ -121,13 +137,15 @@ function press(x, y, isKey) {
   if (state.mode === 'PLAY') {
     if (state.tutorStep === 2) { state.tutorStep = 3; state.tutorT = 2.6; return true; } // tutorial read-gate: any tap continues
     if (inRect(hudRects.pause, x, y)) { state.mode = 'PAUSE'; return true; }
-    if (inRect(hudRects.help, x, y)) { state.helpFrom = 'PLAY'; state.mode = 'HELP'; return true; }
+    if (inRect(hudRects.help, x, y)) { state.helpFrom = 'PLAY'; resetHelpPage(); state.mode = 'HELP'; return true; }
   } else if (state.mode === 'PAUSE') {
     if (inRect(hudRects.resume, x, y)) { state.mode = 'PLAY'; return true; }
     if (inRect(hudRects.sound, x, y)) { toggleGameAudioMuted(); return true; }
     if (inRect(hudRects.toMenu, x, y)) { state.mode = 'MENU'; return true; }
     return true; // swallow stray taps so the joystick never grabs them under the overlay
   } else if (state.mode === 'HELP') {
+    if (inRect(hudRects.helpPrev, x, y)) { moveHelpPage(-1); return true; }
+    if (inRect(hudRects.helpNext, x, y)) { moveHelpPage(1); return true; }
     if (inRect(hudRects.back, x, y)) { state.mode = state.helpFrom === 'PAUSE' ? 'PAUSE' : 'PLAY'; return true; }
     return true;
   }
@@ -143,7 +161,7 @@ function stepFrame(dt) {
   update(dt);
 }
 
-window.advanceTime = function (ms) {
+if (localQaHost) window.advanceTime = function (ms) {
   var steps = Math.max(1, Math.round(ms / (1000 / 60)));
   for (var i = 0; i < steps; i++) update(STEP);
   renderWorld();

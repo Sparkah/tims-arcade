@@ -33,7 +33,7 @@ function writeMuted() {
 }
 
 function url(file) {
-  return new URL(file, import.meta.url).href + '?v=20260704a';
+  return new URL(file, import.meta.url).href + '?v=20260801a';
 }
 
 function ensureContext() {

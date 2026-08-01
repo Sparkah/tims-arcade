@@ -150,6 +150,10 @@ for ((i = 0; i < COUNT; i++)); do
   # "never sweep development helpers into public" rule this file is built on.
   SHIP_LIST="$GAME_DIR/gallery_ship.txt"
   if [[ -f "$SHIP_LIST" ]]; then
+    # Publish the manifest itself as content-addressed metadata. The release
+    # verifier reads the same file from source and Gallery so stale leftovers
+    # cannot masquerade as part of the declared public runtime.
+    cp "$SHIP_LIST" "$OUT_GAMES/$SLUG/gallery_ship.txt"
     ship_missing=0
     while IFS= read -r ship_path || [[ -n "$ship_path" ]]; do
       ship_path="${ship_path%%#*}"

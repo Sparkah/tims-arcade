@@ -3,7 +3,7 @@
 // Same data-oriented stack as Bloodtread: SoA pools sized here, WebGL2 instance buffer.
 
 // -- engine: instance renderer + loop (context.js + main loop read these) --
-import { T } from './texts.js?v=20260704a';
+import { T } from './texts.js?v=20260801a';
 
 export var INV_STRIDE = 12;          // floats per GL instance (matches context.js addInst layout)
 export var STEP = 1 / 60;            // fixed sim timestep

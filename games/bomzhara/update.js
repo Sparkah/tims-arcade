@@ -1,13 +1,13 @@
 // BULLET HELL BOMZHARA - simulation step. The enemy is you: vodka is ammo AND sanity, blood is your last
 // reserve, белочка spawns the ghosts. The bomzh loves VODKA only - every other drink is a demon. Roguelite
 // level-ups between the killing. Your own bounced bottles are dangerous too.
-import { state, player, bullets, enemies, parts, pickups, puddles, squirrel, tapok, cam, view, input, rememberHorror } from './state.js?v=20260704a';
-import { BAL, ARENA_INSET, BOOZE, UPGRADES } from './config.js?v=20260704a';
-import { clamp, len, rand, randInt, TAU } from './lib/math.js?v=20260704a';
-import { addTrauma } from './render/camera.js?v=20260704a';
-import { loadMapSolidDefs, hasStoredMapSolidDefs, loadEventTuning } from './map-colliders.js?v=20260704a';
-import { T } from './texts.js?v=20260704a';
-import { playSfx } from './audio.js?v=20260704a';
+import { state, player, bullets, enemies, parts, pickups, puddles, squirrel, tapok, cam, view, input, rememberHorror } from './state.js?v=20260801a';
+import { BAL, ARENA_INSET, BOOZE, UPGRADES } from './config.js?v=20260801a';
+import { clamp, len, rand, randInt, TAU } from './lib/math.js?v=20260801a';
+import { addTrauma } from './render/camera.js?v=20260801a';
+import { loadMapSolidDefs, hasStoredMapSolidDefs, loadEventTuning } from './map-colliders.js?v=20260801a';
+import { T } from './texts.js?v=20260801a';
+import { playSfx } from './audio.js?v=20260801a';
 
 export function arena() {
   return {

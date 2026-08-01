@@ -1,4 +1,4 @@
-import { BAL } from './config.js?v=20260704a';
+import { BAL } from './config.js?v=20260801a';
 
 export var COLLIDER_STORAGE_KEY = 'bomzhara:map-colliders:v1';
 export var MAP_COLLIDER_VERSION = 6;   // payload version written by the builder

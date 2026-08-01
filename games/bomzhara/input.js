@@ -1,7 +1,7 @@
 // Input: drag-anywhere joystick (touch/mouse) + WASD/arrows, plus a tap callback for menu buttons.
 // Writes a normalized move vector to input.moveX/moveY (read by systems/player each step).
-import { input, view } from './state.js?v=20260704a';
-import { clamp, len } from './lib/math.js?v=20260704a';
+import { input, view } from './state.js?v=20260801a';
+import { clamp, len } from './lib/math.js?v=20260801a';
 
 var keysDown = Object.create(null);
 var pressCb = null;

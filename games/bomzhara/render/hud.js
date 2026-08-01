@@ -1,21 +1,20 @@
 // 2D HUD overlay (drawn in CSS px on the #hud canvas above the GL world): meters, белочка drunk
 // vignette + double-vision, banners, the squirrel taunt, and the menu / death / win screens.
-import { hud } from './context.js?v=20260704a';
-import { player, view, state, squirrel, tapok, sprites } from '../state.js?v=20260704a';
-import { UPGRADES, BOOZE } from '../config.js?v=20260704a';
-import { clamp } from '../lib/math.js?v=20260704a';
-import { T } from '../texts.js?v=20260704a';
-import { audioDebug } from '../audio.js?v=20260704a';
+import { hud } from './context.js?v=20260801a';
+import { player, view, state, squirrel, tapok, sprites } from '../state.js?v=20260801a';
+import { UPGRADES, BOOZE } from '../config.js?v=20260801a';
+import { clamp } from '../lib/math.js?v=20260801a';
+import { T, getLocale } from '../texts.js?v=20260801a';
+import { audioDebug } from '../audio.js?v=20260801a';
 
-export var hudRects = { play: null, retry: null, diff: [], pause: null, help: null, resume: null, sound: null, back: null, toMenu: null };
+export var hudRects = { play: null, retry: null, diff: [], languages: [], pause: null, help: null, helpPrev: null, helpNext: null, resume: null, sound: null, back: null, toMenu: null };
 export var upRects = [];
 export var bomzharaArtStatus = { loaded: false, error: false, src: '', deathLoaded: false, deathError: false, deathSrc: '', menuBgLoaded: false, menuBgError: false };
-var SQUIRREL_LINES = T.squirrelLines;
-var HORRORS = [
-  { id: 'blackout', name: T.horrorBlackoutName, desc: T.horrorBlackoutDesc },
-  { id: 'possessed', name: T.horrorPossessedName, desc: T.horrorPossessedDesc },
-  { id: 'window', name: T.horrorWindowName, desc: T.horrorWindowDesc },
-];
+var mobileHelpPage = 0;
+
+export function resetHelpPage() { mobileHelpPage = 0; }
+export function moveHelpPage(delta) { mobileHelpPage = clamp(mobileHelpPage + delta, 0, 2); }
+export function getHelpPage() { return mobileHelpPage; }
 var bomzharaArt = null;
 var bomzharaDeathArt = null;
 var menuBgArt = null;
@@ -25,21 +24,21 @@ if (typeof Image !== 'undefined') {
   bomzharaArt.decoding = 'async';
   bomzharaArt.onload = function () { bomzharaArtStatus.loaded = true; };
   bomzharaArt.onerror = function () { bomzharaArtStatus.error = true; };
-  bomzharaArtStatus.src = new URL('../assets/final/bomzhara_toast_builtin_b_painterly.png', import.meta.url).href + '?v=20260704a';
+  bomzharaArtStatus.src = new URL('../assets/final/bomzhara_toast_builtin_b_painterly.png', import.meta.url).href + '?v=20260801a';
   bomzharaArt.src = bomzharaArtStatus.src;
 
   bomzharaDeathArt = new Image();
   bomzharaDeathArt.decoding = 'async';
   bomzharaDeathArt.onload = function () { bomzharaArtStatus.deathLoaded = true; };
   bomzharaDeathArt.onerror = function () { bomzharaArtStatus.deathError = true; };
-  bomzharaArtStatus.deathSrc = new URL('../assets/final/bomzhara_death_broken_glass_painterly.png', import.meta.url).href + '?v=20260704a';
+  bomzharaArtStatus.deathSrc = new URL('../assets/final/bomzhara_death_broken_glass_painterly.png', import.meta.url).href + '?v=20260801a';
   bomzharaDeathArt.src = bomzharaArtStatus.deathSrc;
 
   menuBgArt = new Image();
   menuBgArt.decoding = 'async';
   menuBgArt.onload = function () { bomzharaArtStatus.menuBgLoaded = true; };
   menuBgArt.onerror = function () { bomzharaArtStatus.menuBgError = true; };
-  menuBgArt.src = new URL('../assets/generated/v12_menu_backdrop/final/menu_backdrop_winter_window.png', import.meta.url).href + '?v=20260704a';
+  menuBgArt.src = new URL('../assets/generated/v12_menu_backdrop/final/menu_backdrop_winter_window.png', import.meta.url).href + '?v=20260801a';
 }
 
 function bar(x, y, w, h, frac, r, g, b, label, val) {
@@ -96,6 +95,9 @@ function button(label, cx, cy, w, h, accent) {
 
 export function renderHud() {
   var c = hud, W = view.cssW, H = view.cssH;
+  hudRects.languages = [];
+  hudRects.helpPrev = null;
+  hudRects.helpNext = null;
   c.setTransform(view.dpr, 0, 0, view.dpr, 0, 0);
   c.clearRect(0, 0, W, H);
   var warp = state.warp;
@@ -159,7 +161,7 @@ export function renderHud() {
   // squirrel taunt
   if (squirrel.active && squirrel.talkT > 0 && state.mode === 'PLAY') {
     c.fillStyle = 'rgba(255,255,255,0.92)'; c.font = 'italic 13px ui-monospace,monospace'; c.textAlign = 'center'; c.textBaseline = 'bottom';
-    c.fillText(SQUIRREL_LINES[squirrel.line], clamp(squirrel.x, 80, W - 80), squirrel.y - 30);
+    c.fillText(T.squirrelLines[squirrel.line], clamp(squirrel.x, 80, W - 80), squirrel.y - 30);
   }
 
   // banner
@@ -198,6 +200,27 @@ function squareButton(glyph, cx, cy, s, active) {
   return { x: x, y: y, w: s, h: s };
 }
 
+function drawLanguagePicker(W) {
+  var c = hud, choices = [['en', 'EN'], ['ru', 'RU']];
+  var w = 48, h = 32, gap = 6, total = choices.length * w + gap;
+  var x0 = W - total - 14, y = 14;
+  hudRects.languages = [];
+  for (var i = 0; i < choices.length; i++) {
+    var x = x0 + i * (w + gap), active = getLocale() === choices[i][0];
+    c.save();
+    if (active) { c.shadowColor = '#ffd23d'; c.shadowBlur = 10; }
+    c.fillStyle = active ? '#ffd23d' : 'rgba(20,16,11,0.88)';
+    rr(c, x, y, w, h, h / 2); c.fill();
+    c.restore();
+    c.strokeStyle = active ? '#ffd23d' : 'rgba(255,210,61,0.45)';
+    c.lineWidth = 1.5; rr(c, x, y, w, h, h / 2); c.stroke();
+    c.fillStyle = active ? '#120a06' : '#f0dfae';
+    c.font = 'bold 13px ui-monospace,monospace'; c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(choices[i][1], x + w / 2, y + h / 2 + 1);
+    hudRects.languages.push({ x: x, y: y, w: w, h: h, id: choices[i][0] });
+  }
+}
+
 function drawTopButtons(W, H) {
   hudRects.pause = squareButton('pause', W - 66, 102, 38, false);
   hudRects.help = squareButton('?', W - 22 - 2, 102, 38, false);
@@ -221,7 +244,7 @@ function drawPause(W, H) {
   var tk = state.takenUpgrades || {};
   for (var i = 0; i < UPGRADES.length; i++) {
     var n = tk[UPGRADES[i].id];
-    if (n) taken.push(UPGRADES[i].ru + (n > 1 ? ' x' + n : ''));
+    if (n) taken.push(T.upgrades[UPGRADES[i].id].name + (n > 1 ? ' x' + n : ''));
   }
   c.font = '13px ui-monospace,monospace';
   if (!taken.length) {
@@ -237,6 +260,7 @@ function drawPause(W, H) {
       c.fillText(taken[t2], tx, H * 0.61 + row * 22);
     }
   }
+  drawLanguagePicker(W);
 }
 
 function iconFit(img, x, y, s) {
@@ -250,6 +274,7 @@ function iconFit(img, x, y, s) {
 function drawHelp(W, H) {
   var c = hud;
   c.fillStyle = 'rgba(5,4,3,0.94)'; c.fillRect(0, 0, W, H);
+  if (W < 760 || H < 620) { drawHelpMobile(W, H); return; }
   var k = Math.max(0.62, Math.min(1, W / 1060, H / 780));
   c.save();
   c.translate(W / 2, 0); c.scale(k, k); c.translate(-530, 0);
@@ -274,7 +299,7 @@ function drawHelp(W, H) {
   for (var m = 0; m < mrows.length; m++) {
     iconFit(sprites.images[mrows[m][0]], 40, y + 2, 40);
     c.fillStyle = '#f3ead6'; c.font = 'bold 13px ui-monospace,monospace';
-    c.fillText(mrows[m][1].ru.toUpperCase() + '  ' + T.helpHpPrefix + mrows[m][1].hp, 90, y + 14);
+    c.fillText(T.booze[mrows[m][1].id].toUpperCase() + '  ' + T.helpHpPrefix + mrows[m][1].hp, 90, y + 14);
     c.fillStyle = '#b6a88d'; c.font = '12px ui-monospace,monospace';
     c.fillText(mrows[m][2], 90, y + 32);
     y += 48;
@@ -304,14 +329,97 @@ function drawHelp(W, H) {
   c.fillStyle = '#f0c966'; c.font = 'bold 15px ui-monospace,monospace';
   c.fillText(T.helpUpgradesTitle, 560, ry); ry += 22;
   for (var u = 0; u < UPGRADES.length; u++) {
+    var upgradeText = T.upgrades[UPGRADES[u].id];
     c.fillStyle = '#f3ead6'; c.font = 'bold 12px ui-monospace,monospace';
-    c.fillText(UPGRADES[u].ru, 560, ry);
+    c.fillText(upgradeText.name, 560, ry);
     c.fillStyle = '#b6a88d'; c.font = '12px ui-monospace,monospace';
-    c.fillText(UPGRADES[u].de, 780, ry);
+    c.fillText(upgradeText.desc, 780, ry);
     ry += 26;
   }
   c.restore();
   hudRects.back = button(T.helpBack, W / 2, H - 44, 220, 46, '#ffd23d');
+}
+
+function drawWrappedLeft(c, text, x, y, maxW, lineHeight, maxLines) {
+  var words = text.split(' '), line = '', lines = [];
+  for (var i = 0; i < words.length; i++) {
+    var next = line ? line + ' ' + words[i] : words[i];
+    if (c.measureText(next).width > maxW && line) { lines.push(line); line = words[i]; }
+    else line = next;
+  }
+  if (line) lines.push(line);
+  if (maxLines && lines.length > maxLines) lines = lines.slice(0, maxLines);
+  for (var j = 0; j < lines.length; j++) c.fillText(lines[j], x, y + j * lineHeight);
+  return Math.max(1, lines.length) * lineHeight;
+}
+
+function drawHelpMobile(W, H) {
+  var c = hud, margin = 18, y = 30;
+  c.textAlign = 'left'; c.textBaseline = 'middle';
+  c.save(); c.shadowColor = '#ffd23d'; c.shadowBlur = 12;
+  c.fillStyle = '#ffd23d'; c.font = 'bold 20px ui-monospace,monospace';
+  c.fillText(T.helpTitle, margin, y); c.restore();
+  c.fillStyle = '#8e826d'; c.font = 'bold 12px ui-monospace,monospace'; c.textAlign = 'right';
+  c.fillText((mobileHelpPage + 1) + '/3', W - margin, y);
+  c.textAlign = 'left'; y = 62;
+
+  if (mobileHelpPage === 0) {
+    c.fillStyle = '#d8c8a8'; c.font = '11px ui-monospace,monospace';
+    for (var h2 = 0; h2 < T.helpHowTo.length; h2++) {
+      y += drawWrappedLeft(c, T.helpHowTo[h2], margin, y, W - margin * 2, 15, 2) + 2;
+    }
+    y += 6;
+    c.fillStyle = '#f0c966'; c.font = 'bold 14px ui-monospace,monospace';
+    c.fillText(T.helpMonstersTitle, margin, y); y += 24;
+    var mrows = [
+      ['enemy_beer_imp', BOOZE[0], T.helpMonsterBeer],
+      ['enemy_wine_wretch', BOOZE[1], T.helpMonsterWine],
+      ['enemy_champagne_shard', BOOZE[2], T.helpMonsterChamp],
+      ['enemy_cognac_brute', BOOZE[3], T.helpMonsterCognac],
+    ];
+    for (var m = 0; m < mrows.length; m++) {
+      iconFit(sprites.images[mrows[m][0]], margin, y - 8, 42);
+      c.fillStyle = '#f3ead6'; c.font = 'bold 12px ui-monospace,monospace';
+      c.fillText(T.booze[mrows[m][1].id].toUpperCase() + '  ' + T.helpHpPrefix + mrows[m][1].hp, margin + 50, y);
+      c.fillStyle = '#b6a88d'; c.font = '11px ui-monospace,monospace';
+      drawWrappedLeft(c, mrows[m][2], margin + 50, y + 17, W - margin * 2 - 50, 14, 2);
+      y += 60;
+    }
+  } else if (mobileHelpPage === 1) {
+    c.fillStyle = '#f0c966'; c.font = 'bold 14px ui-monospace,monospace';
+    c.fillText(T.helpItemsTitle, margin, y); y += 24;
+    var irows = [
+      ['proj_vodka_bottle', T.helpItemVodka],
+      ['pickup_zakuska_pickle', T.helpItemZakuska],
+      ['tapok_old_sneaker', T.helpItemTapok],
+      ['horror_open_window', T.helpItemWindow],
+      ['shield_mattress', T.helpItemMattress],
+      ['belochka_squirrel', T.helpItemBelochka],
+    ];
+    for (var it = 0; it < irows.length; it++) {
+      iconFit(sprites.images[irows[it][0]], margin, y - 8, 42);
+      c.fillStyle = '#f3ead6'; c.font = 'bold 12px ui-monospace,monospace';
+      c.fillText(irows[it][1].name, margin + 50, y);
+      c.fillStyle = '#b6a88d'; c.font = '11px ui-monospace,monospace';
+      drawWrappedLeft(c, irows[it][1].desc, margin + 50, y + 17, W - margin * 2 - 50, 14, 3);
+      y += 78;
+    }
+  } else {
+    c.fillStyle = '#f0c966'; c.font = 'bold 14px ui-monospace,monospace';
+    c.fillText(T.helpUpgradesTitle, margin, y); y += 24;
+    for (var u = 0; u < UPGRADES.length; u++) {
+      var upgradeText = T.upgrades[UPGRADES[u].id];
+      c.fillStyle = '#f3ead6'; c.font = 'bold 11px ui-monospace,monospace';
+      c.fillText(upgradeText.name, margin, y);
+      c.fillStyle = '#b6a88d'; c.font = '10px ui-monospace,monospace';
+      c.fillText(upgradeText.desc, margin, y + 15);
+      y += 38;
+    }
+  }
+
+  hudRects.back = button(T.helpBack, W / 2, H - 42, 160, 44, '#ffd23d');
+  if (mobileHelpPage > 0) hudRects.helpPrev = button('<', 44, H - 42, 54, 44, '#d8c8a8');
+  if (mobileHelpPage < 2) hudRects.helpNext = button('>', W - 44, H - 42, 54, 44, '#d8c8a8');
 }
 
 function drawMeters(W, H, warp) {
@@ -458,6 +566,7 @@ function drawMenu(W, H) {
   }
   if (state.best > 0) { c.fillStyle = '#776'; c.font = '12px ui-monospace,monospace'; c.fillText(T.menuBestPrefix + state.best, cx, H / 2 + 150); }
   drawHorrorList(W, H);
+  drawLanguagePicker(W);
 }
 
 function drawEnd(W, H, win) {
@@ -497,13 +606,14 @@ function drawUpgrade(W, H) {
   var n = state.upChoices.length, top = 172, ch = Math.min((H - top - 24) / n - 10, 112), cw = Math.min(W - 40, 460), cx0 = W / 2 - cw / 2;
   for (var i = 0; i < n; i++) {
     var u = UPGRADES[state.upChoices[i]], y = top + i * (ch + 10);
+    var upgradeText = T.upgrades[u.id];
     c.save(); c.shadowColor = '#ffd23d'; c.shadowBlur = 12;
     c.fillStyle = 'rgba(22,18,12,0.96)'; rr(c, cx0, y, cw, ch, 12); c.fill(); c.restore();
     c.lineWidth = 2; c.strokeStyle = '#ffd23d'; rr(c, cx0, y, cw, ch, 12); c.stroke();
     c.textAlign = 'left'; c.fillStyle = '#ffd23d'; c.font = 'bold 18px ui-monospace,monospace';
-    c.fillText(u.ru, cx0 + 16, y + ch * 0.44);
+    c.fillText(upgradeText.name, cx0 + 16, y + ch * 0.44);
     c.fillStyle = '#c8d2ee'; c.font = '13px ui-monospace,monospace';
-    c.fillText(u.de, cx0 + 16, y + ch * 0.72);
+    c.fillText(upgradeText.desc, cx0 + 16, y + ch * 0.72);
     upRects.push({ x: cx0, y: y, w: cw, h: ch });
   }
   c.textAlign = 'left';
@@ -556,7 +666,12 @@ function drawWindSound(W, H) {
 
 function drawHorrorList(W, H) {
   var c = hud, seen = [], i;
-  for (i = 0; i < HORRORS.length; i++) if (state.horrorSeen[HORRORS[i].id]) seen.push(HORRORS[i]);
+  var horrors = [
+    { id: 'blackout', name: T.horrorBlackoutName, desc: T.horrorBlackoutDesc },
+    { id: 'possessed', name: T.horrorPossessedName, desc: T.horrorPossessedDesc },
+    { id: 'window', name: T.horrorWindowName, desc: T.horrorWindowDesc },
+  ];
+  for (i = 0; i < horrors.length; i++) if (state.horrorSeen[horrors[i].id]) seen.push(horrors[i]);
   if (!seen.length) return;
   var w = Math.min(560, W - 40), x = W / 2 - w / 2, y = Math.min(H - 122, H / 2 + 134);
   c.save();

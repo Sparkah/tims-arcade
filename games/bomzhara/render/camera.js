@@ -1,8 +1,8 @@
 // Camera projection. Single-screen arena: the camera target `cam` is pinned at the viewport centre
 // (set in main on resize), zoom = 1, so WORLD space == SCREEN space. context.js imports worldToScreenX/Y.
-import { view, cam, state } from '../state.js?v=20260704a';
-import { MAX_SHAKE_PX, SHAKE_ENABLED } from '../config.js?v=20260704a';
-import { NO_SHAKE } from '../flags.js?v=20260704a';
+import { view, cam, state } from '../state.js?v=20260801a';
+import { MAX_SHAKE_PX, SHAKE_ENABLED } from '../config.js?v=20260801a';
+import { NO_SHAKE } from '../flags.js?v=20260801a';
 
 export function updateCameraMetrics() {
   view.cameraZoom = 1;
