@@ -9,17 +9,32 @@ function adminJson(body, status = 200) {
   return json(body, status, { 'cache-control': 'no-store' });
 }
 
+export function mutationHostAllowed(request) {
+  const host = new URL(request.url).hostname.toLowerCase();
+  return (
+    host === 'game-factory.tech'
+    || host === 'www.game-factory.tech'
+    || host === 'localhost'
+    || host === '127.0.0.1'
+  );
+}
+
 export async function onRequestGet({ request, env }) {
   const guard = await requireAdmin(request, env);
   if (guard) return guard;
-  const config = await readTelegramBotConfig(env);
-  return adminJson({ ok: true, config });
+  try {
+    const config = await readTelegramBotConfig(env, { strict: true });
+    return adminJson({ ok: true, config });
+  } catch {
+    return jsonError('telegram_bot_config_unavailable', 503);
+  }
 }
 
 export async function onRequestPost({ request, env }) {
   const guard = await requireAdmin(request, env);
   if (guard) return guard;
   if (!sameOriginOk(request)) return adminJson({ error: 'forbidden' }, 403);
+  if (!mutationHostAllowed(request)) return adminJson({ error: 'production_host_required' }, 403);
 
   let body;
   try {
@@ -30,9 +45,14 @@ export async function onRequestPost({ request, env }) {
 
   const rawConfig = body && body.config ? body.config : body;
   try {
-    const config = await writeTelegramBotConfig(env, rawConfig);
+    const config = await writeTelegramBotConfig(env, rawConfig, {
+      expectedVersion: body && body.expectedVersion,
+    });
     return adminJson({ ok: true, config });
   } catch (error) {
-    return jsonError(error && error.message ? error.message : 'telegram_bot_config_failed', 500);
+    return jsonError(
+      error && error.message ? error.message : 'telegram_bot_config_failed',
+      error && Number.isInteger(error.status) ? error.status : 500,
+    );
   }
 }

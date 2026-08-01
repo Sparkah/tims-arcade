@@ -32,7 +32,7 @@ function curate(all, cfg, hidden, trending) {
   playable.forEach(g => { g._score = (tr[g.slug] && tr[g.slug].score) || 0; });
   const bySlug = Object.fromEntries(playable.map(g => [g.slug, g]));
   let vis = playable.filter(g => !hidden.has(g.slug));
-  if (mode === 'selected' && inc.length) vis = inc.map(s => bySlug[s]).filter(g => g && !hidden.has(g.slug));
+  if (mode === 'selected') vis = inc.map(s => bySlug[s]).filter(g => g && !hidden.has(g.slug));
   else vis = vis.filter(g => !exc.has(g.slug));
   const pr = Object.fromEntries(pin.map((s, i) => [s, i]));
   vis.sort((a, b) => {

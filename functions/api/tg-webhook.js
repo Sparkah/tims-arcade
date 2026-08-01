@@ -24,7 +24,7 @@ const BASE = 'https://game-factory.tech';
 const STARFALL_URL = `${BASE}/tg-starfall/`;
 const MEGATON_URL = `${BASE}/tg-megaton/`;
 const MAX_RELAY_RECIPIENTS = 5000;
-const TG_LIBRARY_VERSION = '20260630-library-v2';
+const TG_LIBRARY_VERSION = '20260801-library-v3';
 
 function backendSecret(env = {}) {
   return env.TG_BACKEND_SECRET || env.TELEGRAM_BACKEND_SECRET || '';
@@ -126,7 +126,7 @@ async function getGames() {
 function curateLibrary(games, config) {
   const library = config.library || {};
   let selected = games.slice();
-  if (library.mode === 'selected' && Array.isArray(library.includeSlugs) && library.includeSlugs.length) {
+  if (library.mode === 'selected') {
     selected = orderedSelection(games, library.includeSlugs);
   } else {
     const excluded = slugSet(library.excludeSlugs);

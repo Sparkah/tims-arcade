@@ -160,8 +160,8 @@ export function normalizeTelegramBotConfig(raw) {
 
   cfg.library.mode = library.mode === 'selected' ? 'selected' : 'all';
   cfg.library.subtitle = cleanText(library.subtitle, 180, cfg.library.subtitle, true);
-  cfg.library.includeSlugs = cleanSlugArray(library.includeSlugs, 180);
-  cfg.library.excludeSlugs = cleanSlugArray(library.excludeSlugs, 180);
+  cfg.library.includeSlugs = cleanSlugArray(library.includeSlugs, 400);
+  cfg.library.excludeSlugs = cleanSlugArray(library.excludeSlugs, 400);
   cfg.library.pinnedSlugs = cleanSlugArray(library.pinnedSlugs, 40);
   cfg.library.maxGames = cleanInt(library.maxGames, cfg.library.maxGames, 1, 240);
   cfg.library.hotLabel = cleanText(library.hotLabel, 40, cfg.library.hotLabel);
@@ -193,18 +193,33 @@ export function publicTelegramBotConfig(config) {
   };
 }
 
-export async function readTelegramBotConfig(env) {
+export async function readTelegramBotConfig(env, options = {}) {
   let stored = null;
   try {
     stored = await env.VOTES.get(TELEGRAM_BOT_CONFIG_KEY, 'json');
-  } catch {
+  } catch (error) {
+    if (options.strict) throw error;
     stored = null;
   }
   return normalizeTelegramBotConfig(stored);
 }
 
-export async function writeTelegramBotConfig(env, raw) {
-  const prev = await readTelegramBotConfig(env);
+export async function writeTelegramBotConfig(env, raw, options = {}) {
+  const prev = await readTelegramBotConfig(env, { strict: true });
+  if (options.expectedVersion !== undefined) {
+    const expectedVersion = Number(options.expectedVersion);
+    if (!Number.isInteger(expectedVersion) || expectedVersion < 1) {
+      const error = new Error('invalid_expected_version');
+      error.status = 400;
+      throw error;
+    }
+    if (expectedVersion !== prev.version) {
+      const error = new Error('telegram_bot_config_conflict');
+      error.status = 409;
+      error.currentVersion = prev.version;
+      throw error;
+    }
+  }
   const clean = normalizeTelegramBotConfig(raw);
   clean.version = Math.min(prev.version + 1, 2147483647);
   clean.updatedAt = new Date().toISOString();
