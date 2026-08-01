@@ -8,6 +8,9 @@ export function createPersistence(options) {
   var timeoutMs = Number(options.timeoutMs || 8000);
   var getStartMeta = options.getStartMeta || function () { return {}; };
   var stateProtocol = String(options.stateProtocol || 'megaton-state-rev-v1');
+  var onAuthoritativeConflict = typeof options.onAuthoritativeConflict === 'function'
+    ? options.onAuthoritativeConflict
+    : function () {};
   var saveTimer = 0;
   var revisionKey = saveKey + '_remote_rev';
 
@@ -177,7 +180,11 @@ export function createPersistence(options) {
       if (e.status === 409 && e.data && e.data.error === 'state_revision_conflict') {
         var conflictRevision = normalizeRevision(e.data.stateRev);
         if (e.data.state && conflictRevision != null) {
-          adoptAuthoritativeState(e.data.state, conflictRevision);
+          if (adoptAuthoritativeState(e.data.state, conflictRevision)) {
+            try {
+              onAuthoritativeConflict({ state: e.data.state, stateRev: conflictRevision });
+            } catch (callbackError) {}
+          }
         } else if (
           Object.prototype.hasOwnProperty.call(e.data, 'state')
           && e.data.state === null

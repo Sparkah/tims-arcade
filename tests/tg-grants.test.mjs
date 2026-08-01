@@ -103,6 +103,22 @@ async function withStateBackend(initialState, run, options = {}) {
     }
     if (method === 'PATCH') {
       patchCount += 1;
+      if (options.protectedGrantConflictOnce && patchCount === 1) {
+        row = {
+          ...row,
+          state: {
+            money: 5300,
+            __server: {
+              entitlements: {
+                applied: { paid_payload: { productId: 'caps_pack' } },
+              },
+            },
+          },
+          state_rev: 11,
+          updated_at: '2026-08-01T10:00:01.000Z',
+        };
+        return jsonResponse([]);
+      }
       if (options.conflictOnce && patchCount === 1) {
         row = {
           ...row,
@@ -887,6 +903,34 @@ test('legacy compatibility never overwrites a protected purchase grant', async (
     assert.equal(getPatchCount(), 0);
     assert.deepEqual(getRow().state, authoritative);
   });
+});
+
+test('a paid grant landing during a legacy save wins the CAS race', async () => {
+  const liveCutover = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  await withStateBackend(
+    { money: 10 },
+    async ({ getRow, getPatchCount }) => {
+      const response = await statePost({
+        request: request('/api/tg-state', {
+          action: 'save',
+          game: 'megaton',
+          initData: signedInitData(),
+          state: { money: 20 },
+        }),
+        env: { ...ENV, MEGATON_PAID_GACHA_CUTOVER_AT: liveCutover },
+      });
+
+      assert.equal(response.status, 409);
+      const data = await response.json();
+      assert.equal(data.error, 'state_revision_conflict');
+      assert.equal(data.stateRev, 11);
+      assert.equal(data.state.money, 5300);
+      assert.equal(getPatchCount(), 1);
+      assert.equal(getRow().state.money, 5300);
+      assert.equal(getRow().state.__server.entitlements.applied.paid_payload.productId, 'caps_pack');
+    },
+    { protectedGrantConflictOnce: true },
+  );
 });
 
 test('versioned or expired revisionless saves must adopt the authoritative row', async () => {

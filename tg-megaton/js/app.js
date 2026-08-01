@@ -835,7 +835,8 @@ import {
     telegram: tg,
     hasTelegram: HAS_TG,
     timeoutMs: API_TIMEOUT_MS,
-    getStartMeta: startMeta
+    getStartMeta: startMeta,
+    onAuthoritativeConflict: guardAndReloadAuthoritativeState
   });
   var apiPost = persistence.apiPost;
   var readLocalState = persistence.readLocalState;
@@ -2020,6 +2021,13 @@ import {
     setTimeout(function () {
       try { game.contentWindow.location.reload(); } catch (e) {}
     }, 160);
+  }
+
+  function guardAndReloadAuthoritativeState() {
+    // The running iframe still holds the stale snapshot that just conflicted.
+    // Reject all of its writes until its load event confirms a fresh instance.
+    authoritativeStateGuardUntil = Number.POSITIVE_INFINITY;
+    reloadGameFromSavedState();
   }
 
   function applyProduct(id, receipt) {
