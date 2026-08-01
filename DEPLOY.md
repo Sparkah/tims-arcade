@@ -390,6 +390,52 @@ not source code:
 Deploy the lane-aware API before restarting the Mac relay. Verify the test UID
 on production first; add a partner UID only after the walkthrough is approved.
 
+## Megaton paid-gacha rollout
+
+Megaton's `mgp1` checkout must be released in this order because a Pages deploy
+does not apply Supabase migrations or create Pages secrets:
+
+1. Audit `telegram_purchases` for duplicate non-empty Telegram/provider charge
+   IDs. Resolve duplicates before adding the unique indexes.
+2. Apply `supabase/migrations/20260801000000_megaton_paid_gacha.sql` to the
+   linked Supabase project. The file uses one explicit `begin`/`commit`, so its
+   tables, immutable receipt trigger, service-role grants, and RPCs are atomic.
+3. Verify all three paid tables have RLS enabled; the two charge indexes are
+   valid and unique; anon/authenticated cannot execute the RPCs; service_role
+   can execute `list_unredeemed_megaton_paid_gacha`,
+   `spend_megaton_ton_credit`, and `redeem_megaton_paid_gacha`; and both
+   duplicate-charge audits still return zero rows.
+4. Set `MEGATON_PAID_GACHA_CUTOVER_AT` on the `tims-arcade` Pages project to an
+   explicit UTC timestamp. Do not put a token, service-role key, or other secret
+   in this file.
+5. Push the Pages tree only after steps 1-4 pass. Invoice creation, Telegram's
+   final pre-checkout callback, and TON order creation each call the read-only
+   `list_unredeemed_megaton_paid_gacha` RPC and fail closed before exposing a
+   payable action if the migration or PostgREST schema cache is unavailable.
+6. Verify the live protocol marker and unauthenticated API boundaries. A real
+   Stars/TON charge is a separate operator-authorized smoke test; never spend a
+   player's funds merely to satisfy automated deployment verification.
+
+Production execution receipt, 2026-08-01:
+
+- Supabase project `cqtvrtyuagxnljupdhmm` was `ACTIVE_HEALTHY` on PostgreSQL 17.
+- Migration `20260801000000_megaton_paid_gacha.sql` was applied before the
+  Pages push. Post-migration checks found all 3 tables with RLS, both unique
+  charge indexes valid, the immutable trigger enabled, 3 service-role RPC
+  grants, 0 anon/authenticated RPC grants, and 0 duplicate Telegram/provider
+  charge groups.
+- Pages secret `MEGATON_PAID_GACHA_CUTOVER_AT` was set to
+  `2026-08-01T14:24:25Z` before deployment.
+- The release code still performs the RPC readiness check at every new paid
+  checkout boundary; this receipt is evidence of ordering, not a bypass.
+
+Rollback is fail-closed: remove the cutover secret or move it to a future UTC
+timestamp first, then revert the Pages code. Do not drop the paid tables, charge
+indexes, or immutable receipts; an already-delivered `successful_payment` is
+validated against its historical catalog amount and durably recorded even if
+the product has since been retired. Legacy pre-cutover invoices may settle but
+do not receive a server-authoritative paid-gacha grant.
+
 ## Custom domain (when you're ready)
 
 In the Cloudflare dashboard → Pages → tims-arcade → Custom domains. Add the domain you bought, follow the DNS instructions. Free.
