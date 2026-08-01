@@ -6,6 +6,7 @@ import { installTelegramAdapter } from "./platform-adapter.js";
 import {
   mergePaidGachaReceipt,
   mergePaidInventorySnapshot,
+  sellableDuplicateCount,
   validatePaidGachaReceipt,
   validatePaidInventorySnapshot
 } from "./paid-inventory.js";
@@ -741,6 +742,7 @@ import {
     opts = opts || {};
     var owned = st.ownedSkins.indexOf(skin.id) >= 0;
     var copies = skinCopyCount(st, skin.id);
+    var sellableCopies = sellableDuplicateCount(st, skin.id);
     var visible = owned || opts.forceName || opts.reveal;
     var card = document.createElement('div');
     card.className = 'skin-card' + (owned || opts.reveal ? '' : ' locked') + (st.equippedSkin === skin.id ? ' equipped' : '') + (opts.reveal ? ' reveal' : '');
@@ -760,11 +762,11 @@ import {
     h.textContent = visible ? skin.name : uiText('unknown_payload');
     card.appendChild(h);
     var p = document.createElement('p');
-    p.textContent = visible ? skin.family + ' · ' + boostLabel(skin.boost.kind) + ' +' + fmtPct(skin.boost.value) + (copies > 1 ? ' · ' + uiText('sell').toLowerCase() + ' +' + fmtCaps(duplicateSellValue(skin)) : '') : uiText('locked_card');
+    p.textContent = visible ? skin.family + ' · ' + boostLabel(skin.boost.kind) + ' +' + fmtPct(skin.boost.value) + (sellableCopies > 0 ? ' · ' + uiText('sell').toLowerCase() + ' +' + fmtCaps(duplicateSellValue(skin)) : '') : uiText('locked_card');
     card.appendChild(p);
     if (owned && !opts.reveal) {
       var actions = document.createElement('div');
-      actions.className = 'card-actions two' + (copies > 1 ? ' has-sell' : '');
+      actions.className = 'card-actions two' + (sellableCopies > 0 ? ' has-sell' : '');
       var btn = document.createElement('button');
       btn.type = 'button';
       btn.className = 'equip-btn primary';
@@ -778,7 +780,7 @@ import {
       share.textContent = uiText('share');
       share.addEventListener('click', function () { shareSkin(skin); });
       actions.appendChild(share);
-      if (copies > 1) {
+      if (sellableCopies > 0) {
         var sell = document.createElement('button');
         sell.type = 'button';
         sell.className = 'equip-btn sell';
@@ -1664,7 +1666,7 @@ import {
     var st = readGachaState();
     var skin = SKINS_BY_ID[id];
     var copies = skinCopyCount(st, id);
-    if (!skin || copies <= 1) {
+    if (!skin || sellableDuplicateCount(st, id) < 1) {
       toast(uiText('toast_no_duplicate'), 1400);
       return false;
     }

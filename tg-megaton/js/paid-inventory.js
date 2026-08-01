@@ -47,6 +47,23 @@ function copyCount(state, itemId) {
   return Math.max(0, Math.floor(Number(state.skinCopies && state.skinCopies[itemId] || 0)));
 }
 
+function paidCopyCount(state, itemId) {
+  return Math.max(0, Math.floor(Number(
+    state.gachaStats
+      && state.gachaStats.paidSkinCopies
+      && state.gachaStats.paidSkinCopies[itemId]
+      || 0
+  )));
+}
+
+export function sellableDuplicateCount(state, itemId) {
+  if (!state || !itemId) return 0;
+  // Until duplicate sales have their own atomic server RPC, every paid copy is
+  // protected. Free copies above that paid floor remain part of the normal
+  // local duplicate economy.
+  return Math.max(0, copyCount(state, itemId) - Math.max(1, paidCopyCount(state, itemId)));
+}
+
 function setCopyCount(state, itemId, count) {
   state.skinCopies = state.skinCopies || {};
   count = Math.max(0, Math.floor(Number(count || 0)));
@@ -64,15 +81,15 @@ export function mergePaidGachaReceipt(state, receipt, verifiedRolls) {
   verifiedRolls.forEach(function (entry) {
     var skin = entry.skin;
     var previousPaid = Math.max(0, Math.floor(Number(paidCopies[skin.id] || 0)));
-    var paidDelta = Math.max(0, entry.paidCopiesAfter - previousPaid);
+    // An already-applied receipt is presentation history, not a grant source.
+    // Restoring a cleared watermark from it must never mint another local copy.
+    var paidDelta = firstLocalApply ? Math.max(0, entry.paidCopiesAfter - previousPaid) : 0;
     var localCopies = copyCount(state, skin.id);
     var newDuplicates = Math.max(0, paidDelta - (localCopies > 0 ? 0 : 1));
 
     if (state.ownedSkins.indexOf(skin.id) < 0) state.ownedSkins.push(skin.id);
-    // paidSkinCopies is a cumulative server-grant watermark, while skinCopies
-    // is the current local balance after legitimate duplicate sales. Merge
-    // only the newly granted delta so reconciliation cannot resurrect a copy
-    // that the player already sold.
+    // paidSkinCopies is a cumulative server-grant watermark. Merge only a new
+    // receipt's delta; replay merely restores the watermark.
     setCopyCount(state, skin.id, Math.max(localCopies + paidDelta, 1));
     if (newDuplicates > 0) {
       state.gachaStats.duplicates += newDuplicates;
@@ -110,17 +127,25 @@ export function mergePaidInventorySnapshot(state, verifiedItems) {
     var previousPaid = Math.max(0, Math.floor(Number(paidCopies[skin.id] || 0)));
     var paidDelta = Math.max(0, entry.paidCopies - previousPaid);
     var localCopies = copyCount(state, skin.id);
-    var newDuplicates = Math.max(0, paidDelta - (localCopies > 0 ? 0 : 1));
+    // With a known watermark, add only the server delta. If the watermark was
+    // cleared, conservatively restore a floor instead of adding the full paid
+    // total to existing local copies; repeated clear/sync cycles then mint
+    // neither copies nor shards.
+    var nextCopies = previousPaid > 0
+      ? localCopies + paidDelta
+      : Math.max(localCopies, entry.paidCopies);
+    var addedLocalCopies = Math.max(0, nextCopies - localCopies);
+    var newDuplicates = Math.max(0, addedLocalCopies - (localCopies > 0 ? 0 : 1));
 
     if (state.ownedSkins.indexOf(skin.id) < 0) state.ownedSkins.push(skin.id);
-    setCopyCount(state, skin.id, Math.max(localCopies + paidDelta, 1));
+    setCopyCount(state, skin.id, Math.max(nextCopies, 1));
     if (newDuplicates > 0) {
       state.gachaStats.duplicates += newDuplicates;
       state.gachaStats.shards += newDuplicates * (DUPLICATE_SHARDS[skin.rarity] || 0);
     }
     paidCopies[skin.id] = Math.max(previousPaid, entry.paidCopies);
-    if (paidDelta > 0) {
-      addedCopies += paidDelta;
+    if (addedLocalCopies > 0) {
+      addedCopies += addedLocalCopies;
       restoredItems.push(skin);
     }
   });
