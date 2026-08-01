@@ -3,6 +3,7 @@ import { PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
 import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
 import {
   getTelegramState,
+  insertTelegramStateIfMissing,
   supabaseIsConfigured,
   updateTelegramStateIfRev,
   upsertTelegramPlayer,
@@ -46,6 +47,23 @@ function sourceMeta(body, auth) {
   };
 }
 
+function stateConflict(row) {
+  return json({
+    ok: false,
+    configured: true,
+    error: 'state_revision_conflict',
+    state: row ? row.state : null,
+    stateRev: row ? row.state_rev : null,
+    updatedAt: row ? row.updated_at : null,
+  }, 409, { 'cache-control': 'no-store' });
+}
+
+function expectedRevision(value) {
+  if (value == null || value === '') return null;
+  const revision = Number(value);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
 export async function onRequestPost({ request, env }) {
   if (!sameOriginOk(request)) return jsonError('Forbidden', 403);
 
@@ -87,8 +105,20 @@ export async function onRequestPost({ request, env }) {
     return jsonError('State must be an object', 400);
   }
 
+  const suppliedExpectedRevision = expectedRevision(body.expectedStateRev);
+
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const existing = await getTelegramState(env, game, auth.user.id);
+    if (game === 'megaton') {
+      // Megaton purchases mutate the same cloud state as gameplay. A save may
+      // only replace the exact revision it loaded; otherwise return the newer
+      // authoritative state so the wrapper can adopt it instead of erasing a
+      // paid grant. Null is valid only while no state row exists yet.
+      if ((existing && suppliedExpectedRevision !== Number(existing.state_rev))
+          || (!existing && suppliedExpectedRevision != null)) {
+        return stateConflict(existing);
+      }
+    }
     const cleanState = cloneJson(body.state);
     // __server is server-authoritative reward/payment state; never accept a client-written copy.
     delete cleanState.__server;
@@ -102,6 +132,13 @@ export async function onRequestPost({ request, env }) {
       const ent = existingServer && existingServer.entitlements;
       cleanState.adFree = ent && ent.adFree ? 1 : 0;
     }
+    if (game === 'megaton') {
+      const ent = existingServer && existingServer.entitlements;
+      // God Power is purchase-exclusive. Its client-visible mirror is always
+      // derived from the server ledger, so a later/stale autosave cannot revoke
+      // a paid entitlement and an edited client save cannot mint one.
+      cleanState.godPower = Boolean(ent && ent.godPower);
+    }
 
     const stateBytes = new TextEncoder().encode(JSON.stringify(cleanState)).length;
     if (stateBytes > MAX_STATE_BYTES) {
@@ -110,7 +147,9 @@ export async function onRequestPost({ request, env }) {
 
     const rows = existing
       ? [await updateTelegramStateIfRev(env, game, auth.user.id, existing.state_rev, cleanState)].filter(Boolean)
-      : await upsertTelegramState(env, game, auth.user.id, cleanState);
+      : game === 'megaton'
+        ? await insertTelegramStateIfMissing(env, game, auth.user.id, cleanState)
+        : await upsertTelegramState(env, game, auth.user.id, cleanState);
     const saved = Array.isArray(rows) && rows.length ? rows[0] : null;
     if (saved) {
       return json(

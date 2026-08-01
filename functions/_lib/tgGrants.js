@@ -1,7 +1,7 @@
 import {
   getTelegramState,
+  insertTelegramStateIfMissing,
   updateTelegramStateIfRev,
-  upsertTelegramState,
 } from './supabase.js';
 
 // Server-authoritative purchase grants (Tim 2026-06-30). This is the SINGLE place a paid product's
@@ -10,18 +10,97 @@ import {
 // applyPurchaseGrant() on a verified-paid receipt, write it into telegram_player_states, and record the
 // payload in state.__server.entitlements.applied so a replayed claim cannot double-grant.
 //
-// SCOPE: two kinds of paid product. (1) DETERMINISTIC bundles (bank/tiers/adFree: starter/blood_cache/hull_kit/
-// arsenal/ad_free/bloodgod) are applied to state SERVER-SIDE here. (2) GACHA pulls (box_*/mythic_*, the in-game
-// Blood Market / STORE) can't be rolled server-side (the loot tables + pity live in the game), so the server
-// VERIFIES the payment and QUEUES a pending pull in __server.entitlements.pending; the game redeems it exactly
-// once (rolls the box / grants the mythic + shows the reveal) then acks to clear it. Both paths are idempotent
-// via applied[payload]; pending is additionally payload-keyed so a redeem can't double even before the ack.
+// SCOPE: deterministic Bloodtread and Megaton bundles are applied SERVER-SIDE here. Bloodtread's legacy gacha
+// products are queued in __server.entitlements.pending for its client redemption flow. Megaton paid Arsenal
+// pulls are deliberately NOT queued here: /api/tg-paid-gacha rolls them server-side and persists an immutable
+// receipt/inventory grant. Megaton welcome_x8 is retired and cannot be invoiced or granted.
+// Every deterministic grant and Bloodtread pending entry is idempotent via applied[payload].
 //
 // The bloodtread deltas below MUST stay in lockstep with games/bloodtread_mobile/tg.js grant() (the live
 // client-feedback path applies the SAME numbers). MAXTIER mirrors data/upgrades.js (6).
 
 const BLOODTREAD_MAXTIER = 6;
 const BLOODTREAD_TIERS = ['armor', 'core', 'cannon', 'treads', 'thirst', 'frenzy'];
+
+const MEGATON_UPGRADE_FIELDS = Object.freeze({
+  yield: 'powerLvl',
+  flares: 'flareLvl',
+  pen: 'penLvl',
+  mirv: 'mirvLvl',
+  shock: 'shockLvl',
+  luck: 'luckLvl',
+  emp: 'empLvl',
+  orbital: 'orbitalLvl',
+  cluster: 'clusterLvl',
+  firestorm: 'firestormLvl',
+  chain: 'chainLvl',
+  glass: 'glassLvl',
+  seismic: 'seismicLvl',
+  inferno: 'infernoLvl',
+  topple: 'toppleLvl',
+  meltdown: 'meltdownLvl',
+  tidal: 'tidalLvl',
+  fireworks: 'fireworksLvl',
+  eye: 'eyeLvl',
+});
+
+const MEGATON_UPGRADE_BASES = Object.freeze({
+  yield: 55,
+  flares: 70,
+  pen: 90,
+  mirv: 210,
+  shock: 150,
+  luck: 100,
+  emp: 120,
+  orbital: 190,
+  cluster: 140,
+  firestorm: 130,
+  chain: 160,
+  glass: 130,
+  seismic: 180,
+  inferno: 170,
+  topple: 200,
+  meltdown: 190,
+  tidal: 160,
+  fireworks: 150,
+  eye: 250,
+});
+
+const MEGATON_WALL_OPTIONAL_UPGRADES = Object.freeze([
+  'flares', 'pen', 'mirv', 'shock', 'emp', 'orbital', 'cluster',
+  'firestorm', 'chain', 'glass', 'seismic', 'inferno', 'topple',
+  'meltdown', 'tidal', 'fireworks', 'eye',
+]);
+
+const MEGATON_GOD_POWER_MAXIMA = Object.freeze({
+  powerLvl: 80,
+  flareLvl: 12,
+  penLvl: 18,
+  mirvLvl: 5,
+  shockLvl: 10,
+  luckLvl: 18,
+  empLvl: 8,
+  orbitalLvl: 8,
+  clusterLvl: 10,
+  firestormLvl: 12,
+  chainLvl: 10,
+  glassLvl: 10,
+  seismicLvl: 9,
+  infernoLvl: 10,
+  toppleLvl: 12,
+  meltdownLvl: 12,
+  tidalLvl: 10,
+  fireworksLvl: 10,
+  eyeLvl: 1,
+});
+
+function ensureEntitlementShape(state) {
+  if (!state.__server || typeof state.__server !== 'object' || Array.isArray(state.__server)) state.__server = {};
+  if (!state.__server.entitlements || typeof state.__server.entitlements !== 'object' || Array.isArray(state.__server.entitlements)) {
+    state.__server.entitlements = {};
+  }
+  return state.__server.entitlements;
+}
 
 function clampTier(n) {
   n = Math.floor(Number(n) || 0);
@@ -35,10 +114,7 @@ function ensureBloodtreadShape(state) {
   if (!state.meta || typeof state.meta !== 'object' || Array.isArray(state.meta)) state.meta = {};
   for (const t of BLOODTREAD_TIERS) state.meta[t] = clampTier(state.meta[t]);
   if (typeof state.bank !== 'number' || !isFinite(state.bank)) state.bank = 0;
-  if (!state.__server || typeof state.__server !== 'object' || Array.isArray(state.__server)) state.__server = {};
-  if (!state.__server.entitlements || typeof state.__server.entitlements !== 'object' || Array.isArray(state.__server.entitlements)) {
-    state.__server.entitlements = {};
-  }
+  ensureEntitlementShape(state);
   return state;
 }
 
@@ -50,6 +126,7 @@ function setAdFree(state) {
 // Products this server can grant deterministically, per game.
 export const SERVER_GRANTABLE = Object.freeze({
   bloodtread: Object.freeze(['starter', 'blood_cache', 'hull_kit', 'arsenal', 'ad_free', 'bloodgod']),
+  megaton: Object.freeze(['starter', 'caps_pack', 'warhead_tuning', 'mirv_kit', 'god_power']),
 });
 
 export function isServerGrantable(game, productId) {
@@ -67,6 +144,114 @@ export function isStorePending(game, productId) {
   return Boolean(list && list.indexOf(productId) >= 0);
 }
 
+function finiteNumber(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function megatonUpgradeLevel(state, id) {
+  const field = MEGATON_UPGRADE_FIELDS[id];
+  return field ? Math.max(0, finiteNumber(state[field])) : 0;
+}
+
+export function megatonUpgradeCost(state, id) {
+  const base = MEGATON_UPGRADE_BASES[id] || 100;
+  const rate = id === 'mirv' || id === 'orbital' ? 2.25 : 1.33;
+  const cost = Math.round(base * Math.pow(rate, megatonUpgradeLevel(state, id)));
+  return Number.isFinite(cost) ? Math.max(1, cost) : Number.MAX_SAFE_INTEGER;
+}
+
+// Mirrors the current Telegram wrapper's localMaxUpgradeCost(): Yield always participates,
+// Extra Income unlocks at city tier 1, and the remaining perks participate once owned.
+export function megatonMaxUpgradeCost(state) {
+  const ids = ['yield'];
+  if (finiteNumber(state.cityTier) >= 1) ids.push('luck');
+  for (const id of MEGATON_WALL_OPTIONAL_UPGRADES) {
+    if (megatonUpgradeLevel(state, id) > 0) ids.push(id);
+  }
+  let max = 0;
+  for (const id of ids) max = Math.max(max, megatonUpgradeCost(state, id));
+  return Math.max(40, max);
+}
+
+function addMegatonCaps(state, amount) {
+  const caps = Math.ceil(finiteNumber(amount));
+  state.money = finiteNumber(state.money) + caps;
+  state.totalEarned = finiteNumber(state.totalEarned) + caps;
+  state.best = Math.max(finiteNumber(state.best), state.totalEarned);
+}
+
+function addMegatonNukeAmmo(state, id, amount) {
+  if (!state.nukeAmmo || typeof state.nukeAmmo !== 'object' || Array.isArray(state.nukeAmmo)) state.nukeAmmo = {};
+  state.nukeAmmo[id] = Math.max(0, finiteNumber(state.nukeAmmo[id])) + amount;
+}
+
+function clampMegatonLevel(state, field, amount, maximum) {
+  state[field] = Math.min(maximum, Math.max(0, finiteNumber(state[field])) + amount);
+}
+
+function maxMegatonNukes(state) {
+  const prior = Array.isArray(state.nukeOwned)
+    ? state.nukeOwned
+    : state.nukeOwned && typeof state.nukeOwned === 'object'
+      ? Object.keys(state.nukeOwned).filter((id) => state.nukeOwned[id])
+      : [];
+  state.nukeOwned = Array.from(new Set(['std', ...prior, 'wide', 'tsar']));
+  if (!state.nukeAmmo || typeof state.nukeAmmo !== 'object' || Array.isArray(state.nukeAmmo)) state.nukeAmmo = {};
+  state.nukeAmmo.wide = Math.max(999, finiteNumber(state.nukeAmmo.wide));
+  state.nukeAmmo.tsar = Math.max(999, finiteNumber(state.nukeAmmo.tsar));
+  state.activeNuke = 'tsar';
+}
+
+function applyMegatonGrant(productId, state) {
+  const entitlements = ensureEntitlementShape(state);
+  const upgradeWall = megatonMaxUpgradeCost(state);
+  switch (productId) {
+    case 'starter':
+      addMegatonCaps(state, 1500 + upgradeWall * 1.5);
+      clampMegatonLevel(state, 'powerLvl', 1, 80);
+      clampMegatonLevel(state, 'luckLvl', 2, 18);
+      break;
+    case 'caps_pack':
+      addMegatonCaps(state, 5000 + upgradeWall * 5);
+      break;
+    case 'warhead_tuning':
+      addMegatonCaps(state, 1200);
+      clampMegatonLevel(state, 'powerLvl', 4, 80);
+      clampMegatonLevel(state, 'luckLvl', 2, 18);
+      addMegatonNukeAmmo(state, 'wide', 1);
+      break;
+    case 'mirv_kit':
+      addMegatonCaps(state, 1800);
+      clampMegatonLevel(state, 'mirvLvl', 1, 5);
+      clampMegatonLevel(state, 'penLvl', 2, 18);
+      clampMegatonLevel(state, 'flareLvl', 2, 12);
+      addMegatonNukeAmmo(state, 'wide', 3);
+      break;
+    case 'god_power':
+      entitlements.godPower = true;
+      state.godPower = true;
+      addMegatonCaps(state, 250000 + upgradeWall * 10);
+      for (const [field, maximum] of Object.entries(MEGATON_GOD_POWER_MAXIMA)) {
+        state[field] = Math.max(finiteNumber(state[field]), maximum);
+      }
+      maxMegatonNukes(state);
+      break;
+    default:
+      return false;
+  }
+
+  // Paid bundles finish onboarding so the authoritative reload cannot strand
+  // the buyer inside a tutorial step that no longer matches their loadout.
+  state.tutDone = true;
+  state.upgDone = true;
+  state.tutorialV = 3;
+  state.tutStep = 13;
+  state.tutDailyPending = false;
+  state.tutorialGiftOpen = false;
+  return true;
+}
+
 // Queue a pending gacha pull the game redeems once. Payload-keyed so a re-claim before the ack can't double it.
 function pushPending(state, productId, payload) {
   ensureBloodtreadShape(state);
@@ -81,7 +266,9 @@ function pushPending(state, productId, payload) {
 // Mutate `state` IN PLACE with the product's delta. Returns true if applied, false if the product is not a
 // server-grantable deterministic product (caller must NOT grant in that case).
 export function applyGrantToState(game, productId, state) {
-  if (game !== 'bloodtread' || !isServerGrantable(game, productId)) return false;
+  if (!state || typeof state !== 'object' || Array.isArray(state) || !isServerGrantable(game, productId)) return false;
+  if (game === 'megaton') return applyMegatonGrant(productId, state);
+  if (game !== 'bloodtread') return false;
   ensureBloodtreadShape(state);
   const m = state.meta;
   switch (productId) {
@@ -105,9 +292,10 @@ function cloneJson(value) {
   return JSON.parse(JSON.stringify(value || {}));
 }
 
-function appliedLedger(state) {
-  ensureBloodtreadShape(state);
-  const ent = state.__server.entitlements;
+function appliedLedger(state, game) {
+  const ent = game === 'bloodtread'
+    ? ensureBloodtreadShape(state).__server.entitlements
+    : ensureEntitlementShape(state);
   if (!ent.applied || typeof ent.applied !== 'object' || Array.isArray(ent.applied)) ent.applied = {};
   return ent.applied;
 }
@@ -125,8 +313,15 @@ export async function applyPurchaseGrant(env, game, telegramUserId, productId, p
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const existing = await getTelegramState(env, game, userId);
+    if (!existing) {
+      // Seed the row without merge-upsert. Concurrent first purchases/saves
+      // then converge through the same revision-CAS loop instead of one
+      // silently overwriting another's state or entitlement ledger.
+      await insertTelegramStateIfMissing(env, game, userId, {});
+      continue;
+    }
     const state = existing && existing.state ? cloneJson(existing.state) : {};
-    const applied = appliedLedger(state);
+    const applied = appliedLedger(state, game);
     if (applied[grantKey]) {
       return {
         granted: true,
@@ -144,9 +339,7 @@ export async function applyPurchaseGrant(env, game, telegramUserId, productId, p
     }
     applied[grantKey] = { productId, ts: Date.now() };
 
-    const rows = existing
-      ? [await updateTelegramStateIfRev(env, game, userId, existing.state_rev, state)].filter(Boolean)
-      : await upsertTelegramState(env, game, userId, state);
+    const rows = [await updateTelegramStateIfRev(env, game, userId, existing.state_rev, state)].filter(Boolean);
     const saved = Array.isArray(rows) && rows.length ? rows[0] : null;
     if (saved) {
       return {

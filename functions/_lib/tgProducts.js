@@ -1,3 +1,13 @@
+export const MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL = 'megaton-paid-gacha-v1';
+export const MEGATON_PAID_GACHA_LINEAGE = 'mgp1';
+
+const MEGATON_PAID_GACHA_PRODUCT_IDS = Object.freeze([
+  'starter',
+  'arsenal_payload',
+  'arsenal_payload_10',
+  'arsenal_legendary_payload',
+]);
+
 export const PRODUCTS_BY_GAME = Object.freeze({
   starfall: Object.freeze({
     starter: Object.freeze({
@@ -161,6 +171,7 @@ export const PRODUCTS_BY_GAME = Object.freeze({
       description: 'Multiply this welcome-back reactor payout by 8.',
       amount: 10,
       deliver: 'welcome_reactor_x8',
+      disabled: true,
     }),
     arsenal_payload: Object.freeze({
       title: 'Megaton Premium Payload',
@@ -234,7 +245,12 @@ export function getTonConfig(gameId, env = {}) {
 }
 
 export function hasStarsPrice(product) {
-  return Boolean(product && Number.isFinite(Number(product.amount)) && Number(product.amount) > 0);
+  return Boolean(
+    product
+    && product.disabled !== true
+    && Number.isFinite(Number(product.amount))
+    && Number(product.amount) > 0,
+  );
 }
 
 export function hasTonPrice(product) {
@@ -253,11 +269,76 @@ export function publicProduct(productId, product) {
   };
 }
 
+export function isMegatonPaidGachaProduct(gameId, productId) {
+  return String(gameId || '').toLowerCase() === 'megaton'
+    && MEGATON_PAID_GACHA_PRODUCT_IDS.includes(String(productId || ''));
+}
+
+export function hasMegatonPaidGachaCheckoutProtocol(value) {
+  return String(value || '') === MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL;
+}
+
+export function megatonPaidGachaCutoverMs(env = {}) {
+  const raw = String(env.MEGATON_PAID_GACHA_CUTOVER_AT || '').trim();
+  const timestamp = Date.parse(raw);
+  return raw && Number.isFinite(timestamp) ? timestamp : NaN;
+}
+
+export function megatonPaidGachaCheckoutIsLive(env = {}, now = Date.now()) {
+  const cutover = megatonPaidGachaCutoverMs(env);
+  return Number.isFinite(cutover) && Number(now) >= cutover;
+}
+
+export function purchaseHasMegatonPaidGachaLineage(purchase) {
+  if (!purchase || typeof purchase !== 'object') return false;
+  const game = String(purchase.game || '').toLowerCase();
+  const productId = String(purchase.product_id || purchase.productId || '');
+  const telegramUserId = String(
+    purchase.telegram_user_id || purchase.telegramUserId || '',
+  );
+  if (!isMegatonPaidGachaProduct(game, productId) || !telegramUserId) return false;
+
+  const parts = String(purchase.payload || '').split(':');
+  const currency = String(purchase.currency || '').toUpperCase();
+  if (currency === 'XTR') {
+    return parts.length === 6
+      && parts[0] === 'megaton'
+      && parts[1] === MEGATON_PAID_GACHA_LINEAGE
+      && parts[2] === productId
+      && parts[3] === telegramUserId
+      && /^\d{10,16}$/.test(parts[4])
+      && /^[A-Za-z0-9_-]{8,128}$/.test(parts[5]);
+  }
+  if (currency === 'TON') {
+    return parts.length === 5
+      && parts[0] === 'ton'
+      && parts[1] === 'megaton'
+      && parts[2] === MEGATON_PAID_GACHA_LINEAGE
+      && parts[3] === productId
+      && /^[A-Za-z0-9_-]{8,128}$/.test(parts[4]);
+  }
+  if (currency === 'TON_CREDIT') {
+    return parts.length === 5
+      && parts[0] === 'megaton'
+      && parts[1] === 'ton_credit'
+      && parts[2] === MEGATON_PAID_GACHA_LINEAGE
+      && parts[3] === telegramUserId
+      && /^[A-Za-z0-9_-]{8,96}$/.test(parts[4]);
+  }
+  return false;
+}
+
 export function parsePaymentPayload(payload) {
   const parts = String(payload || '').split(':');
-  if (parts.length < 5) return null;
+  const lineaged = parts.length === 6
+    && parts[0] === 'megaton'
+    && parts[1] === MEGATON_PAID_GACHA_LINEAGE
+    && isMegatonPaidGachaProduct(parts[0], parts[2]);
+  if ((!lineaged && parts.length < 5) || (lineaged && parts.length !== 6)) return null;
 
-  const [game, productId, telegramUserId, timestamp, nonce] = parts;
+  const [game, productId, telegramUserId, timestamp, nonce] = lineaged
+    ? [parts[0], parts[2], parts[3], parts[4], parts[5]]
+    : parts;
   if (!game || !productId || !telegramUserId || !timestamp || !nonce) return null;
 
   return {
@@ -266,5 +347,7 @@ export function parsePaymentPayload(payload) {
     telegramUserId,
     timestamp,
     nonce,
+    checkoutProtocol: lineaged ? MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL : '',
+    lineage: lineaged ? MEGATON_PAID_GACHA_LINEAGE : '',
   };
 }

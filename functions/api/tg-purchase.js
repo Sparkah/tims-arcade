@@ -1,7 +1,14 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
-import { getProduct, parsePaymentPayload } from '../_lib/tgProducts.js';
+import {
+  getProduct,
+  hasMegatonPaidGachaCheckoutProtocol,
+  isMegatonPaidGachaProduct,
+  parsePaymentPayload,
+  purchaseHasMegatonPaidGachaLineage,
+} from '../_lib/tgProducts.js';
 import { applyPurchaseGrant, ackPendingGrant } from '../_lib/tgGrants.js';
 import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
+import { validateVerifiedPurchase } from '../_lib/tgVerifiedPurchase.js';
 import {
   getTelegramPurchase,
   recordTelegramPurchase,
@@ -40,6 +47,17 @@ function publicPurchase(row) {
   };
 }
 
+function paidGachaServerFulfillment(purchase) {
+  const paidGacha = isMegatonPaidGachaProduct(
+    purchase && purchase.game,
+    purchase && (purchase.product_id || purchase.productId),
+  );
+  return {
+    paidGacha,
+    lineaged: paidGacha && purchaseHasMegatonPaidGachaLineage(purchase),
+  };
+}
+
 async function recordFromBot(request, env, body) {
   const secret = env.TG_BACKEND_SECRET || env.TELEGRAM_BACKEND_SECRET;
   if (!secret) return jsonError('Backend secret is not configured', 503);
@@ -58,6 +76,32 @@ async function recordFromBot(request, env, body) {
     return jsonError('Payload user mismatch', 400);
   }
 
+  const paidPurchase = {
+    payload: purchase.payload,
+    game: purchase.game || parsed.game,
+    product_id: purchase.product_id || purchase.productId || parsed.productId,
+    telegram_user_id:
+      purchase.telegram_user_id || purchase.telegramUserId || parsed.telegramUserId,
+    currency: purchase.currency,
+    total_amount: purchase.total_amount ?? purchase.totalAmount,
+    telegram_payment_charge_id:
+      purchase.telegram_payment_charge_id || purchase.telegramPaymentChargeId || null,
+    provider_payment_charge_id:
+      purchase.provider_payment_charge_id || purchase.providerPaymentChargeId || null,
+    status: purchase.status,
+    paid_at: purchase.paid_at || purchase.paidAt || purchase.at || new Date().toISOString(),
+    raw: purchase.raw || purchase,
+  };
+  const validation = validateVerifiedPurchase(paidPurchase, {
+    game: parsed.game,
+    productId: parsed.productId,
+    telegramUserId: parsed.telegramUserId,
+    payload: purchase.payload,
+  });
+  if (!validation.ok) {
+    return jsonError(`Invalid paid purchase: ${validation.error}`, 400);
+  }
+
   const rawFrom = (purchase.raw && purchase.raw.from) || purchase.from || {};
   await upsertTelegramPlayer(env, {
     id: parsed.telegramUserId,
@@ -68,25 +112,37 @@ async function recordFromBot(request, env, body) {
     is_premium: rawFrom.is_premium || false,
   });
 
-  await recordTelegramPurchase(env, {
-    payload: purchase.payload,
+  const rows = await recordTelegramPurchase(env, paidPurchase);
+  const saved = Array.isArray(rows) && rows.length ? rows[0] : null;
+  const savedValidation = validateVerifiedPurchase(saved, {
     game: parsed.game,
-    product_id: parsed.productId,
-    telegram_user_id: parsed.telegramUserId,
-    currency: purchase.currency || 'XTR',
-    total_amount: Number(purchase.total_amount || purchase.totalAmount || product.amount),
-    telegram_payment_charge_id: purchase.telegram_payment_charge_id || purchase.telegramPaymentChargeId || null,
-    provider_payment_charge_id: purchase.provider_payment_charge_id || purchase.providerPaymentChargeId || null,
-    status: purchase.status || 'paid',
-    raw: purchase.raw || purchase,
+    productId: parsed.productId,
+    telegramUserId: parsed.telegramUserId,
+    payload: purchase.payload,
   });
+  if (!savedValidation.ok) {
+    return jsonError(`Stored purchase verification failed: ${savedValidation.error}`, 409);
+  }
 
-  const status = purchase.status || 'paid';
-  const grant = status === 'paid'
-    ? await applyPurchaseGrant(env, parsed.game, parsed.telegramUserId, parsed.productId, purchase.payload)
+  const fulfillment = paidGachaServerFulfillment(saved);
+  if (parsed.lineage && fulfillment.paidGacha && !fulfillment.lineaged) {
+    return jsonError('Stored Megaton paid-gacha checkout lineage is invalid', 409);
+  }
+  const grant = !fulfillment.paidGacha || fulfillment.lineaged
+    ? await applyPurchaseGrant(
+      env,
+      parsed.game,
+      parsed.telegramUserId,
+      parsed.productId,
+      purchase.payload,
+    )
     : null;
 
-  return json({ ok: true, grant });
+  return json({
+    ok: true,
+    grant,
+    legacySettlement: fulfillment.paidGacha && !fulfillment.lineaged,
+  });
 }
 
 async function claimFromClient(body, env) {
@@ -105,7 +161,31 @@ async function claimFromClient(body, env) {
   const purchase = await getTelegramPurchase(env, parsed.game, auth.user.id, body.payload);
   const paid = Boolean(purchase && purchase.status === 'paid');
 
-  const grant = paid
+  if (paid) {
+    const validation = validateVerifiedPurchase(purchase, {
+      game: parsed.game,
+      productId: parsed.productId,
+      telegramUserId: auth.user.id,
+      payload: body.payload,
+    });
+    if (!validation.ok) {
+      return jsonError(`Paid purchase verification failed: ${validation.error}`, 409);
+    }
+  }
+
+  const fulfillment = paidGachaServerFulfillment(purchase);
+  if (
+    paid
+    && fulfillment.lineaged
+    && !hasMegatonPaidGachaCheckoutProtocol(body.checkoutProtocol)
+  ) {
+    return jsonError('Megaton paid-gacha checkout protocol does not match the purchase', 409);
+  }
+  if (paid && parsed.lineage && fulfillment.paidGacha && !fulfillment.lineaged) {
+    return jsonError('Megaton paid-gacha checkout lineage is invalid', 409);
+  }
+
+  const grant = paid && (!fulfillment.paidGacha || fulfillment.lineaged)
     ? await applyPurchaseGrant(env, parsed.game, auth.user.id, parsed.productId, body.payload)
     : null;
 
@@ -120,6 +200,7 @@ async function claimFromClient(body, env) {
       state: grant && grant.state || null,
       stateRev: grant && grant.stateRev || null,
       updatedAt: grant && grant.updatedAt || null,
+      legacySettlement: paid && fulfillment.paidGacha && !fulfillment.lineaged,
     },
     200,
     { 'cache-control': 'no-store' },

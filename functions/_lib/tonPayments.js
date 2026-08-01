@@ -1,4 +1,11 @@
-import { getProduct, getTonConfig, hasTonPrice } from './tgProducts.js';
+import {
+  MEGATON_PAID_GACHA_LINEAGE,
+  getProduct,
+  getTonConfig,
+  hasMegatonPaidGachaCheckoutProtocol,
+  hasTonPrice,
+  isMegatonPaidGachaProduct,
+} from './tgProducts.js';
 
 const TON_COMMENT_OP_BYTES = [0, 0, 0, 0];
 const MAX_COMMENT_BYTES = 123;
@@ -48,19 +55,27 @@ export function textCommentBocBase64(comment) {
   return bytesToBase64(bytes);
 }
 
-export function createTonOrderPayload(game, productId) {
+export function createTonOrderPayload(game, productId, checkoutProtocol = '') {
   const nonce = crypto.randomUUID
     ? crypto.randomUUID()
     : String(Date.now()) + Math.random().toString(16).slice(2);
-  return ['ton', game, productId, nonce].join(':');
+  const lineaged = isMegatonPaidGachaProduct(game, productId)
+    && hasMegatonPaidGachaCheckoutProtocol(checkoutProtocol);
+  return lineaged
+    ? ['ton', game, MEGATON_PAID_GACHA_LINEAGE, productId, nonce].join(':')
+    : ['ton', game, productId, nonce].join(':');
 }
 
-export function buildTonOrder(game, productId, env = {}) {
+export function buildTonOrder(game, productId, env = {}, checkoutProtocol = '') {
   const product = getProduct(game, productId);
   const config = getTonConfig(game, env);
   if (!product || !config || !hasTonPrice(product)) return null;
+  if (
+    isMegatonPaidGachaProduct(game, productId)
+    && !hasMegatonPaidGachaCheckoutProtocol(checkoutProtocol)
+  ) return null;
 
-  const payload = createTonOrderPayload(game, productId);
+  const payload = createTonOrderPayload(game, productId, checkoutProtocol);
   const memo = `${config.memoPrefix}:${payload}`;
   const validUntil = Math.floor(Date.now() / 1000) + 10 * 60;
   return {

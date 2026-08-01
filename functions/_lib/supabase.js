@@ -225,13 +225,18 @@ export async function listTelegramStates(env, game, limit = 1000) {
   return Array.isArray(rows) ? rows : [];
 }
 
+function nextStateRevision(previousRevision) {
+  const previous = Number(previousRevision);
+  return Math.max(Date.now(), Number.isSafeInteger(previous) ? previous + 1 : 0);
+}
+
 export async function upsertTelegramState(env, game, telegramUserId, state) {
   const now = new Date().toISOString();
   const row = {
     game,
     telegram_user_id: String(telegramUserId),
     state: jsonSafe(state),
-    state_rev: Date.now(),
+    state_rev: nextStateRevision(),
     updated_at: now,
   };
 
@@ -239,6 +244,26 @@ export async function upsertTelegramState(env, game, telegramUserId, state) {
     method: 'POST',
     headers: {
       prefer: 'resolution=merge-duplicates,return=representation',
+    },
+    body: JSON.stringify([row]),
+  });
+}
+
+// Create the first state row without overwriting a row won by a concurrent
+// save or purchase grant. Callers that receive [] must refetch and CAS-update.
+export async function insertTelegramStateIfMissing(env, game, telegramUserId, state) {
+  const row = {
+    game,
+    telegram_user_id: String(telegramUserId),
+    state: jsonSafe(state),
+    state_rev: nextStateRevision(),
+    updated_at: new Date().toISOString(),
+  };
+
+  return supabaseRequest(env, 'telegram_player_states?on_conflict=game,telegram_user_id', {
+    method: 'POST',
+    headers: {
+      prefer: 'resolution=ignore-duplicates,return=representation',
     },
     body: JSON.stringify([row]),
   });
@@ -257,7 +282,7 @@ export async function updateTelegramStateIfRev(env, game, telegramUserId, stateR
     },
     body: JSON.stringify({
       state: jsonSafe(state),
-      state_rev: Date.now(),
+      state_rev: nextStateRevision(stateRev),
       updated_at: new Date().toISOString(),
     }),
   });

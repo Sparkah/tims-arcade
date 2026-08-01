@@ -12,8 +12,10 @@ import {
   PRODUCTS_BY_GAME,
   getProduct,
   hasStarsPrice,
+  isMegatonPaidGachaProduct,
   parsePaymentPayload,
 } from '../_lib/tgProducts.js';
+import { validateVerifiedPurchase } from '../_lib/tgVerifiedPurchase.js';
 import {
   recordTelegramPurchase,
   supabaseIsConfigured,
@@ -290,7 +292,10 @@ async function sendStarfall(env, profile, chatId, isPrivate) {
 
 function starsProducts(gameId) {
   const products = PRODUCTS_BY_GAME[gameId] || PRODUCTS_BY_GAME.megaton || {};
-  return Object.entries(products).filter(([, product]) => hasStarsPrice(product));
+  return Object.entries(products).filter(([productId, product]) => (
+    hasStarsPrice(product)
+    && !isMegatonPaidGachaProduct(gameId, productId)
+  ));
 }
 
 function productLines(gameId) {
@@ -302,6 +307,36 @@ function productLines(gameId) {
   }).join('\n');
 }
 
+function validateStarsPaymentEnvelope(payment, payer) {
+  const parsed = parsePaymentPayload(payment && payment.invoice_payload);
+  const product = parsed && getProduct(parsed.game, parsed.productId);
+  if (!parsed || !product || !hasStarsPrice(product)) {
+    return { ok: false, error: 'unknown_product', parsed, product };
+  }
+  if (String(payer && payer.id || '') !== parsed.telegramUserId) {
+    return { ok: false, error: 'payer_mismatch', parsed, product };
+  }
+  if (String(payment.currency || '') !== 'XTR') {
+    return { ok: false, error: 'currency_mismatch', parsed, product };
+  }
+  const totalAmount = Number(payment.total_amount);
+  if (
+    !Number.isSafeInteger(totalAmount)
+    || totalAmount <= 0
+    || totalAmount !== Number(product.amount)
+  ) {
+    return { ok: false, error: 'amount_mismatch', parsed, product };
+  }
+  return { ok: true, error: '', parsed, product };
+}
+
+function webhookError(message, status, code) {
+  const error = new Error(message);
+  error.status = status;
+  error.code = code;
+  return error;
+}
+
 async function sendBuyHelp(env, profile, chatId, gameId = 'megaton', isPrivate = true) {
   const cleanGame = gameId === 'starfall' ? 'starfall' : 'megaton';
   const title = cleanGame === 'starfall' ? 'Starfall Sprint Stars shop' : 'Megaton Stars shop';
@@ -310,7 +345,7 @@ async function sendBuyHelp(env, profile, chatId, gameId = 'megaton', isPrivate =
     : megatonButton(isPrivate, profile, env, 'Open Megaton');
   const examples = cleanGame === 'starfall'
     ? '<code>/buy starfall starter</code>, <code>/buy starfall doubler</code>, <code>/buy starfall revives</code>, or <code>/buy starfall nova_skin</code>'
-    : '<code>/buy starter</code>, <code>/buy caps_pack</code>, <code>/buy warhead_tuning</code>, or <code>/buy mirv_kit</code>';
+    : '<code>/buy caps_pack</code>, <code>/buy warhead_tuning</code>, or <code>/buy mirv_kit</code>';
   await callBot(env, profile, 'sendMessage', {
     chat_id: chatId,
     parse_mode: 'HTML',
@@ -322,6 +357,9 @@ async function sendBuyHelp(env, profile, chatId, gameId = 'megaton', isPrivate =
 async function sendInvoice(env, profile, chatId, productId, userId, gameId = 'megaton') {
   const cleanGame = gameId === 'starfall' ? 'starfall' : 'megaton';
   const product = getProduct(cleanGame, productId);
+  if (isMegatonPaidGachaProduct(cleanGame, productId)) {
+    return sendBuyHelp(env, profile, chatId, cleanGame, true);
+  }
   if (!hasStarsPrice(product)) return sendBuyHelp(env, profile, chatId, cleanGame, true);
   const payload = [
     cleanGame,
@@ -345,10 +383,19 @@ async function sendInvoice(env, profile, chatId, productId, userId, gameId = 'me
 function paymentRecordFromMessage(msg) {
   const payment = msg && msg.successful_payment;
   if (!payment) return null;
-  const parsed = parsePaymentPayload(payment.invoice_payload);
+  const validation = validateStarsPaymentEnvelope(payment, msg.from || {});
+  if (!validation.ok) {
+    throw webhookError(
+      `Invalid Telegram successful_payment: ${validation.error}`,
+      400,
+      `successful_payment_${validation.error}`,
+    );
+  }
+  const parsed = validation.parsed;
   const from = msg.from || {};
   return {
     parsed,
+    product: validation.product,
     record: {
       at: new Date().toISOString(),
       chat_id: msg.chat && msg.chat.id,
@@ -381,46 +428,69 @@ function paymentRecordFromMessage(msg) {
 async function onSuccessfulPayment(env, profile, msg) {
   const saved = paymentRecordFromMessage(msg);
   const parsed = saved && saved.parsed;
-  const product = parsed && getProduct(parsed.game, parsed.productId);
-  let synced = false;
-  if (parsed && product && supabaseIsConfigured(env)) {
-    try {
-      await upsertTelegramPlayer(env, {
-        id: parsed.telegramUserId,
-        username: msg.from && msg.from.username || null,
-        first_name: msg.from && msg.from.first_name || null,
-        last_name: msg.from && msg.from.last_name || null,
-        language_code: msg.from && msg.from.language_code || null,
-        is_premium: Boolean(msg.from && msg.from.is_premium),
-      });
-      await recordTelegramPurchase(env, saved.record);
-      synced = true;
-    } catch (error) {
-      console.error('tg-webhook purchase sync failed', error && error.message || error);
-    }
+  const product = saved && saved.product;
+  if (!saved || !parsed || !product) {
+    throw webhookError('Telegram successful_payment is missing', 400, 'successful_payment_missing');
   }
+  if (!supabaseIsConfigured(env)) {
+    throw webhookError(
+      'Telegram purchase storage is not configured',
+      503,
+      'purchase_storage_not_configured',
+    );
+  }
+
+  await upsertTelegramPlayer(env, {
+    id: parsed.telegramUserId,
+    username: msg.from && msg.from.username || null,
+    first_name: msg.from && msg.from.first_name || null,
+    last_name: msg.from && msg.from.last_name || null,
+    language_code: msg.from && msg.from.language_code || null,
+    is_premium: Boolean(msg.from && msg.from.is_premium),
+  });
+  const rows = await recordTelegramPurchase(env, saved.record);
+  const durable = Array.isArray(rows) && rows.length ? rows[0] : null;
+  const durableValidation = validateVerifiedPurchase(durable, {
+    game: parsed.game,
+    productId: parsed.productId,
+    telegramUserId: parsed.telegramUserId,
+    payload: saved.record.payload,
+  });
+  if (!durableValidation.ok) {
+    throw webhookError(
+      `Telegram paid row is not durable: ${durableValidation.error}`,
+      503,
+      'purchase_not_durable',
+    );
+  }
+
   const game = parsed && parsed.game === 'starfall' ? 'starfall' : 'megaton';
   const returnButton = game === 'starfall'
     ? starfallButton(true, profile, env, 'Return to Starfall Sprint')
     : megatonButton(true, profile, env, 'Return to Megaton');
-  const text = synced
-    ? `<b>Payment received.</b>\n\n${esc(product ? product.title : 'Item')} is recorded. If the Mini App is still open, it should apply the item automatically after the invoice closes.\n\nIf anything looks wrong, send <code>/paysupport</code> with the purchase time.`
-    : '<b>Payment received.</b>\n\nThe payment reached the bot, but the backend receipt was not recorded. Send <code>/paysupport</code> with the purchase time so I can fix it.';
-  await callBot(env, profile, 'sendMessage', {
-    chat_id: msg.chat.id,
-    parse_mode: 'HTML',
-    text,
-    reply_markup: { inline_keyboard: [[returnButton], [termsButton(game)]] },
-  });
+  try {
+    await callBot(env, profile, 'sendMessage', {
+      chat_id: msg.chat.id,
+      parse_mode: 'HTML',
+      text: `<b>Payment received.</b>\n\n${esc(product.title)} is recorded. If the Mini App is still open, it should apply the item automatically after the invoice closes.\n\nIf anything looks wrong, send <code>/paysupport</code> with the purchase time.`,
+      reply_markup: { inline_keyboard: [[returnButton], [termsButton(game)]] },
+    });
+  } catch (error) {
+    // The paid row is already durable. Do not ask Telegram to redeliver the
+    // payment update merely because the optional confirmation message failed.
+    console.warn('tg-webhook payment confirmation failed', error && error.message || error);
+  }
+  return durable;
 }
 
 async function onPreCheckoutQuery(env, profile, query) {
-  const parsed = parsePaymentPayload(query.invoice_payload);
-  const product = parsed && getProduct(parsed.game, parsed.productId);
+  const validation = validateStarsPaymentEnvelope(query, query.from || {});
   await callBot(env, profile, 'answerPreCheckoutQuery', {
     pre_checkout_query_id: query.id,
-    ok: Boolean(parsed && hasStarsPrice(product)),
-    error_message: parsed && hasStarsPrice(product) ? undefined : 'Unknown game item.',
+    ok: validation.ok,
+    error_message: validation.ok
+      ? undefined
+      : 'This payment no longer matches the selected game item.',
   });
 }
 
@@ -454,8 +524,17 @@ async function handleMessage(env, profile, msg) {
   const chat = msg.chat || {};
   const isPrivate = chat.type === 'private';
   if (msg.successful_payment) {
-    if (isPrivate) await registerPrivateUser(env, profile, msg, 'successful_payment');
-    return onSuccessfulPayment(env, profile, msg);
+    // Make the purchase durable before any optional audience bookkeeping. A
+    // transient KV failure must never get in front of the paid-row write.
+    const durable = await onSuccessfulPayment(env, profile, msg);
+    if (isPrivate) {
+      try {
+        await registerPrivateUser(env, profile, msg, 'successful_payment');
+      } catch (error) {
+        console.warn('tg-webhook paid-user registration failed', error && error.message || error);
+      }
+    }
+    return durable;
   }
   const text = String(msg.text || '').trim();
   if (!text) return;
@@ -643,6 +722,22 @@ export async function onRequestPost(context) {
   } catch {
     return jsonError('bad_json', 400);
   }
+  const isPaymentUpdate = Boolean(update && update.message && update.message.successful_payment);
+  if (isPaymentUpdate) {
+    try {
+      // Payment updates are the exception to the normal background webhook
+      // path: acknowledge only after the paid purchase row is durable.
+      await handleUpdate(env, profile, update);
+    } catch (error) {
+      console.error('tg-webhook payment handling failed', error && error.message || error);
+      const status = /^successful_payment_/.test(String(error && error.code || ''))
+        ? 400
+        : 503;
+      return jsonError(error && error.code || 'payment_handling_failed', status);
+    }
+    return json({ ok: true }, 200, { 'cache-control': 'no-store' });
+  }
+
   const task = handleUpdate(env, profile, update).catch((error) => {
     console.error('tg-webhook handler failed', error && error.message || error);
   });

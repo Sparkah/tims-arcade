@@ -3,6 +3,12 @@ import { applyPurchaseGrant } from '../_lib/tgGrants.js';
 import { findTonPayment, expectedTonMemo, productForTonOrder, publicTonPurchase } from '../_lib/tonPayments.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
 import {
+  hasMegatonPaidGachaCheckoutProtocol,
+  isMegatonPaidGachaProduct,
+  purchaseHasMegatonPaidGachaLineage,
+} from '../_lib/tgProducts.js';
+import { validateVerifiedPurchase } from '../_lib/tgVerifiedPurchase.js';
+import {
   getTelegramPurchase,
   recordTelegramPurchase,
   supabaseIsConfigured,
@@ -20,6 +26,22 @@ async function readBody(request) {
 function rowCreatedMs(row) {
   const ms = Date.parse(row && row.created_at || '');
   return Number.isFinite(ms) ? ms : 0;
+}
+
+function paidGachaFulfillment(purchase) {
+  const paidGacha = isMegatonPaidGachaProduct(
+    purchase && purchase.game,
+    purchase && (purchase.product_id || purchase.productId),
+  );
+  return {
+    paidGacha,
+    lineaged: paidGacha && purchaseHasMegatonPaidGachaLineage(purchase),
+  };
+}
+
+function hasTaggedMegatonTonPayload(payload) {
+  const parts = String(payload || '').split(':');
+  return parts[0] === 'ton' && parts[1] === 'megaton' && parts[2] === 'mgp1';
 }
 
 export async function onRequestPost({ request, env }) {
@@ -48,8 +70,30 @@ export async function onRequestPost({ request, env }) {
   const product = productForTonOrder(game, purchase.product_id);
   if (!product) return jsonError('unknown ton product', 400);
 
+  const fulfillment = paidGachaFulfillment(purchase);
+  if (fulfillment.paidGacha && hasTaggedMegatonTonPayload(payload) && !fulfillment.lineaged) {
+    return jsonError('Megaton paid-gacha TON checkout lineage is invalid', 409);
+  }
+  if (
+    fulfillment.lineaged
+    && !hasMegatonPaidGachaCheckoutProtocol(body.checkoutProtocol)
+  ) {
+    return jsonError('Megaton paid-gacha checkout protocol does not match the TON order', 409);
+  }
+
   if (purchase.status === 'paid') {
-    const grant = await applyPurchaseGrant(env, game, auth.user.id, purchase.product_id, payload);
+    const validation = validateVerifiedPurchase(purchase, {
+      game,
+      productId: purchase.product_id,
+      telegramUserId: auth.user.id,
+      payload,
+    });
+    if (!validation.ok) {
+      return jsonError(`Paid TON purchase verification failed: ${validation.error}`, 409);
+    }
+    const grant = !fulfillment.paidGacha || fulfillment.lineaged
+      ? await applyPurchaseGrant(env, game, auth.user.id, purchase.product_id, payload)
+      : null;
     return json(
       {
         ok: true,
@@ -61,6 +105,7 @@ export async function onRequestPost({ request, env }) {
         state: grant && grant.state || null,
         stateRev: grant && grant.stateRev || null,
         updatedAt: grant && grant.updatedAt || null,
+        legacySettlement: fulfillment.paidGacha && !fulfillment.lineaged,
       },
       200,
       { 'cache-control': 'no-store' },
@@ -124,7 +169,23 @@ export async function onRequestPost({ request, env }) {
     },
   });
   const saved = Array.isArray(rows) && rows.length ? rows[0] : null;
-  const grant = await applyPurchaseGrant(env, game, auth.user.id, purchase.product_id, payload);
+  const validation = validateVerifiedPurchase(saved, {
+    game,
+    productId: purchase.product_id,
+    telegramUserId: auth.user.id,
+    payload,
+  });
+  if (!validation.ok) {
+    return jsonError(`Paid TON purchase verification failed: ${validation.error}`, 409);
+  }
+  const savedFulfillment = paidGachaFulfillment(saved);
+  if (
+    fulfillment.lineaged
+    && !savedFulfillment.lineaged
+  ) return jsonError('Stored Megaton paid-gacha TON checkout lineage is invalid', 409);
+  const grant = !savedFulfillment.paidGacha || savedFulfillment.lineaged
+    ? await applyPurchaseGrant(env, game, auth.user.id, purchase.product_id, payload)
+    : null;
 
   return json(
     {
@@ -133,11 +194,12 @@ export async function onRequestPost({ request, env }) {
       granted: Boolean(grant && grant.granted),
       productId: purchase.product_id,
       txHash: payment.hash || null,
-      purchase: publicTonPurchase(saved || purchase),
+      purchase: publicTonPurchase(saved),
       grant,
       state: grant && grant.state || null,
       stateRev: grant && grant.stateRev || null,
       updatedAt: grant && grant.updatedAt || null,
+      legacySettlement: savedFulfillment.paidGacha && !savedFulfillment.lineaged,
     },
     200,
     { 'cache-control': 'no-store' },

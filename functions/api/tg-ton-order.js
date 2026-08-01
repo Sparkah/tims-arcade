@@ -1,5 +1,12 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
-import { PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
+import {
+  MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL,
+  MEGATON_PAID_GACHA_LINEAGE,
+  PRODUCTS_BY_GAME,
+  hasMegatonPaidGachaCheckoutProtocol,
+  isMegatonPaidGachaProduct,
+  megatonPaidGachaCheckoutIsLive,
+} from '../_lib/tgProducts.js';
 import { buildTonOrder } from '../_lib/tonPayments.js';
 import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
 import {
@@ -30,7 +37,16 @@ export async function onRequestPost({ request, env }) {
   if (!Object.hasOwn(PRODUCTS_BY_GAME, game)) return jsonError('bad game', 400);
 
   const productId = String(body.productId || '');
-  const order = buildTonOrder(game, productId, env);
+  const paidGachaCheckout = isMegatonPaidGachaProduct(game, productId);
+  if (
+    paidGachaCheckout
+    && !hasMegatonPaidGachaCheckoutProtocol(body.checkoutProtocol)
+  ) return jsonError('Megaton paid-gacha checkout protocol is required', 409);
+  if (paidGachaCheckout && !megatonPaidGachaCheckoutIsLive(env)) {
+    return jsonError('Megaton paid-gacha checkout is not live', 503);
+  }
+
+  const order = buildTonOrder(game, productId, env, body.checkoutProtocol);
   if (!order) return jsonError('bad ton product', 400);
 
   const auth = await verifyTelegramInitData(String(body.initData || ''), env.TELEGRAM_GAMEBOT_TOKEN);
@@ -52,6 +68,10 @@ export async function onRequestPost({ request, env }) {
       network: order.network,
       ton: order.ton,
       validUntil: order.validUntil,
+      ...(paidGachaCheckout ? {
+        checkoutProtocol: MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL,
+        checkoutLineage: MEGATON_PAID_GACHA_LINEAGE,
+      } : {}),
     },
   });
 
@@ -69,6 +89,9 @@ export async function onRequestPost({ request, env }) {
       memo: order.memo,
       payloadBoc: order.payloadBoc,
       validUntil: order.validUntil,
+      ...(paidGachaCheckout ? {
+        checkoutProtocol: MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL,
+      } : {}),
     },
     200,
     { 'cache-control': 'no-store' },

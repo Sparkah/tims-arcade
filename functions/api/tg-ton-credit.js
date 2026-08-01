@@ -1,13 +1,28 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
-import { getProduct, hasTonPrice, PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
-import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
+import { applyPurchaseGrant, isServerGrantable } from '../_lib/tgGrants.js';
 import {
-  ensureServerBlock,
+  paidGachaSpec,
+  publicPaidGachaReceipt,
+  redeemMegatonPaidGacha,
+  rollMegatonPaidProduct,
+} from '../_lib/megatonPaidGacha.js';
+import {
+  MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL,
+  PRODUCTS_BY_GAME,
+  getProduct,
+  hasMegatonPaidGachaCheckoutProtocol,
+  hasTonPrice,
+  megatonPaidGachaCutoverMs,
+  purchaseHasMegatonPaidGachaLineage,
+} from '../_lib/tgProducts.js';
+import { verifyTelegramInitData } from '../_lib/telegramAuth.js';
+import { validateVerifiedPurchase } from '../_lib/tgVerifiedPurchase.js';
+import {
   formatTon,
   getTelegramState,
   normalizeNanotons,
   supabaseIsConfigured,
-  updateTelegramStateIfRev,
+  supabaseRequest,
   upsertTelegramPlayer,
 } from '../_lib/supabase.js';
 
@@ -17,28 +32,6 @@ async function readBody(request) {
   } catch {
     return null;
   }
-}
-
-function cloneJson(value) {
-  return JSON.parse(JSON.stringify(value || {}));
-}
-
-function spendsFor(server) {
-  return server.tonCreditSpends && typeof server.tonCreditSpends === 'object' ? server.tonCreditSpends : (server.tonCreditSpends = {});
-}
-
-function newPayload(game, productId, telegramUserId) {
-  const nonce = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return `${game}:ton_credit:${productId}:${telegramUserId}:${nonce}`;
-}
-
-function trimSpendLedger(spends, max = 120) {
-  const keys = Object.keys(spends);
-  if (keys.length <= max) return;
-  keys
-    .sort((a, b) => String(spends[a]?.spentAt || '').localeCompare(String(spends[b]?.spentAt || '')))
-    .slice(0, keys.length - max)
-    .forEach((key) => { delete spends[key]; });
 }
 
 function balanceResponse(game, state) {
@@ -61,6 +54,42 @@ async function authenticate(body, env) {
   return { user: auth.user };
 }
 
+function errorDetail(error) {
+  return `${error && error.message || ''} ${JSON.stringify(error && error.body || {})}`;
+}
+
+function migrationIsMissing(error) {
+  return /spend_megaton_ton_credit|redeem_megaton_paid_gacha|telegram_megaton_paid/i.test(errorDetail(error))
+    && /PGRST202|schema cache|does not exist|could not find/i.test(errorDetail(error));
+}
+
+function insufficientCredit(error) {
+  const match = errorDetail(error).match(/insufficient_ton_credit:(\d+):(\d+)/i);
+  return match ? { balance: BigInt(match[1]), required: BigInt(match[2]) } : null;
+}
+
+async function spendTonCredit(
+  env,
+  telegramUserId,
+  productId,
+  requestId,
+  checkoutProtocol,
+  cutoverAt,
+) {
+  const rows = await supabaseRequest(env, 'rpc/spend_megaton_ton_credit', {
+    method: 'POST',
+    headers: { prefer: 'return=representation' },
+    body: JSON.stringify({
+      p_telegram_user_id: String(telegramUserId),
+      p_product_id: productId,
+      p_request_id: requestId,
+      p_checkout_protocol: checkoutProtocol,
+      p_cutover_at: cutoverAt,
+    }),
+  });
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
 export async function onRequestPost({ request, env }) {
   if (!sameOriginOk(request)) return jsonError('Forbidden', 403);
   if (!env.TELEGRAM_GAMEBOT_TOKEN) return jsonError('telegram bot token not configured', 503);
@@ -73,10 +102,19 @@ export async function onRequestPost({ request, env }) {
   const game = String(body.game || '').toLowerCase();
   if (!Object.hasOwn(PRODUCTS_BY_GAME, game) || game !== 'megaton') return jsonError('bad game', 400);
 
+  const requestedAction = String(body.action || 'balance');
+  if (requestedAction === 'spend') {
+    const requestedProductId = String(body.productId || '');
+    if (
+      paidGachaSpec(requestedProductId)
+      && !hasMegatonPaidGachaCheckoutProtocol(body.checkoutProtocol)
+    ) return jsonError('Megaton paid-gacha checkout protocol is required', 409);
+  }
+
   const auth = await authenticate(body, env);
   if (auth.error) return auth.error;
 
-  const action = String(body.action || 'balance');
+  const action = requestedAction;
   if (action === 'balance') {
     const stateRow = await getTelegramState(env, game, auth.user.id);
     return json(balanceResponse(game, stateRow && stateRow.state), 200, { 'cache-control': 'no-store' });
@@ -89,56 +127,138 @@ export async function onRequestPost({ request, env }) {
   if (!product || !hasTonPrice(product)) return jsonError('bad TON product', 400);
   const priceNanotons = normalizeNanotons(product.nanotons);
   if (!priceNanotons) return jsonError('bad TON product price', 400);
+  const hasPaidRoll = Boolean(paidGachaSpec(productId));
+  const hasDeterministicGrant = isServerGrantable(game, productId);
+  if (!hasPaidRoll && !hasDeterministicGrant) {
+    return jsonError('TON credit product is not server-fulfillable', 422);
+  }
+  if (
+    hasPaidRoll
+    && !hasMegatonPaidGachaCheckoutProtocol(body.checkoutProtocol)
+  ) return jsonError('Megaton paid-gacha checkout protocol is required', 409);
 
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const stateRow = await getTelegramState(env, game, auth.user.id);
-    const state = cloneJson(stateRow && stateRow.state);
-    const server = ensureServerBlock(state);
-    const balance = normalizeNanotons(server.tonCreditNanotons);
-    if (balance < priceNanotons) {
+  const requestId = String(body.requestId || '');
+  if (!/^[A-Za-z0-9_-]{8,96}$/.test(requestId)) {
+    return jsonError('Invalid TON credit request id', 400);
+  }
+  const cutover = hasPaidRoll ? megatonPaidGachaCutoverMs(env) : NaN;
+  if (hasPaidRoll && (!Number.isFinite(cutover) || Date.now() < cutover)) {
+    return json(
+      { ok: false, error: 'megaton_paid_gacha_cutover_not_configured' },
+      503,
+      { 'cache-control': 'no-store' },
+    );
+  }
+
+  let spend;
+  try {
+    spend = await spendTonCredit(
+      env,
+      auth.user.id,
+      productId,
+      requestId,
+      hasPaidRoll ? MEGATON_PAID_GACHA_CHECKOUT_PROTOCOL : '',
+      hasPaidRoll ? new Date(cutover).toISOString() : null,
+    );
+  } catch (error) {
+    const insufficient = insufficientCredit(error);
+    if (insufficient) {
       return json({
         ok: false,
         configured: true,
         game,
         status: 'insufficient_credit',
-        creditTon: formatTon(balance),
-        creditNanotons: balance.toString(),
-        requiredTon: formatTon(priceNanotons),
-        requiredNanotons: priceNanotons.toString(),
+        creditTon: formatTon(insufficient.balance),
+        creditNanotons: insufficient.balance.toString(),
+        requiredTon: formatTon(insufficient.required),
+        requiredNanotons: insufficient.required.toString(),
       }, 402, { 'cache-control': 'no-store' });
     }
+    if (migrationIsMissing(error)) {
+      return json(
+        { ok: false, error: 'megaton_paid_gacha_not_migrated' },
+        503,
+        { 'cache-control': 'no-store' },
+      );
+    }
+    if (/ton_credit_request_conflict/i.test(errorDetail(error))) {
+      return jsonError('TON credit request id conflicts with an existing spend', 409);
+    }
+    console.error('Megaton TON credit spend failed', error && error.message || error);
+    return jsonError('TON credit spend failed', 500);
+  }
 
-    const payload = newPayload(game, productId, auth.user.id);
-    const spends = spendsFor(server);
-    const now = new Date().toISOString();
-    const nextBalance = balance - priceNanotons;
-    server.tonCreditNanotons = nextBalance.toString();
-    server.tonCreditUpdatedAt = now;
-    spends[payload] = {
-      productId,
-      nanotons: priceNanotons.toString(),
-      spentAt: now,
-    };
-    trimSpendLedger(spends);
+  const validation = validateVerifiedPurchase(spend, {
+    game,
+    productId,
+    telegramUserId: auth.user.id,
+    payload: spend && spend.payload,
+  });
+  if (!validation.ok) {
+    return jsonError(`TON credit purchase verification failed: ${validation.error}`, 409);
+  }
+  if (hasPaidRoll && !purchaseHasMegatonPaidGachaLineage(spend)) {
+    return jsonError('TON credit purchase has invalid Megaton paid-gacha lineage', 409);
+  }
+  if (hasPaidRoll && Date.parse(spend.paid_at) < cutover) {
+    return jsonError('TON credit purchase predates the paid-gacha cutover', 409);
+  }
 
-    const updated = stateRow && await updateTelegramStateIfRev(env, game, auth.user.id, stateRow.state_rev, state);
-    if (updated) {
-      return json({
-        ok: true,
-        configured: true,
-        game,
-        paid: true,
-        source: 'ton_credit',
-        productId,
-        payload,
-        creditTon: formatTon(nextBalance),
-        creditNanotons: nextBalance.toString(),
-        spentTon: formatTon(priceNanotons),
-        spentNanotons: priceNanotons.toString(),
-        inGameOnly: true,
-      }, 200, { 'cache-control': 'no-store' });
+  let grant = null;
+  if (hasDeterministicGrant) {
+    grant = await applyPurchaseGrant(env, game, auth.user.id, productId, spend.payload);
+    if (!grant || !grant.granted) {
+      return jsonError('TON credit grant conflict, retry the same request id', 409);
     }
   }
 
-  return jsonError('credit spend conflict, retry', 409);
+  let receipt = null;
+  if (hasPaidRoll) {
+    try {
+      receipt = publicPaidGachaReceipt(await redeemMegatonPaidGacha(
+        env,
+        spend,
+        rollMegatonPaidProduct(productId),
+        new Date(cutover).toISOString(),
+      ));
+    } catch (error) {
+      if (migrationIsMissing(error)) {
+        return json(
+          { ok: false, error: 'megaton_paid_gacha_not_migrated' },
+          503,
+          { 'cache-control': 'no-store' },
+        );
+      }
+      console.error('Megaton TON credit paid-gacha redemption failed', error && error.message || error);
+      return jsonError('TON credit paid roll failed; retry the same request id', 500);
+    }
+    if (!receipt) return jsonError('TON credit paid roll receipt was not returned', 500);
+  }
+
+  const creditNanotons = String(spend.credit_nanotons ?? '0');
+  const state = grant && grant.state || spend.player_state || null;
+  const stateRev = grant && grant.stateRev != null
+    ? grant.stateRev
+    : (spend.state_rev ?? null);
+  return json({
+    ok: true,
+    configured: true,
+    game,
+    paid: true,
+    source: 'TON_CREDIT',
+    productId,
+    payload: spend.payload,
+    requestId,
+    state,
+    stateRev,
+    serverGrantApplied: Boolean(grant && grant.granted),
+    grant,
+    receipt,
+    idempotent: Boolean(spend.idempotent),
+    creditTon: formatTon(creditNanotons),
+    creditNanotons,
+    spentTon: formatTon(priceNanotons),
+    spentNanotons: priceNanotons.toString(),
+    inGameOnly: true,
+  }, 200, { 'cache-control': 'no-store' });
 }
