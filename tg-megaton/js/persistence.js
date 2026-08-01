@@ -7,6 +7,7 @@ export function createPersistence(options) {
   var hasTelegram = Boolean(options.hasTelegram);
   var timeoutMs = Number(options.timeoutMs || 8000);
   var getStartMeta = options.getStartMeta || function () { return {}; };
+  var stateProtocol = String(options.stateProtocol || 'megaton-state-rev-v1');
   var saveTimer = 0;
   var revisionKey = saveKey + '_remote_rev';
 
@@ -25,6 +26,16 @@ export function createPersistence(options) {
     if (revision == null) return false;
     try {
       localStorage.setItem(revisionKey, String(revision));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function clearRemoteRevision() {
+    remoteStateRev = null;
+    try {
+      localStorage.removeItem(revisionKey);
       return true;
     } catch (e) {
       return false;
@@ -106,10 +117,17 @@ export function createPersistence(options) {
         action: 'load',
         game: gameId,
         initData: telegram.initData,
+        stateProtocol: stateProtocol,
         source: meta.source,
         startParam: meta.startParam
       }, false, 3500);
-      if (!data || !data.state) return null;
+      if (!data || !data.state) {
+        // A successful empty load means this Telegram account has no row. A
+        // cached revision can belong to an earlier reset/account and would make
+        // every first save conflict without an authoritative state to adopt.
+        if (data && data.ok) clearRemoteRevision();
+        return null;
+      }
 
       var local = readLocalState();
       var serverRevision = normalizeRevision(data.stateRev);
@@ -141,6 +159,7 @@ export function createPersistence(options) {
         action: 'save',
         game: gameId,
         initData: telegram.initData,
+        stateProtocol: stateProtocol,
         reason: reason || 'autosave',
         source: meta.source,
         startParam: meta.startParam,

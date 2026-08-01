@@ -428,6 +428,11 @@ Production execution receipt, 2026-08-01:
   `2026-08-01T14:24:25Z` before deployment.
 - The release code still performs the RPC readiness check at every new paid
   checkout boundary; this receipt is evidence of ordering, not a bypass.
+- New clients send state protocol `megaton-state-rev-v1`. For the first 24
+  hours after the cutover timestamp, an already-open legacy client may save
+  without a revision only when its server row has no protected purchase grant;
+  the write still uses compare-and-swap. Protected rows, versioned clients, and
+  all clients after that window receive the authoritative 409 state instead.
 
 Rollback is fail-closed: remove the cutover secret or move it to a future UTC
 timestamp first, then revert the Pages code. Do not drop the paid tables, charge

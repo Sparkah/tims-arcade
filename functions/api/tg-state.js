@@ -1,5 +1,5 @@
 import { json, jsonError, sameOriginOk } from '../_lib/response.js';
-import { PRODUCTS_BY_GAME } from '../_lib/tgProducts.js';
+import { PRODUCTS_BY_GAME, megatonPaidGachaCutoverMs } from '../_lib/tgProducts.js';
 import { verifyTelegramInitDataFromEnv } from '../_lib/telegramAuth.js';
 import {
   getTelegramState,
@@ -11,6 +11,8 @@ import {
 } from '../_lib/supabase.js';
 
 const MAX_STATE_BYTES = 32 * 1024;
+const MEGATON_STATE_PROTOCOL = 'megaton-state-rev-v1';
+const MEGATON_LEGACY_SAVE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 async function readBody(request) {
   try {
@@ -64,6 +66,27 @@ function expectedRevision(value) {
   return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
 }
 
+function hasProtectedMegatonGrant(state) {
+  const block = serverBlock(state);
+  const entitlements = block && block.entitlements;
+  if (!entitlements || typeof entitlements !== 'object' || Array.isArray(entitlements)) return false;
+  return Object.entries(entitlements).some(([key, value]) => (
+    key === 'applied'
+      ? Boolean(value && typeof value === 'object' && Object.keys(value).length)
+      : Boolean(value)
+  ));
+}
+
+function legacyMegatonSaveAllowed(body, env, existing, now = Date.now()) {
+  if (!existing || Object.hasOwn(body, 'expectedStateRev')) return false;
+  if (String(body.stateProtocol || '') === MEGATON_STATE_PROTOCOL) return false;
+  if (hasProtectedMegatonGrant(existing.state)) return false;
+  const cutover = megatonPaidGachaCutoverMs(env);
+  return Number.isFinite(cutover)
+    && now >= cutover
+    && now < cutover + MEGATON_LEGACY_SAVE_WINDOW_MS;
+}
+
 export async function onRequestPost({ request, env }) {
   if (!sameOriginOk(request)) return jsonError('Forbidden', 403);
 
@@ -94,6 +117,7 @@ export async function onRequestPost({ request, env }) {
         state: row ? row.state : null,
         stateRev: row ? row.state_rev : null,
         updatedAt: row ? row.updated_at : null,
+        ...(game === 'megaton' ? { stateProtocol: MEGATON_STATE_PROTOCOL } : {}),
       },
       200,
       { 'cache-control': 'no-store' },
@@ -113,8 +137,14 @@ export async function onRequestPost({ request, env }) {
       // Megaton purchases mutate the same cloud state as gameplay. A save may
       // only replace the exact revision it loaded; otherwise return the newer
       // authoritative state so the wrapper can adopt it instead of erasing a
-      // paid grant. Null is valid only while no state row exists yet.
-      if ((existing && suppliedExpectedRevision !== Number(existing.state_rev))
+      // paid grant. For 24 hours after the paid-gacha cutover, an already-open
+      // legacy client may save without a revision only while the row has no
+      // protected purchase grant. The CAS write below still closes races with
+      // a grant that lands between this read and update.
+      const legacySave = legacyMegatonSaveAllowed(body, env, existing);
+      if ((existing
+          && suppliedExpectedRevision !== Number(existing.state_rev)
+          && !legacySave)
           || (!existing && suppliedExpectedRevision != null)) {
         return stateConflict(existing);
       }
@@ -158,6 +188,7 @@ export async function onRequestPost({ request, env }) {
           configured: true,
           stateRev: saved.state_rev,
           updatedAt: saved.updated_at,
+          ...(game === 'megaton' ? { stateProtocol: MEGATON_STATE_PROTOCOL } : {}),
         },
         200,
         { 'cache-control': 'no-store' },

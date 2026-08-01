@@ -843,3 +843,82 @@ test('a stale Megaton save returns and preserves the newer authoritative purchas
     assert.deepEqual(getRow().state, authoritative);
   });
 });
+
+test('legacy Megaton saves have a bounded compatibility window before the new client refreshes', async () => {
+  const liveCutover = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  await withStateBackend({ money: 10, powerLvl: 1 }, async ({ getRow, getPatchCount }) => {
+    const response = await statePost({
+      request: request('/api/tg-state', {
+        action: 'save',
+        game: 'megaton',
+        initData: signedInitData(),
+        state: { money: 20, powerLvl: 2 },
+      }),
+      env: { ...ENV, MEGATON_PAID_GACHA_CUTOVER_AT: liveCutover },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(getPatchCount(), 1);
+    assert.equal(getRow().state.money, 20);
+  });
+});
+
+test('legacy compatibility never overwrites a protected purchase grant', async () => {
+  const liveCutover = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const authoritative = {
+    money: 5300,
+    __server: {
+      entitlements: {
+        applied: { paid_payload: { productId: 'caps_pack' } },
+      },
+    },
+  };
+  await withStateBackend(authoritative, async ({ getRow, getPatchCount }) => {
+    const response = await statePost({
+      request: request('/api/tg-state', {
+        action: 'save',
+        game: 'megaton',
+        initData: signedInitData(),
+        state: { money: 10 },
+      }),
+      env: { ...ENV, MEGATON_PAID_GACHA_CUTOVER_AT: liveCutover },
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).error, 'state_revision_conflict');
+    assert.equal(getPatchCount(), 0);
+    assert.deepEqual(getRow().state, authoritative);
+  });
+});
+
+test('versioned or expired revisionless saves must adopt the authoritative row', async () => {
+  const scenarios = [
+    {
+      name: 'versioned client',
+      env: { ...ENV, MEGATON_PAID_GACHA_CUTOVER_AT: new Date(Date.now() - 60 * 60 * 1000).toISOString() },
+      extra: { stateProtocol: 'megaton-state-rev-v1' },
+    },
+    {
+      name: 'expired legacy client',
+      env: { ...ENV, MEGATON_PAID_GACHA_CUTOVER_AT: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString() },
+      extra: {},
+    },
+  ];
+  for (const scenario of scenarios) {
+    await withStateBackend({ money: 40 }, async ({ getPatchCount }) => {
+      const response = await statePost({
+        request: request('/api/tg-state', {
+          action: 'save',
+          game: 'megaton',
+          initData: signedInitData(),
+          state: { money: 5 },
+          ...scenario.extra,
+        }),
+        env: scenario.env,
+      });
+      assert.equal(response.status, 409, scenario.name);
+      const data = await response.json();
+      assert.equal(data.stateRev, 10, scenario.name);
+      assert.equal(data.state.money, 40, scenario.name);
+      assert.equal(getPatchCount(), 0, scenario.name);
+    });
+  }
+});
