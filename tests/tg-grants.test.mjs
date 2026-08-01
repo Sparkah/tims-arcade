@@ -922,3 +922,28 @@ test('versioned or expired revisionless saves must adopt the authoritative row',
     });
   }
 });
+
+test('unknown state protocols and malformed revisions never enter legacy mode', async () => {
+  const liveCutover = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const scenarios = [
+    { stateProtocol: 'megaton-state-rev-v999' },
+    { expectedStateRev: 'not-a-revision' },
+    { expectedStateRev: -1 },
+  ];
+  for (const extra of scenarios) {
+    await withStateBackend({ money: 40 }, async ({ getPatchCount }) => {
+      const response = await statePost({
+        request: request('/api/tg-state', {
+          action: 'save',
+          game: 'megaton',
+          initData: signedInitData(),
+          state: { money: 5 },
+          ...extra,
+        }),
+        env: { ...ENV, MEGATON_PAID_GACHA_CUTOVER_AT: liveCutover },
+      });
+      assert.equal(response.status, 400);
+      assert.equal(getPatchCount(), 0);
+    });
+  }
+});

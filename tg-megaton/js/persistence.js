@@ -149,7 +149,7 @@ export function createPersistence(options) {
     }
   }
 
-  async function saveRemoteState(reason, keepalive) {
+  async function saveRemoteState(reason, keepalive, retriedAfterReset) {
     if (!hasTelegram) return false;
     var state = readLocalState();
     if (!state || typeof state !== 'object') return false;
@@ -174,8 +174,23 @@ export function createPersistence(options) {
       }
       return true;
     } catch (e) {
-      if (e.status === 409 && e.data && e.data.state && normalizeRevision(e.data.stateRev) != null) {
-        adoptAuthoritativeState(e.data.state, e.data.stateRev);
+      if (e.status === 409 && e.data && e.data.error === 'state_revision_conflict') {
+        var conflictRevision = normalizeRevision(e.data.stateRev);
+        if (e.data.state && conflictRevision != null) {
+          adoptAuthoritativeState(e.data.state, conflictRevision);
+        } else if (
+          Object.prototype.hasOwnProperty.call(e.data, 'state')
+          && e.data.state === null
+          && Object.prototype.hasOwnProperty.call(e.data, 'stateRev')
+          && e.data.stateRev === null
+          && remoteStateRev != null
+          && !retriedAfterReset
+        ) {
+          // The row was deleted/reset after this client cached its revision.
+          // Clear that orphaned revision and retry once as a first save.
+          clearRemoteRevision();
+          return saveRemoteState(reason, keepalive, true);
+        }
       }
       if (e.status !== 503) console.warn('Megaton Telegram state save failed', e.message);
       return false;

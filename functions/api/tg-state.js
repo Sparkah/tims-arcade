@@ -79,7 +79,9 @@ function hasProtectedMegatonGrant(state) {
 
 function legacyMegatonSaveAllowed(body, env, existing, now = Date.now()) {
   if (!existing || Object.hasOwn(body, 'expectedStateRev')) return false;
-  if (String(body.stateProtocol || '') === MEGATON_STATE_PROTOCOL) return false;
+  // Only a truly absent marker identifies the pre-protocol client. Unknown or
+  // future non-empty markers must never inherit the temporary legacy bypass.
+  if (String(body.stateProtocol || '')) return false;
   if (hasProtectedMegatonGrant(existing.state)) return false;
   const cutover = megatonPaidGachaCutoverMs(env);
   return Number.isFinite(cutover)
@@ -129,7 +131,18 @@ export async function onRequestPost({ request, env }) {
     return jsonError('State must be an object', 400);
   }
 
+  if (
+    game === 'megaton'
+    && body.stateProtocol != null
+    && String(body.stateProtocol) !== ''
+    && String(body.stateProtocol) !== MEGATON_STATE_PROTOCOL
+  ) return jsonError('Unsupported Megaton state protocol', 400);
+
+  const hasExpectedRevision = Object.hasOwn(body, 'expectedStateRev');
   const suppliedExpectedRevision = expectedRevision(body.expectedStateRev);
+  if (game === 'megaton' && hasExpectedRevision && suppliedExpectedRevision == null) {
+    return jsonError('Invalid expected state revision', 400);
+  }
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const existing = await getTelegramState(env, game, auth.user.id);
