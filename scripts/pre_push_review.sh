@@ -313,10 +313,46 @@ PY
 REVIEW_STATUS=$?
 echo "$RAW" > "$LOG"
 
+# 2026-08-02: Codex-outage fallback. Codex hit its usage limit (reset 8 Aug)
+# and the gate failed closed, blocking every production push for a week. A
+# gate that cannot run must still GATE, not force --no-verify bypasses - so
+# when the Codex reviewer fails for ANY reason, retry the identical prompt
+# through the Claude CLI (same rubric, same JSON contract, same threshold).
+# Claude runs headless (-p), with a hard timeout, from the caller's real HOME
+# (keychain auth) with CLAUDE_CONFIG_DIR stripped (a stale one hangs headless
+# runs). If the fallback also fails, the original fail-closed abort stands.
+if (( REVIEW_STATUS != 0 )); then
+  CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || true)}"
+  if [[ -n "$CLAUDE_BIN" && -x "$CLAUDE_BIN" ]]; then
+    echo "pre-push-review: Codex reviewer failed (status $REVIEW_STATUS) — retrying via Claude fallback" >&2
+    RAW=$(CLAUDE_BIN="$CLAUDE_BIN" CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-sonnet}" \
+          REVIEW_TIMEOUT_SECONDS="$TIMEOUT_SECONDS" python3 /dev/fd/3 3<<'PY2' <<<"$PROMPT" 2>&1
+import os, subprocess, sys
+prompt = sys.stdin.read()
+timeout = int(os.environ["REVIEW_TIMEOUT_SECONDS"])
+env = dict(os.environ)
+env.pop("CLAUDE_CONFIG_DIR", None)
+env["NO_COLOR"] = "1"
+args = [os.environ["CLAUDE_BIN"], "-p", "--model", os.environ["CLAUDE_REVIEW_MODEL"]]
+try:
+    r = subprocess.run(args, input=prompt, text=True, timeout=timeout,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
+except subprocess.TimeoutExpired:
+    print(f"pre-push-review: Claude fallback timed out after {timeout}s", file=sys.stderr)
+    sys.exit(124)
+sys.stdout.write(r.stdout or "")
+sys.exit(r.returncode)
+PY2
+)
+    REVIEW_STATUS=$?
+    { echo ""; echo "--- claude fallback ---"; echo "$RAW"; } >> "$LOG"
+  fi
+fi
+
 if (( REVIEW_STATUS != 0 )); then
   echo "" >&2
-  echo "pre-push-review: Codex review command failed with status $REVIEW_STATUS — see $LOG" >&2
-  echo "🚫 push aborted. Restore Codex auth/tooling and run the review again." >&2
+  echo "pre-push-review: AI review failed with status $REVIEW_STATUS — see $LOG" >&2
+  echo "🚫 push aborted. Restore Codex auth/tooling (or the Claude fallback) and run the review again." >&2
   exit 1
 fi
 
