@@ -30,6 +30,9 @@ function resize() {
   H = canvas.height = window.innerHeight;
   cx = W / 2; cy = H / 2;
   S = Math.min(W / 480, H / 640);
+  // Re-derive every world entity from the LIVE arena. Without this a size
+  // change strands debris outside the playfield forever (see reflowWorld).
+  reflowWorld();
 }
 window.addEventListener('resize', function() { resize(); });
 resize();
@@ -46,6 +49,20 @@ function rr(ctx, x, y, w, h, r) {
 }
 function lerp(a, b, t) { return a + (b - a) * t; }
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+// Shrink a bold label until it fits maxW, so a longer localisation (Russian
+// runs ~40% longer than English here) can never spill outside its pill.
+// Returns the px size to use; the caller sets the font.
+function fitBoldFs(label, maxW, baseFs, minFs) {
+  var fs = baseFs;
+  var prev = ctx.font;
+  while (fs > minFs) {
+    ctx.font = 'bold ' + fs + 'px sans-serif';
+    if (ctx.measureText(label).width <= maxW) break;
+    fs -= 1;
+  }
+  ctx.font = prev;
+  return Math.max(minFs, fs);
+}
 function platformSafeInsets() {
   var shortWide = W / Math.max(1, H) > 1.55 && H <= 720;
   return {
@@ -130,6 +147,10 @@ var STRINGS = {
     toolUnlocked: 'NEW TOOL UNLOCKED!',
     sprinkles:    'SPRINKLES',
     locked2:      'Play to unlock',
+    playedLbl:    'played',
+    unlockNow:    'UNLOCK',
+    continueBtn:  'CONTINUE',
+    startOver:    'Start over from level 1',
     lvlAbbr:      'Lv',
     claim:        'CLAIM',
     claimed:      'DONE',
@@ -150,6 +171,24 @@ var STRINGS = {
     tut_combo:    'Keep cleaning fast to build a COMBO',
     tut_clear:    'Clear the floor before TIME runs out',
     tutSkip:      'SKIP',
+    caseTab:      'CASE',
+    caseTitle:    'DONUT CASE',
+    caseCount:    'COLLECTED',
+    caseEmpty:    'Clear levels to earn boxes',
+    caseEquipped: 'EQUIPPED',
+    boxChip:      'OPEN A DONUT BOX',
+    boxLeftLbl:   'boxes left',
+    boxReadyLbl:  'ready',
+    boxNoneLeft:  'All boxes used',
+    boxOpening:   'OPENING...',
+    boxGotDonut:  'NEW DONUT!',
+    boxGotCoins:  'SPRINKLES!',
+    boxFullCase:  'Case complete - double sprinkles instead',
+    boxStreakTag: 'DAY 7 STREAK BOX',
+    boxClose:     'NICE',
+    boxEarnHint:  'Clear a level to earn another box',
+    streakBoxDue: 'Day 7+: free donut box included!',
+    lockedSlot:   'Locked',
   },
   ru: {
     title: 'Чистая Уборка',
@@ -224,6 +263,10 @@ var STRINGS = {
     toolUnlocked: 'НОВЫЙ ПРЕДМЕТ!',
     sprinkles:    'ПОСЫПКА',
     locked2:      'Играйте, чтобы открыть',
+    playedLbl:    'сыграно',
+    unlockNow:    'ОТКРЫТЬ',
+    continueBtn:  'ПРОДОЛЖИТЬ',
+    startOver:    'Начать заново с 1 уровня',
     lvlAbbr:      'Ур',
     claim:        'ЗАБРАТЬ',
     claimed:      'ГОТОВО',
@@ -244,6 +287,24 @@ var STRINGS = {
     tut_combo:    'Убирайте быстро, чтобы копить КОМБО',
     tut_clear:    'Очистите пол, пока не вышло ВРЕМЯ',
     tutSkip:      'ПРОПУСТИТЬ',
+    caseTab:      'КОЛЛЕКЦИЯ',
+    caseTitle:    'КОЛЛЕКЦИЯ ПОНЧИКОВ',
+    caseCount:    'СОБРАНО',
+    caseEmpty:    'Проходите уровни за коробки',
+    caseEquipped: 'ВЫБРАН',
+    boxChip:      'ОТКРЫТЬ КОРОБКУ',
+    boxLeftLbl:   'коробок осталось',
+    boxReadyLbl:  'готово',
+    boxNoneLeft:  'Коробки закончились',
+    boxOpening:   'ОТКРЫВАЕМ...',
+    boxGotDonut:  'НОВЫЙ ПОНЧИК!',
+    boxGotCoins:  'ПОСЫПКА!',
+    boxFullCase:  'Коллекция собрана - двойная посыпка',
+    boxStreakTag: 'КОРОБКА ЗА 7 ДНЕЙ',
+    boxClose:     'ОТЛИЧНО',
+    boxEarnHint:  'Пройдите уровень за новую коробку',
+    streakBoxDue: '7+ дней: бесплатная коробка!',
+    lockedSlot:   'Закрыто',
   },
 };
 function t(k) { return (STRINGS[lang] || STRINGS.en)[k] || k; }
@@ -279,6 +340,12 @@ window._jumpLevel = function(n) {
     else { lastLevelStarsNewBest = false; }
     // iter#13 visual-test hook: also seed PERFECT SWEEP so harness paints the stamp
     lastLevelPerfect = true;
+    // MCPlay 2026-07-27 visual-test hook: seed the remaining level-end rows
+    // (TIME BONUS + sprinkle payout) so the overlap gate can review the panel
+    // with EVERY optional row present - the densest frame it can produce.
+    if (score <= 0) score = 594;
+    if (lastLevelTimeBonus <= 0) lastLevelTimeBonus = 436;
+    if (lastLevelSprinkles <= 0) lastLevelSprinkles = 19;
     gs = 'LEVELEND';
     return;
   }
@@ -301,6 +368,21 @@ var EXTRA_TIME_SEC = 15;
 function showInterstitial(onDone) {
   var now = performance.now();
   if (now - lastInterstitialMs < INTERSTITIAL_GAP_MS) { onDone && onDone(); return; }
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showFullscreen === 'function') {
+    lastInterstitialMs = now;
+    var gpSettled = false;
+    function gpDone() {
+      if (gpSettled) return; gpSettled = true;
+      resumeAudioForAd();
+      onDone && onDone();
+    }
+    try {
+      pauseAudioForAd();
+      window.gp.ads.showFullscreen().then(gpDone).catch(gpDone);
+      setTimeout(gpDone, 30000);
+    } catch(e) { gpDone(); }
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showFullscreenAdv) { onDone && onDone(); return; }
   lastInterstitialMs = now;
   var opened = false, settled = false, openTimer = null, maxTimer = null;
@@ -347,6 +429,23 @@ function resumeAudioForAd() {
 function showRewardedExtraTime() {
   if (extraTimeUsed || extraTimeLoading) return;
   extraTimeLoading = true;
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showRewardedVideo === 'function') {
+    var gpSettled = false;
+    function gpSettle(grant) {
+      if (gpSettled) return; gpSettled = true;
+      extraTimeLoading = false;
+      resumeAudioForAd();
+      if (grant) grantExtraTime();
+    }
+    try {
+      pauseAudioForAd();
+      window.gp.ads.showRewardedVideo()
+        .then(function(success) { gpSettle(!!success); })
+        .catch(function() { gpSettle(true); });
+      setTimeout(function() { gpSettle(true); }, 30000);
+    } catch(e) { gpSettle(true); }
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) {
     extraTimeLoading = false; grantExtraTime(); return;
   }
@@ -377,19 +476,125 @@ function grantExtraTime() {
   timeLeft = EXTRA_TIME_SEC;
   gs = 'PLAYING';
 }
+// ── Rewarded "unlock this boost now" (Workshop) ──────────────────────────────
+// User-click only, offered on the FIRST locked tool only. Same SDK branches as
+// the Extra Time revive above.
+var toolUnlockLoading = false;
+function unlockBtnVisible() { return !!adUnlockableTool(); }
+function showRewardedToolUnlock(id) {
+  if (toolUnlockLoading) return;
+  var d = TOOL_BY_ID[id];
+  if (!d || (meta && meta.tools[id])) return;
+  // Re-check the offer at click time, not just at draw time.
+  var offer = adUnlockableTool();
+  if (!offer || offer.id !== id) return;
+  toolUnlockLoading = true;
+  function finish(grant) {
+    toolUnlockLoading = false;
+    resumeAudioForAd();
+    if (grant) grantToolUnlock(id);
+  }
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showRewardedVideo === 'function') {
+    var gpSettled = false;
+    function gpSettle(grant) { if (gpSettled) return; gpSettled = true; finish(grant); }
+    try {
+      pauseAudioForAd();
+      window.gp.ads.showRewardedVideo()
+        .then(function(success) { gpSettle(!!success); })
+        .catch(function() { gpSettle(true); });
+      setTimeout(function() { gpSettle(true); }, 30000);
+    } catch(e) { gpSettle(true); }
+    return;
+  }
+  if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) { finish(true); return; }
+  var rewarded = false, opened = false, settled = false, watchdog = null;
+  function settleUnlock(grant) {
+    if (settled) return; settled = true;
+    if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+    finish(grant);
+  }
+  watchdog = setTimeout(function() { if (!opened) settleUnlock(true); }, 4500);
+  try {
+    window.ysdk.adv.showRewardedVideo({
+      callbacks: {
+        onOpen:     function() { opened = true; pauseAudioForAd(); if (watchdog) { clearTimeout(watchdog); watchdog = null; } },
+        onRewarded: function() { rewarded = true; },
+        onClose:    function() { settleUnlock(rewarded); },
+        onError:    function() { settleUnlock(true); },
+      },
+    });
+  } catch(e) { settleUnlock(true); }
+}
+// ── Rewarded "open a donut box" ──────────────────────────────────────────────
+// Costs one earned box token plus one of the BOX_AD_CAP lifetime ads. The offer
+// is re-checked at CLICK time and again after the ad settles, so nothing can be
+// granted on an offer that expired while the ad was on screen.
+var boxAdLoading = false;
+function boxBtnVisible() { return boxOfferAvailable(); }
+function openDonutBoxAfterAd() {
+  if (!consumeBoxOffer()) return;
+  var res = rollBoxReward();
+  grantBoxResult(res);
+  openBoxReveal(res, false);
+}
+function showRewardedDonutBox() {
+  if (boxAdLoading) return;
+  if (!boxOfferAvailable()) return;
+  boxAdLoading = true;
+  function finish(grant) {
+    boxAdLoading = false;
+    resumeAudioForAd();
+    if (grant) openDonutBoxAfterAd();
+  }
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showRewardedVideo === 'function') {
+    var gpSettled = false;
+    function gpSettle(grant) { if (gpSettled) return; gpSettled = true; finish(grant); }
+    try {
+      pauseAudioForAd();
+      window.gp.ads.showRewardedVideo()
+        .then(function(success) { gpSettle(!!success); })
+        .catch(function() { gpSettle(true); });
+      setTimeout(function() { gpSettle(true); }, 30000);
+    } catch(e) { gpSettle(true); }
+    return;
+  }
+  if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) { finish(true); return; }
+  var boxRewarded = false, boxOpened = false, boxSettled = false, boxWatchdog = null;
+  function settleBox(grant) {
+    if (boxSettled) return; boxSettled = true;
+    if (boxWatchdog) { clearTimeout(boxWatchdog); boxWatchdog = null; }
+    finish(grant);
+  }
+  boxWatchdog = setTimeout(function() { if (!boxOpened) settleBox(true); }, 4500);
+  try {
+    window.ysdk.adv.showRewardedVideo({
+      callbacks: {
+        onOpen:     function() { boxOpened = true; pauseAudioForAd(); if (boxWatchdog) { clearTimeout(boxWatchdog); boxWatchdog = null; } },
+        onRewarded: function() { boxRewarded = true; },
+        onClose:    function() { settleBox(boxRewarded); },
+        onError:    function() { settleBox(true); },
+      },
+    });
+  } catch(e) { settleBox(true); }
+}
 
-// ── iter#8: SFX (procedural Web Audio - zero asset files) ────────────────────
-// Additive sound design pass. No <audio> tags, no files - every sound is a
-// short oscillator + envelope so the build stays the same size and there's
-// no Yandex risk over asset loading. Engine init is lazy on first user
-// gesture (so Chrome's autoplay policy doesn't block us). Mute state
-// persists in localStorage as 'clean_sweep_muted'. The mute button is a
-// 36×36 speaker icon top-right above the canvas (drawn on MENU + GAMEOVER
+// ── iter#8: SFX (recorded CC0 samples via decodeAudioData + synth fallback) ──
+// 2026-07-21 sound pass: real recorded CC0 samples (freesound, see
+// audio/SOURCES.md) decoded through Web Audio - NEVER HTMLMediaElement
+// (Yandex 1.6.2.5 / YouTube policy). Buffers decode lazily after the first
+// user gesture; until a sample is ready (or if its fetch fails) each function
+// falls back to the original oscillator synth, so sound never breaks.
+// Mute state persists in localStorage as 'clean_sweep_muted'. The mute button
+// is a 36×36 speaker icon top-right above the canvas (drawn on MENU + GAMEOVER
 // overlays only - never during gameplay, no HUD overlap risk).
 var MUTE_KEY = 'clean_sweep_muted';
 var sfxMuted = false;
+var platformAudioMuted = false;
 var _ac = null;
 var muteBtnRect = null;
+function audioMuted() {
+  return sfxMuted || platformAudioMuted;
+}
 function loadMute() {
   try { sfxMuted = (localStorage.getItem(MUTE_KEY) === '1'); } catch(e) {}
 }
@@ -399,12 +604,44 @@ function saveMute() {
 function ac() {
   if (!_ac) {
     try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
+    if (_ac) loadSfx();
   }
-  if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch(e) {} }
+  if (_ac && _ac.state === 'suspended' && !platformAudioMuted) { try { _ac.resume(); } catch(e) {} }
   return _ac;
 }
+// Recorded-sample layer: manifest + lazy decode + one-shot buffer player.
+var SFX_FILES = { pop:'audio/sfx_pop.mp3', win:'audio/sfx_win.mp3', over:'audio/sfx_gameover.mp3', sparkle:'audio/sfx_sparkle.mp3', click:'audio/sfx_click.mp3' };
+var SFX_BUF = {};
+var _sfxLoadStarted = false;
+function loadSfx() {
+  if (_sfxLoadStarted || !_ac) return;
+  _sfxLoadStarted = true;
+  Object.keys(SFX_FILES).forEach(function(name) {
+    try {
+      fetch(SFX_FILES[name])
+        .then(function(r) { return r.arrayBuffer(); })
+        .then(function(ab) { return _ac.decodeAudioData(ab); })
+        .then(function(buf) { SFX_BUF[name] = buf; })
+        .catch(function() {});
+    } catch(e) {}
+  });
+}
+function _playBuf(name, rate, gain) {
+  var buf = SFX_BUF[name];
+  if (!buf || !_ac) return false;
+  try {
+    var src = _ac.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = rate || 1;
+    var g = _ac.createGain();
+    g.gain.value = (gain == null ? 1 : gain);
+    src.connect(g); g.connect(_ac.destination);
+    src.start();
+    return true;
+  } catch(e) { return false; }
+}
 function _play(fn) {
-  if (sfxMuted) return;
+  if (audioMuted()) return;
   var ctx2 = ac();
   if (!ctx2) return;
   try { fn(ctx2); } catch(e) {}
@@ -422,16 +659,20 @@ function _tone(ctx2, freq, dur, type, gain) {
 }
 // Crumb pickup - pitch rises with combo so chaining FEELS rewarding.
 function sfxCollect(c) { _play(function(ctx2){
+  if (_playBuf('pop', 1 + Math.min(c, 12) * 0.05, 0.9)) return;
   var base = 380 + Math.min(c, 12) * 55;
   _tone(ctx2, base, 0.09, 'triangle', 0.16);
 }); }
-// Big trash thump - when shake fires.
+// Big trash thump - same pop sample pitched way down = deeper, heavier plop.
+// Gain stays <=1.0: samples are peak-normalized to -1 dBFS, so boosting clips.
 function sfxBigPickup() { _play(function(ctx2){
+  if (_playBuf('pop', 0.55, 1.0)) return;
   _tone(ctx2, 180, 0.18, 'sawtooth', 0.18);
   _tone(ctx2, 90,  0.22, 'sine',     0.22);
 }); }
-// Level end fanfare - 3-note rising arpeggio.
+// Level end fanfare.
 function sfxLevelEnd() { _play(function(ctx2){
+  if (_playBuf('win', 1, 0.9)) return;
   var notes = [523, 659, 784];
   for (var i = 0; i < notes.length; i++) (function(idx, freq){
     var g = ctx2.createGain();
@@ -444,8 +685,9 @@ function sfxLevelEnd() { _play(function(ctx2){
     o.connect(g); o.start(t0); o.stop(t0 + 0.3);
   })(i, notes[i]);
 }); }
-// Game over - falling descent.
+// Game over.
 function sfxGameOver() { _play(function(ctx2){
+  if (_playBuf('over', 1, 0.9)) return;
   var g = ctx2.createGain();
   var t0 = ctx2.currentTime;
   g.gain.setValueAtTime(0.22, t0);
@@ -457,90 +699,121 @@ function sfxGameOver() { _play(function(ctx2){
   o.frequency.exponentialRampToValueAtTime(110, t0 + 0.45);
   o.connect(g); o.start(t0); o.stop(t0 + 0.5);
 }); }
-// Achievement / skin sparkle - short 2-note bell.
+// Achievement sparkle; skin select reuses it pitched up so they feel related.
 function sfxBadge() { _play(function(ctx2){
+  if (_playBuf('sparkle', 1, 0.9)) return;
   _tone(ctx2, 880, 0.12, 'sine', 0.18);
   setTimeout(function(){ _play(function(c2){ _tone(c2, 1320, 0.18, 'sine', 0.16); }); }, 80);
 }); }
 function sfxSkin() { _play(function(ctx2){
+  if (_playBuf('sparkle', 1.3, 0.75)) return;
   _tone(ctx2, 740, 0.1, 'triangle', 0.18);
   setTimeout(function(){ _play(function(c2){ _tone(c2, 1175, 0.14, 'triangle', 0.16); }); }, 70);
 }); }
-// UI button click - tiny chirp.
+// UI button click.
 function sfxClick() { _play(function(ctx2){
+  if (_playBuf('click', 1, 0.8)) return;
   _tone(ctx2, 640, 0.05, 'square', 0.12);
 }); }
 function toggleMute() {
   sfxMuted = !sfxMuted;
   saveMute();
   // tap the engine so iOS keeps it primed when the player unmutes
-  if (!sfxMuted) { ac(); startMusic(); }
+  if (!audioMuted()) { ac(); startMusic(); }
   // mirror to the background-music bed so one button controls SFX + music
-  MUS.master && (MUS.master.gain.value = sfxMuted ? 0 : MUS_VOL);
+  MUS.master && (MUS.master.gain.value = audioMuted() ? 0 : musVol());
 }
 
-// ── BACKGROUND MUSIC (procedural WebAudio loop - no asset file, respects mute) ─
-// milestone#1: the game shipped SFX but NO music bed, which HARD-fails the
-// Yandex audio gate (it needs BOTH). This adds a light, cozy "kitchen jingle"
-// loop synthesised in WebAudio - zero asset files, zero credits, loops forever.
-// A dedicated AudioContext + master gain (so a future SFX rework can't fight it),
-// a lookahead note scheduler (soft kick + plucky bass + bell arp in a warm major
-// key, ~96 BPM), gated on `sfxMuted` each tick, suspended on tab-hide, and started
-// on the first user gesture per the autoplay policy. Inline scheduleMusic() pattern
-// per Game Build Hygiene #9 (à la merge_defense / rage_room).
-var MUS_VOL = 0.12;
-var MUS = { ctx:null, master:null, on:false, step:0, bar:0, nextT:0, timer:null, bpm:96 };
-// Warm major-key loop (C major-ish): bass line + bell arpeggio, 16 sixteenth-steps/bar.
-var MUS_BASS = [130.8,0,0,0, 130.8,0,196.0,0, 174.6,0,0,0, 196.0,0,146.8,0]; // C/G/F/G
-var MUS_ARP  = [523.3,659.3,784.0,659.3, 587.3,698.5,880.0,698.5]; // C/E/G  D/F/A bell sparkles
+// ── BACKGROUND MUSIC (licensed bakery-arcade loop via decodeAudioData) ───────
+// 2026-07-30 sound pass: the bed is a Suno Pro track, "Glazed Dash Loop",
+// imported by Shared/tools/game-audio/import_music.py (audio/bg_loop.mp3,
+// provenance in audio/audio_manifest.json) and looped through a Web
+// Audio buffer source into the same MUS.master gain. Dedicated AudioContext +
+// master gain, mute/suspend plumbing shared with the SFX engine (toggleMute,
+// setPlatformAudioEnabled), started on the first user gesture per the autoplay
+// policy.
+//
+// ONE MUSIC SYSTEM, and the recorded loop is it. There used to be a procedural
+// scheduler (kick + bass + bell arp) carrying the bed while the mp3 decoded:
+// that is what made old music replay intermittently after a restart. Every boot
+// spent the decode window playing the synth, and the handover only cleared the
+// scheduler's setTimeout - notes already queued on the graph up to ~0.25s ahead
+// kept sounding OVER the recorded track, so a reload could be heard as two beds
+// at once. A fetch failure was worse: the synth then owned the bed for the whole
+// session. There is no second engine now; a failed fetch retries a bounded
+// number of times and otherwise leaves the bed silent rather than substituting a
+// different piece of music.
+var MUS_VOL = 0.35;
+var MUS_FILE = 'audio/bg_loop.mp3';
+var MUS_MAX_TRIES = 3;        // bounded retry - never an alternate music engine
+var MUS_RETRY_MS = 1200;
+// load: 0 idle | 1 fetching/decoding | 2 decoded | 3 given up
+var MUS = { ctx:null, master:null, on:false, buf:null, src:null, load:0, tries:0 };
+function musVol() { return MUS_VOL; }
 function musEnsure() {
   if (MUS.ctx) return;
   try { MUS.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) { return; }
   MUS.master = MUS.ctx.createGain();
-  MUS.master.gain.value = sfxMuted ? 0 : MUS_VOL;
+  MUS.master.gain.value = audioMuted() ? 0 : musVol();
   MUS.master.connect(MUS.ctx.destination);
 }
-function musTone(freq, t, dur, type, gain) {
-  var o = MUS.ctx.createOscillator(), g = MUS.ctx.createGain();
-  o.type = type || 'sine'; o.frequency.setValueAtTime(freq, t);
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(gain, t + 0.02);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  o.connect(g); g.connect(MUS.master); o.start(t); o.stop(t + dur + 0.02);
+function musLoadTrack() {
+  if (MUS.load !== 0 || !MUS.ctx) return;
+  MUS.load = 1;
+  try {
+    fetch(MUS_FILE)
+      .then(function(r) { return r.arrayBuffer(); })
+      .then(function(ab) { return MUS.ctx.decodeAudioData(ab); })
+      .then(function(buf) {
+        MUS.buf = buf; MUS.load = 2;
+        if (MUS.on) musPlayBuf();
+      })
+      .catch(musLoadFailed);
+  } catch(e) { musLoadFailed(); }
 }
-function musKick(t) {
-  var o = MUS.ctx.createOscillator(), g = MUS.ctx.createGain();
-  o.type = 'sine'; o.frequency.setValueAtTime(150, t);
-  o.frequency.exponentialRampToValueAtTime(55, t + 0.13);
-  g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
-  o.connect(g); g.connect(MUS.master); o.start(t); o.stop(t + 0.18);
+// Retry the same file; the bed stays silent if it never arrives.
+function musLoadFailed() {
+  MUS.tries++;
+  if (MUS.tries >= MUS_MAX_TRIES) { MUS.load = 3; return; }
+  MUS.load = 0;
+  setTimeout(function() { if (MUS.on) musLoadTrack(); }, MUS_RETRY_MS);
 }
-function musSchedule() {
-  if (!MUS.ctx) return;
-  // keep the bed responsive to the shared mute flag every tick
-  if (MUS.master) MUS.master.gain.value = sfxMuted ? 0 : MUS_VOL;
-  if (MUS.nextT < MUS.ctx.currentTime) MUS.nextT = MUS.ctx.currentTime + 0.05; // no catch-up burst after suspend/resume
-  var spb = 60 / MUS.bpm / 4; // sixteenth-note seconds
-  while (MUS.nextT < MUS.ctx.currentTime + 0.13) {
-    var s = MUS.step % 16;
-    if (s === 0) MUS.bar++;
-    if (s % 4 === 0) musKick(MUS.nextT);                       // soft 4-on-the-floor
-    if (MUS_BASS[s]) musTone(MUS_BASS[s], MUS.nextT, spb * 1.6, 'triangle', 0.08);
-    // bell arpeggio every other bar so it breathes (not a wall of sound)
-    if (MUS.bar % 2 === 0 && s % 2 === 0) musTone(MUS_ARP[(s / 2) | 0], MUS.nextT, spb * 1.3, 'sine', 0.05);
-    MUS.nextT += spb; MUS.step++;
-  }
-  MUS.timer = setTimeout(musSchedule, 28);
+function musPlayBuf() {
+  if (!MUS.buf || !MUS.ctx || MUS.src) return;   // MUS.src guard = never two beds
+  try {
+    var src = MUS.ctx.createBufferSource();
+    src.buffer = MUS.buf;
+    src.loop = true;
+    src.connect(MUS.master);
+    src.start();
+    MUS.src = src;
+    MUS.master.gain.value = audioMuted() ? 0 : musVol();
+  } catch(e) { MUS.src = null; }
 }
 function startMusic() {
   musEnsure(); if (!MUS.ctx) return;
-  if (MUS.ctx.state === 'suspended') { try { MUS.ctx.resume(); } catch(e) {} }
+  if (MUS.ctx.state === 'suspended' && !platformAudioMuted) { try { MUS.ctx.resume(); } catch(e) {} }
   if (MUS.on) return;
-  MUS.on = true; MUS.step = 0; MUS.bar = 0; MUS.nextT = MUS.ctx.currentTime + 0.06;
-  musSchedule();
+  MUS.on = true;
+  musLoadTrack();
+  if (MUS.load === 2) musPlayBuf();
 }
 function pauseMusic() { if (MUS.ctx && MUS.ctx.state === 'running') { try { MUS.ctx.suspend(); } catch(e) {} } }
-function resumeMusic() { if (MUS.ctx && !sfxMuted) { try { MUS.ctx.resume(); } catch(e) {} } }
+function resumeMusic() { if (MUS.ctx && !audioMuted()) { try { MUS.ctx.resume(); } catch(e) {} } }
+function setPlatformAudioEnabled(enabled) {
+  platformAudioMuted = !enabled;
+  if (platformAudioMuted) {
+    try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch(e) {}
+    pauseMusic();
+  } else {
+    try { if (_ac && _ac.state === 'suspended' && !sfxMuted) _ac.resume(); } catch(e) {}
+    resumeMusic();
+  }
+  if (MUS.master) MUS.master.gain.value = audioMuted() ? 0 : musVol();
+}
+window.__gfSetPlatformAudioEnabled = setPlatformAudioEnabled;
+window.__gfPauseAudio = function() { setPlatformAudioEnabled(false); };
+window.__gfResumeAudio = function() { setPlatformAudioEnabled(true); };
 
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 var DR    = 26;  // donut outer radius (design px)
@@ -621,6 +894,32 @@ function loadLevelStars() {
 function saveLevelStars() {
   try { localStorage.setItem(STARS_KEY, JSON.stringify(levelStars)); } catch(e) {}
 }
+
+// ── LEVEL PROGRESS SAVE (MCPlay rejection 2026-07-27) ────────────────────────
+// The reviewer bounced the build with "the game has no save - on reload it
+// starts from the tutorial and level 1; after a loss RETRY restarts from
+// level 1 instead of the last cleared level; only upgraded skills and coins
+// persist". Skills/Sprinkles/stars all persisted; the LEVEL itself never did,
+// because it lived only in the `level` runtime var. It is now persisted like
+// every other meta value, and PLAY / RETRY / autostart all resume there.
+var PROG_KEY = 'clean_sweep_progress_v1';
+var progressLevel = 1;         // highest level the player has ever reached (>=1)
+function loadProgress() {
+  try { progressLevel = Math.max(1, parseInt(localStorage.getItem(PROG_KEY) || '1', 10) || 1); }
+  catch(e) { progressLevel = 1; }
+}
+function saveProgress() {
+  try { localStorage.setItem(PROG_KEY, String(progressLevel)); } catch(e) {}
+}
+// Called when a level is reached and again when it is cleared. Always writes,
+// so the save key exists from the very first level rather than only appearing
+// once the player is past level 1.
+function noteLevelReached(lvl) {
+  if (lvl > progressLevel) progressLevel = lvl;
+  saveProgress();
+}
+// The level a fresh run starts at. Endless mode past MAX_LEVEL still resumes.
+function resumeLevel() { return Math.max(1, progressLevel); }
 function computeStarsForRun(timeRemaining, startingTime) {
   if (!startingTime || startingTime <= 0) return 1;
   var pct = timeRemaining / startingTime;
@@ -788,6 +1087,7 @@ var PERFECT_BONUS = 50;
 var chainStartedThisLevel = false;  // armed on first collect of the level
 var perfectChainAlive = false;      // false once comboTimer expires after a chain started
 var lastLevelPerfect = false;       // true on level clear if perfectChainAlive at clear time
+var lastLevelTimeBonus = 0;         // TIME BONUS awarded on the last clear (LEVELEND panel row)
 
 // ════════════════════════════════════════════════════════════════════════════
 // ── RETENTION META - "THE BAKERY" (milestone#1 / #2 / #3) ────────────────────
@@ -885,6 +1185,10 @@ function defaultMeta() {
     quests: { key:'', items:[] },   // {id, prog, goal, done, claimed}
     pass: 0,                 // 1 once the Baker's Pass is owned
     eventBest: {},           // eventId -> best score in that event (light depth)
+    donuts: {},              // donut case: skinId -> 1 for every box-won donut
+    boxAds: 0,               // lifetime rewarded ads spent on boxes (cap BOX_AD_CAP)
+    boxTokens: 0,            // unopened boxes in hand (minted by clearing a level)
+    boxDay: '',              // YYYY-MM-DD of the last day-7 streak box claimed
   };
 }
 function loadMeta() {
@@ -916,6 +1220,17 @@ function loadMeta() {
         }
         if (s.quests && typeof s.quests === 'object') meta.quests = { key:String(s.quests.key||''), items: Array.isArray(s.quests.items)? s.quests.items : [] };
         if (s.eventBest && typeof s.eventBest === 'object') meta.eventBest = s.eventBest;
+        // Donut case. Only ids that still exist in the roster are restored, so a
+        // trimmed roster can never resurrect a donut that has no definition.
+        if (s.donuts && typeof s.donuts === 'object') {
+          for (var did = 0; did < DONUT_SKINS.length; did++) {
+            var dkey = DONUT_SKINS[did].id;
+            if (s.donuts[dkey]) meta.donuts[dkey] = 1;
+          }
+        }
+        meta.boxAds = clamp(Math.floor(+s.boxAds || 0), 0, BOX_AD_CAP);
+        meta.boxTokens = clamp(Math.floor(+s.boxTokens || 0), 0, BOX_TOKEN_CAP);
+        meta.boxDay = String(s.boxDay || '');
       }
     }
   } catch(e) { meta = null; }
@@ -956,6 +1271,45 @@ function checkToolUnlocks() {
   }
   return newest;
 }
+// Grant ONE tool ahead of its playtime threshold. Called only after a rewarded
+// ad reports the reward was actually earned (MCPlay 2026-07-27: the reviewer
+// could not tell when boosts unlock and asked for an ad shortcut). Shares the
+// auto-equip + toast path with checkToolUnlocks so the boost is felt at once.
+function grantToolUnlock(id) {
+  if (!meta) return false;
+  var d = TOOL_BY_ID[id];
+  if (!d || meta.tools[id]) return false;
+  meta.tools[id] = { lvl: 1 };
+  for (var s = 0; s < meta.equipped.length; s++) { if (!meta.equipped[s]) { meta.equipped[s] = id; break; } }
+  toolUnlockToastId = id; toolUnlockToast = 1;
+  saveMeta();
+  applyToolBonuses();   // fold the new tool into the run immediately
+  try { sfxSkin(); } catch(e) {}
+  return true;
+}
+// The first still-locked tool - the only one the ad shortcut is offered on, so
+// the ladder keeps its order and the offer is never ambiguous. The shortcut is
+// additionally gated on being at least HALFWAY to that tool's playtime
+// requirement: Mediacube asked to open boosts "чуть раньше" (a bit earlier),
+// and without the gate a player could watch seven ads back to back and unlock
+// the entire ladder in minutes, which is exactly the playtime retention curve
+// the ladder exists to create. Halfway means the ad skips the tail of a wait
+// the player has already invested in, and each further tool needs real play
+// before its own chip appears.
+var AD_UNLOCK_MIN_FRACTION = 0.5;
+function nextLockedTool() {
+  if (!meta) return null;
+  for (var i = 0; i < TOOL_DEFS.length; i++) if (!meta.tools[TOOL_DEFS[i].id]) return TOOL_DEFS[i];
+  return null;
+}
+// The locked tool the ad shortcut may be offered on right now, or null.
+function adUnlockableTool() {
+  var d = nextLockedTool();
+  if (!d) return null;
+  if (d.min > 0 && totalPlayMin() < d.min * AD_UNLOCK_MIN_FRACTION) return null;
+  return d;
+}
+
 // Summed run bonus across EQUIPPED tools whose stat matches (per × lvl).
 function toolVal(stat) {
   if (!meta) return 0;
@@ -1103,6 +1457,10 @@ function claimLogin() {
   if (meta) meta.lastLoginKey = getDayKey();
   try { sfxBadge(); } catch(e) {}
   saveMeta();
+  // A 7-day login streak opens a free donut box on top of the coin reward -
+  // one per day, no ad, outside the BOX_AD_CAP budget. claimStreakBox() moves
+  // the game into the reveal state, so it runs LAST.
+  claimStreakBox();
 }
 
 // milestone#3 (deferred-tune): Baker's Pass. No real IAP SDK is wired here, so
@@ -1123,6 +1481,22 @@ function grantBakerPass() {
 function buyBakerPass() {
   if (!meta || meta.pass) return;
   // route through a rewarded ad if the SDK is present; else grant directly.
+  if (window.gp && window.gp.ads && typeof window.gp.ads.showRewardedVideo === 'function') {
+    var gpDone = false;
+    function gpFinish(grant) {
+      if (gpDone) return; gpDone = true;
+      resumeAudioForAd();
+      if (grant) grantBakerPass();
+    }
+    try {
+      pauseAudioForAd();
+      window.gp.ads.showRewardedVideo()
+        .then(function(success) { gpFinish(!!success); })
+        .catch(function() { gpFinish(true); });
+      setTimeout(function() { gpFinish(true); }, 30000);
+    } catch(e) { gpFinish(true); }
+    return;
+  }
   if (window.ysdk && window.ysdk.adv && window.ysdk.adv.showRewardedVideo) {
     var done = false, opened = false;
     var wd = setTimeout(function(){ if (!opened && !done) { done = true; grantBakerPass(); } }, 4500);
@@ -1183,11 +1557,35 @@ function onRunEnd() {
 // localStorage; locked skins reveal as best score crosses thresholds.
 var SKIN_KEY      = 'clean_sweep_skin';
 var SKIN_SEEN_KEY = 'clean_sweep_skins_seen'; // CSV of skin ids the player has already been notified about
+// The 20-donut CASE. The first four keep their original best-score thresholds
+// (`unlock` = a number) so a returning player loses nothing and a player who
+// never watches an ad still has a free path. The other sixteen carry
+// `unlock:null` - they exist ONLY inside a donut box (rewarded, capped at
+// BOX_AD_CAP for life) or the day-7 streak box. `top`/`top2` drive the swatch
+// topping so twenty tinted rings still read as twenty distinct donuts; the
+// in-game donut stays the AI sprite with a `tint` composite, which is the art
+// convention this game already uses (no new assets, no archive growth).
 var DONUT_SKINS = [
-  { id:'strawberry', name:'Strawberry', nameRu:'Клубника',  unlock:0,    tint:null,                 ring:'#FFB7C5' },
-  { id:'chocolate',  name:'Chocolate',  nameRu:'Шоколад',   unlock:100,  tint:'rgba(82,46,28,0.55)', ring:'#5C3317' },
-  { id:'matcha',     name:'Matcha',     nameRu:'Матча',     unlock:300,  tint:'rgba(120,180,80,0.55)', ring:'#7BB661' },
-  { id:'galaxy',     name:'Galaxy',     nameRu:'Космос',    unlock:800,  tint:'rgba(70,30,140,0.6)',   ring:'#7c3aed' },
+  { id:'strawberry', name:'Strawberry', nameRu:'Клубника',   unlock:0,    tint:null,                     ring:'#FFB7C5', top:'sprinkles', top2:null },
+  { id:'chocolate',  name:'Chocolate',  nameRu:'Шоколад',    unlock:100,  tint:'rgba(82,46,28,0.55)',    ring:'#5C3317', top:'drizzle',   top2:'#F5DEB3' },
+  { id:'matcha',     name:'Matcha',     nameRu:'Матча',      unlock:300,  tint:'rgba(120,180,80,0.55)',  ring:'#7BB661', top:'dots',      top2:'#FFF6D5' },
+  { id:'galaxy',     name:'Galaxy',     nameRu:'Космос',     unlock:800,  tint:'rgba(70,30,140,0.6)',    ring:'#7c3aed', top:'stars',     top2:'#E9D5FF' },
+  { id:'blueberry',  name:'Blueberry',  nameRu:'Черника',    unlock:null, tint:'rgba(60,90,200,0.5)',    ring:'#4C6FE0', top:'dots',      top2:'#FFFFFF' },
+  { id:'lemon',      name:'Lemon',      nameRu:'Лимон',      unlock:null, tint:'rgba(240,200,40,0.45)',  ring:'#F2C53D', top:'drizzle',   top2:'#FFFFFF' },
+  { id:'mint',       name:'Mint',       nameRu:'Мята',       unlock:null, tint:'rgba(90,210,190,0.45)',  ring:'#5AD2BE', top:'sprinkles', top2:'#FFFFFF' },
+  { id:'caramel',    name:'Caramel',    nameRu:'Карамель',   unlock:null, tint:'rgba(200,130,50,0.5)',   ring:'#C88232', top:'drizzle',   top2:'#6B3F1D' },
+  { id:'bubblegum',  name:'Bubblegum',  nameRu:'Жвачка',     unlock:null, tint:'rgba(255,120,190,0.5)',  ring:'#FF78BE', top:'dots',      top2:'#7CE0FF' },
+  { id:'maple',      name:'Maple',      nameRu:'Клён',       unlock:null, tint:'rgba(190,110,50,0.5)',   ring:'#BE6E32', top:'stripe',    top2:'#FFE0A8' },
+  { id:'cookies',    name:'Cookies',    nameRu:'Печенье',    unlock:null, tint:'rgba(120,100,90,0.45)',  ring:'#8C7A6B', top:'crumbs',    top2:'#3A2A20' },
+  { id:'coconut',    name:'Coconut',    nameRu:'Кокос',      unlock:null, tint:'rgba(245,245,235,0.35)', ring:'#F0EDE2', top:'crumbs',    top2:'#FFFFFF' },
+  { id:'lavender',   name:'Lavender',   nameRu:'Лаванда',    unlock:null, tint:'rgba(160,120,220,0.5)',  ring:'#A078DC', top:'dots',      top2:'#FFF0FF' },
+  { id:'tiger',      name:'Tiger',      nameRu:'Тигр',       unlock:null, tint:'rgba(240,160,40,0.5)',   ring:'#F0A028', top:'stripe',    top2:'#3A2A20' },
+  { id:'cherry',     name:'Cherry',     nameRu:'Вишня',      unlock:null, tint:'rgba(210,40,70,0.5)',    ring:'#D22846', top:'swirl',     top2:'#FFFFFF' },
+  { id:'pistachio',  name:'Pistachio',  nameRu:'Фисташка',   unlock:null, tint:'rgba(150,190,110,0.45)', ring:'#96BE6E', top:'crumbs',    top2:'#4A6B2A' },
+  { id:'honey',      name:'Honey',      nameRu:'Мёд',        unlock:null, tint:'rgba(230,170,50,0.5)',   ring:'#E6AA32', top:'swirl',     top2:'#FFE9A8' },
+  { id:'currant',    name:'Blackcurrant', nameRu:'Смородина', unlock:null, tint:'rgba(80,40,110,0.55)',  ring:'#50286E', top:'sprinkles', top2:'#D0A8FF' },
+  { id:'rainbow',    name:'Rainbow',    nameRu:'Радуга',     unlock:null, tint:'rgba(255,150,120,0.35)', ring:'#FF9678', top:'sprinkles', top2:null },
+  { id:'midnight',   name:'Midnight',   nameRu:'Полночь',    unlock:null, tint:'rgba(20,25,60,0.6)',     ring:'#141938', top:'stars',     top2:'#FFD700' },
 ];
 var skinId = 'strawberry';
 var skinUnlockToast = 0;          // animation timer when a new tier unlocks mid-run
@@ -1215,14 +1613,21 @@ function getSkin(id) {
   for (var i=0;i<DONUT_SKINS.length;i++) if (DONUT_SKINS[i].id===id) return DONUT_SKINS[i];
   return DONUT_SKINS[0];
 }
-function isSkinUnlocked(skin) { return best >= skin.unlock; }
+// Two independent sources: the original best-score ladder (`unlock` is a
+// number) and the donut case (`meta.donuts[id]`, filled by boxes). A donut
+// with `unlock:null` can ONLY arrive from a box.
+function isSkinUnlocked(skin) {
+  if (!skin) return false;
+  if (meta && meta.donuts && meta.donuts[skin.id]) return true;
+  return typeof skin.unlock === 'number' && best >= skin.unlock;
+}
 // Detect newly-unlocked skins after a score increase. Returns the highest
 // newly-unlocked skin (so a single big jump shows the top tier, not a stack).
 function checkSkinUnlocks() {
   var newest = null;
   for (var i=0;i<DONUT_SKINS.length;i++) {
     var s = DONUT_SKINS[i];
-    if (best >= s.unlock && !skinSeen[s.id]) {
+    if (typeof s.unlock === 'number' && best >= s.unlock && !skinSeen[s.id]) {
       newest = s;
       markSkinSeen(s.id);
     }
@@ -1232,6 +1637,117 @@ function checkSkinUnlocks() {
     skinUnlockToast = 1;
     sfxSkin(); // iter#8
   }
+}
+
+// ── DONUT BOXES (rewarded lootbox + day-7 streak box) ────────────────────────
+// Odds and caps live here; the AD plumbing lives in the platform ad runtime so
+// the YouTube target can be fail-closed (no ads API -> the chip is never drawn
+// and nothing is ever granted) while the Yandex/GamePush target keeps its own
+// SDK branches.
+//
+// LADDER: a box costs a TOKEN, and a token is minted only by CLEARING A LEVEL,
+// at most BOX_TOKEN_CAP in hand. That is the guard the 2026-07-27 rejection
+// round asked for - a loading flag only stops CONCURRENT ad requests, so
+// without an earn-rate the player watches ads back to back and empties the
+// whole system in minutes. Here twenty boxes cost twenty cleared levels.
+//
+// DUPLICATES ARE STRUCTURALLY IMPOSSIBLE: the donut side rolls uniformly over
+// the donuts the player does NOT own. When every donut is already owned the
+// donut side cannot pay a donut, so it pays DOUBLE sprinkles instead and says
+// so on the reveal - a roll is never silently wasted.
+//
+// ARITHMETIC (deliberate): 20 boxes x 50% is ~10 donuts, so the ad cap alone
+// cannot complete a 20-donut case. The best-score ladder (4 donuts) and the
+// day-7 streak box (one guaranteed donut per day at a 7-day streak) are the
+// other two sources; the case is a multi-week goal, not a twenty-ad purchase.
+var BOX_AD_CAP = 20;          // lifetime rewarded ads that may be spent on boxes
+var BOX_TOKEN_CAP = 2;        // boxes bankable at once (stops a level-farm burst)
+var BOX_DONUT_CHANCE = 0.5;   // 50/50 donut vs sprinkles
+var STREAK_BOX_DAYS = 7;      // login streak at which the daily free box starts
+var boxReveal = null;         // { kind, id, n, full, free, t } while gs === 'BOXOPEN'
+var boxPrevGs = 'MENU';       // state to restore when the reveal closes
+
+function donutTotal() { return DONUT_SKINS.length; }
+function donutOwnedCount() {
+  var n = 0;
+  for (var i = 0; i < DONUT_SKINS.length; i++) if (isSkinUnlocked(DONUT_SKINS[i])) n++;
+  return n;
+}
+function lockedDonuts() {
+  var out = [];
+  for (var i = 0; i < DONUT_SKINS.length; i++) if (!isSkinUnlocked(DONUT_SKINS[i])) out.push(DONUT_SKINS[i]);
+  return out;
+}
+function boxAdsLeft() { return meta ? Math.max(0, BOX_AD_CAP - meta.boxAds) : 0; }
+function boxTokens()  { return meta ? meta.boxTokens : 0; }
+// A cleared level mints one box token (the earn side of the ladder).
+function earnBoxToken() {
+  if (!meta) return;
+  if (meta.boxTokens >= BOX_TOKEN_CAP) return;
+  meta.boxTokens += 1;
+  saveMeta();
+}
+// The offer, evaluated identically at DRAW time and at CLICK time.
+function boxOfferAvailable() { return !!meta && boxTokens() > 0 && boxAdsLeft() > 0; }
+// Consumed only after the SDK confirms the reward was actually earned.
+function consumeBoxOffer() {
+  if (!boxOfferAvailable()) return false;
+  meta.boxTokens -= 1;
+  meta.boxAds += 1;
+  saveMeta();
+  return true;
+}
+function rollBoxReward() {
+  var locked = lockedDonuts();
+  var wantDonut = Math.random() < BOX_DONUT_CHANCE;
+  if (wantDonut && locked.length > 0) {
+    return { kind:'donut', id: locked[Math.floor(Math.random() * locked.length)].id };
+  }
+  var base = 40 + Math.max(1, level) * 10;
+  var caseFull = (wantDonut && locked.length === 0);
+  return { kind:'sprinkles', n: Math.round(base * (caseFull ? 2 : 1)), full: caseFull };
+}
+function grantBoxResult(res) {
+  if (!res || !meta) return;
+  if (res.kind === 'donut') {
+    if (!meta.donuts) meta.donuts = {};
+    meta.donuts[res.id] = 1;
+    markSkinSeen(res.id);
+    saveMeta();
+    try { sfxSkin(); } catch(e) {}
+  } else {
+    awardSprinkles(res.n);
+    try { sfxBadge(); } catch(e) {}
+  }
+}
+function openBoxReveal(res, free) {
+  if (!res) return;
+  boxReveal = { kind:res.kind, id:res.id, n:res.n, full:!!res.full, free:!!free, t:0 };
+  if (gs !== 'BOXOPEN') boxPrevGs = gs;
+  gs = 'BOXOPEN';
+}
+function closeBoxReveal() {
+  boxReveal = null;
+  gs = (boxPrevGs === 'BOXOPEN') ? 'MENU' : boxPrevGs;
+  try { sfxClick(); } catch(e) {}
+}
+// Day-7 login streak: one guaranteed donut per day, no ad, no token, outside
+// the BOX_AD_CAP budget. This is the source that finishes a case the ad cap
+// mathematically cannot.
+function streakBoxDue() {
+  return !!meta && streak >= STREAK_BOX_DAYS && meta.boxDay !== getDayKey();
+}
+function claimStreakBox() {
+  if (!streakBoxDue()) return false;
+  meta.boxDay = getDayKey();
+  saveMeta();
+  var locked = lockedDonuts();
+  var res = locked.length > 0
+    ? { kind:'donut', id: locked[Math.floor(Math.random() * locked.length)].id }
+    : { kind:'sprinkles', n: 120, full:true };
+  grantBoxResult(res);
+  openBoxReveal(res, true);
+  return true;
 }
 
 // ── LEADERBOARD (iter#2: shared daily top-10) ────────────────────────────────
@@ -1387,7 +1903,18 @@ function ensurePlayerName() {
   return playerName;
 }
 
+function galleryScoresEnabled() {
+  try {
+    var h = location.hostname;
+    return h === 'game-factory.tech' || h === 'www.game-factory.tech';
+  } catch(e) { return false; }
+}
+
 function fetchLeaderboard() {
+  if (!galleryScoresEnabled()) {
+    leaderboard = [];
+    return Promise.resolve();
+  }
   var date = getDayKey();
   return fetch('/api/scores?slug=' + LB_SLUG + '&date=' + date, { cache: 'no-store' })
     .then(function(r) { return r.ok ? r.json() : { entries: [] }; })
@@ -1399,6 +1926,7 @@ function fetchLeaderboard() {
 }
 
 function submitAndFetchLeaderboard() {
+  if (!galleryScoresEnabled()) return fetchLeaderboard();
   if (lbSubmitted) return;
   lbSubmitted = true;
   var name = ensurePlayerName();
@@ -1468,6 +1996,37 @@ canvas.addEventListener('touchend', function(e) {
     }
   }
 }, { passive: false });
+
+// YouTube Playables requires every gameplay interaction to work with a mouse
+// as well as touch. Treat a held mouse/pen drag as the same virtual joystick
+// used by touch, and capture the pointer so steering survives leaving canvas.
+var pointer = { active: false, sx: 0, sy: 0, dx: 0, dy: 0, id: null };
+canvas.addEventListener('pointerdown', function(e) {
+  if (e.pointerType === 'touch' || e.button !== 0) return;
+  e.preventDefault();
+  firstGesture();
+  pointer.active = true; pointer.id = e.pointerId;
+  pointer.sx = e.clientX; pointer.sy = e.clientY;
+  pointer.dx = 0; pointer.dy = 0;
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+}, { passive: false });
+canvas.addEventListener('pointermove', function(e) {
+  if (!pointer.active || e.pointerId !== pointer.id) return;
+  e.preventDefault();
+  var dx = e.clientX - pointer.sx, dy = e.clientY - pointer.sy;
+  var d = Math.sqrt(dx*dx + dy*dy);
+  if (d > 8) { pointer.dx = dx / Math.max(d, 45); pointer.dy = dy / Math.max(d, 45); }
+}, { passive: false });
+function endPointerSteer(e) {
+  if (!pointer.active || e.pointerId !== pointer.id) return;
+  pointer.active = false; pointer.dx = 0; pointer.dy = 0; pointer.id = null;
+  try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+}
+canvas.addEventListener('pointerup', endPointerSteer);
+canvas.addEventListener('pointercancel', endPointerSteer);
+canvas.addEventListener('lostpointercapture', function() {
+  pointer.active = false; pointer.dx = 0; pointer.dy = 0; pointer.id = null;
+});
 canvas.addEventListener('click', function(e) { firstGesture(); checkButtons(e.clientX, e.clientY); });
 
 // iter#15: one-time first-gesture hook - starts both the SFX engine and the
@@ -1478,11 +2037,18 @@ function firstGesture() {
   ac(); startMusic();
 }
 
-function checkButtons(x, y) {
+function checkButtons(clientX, clientY) {
+  var rect = canvas.getBoundingClientRect();
+  var x = rect.width ? (clientX - rect.left) * canvas.width / rect.width : clientX;
+  var y = rect.height ? (clientY - rect.top) * canvas.height / rect.height : clientY;
   for (var i = 0; i < buttons.length; i++) {
     var b = buttons[i];
-    if (x >= b.x && x <= b.x+b.w && y >= b.y && y <= b.y+b.h) b.fn();
+    if (x >= b.x && x <= b.x+b.w && y >= b.y && y <= b.y+b.h) {
+      b.fn();
+      return true;
+    }
   }
+  return false;
 }
 
 // ── PARTICLES & FLOATS ────────────────────────────────────────────────────────
@@ -1506,19 +2072,85 @@ function arena() {
   return { x: pad, y: top, w: W - pad*2 - inset.right, h: H - top - pad - inset.bottom };
 }
 
+// ── LIVE-VIEWPORT WORLD REFLOW (MCPlay 2026-07-30) ───────────────────────────
+// Debris and sprinkles are stored as ABSOLUTE pixels, picked from the arena
+// that existed when the level started. The MCPlay reviewer's "Aspect ratio"
+// step resizes the frame to portrait MID-LEVEL, and nothing used to remap
+// them: everything spawned right of the new, narrower arena fell outside it,
+// unreachable (the donut is hard-clamped to the LIVE arena), so CLEAN% stuck
+// part-way and the level could never be finished - "игровое поле выходит за
+// рамки мобильной ориентации и не дает закончить уровень".
+//
+// The world is therefore re-derived from the live viewport on every size
+// change: entities keep their position RELATIVE to the arena, then are held
+// inside it. The containment clamp is the invariant that matters - however an
+// entity ended up out of bounds, it comes back within the donut's reach.
+var _worldArena = null;   // the arena rect the current world coordinates belong to
+
+// Hold a pickup inside the arena, leaving room for the donut to touch it. On a
+// viewport so small the margin exceeds half the arena, collapse it to the
+// centre line rather than inverting the clamp.
+function holdInside(e, ar, m) {
+  m = Math.max(0, Math.min(m, ar.w / 2 - 1, ar.h / 2 - 1));
+  e.x = clamp(e.x, ar.x + m, ar.x + ar.w - m);
+  e.y = clamp(e.y, ar.y + m, ar.y + ar.h - m);
+}
+
+function reflowWorld() {
+  var to = arena();
+  var from = _worldArena;
+  _worldArena = to;
+  // Called once from the initial resize(), before any world state exists.
+  if (!debrisList || !sprinkleList || !donut) return;
+  if (!(to.w > 0) || !(to.h > 0)) return;
+  var fx = to.x, fy = to.y, kx = 1, ky = 1;
+  if (from && from.w > 0 && from.h > 0) {
+    fx = from.x; fy = from.y; kx = to.w / from.w; ky = to.h / from.h;
+  }
+  var mapX = function(x) { return to.x + (x - fx) * kx; };
+  var mapY = function(y) { return to.y + (y - fy) * ky; };
+  var i, e;
+  for (i = 0; i < debrisList.length; i++) {
+    e = debrisList[i];
+    e.x = mapX(e.x); e.y = mapY(e.y);
+    e.r = e.typeR * S;                  // sprite radius follows the live scale
+    holdInside(e, to, e.r + 2);
+  }
+  for (i = 0; i < sprinkleList.length; i++) {
+    e = sprinkleList[i];
+    e.x = mapX(e.x); e.y = mapY(e.y);
+    holdInside(e, to, 14 * S);
+  }
+  for (i = 0; i < particles.length; i++) { e = particles[i]; e.x = mapX(e.x); e.y = mapY(e.y); }
+  for (i = 0; i < floats.length; i++)    { e = floats[i];    e.x = mapX(e.x); e.y = mapY(e.y); }
+  var dr = DR * S;
+  donut.x = clamp(mapX(donut.x), to.x + dr, to.x + to.w - dr);
+  donut.y = clamp(mapY(donut.y), to.y + dr, to.y + to.h - dr);
+}
+
 // ── LEVEL SETUP ───────────────────────────────────────────────────────────────
-function startLevel(lvl) {
+// `freshRun` marks the start of a NEW run (menu PLAY, game-over RETRY,
+// autostart) as opposed to advancing from LEVELEND. It used to be inferred as
+// `lvl === 1`, which broke the moment a run could resume at the last cleared
+// level (MCPlay 2026-07-27) - a resumed run at level 7 kept the previous run's
+// per-run state. Callers now say so explicitly; the old inference remains the
+// default so every untouched call site behaves exactly as before.
+function startLevel(lvl, freshRun) {
+  if (freshRun === undefined) freshRun = (lvl === 1);
   level = lvl;
   debrisList = []; particles = []; floats = []; buttons = [];
   combo = 0; comboTimer = 0; shake = 0;
   // iter#13: per-level reset - combo-break tracker for the PERFECT SWEEP bonus
   chainStartedThisLevel = false; perfectChainAlive = true; lastLevelPerfect = false;
-  // newBest is per-RUN, not per-level - only reset when starting a fresh run from level 1
-  if (lvl === 1) { newBest = false; bestPulse = 0; lbSubmitted = false; myRank = null; maxComboThisRun = 0; newBestCombo = false; chainPulse = 0; lastLevelStars = 0; lastLevelStarsNewBest = false; sprinkleHudPulse = 0; sprinkleToastTimer = 0; runPlaySec = 0; _runEnded = false; }
+  // newBest is per-RUN, not per-level - only reset when starting a fresh run
+  if (freshRun) { newBest = false; bestPulse = 0; lbSubmitted = false; myRank = null; maxComboThisRun = 0; newBestCombo = false; chainPulse = 0; lastLevelStars = 0; lastLevelStarsNewBest = false; sprinkleHudPulse = 0; sprinkleToastTimer = 0; runPlaySec = 0; _runEnded = false; }
   // milestone#1: per-level reset of the one-shot Crumb Shield grace
   window._shieldUsedThisLevel = false;
   // iter#7: reset the "+15s" rewarded-ad slot each level
   extraTimeUsed = false; extraTimeLoading = false; reviveBtnRect = null;
+  // Persist the moment a level is REACHED, not just when it is cleared, so a
+  // reload part-way through level 7 resumes at level 7 rather than level 1.
+  noteLevelReached(lvl);
   // milestone#1: fold equipped Cleaning Tool bonuses into this run.
   applyToolBonuses();
   timeLeft = Math.max(25, 70 - (lvl - 1) * 6) + toolTime; // Fresh Batch tool adds start seconds
@@ -1533,6 +2165,9 @@ function startLevel(lvl) {
   levelRng = makeRng(daySeed * 100 + lvl);
 
   var ar = arena();
+  // This level's coordinates are chosen from THIS arena; record it so the next
+  // resize remaps them from the right frame of reference.
+  _worldArena = ar;
   donut.x = ar.x + ar.w / 2;
   donut.y = ar.y + ar.h / 2;
   donut.vx = 0; donut.vy = 0; donut.angle = 0;
@@ -1581,7 +2216,9 @@ function update(dt) {
   // check; grant happens in-memory, only saveMeta()s on an actual unlock).
   runPlaySec += dt;
   if (sprinkleEarnFlash > 0) sprinkleEarnFlash = Math.max(0, sprinkleEarnFlash - dt * 0.8);
-  if (toolUnlockToast > 0) toolUnlockToast = Math.max(0, toolUnlockToast - dt * 0.3);
+  // Only the pill currently OWNING the toast band counts down, so a toast that
+  // is waiting its turn still gets its full time on screen when it gets there.
+  if (toolUnlockToast > 0 && pillToastOwner() === 'tool') toolUnlockToast = Math.max(0, toolUnlockToast - dt * 0.3);
   checkToolUnlocks();
 
   timeLeft -= dt;
@@ -1631,10 +2268,10 @@ function update(dt) {
       }
     }
   }
-  if (skinUnlockToast > 0) skinUnlockToast = Math.max(0, skinUnlockToast - dt * 0.35);
+  if (skinUnlockToast > 0 && pillToastOwner() === 'skin') skinUnlockToast = Math.max(0, skinUnlockToast - dt * 0.35);
   // iter#6: drive achievement toast queue (one at a time, ~2.5s each)
   if (!achToastActive && achToastQueue.length > 0) achToastActive = achToastQueue.shift();
-  if (achToastActive) {
+  if (achToastActive && pillToastOwner() === 'badge') {
     achToastActive.life -= dt * 0.4;
     if (achToastActive.life <= 0) achToastActive = null;
   }
@@ -1646,6 +2283,7 @@ function update(dt) {
   if (keys['ArrowUp']    || keys['KeyW']) ay -= 1;
   if (keys['ArrowDown']  || keys['KeyS']) ay += 1;
   if (touch.active) { ax += touch.dx; ay += touch.dy; }
+  if (pointer.active) { ax += pointer.dx; ay += pointer.dy; }
   var alen = Math.sqrt(ax*ax + ay*ay);
   if (alen > 0) { ax /= alen; ay /= alen; }
 
@@ -1709,12 +2347,12 @@ function update(dt) {
       else               { sfxCollect(combo); }
       debrisList.splice(i, 1);
       removed++;
-      // milestone tutorial (action-gated): step 0 needs 3 real pickups, step 1
-      // needs a real x2 combo. The gameplay input fell THROUGH to here, so the
-      // step advances only on the genuine action (Game Build Hygiene #10).
+      // milestone tutorial (action-gated): stop after 3 real pickups. The
+      // gameplay input fell THROUGH to here, so completion only happens on the
+      // genuine action (Game Build Hygiene #10).
       if (tut.active) {
-        if (tut.step === 0) { tut.startCleans++; if (tut.startCleans >= 3) tutAdvance(); }
-        else if (tut.step === 1 && combo >= 2) tutAdvance();
+        tut.startCleans++;
+        if (tut.startCleans >= 3) endTutorial();
       }
     }
   }
@@ -1753,14 +2391,19 @@ function update(dt) {
   if (debrisList.length === 0) {
     var bonus = Math.round(timeLeft * 8);
     score += bonus;
-    spawnFloat(cx, cy - 30*S, t('bonus')+' +'+bonus, '#2ecc71');
+    // The TIME BONUS used to spawn as a world float at cy-30*S. It survived
+    // into the LEVELEND overlay behind the scrim and collided with the score
+    // line and the star row (MCPlay overlap screenshot 2026-07-27). It is now
+    // a laid-out row of the level-end panel instead.
+    lastLevelTimeBonus = bonus;
     spawnParticles(donut.x, donut.y, '#FFD700', 25);
     sfxLevelEnd(); // iter#8
     // iter#13: PERFECT SWEEP bonus - clear without ever breaking the combo chain
     if (chainStartedThisLevel && perfectChainAlive) {
       lastLevelPerfect = true;
       score += PERFECT_BONUS;
-      spawnFloat(cx, cy + 12*S, t('perfectSweep')+' '+t('perfectBonus'), '#FFD700');
+      // Same reason as TIME BONUS above: this float landed at cy+12*S, right
+      // on the level-end button. The panel renders it as its own pill row.
       spawnParticles(donut.x, donut.y, '#FFD700', 18);
       spawnParticles(donut.x, donut.y, '#FFF8C0', 12);
       try { if (typeof sfxBadge === 'function') sfxBadge(); } catch(e) {}
@@ -1788,9 +2431,17 @@ function update(dt) {
     // the Tip Jar tool + Bonus Pay event. Bump the "clear N levels" daily quest.
     lastLevelSprinkles = sprinklesForClear(level, lastLevelStars);
     awardSprinkles(lastLevelSprinkles);
+    // A cleared level mints one donut-box token (capped at BOX_TOKEN_CAP). This
+    // is the earn-rate that keeps the rewarded box from collapsing the case:
+    // twenty boxes cost twenty cleared levels, not twenty consecutive ads.
+    earnBoxToken();
     bumpQuest('clean3', 1);
     if (lastLevelPerfect) bumpQuest('perfect1', 1);
     if (tut.active) endTutorial(); // clearing a level finishes the tutorial
+    // Persist the newly-unlocked level so a reload / RETRY resumes here.
+    noteLevelReached(level + 1);
+    // Drop leftover world floats so nothing bleeds through the level-end scrim.
+    floats = [];
     gs = 'LEVELEND';try{parent.postMessage({type:'gf:gameEnded'},'*')}catch(_){};
   }
 
@@ -2033,6 +2684,34 @@ function drawArena() {
 }
 
 // ── DRAW HUD ──────────────────────────────────────────────────────────────────
+// ── HUD READOUT: "LABEL value" ON ONE LINE ───────────────────────────────────
+// The level readout used to be the word LEVEL on one line with the number
+// underneath it (label at bh*0.42, value at bh*0.78). On a phone that reads as
+// the label having WRAPPED onto a second line, and it was the same for SCORE
+// and TIME. Each readout is now a single line whose label and value shrink
+// together, and the whole row is measured against the live width before
+// anything is drawn - so a long localisation (Cyrillic runs ~40% longer) or a
+// five-digit score scales the text down instead of colliding with its
+// neighbour (ledger defect classes 1 and 4).
+function hudCellWidth(label, value, labFs, valFs) {
+  ctx.font = 'bold ' + labFs + 'px sans-serif';
+  var w = ctx.measureText(label).width + labFs * 0.42;
+  ctx.font = 'bold ' + valFs + 'px sans-serif';
+  return w + ctx.measureText(value).width;
+}
+function drawHudCell(x, midY, label, value, labFs, valFs, valCol, alpha) {
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.font = 'bold ' + labFs + 'px sans-serif';
+  ctx.fillStyle = '#6a6a7c';
+  ctx.fillText(label, x, midY);
+  var lw = ctx.measureText(label).width;
+  ctx.font = 'bold ' + valFs + 'px sans-serif';
+  ctx.fillStyle = valCol;
+  if (alpha !== undefined && alpha < 1) ctx.globalAlpha = alpha;
+  ctx.fillText(value, x + lw + labFs * 0.42, midY);
+  ctx.globalAlpha = 1;
+  ctx.textBaseline = 'alphabetic';
+}
 function drawHUD() {
   var inset = platformSafeInsets();
   var bh = HUD_H * S;
@@ -2042,21 +2721,75 @@ function drawHUD() {
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(0, bh); ctx.lineTo(W, bh); ctx.stroke();
 
-  var pad = 14*S, rightX = W - pad - inset.right, fs = clamp(13*S, 11, 17), fy = bh*0.78;
-  var bigFs = clamp(18*S, 14, 24);
+  var pad = 14*S, rightX = W - pad - inset.right;
   ctx.textBaseline = 'alphabetic';
 
-  // Level (left)
-  ctx.fillStyle = '#555'; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'left';
-  ctx.fillText(t('level'), pad, bh*0.42);
-  ctx.fillStyle = '#fff'; ctx.font = 'bold '+bigFs+'px sans-serif';
-  ctx.fillText(level, pad, fy);
+  // 1. Declare the row's contents.
+  var pct = totalDebris > 0 ? Math.round((1 - debrisList.length/totalDebris)*100) : 100;
+  var lvlLbl = t('level'),   lvlVal   = String(level);
+  var timeLbl = t('time'),   timeVal  = Math.ceil(timeLeft) + t('secAbbr');
+  var scoreLbl = t('score'), scoreVal = String(score);
+  var cleanLbl = t('clean') + ' ' + pct + '%';
 
-  // Score (right)
-  ctx.fillStyle = '#555'; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'right';
-  ctx.fillText(t('score'), rightX, bh*0.42);
-  ctx.fillStyle = '#FFD700'; ctx.font = 'bold '+bigFs+'px sans-serif';
-  ctx.fillText(score, rightX, fy);
+  var labFs = clamp(12*S, 9, 15);
+  var valFs = clamp(19*S, 14, 25);
+  var cellGap = clamp(14*S, 8, 22);
+  var barH = 9*S;
+  var meterMinW = clamp(90*S, 70, 240);
+  var rowW = Math.max(40, rightX - pad);
+  var midY = bh * 0.46;
+
+  // 2. Measure, then shrink EVERY readout by one factor. Two stages: the first
+  //    tries to keep the meter at a readable width, the second only has to stop
+  //    the three readouts from touching each other. The second stage is what
+  //    makes non-overlap STRUCTURAL rather than true-for-the-widths-we-tested -
+  //    a long localisation and a large score both feed straight into it.
+  var kh = 1, wl = 0, wt = 0, ws = 0, freeW = 0;
+  for (var hp = 0; hp < 40; hp++) {
+    wl = hudCellWidth(lvlLbl,   lvlVal,   labFs*kh, valFs*kh);
+    wt = hudCellWidth(timeLbl,  timeVal,  labFs*kh, valFs*kh);
+    ws = hudCellWidth(scoreLbl, scoreVal, labFs*kh, valFs*kh);
+    freeW = rowW - (wl + wt + ws) - cellGap*3;
+    if (freeW >= meterMinW) break;
+    if (kh <= 0.6 && freeW >= barH * 3) break;
+    if (kh <= 0.35) break;
+    kh -= 0.05;
+  }
+  labFs *= kh; valFs *= kh;
+
+  // 3. Place. LEVEL owns the left edge, SCORE the right, TIME sits inside
+  //    SCORE, and the meter takes whatever band is left between them.
+  drawHudCell(pad, midY, lvlLbl, lvlVal, labFs, valFs, '#fff');
+  drawHudCell(rightX - ws, midY, scoreLbl, scoreVal, labFs, valFs, '#FFD700');
+  // iter#12: TIME flashes gold for the half-second after a sprinkle pickup
+  var tc = timeLeft < 12 ? '#e74c3c' : timeLeft < 25 ? '#f39c12' : '#d8d8e4';
+  if (sprinkleHudPulse > 0) tc = '#FFD700';
+  drawHudCell(rightX - ws - cellGap - wt, midY, timeLbl, timeVal, labFs, valFs, tc,
+              sprinkleHudPulse > 0 ? (0.7 + sprinkleHudPulse * 0.3) : 1);
+
+  // Clean meter - centred in the band the three readouts left behind. If the
+  // readouts have eaten the whole row there IS no band, and the meter is
+  // dropped rather than drawn on top of TIME.
+  var bandL = pad + wl + cellGap;
+  var bandR = rightX - ws - cellGap - wt - cellGap;
+  var bandW = bandR - bandL;
+  if (bandW >= barH * 2) {
+    var mw = Math.min(clamp(W*0.35, 120, 240), bandW);
+    var mx = bandL + (bandW - mw)/2;
+    var meterH = labFs + 4*S + barH;
+    var meterTop = midY - meterH/2;
+    ctx.font = 'bold ' + fitBoldFs(cleanLbl, mw, labFs, 7) + 'px sans-serif';
+    ctx.fillStyle = '#7c7c8e'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(cleanLbl, mx + mw/2, meterTop + labFs/2);
+    ctx.textBaseline = 'alphabetic';
+    var my = meterTop + labFs + 4*S;
+    rr(ctx, mx, my, mw, barH, barH/2); ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
+    if (pct > 0) {
+      var fg = ctx.createLinearGradient(mx, 0, mx+mw, 0);
+      fg.addColorStop(0, '#2ecc71'); fg.addColorStop(1, '#1abc9c');
+      rr(ctx, mx, my, mw*pct/100, barH, barH/2); ctx.fillStyle = fg; ctx.fill();
+    }
+  }
 
   // Best (small, below score on the right) - pulses gold when score has just beaten it
   if (best > 0) {
@@ -2069,7 +2802,7 @@ function drawHUD() {
     } else {
       ctx.fillStyle = '#777';
     }
-    ctx.fillText(t('best')+': '+best, rightX, bh + bestFs + 4*S);
+    ctx.fillText(t('best')+': '+best, rightX, bh + topRightReserve() + bestFs + 4*S);
     ctx.globalAlpha = 1;
   }
   // iter#9: persistent best chain under the BEST line (only show after a chain exists)
@@ -2083,37 +2816,10 @@ function drawHUD() {
     } else {
       ctx.fillStyle = '#777';
     }
-    var chainY = bh + chainFs*2 + 8*S;
+    var chainY = bh + topRightReserve() + chainFs*2 + 8*S;
     ctx.fillText(t('chain')+' '+t('chainBest')+': x'+bestCombo, W-pad, chainY);
     ctx.globalAlpha = 1;
   }
-
-  // Clean meter (center)
-  var pct = totalDebris > 0 ? Math.round((1 - debrisList.length/totalDebris)*100) : 100;
-  var mw = clamp(W*0.35, 120, 240), mh = 10*S;
-  var mx = cx - mw/2, my = bh*0.58;
-  ctx.fillStyle = '#666'; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText(t('clean')+' '+pct+'%', cx, bh*0.36);
-  // bar bg
-  rr(ctx, mx, my, mw, mh, mh/2); ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fill();
-  // bar fill
-  if (pct > 0) {
-    var fg = ctx.createLinearGradient(mx, 0, mx+mw, 0);
-    fg.addColorStop(0, '#2ecc71'); fg.addColorStop(1, '#1abc9c');
-    rr(ctx, mx, my, mw*pct/100, mh, mh/2); ctx.fillStyle = fg; ctx.fill();
-  }
-
-  // Timer (3/4 right)
-  var tx = W*0.75;
-  var tc = timeLeft < 12 ? '#e74c3c' : timeLeft < 25 ? '#f39c12' : '#aaa';
-  // iter#12: TIME flashes gold for the half-second after a sprinkle pickup
-  if (sprinkleHudPulse > 0) tc = '#FFD700';
-  ctx.fillStyle = tc; ctx.font = 'bold '+fs+'px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText(t('time'), tx, bh*0.42);
-  ctx.font = 'bold '+bigFs+'px sans-serif';
-  if (sprinkleHudPulse > 0) { ctx.globalAlpha = 0.7 + sprinkleHudPulse * 0.3; }
-  ctx.fillText(Math.ceil(timeLeft)+t('secAbbr'), tx, fy);
-  ctx.globalAlpha = 1;
 
   // Combo badge
   if (combo > 1 && comboTimer > 0) {
@@ -2128,9 +2834,28 @@ function drawHUD() {
 }
 
 // ── DRAW MENU / END SCREENS ───────────────────────────────────────────────────
+// The rect drawOverlay last drew its primary button at. Everything that
+// stacks under that button (the rewarded revive chip, the leaderboard, the
+// yesterday / 7-day pills) used to RE-DERIVE it as `cy + 20*S` with a
+// clamp(52*S,40,66) height - which is only correct on the narrow path. On any
+// window wider than 1.15:1 drawOverlay moves the button and scales it 1.4x,
+// so every one of those consumers was positioned against a button that was no
+// longer there. They now read the published rect instead.
+var lastOverlayBtn = null;
+function overlayBtnRect() {
+  if (lastOverlayBtn) return lastOverlayBtn;
+  var w = clamp(240*S, 160, 320), h = clamp(52*S, 40, 66);
+  return { x: cx - w/2, y: cy + 20*S, w: w, h: h };
+}
 function drawOverlay(title, sub, btnText, btnFn, sub2) {
   buttons = [];
-  ctx.fillStyle = 'rgba(8,8,18,0.88)';
+  // OPAQUE, not a translucent scrim. At 0.88 the live HUD and world showed
+  // through on GAMEOVER - CLEAN%, TIME and BEST ghosting behind the title. It
+  // is legible enough in isolation, but this game has twice been rejected for
+  // «есть наложение», and text faintly behind other text is exactly what that
+  // reads as in a reviewer screenshot. Nothing is layered under these screens
+  // that the player still needs to see.
+  ctx.fillStyle = '#080812';
   ctx.fillRect(0, 0, W, H);
 
   var titleFs = clamp(36*S, 22, 52);
@@ -2144,7 +2869,13 @@ function drawOverlay(title, sub, btnText, btnFn, sub2) {
   var wideFloor = H * 0.50;
   // Skin picker is below the button - cap so button bottom stays above H*0.62
   var wideCeil = H * 0.62 - btnH;
-  var btnY = isWide ? Math.min(Math.max(textBlockBottom + clearMargin, wideFloor), wideCeil) : cy + 20*S;
+  // The cap must never win against the text clearance. On a very short wide
+  // window wideCeil drops BELOW wideFloor, and the old
+  // min(max(clearance, floor), ceil) then pulled the button UP over the
+  // subtitle - at 1600x300 the RETRY pill swallowed the SCORE line entirely.
+  var btnMinY = textBlockBottom + clearMargin;
+  var btnY = isWide ? Math.max(btnMinY, Math.min(Math.max(btnMinY, wideFloor), Math.max(btnMinY, wideCeil)))
+                    : cy + 20*S;
   var btnX    = cx - btnW/2;
 
   // glow effect behind title
@@ -2179,11 +2910,13 @@ function drawOverlay(title, sub, btnText, btnFn, sub2) {
   rr(ctx, drawBtnX, drawBtnY, drawBtnW, drawBtnH, drawBtnH/2);
   ctx.fillStyle = grad; ctx.fill();
   ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
-  ctx.font = 'bold '+clamp((isWide?20:16)*S,14,26)+'px sans-serif'; ctx.fillStyle = '#fff';
+  ctx.font = 'bold ' + fitBoldFs(btnText, btnW - 24*S, clamp((isWide?20:16)*S,14,26), 10) + 'px sans-serif';
+  ctx.fillStyle = '#fff';
   ctx.textBaseline = 'middle';
   ctx.fillText(btnText, cx, btnY + btnH/2);
   ctx.textBaseline = 'alphabetic';
 
+  lastOverlayBtn = { x: btnX, y: btnY, w: btnW, h: btnH };
   buttons.push({ x:btnX, y:btnY, w:btnW, h:btnH, fn:function(){ sfxClick(); btnFn(); } });
 
   if (best > 0) {
@@ -2192,10 +2925,176 @@ function drawOverlay(title, sub, btnText, btnFn, sub2) {
   }
 }
 
+// ── LEVEL-END PANEL (MCPlay overlap rejection 2026-07-27) ────────────────────
+// The level-end screen used to be four independent draws layered over one
+// generic drawOverlay(), each positioned by hand-tuned offsets from cy:
+//   * the star row was centred at cy-8*S, right on top of the SCORE line;
+//   * the 'NEW BEST!' label sat at cy+~44*S - inside the NEXT LEVEL button;
+//   * the '+N sprinkles' readout sat at cy+~84*S - also inside the button;
+//   * TIME BONUS / PERFECT SWEEP spawned as world floats that bled through
+//     the scrim into the same band.
+// The reviewer's screenshot caught all four collisions in one frame. This
+// replaces the lot with ONE measured vertical stack: every row declares its
+// height up front, the stack is centred as a group and uniformly shrunk if the
+// viewport is short, and the button owns its own row. No element can land on
+// another at any viewport shape.
+function drawLevelEndPanel(onNext) {
+  buttons = [];
+  // Opaque for the same reason as drawOverlay: at 0.92 the HUD behind the
+  // level-complete stack stayed readable through it.
+  ctx.fillStyle = '#080812';
+  ctx.fillRect(0, 0, W, H);
+
+  var isWide = W / H > 1.15;
+  var titleFs = clamp(34*S, 20, 48);
+  var subFs   = clamp(15*S, 11, 20);
+  var tagFs   = clamp(12*S, 10, 16);
+  var starSz  = clamp(34*S, 20, 46);
+  var btnW    = clamp(240*S, 160, 320), btnH = clamp(52*S, 40, 66);
+  if (isWide) { btnW = Math.round(btnW * 1.4); btnH = Math.round(btnH * 1.35); }
+  var gap = clamp(10*S, 7, 16);
+  var pillPadY = clamp(7*S, 5, 12);
+  var boxChipH = clamp(42*S, 34, 54);
+
+  // 1. Declare the rows. Nothing is drawn until the whole stack is measured.
+  var rows = [{ kind:'title', h: titleFs * 1.15 }];
+  if (lastLevelStars > 0) {
+    rows.push({ kind:'stars', h: starSz * 1.3 });
+    if (lastLevelStarsNewBest) rows.push({ kind:'newbest', h: tagFs * 1.6 });
+  }
+  if (lastLevelPerfect) rows.push({ kind:'perfect', h: tagFs + pillPadY*2 });
+  rows.push({ kind:'score', h: subFs * 1.5 });
+  if (lastLevelTimeBonus > 0)  rows.push({ kind:'bonus',     h: subFs * 1.4 });
+  if (lastLevelSprinkles > 0)  rows.push({ kind:'sprinkles', h: subFs * 1.6 });
+  rows.push({ kind:'button', h: btnH });
+  // The rewarded donut box is offered here because clearing the level is what
+  // MINTED the box. It is a row of the measured stack like everything else, so
+  // it cannot land on NEXT LEVEL at any viewport.
+  if (boxBtnVisible()) rows.push({ kind:'box', h: boxChipH });
+  if (best > 0) rows.push({ kind:'best', h: tagFs * 1.9 });
+
+  // 2. Measure, then fit. safeTop clears the WORKSHOP pill / mute button.
+  var i, total = 0;
+  for (i = 0; i < rows.length; i++) total += rows[i].h + (i ? gap : 0);
+  var safeTop = clamp(58*S, 44, 96);
+  var safeBot = clamp(16*S, 12, 30);
+  var avail = H - safeTop - safeBot;
+  // Shrink every row AND every gap by one factor rather than letting rows
+  // collide on short viewports.
+  var k = (total > avail && total > 0) ? Math.max(0.5, avail / total) : 1;
+  if (k !== 1) {
+    gap *= k; titleFs *= k; subFs *= k; tagFs *= k;
+    starSz *= k; btnH *= k; btnW *= k; pillPadY *= k;
+    total = 0;
+    for (i = 0; i < rows.length; i++) { rows[i].h *= k; total += rows[i].h + (i ? gap : 0); }
+  }
+
+  // 3. Draw top-down. Each row only ever paints inside its own band.
+  var y = safeTop + Math.max(0, (avail - total) / 2);
+  ctx.textAlign = 'center';
+  for (i = 0; i < rows.length; i++) {
+    var r = rows[i], top = y, mid = y + r.h / 2;
+    ctx.textBaseline = 'middle';
+    if (r.kind === 'title') {
+      ctx.shadowColor = 'rgba(46,204,113,0.4)'; ctx.shadowBlur = 30*S;
+      ctx.font = 'bold ' + titleFs + 'px sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(t('complete'), cx, mid);
+      ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    } else if (r.kind === 'stars') {
+      _starPulseT += 0.05;
+      // Pulse stays <= 1 so a pulsing star can never grow into its neighbours.
+      var pulse = 1 - (lastLevelStarsNewBest ? 0.06 : 0.02) * (0.5 + 0.5*Math.sin(_starPulseT * 4));
+      var sGap = starSz * 0.34;
+      var startX = cx - (starSz*3 + sGap*2)/2 + starSz/2;
+      for (var si = 0; si < 3; si++) {
+        var filled = (si < lastLevelStars);
+        var sz = starSz * 0.92 * (filled ? pulse : 1);
+        if (filled) { ctx.shadowColor = 'rgba(255,215,0,0.7)'; ctx.shadowBlur = 18*S; }
+        drawStar(startX + si*(starSz + sGap), mid, sz, filled ? '#FFD700' : 'rgba(255,255,255,0.18)', null);
+        ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+      }
+    } else if (r.kind === 'newbest') {
+      ctx.font = 'bold ' + tagFs + 'px sans-serif';
+      ctx.fillStyle = '#FFD700';
+      ctx.fillText(t('starsNewBest'), cx, mid);
+    } else if (r.kind === 'perfect') {
+      var pLabel = t('perfectSweep') + '  ' + t('perfectBonus');
+      ctx.font = 'bold ' + tagFs + 'px sans-serif';
+      var pw = ctx.measureText(pLabel).width + clamp(14*S, 10, 22) * 2;
+      rr(ctx, cx - pw/2, top, pw, r.h, r.h/2);
+      ctx.fillStyle = '#FFD700'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1.3 * S; ctx.stroke();
+      ctx.fillStyle = '#1a1a2e';
+      ctx.fillText(pLabel, cx, mid);
+    } else if (r.kind === 'score') {
+      ctx.font = 'bold ' + subFs + 'px sans-serif'; ctx.fillStyle = '#e8e8f0';
+      ctx.fillText(t('score') + ': ' + score, cx, mid);
+    } else if (r.kind === 'bonus') {
+      ctx.font = subFs + 'px sans-serif'; ctx.fillStyle = '#2ecc71';
+      ctx.fillText(t('bonus') + ' +' + lastLevelTimeBonus, cx, mid);
+    } else if (r.kind === 'sprinkles') {
+      ctx.font = 'bold ' + subFs + 'px sans-serif';
+      var sLbl = '+' + lastLevelSprinkles;
+      var sIc = subFs * 1.2;
+      var sTw = ctx.measureText(sLbl).width;
+      drawSprinkleIcon(cx - (sTw + sIc*0.9)/2 + sIc*0.4, mid, sIc, '#FFD700');
+      ctx.fillStyle = '#FFE066'; ctx.textAlign = 'left';
+      ctx.fillText(sLbl, cx - (sTw + sIc*0.9)/2 + sIc*1.1, mid);
+      ctx.textAlign = 'center';
+    } else if (r.kind === 'button') {
+      var bx = cx - btnW/2;
+      var grad = ctx.createLinearGradient(bx, top, bx, top + r.h);
+      grad.addColorStop(0, '#2ecc71'); grad.addColorStop(1, '#27ae60');
+      rr(ctx, bx, top, btnW, r.h, r.h/2);
+      ctx.fillStyle = grad; ctx.fill();
+      ctx.font = 'bold ' + fitBoldFs(t('next'), btnW - 24*S, clamp((isWide?20:16)*S*k, 13, 26), 10) + 'px sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(t('next'), cx, mid);
+      buttons.push({ x:bx, y:top, w:btnW, h:r.h, fn:function(){ sfxClick(); onNext(); } });
+    } else if (r.kind === 'box') {
+      drawBoxChip(cx - btnW/2, top, btnW, r.h);
+    } else if (r.kind === 'best') {
+      ctx.font = tagFs + 'px sans-serif'; ctx.fillStyle = '#666';
+      ctx.fillText(t('best') + ': ' + best, cx, mid);
+    }
+    y += r.h + gap;
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+// Small "start over" text link under the MENU button, shown only once the
+// player has progress to resume from (MCPlay 2026-07-27). Keeps CONTINUE from
+// being a one-way door without adding a second competing pill.
+function drawRestartLink() {
+  var fs = clamp(12*S, 10, 15);
+  var y = cy + 20*S + clamp(52*S, 40, 66) + clamp(48*S, 38, 62);
+  ctx.font = fs + 'px sans-serif';
+  ctx.fillStyle = '#7a7a8c';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var label = t('startOver');
+  var tw = ctx.measureText(label).width;
+  ctx.fillText(label, cx, y);
+  var padX = clamp(12*S, 8, 18), padY = clamp(8*S, 6, 12);
+  buttons.push({ x: cx - tw/2 - padX, y: y - fs/2 - padY, w: tw + padX*2, h: fs + padY*2,
+    fn: function() {
+      sfxClick();
+      // Resets the record on purpose. CONTINUE is the only entry point, so a
+      // non-destructive "start over" would silently resume at the abandoned
+      // level on the next reload - which is exactly the behaviour the save fix
+      // exists to remove.
+      progressLevel = 1; saveProgress();
+      score = 0; maybeStartTutorial(); startLevel(1, true);
+    } });
+  ctx.textBaseline = 'alphabetic';
+}
+
 // iter#10: Big 3-star row drawn on LEVELEND between the title and the NEXT
 // button. Filled gold stars for stars earned this clear; outline stars for
 // the remainder. Subtle pulse + 'NEW BEST!' label when this clear beat the
 // previously-saved best for this level.
+// (Superseded on LEVELEND by drawLevelEndPanel above - kept for any other
+// caller and because the star geometry is shared.)
 var _starPulseT = 0;
 function drawLevelEndStars() {
   if (!lastLevelStars) return;
@@ -2310,10 +3209,12 @@ function drawTotalStarsPillAt(px, py) {
 // LEFT of the title row so it doesn't fight the leaderboard / NEW BEST banner
 // / skin picker. Uses tiny font; only renders when player actually built a
 // chain this run.
-function drawChainSummary() {
-  if (maxComboThisRun < 2) return;
+function drawChainSummary(yTop, measure) {
+  if (maxComboThisRun < 2) return 0;
   var fs = clamp(13*S, 10, 16);
-  var y = cy - 75*S;
+  var mH = fs * 1.45;
+  if (measure) return mH;
+  var y = (yTop !== undefined) ? (yTop + mH - fs*0.30) : (cy - 75*S);
   ctx.save();
   ctx.font = 'bold '+fs+'px sans-serif';
   ctx.textAlign = 'center';
@@ -2332,16 +3233,19 @@ function drawChainSummary() {
     ctx.fillText(line, cx, y);
   }
   ctx.restore();
+  return mH;
 }
 
 // Yellow celebratory NEW BEST! banner - drawn over the GAMEOVER overlay when
 // the player just beat their saved high score this run.
 var newBestAnim = 0;
-function drawNewBestBanner() {
+function drawNewBestBanner(yTop, measure) {
+  var mH = clamp(28*S, 18, 40) * 1.30;   // includes the pulse headroom
+  if (measure) return mH;
   newBestAnim += 0.04;
   var pulse = 1 + Math.sin(newBestAnim * 3) * 0.06;
   var bannerFs = clamp(28*S, 18, 40) * pulse;
-  var bannerY = cy - 110*S;
+  var bannerY = (yTop !== undefined) ? (yTop + mH/2) : (cy - 110*S);
 
   ctx.save();
   // soft glow halo
@@ -2365,13 +3269,17 @@ function drawNewBestBanner() {
     var ay = bannerY + (Math.random()-0.5) * 50*S;
     spawnParticles(ax, ay, '#FFD700', 1);
   }
+  return mH;
 }
 
 // ── DRAW DAY SEED BADGE (iter#4) ─────────────────────────────────────────────
 // Tiny, low-key label that prints today's UTC date + the seed number so
 // players see "everyone's playing the same layout today". Drawn near the top
 // of the MENU/GAMEOVER overlay so it sits naturally above the title.
-function drawDaySeedBadge() {
+function drawDaySeedBadge(yTop, measure) {
+  // height includes the "same layout for everyone today" sub-line
+  var mH = clamp(11*S, 9, 14) + 5*S*2 + clamp(10*S, 8, 13) + 4*S;
+  if (measure) return mH;
   var dateKey = getDayKey();
   var seedNum = getDaySeed();
   var fs = clamp(11*S, 9, 14);
@@ -2384,7 +3292,7 @@ function drawDaySeedBadge() {
   var padX = 12*S, padY = 5*S;
   var w = ctx.measureText(label).width + padX*2;
   var h = fs + padY*2;
-  var bx = cx - w/2, by = cy - 130*S;
+  var bx = cx - w/2, by = (yTop !== undefined) ? yTop : cy - 130*S;
   ctx.fillStyle = 'rgba(72,201,176,0.18)';
   rr(ctx, bx, by, w, h, h/2);
   ctx.fill();
@@ -2396,6 +3304,7 @@ function drawDaySeedBadge() {
   ctx.fillStyle = '#666';
   ctx.fillText(t('sameLayout'), cx, by + h + subFs + 4*S);
   ctx.restore();
+  return mH;
 }
 
 // ── DRAW STREAK PILL (iter#5) ────────────────────────────────────────────────
@@ -2403,8 +3312,14 @@ function drawDaySeedBadge() {
 // + "come back tomorrow" sub-line. Pulses on first frame of the visit that
 // incremented the streak. No-op when streak is 0 (defensive).
 var _streakAnim = 0;
-function drawStreakPill() {
-  if (streak <= 0) return;
+// `yTop` overrides the legacy fixed offset so the GAMEOVER cluster can stack
+// these pills without them landing on each other; `measure` returns the height
+// without drawing. Called with no arguments (MENU) it behaves exactly as before.
+function drawStreakPill(yTop, measure) {
+  if (streak <= 0) return 0;
+  var mFs = clamp(11*S, 9, 14);
+  var mH = mFs + 5*S*2 + (streakBumped ? clamp(10*S, 8, 13) + 4*S : 0);
+  if (measure) return mH;
   _streakAnim += 0.06;
   var pulse = streakBumped ? (1 + Math.sin(_streakAnim * 4) * 0.07) : 1;
   var fs = clamp(11*S, 9, 14) * pulse;
@@ -2419,7 +3334,7 @@ function drawStreakPill() {
   var w = ctx.measureText(label).width + iconSz + 6*S + padX*2;
   var h = fs + padY*2;
   var bx = cx - w/2;
-  var by = cy - 170*S; // sits above the daily-seed badge (which is at cy - 130*S)
+  var by = (yTop !== undefined) ? yTop : cy - 170*S;
   // pill bg - flame orange, slightly stronger when bumped
   ctx.fillStyle = streakBumped ? 'rgba(255,140,50,0.32)' : 'rgba(255,140,50,0.18)';
   rr(ctx, bx, by, w, h, h/2);
@@ -2437,6 +3352,7 @@ function drawStreakPill() {
     ctx.fillText(t('comeBack'), cx, by + h + subFs + 4*S);
   }
   ctx.restore();
+  return mH;
 }
 
 // ── DRAW ACHIEVEMENT ROW (iter#6) ────────────────────────────────────────────
@@ -2501,7 +3417,7 @@ function drawAchievementToast() {
   var w2 = ctx.measureText(heading).width;
   var w = Math.max(w1, w2) + iconFs + 28*S;
   var h = iconFs + fs + 22*S;
-  var bx = cx - w/2, by = HUD_H * S + 10*S;
+  var bx = cx - w/2, by = toastBandY();
   // warm glow pill
   ctx.shadowColor = 'rgba(255,200,80,0.55)';
   ctx.shadowBlur = 20*S;
@@ -2705,76 +3621,199 @@ function drawMuteButton() {
   buttons.push({ x: bx, y: by, w: sz, h: sz, fn: toggleMute });
 }
 
-// Renders the cosmetic donut row on MENU + GAMEOVER. Tap to swap (only unlocked
-// rows are tappable). Locked rows show "BEST 100" hint. Adds button hits to
-// the existing buttons[] array so the existing checkButtons() handler picks
-// them up - no input rewrite needed.
-function drawSkinSelector(yCenter) {
-  var skinFs = clamp(11*S, 9, 14);
-  var labelFs = clamp(10*S, 8, 13);
-  var swatchR = clamp(20*S, 14, 26);
-  // 2026-05-15: gap was swatchR*2.6 - too tight for RU labels ("Рекорд 300")
-  // which run ~80px wide. Bumped to 3.8× swatchR (with floor) so labels
-  // never bleed into each other across languages.
-  var gap = Math.max(swatchR * 3.8, 90 * S);
-  var totalW = gap * (DONUT_SKINS.length - 1);
-  var startX = cx - totalW / 2;
-
-  ctx.font = 'bold '+skinFs+'px sans-serif';
-  ctx.fillStyle = '#888';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'alphabetic';
-  ctx.fillText(t('skin'), cx, yCenter - swatchR - 8*S);
-
-  for (var i = 0; i < DONUT_SKINS.length; i++) {
-    var skin = DONUT_SKINS[i];
-    var sx = startX + i * gap;
-    var sy = yCenter;
-    var unlocked = isSkinUnlocked(skin);
-    var selected = (skin.id === skinId);
-
-    // outer ring (selection indicator)
-    if (selected && unlocked) {
-      ctx.beginPath(); ctx.arc(sx, sy, swatchR + 4*S, 0, Math.PI*2);
-      ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2.5*S; ctx.stroke();
+// Renders the cosmetic donut row on MENU + GAMEOVER - now a single CASE pill
+// rather than one swatch per donut. The roster grew from 4 to 20 (donut boxes),
+// and the old row laid every skin out at a fixed 90px pitch centred on cx: at
+// twenty entries that is 1710px of swatches, i.e. guaranteed off-screen clipping
+// at every viewport a reviewer uses (ledger defect class 4). The pill shows the
+// equipped donut plus "COLLECTED n / 20" and opens the browsable case.
+var SPRINKLE_PALETTE = ['#FF6B6B','#4ECDC4','#FFE66D','#A78BFA','#FB923C'];
+// One donut renderer, shared by the case grid, the reveal panel and the pill,
+// so a donut looks the same everywhere it appears. Deterministic - no
+// per-frame randomness, which a reviewer reads as flicker.
+function drawDonutTopping(x, y, r, hole, skin) {
+  var midR = hole + (r - hole) * 0.55;
+  var i, a;
+  if (skin.top === 'sprinkles') {
+    for (i = 0; i < 8; i++) {
+      a = (i / 8) * Math.PI * 2 + 0.4;
+      ctx.save();
+      ctx.translate(x + Math.cos(a)*midR, y + Math.sin(a)*midR);
+      ctx.rotate(a + Math.PI/2);
+      ctx.fillStyle = skin.top2 || SPRINKLE_PALETTE[i % SPRINKLE_PALETTE.length];
+      ctx.fillRect(-r*0.13, -r*0.045, r*0.26, r*0.09);
+      ctx.restore();
     }
-
-    // swatch (donut shape - outer ring + hole)
-    ctx.save();
-    ctx.globalAlpha = unlocked ? 1 : 0.35;
-    ctx.beginPath(); ctx.arc(sx, sy, swatchR, 0, Math.PI*2);
-    ctx.arc(sx, sy, swatchR*0.42, 0, Math.PI*2, true);
-    ctx.fillStyle = '#F5DEB3'; ctx.fill();
-    ctx.beginPath(); ctx.arc(sx, sy, swatchR*0.88, 0, Math.PI*2);
-    ctx.arc(sx, sy, swatchR*0.5, 0, Math.PI*2, true);
-    ctx.fillStyle = skin.ring;
-    ctx.fill();
-    ctx.restore();
-
-    // lock overlay
-    if (!unlocked) {
-      ctx.font = 'bold '+labelFs+'px sans-serif';
-      ctx.fillStyle = '#999';
-      ctx.fillText(t('unlockAt')+skin.unlock, sx, sy + swatchR + labelFs + 4*S);
-    } else {
-      ctx.font = labelFs+'px sans-serif';
-      ctx.fillStyle = selected ? '#FFD700' : '#aaa';
-      var dispName = (lang === 'ru' ? skin.nameRu : skin.name);
-      ctx.fillText(dispName, sx, sy + swatchR + labelFs + 4*S);
+  } else if (skin.top === 'dots') {
+    for (i = 0; i < 7; i++) {
+      a = (i / 7) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(x + Math.cos(a)*midR, y + Math.sin(a)*midR, r*0.09, 0, Math.PI*2);
+      ctx.fillStyle = skin.top2 || '#fff'; ctx.fill();
     }
-
-    // hit area - only for unlocked
-    if (unlocked) {
-      (function(targetId){
-        buttons.push({
-          x: sx - swatchR, y: sy - swatchR, w: swatchR*2, h: swatchR*2,
-          fn: function() {
-            if (skinId !== targetId) { skinId = targetId; saveSkin(); }
-          }
-        });
-      })(skin.id);
+  } else if (skin.top === 'drizzle') {
+    ctx.strokeStyle = skin.top2 || '#fff';
+    ctx.lineWidth = Math.max(1, r*0.09); ctx.lineCap = 'round';
+    for (i = 0; i < 5; i++) {
+      a = (i / 5) * Math.PI * 2 + 0.3;
+      ctx.beginPath();
+      ctx.moveTo(x + Math.cos(a)*hole*1.3, y + Math.sin(a)*hole*1.3);
+      ctx.lineTo(x + Math.cos(a + 0.55)*r*0.85, y + Math.sin(a + 0.55)*r*0.85);
+      ctx.stroke();
+    }
+  } else if (skin.top === 'stripe') {
+    ctx.strokeStyle = skin.top2 || '#fff';
+    ctx.lineWidth = Math.max(1, r*0.12); ctx.lineCap = 'butt';
+    for (i = 0; i < 6; i++) {
+      a = (i / 6) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(x + Math.cos(a)*hole*1.25, y + Math.sin(a)*hole*1.25);
+      ctx.lineTo(x + Math.cos(a)*r*0.85, y + Math.sin(a)*r*0.85);
+      ctx.stroke();
+    }
+  } else if (skin.top === 'crumbs') {
+    for (i = 0; i < 11; i++) {
+      a = (i / 11) * Math.PI * 3.4;
+      var cr = hole*1.3 + ((i * 37) % 100) / 100 * (r*0.80 - hole*1.3);
+      ctx.beginPath();
+      ctx.arc(x + Math.cos(a)*cr, y + Math.sin(a)*cr, r*0.055, 0, Math.PI*2);
+      ctx.fillStyle = skin.top2 || '#fff'; ctx.fill();
+    }
+  } else if (skin.top === 'swirl') {
+    ctx.strokeStyle = skin.top2 || '#fff';
+    ctx.lineWidth = Math.max(1, r*0.09); ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (i = 0; i <= 40; i++) {
+      var f = i / 40, ang = f * Math.PI * 4;
+      var rad = hole*1.3 + f * (r*0.83 - hole*1.3);
+      var px = x + Math.cos(ang)*rad, py = y + Math.sin(ang)*rad;
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  } else if (skin.top === 'stars') {
+    for (i = 0; i < 6; i++) {
+      a = (i / 6) * Math.PI * 2 + 0.25;
+      drawStar(x + Math.cos(a)*midR, y + Math.sin(a)*midR, r*0.26, skin.top2 || '#FFD700', null);
     }
   }
+}
+function drawDonutSwatch(x, y, r, skin, alpha) {
+  var hole = r * 0.40;
+  ctx.save();
+  ctx.globalAlpha = (alpha === undefined ? 1 : alpha);
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.arc(x, y, hole, 0, Math.PI*2, true);
+  ctx.fillStyle = '#F5DEB3'; ctx.fill();
+  ctx.beginPath(); ctx.arc(x, y, r*0.88, 0, Math.PI*2);
+  ctx.arc(x, y, hole*1.18, 0, Math.PI*2, true);
+  ctx.fillStyle = skin.ring; ctx.fill();
+  ctx.beginPath(); ctx.arc(x - r*0.24, y - r*0.26, r*0.22, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(255,255,255,0.30)'; ctx.fill();
+  drawDonutTopping(x, y, r, hole, skin);
+  ctx.restore();
+}
+// A locked slot: donut silhouette + a small GIFT BOX telling the player this
+// one arrives in a donut box. It used to draw a literal '?' glyph, which is the
+// one symbol a reviewer reads as a help button - and a help affordance that does
+// nothing reads as broken. The requirement itself lives in the case header,
+// which states both the count and where boxes come from (ledger defect class 7).
+// Vector-drawn, never emoji (Game Build Hygiene #1: emoji are tofu on headless
+// and on some Android builds).
+function drawLockedSlot(x, y, r) {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2);
+  ctx.arc(x, y, r*0.40, 0, Math.PI*2, true);
+  ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = Math.max(1, r*0.07);
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.stroke();
+  drawGiftIcon(x, y, r * 0.86, 'rgba(255,215,0,0.42)');
+  ctx.restore();
+}
+// Gift box: lid, body, one vertical ribbon and a small bow. `sz` is the full
+// footprint, so it scales with whatever slot or pill hosts it.
+function drawGiftIcon(x, y, sz, col) {
+  var w = sz * 0.62, h = sz * 0.54;
+  var lidH = h * 0.30;
+  var bodyTop = y - h/2 + lidH;
+  ctx.save();
+  ctx.fillStyle = col;
+  // body + lid
+  ctx.fillRect(x - w/2, bodyTop, w, h - lidH);
+  ctx.fillRect(x - w*0.58, y - h/2, w*1.16, lidH);
+  // ribbon down the body, punched out so it reads at small sizes
+  ctx.fillStyle = 'rgba(0,0,0,0.34)';
+  ctx.fillRect(x - w*0.09, bodyTop, w*0.18, h - lidH);
+  // bow: two loops above the lid
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  ctx.ellipse(x - w*0.20, y - h/2 - lidH*0.42, w*0.20, lidH*0.46, -0.35, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(x + w*0.20, y - h/2 - lidH*0.42, w*0.20, lidH*0.46, 0.35, 0, Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+function drawCasePill(yCenter) {
+  var fs = clamp(12*S, 10, 15);
+  var swR = clamp(13*S, 10, 17);
+  var label = t('caseCount') + ' ' + donutOwnedCount() + ' / ' + donutTotal();
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  var padX = clamp(13*S, 10, 18);
+  var w = ctx.measureText(label).width + swR*2 + 8*S + padX*2;
+  var h = Math.max(fs + clamp(14*S, 10, 20), swR*2 + 8*S);
+  var x = cx - w/2, y = yCenter - h/2;
+  rr(ctx, x, y, w, h, h/2);
+  ctx.fillStyle = 'rgba(255,215,0,0.12)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,215,0,0.45)'; ctx.lineWidth = 1.2*S; ctx.stroke();
+  drawDonutSwatch(x + padX + swR, y + h/2, swR, getSkin(skinId), 1);
+  ctx.fillStyle = '#FFE066'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x + padX + swR*2 + 8*S, y + h/2);
+  // A box waiting to be opened gets a dot, same language as the quest badge.
+  if (boxBtnVisible()) {
+    var bdR = clamp(6*S, 5, 9);
+    ctx.beginPath(); ctx.arc(x + w - bdR - 2*S, y + bdR + 1*S, bdR, 0, Math.PI*2);
+    ctx.fillStyle = '#2ecc71'; ctx.fill();
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  buttons.push({ x:x, y:y, w:w, h:h, fn: function(){ workshopTab = 'case'; openWorkshop(); } });
+}
+
+// ── THE UNDER-HUD BAND, MEASURED ONCE ────────────────────────────────────────
+// The strip below the HUD bar is shared by the WORKSHOP pill, the sprinkle
+// bank, the tutorial SKIP button, the BEST / CHAIN readout and the unlock
+// toasts. Every one of them used to pick its own constant offset from
+// HUD_H*S, so whichever combination happened to be on screen collided: the
+// badge toast printed over the sprinkle bank, and "BEST: 1" was drawn straight
+// through the SKIP button on the very first screen a reviewer sees. These
+// three helpers are the single source of that geometry.
+function metaRowBottom() {           // bottom of the WORKSHOP pill / bank row
+  return HUD_H * S + 8*S + clamp(26*S, 20, 34);
+}
+function topRightReserve() {         // height the tutorial SKIP button owns
+  if (!tut || !tut.active || gs !== 'PLAYING') return 0;
+  return clamp(11*S, 9, 14) + 12*S + 10*S;
+}
+function toastBandY() {              // top of the single pill-toast row
+  return metaRowBottom() + 8*S;
+}
+
+// ── ONE PILL TOAST AT A TIME (MCPlay ledger defect class 2) ──────────────────
+// The badge, skin-unlock and tool-unlock pills each sat at their OWN fixed
+// offset in the same band under the HUD (HUD_H*S + 10/30/44*S) and were drawn
+// independently, so any two firing together printed text straight over text -
+// a level clear that unlocked a donut AND a badge rendered both pills on top of
+// each other and neither could be read. Exactly one owns the band at a time;
+// the losers keep their full duration (their timers are frozen in update()) and
+// take their turn afterwards.
+function pillToastOwner() {
+  // The box reveal is a full-screen modal; a pill toast printed over it is the
+  // same text-over-text class as the toasts this function already serialises.
+  if (gs === 'BOXOPEN') return null;
+  var inRun = (gs === 'PLAYING' || gs === 'LEVELEND');
+  if (inRun && toolUnlockToast > 0 && toolUnlockToastId) return 'tool';
+  if (inRun && skinUnlockToast > 0 && skinUnlockToastId) return 'skin';
+  if (gs !== 'MENU' && gs !== 'WORKSHOP' && achToastActive) return 'badge';
+  return null;
 }
 
 function drawSkinUnlockToast() {
@@ -2783,7 +3822,7 @@ function drawSkinUnlockToast() {
   var alpha = Math.min(1, skinUnlockToast * 1.2);
   var fs = clamp(15*S, 12, 20);
   var nameFs = clamp(13*S, 10, 17);
-  var toastY = HUD_H * S + 30*S;
+  var toastY = toastBandY() + fs;   // rr() below draws from toastY - fs
   ctx.save();
   ctx.globalAlpha = alpha;
   // pill bg
@@ -2811,8 +3850,8 @@ function drawLeaderboard() {
 
   // Show up to 5 rows on the overlay (top-10 cached, top-5 displayed for space)
   var rows = leaderboard.slice(0, 5);
-  var btnH = clamp(52*S, 40, 66);
-  var btnY = cy + 20*S;
+  var _ob = overlayBtnRect();
+  var btnH = _ob.h, btnY = _ob.y;
   var startY = btnY + btnH + 60*S;
   var rowH = clamp(20*S, 16, 26);
   var headerFs = clamp(13*S, 11, 17);
@@ -2835,7 +3874,9 @@ function drawLeaderboard() {
     var isMe = entry.name && entry.name === playerName;
     ctx.fillStyle = isMe ? '#FFD700' : '#aaa';
     var rank = '#' + (i + 1);
-    var name = (entry.name || '?').slice(0, 12);
+    // Never '?' for a missing name - a lone question mark in a UI reads as a
+    // help affordance. Matches the default offered by the name prompt.
+    var name = (entry.name || 'Player').slice(0, 12);
     if (isMe) name += ' (' + t('you') + ')';
     var sc = entry.score;
     // simple 3-column row centered around cx
@@ -2858,8 +3899,8 @@ function drawLeaderboard() {
 function drawYesterdayPill() {
   // Y anchor: stack BELOW the leaderboard if it rendered, else below the
   // revive button. Same math as drawLeaderboard for the base Y.
-  var btnH = clamp(52*S, 40, 66);
-  var btnY = cy + 20*S;
+  var _ob = overlayBtnRect();
+  var btnH = _ob.h, btnY = _ob.y;
   var lbHasRows = (leaderboard && leaderboard.length > 0);
   var rowH = clamp(20*S, 16, 26);
   var startY;
@@ -2916,8 +3957,8 @@ function drawWeekBestPill() {
   if (weekBestScore <= 0) return;
   // Compute Y by stacking under the yesterday pill. The yesterday pill uses
   // the same anchor math as drawLeaderboard - replicate so we stay in sync.
-  var btnH = clamp(52*S, 40, 66);
-  var btnY = cy + 20*S;
+  var _ob = overlayBtnRect();
+  var btnH = _ob.h, btnY = _ob.y;
   var lbHasRows = (leaderboard && leaderboard.length > 0);
   var rowH = clamp(20*S, 16, 26);
   var yesterdayY;
@@ -3036,14 +4077,17 @@ function drawWorkshop() {
   // Sprinkle balance chip (centered under title)
   var balBottom = drawSprinkleBalance(cx, 60*S);
 
-  // Tab switcher (TOOLS / QUESTS)
+  // Tab switcher (TOOLS / QUESTS / CASE). The strip is measured from the live
+  // width rather than assuming two fixed-width tabs, so adding the case tab
+  // cannot push a tab off-screen at 320px (ledger defect class 4).
   var tabY = balBottom + 12*S;
   var tabH = clamp(34*S, 28, 44);
-  var tabW = clamp(120*S, 90, 160);
   var tabGap = 8*S;
-  var tabsX = cx - tabW - tabGap/2;
-  var tabDefs = [ ['tools', t('tools')], ['quests', t('quests')] ];
-  for (var ti = 0; ti < 2; ti++) {
+  var tabDefs = [ ['tools', t('tools')], ['quests', t('quests')], ['case', t('caseTab')] ];
+  var tabW = Math.min(clamp(120*S, 90, 160),
+                      (W - marginX*2 - tabGap*(tabDefs.length-1)) / tabDefs.length);
+  var tabsX = cx - (tabW*tabDefs.length + tabGap*(tabDefs.length-1)) / 2;
+  for (var ti = 0; ti < tabDefs.length; ti++) {
     var tabX = tabsX + ti * (tabW + tabGap);
     var active = (workshopTab === tabDefs[ti][0]);
     rr(ctx, tabX, tabY, tabW, tabH, tabH/2);
@@ -3072,8 +4116,212 @@ function drawWorkshop() {
   ctx.textAlign = 'center';
 
   var bodyTop = tabY + tabH + 16*S;
-  if (workshopTab === 'tools') drawWorkshopTools(marginX, bodyTop);
-  else                          drawWorkshopQuests(marginX, bodyTop);
+  if (workshopTab === 'case')       drawWorkshopCase(marginX, bodyTop);
+  else if (workshopTab === 'tools') drawWorkshopTools(marginX, bodyTop);
+  else                              drawWorkshopQuests(marginX, bodyTop);
+}
+
+// CASE tab - the browsable 20-donut collection. Laid out as a MEASURED stack
+// (ledger defect class 6): the header, the grid and the box chip each declare a
+// height, the remainder is what the grid may use, and the cell size is derived
+// from that rather than from a constant. Nothing here is positioned relative to
+// cy, so no combination of states can put two rows on each other.
+function drawWorkshopCase(marginX, top) {
+  var owned = donutOwnedCount(), total = donutTotal();
+  var headFs = clamp(13*S, 11, 17);
+  var subFs  = clamp(11*S, 9, 14);
+  var chipH  = clamp(44*S, 36, 56);
+  var gapY   = clamp(10*S, 7, 15);
+  var bottomPad = clamp(14*S, 10, 22);
+
+  // 1. Header: the count AND where more come from - never a bare number.
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold ' + headFs + 'px sans-serif'; ctx.fillStyle = '#FFE066';
+  ctx.fillText(t('caseCount') + '  ' + owned + ' / ' + total, cx, top + headFs);
+  var subLabel;
+  if (boxTokens() > 0 && boxAdsLeft() > 0)      subLabel = boxTokens() + ' ' + t('boxReadyLbl') + '  -  ' + boxAdsLeft() + ' ' + t('boxLeftLbl');
+  else if (boxAdsLeft() <= 0)                   subLabel = t('boxNoneLeft');
+  else                                          subLabel = t('caseEmpty');
+  ctx.font = subFs + 'px sans-serif'; ctx.fillStyle = '#8c8ca0';
+  ctx.fillText(subLabel, cx, top + headFs + subFs + 6*S);
+  var headBottom = top + headFs + subFs + 6*S + gapY;
+
+  // 2. The chip owns its own row at the bottom; the grid gets what is left.
+  var showChip = boxBtnVisible();
+  var gridTop = headBottom;
+  var gridBottom = H - bottomPad - (showChip ? (chipH + gapY) : 0);
+  var gridH = Math.max(40, gridBottom - gridTop);
+  var gridW = W - marginX*2;
+
+  var cols = (W / Math.max(1, H) > 1.15) ? 7 : 4;
+  var rows = Math.ceil(total / cols);
+  var nameFs = clamp(9*S, 8, 12);
+  var cellW = gridW / cols;
+  var cellH = gridH / rows;
+  var swR = Math.max(6, Math.min(cellW * 0.34, (cellH - nameFs - 6*S) * 0.42));
+
+  for (var i = 0; i < total; i++) {
+    var skin = DONUT_SKINS[i];
+    var col = i % cols, row = Math.floor(i / cols);
+    var sxC = cx - gridW/2 + cellW * (col + 0.5);
+    var syC = gridTop + cellH * row + swR + 3*S;
+    var unlocked = isSkinUnlocked(skin);
+    var selected = unlocked && (skin.id === skinId);
+    if (selected) {
+      ctx.beginPath(); ctx.arc(sxC, syC, swR + 4*S, 0, Math.PI*2);
+      ctx.strokeStyle = '#FFD700'; ctx.lineWidth = 2.2*S; ctx.stroke();
+    }
+    if (unlocked) {
+      drawDonutSwatch(sxC, syC, swR, skin, 1);
+      ctx.fillStyle = selected ? '#FFD700' : '#9a9aae';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+      var nm = (lang === 'ru' ? skin.nameRu : skin.name);
+      // Measured bold, drawn regular - it can only come out narrower than the
+      // budget, never wider (Cyrillic names run ~40% longer than English).
+      ctx.font = fitBoldFs(nm, cellW - 6*S, nameFs, 7) + 'px sans-serif';
+      ctx.fillText(nm, sxC, syC + swR + nameFs + 3*S);
+      (function(targetId){
+        buttons.push({ x: sxC - swR, y: syC - swR, w: swR*2, h: swR*2, fn: function() {
+          if (skinId !== targetId) { skinId = targetId; saveSkin(); try { sfxClick(); } catch(e) {} }
+        } });
+      })(skin.id);
+    } else {
+      drawLockedSlot(sxC, syC, swR);
+      ctx.font = nameFs + 'px sans-serif'; ctx.fillStyle = '#5a5a6a';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+      ctx.fillText(t('lockedSlot'), sxC, syC + swR + nameFs + 3*S);
+    }
+  }
+  ctx.textAlign = 'center';
+
+  // 3. The rewarded box chip, in its own reserved row.
+  if (showChip) {
+    drawBoxChip(cx - Math.min(gridW, clamp(300*S, 200, 360))/2,
+                gridBottom + gapY,
+                Math.min(gridW, clamp(300*S, 200, 360)),
+                chipH);
+  }
+}
+
+// The rewarded "open a donut box" chip. Drawn ONLY when boxBtnVisible() - on
+// the YouTube target that is fail-closed on ytgame.ads, so no ads API means the
+// chip never exists and no reward can be granted.
+function drawBoxChip(x, y, w, h) {
+  rr(ctx, x, y, w, h, h/2);
+  var g = ctx.createLinearGradient(x, y, x, y + h);
+  g.addColorStop(0, '#FFD700'); g.addColorStop(1, '#8a6a00');
+  ctx.fillStyle = g; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 1.4*S; ctx.stroke();
+  var label = t('boxChip');
+  // The icon rides the chip's own height so a shrunk row cannot outgrow it.
+  var iconSz = Math.min(clamp(18*S, 14, 22), h * 0.5);
+  var fs = fitBoldFs(label, w - iconSz*2.2 - 20*S, Math.min(clamp(14*S, 11, 18), h * 0.42), 9);
+  ctx.font = 'bold ' + fs + 'px sans-serif';
+  ctx.fillStyle = '#1a1a2e';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  var tw = ctx.measureText(label).width;
+  drawPlayTvIcon(x + w/2 - tw/2 - iconSz*0.7, y + h/2, iconSz, '#1a1a2e');
+  ctx.fillText(label, x + w/2 + iconSz*0.45, y + h/2);
+  ctx.textBaseline = 'alphabetic';
+  buttons.push({ x:x, y:y, w:w, h:h, fn: showRewardedDonutBox });
+}
+
+// ── DONUT BOX REVEAL (modal state 'BOXOPEN') ─────────────────────────────────
+// Opaque full-screen panel, one measured vertical stack, one button. It is its
+// own game state so nothing else owns buttons[] while it is up.
+function drawBoxRevealPanel() {
+  if (!boxReveal) { closeBoxReveal(); return; }
+  buttons = [];
+  ctx.fillStyle = '#13101e'; ctx.fillRect(0, 0, W, H);
+  var vg = ctx.createLinearGradient(0, 0, 0, H);
+  vg.addColorStop(0, 'rgba(255,215,0,0.12)'); vg.addColorStop(0.35, 'rgba(255,215,0,0)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+
+  var isDonut = (boxReveal.kind === 'donut');
+  var skin = isDonut ? getSkin(boxReveal.id) : null;
+  var titleFs = clamp(26*S, 18, 38);
+  var nameFs  = clamp(18*S, 14, 26);
+  var subFs   = clamp(12*S, 10, 16);
+  var tagFs   = clamp(11*S, 9, 14);
+  var artR    = clamp(52*S, 34, 74);
+  var btnW    = clamp(220*S, 160, 300), btnH = clamp(50*S, 40, 64);
+  var gap     = clamp(12*S, 8, 18);
+
+  var rows = [];
+  if (boxReveal.free) rows.push({ kind:'tag',   h: tagFs * 1.7 });
+  rows.push({ kind:'title', h: titleFs * 1.2 });
+  rows.push({ kind:'art',   h: artR * 2.2 });
+  rows.push({ kind:'name',  h: nameFs * 1.4 });
+  if (boxReveal.full) rows.push({ kind:'note', h: subFs * 1.5 });
+  rows.push({ kind:'prog',  h: subFs * 1.5 });
+  rows.push({ kind:'button', h: btnH });
+  if (boxOfferAvailable() || boxAdsLeft() > 0) rows.push({ kind:'hint', h: subFs * 1.6 });
+
+  var i, total = 0;
+  for (i = 0; i < rows.length; i++) total += rows[i].h + (i ? gap : 0);
+  var safeTop = clamp(44*S, 32, 72), safeBot = clamp(16*S, 12, 30);
+  var avail = H - safeTop - safeBot;
+  var k = (total > avail && total > 0) ? Math.max(0.45, avail / total) : 1;
+  if (k !== 1) {
+    gap *= k; titleFs *= k; nameFs *= k; subFs *= k; tagFs *= k;
+    artR *= k; btnH *= k; btnW *= k;
+    total = 0;
+    for (i = 0; i < rows.length; i++) { rows[i].h *= k; total += rows[i].h + (i ? gap : 0); }
+  }
+
+  boxReveal.t += 0.05;
+  var pop = Math.min(1, boxReveal.t * 3);
+  var y = safeTop + Math.max(0, (avail - total) / 2);
+  ctx.textAlign = 'center';
+  for (i = 0; i < rows.length; i++) {
+    var r = rows[i], top = y, mid = y + r.h / 2;
+    ctx.textBaseline = 'middle';
+    if (r.kind === 'tag') {
+      ctx.font = 'bold ' + tagFs + 'px sans-serif';
+      var tagLbl = t('boxStreakTag');
+      var tw = ctx.measureText(tagLbl).width + clamp(14*S, 10, 20) * 2;
+      rr(ctx, cx - tw/2, top, tw, r.h, r.h/2);
+      ctx.fillStyle = 'rgba(255,148,77,0.9)'; ctx.fill();
+      ctx.fillStyle = '#2a1400'; ctx.fillText(tagLbl, cx, mid);
+    } else if (r.kind === 'title') {
+      ctx.shadowColor = 'rgba(255,215,0,0.45)'; ctx.shadowBlur = 26*S;
+      ctx.font = 'bold ' + fitBoldFs(isDonut ? t('boxGotDonut') : t('boxGotCoins'), W - 32*S, titleFs, 12) + 'px sans-serif';
+      ctx.fillStyle = '#FFD700';
+      ctx.fillText(isDonut ? t('boxGotDonut') : t('boxGotCoins'), cx, mid);
+      ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+    } else if (r.kind === 'art') {
+      if (isDonut) drawDonutSwatch(cx, mid, artR * pop, skin, 1);
+      else {
+        drawSprinkleIcon(cx, mid, artR * 1.5 * pop, '#FFD700');
+      }
+    } else if (r.kind === 'name') {
+      ctx.font = 'bold ' + nameFs + 'px sans-serif'; ctx.fillStyle = '#fff';
+      var nameLbl = isDonut ? (lang === 'ru' ? skin.nameRu : skin.name) : ('+' + boxReveal.n);
+      ctx.font = 'bold ' + fitBoldFs(nameLbl, W - 40*S, nameFs, 10) + 'px sans-serif';
+      ctx.fillText(nameLbl, cx, mid);
+    } else if (r.kind === 'note') {
+      ctx.font = subFs + 'px sans-serif'; ctx.fillStyle = '#8c8ca0';
+      ctx.fillText(t('boxFullCase'), cx, mid);
+    } else if (r.kind === 'prog') {
+      ctx.font = 'bold ' + subFs + 'px sans-serif'; ctx.fillStyle = '#9a9aae';
+      ctx.fillText(t('caseCount') + '  ' + donutOwnedCount() + ' / ' + donutTotal(), cx, mid);
+    } else if (r.kind === 'button') {
+      var bx = cx - btnW/2;
+      var bg = ctx.createLinearGradient(bx, top, bx, top + r.h);
+      bg.addColorStop(0, '#2ecc71'); bg.addColorStop(1, '#27ae60');
+      rr(ctx, bx, top, btnW, r.h, r.h/2);
+      ctx.fillStyle = bg; ctx.fill();
+      ctx.font = 'bold ' + fitBoldFs(t('boxClose'), btnW - 24*S, clamp(16*S, 12, 22) * k, 10) + 'px sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(t('boxClose'), cx, mid);
+      buttons.push({ x:bx, y:top, w:btnW, h:r.h, fn: closeBoxReveal });
+    } else if (r.kind === 'hint') {
+      ctx.font = subFs + 'px sans-serif'; ctx.fillStyle = '#6f6f82';
+      ctx.fillText(boxOfferAvailable() ? t('boxChip') : t('boxEarnHint'), cx, mid);
+    }
+    y += r.h + gap;
+  }
+  ctx.textBaseline = 'alphabetic';
 }
 
 // TOOLS tab - the playtime-item ladder: each tool row shows icon, name, level,
@@ -3134,9 +4382,11 @@ function drawWorkshopTools(marginX, top) {
     ctx.fillStyle = owned ? '#fff' : '#999';
     var nm = (lang === 'ru' ? def.ru : def.en);
     var c = owned ? meta.tools[def.id] : null;
-    ctx.fillText(nm + (c ? '  ' + t('lvlAbbr') + c.lvl : ''), textX, rowY + rowH*0.42);
+    // Locked rows carry a third line (the unlock progress bar), so their name
+    // and description sit higher to keep every line clear of the others.
+    ctx.fillText(nm + (c ? '  ' + t('lvlAbbr') + c.lvl : ''), textX, rowY + rowH*(owned ? 0.42 : 0.34));
     ctx.font = descFs + 'px sans-serif'; ctx.fillStyle = '#9a9aaa';
-    ctx.fillText((lang === 'ru' ? def.descRu : def.descEn), textX, rowY + rowH*0.72);
+    ctx.fillText((lang === 'ru' ? def.descRu : def.descEn), textX, rowY + rowH*(owned ? 0.72 : 0.60));
 
     // right side: equip toggle + upgrade button (owned) OR unlock hint (locked)
     var btnH = clamp(rowH*0.56, 22, 34);
@@ -3175,14 +4425,62 @@ function drawWorkshopTools(marginX, top) {
       (function(id){ buttons.push({ x: eqX, y: btnY, w: eqW, h: btnH, fn: function(){ toggleEquip(id); } }); })(def.id);
       ctx.textBaseline = 'alphabetic';
     } else {
-      // locked: "play N min" hint
-      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-      ctx.font = 'bold ' + clamp(11*S,9,14) + 'px sans-serif';
-      ctx.fillStyle = '#FFD700';
-      var remain = Math.max(0, Math.ceil(def.min - mins));
-      ctx.fillText(remain + t('minAbbr'), marginX + rowW - 12*S, rowY + rowH/2);
-      ctx.fillStyle = '#777'; ctx.font = clamp(9*S,8,11) + 'px sans-serif';
-      ctx.fillText(t('locked2'), marginX + rowW - 12*S, rowY + rowH*0.74);
+      // LOCKED (MCPlay 2026-07-27: "it isn't clear when the boosts open").
+      // The row used to show a bare "2m" over "Play to unlock", which reads as
+      // a price as easily as a countdown. It now states the requirement, the
+      // progress towards it, and a filled bar - plus, on the NEXT tool in the
+      // ladder, a rewarded-ad shortcut, exactly as Mediacube suggested.
+      var adDef = adUnlockableTool();
+      var showAd = !!(adDef && adDef.id === def.id);
+      var adW = clamp(96*S, 74, 128);
+      var adX = marginX + rowW - adW - 8*S;
+      // progress bar spans from the text column to whatever the right side left
+      var barRight = (showAd ? adX : marginX + rowW) - 12*S;
+      var barX = textX, barW = Math.max(24, barRight - barX);
+      var barH = clamp(5*S, 4, 8);
+      var barY = rowY + rowH*0.84 - barH/2;
+      var frac = def.min > 0 ? clamp(mins / def.min, 0, 1) : 1;
+      rr(ctx, barX, barY, barW, barH, barH/2);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)'; ctx.fill();
+      if (frac > 0) {
+        rr(ctx, barX, barY, Math.max(barH, barW * frac), barH, barH/2);
+        ctx.fillStyle = '#FFD700'; ctx.fill();
+      }
+      // "12 / 15m played" - unambiguous about what the number means. Sits
+      // right-aligned on the DESCRIPTION baseline (the row's free right half)
+      // rather than on its own line above the bar, where the longer Russian
+      // description ran straight into it.
+      var progLbl = Math.floor(mins) + ' / ' + def.min + t('minAbbr') + ' ' + t('playedLbl');
+      ctx.font = 'bold ' + clamp(9.5*S,8,12) + 'px sans-serif';
+      var descW = 0;
+      ctx.save();
+      ctx.font = descFs + 'px sans-serif';
+      descW = ctx.measureText(lang === 'ru' ? def.descRu : def.descEn).width;
+      ctx.restore();
+      ctx.font = 'bold ' + clamp(9.5*S,8,12) + 'px sans-serif';
+      // Only draw it if it genuinely clears the description text.
+      if (barX + barW - ctx.measureText(progLbl).width > textX + descW + 12*S) {
+        ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
+        ctx.fillStyle = '#FFD700';
+        ctx.fillText(progLbl, barX + barW, rowY + rowH*0.60);
+      }
+      if (showAd) {
+        var adH = clamp(rowH*0.56, 22, 34);
+        var adY = rowY + (rowH - adH)/2;
+        rr(ctx, adX, adY, adW, adH, adH/2);
+        ctx.fillStyle = 'rgba(255,215,0,0.85)'; ctx.fill();
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.font = 'bold ' + clamp(10*S,8,12) + 'px sans-serif';
+        ctx.fillStyle = '#3a2a00';
+        var adLbl = t('unlockNow');
+        var adIc = adH * 0.5;
+        var adTw = ctx.measureText(adLbl).width;
+        drawPlayTvIcon(adX + adW/2 - (adTw + adIc*0.9)/2 + adIc*0.35, adY + adH/2, adIc, '#3a2a00');
+        ctx.textAlign = 'left';
+        ctx.fillText(adLbl, adX + adW/2 - (adTw + adIc*0.9)/2 + adIc*1.05, adY + adH/2);
+        ctx.textAlign = 'center';
+        (function(id){ buttons.push({ x: adX, y: adY, w: adW, h: adH, fn: function(){ showRewardedToolUnlock(id); } }); })(def.id);
+      }
       ctx.textBaseline = 'alphabetic';
     }
   }
@@ -3283,46 +4581,107 @@ function drawPassCard(marginX, y, rowW) {
 // Shown on MENU when there's an unclaimed login/overnight reward. A single
 // CLAIM button banks the sprinkles. Non-RV recovery from dead-broke (1.15) -
 // this always grants the player currency just for opening the game.
+// Rebuilt as a MEASURED stack (ledger defect class 6). It used to place five
+// elements at hand-tuned offsets from cardY (38/86/118/134 and a button pinned
+// to the card's bottom) while cardH was clamped independently - so at 393x852
+// with any streak above 1 the "x1.50 day streak bonus" line was drawn INSIDE
+// the CLAIM button (line at cardY+109.7, button top at cardY+106.5). Adding the
+// day-7 box line to that layout would have made it three-deep. Every row now
+// declares a height, the card is sized from the measured total, and the button
+// owns its own row.
 function drawLoginCard() {
   if (pendingLogin <= 0) return;
+  // The card LOOKED modal (full scrim, drawn last) but was not: checkButtons()
+  // returns the FIRST registered hit, and the menu's PLAY button is registered
+  // long before this one and sits right on top of CLAIM at every viewport
+  // (measured 393x852: PLAY 442-485, CLAIM 474-510, same x band). Tapping CLAIM
+  // therefore started a run instead, which is why the reward had to be made
+  // survive-a-dismiss in the first place. The card now owns input outright -
+  // it is drawn LAST on MENU, so clearing here deregisters everything behind it
+  // and CLAIM is the only target while a reward is waiting.
+  buttons = [];
   // dim scrim so the card reads as a modal
   ctx.fillStyle = 'rgba(6,5,15,0.78)'; ctx.fillRect(0, 0, W, H);
-  var cardW = clamp(300*S, 220, 380), cardH = clamp(190*S, 150, 240);
+
+  var titleFs = clamp(20*S, 15, 28);
+  var amtFs   = clamp(34*S, 24, 46);
+  var subFs   = clamp(11*S, 9, 14);
+  var tagFs   = clamp(10*S, 8, 13);
+  var bw = clamp(180*S, 140, 240), bh = clamp(44*S, 36, 56);
+  var gap = clamp(9*S, 6, 14);
+  var padY = clamp(20*S, 14, 28);
+  var cardW = clamp(300*S, 220, 380);
+
+  var rows = [ { kind:'title', h: titleFs * 1.25 },
+               { kind:'amount', h: amtFs * 1.25 },
+               { kind:'sub', h: subFs * 1.5 } ];
+  if (streak > 1)     rows.push({ kind:'mult', h: tagFs * 1.5 });
+  if (streakBoxDue()) rows.push({ kind:'day7', h: tagFs * 1.6 });
+  rows.push({ kind:'button', h: bh });
+
+  var i, total = 0;
+  for (i = 0; i < rows.length; i++) total += rows[i].h + (i ? gap : 0);
+  // Shrink the whole card (not just the text) if the viewport cannot hold it.
+  var maxCardH = H - clamp(24*S, 16, 40) * 2;
+  var k = (total + padY*2 > maxCardH) ? Math.max(0.5, (maxCardH - padY*2) / total) : 1;
+  if (k !== 1) {
+    gap *= k; titleFs *= k; amtFs *= k; subFs *= k; tagFs *= k; bh *= k; bw *= k;
+    total = 0;
+    for (i = 0; i < rows.length; i++) { rows[i].h *= k; total += rows[i].h + (i ? gap : 0); }
+  }
+
+  var cardH = total + padY*2;
   var cardX = cx - cardW/2, cardY = cy - cardH/2;
   rr(ctx, cardX, cardY, cardW, cardH, clamp(18*S,12,24));
   ctx.fillStyle = '#1a1630'; ctx.fill();
   ctx.strokeStyle = 'rgba(255,215,0,0.45)'; ctx.lineWidth = 1.6*S; ctx.stroke();
-  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  ctx.fillStyle = '#FFD700'; ctx.font = 'bold ' + clamp(20*S,15,28) + 'px sans-serif';
-  ctx.fillText(t('welcomeBack'), cx, cardY + 38*S);
-  // big sprinkle + amount
-  var amtFs = clamp(34*S, 24, 46);
-  drawSprinkleIcon(cx - clamp(40*S,28,54), cardY + 86*S, amtFs*1.1, '#FFD700');
-  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + amtFs + 'px sans-serif';
-  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText('+' + pendingLogin, cx - clamp(40*S,28,54) + amtFs*0.7, cardY + 86*S);
-  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  // sub-line: overnight + streak bonus
-  ctx.font = clamp(11*S,9,14) + 'px sans-serif'; ctx.fillStyle = '#9a9aaa';
-  var sub = t('loginReward');
-  if (pendingOvernight > 0) sub = t('overnight') + ' +' + pendingOvernight;
-  ctx.fillText(sub, cx, cardY + 118*S);
-  if (streak > 1) {
-    ctx.fillStyle = '#ff944d'; ctx.font = clamp(10*S,8,13) + 'px sans-serif';
-    ctx.fillText('x' + (1 + Math.min(streak,7)*0.25).toFixed(2) + ' ' + t('dayStreakLbl'), cx, cardY + 134*S);
+
+  var y = cardY + padY;
+  ctx.textAlign = 'center';
+  for (i = 0; i < rows.length; i++) {
+    var r = rows[i], top = y, mid = y + r.h / 2;
+    ctx.textBaseline = 'middle';
+    if (r.kind === 'title') {
+      ctx.fillStyle = '#FFD700';
+      ctx.font = 'bold ' + fitBoldFs(t('welcomeBack'), cardW - 28*S, titleFs, 11) + 'px sans-serif';
+      ctx.fillText(t('welcomeBack'), cx, mid);
+    } else if (r.kind === 'amount') {
+      var amtLbl = '+' + pendingLogin;
+      ctx.font = 'bold ' + amtFs + 'px sans-serif';
+      var iw = amtFs * 1.1, tw = ctx.measureText(amtLbl).width;
+      var startX = cx - (iw + 8*S + tw) / 2;
+      drawSprinkleIcon(startX + iw/2, mid, iw, '#FFD700');
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
+      ctx.fillText(amtLbl, startX + iw + 8*S, mid);
+      ctx.textAlign = 'center';
+    } else if (r.kind === 'sub') {
+      var sub = (pendingOvernight > 0) ? (t('overnight') + ' +' + pendingOvernight) : t('loginReward');
+      ctx.font = fitBoldFs(sub, cardW - 28*S, subFs, 8) + 'px sans-serif';
+      ctx.fillStyle = '#9a9aaa';
+      ctx.fillText(sub, cx, mid);
+    } else if (r.kind === 'mult') {
+      var mLbl = 'x' + (1 + Math.min(streak,7)*0.25).toFixed(2) + ' ' + t('dayStreakLbl');
+      ctx.font = fitBoldFs(mLbl, cardW - 28*S, tagFs, 7) + 'px sans-serif';
+      ctx.fillStyle = '#ff944d';
+      ctx.fillText(mLbl, cx, mid);
+    } else if (r.kind === 'day7') {
+      ctx.font = 'bold ' + fitBoldFs(t('streakBoxDue'), cardW - 28*S, tagFs, 7) + 'px sans-serif';
+      ctx.fillStyle = '#7fe6a8';
+      ctx.fillText(t('streakBoxDue'), cx, mid);
+    } else if (r.kind === 'button') {
+      var bX = cx - bw/2;
+      rr(ctx, bX, top, bw, r.h, r.h/2);
+      var g = ctx.createLinearGradient(bX, top, bX, top + r.h);
+      g.addColorStop(0, '#FFE066'); g.addColorStop(1, '#E0A800');
+      ctx.fillStyle = g; ctx.fill();
+      ctx.fillStyle = '#3a2a00';
+      ctx.font = 'bold ' + fitBoldFs(t('claim'), bw - 20*S, clamp(16*S,13,20) * k, 9) + 'px sans-serif';
+      ctx.fillText(t('claim'), cx, mid);
+      buttons.push({ x: bX, y: top, w: bw, h: r.h, fn: function(){ claimLogin(); } });
+    }
+    y += r.h + gap;
   }
-  // CLAIM button
-  var bw = clamp(180*S, 140, 240), bh = clamp(44*S, 36, 56);
-  var bX = cx - bw/2, bY = cardY + cardH - bh - 16*S;
-  rr(ctx, bX, bY, bw, bh, bh/2);
-  var g = ctx.createLinearGradient(bX, bY, bX, bY+bh);
-  g.addColorStop(0, '#FFE066'); g.addColorStop(1, '#E0A800');
-  ctx.fillStyle = g; ctx.fill();
-  ctx.fillStyle = '#3a2a00'; ctx.font = 'bold ' + clamp(16*S,13,20) + 'px sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(t('claim'), cx, bY + bh/2);
   ctx.textBaseline = 'alphabetic';
-  buttons.push({ x: bX, y: bY, w: bw, h: bh, fn: function(){ claimLogin(); } });
 }
 
 // ── HUD: sprinkle bank + "next tool in Nm" hint + WORKSHOP pill (in-run) ──────
@@ -3337,6 +4696,7 @@ function drawMetaHud() {
   var pillW = ctx.measureText(label).width + iconSz + 8*S + clamp(22*S,16,30);
   var pillX = 12*S, pillY = HUD_H * S + 8*S;
   workshopPillRect = { x: pillX, y: pillY, w: pillW, h: pillH };
+  buttons.push({ x: pillX, y: pillY, w: pillW, h: pillH, fn: openWorkshop });
   rr(ctx, pillX, pillY, pillW, pillH, pillH/2);
   ctx.fillStyle = 'rgba(46,204,113,0.20)'; ctx.fill();
   ctx.strokeStyle = 'rgba(46,204,113,0.55)'; ctx.lineWidth = 1.2*S; ctx.stroke();
@@ -3433,7 +4793,7 @@ function drawToolUnlockToast() {
   ctx.font = 'bold ' + fs + 'px sans-serif';
   var w = Math.max(ctx.measureText(label).width, ctx.measureText(nm).width) + iconSz + 36*S;
   var h = iconSz + 20*S;
-  var bx = cx - w/2, by = HUD_H * S + 44*S;
+  var bx = cx - w/2, by = toastBandY();
   ctx.shadowColor = 'rgba(46,204,113,0.6)'; ctx.shadowBlur = 20*S;
   ctx.fillStyle = 'rgba(12,24,16,0.95)'; rr(ctx, bx, by, w, h, h/2); ctx.fill();
   ctx.shadowColor = 'transparent';
@@ -3478,12 +4838,10 @@ function drawEventBanner(y) {
 
 // ── HANDS-ON TUTORIAL (milestone - action-gated, animated demo hand) ─────────
 // The game had NO interactive tutorial (just static menu strings shown nowhere).
-// This is action-gated per Game Build Hygiene #10: each step advances ONLY when
+// This is action-gated per Game Build Hygiene #10: the tutorial ends only after
 // the player performs the REAL action. An animated vector HAND demonstrates the
 // gesture; a slim caption pill sits above it; a SKIP button is always available.
-//   step 0: clean the first 3 crumbs (drag/roll) - advances on 3rd pickup
-//   step 1: build a combo (reach x2) - advances when combo >= 2
-//   step 2: shown briefly as you clear - auto-completes
+//   clean the first 3 debris objects (drag/roll) - then tutorial is done
 var TUT_KEY = 'clean_sweep_seen_tut_v2';
 var tut = { active:false, step:0, t:0, startCleans:0 };
 function maybeStartTutorial() {
@@ -3496,14 +4854,10 @@ function endTutorial() {
   tut.active = false;
   try { localStorage.setItem(TUT_KEY, '1'); } catch(e) {}
 }
-function tutAdvance() {
-  tut.step++; tut.t = 0;
-  if (tut.step >= 3) endTutorial();
-}
 function drawTutorial() {
   if (!tut.active || gs !== 'PLAYING') return;
   tut.t += 0.016;
-  var capKey = tut.step === 0 ? 'tut_drag' : tut.step === 1 ? 'tut_combo' : 'tut_clear';
+  var capKey = 'tut_drag';
   // dim scrim (light - keep the board visible, per the demo-hand UX note)
   ctx.save();
   ctx.fillStyle = 'rgba(6,5,15,0.22)'; ctx.fillRect(0, 0, W, H);
@@ -3530,12 +4884,21 @@ function drawTutorial() {
   ctx.beginPath(); ctx.arc(tx, ty, 16*S, 0, Math.PI*2); ctx.stroke();
   drawHand(px, py, 30*S);
   ctx.restore();
-  // caption pill above the hand
+  // Caption pill. It used to sit a fixed 60*S above the MOVING hand, so as the
+  // hand travelled it drifted straight over the donut and the target ring - the
+  // ledger's "tutorial caption anchored with no reserved band" class, and very
+  // visible at wide shapes. Reserve a band clear of BOTH the donut and the
+  // target: directly above the higher of the two when there is room, otherwise
+  // below the lower one, and never down in the drag-hint / next-tool strip.
   var capFs = clamp(15*S, 12, 20);
   ctx.font = 'bold ' + capFs + 'px sans-serif';
   var cap = t(capKey);
   var cw = ctx.measureText(cap).width + 28*S, ch = capFs + 18*S;
-  var cyy = Math.max(HUD_H*S + 50*S, Math.min(py - 60*S, H - 120*S));
+  var clearR = 30*S;                                  // covers both rings + the donut sprite
+  var capLo = HUD_H*S + 50*S, capHi = H - 62*S - ch;
+  var cyy = Math.min(hy, ty) - clearR - 14*S - ch;    // above both
+  if (cyy < capLo) cyy = Math.max(hy, ty) + clearR + 14*S;  // no room above -> below both
+  cyy = clamp(cyy, capLo, Math.max(capLo, capHi));
   var cxx = clamp(px, cw/2 + 8, W - cw/2 - 8);
   rr(ctx, cxx - cw/2, cyy, cw, ch, ch/2);
   ctx.fillStyle = 'rgba(12,12,24,0.92)'; ctx.fill();
@@ -3578,7 +4941,17 @@ function frame(ts) {
   var dt = Math.min((ts - lastTs) / 1000, 0.08);
   lastTs = ts;
 
+  // A container can be resized without a window `resize` event ever reaching
+  // us (the MCPlay test frame swaps its own aspect ratio). Two property reads
+  // a frame guarantee the world is never left sized to a viewport that is gone.
+  if (W !== window.innerWidth || H !== window.innerHeight) resize();
+
   update(dt);
+
+  // Rebuild live gameplay targets once per frame. Previously tutorial Skip
+  // accumulated a duplicate button every RAF while the visible Workshop pill
+  // had no target at all.
+  if (gs === 'PLAYING') buttons = [];
 
   var sx = 0, sy = 0;
   if (shake > 0) { sx=(Math.random()-0.5)*shake*12*S; sy=(Math.random()-0.5)*shake*12*S; }
@@ -3625,13 +4998,21 @@ function frame(ts) {
 
   if (gs === 'MENU') {
     ctx.fillStyle = '#0a0a12'; ctx.fillRect(0,0,W,H);
-    drawOverlay(t('title'), t('sub'), t('play'), function() { score=0; maybeStartTutorial(); startLevel(1); });
+    // The button resumes at the last unlocked level and SAYS so, and the
+    // tutorial never replays for a returning player (MCPlay 2026-07-27).
+    var _resume = resumeLevel();
+    drawOverlay(t('title'), t('sub'),
+      _resume > 1 ? (t('continueBtn') + '  ' + t('lvlAbbr') + ' ' + _resume) : t('play'),
+      function() { score=0; if (_resume <= 1) maybeStartTutorial(); startLevel(_resume, true); });
+    // Secondary "start over" link so resuming is never a trap.
+    if (_resume > 1) drawRestartLink();
     // iter#5: streak pill above the day-seed badge
     drawStreakPill();
     // iter#4: daily-seed badge above the title
     drawDaySeedBadge();
-    // iter#3: cosmetic donut picker below the BEST: line
-    drawSkinSelector(cy + 20*S + clamp(52*S, 40, 66) + 80*S);
+    // iter#3: cosmetic donut picker below the BEST: line - one CASE pill that
+    // opens the browsable 20-slot case (the 4-wide swatch row could not scale).
+    drawCasePill(cy + 20*S + clamp(52*S, 40, 66) + 80*S);
     // iter#6: achievement badge row near the bottom of the menu
     drawAchievementRow(H - 36*S);
     // milestone#3: limited-time event banner - between the skin picker and badges
@@ -3646,41 +5027,27 @@ function frame(ts) {
     drawLoginCard();
   }
   if (gs === 'LEVELEND') {
-    drawOverlay(t('complete'), t('score')+': '+score, t('next'),
-      function() { startLevel(level+1); });
-    // iter#10: per-level 1-3 star rating between title and NEXT button
-    drawLevelEndStars();
-    // iter#13: PERFECT SWEEP stamp (sits below the star row, above the NEXT button)
-    drawPerfectSweepStamp();
-    // milestone#1: show sprinkles earned this level + a WORKSHOP shortcut
-    if (lastLevelSprinkles > 0) {
-      var leFs = clamp(14*S, 11, 18);
-      ctx.font = 'bold ' + leFs + 'px sans-serif';
-      var leLbl = '+' + lastLevelSprinkles;
-      var leIc = leFs * 1.2;
-      var leTw = ctx.measureText(leLbl).width;
-      var leY = cy - 8*S + clamp(38*S,22,54) * 1.7;
-      drawSprinkleIcon(cx - leTw/2 - leIc*0.6, leY, leIc, '#FFD700');
-      ctx.fillStyle = '#FFE066'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-      ctx.fillText(leLbl, cx + leIc*0.3, leY);
-      ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    }
+    // One measured stack owns this screen now - the star row, NEW BEST label,
+    // PERFECT SWEEP pill, score/bonus/sprinkle lines and the NEXT button are
+    // all rows inside it, so none can overlap another (MCPlay 2026-07-27).
+    drawLevelEndPanel(function() { startLevel(level+1); });
     drawWorkshopButton(14*S, 14*S);
     drawMuteButton();
   }
   if (gs === 'GAMEOVER') {
     // (best is already live-tracked during play; saveBest also runs on each new high)
     // iter#7: RETRY now routes through a throttled interstitial (Yandex 4.1)
+    // RETRY resumes at the last cleared level, not level 1 (MCPlay 2026-07-27:
+    // "after a loss, restart begins from the start, not the last level").
     drawOverlay(t('gameover'), t('score')+': '+score, t('retry'),
-      function() { showInterstitial(function() { score=0; startLevel(1); }); });
+      function() { showInterstitial(function() { score=0; startLevel(resumeLevel(), true); }); });
 
     // iter#7: EXTRA TIME (rewarded ad). One revive per level; user-click only.
     if (!extraTimeUsed) {
-      var _btnW = clamp(240*S, 160, 320), _btnH = clamp(52*S, 40, 66);
-      var _btnY = cy + 26*S;
-      var rW = _btnW, rH = clamp(42*S, 34, 54);
-      var rX = cx - rW/2;
-      var rY = _btnY + _btnH + 14*S;
+      var _ob = overlayBtnRect();
+      var rW = _ob.w, rH = clamp(42*S, 34, 54);
+      var rX = _ob.x;
+      var rY = _ob.y + _ob.h + Math.max(12, 14*S);
       reviveBtnRect = { x: rX, y: rY, w: rW, h: rH };
       rr(ctx, rX, rY, rW, rH, rH/2);
       var gradR = ctx.createLinearGradient(rX, rY, rX, rY+rH);
@@ -3701,22 +5068,36 @@ function frame(ts) {
       buttons.push({ x: rX, y: rY, w: rW, h: rH, fn: showRewardedExtraTime });
     }
 
-    // iter#5: streak pill above the day-seed badge
-    drawStreakPill();
-    // iter#4: daily-seed badge so players know their leaderboard rank is on
-    // today's shared layout, not a random one
-    drawDaySeedBadge();
-    if (newBest) drawNewBestBanner();
-    drawChainSummary(); // iter#9
+    // Measured cluster ABOVE the "TIME'S UP!" title. These four used to be
+    // drawn at fixed offsets from cy that each assumed the others were absent;
+    // a run that set a streak AND a new best AND a new best chain stacked all
+    // of them on each other and on the title (MCPlay 2026-07-27 - the same
+    // "наложение" defect class the reviewer cited on the level-end screen).
+    // Now they are measured and stacked upward from the title's visual top.
+    var goGap = clamp(7*S, 5, 12);
+    var goStack = [];
+    if (streak > 0)            goStack.push({ fn: drawStreakPill,    h: drawStreakPill(0, true) });
+    goStack.push({ fn: drawDaySeedBadge, h: drawDaySeedBadge(0, true) });
+    if (newBest)               goStack.push({ fn: drawNewBestBanner, h: drawNewBestBanner(0, true) });
+    if (maxComboThisRun >= 2)  goStack.push({ fn: drawChainSummary,  h: drawChainSummary(0, true) });
+    var goTotal = 0;
+    for (var gi = 0; gi < goStack.length; gi++) goTotal += goStack[gi].h + (gi ? goGap : 0);
+    // Title baseline is cy-50*S with font clamp(36*S,22,52) - keep clear of it.
+    var goBottom = cy - 50*S - clamp(36*S, 22, 52) * 0.86;
+    var goY = Math.max(clamp(10*S, 8, 18), goBottom - goTotal);
+    for (var gj = 0; gj < goStack.length; gj++) {
+      goStack[gj].fn(goY, false);
+      goY += goStack[gj].h + goGap;
+    }
     drawLeaderboard();
     drawYesterdayPill(); // iter#11
     drawWeekBestPill();  // iter#14
-    // iter#3: skin picker on GAMEOVER (only on desktop - mobile portrait
-    // is too tight; the picker IS still on MENU for everyone).
+    // iter#3: case pill on GAMEOVER (only on desktop - mobile portrait
+    // is too tight; the pill IS still on MENU for everyone).
     // Achievement row is MENU-only - on GAMEOVER it stacked under the skin
     // labels and made visual mess (2026-05-15 layout audit).
     if (H >= 720) {
-      drawSkinSelector(H - 80*S);
+      drawCasePill(H - 80*S);
     }
     // milestone#1/#2: WORKSHOP shortcut from GAMEOVER (top-left, away from the
     // leaderboard / NEW BEST cluster).
@@ -3730,12 +5111,21 @@ function frame(ts) {
     drawWorkshop();
   }
 
+  // The donut-box reveal is its own modal state over an opaque fill, so it owns
+  // buttons[] outright and nothing behind it stays clickable.
+  if (gs === 'BOXOPEN') {
+    drawBoxRevealPanel();
+  }
+
+  // The three unlock pills share one band, so exactly one is drawn (see
+  // pillToastOwner) - otherwise they print over each other.
+  var toastOwner = pillToastOwner();
   // iter#3: in-run toast when a new donut tier unlocks during play
-  if ((gs === 'PLAYING' || gs === 'LEVELEND') && skinUnlockToast > 0) {
+  if (toastOwner === 'skin') {
     drawSkinUnlockToast();
   }
   // milestone#1: in-run toast when a Cleaning Tool unlocks from playtime
-  if ((gs === 'PLAYING' || gs === 'LEVELEND') && toolUnlockToast > 0) {
+  if (toastOwner === 'tool') {
     drawToolUnlockToast();
   }
   // milestone - hands-on action-gated tutorial (PLAYING only, drawn on top)
@@ -3743,7 +5133,7 @@ function frame(ts) {
   // iter#6: in-run toast when an achievement unlocks (any state, sits high so
   // it doesn't fight the score HUD or the gameover overlay; off-by-default
   // for MENU so first-load isn't noisy)
-  if (gs !== 'MENU' && gs !== 'WORKSHOP' && achToastActive) {
+  if (toastOwner === 'badge') {
     drawAchievementToast();
   }
 
@@ -3823,11 +5213,33 @@ window.__gfState = function () {
       equipped: meta ? meta.equipped.slice() : [],
       questsClaimable: questClaimable(),
       pendingLogin: pendingLogin,
+      donut: { x: donut.x, y: donut.y, vx: donut.vx, vy: donut.vy },
+      pointerActive: pointer.active,
+      touchActive: touch.active,
       tutActive: tut.active,
       tutStep: tut.step,
       activeEvent: activeEvent().id,
     };
   } catch (e) { return { __error: String(e) }; }
+};
+
+window.render_game_to_text = function () {
+  var state = window.__gfState();
+  return JSON.stringify({
+    coordinateSystem: 'Canvas pixels; origin top-left; +x right; +y down',
+    mode: state.gs,
+    level: state.level,
+    score: state.score,
+    timeLeft: state.timeLeft,
+    donut: state.donut,
+    input: { pointerActive: state.pointerActive, touchActive: state.touchActive },
+    tutorialActive: state.tutActive
+  });
+};
+window.advanceTime = function (ms) {
+  if (window.__ytPaused) return;
+  var steps = Math.max(1, Math.round(Math.max(0, ms) / (1000 / 60)));
+  for (var i = 0; i < steps; i++) update(1 / 60);
 };
 
 // ── milestone#1/#2 test seams (verify-by-playing; harmless in production) ─────
@@ -3862,6 +5274,7 @@ function boot() {
   loadMute();           // iter#8
   loadBestCombo();      // iter#9
   loadLevelStars();     // iter#10
+  loadProgress();       // MCPlay 2026-07-27 - resume at the last unlocked level
   loadDailyScores();    // iter#11
   recomputeWeekBest();  // iter#14 - seed rolling 7-day ceiling from loaded daily scores
   loadSprinkleStats();  // iter#12
@@ -3872,9 +5285,14 @@ function boot() {
   // If lifetime best already crosses higher tiers, mark them seen on first
   // boot so we don't dump multiple toasts on a returning player. checkSkinUnlocks
   // would otherwise fire all of them on the next collect.
+  // `unlock` is null for the sixteen box-only donuts. `best >= null` coerces to
+  // `best >= 0`, which is true for every player - without the typeof guard a
+  // fresh install would mark all twenty as already seen and the first box would
+  // open in silence.
   for (var __i=0;__i<DONUT_SKINS.length;__i++) {
     var __s = DONUT_SKINS[__i];
-    if (best >= __s.unlock) skinSeen[__s.id] = true;
+    if (typeof __s.unlock === 'number' && best >= __s.unlock) skinSeen[__s.id] = true;
+    if (meta && meta.donuts && meta.donuts[__s.id]) skinSeen[__s.id] = true;
   }
   // Persist in case this was a brand-new install
   try {
@@ -3885,7 +5303,10 @@ function boot() {
   // reset), revert to strawberry rather than render a tinted donut the player
   // hasn't earned.
   if (!isSkinUnlocked(getSkin(skinId))) { skinId = 'strawberry'; saveSkin(); }
-  loadSprites().then(function() {
+  Promise.race([
+    loadSprites(),
+    new Promise(function(resolve) { setTimeout(resolve, 3000); })
+  ]).then(function() {
     if (window.ysdk && window.ysdk.features && window.ysdk.features.LoadingAPI) {
       window.ysdk.features.LoadingAPI.ready();
     }
@@ -3900,9 +5321,18 @@ function boot() {
     // stay reachable in-run (the HUD pill) so autostart players aren't stranded.
     if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') {
       score = 0;
-      maybeStartTutorial();   // first-timers still get the hands-on coach
-      startLevel(1);
+      // Returning players resume at their last unlocked level and skip the
+      // coach; only a genuine first-timer (level 1) still gets it. This is the
+      // exact path MCPlay boots into, and the exact symptom the reviewer hit
+      // on 2026-07-27 ("on reload it starts from the tutorial and level 1").
+      var _auto = resumeLevel();
+      if (_auto <= 1) maybeStartTutorial();
+      startLevel(_auto, true);
     }
+    // Signal platform readiness only after the first interactive game frame.
+    requestAnimationFrame(function() {
+      if (window.__ytSignalGameReady) window.__ytSignalGameReady();
+    });
   });
 }
 
@@ -3919,9 +5349,16 @@ Object.defineProperty(window, 'newBest',    { get: function(){ return newBest; }
 Object.defineProperty(window, 'myRank',     { get: function(){ return myRank; } });
 Object.defineProperty(window, 'lbCount',    { get: function(){ return leaderboard ? leaderboard.length : 0; } });
 Object.defineProperty(window, 'skinId',     { get: function(){ return skinId; } });
-Object.defineProperty(window, 'skinUnlockCount', { get: function(){
-  var n = 0; for (var i=0;i<DONUT_SKINS.length;i++) if (best >= DONUT_SKINS[i].unlock) n++; return n;
-} });
+// Counts BOTH sources (score ladder + donut case). The old form compared
+// `best >= unlock` directly, which is true for every box-only donut because
+// their `unlock` is null and `best >= null` is `best >= 0`.
+Object.defineProperty(window, 'skinUnlockCount', { get: function(){ return donutOwnedCount(); } });
+Object.defineProperty(window, 'donutTotal',   { get: function(){ return donutTotal(); } });
+Object.defineProperty(window, 'boxTokens',    { get: function(){ return meta ? meta.boxTokens : 0; } });
+Object.defineProperty(window, 'boxAdsUsed',   { get: function(){ return meta ? meta.boxAds : 0; } });
+Object.defineProperty(window, 'boxAdsLeft',   { get: function(){ return boxAdsLeft(); } });
+Object.defineProperty(window, 'sprinkleBank', { get: function(){ return meta ? meta.sprinkles : 0; } });
+Object.defineProperty(window, 'streakBoxDue', { get: function(){ return streakBoxDue(); } });
 Object.defineProperty(window, 'daySeed',    { get: function(){ return daySeed; } });
 Object.defineProperty(window, 'streak',     { get: function(){ return streak; } });
 Object.defineProperty(window, 'streakBest', { get: function(){ return streakBest; } });

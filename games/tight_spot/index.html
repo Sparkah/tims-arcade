@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Tight Spot</title>
   <script src="/sdk.js"></script>
+  <script src="analytics/gameanalytics-config.js"></script>
+  <script src="analytics/gameanalytics.min.js"></script>
   <style>
     *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #14171d; position: fixed; touch-action: none; overscroll-behavior: none; }
@@ -34,7 +36,6 @@ var STRINGS = {
     tut_win:      'Win: Settle inside the bay, lined up straight, without touching anything.',
     tut_lose:     'Lose: Scrape any wall, parked car, or cone and the level instantly resets - no penalty, just try again.',
     tut_tip:      'Tip: Go slow and steer early. Clean, short lines earn all 3 stars.',
-    tap_close: '(tap anywhere to close)',
     garage: 'GARAGE', coins: 'COINS', earned: 'EARNED', next_car: 'Next car',
     away: 'away', owned: 'OWNED', drive: 'DRIVE', driving: 'DRIVING', locked: 'LOCKED',
     unlock: 'UNLOCK', new_car: 'NEW CAR!', perk: 'Perk', close: 'CLOSE',
@@ -67,7 +68,6 @@ var STRINGS = {
     tut_win:      'Победа: Встань ровно внутри места, ничего не задев.',
     tut_lose:     'Поражение: Заденешь стену, чужую машину или конус - уровень сразу сбросится, без штрафа, просто попробуй снова.',
     tut_tip:      'Совет: Не спеши и руль заранее. Чистые короткие траектории дают 3 звезды.',
-    tap_close: '(нажми, чтобы закрыть)',
     garage: 'ГАРАЖ', coins: 'МОНЕТЫ', earned: 'ПОЛУЧЕНО', next_car: 'След. авто',
     away: 'осталось', owned: 'ЕСТЬ', drive: 'ВЫБРАТЬ', driving: 'В ИГРЕ', locked: 'ЗАКРЫТО',
     unlock: 'ОТКРЫТЬ', new_car: 'НОВОЕ АВТО!', perk: 'Бонус', close: 'ЗАКРЫТЬ',
@@ -107,6 +107,8 @@ var CRASH_RESET_SEC = 0.65;  // sec crash freeze before auto-retry
 var AUTHORED_LEVELS = 14;    // hand-authored layouts before endless
 var WALL_THICK      = 8;     // wall half-width (design px) for swept test
 var PATH_PAR        = 1.55;  // path-length-to-straight ratio under which a star is kept
+var BONUS_COIN_R    = 13;    // collectible pickup radius (design px)
+var BONUS_COIN_VALUE = 5;    // default extra coins from level pickups
 // ── M1 meta economy ─────────────────────────────────────────────────────────
 var COIN_PER_STAR   = 8;     // coins per star earned on a park (3-star park = 24)
 var COIN_FIRST_CLR  = 12;    // bonus coins the first time a level is ever cleared
@@ -135,6 +137,7 @@ var car = null;             // { x,y,heading,speed }  (field-local)
 var walls = [];             // [{x1,y1,x2,y2}]
 var obstacles = [];         // [{x,y,w,l,heading}]  (oriented rects, field-local)
 var cones = [];             // [{x,y}]
+var bonusCoins = [];        // [{x,y,value,collected}] optional pickup rewards
 var bay = null;             // {x,y,w,l,heading}  target rect
 
 var crashes = 0;            // resets on this level attempt
@@ -148,18 +151,16 @@ var steerHintFade = 1;      // fades after first steer input
 var pulseT = 0;
 var lastParkPerfect = false;
 var earnedStars = 0;        // stars banked on the LEVELCLEAR screen
+var runBonusCoins = 0;      // unbanked pickup coins collected this attempt
 var tyreMarks = [];         // cosmetic trail [{x,y}]
-var tutorialOpen = false;
 var _ssMode = false;        // screenshot freeze
 // Ads (Yandex interstitial - user-click only, throttled)
 var lastInterstitialMs = -1e9;
 var INTERSTITIAL_GAP_MS = 180000;
 
 // ── PERSISTENCE ─────────────────────────────────────────────────────────────
-function loadTutorialSeen() {
-  try { return localStorage.getItem('tight_spot_seen_tutorial') === '1'; } catch (e) { return false; }
-}
-function saveTutorialSeen() { try { localStorage.setItem('tight_spot_seen_tutorial', '1'); } catch (e) {} }
+// (the how-to-play copy lives on the MENU screen — see drawMenu/tutorialItems —
+// so there is no separate "seen the tutorial" flag to persist.)
 
 // ── M1 GARAGE: persistent owned collection of cars (the come-back meta) ──────
 // A fixed ladder of cars unlocked with permanent COINS (earned per clean park).
@@ -172,31 +173,38 @@ var CARS = [
   { id: 0, cost: 0,    body: '#4aa3ff', roof: '#bfe0ff',
     en: 'Hatchback',   ru: 'Хэтчбек',
     perkEn: 'The trusty starter.',         perkRu: 'Надёжный старт.',
+    perkShortEn: 'Trusty starter.',        perkShortRu: 'Надёжный старт.',
     turn: 1.0,  creep: 1.0,  pos: 1.0,  ang: 1.0 },
   { id: 1, cost: 120,  body: '#39d98a', roof: '#bff2da',
     en: 'City Cruiser', ru: 'Круизер',
     perkEn: '-15% creep speed — more time to line up.', perkRu: '-15% скорость — больше времени на манёвр.',
+    perkShortEn: '-15% creep speed.',      perkShortRu: '-15% скорость.',
     turn: 1.0,  creep: 0.85, pos: 1.0,  ang: 1.0 },
   { id: 2, cost: 300,  body: '#ffd24a', roof: '#fff0bf',
     en: 'Roadster',     ru: 'Родстер',
     perkEn: '+18% sharper steering — tighter turns.',  perkRu: '+18% острее руль — круче повороты.',
+    perkShortEn: '+18% steering.',         perkShortRu: '+18% руль.',
     turn: 1.18, creep: 1.0,  pos: 1.0,  ang: 1.0 },
   { id: 3, cost: 650,  body: '#ff8a5e', roof: '#ffd6c4',
     en: 'Compact',      ru: 'Компакт',
     perkEn: '+30% park forgiveness — slot in easier.',  perkRu: '+30% допуск парковки — легче встать.',
+    perkShortEn: '+30% forgiveness.',      perkShortRu: '+30% допуск.',
     turn: 1.0,  creep: 1.0,  pos: 1.30, ang: 1.30 },
   { id: 4, cost: 1200, body: '#b06bff', roof: '#e0c8ff',
     en: 'Drift Coupe',  ru: 'Дрифт-купе',
     perkEn: 'Sharp steering + slower creep.',           perkRu: 'Острый руль + медленный ход.',
+    perkShortEn: 'Steering + creep.',      perkShortRu: 'Руль + ход.',
     turn: 1.15, creep: 0.88, pos: 1.0,  ang: 1.0 },
   { id: 5, cost: 2200, body: '#19d3e6', roof: '#bff4fa',
     en: 'GT Prototype', ru: 'GT-Прототип',
     perkEn: 'All-round: steering, creep, forgiveness.', perkRu: 'Всё сразу: руль, ход, допуск.',
+    perkShortEn: 'All-round upgrade.',     perkShortRu: 'Всё сразу.',
     turn: 1.12, creep: 0.9,  pos: 1.20, ang: 1.20 },
 ];
 function carById(id) { for (var i = 0; i < CARS.length; i++) if (CARS[i].id === id) return CARS[i]; return CARS[0]; }
 function carName(c) { return GF.lang === 'ru' ? c.ru : c.en; }
 function carPerk(c) { return GF.lang === 'ru' ? c.perkRu : c.perkEn; }
+function carPerkShort(c) { return GF.lang === 'ru' ? c.perkShortRu : c.perkShortEn; }
 
 // owned-meta state (persisted)
 var coins = 0;                 // permanent soft currency
@@ -353,6 +361,11 @@ function saveMeta() {
       // M2
       dailyKey: dailyKey, dailyTriesLeft: dailyTriesLeft, dailyBestMedal: dailyBestMedal,
       medalShelf: medalShelf, lastLoginDay: lastLoginDay, lastValetMs: lastValetMs,
+      // An UNCOLLECTED valet pile is money the player has already earned; it
+      // used to live only in a runtime var, so reloading before tapping COLLECT
+      // silently binned it (and rolloverDay then re-accrued from lastValetMs,
+      // which it had already advanced — so the pile was gone for good).
+      valetPending: valetPending,
       streak: streak, trophies: trophies,
       // M3 car tune / mastery
       tuneXp: tuneXp,
@@ -383,6 +396,7 @@ function loadMeta() {
     }
     lastLoginDay = +s.lastLoginDay || 0;
     lastValetMs = +s.lastValetMs || 0;
+    valetPending = Math.max(0, +s.valetPending || 0);
     streak = Math.max(0, +s.streak || 0);
     trophies = (s.trophies && typeof s.trophies === 'object') ? s.trophies : {};
     // M3: per-car tune XP (only keep entries for real, owned-or-known car ids)
@@ -441,10 +455,12 @@ function rolloverDay() {
 }
 function collectValet() {
   if (valetPending <= 0) return;
+  var collected = valetPending;
   coins += valetPending;
   if (GF.spawnFloat) GF.spawnFloat(GF.cx, GF.H * 0.30, '+' + valetPending + curStrings().coins_short, '#ffd24a');
   valetPending = 0;
   if (GF.sfx) GF.sfx('coin');
+  gaEvent('garage:valet_collect', collected);
   saveMeta();
 }
 // medal tier from crashes on a clean Daily Spot park (0=gold,1-2=silver,>=3=bronze)
@@ -577,6 +593,99 @@ var LEVELS = [
     cones: [ {x:150,y:470}, {x:245,y:280} ],
   },
 ];
+var LEVEL_SOURCE = 'embedded';
+var LEVEL_LOAD_ERROR = '';
+
+function parseSheetJson(v, fallback) {
+  if (Array.isArray(v)) return v;
+  if (v == null || v === '') return fallback;
+  try {
+    var parsed = JSON.parse(String(v));
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+function sheetNum(row, key, fallback) {
+  var n = Number(row[key]);
+  return isFinite(n) ? n : fallback;
+}
+function normalizeSheetLevel(row) {
+  var start = {
+    x: sheetNum(row, 'start_x', NaN),
+    y: sheetNum(row, 'start_y', NaN),
+    h: sheetNum(row, 'start_h', 0)
+  };
+  var bayDef = {
+    x: sheetNum(row, 'bay_x', NaN),
+    y: sheetNum(row, 'bay_y', NaN),
+    w: sheetNum(row, 'bay_w', NaN),
+    l: sheetNum(row, 'bay_l', NaN),
+    heading: sheetNum(row, 'bay_heading', 0)
+  };
+  if (!isFinite(start.x) || !isFinite(start.y) ||
+      !isFinite(bayDef.x) || !isFinite(bayDef.y) ||
+      !isFinite(bayDef.w) || !isFinite(bayDef.l)) return null;
+  return {
+    start: start,
+    bay: bayDef,
+    walls: parseSheetJson(row.walls_json, []),
+    obstacles: parseSheetJson(row.obstacles_json, []),
+    cones: parseSheetJson(row.cones_json, []),
+    coins: parseSheetJson(row.coins_json, [])
+  };
+}
+function applySheetLevels(rows, source) {
+  if (!Array.isArray(rows) || rows.length < 1) return false;
+  var next = [];
+  rows.sort(function(a, b) { return sheetNum(a, 'level', 0) - sheetNum(b, 'level', 0); });
+  for (var i = 0; i < rows.length; i++) {
+    var normalized = normalizeSheetLevel(rows[i]);
+    if (!normalized) return false;
+    next.push(normalized);
+  }
+  LEVELS = next;
+  AUTHORED_LEVELS = LEVELS.length;
+  LEVEL_SOURCE = source || 'balance.json';
+  return true;
+}
+function loadSheetLevels() {
+  if (!window.fetch) return Promise.resolve(false);
+  var timedOut = false;
+  var timeout = new Promise(function(resolve) {
+    setTimeout(function() { timedOut = true; resolve(false); }, 1600);
+  });
+  function hostedLevelUrl() {
+    var host = (location.hostname || '').toLowerCase();
+    if (host === 'game-factory.tech' || host.endsWith('.game-factory.tech') || host.endsWith('.pages.dev') || host === 'localhost' || host === '127.0.0.1') {
+      return '/api/game-levels/tight_spot';
+    }
+    return '';
+  }
+  var sources = [];
+  var hosted = hostedLevelUrl();
+  if (hosted) sources.push({ url: hosted, label: 'game-factory-editor' });
+  sources.push({ url: './balance.json', label: 'balance.json' });
+  function trySource(index) {
+    if (index >= sources.length || timedOut) return Promise.resolve(false);
+    var source = sources[index];
+    return fetch(source.url, { cache: 'no-store' })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(data) {
+        if (timedOut || !data) return false;
+        if (applySheetLevels(data.levels, source.label)) return true;
+        return trySource(index + 1);
+      })
+      .catch(function(e) {
+        LEVEL_LOAD_ERROR = e && e.message ? e.message : 'balance load failed';
+        return trySource(index + 1);
+      });
+  }
+  var request = trySource(0).then(function(ok) {
+    return timedOut ? false : ok;
+  });
+  return Promise.race([request, timeout]);
+}
 
 // ── DAILY-SEEDED ENDLESS GENERATOR ──────────────────────────────────────────
 // After the 14 authored levels, generate increasingly tight spots. Seeded by
@@ -604,7 +713,7 @@ function genEndlessLevel(idx) {
   var L = { start: { x: 180, y: 580, h: 0 },
             bay: { x: bayX, y: 110 + Math.round(rng()*30),
                    w: bw, l: sideways ? 88 : 100, heading: sideways ? PI/2 : 0 },
-            walls: [], obstacles: [], cones: [] };
+            walls: [], obstacles: [], cones: [], coins: [] };
   // flanking cars on most spots
   if (rng() < 0.8) {
     if (sideways) {
@@ -629,35 +738,90 @@ function genEndlessLevel(idx) {
 }
 
 // ── M2: THE DAILY SPOT — one tough daily-seeded puzzle, different every day ───
-// Reuses the daySeed RNG but biases hard: a narrow bay, both flank cars, a
-// partition and a cone chicane, sometimes sideways. This is the never-driven
-// "tightest spot of the day" a returning player opens to.
+// Reuses the daySeed RNG but validates the generated spawn so the daily puzzle
+// can be tight without starting the player inside a barrier.
 var DAILY_LVL = -1; // sentinel level index for the Daily Spot
+function dailyClamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function dailyPoseClear(level, pose) {
+  var poly = rectCorners(pose.x, pose.y, CAR_W + 12, CAR_L + 14, pose.h);
+  for (var c = 0; c < poly.length; c++) {
+    if (poly[c].x < 8 || poly[c].x > FIELD_W - 8 || poly[c].y < 8 || poly[c].y > FIELD_H - 8) return false;
+  }
+  for (var w = 0; w < level.walls.length; w++) {
+    var wl = level.walls[w];
+    for (var p = 0; p < poly.length; p++) {
+      if (ptSegDist(poly[p].x, poly[p].y, wl.x1, wl.y1, wl.x2, wl.y2) <= WALL_THICK + 4) return false;
+    }
+    for (var s = 0; s <= 8; s++) {
+      var t = s / 8;
+      var sx = wl.x1 + (wl.x2 - wl.x1) * t;
+      var sy = wl.y1 + (wl.y2 - wl.y1) * t;
+      if (pointInPoly(sx, sy, poly)) return false;
+    }
+  }
+  for (var o = 0; o < level.obstacles.length; o++) {
+    var ob = level.obstacles[o];
+    if (polysOverlap(poly, rectCorners(ob.x, ob.y, ob.w + 8, ob.l + 8, ob.heading))) return false;
+  }
+  for (var k = 0; k < level.cones.length; k++) {
+    if (polyCircleHit(poly, level.cones[k].x, level.cones[k].y, CONE_R + 6)) return false;
+  }
+  return true;
+}
+function dailyPickClearStart(level, preferredX) {
+  var xs = [preferredX, preferredX - 58, preferredX + 58, 76, 116, 164, 212, 260, 304];
+  for (var i = 0; i < xs.length; i++) {
+    var start = { x: dailyClamp(Math.round(xs[i]), 62, FIELD_W - 62), y: 585, h: 0 };
+    if (dailyPoseClear(level, start)) return start;
+  }
+  level.walls = [];
+  for (var j = 0; j < xs.length; j++) {
+    var wallFreeStart = { x: dailyClamp(Math.round(xs[j]), 62, FIELD_W - 62), y: 585, h: 0 };
+    if (dailyPoseClear(level, wallFreeStart)) return wallFreeStart;
+  }
+  level.cones = [];
+  return { x: 180, y: 585, h: 0 };
+}
+function dailyConeClear(level, x, y) {
+  if (GF.dist(x, y, level.start.x, level.start.y) < 70) return false;
+  if (GF.dist(x, y, level.bay.x, level.bay.y) < 78) return false;
+  for (var w = 0; w < level.walls.length; w++) {
+    var wl = level.walls[w];
+    if (ptSegDist(x, y, wl.x1, wl.y1, wl.x2, wl.y2) < CONE_R + WALL_THICK + 12) return false;
+  }
+  for (var o = 0; o < level.obstacles.length; o++) {
+    var ob = level.obstacles[o];
+    if (polyCircleHit(rectCorners(ob.x, ob.y, ob.w + 14, ob.l + 14, ob.heading), x, y, CONE_R + 4)) return false;
+  }
+  return true;
+}
 function genDailySpot() {
   var rng = mulberry32(daySeed() * 977 + 401);
-  var sideways = rng() < 0.45;
-  var bw = Math.round(CAR_W + 12 - rng() * 4); // tight: ~34-38
-  var bayX = 110 + Math.round(rng() * 140);
-  var L = { start: { x: 150 + Math.round(rng()*60), y: 585, h: 0 },
+  var bw = Math.round(CAR_W + 18 - rng() * 4); // tough but not pixel-perfect
+  var bayX = 105 + Math.round(rng() * 150);
+  var side = rng() < 0.5 ? -1 : 1;
+  var startX = dailyClamp(bayX + side * (70 + Math.round(rng() * 46)), 76, 284);
+  var L = { start: { x: startX, y: 585, h: 0 },
             bay: { x: bayX, y: 120 + Math.round(rng()*24),
-                   w: bw, l: sideways ? 86 : 98, heading: sideways ? PI/2 : 0 },
-            walls: [], obstacles: [], cones: [] };
-  // always both flank cars (the classic squeeze)
-  if (sideways) {
-    L.obstacles.push(carBox(bayX, L.bay.y - 74, PI/2));
-    L.obstacles.push(carBox(bayX, L.bay.y + 74, PI/2));
-  } else {
-    L.obstacles.push(carBox(bayX - 64, L.bay.y, 0));
-    L.obstacles.push(carBox(bayX + 64, L.bay.y, 0));
-  }
-  // a dog-leg partition
-  var wx = 100 + Math.round(rng() * 160);
-  L.walls.push({ x1: wx, y1: 600, x2: wx, y2: 320 + Math.round(rng()*50) });
-  // a cone chicane (2-3 cones)
+                   w: bw, l: 100, heading: 0 },
+            walls: [], obstacles: [], cones: [], coins: [] };
+  var flank = Math.max(62, Math.round(L.bay.w / 2 + CAR_W / 2 + 20));
+  L.obstacles.push(carBox(bayX - flank, L.bay.y, 0));
+  L.obstacles.push(carBox(bayX + flank, L.bay.y, 0));
+  var wallSide = startX < FIELD_W / 2 ? 1 : -1;
+  var wx = dailyClamp(startX + wallSide * (72 + Math.round(rng() * 36)), 48, FIELD_W - 48);
+  L.walls.push({ x1: wx, y1: 558, x2: dailyClamp(wx + wallSide * (12 + Math.round(rng()*16)), 36, FIELD_W - 36),
+                 y2: 330 + Math.round(rng()*44) });
+  // A small chicane, kept clear of spawn, bay, parked cars, and the partition.
   var nc = 2 + Math.round(rng());
   for (var i = 0; i < nc; i++) {
-    L.cones.push({ x: 90 + Math.round(rng() * 180), y: 260 + i * 70 + Math.round(rng()*30) });
+    var y = 424 - i * 72 + Math.round(rng() * 18);
+    var routeT = (585 - y) / Math.max(1, 585 - L.bay.y);
+    var routeX = startX + (bayX - startX) * routeT;
+    var coneX = dailyClamp(routeX + (i % 2 ? 1 : -1) * -wallSide * (34 + Math.round(rng() * 20)), 58, FIELD_W - 58);
+    if (dailyConeClear(L, coneX, y)) L.cones.push({ x: coneX, y: y });
   }
+  L.start = dailyPickClearStart(L, startX);
   return L;
 }
 
@@ -685,6 +849,17 @@ function loadLevel(n) {
   }
   cones = [];
   for (var k = 0; k < (d.cones || []).length; k++) cones.push({ x: d.cones[k].x, y: d.cones[k].y });
+  bonusCoins = [];
+  for (var c = 0; c < (d.coins || []).length; c++) {
+    var bc = d.coins[c] || {};
+    var cv = bc.value !== undefined ? bc.value : bc.v;
+    bonusCoins.push({
+      x: GF.clamp(Number(bc.x) || FIELD_W / 2, 0, FIELD_W),
+      y: GF.clamp(Number(bc.y) || FIELD_H / 2, 0, FIELD_H),
+      value: GF.clamp(Math.round(Number(cv) || BONUS_COIN_VALUE), 1, 50),
+      collected: false
+    });
+  }
   bay = { x: d.bay.x, y: d.bay.y, w: d.bay.w, l: d.bay.l, heading: d.bay.heading };
   resetCar(d.start);
   straightLen = Math.max(1, GF.dist(d.start.x, d.start.y, bay.x, bay.y));
@@ -694,8 +869,92 @@ function resetCar(start) {
   car = { x: start.x, y: start.y, heading: start.h, speed: 0 };
   settleT = 0;
   pathLen = 0;
+  runBonusCoins = 0;
+  for (var i = 0; i < bonusCoins.length; i++) bonusCoins[i].collected = false;
   steerHintFade = (lvl === 1 && !endless) ? 1 : 0;
   tyreMarks = [];
+}
+
+// ── GameAnalytics ────────────────────────────────────────────────────────────
+var GA_PROGRESS_START = 1;
+var GA_PROGRESS_COMPLETE = 2;
+var GA_PROGRESS_FAIL = 3;
+var gaReady = false;
+var gaInitTried = false;
+var gaRuntimePlatform = 'local';
+
+function gaPlatform() {
+  if (window.gp || window.__gpKey) return 'gamepush';
+  if (window.CrazyGames && window.CrazyGames.SDK) return 'crazygames';
+  if (typeof YaGames !== 'undefined' || window.ysdk) return 'yandex';
+  if (window.__GAME_PLATFORM__ === 'playgama' || window.bridge) return 'playgama';
+  return 'local';
+}
+function gaDeviceClass() {
+  var sw = Math.min(screen.width || 0, screen.height || 0);
+  if (sw && sw < 600) return 'mobile';
+  if (sw && sw < 1000 && navigator.maxTouchPoints > 0) return 'tablet';
+  if (navigator.maxTouchPoints > 0 && window.innerWidth < 900) return 'mobile';
+  return 'desktop';
+}
+function initGameAnalytics() {
+  if (gaInitTried) return;
+  gaInitTried = true;
+  var cfg = window.__GAME_ANALYTICS_CONFIG || {};
+  var key = String(cfg.gameKey || '').trim();
+  var secret = String(cfg.gameSecret || '').trim();
+  if (!cfg.enabled || !/^[A-Za-z0-9]{32}$/.test(key) || !/^[A-Za-z0-9]{40}$/.test(secret)) return;
+  if (typeof window.GameAnalytics !== 'function') return;
+  gaRuntimePlatform = gaPlatform();
+  try {
+    GameAnalytics('configureBuild', cfg.build || 'tight-spot');
+    GameAnalytics('configureAvailableCustomDimensions01', cfg.customDimensions01 || ['local', 'yandex', 'crazygames', 'gamepush', 'playgama', 'other']);
+    GameAnalytics('configureAvailableCustomDimensions02', cfg.customDimensions02 || ['en', 'ru', 'other']);
+    GameAnalytics('configureAvailableCustomDimensions03', cfg.customDimensions03 || ['desktop', 'mobile', 'tablet', 'other']);
+    GameAnalytics('setCustomDimension01', gaRuntimePlatform);
+    GameAnalytics('setCustomDimension02', GF.lang === 'ru' ? 'ru' : 'en');
+    GameAnalytics('setCustomDimension03', gaDeviceClass());
+    GameAnalytics('initialize', key, secret);
+    gaReady = true;
+    gaEvent('boot:ready');
+  } catch (e) {
+    gaReady = false;
+  }
+}
+function gaEvent(id, value) {
+  if (!gaReady || typeof window.GameAnalytics !== 'function') return;
+  try {
+    if (typeof value === 'number' && isFinite(value)) GameAnalytics('addDesignEvent', id, value);
+    else GameAnalytics('addDesignEvent', id);
+  } catch (e) {}
+}
+function gaProgress(status, p1, p2, p3, score) {
+  if (!gaReady || typeof window.GameAnalytics !== 'function') return;
+  try {
+    if (typeof score === 'number' && isFinite(score)) GameAnalytics('addProgressionEvent', status, p1, p2 || '', p3 || '', score);
+    else GameAnalytics('addProgressionEvent', status, p1, p2 || '', p3 || '');
+  } catch (e) {}
+}
+function gaLevelGroup() {
+  if (dailyMode || lvl === DAILY_LVL) return 'daily';
+  return endless ? 'endless' : 'campaign';
+}
+function gaLevelName() {
+  if (dailyMode || lvl === DAILY_LVL) return 'daily_' + daySeed();
+  if (endless || lvl > AUTHORED_LEVELS) return 'endless_' + Math.max(1, lvl - AUTHORED_LEVELS);
+  return 'level_' + String(lvl);
+}
+function gaTrackLevelStart(reason) {
+  gaProgress(GA_PROGRESS_START, 'tight_spot', gaLevelGroup(), gaLevelName());
+  gaEvent('level:start:' + (reason || 'play'), lvl);
+}
+function gaTrackLevelFail(reason) {
+  gaProgress(GA_PROGRESS_FAIL, 'tight_spot', gaLevelGroup(), gaLevelName(), crashes);
+  gaEvent('level:fail:' + (reason || 'crash'), crashes);
+}
+function gaTrackLevelComplete() {
+  gaProgress(GA_PROGRESS_COMPLETE, 'tight_spot', gaLevelGroup(), gaLevelName(), earnedStars);
+  gaEvent('level:complete:stars', earnedStars);
 }
 
 // Start a fresh attempt of `lvl` (first entry - resets crash/star bookkeeping).
@@ -709,6 +968,7 @@ function startLevel(n) {
   loadLevel(n);
   gs = 'PLAYING';
   GF.gameStarted();
+  gaTrackLevelStart('start');
   GF.saveRun();
 }
 
@@ -788,6 +1048,22 @@ function collide() {
   return false;
 }
 
+function collectBonusCoins() {
+  if (!bonusCoins.length) return;
+  var corners = carCorners();
+  for (var i = 0; i < bonusCoins.length; i++) {
+    var coin = bonusCoins[i];
+    if (coin.collected) continue;
+    if (!polyCircleHit(corners, coin.x, coin.y, BONUS_COIN_R)) continue;
+    coin.collected = true;
+    runBonusCoins += coin.value;
+    GF.spawnParticles(fx(coin.x), fy(coin.y), '#ffd24a', 14);
+    GF.spawnFloat(fx(coin.x), fy(coin.y) - 18 * GF.S, '+' + coin.value + curStrings().coins_short, '#ffd24a');
+    if (GF.sfx) GF.sfx('coin');
+    gaEvent('level:bonus_coin', coin.value);
+  }
+}
+
 function pointInPoly(px, py, poly) {
   var inside = false;
   for (var i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -831,7 +1107,7 @@ function angDiff(a, b) {
 
 // ── INPUT ───────────────────────────────────────────────────────────────────
 var steerLeft = false, steerRight = false;
-var helpBtn = null, menuBtn = null, garageBtn = null, muteBtn = null;
+var menuBtn = null, garageBtn = null, muteBtn = null;
 var uiButtons = [];
 var uiLockUntil = 0;
 // pointer id → 'L' | 'R' so multitouch steer halves track independently
@@ -856,10 +1132,7 @@ function pressDown(id, px, py) {
   // mute button is live on every screen (bottom-right), checked before anything else.
   if (muteBtn && hitBtn(muteBtn, px, py)) { if (GF.toggleMute) GF.toggleMute(); return; }
   if (Date.now() < uiLockUntil && (gs === 'MENU' || gs === 'LEVELCLEAR' || gs === 'WIN')) return;
-  if (gs === 'MENU') {
-    if (tutorialOpen) { tutorialOpen = false; saveTutorialSeen(); return; }
-    uiHit(px, py); return;
-  }
+  if (gs === 'MENU') { uiHit(px, py); return; }
   if (gs === 'LEVELCLEAR' || gs === 'WIN') { uiHit(px, py); return; }
   if (gs === 'CRASH') {
     // only the back-to-menu button is live during the crash freeze
@@ -867,8 +1140,6 @@ function pressDown(id, px, py) {
     return;
   }
   if (gs === 'PLAYING') {
-    if (tutorialOpen) { tutorialOpen = false; return; }
-    if (helpBtn && hitBtn(helpBtn, px, py)) { tutorialOpen = true; return; }
     if (garageBtn && hitBtn(garageBtn, px, py)) { openGarage(); return; }
     if (menuBtn && hitBtn(menuBtn, px, py)) { goMenu(); return; }
     // steer half
@@ -892,7 +1163,40 @@ function pressUp(id) {
 }
 function hitBtn(b, px, py) { return px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h; }
 
+// Which level a "continue" should drop the player into, given the screen they
+// are leaving. The run save records the level the player was ON; the resume
+// path used to ignore it and start `maxLevel` instead. Those are the same
+// number for the whole campaign, so the bug was invisible there — but they
+// diverge in endless, where `maxLevel` is capped at AUTHORED_LEVELS + 1 while
+// `lvl` keeps climbing, so every returning endless player was silently thrown
+// back to the first endless spot. A cleared screen rolls forward (the player
+// finished that one); a live attempt stays put. The Daily Spot is never
+// resumed: it stores lvl = DAILY_LVL (-1) and `dailyMode` is not part of the
+// save, so that index means nothing once the mode is gone.
+//
+// Every branch is floored at `maxLevel`. `lvl` starts at 1 as a module default,
+// so a save that carries the standalone `tight_spot_maxlvl` key WITHOUT a
+// `tight_spot_run_v1` blob — the two are written by different code paths and
+// nothing guarantees they arrive together — made the default outrank the real
+// frontier and dropped the player back to level 1. Caught by
+// verify_resume_level.cjs (seed maxlvl=5, no run blob: the HUD read LVL 1 where
+// the previously shipped build read LVL 5), and it is word for word the
+// rejection this change was meant to fix. `lvl` may legitimately be AHEAD of
+// maxLevel in endless, which is the case the floor leaves untouched; it must
+// never be behind it.
+function resumeLevelFrom(screen) {
+  var floor = Math.max(1, maxLevel);
+  if (dailyMode || !(lvl >= 1)) return floor;
+  if (screen === 'LEVELCLEAR') return Math.max(lvl + 1, floor);
+  if (screen === 'WIN') return Math.max(AUTHORED_LEVELS + 1, floor);
+  return Math.max(lvl, floor);
+}
+
 function goMenu() {
+  // Roll `lvl` forward before leaving a cleared screen so the menu's PLAY
+  // button (and the next reload) resume the NEXT spot, not the one just won.
+  lvl = resumeLevelFrom(gs);
+  dailyMode = false;
   gs = 'MENU';
   garageOpen = false;
   steerLeft = steerRight = false;
@@ -911,7 +1215,6 @@ _canvas.addEventListener('click', function(e) {
   if (garageOpen) return; // pointerdown already routes garage taps
   if (gs === 'MENU' || gs === 'LEVELCLEAR' || gs === 'WIN') {
     if (Date.now() < uiLockUntil) return;
-    if (gs === 'MENU' && tutorialOpen) return;
     if (muteBtn && hitBtn(muteBtn, e.clientX, e.clientY)) return; // handled on pointerdown
     uiHit(e.clientX, e.clientY);
   }
@@ -922,11 +1225,10 @@ var keyL = false, keyR = false;
 document.addEventListener('keydown', function(e) {
   var c = e.code;
   if (c === 'Escape') return; // reserved
-  if (gs === 'PLAYING' && tutorialOpen) { return; }
   if ((c === 'ArrowLeft' || c === 'KeyA')) { keyL = true; if (gs === 'PLAYING') { steerLeft = true; steerHintFade = 0; } }
   if ((c === 'ArrowRight' || c === 'KeyD')) { keyR = true; if (gs === 'PLAYING') { steerRight = true; steerHintFade = 0; } }
   if (c === 'Space' || c === 'Enter') {
-    if (gs === 'MENU') startLevel(maxLevel);
+    if (gs === 'MENU') startLevel(resumeLevelFrom(gs));
     else if (gs === 'LEVELCLEAR') advance();
     else if (gs === 'WIN') startEndless();
     e.preventDefault();
@@ -950,6 +1252,7 @@ function onCrash() {
   GF.spawnParticles(fx(car.x), fy(car.y), '#ffd24a', 12);
   gs = 'CRASH';
   crashT = CRASH_RESET_SEC;
+  gaTrackLevelFail(dailyMode ? 'daily_crash' : 'crash');
   if (dailyMode) { // each scrape in the Daily Spot costs a try (it's a challenge, not free retry)
     dailyTriesLeft = Math.max(0, dailyTriesLeft - 1);
     saveMeta();
@@ -965,28 +1268,24 @@ function onParked() {
   earnedStars = Math.max(1, stars);
   lastParkPerfect = (crashes === 0 && ratio <= PATH_PAR);
   GF.spawnParticles(fx(car.x), fy(car.y), '#39d98a', 26);
-  GF.spawnFloat(fx(car.x), fy(car.y) - 24 * GF.S, curStrings()[lastParkPerfect ? 'perfect' : 'parked'], '#39d98a');
+  // NO text floats here: every onParked path lands on the LEVELCLEAR/WIN panel,
+  // which already announces the result — a float would double it (MCPlay
+  // rejection ledger class 2: one announcement system at a time).
   if (GF.sfx) GF.sfx(lastParkPerfect ? 'win' : 'levelup');
   // ── M1: bank permanent COINS (the meta currency) ──────────────────────────
   var firstClear = !clearedOnce[lvl];
-  lastEarned = earnedStars * COIN_PER_STAR + (firstClear ? COIN_FIRST_CLR : 0);
+  lastEarned = earnedStars * COIN_PER_STAR + (firstClear ? COIN_FIRST_CLR : 0) + runBonusCoins;
   coins += lastEarned;
   clearedOnce[lvl] = true;
-  GF.spawnFloat(fx(car.x), fy(car.y) - 44 * GF.S, '+' + lastEarned + curStrings().coins_short, '#ffd24a');
   if (GF.sfx) GF.sfx('coin');
+  if (runBonusCoins > 0) gaEvent('level:bonus_coins_banked', runBonusCoins);
   checkCarUnlock();
   // ── M3: bank TUNE XP onto the DRIVEN car (the per-car mastery curve) ────────
   // A clean park tunes the car you're driving: +1 base + the stars you earned
   // (so a sharper park tunes faster). The Daily Spot adds a bonus below. A
   // level-up brightens the car + may CHROME it — felt next drive (gainTuneXp FX).
   var tuneGain = 1 + earnedStars + (dailyMode ? 2 : 0);
-  gainTuneXp(tuneGain);
-  if (lastTuneGain > 0) {
-    var tlbl = lastTuneLevelUp ? (lastTuneLevelUp >= TUNE_MAX ? curStrings().chromed : curStrings().tune_up)
-                               : ('+' + lastTuneGain + ' ' + curStrings().tune);
-    GF.spawnFloat(fx(car.x), fy(car.y) - 84 * GF.S, tlbl,
-                  lastTuneLevelUp >= TUNE_MAX ? '#eef4ff' : '#7fd0ff');
-  }
+  gainTuneXp(tuneGain); // gain is announced as a line ON the result panel
   // ── M2: DAILY SPOT clean park → bank a MEDAL onto the shelf ────────────────
   if (dailyMode) {
     var m = medalForCrashes(crashes); // 3 gold / 2 silver / 1 bronze
@@ -1000,10 +1299,10 @@ function onParked() {
     }
     dailyTriesLeft = 0; // a clean park ends the day's challenge
     earnedStars = m;    // reuse the stars row to show the medal tier on the result
-    GF.spawnFloat(fx(car.x), fy(car.y) - 64 * GF.S, medalName(m), medalColor(m));
-    GF.happytime();
+    GF.happytime();     // medal itself is drawn on the daily result panel
     gs = 'LEVELCLEAR';
     steerLeft = steerRight = false;
+    gaTrackLevelComplete();
     saveMeta();
     GF.gameEnded();
     GF.saveRun();
@@ -1022,6 +1321,7 @@ function onParked() {
     if (lastParkPerfect) GF.happytime();
   }
   steerLeft = steerRight = false;
+  gaTrackLevelComplete();
   saveMeta();
   GF.gameEnded();
   GF.saveRun();
@@ -1048,6 +1348,7 @@ function buyCar(id) {
   activeCar = id; // auto-drive the new car so the perk is felt immediately
   carToast = { car: c, t: 3.0, kind: 'unlock' };
   if (GF.sfx) GF.sfx('unlock');
+  gaEvent('garage:buy_car:' + String(id), c.cost || 0);
   saveMeta();
   return true;
 }
@@ -1055,6 +1356,7 @@ function driveCar(id) {
   if (!ownedCars[id]) return false;
   activeCar = id;
   if (GF.sfx) GF.sfx('tap');
+  gaEvent('garage:drive_car:' + String(id));
   saveMeta();
   return true;
 }
@@ -1077,6 +1379,7 @@ function tuneBoostAd(id) {
     activeCar = prevActive;          // don't change the driven car as a side effect
     if (GF.spawnFloat) GF.spawnFloat(GF.cx, GF.H * 0.30,
       curStrings().boost_reward.replace('%n', String(TUNE_BOOST_XP)), '#7fd0ff');
+    gaEvent('tune:rewarded_boost:' + String(id), TUNE_BOOST_XP);
     saveMeta();
     _boostInFlight = false;
   }, function onSkip() { _boostInFlight = false; });
@@ -1106,6 +1409,8 @@ function startDailySpot() {
   loadLevel(DAILY_LVL);
   gs = 'PLAYING';
   GF.gameStarted();
+  gaEvent('daily:start', dailyTriesLeft);
+  gaTrackLevelStart('daily');
   GF.saveRun();
 }
 
@@ -1142,12 +1447,12 @@ function update(dt) {
       resetCar(d.start);
       gs = 'PLAYING';
       GF.gameStarted();
+      gaTrackLevelStart(dailyMode ? 'daily_retry' : 'retry');
       GF.saveRun();
     }
     return;
   }
   if (gs !== 'PLAYING') return;
-  if (tutorialOpen) return;
   if (_ssMode) return;
 
   attemptTimer += dt;
@@ -1176,6 +1481,8 @@ function update(dt) {
     if (tyreMarks.length > 90) tyreMarks.shift();
   }
 
+  collectBonusCoins();
+
   // collision → instant retry
   if (collide()) { onCrash(); return; }
 
@@ -1203,6 +1510,7 @@ function draw(ctx) {
     drawTrail(ctx);
     drawObstacles(ctx);
     drawCones(ctx);
+    drawBonusCoins(ctx);
     drawWalls(ctx);
     drawCar(ctx);
   }
@@ -1210,7 +1518,6 @@ function draw(ctx) {
   if (gs === 'PLAYING') {
     if (steerHintFade > 0.02) drawSteerHints(ctx);
     drawHUD(ctx);
-    if (tutorialOpen) drawTutorialPanel(ctx);
   }
   if (gs === 'CRASH') {
     drawHUD(ctx);
@@ -1240,7 +1547,16 @@ function drawReturnToasts(ctx) {
     var a = GF.clamp(welcomeBack.t / 0.4, 0, 1);
     ctx.save(); ctx.globalAlpha = a;
     var rw = Math.min(GF.W * 0.8, 340 * GF.S), rh = GF.clamp(34 * GF.S, 28, 44);
-    var rx = GF.cx - rw / 2, ry = GF.H * 0.045;
+    // The ribbon used a flat 4.5%-of-height offset while the title below it is
+    // placed at 16% with a font that stops shrinking at its 26px floor. On a short
+    // viewport (852x393) the title's cap line rose past the ribbon and the two
+    // drew on top of each other. Anchor the ribbon to the measured top of the
+    // title instead, so a gap is guaranteed at every height.
+    var mTitleFs = GF.clamp(40 * GF.S, 26, 60);
+    ctx.font = 'bold ' + mTitleFs + 'px sans-serif';
+    var mAsc = ctx.measureText(s.title).actualBoundingBoxAscent || mTitleFs * 0.78;
+    var rx = GF.cx - rw / 2;
+    var ry = Math.max(4 * GF.S, Math.min(GF.H * 0.045, GF.H * 0.16 - mAsc - rh - 7 * GF.S));
     GF.rr(ctx, rx, ry, rw, rh, rh / 2);
     ctx.fillStyle = 'rgba(57,217,138,0.92)'; ctx.fill();
     ctx.font = 'bold ' + GF.clamp(14 * GF.S, 11, 19) + 'px sans-serif';
@@ -1324,7 +1640,7 @@ function drawSideMargins(ctx) {
   for (var x = step; x < leftW; x += step) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, GF.H); ctx.stroke(); }
   for (var x2 = rightX + step; x2 < GF.W; x2 += step) { ctx.beginPath(); ctx.moveTo(x2, 0); ctx.lineTo(x2, GF.H); ctx.stroke(); }
   // a faint LEFT|RIGHT steer-half divider down the screen center (desktop affordance)
-  if (gs === 'PLAYING' && !tutorialOpen) {
+  if (gs === 'PLAYING') {
     ctx.save();
     ctx.globalAlpha = 0.5;
     ctx.setLineDash([6 * GF.S, 8 * GF.S]);
@@ -1456,6 +1772,19 @@ function drawCones(ctx) {
     ctx.restore();
   }
 }
+function drawBonusCoins(ctx) {
+  for (var i = 0; i < bonusCoins.length; i++) {
+    var coin = bonusCoins[i];
+    if (coin.collected) continue;
+    var pulse = 1 + 0.08 * Math.sin(pulseT * 5 + i);
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.shadowColor = 'rgba(255,210,74,0.75)';
+    ctx.shadowBlur = 10 * GF.S;
+    drawCoin(ctx, fx(coin.x), fy(coin.y), BONUS_COIN_R * pulse * GF.S);
+    ctx.restore();
+  }
+}
 function drawWalls(ctx) {
   ctx.strokeStyle = '#3a4150';
   ctx.lineWidth = WALL_THICK * 2 * GF.S;
@@ -1584,12 +1913,19 @@ function drawHUD(ctx) {
   ctx.fillStyle = '#ffd24a'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   var coinTxt = String(Math.round(coins));
   ctx.fillText(coinTxt, 14 * GF.S + coinR * 2 + 6 * GF.S, coinY + coinR + 1);
+  var coinHudW = ctx.measureText(coinTxt).width;
+  if (runBonusCoins > 0 && gs === 'PLAYING') {
+    var runTxt = ' +' + Math.round(runBonusCoins);
+    ctx.fillStyle = '#fff1a6';
+    ctx.fillText(runTxt, 14 * GF.S + coinR * 2 + 10 * GF.S + coinHudW, coinY + coinR + 1);
+    coinHudW += 4 * GF.S + ctx.measureText(runTxt).width;
+  }
   // ── M3: active-car TUNE badge (so the in-RUN world reflects the car's tune) ─
   // A returning player who tuned/chromed their car SEES it here mid-run, not just
   // in the menu. Cyan "TUNE n", near-white "CHROME" at max.
   (function() {
     var lv = tuneLevel(activeCar), maxed = isChrome(activeCar);
-    var bx = 14 * GF.S + coinR * 2 + 6 * GF.S + ctx.measureText(coinTxt).width + 12 * GF.S;
+    var bx = 14 * GF.S + coinR * 2 + 6 * GF.S + coinHudW + 12 * GF.S;
     var bh = GF.clamp(18 * GF.S, 15, 26), by = coinY + coinR + 1 - bh / 2;
     ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
     var tlab = maxed ? curStrings().tune_max : (curStrings().tune + ' ' + lv);
@@ -1618,13 +1954,12 @@ function drawHUD(ctx) {
   var starSz = GF.clamp(16 * GF.S, 12, 22);
   drawStars(ctx, stars, GF.cx - starSz * 1.6, 14 * GF.S + starSz/2, starSz);
 
-  // help (?) + garage + menu buttons top-right
+  // garage + menu buttons top-right (no "?" — the how-to-play copy lives on the
+  // MENU screen, which stays reachable in-run through ≡)
   var btn = GF.clamp(32 * GF.S, 26, 42);
   var pad = 12 * GF.S, gap = 8 * GF.S;
-  helpBtn   = { x: GF.W - pad - btn,                 y: 12 * GF.S, w: btn, h: btn };
-  garageBtn = { x: GF.W - pad - btn * 2 - gap,       y: 12 * GF.S, w: btn, h: btn };
-  menuBtn   = { x: GF.W - pad - btn * 3 - gap * 2,   y: 12 * GF.S, w: btn, h: btn };
-  drawIconBtn(ctx, helpBtn, '?');
+  garageBtn = { x: GF.W - pad - btn,               y: 12 * GF.S, w: btn, h: btn };
+  menuBtn   = { x: GF.W - pad - btn * 2 - gap,     y: 12 * GF.S, w: btn, h: btn };
   drawGarageBtn(ctx, garageBtn);
   drawIconBtn(ctx, menuBtn, '≡');
 
@@ -1732,13 +2067,18 @@ function drawMenu(ctx) {
   var drawH = wide ? GF.clamp(70 * GF.S, 48, 90) : btnH;
   var textBlockBottom = endY;
   var clearMargin = drawH / 2 + 16;
+  // wide: DAILY/GARAGE sit BESIDE the pill, so PLAY only reserves the coin/progress
+  // lines below it. Portrait: the row stacks under PLAY, so reserve its full height —
+  // this is what keeps the row from ever clamping back up onto the PLAY pill.
+  var rowH = GF.clamp(46 * GF.S, 38, 58);
+  var rowReserve = rowH + 60 * GF.S;
   var wideFloor = GF.H * 0.56;
-  var wideCap = GF.H - drawH - 20 * GF.S;
+  var wideCap = GF.H - drawH - 44 * GF.S;
   var drawY = wide ? Math.min(Math.max(textBlockBottom + clearMargin, wideFloor), wideCap)
-                   : Math.min(endY + 14 * GF.S, GF.H - btnH - 30 * GF.S);
+                   : Math.min(endY + 14 * GF.S, GF.H - btnH - rowReserve);
   // stable hit-rect at base size, centered on drawY
   var hitX = GF.cx - btnW / 2, hitY = drawY + (drawH - btnH) / 2;
-  uiButtons.push({ x: hitX, y: hitY, w: btnW, h: btnH, fn: function() { startLevel(maxLevel); } });
+  uiButtons.push({ x: hitX, y: hitY, w: btnW, h: btnH, fn: function() { startLevel(resumeLevelFrom(gs)); } });
   if (wide) {
     var _t = (typeof performance !== 'undefined' ? performance.now() : Date.now()) / 1000;
     var _k = Math.sin(_t * 2.2);
@@ -1754,13 +2094,21 @@ function drawMenu(ctx) {
     drawPrimaryBtn(ctx, GF.cx - drawW / 2, drawY, drawW, drawH, curStrings().play);
   }
 
-  // ── M1+M2: DAILY SPOT + GARAGE buttons (two-up row) + coin balance ─────────
-  var rowW = GF.clamp(224 * GF.S, 154, 304), gBtnH = GF.clamp(46 * GF.S, 38, 58);
-  var gY = drawY + drawH + 16 * GF.S;
-  // keep the row on-screen on short portraits
-  gY = Math.min(gY, GF.H - gBtnH - 44 * GF.S);
+  // ── M1+M2: DAILY SPOT + GARAGE buttons + coin balance ──────────────────────
+  // wide: flank the PLAY pill (clear of its pulse); portrait: two-up row under it
+  var rowW = GF.clamp(224 * GF.S, 154, 304), gBtnH = rowH;
   var halfGap = 8 * GF.S, halfW = (rowW - halfGap) / 2;
-  var dX = GF.cx - rowW / 2, gX = dX + halfW + halfGap;
+  var dX, gX, gY;
+  if (wide) {
+    var sideGap = GF.clamp(26 * GF.S, 18, 40);
+    var pillHalf = (drawW * 1.06) / 2;
+    gY = drawY + (drawH - gBtnH) / 2;
+    dX = GF.cx - pillHalf - sideGap - halfW;
+    gX = GF.cx + pillHalf + sideGap;
+  } else {
+    gY = drawY + drawH + 16 * GF.S;
+    dX = GF.cx - rowW / 2; gX = dX + halfW + halfGap;
+  }
   // DAILY SPOT (left) — gold when today's spot is unplayed, checked when done
   var dailyAvail = (dailyKey !== daySeed() || dailyTriesLeft > 0) && dailyBestMedal === 0;
   drawDailyBtn(ctx, dX, gY, halfW, gBtnH, dailyAvail);
@@ -1775,10 +2123,10 @@ function drawMenu(ctx) {
   }
   uiButtons.push({ x: gX, y: gY, w: halfW, h: gBtnH, fn: openGarage });
 
-  // coin balance line
+  // coin balance line — below whichever of PLAY / the side row reaches lower
   ctx.textBaseline = 'alphabetic';
   var cbR = GF.clamp(7 * GF.S, 5, 10);
-  var cbY = gY + gBtnH + 20 * GF.S;
+  var cbY = (wide ? drawY + drawH : gY + gBtnH) + 20 * GF.S;
   ctx.font = 'bold ' + GF.clamp(13 * GF.S, 11, 18) + 'px sans-serif';
   var cbTxt = String(Math.round(coins));
   var cbW = ctx.measureText(cbTxt).width;
@@ -1886,13 +2234,22 @@ function drawGarage(ctx) {
   // ── M2 HEADER BAND: Daily Spot + Valet pile + the Shelf (world-visible) ────
   var y = drawGarageM2Header(ctx, listX, listW, balY + cr * 2 + 12 * GF.S, closeY);
 
-  // car rows: shrink a touch so all 6 fit under the M2 band on a 852 portrait
-  var rowH = GF.clamp(66 * GF.S, 52, 84);
+  // car rows: EVERY car must be reachable at EVERY viewport (a dropped row =
+  // unpurchasable car; MCPlay ledger class 4). Compress rowH until all
+  // CARS.length rows fit between the M2 band and the CLOSE button.
   var rowGap = 7 * GF.S;
+  var rowSpace = (closeY - 4 * GF.S) - y;
+  var fitRowH = Math.floor(rowSpace / CARS.length) - rowGap;
+  // The 34px floor used to OUTRANK the fit, so on a short viewport (852x393,
+  // 1024x500) rowH snapped back up to 34, the last row no longer fitted above
+  // CLOSE, and the guard below dropped GT Prototype entirely — an unpurchasable
+  // car, the MCPlay class-4 defect this loop exists to prevent. Keep a tappable
+  // floor only while it still leaves room for every car.
+  var rowH = Math.min(GF.clamp(66 * GF.S, 52, 84), Math.max(fitRowH, 26));
 
   for (var i = 0; i < CARS.length; i++) {
     var c = CARS[i];
-    if (y + rowH > closeY - 4 * GF.S) break; // guard (6 rows fit 852; cap on tiny screens)
+    if (y + rowH > closeY - 4 * GF.S) break; // last-resort guard (sub-320px heights)
     var owned = !!ownedCars[c.id];
     var active = (activeCar === c.id);
     // row card
@@ -1910,29 +2267,68 @@ function drawGarage(ctx) {
       ctx.strokeStyle = '#eef4ff'; ctx.lineWidth = 2; ctx.stroke();
     }
     ctx.restore();
+    // Name, perk and tune bar sit at fixed FRACTIONS of rowH (0.16 / 0.40 / 0.72),
+    // which only holds while the row is tall. Compressed to fit six cars on a
+    // short viewport the bands collided and the name was drawn straight over the
+    // perk — "наложение элементов", the exact overlap Mediacube rejected twice.
+    // Two-line mode is therefore allowed only when each band's glyphs actually end
+    // before the next band begins; otherwise the row carries the NAME alone.
+    var twoLine = (rowH * 0.24 >= nameFs) && (rowH * 0.32 >= perkFs);
+    // Status-pill geometry, computed BEFORE any text so both the text and the tune
+    // bar can reserve the right-side control cluster instead of running under it.
+    // Heights are clamped INTO the row: a compressed row is shorter than the
+    // pill's natural height, which pushed the pill over the row border.
+    var pillW = GF.clamp(92 * GF.S, 70, 116), pillH = Math.min(GF.clamp(34 * GF.S, 28, 44), rowH - 6 * GF.S);
+    var pillX = listX + listW - pillW - 10 * GF.S, pillY = y + (rowH - pillH) / 2;
+    // BOOST's chip was a FIXED width while its label is localised: Russian
+    // "УСИЛИТЬ" is wider than "BOOST", so the label overflowed its own chip and
+    // ran under the DRIVE pill (it read "УСИЛИТ"). Size the chip to the measured
+    // label; the row text below reserves whatever is left, and FITs into it.
+    var bbFs = GF.clamp(11 * GF.S, 9, 15);
+    ctx.font = 'bold ' + bbFs + 'px sans-serif';
+    var bbW = GF.clamp(20 * GF.S + ctx.measureText(curStrings().tune_boost).width + 10 * GF.S, 50, 130);
+    var bbH = Math.min(GF.clamp(30 * GF.S, 26, 40), rowH - 8 * GF.S);
+    var bbX = pillX - bbW - 8 * GF.S, bbY = y + (rowH - bbH) / 2;
+    // BOOST needs the row's full height for its own band; on a single-line row it
+    // would sit on top of the name, so it stands down there and the name gets the
+    // width back. The rewarded TUNE BOOST stays reachable at every other size.
+    var showBoost = owned && !isChrome(c.id) && twoLine;
     // name + perk
     ctx.textAlign = 'left';
-    ctx.font = 'bold ' + nameFs + 'px sans-serif';
     ctx.fillStyle = owned ? '#fff' : '#9fb0c4'; ctx.textBaseline = 'top';
     var tx = listX + rowH * 0.86;
-    ctx.fillText(carName(c), tx, y + rowH * 0.16);
-    ctx.font = perkFs + 'px sans-serif';
-    ctx.fillStyle = '#9fb0c4';
-    // M3: leave the bottom strip of the row for the tune bar, so cap the perk to
-    // ONE line here (the full perk is felt in handling, not the menu).
-    var perkLines = wrapLines(ctx, carPerk(c), listW - (tx - listX) - GF.clamp(150 * GF.S, 120, 200));
-    ctx.fillText(perkLines[0] || '', tx, y + rowH * 0.40);
-    // status pill geometry (right side) — computed BEFORE the tune bar so the bar
-    // can be clamped to never run under the right-side controls (pill / BOOST).
-    var pillW = GF.clamp(92 * GF.S, 70, 116), pillH = GF.clamp(34 * GF.S, 28, 44);
-    var pillX = listX + listW - pillW - 10 * GF.S, pillY = y + (rowH - pillH) / 2;
-    var bbW = GF.clamp(62 * GF.S, 50, 82), bbH = GF.clamp(30 * GF.S, 26, 40);
-    var bbX = pillX - bbW - 8 * GF.S, bbY = y + (rowH - bbH) / 2;
+    var textAvail = (showBoost ? bbX : pillX) - 8 * GF.S - tx;
+    // FIT rather than clip: shrink this row's name until it clears the controls.
+    var nfs = nameFs;
+    ctx.font = 'bold ' + nfs + 'px sans-serif';
+    while (nfs > 9 && ctx.measureText(carName(c)).width > textAvail) {
+      nfs -= 1;
+      ctx.font = 'bold ' + nfs + 'px sans-serif';
+    }
+    if (twoLine) {
+      ctx.fillText(carName(c), tx, y + rowH * 0.16);
+      ctx.font = perkFs + 'px sans-serif';
+      ctx.fillStyle = '#9fb0c4';
+      // M3: the bottom strip of the row belongs to the tune bar, so the perk gets
+      // ONE line. Never cut a sentence mid-phrase (dangling "—" reads as broken
+      // text to a reviewer): draw the full perk only if it FITS, else the
+      // hand-authored short variant.
+      var perkTxt = carPerk(c);
+      if (ctx.measureText(perkTxt).width > textAvail) perkTxt = carPerkShort(c);
+      ctx.fillText(perkTxt, tx, y + rowH * 0.40);
+    } else {
+      ctx.textBaseline = 'middle';
+      ctx.fillText(carName(c), tx, y + rowH / 2);
+      ctx.textBaseline = 'top';
+    }
     // the left edge of the right-side control cluster (BOOST shows only for an
-    // owned, not-yet-maxed car; otherwise the pill is the leftmost right control).
-    var rightCtrlX = (owned && !isChrome(c.id)) ? bbX : pillX;
+    // owned, not-yet-maxed car on a two-line row; otherwise the pill is the
+    // leftmost right control).
+    var rightCtrlX = showBoost ? bbX : pillX;
     // ── M3: TUNE bar + level (owned cars only) ────────────────────────────────
-    if (owned) {
+    // The bar lives in the row's bottom strip, which a single-line row does not
+    // have; drawing it there put the TUNE label across the car name.
+    if (owned && twoLine) {
       var tp = tuneProgress(c.id);
       var barX = tx, barY = y + rowH * 0.72, barH = GF.clamp(6 * GF.S, 5, 9);
       // label: "TUNE 3" or "CHROME"
@@ -1958,7 +2354,7 @@ function drawGarage(ctx) {
     // Player-INITIATED, rewarded-only: WATCH AD → +TUNE_BOOST_XP. Never gates
     // play; no-ops on the gallery (GF.rewardedAd resolves shown:false). Sits just
     // left of the status pill, vertically centered.
-    if (owned && !isChrome(c.id)) {
+    if (showBoost) {
       GF.rr(ctx, bbX, bbY, bbW, bbH, bbH / 2);
       ctx.fillStyle = 'rgba(38,56,82,0.95)'; ctx.fill();
       ctx.strokeStyle = 'rgba(127,208,255,0.7)'; ctx.lineWidth = 1.4; ctx.stroke();
@@ -1967,7 +2363,7 @@ function drawGarage(ctx) {
       var ptx = bbX + 11 * GF.S, pty = bbY + bbH / 2, ps = 5 * GF.S;
       ctx.moveTo(ptx - ps * 0.5, pty - ps); ctx.lineTo(ptx + ps, pty); ctx.lineTo(ptx - ps * 0.5, pty + ps);
       ctx.closePath(); ctx.fillStyle = '#7fd0ff'; ctx.fill();
-      ctx.font = 'bold ' + GF.clamp(11 * GF.S, 9, 15) + 'px sans-serif';
+      ctx.font = 'bold ' + bbFs + 'px sans-serif';   // same size the chip was measured at
       ctx.fillStyle = '#bfe6ff'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
       ctx.fillText(curStrings().tune_boost, bbX + 20 * GF.S, bbY + bbH / 2 + 1);
       garageBtns.push({ x: bbX, y: bbY, w: bbW, h: bbH, fn: (function(cid){ return function(){ tuneBoostAd(cid); }; })(c.id) });
@@ -2134,11 +2530,18 @@ function drawGarageM2Header(ctx, listX, listW, topY, closeY) {
     ctx.fillText(s.collect, cbX2 + cbW2 / 2, cbY2 + cbH2 / 2 + 1);
     garageBtns.push({ x: cbX2, y: cbY2, w: cbW2, h: cbH2, fn: function(){ collectValet(); } });
   } else {
-    ctx.font = GF.clamp(10 * GF.S, 9, 13) + 'px sans-serif';
+    var vhFs = GF.clamp(10 * GF.S, 9, 13);
+    ctx.font = vhFs + 'px sans-serif';
     ctx.fillStyle = '#667'; ctx.textBaseline = 'top';
     var vh = wrapLines(ctx, s.valet_hint, rightW - 22 * GF.S);
+    // The line step was a flat 11*S, which is SMALLER than the font once S drops
+    // below ~1 — the two wrapped lines were drawn on top of each other. Step by
+    // the glyph height, and only draw a line that still fits inside the card.
+    var vhLh = vhFs + 3 * GF.S;
+    var vhTop = vy + cardH * 0.42;
     for (var vl = 0; vl < Math.min(2, vh.length); vl++) {
-      ctx.fillText(vh[vl], vx + 11 * GF.S, vy + cardH * 0.42 + vl * (11 * GF.S));
+      if (vhTop + (vl + 1) * vhLh > vy + cardH - 2 * GF.S) break;
+      ctx.fillText(vh[vl], vx + 11 * GF.S, vhTop + vl * vhLh);
     }
   }
   // ── SHELF strip: lifetime medals + streak trophies (the owned record) ───
@@ -2264,6 +2667,7 @@ function drawEarningsStrip(ctx, cy) {
 
   // next-car progress (the come-back hook)
   var nl = nextLockedCar();
+  var stripBottom = cy + cr + 6 * GF.S;
   if (nl) {
     var barW = Math.min(GF.W * 0.62, 300 * GF.S), barH = GF.clamp(8 * GF.S, 6, 12);
     var barX = GF.cx - barW / 2, barY = cy + cr + 20 * GF.S;
@@ -2277,6 +2681,16 @@ function drawEarningsStrip(ctx, cy) {
       ? (curStrings().garage + ': ' + carName(nl) + ' ' + curStrings().unlock + '!')
       : (curStrings().next_car + ': ' + carName(nl) + ' — ' + need + curStrings().coins_short + ' ' + curStrings().away);
     ctx.fillText(label, GF.cx, barY + barH + 14 * GF.S);
+    stripBottom = barY + barH + 14 * GF.S;
+  }
+  // tune gain earned by this park — a PANEL line, replacing the old world float
+  // (one announcement system at a time; MCPlay ledger class 2)
+  if (lastTuneGain > 0) {
+    var tlbl = lastTuneLevelUp ? (lastTuneLevelUp >= TUNE_MAX ? curStrings().chromed : curStrings().tune_up)
+                               : ('+' + lastTuneGain + ' ' + curStrings().tune);
+    ctx.font = 'bold ' + GF.clamp(12 * GF.S, 10, 16) + 'px sans-serif';
+    ctx.fillStyle = lastTuneLevelUp >= TUNE_MAX ? '#eef4ff' : '#7fd0ff';
+    ctx.fillText(tlbl, GF.cx, stripBottom + 19 * GF.S);
   }
   ctx.restore();
 }
@@ -2362,28 +2776,6 @@ function drawWin(ctx) {
   uiButtons.push({ x: btnX, y: y3, w: btnW, h: btnH * 0.82, fn: goMenu });
 }
 
-// ── TUTORIAL PANEL (in-game, via ? button) ──────────────────────────────────
-function drawTutorialPanel(ctx) {
-  ctx.fillStyle = 'rgba(8,10,16,0.92)';
-  ctx.fillRect(0, 0, GF.W, GF.H);
-  var titleFs = GF.clamp(24 * GF.S, 18, 34);
-  ctx.font = 'bold ' + titleFs + 'px sans-serif';
-  ctx.fillStyle = '#fff';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  var topY = GF.H * 0.13;
-  ctx.fillText(curStrings().title, GF.cx, topY);
-
-  var bodyFs = GF.clamp(15 * GF.S, 12, 19);
-  ctx.font = bodyFs + 'px sans-serif';
-  ctx.fillStyle = '#cdd6e3';
-  var maxW = Math.min(GF.W * 0.86, 460 * GF.S);
-  var endY = drawTutorialBlock(ctx, tutorialItems(), topY + titleFs + 18 * GF.S, maxW, bodyFs + 6 * GF.S, 10 * GF.S);
-
-  ctx.fillStyle = '#88a';
-  ctx.font = GF.clamp(13 * GF.S, 11, 17) + 'px sans-serif';
-  ctx.fillText(curStrings().tap_close, GF.cx, Math.min(endY + 8 * GF.S, GF.H - 28 * GF.S));
-}
-
 // ── SCREENSHOT / GATE HOOKS ──────────────────────────────────────────────────
 // Land in a populated mid-level PLAYING state for Yandex 5.1.1 screenshots.
 window._setupForScreenshot = function(level) {
@@ -2419,6 +2811,34 @@ window._jumpLevel = function(n) {
 };
 
 // ── BOOT ────────────────────────────────────────────────────────────────────
+function resetTightSpotProgressIfRequested() {
+  var requested = false;
+  try {
+    var params = new URLSearchParams(location.search || '');
+    requested = params.get('reset') === '1' || params.get('resetProgress') === '1';
+  } catch (e) {}
+  if (!requested) return;
+  var keys = [
+    'tight_spot_maxlvl',
+    'tight_spot_stars',
+    'tight_spot_meta_v1',
+    'tight_spot_run_v1',
+    'tight_spot_level_funnel_sid'
+  ];
+  try {
+    for (var i = 0; i < keys.length; i++) localStorage.removeItem(keys[i]);
+  } catch (e2) {}
+  try {
+    if (history && history.replaceState) {
+      var clean = new URL(location.href);
+      clean.searchParams.delete('reset');
+      clean.searchParams.delete('resetProgress');
+      history.replaceState(null, document.title, clean.pathname + clean.search + clean.hash);
+    }
+  } catch (e3) {}
+}
+function bootTightSpot() {
+resetTightSpotProgressIfRequested();
 GF.init({
   designW: 393,
   designH: 852,
@@ -2439,6 +2859,7 @@ GF.init({
     // the Daily Spot on a new calendar day, grant streak trophies/gifts. This is
     // what makes a returning player's first 60s visibly different from yesterday.
     rolloverDay();
+    initGameAnalytics();
     GF.persist('tight_spot_run_v1',
       function() {
         return { gs: (gs === 'PLAYING' || gs === 'CRASH') ? 'PLAYING' : gs,
@@ -2461,20 +2882,21 @@ GF.init({
       localStorage.setItem('tight_spot_maxlvl', String(maxLevel));
       localStorage.setItem('tight_spot_stars', JSON.stringify(bestStars));
     } catch (e) {}
+    // Resolve where the player actually was BEFORE the screen is normalised —
+    // resumeLevelFrom() needs the restored screen to tell "mid-attempt" from
+    // "already cleared it", and the next line destroys that information.
+    lvl = resumeLevelFrom(gs);
     // never resume into live play (Yandex 1.9 best practice) - show MENU
     if (gs === 'PLAYING' || gs === 'CRASH' || gs === 'LEVELCLEAR' || gs === 'WIN') gs = 'MENU';
-    tutorialOpen = false;
     layoutField();
     // preload level geometry so MENU has something behind it if ever drawn
-    loadLevel(Math.min(maxLevel, AUTHORED_LEVELS));
+    loadLevel(Math.min(lvl, AUTHORED_LEVELS));
     // ▶ PLATFORM AUTOSTART (CLAUDE.md #9): Yandex/CrazyGames inject __GF_AUTOSTART
     // so the player drops STRAIGHT into gameplay (no menu landing). The gallery
-    // build never gets the flag, so it keeps its menu. Menu stays reachable in-run
-    // via the ≡ button. Suppress the first-session tutorial auto-open on platforms.
+    // build never gets the flag, so it keeps its menu. The MENU — which carries the
+    // how-to-play copy — stays reachable in-run via the ≡ button.
     if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') {
-      saveTutorialSeen();
-      tutorialOpen = false;
-      startLevel(maxLevel);
+      startLevel(lvl);
     }
   },
   onUpdate: update,
@@ -2500,10 +2922,11 @@ GF.exposeState(function() {
     attemptTimer: Math.round(attemptTimer * 10) / 10,
     parked: gs === 'PLAYING' ? parkedInBay() : false,
     obstacleCount: obstacles.length, coneCount: cones.length, wallCount: walls.length,
-    tutorialOpen: tutorialOpen,
+    bonusCoinCount: bonusCoins.length,
+    bonusCoinsLeft: bonusCoins.filter(function(c) { return !c.collected; }).length,
     // M1 garage meta
     coins: Math.round(coins), activeCar: activeCar,
-    ownedCount: Object.keys(ownedCars).length, lastEarned: lastEarned,
+    ownedCount: Object.keys(ownedCars).length, lastEarned: lastEarned, runBonusCoins: runBonusCoins,
     garageOpen: garageOpen, nextCarCost: (nextLockedCar() ? nextLockedCar().cost : 0),
     // M2 reason-to-return
     dailyMode: dailyMode, dailyTriesLeft: dailyTriesLeft, dailyBestMedal: dailyBestMedal,
@@ -2521,6 +2944,47 @@ GF.exposeState(function() {
     WALL_THICK: WALL_THICK, PATH_PAR: PATH_PAR,
   };
 });
+window.render_game_to_text = function() {
+  return JSON.stringify({
+    coords: 'field-local pixels, origin top-left, x right, y down',
+    gs: gs,
+    lvl: lvl,
+    endless: endless,
+    dailyMode: dailyMode,
+    car: car ? {
+      x: Math.round(car.x),
+      y: Math.round(car.y),
+      heading: Math.round(car.heading * 100) / 100,
+      speed: Math.round(car.speed)
+    } : null,
+    bay: bay ? {
+      x: Math.round(bay.x),
+      y: Math.round(bay.y),
+      w: bay.w,
+      l: bay.l,
+      heading: Math.round(bay.heading * 100) / 100
+    } : null,
+    counts: { walls: walls.length, obstacles: obstacles.length, cones: cones.length, bonusCoins: bonusCoins.length },
+    bonusCoins: {
+      total: bonusCoins.length,
+      collected: bonusCoins.filter(function(c) { return c.collected; }).length,
+      runBonusCoins: runBonusCoins
+    },
+    crashes: crashes,
+    stars: stars,
+    maxLevel: maxLevel,
+    coins: Math.round(coins),
+    levelSource: LEVEL_SOURCE,
+    analyticsReady: gaReady
+  });
+};
+window.advanceTime = function(ms) {
+  var steps = Math.max(1, Math.round((ms || 16) / (1000 / 60)));
+  if (window.__gfStep) window.__gfStep(steps, 1 / 60);
+  var ctx = _canvas && _canvas.getContext ? _canvas.getContext('2d') : null;
+  if (ctx) draw(ctx);
+  return Promise.resolve();
+};
 
 // ── PROGRESSION-PROBE BOT (balance-curve fast-forward) ──────────────────────
 // getActions() lists what the bot can do right now; doAction(a) performs one.
@@ -2532,7 +2996,7 @@ GF.exposeBot(
     if (gs === 'MENU' || gs === 'WIN') acts.push('play');
     else if (gs === 'LEVELCLEAR') acts.push('next');
     else if (gs === 'CRASH') acts.push('recover');   // never let the bot stall in the crash freeze
-    else if (gs === 'PLAYING' && !tutorialOpen) acts.push('park');
+    else if (gs === 'PLAYING') acts.push('park');
     var nl = nextLockedCar();
     if (nl && canAfford(nl) && (gs === 'PLAYING' || gs === 'LEVELCLEAR' || gs === 'WIN' || gs === 'MENU')) acts.push('buycar');
     if ((gs === 'MENU') && valetPending > 0) acts.push('collect');
@@ -2572,6 +3036,33 @@ window._steer = function(side, on) {
   if (on) steerHintFade = 0;
 };
 window._startLevel = function(n) { startLevel(n || 1); };
+window._setCarPose = function(x, y, h) {
+  if (!car) return null;
+  car.x = Number(x) || car.x;
+  car.y = Number(y) || car.y;
+  if (h !== undefined) car.heading = Number(h) || 0;
+  car.speed = 0;
+  return { x: car.x, y: car.y, heading: car.heading };
+};
+window._bonusCoinInfo = function() {
+  return {
+    total: bonusCoins.length,
+    collected: bonusCoins.filter(function(c) { return c.collected; }).length,
+    runBonusCoins: runBonusCoins,
+    coins: bonusCoins.map(function(c) {
+      return { x: c.x, y: c.y, value: c.value, collected: !!c.collected };
+    })
+  };
+};
+window._collectAllBonusCoins = function() {
+  for (var i = 0; i < bonusCoins.length; i++) {
+    if (!bonusCoins[i].collected) {
+      bonusCoins[i].collected = true;
+      runBonusCoins += bonusCoins[i].value;
+    }
+  }
+  return window._bonusCoinInfo();
+};
 // M1 garage test seams (safe to ship)
 window._grant = function(n) { coins += (n || 100); saveMeta(); };
 window._buyCar = function(id) { return buyCar(id || 1); };
@@ -2604,19 +3095,41 @@ window._tightSpotInfo = function() {
            nextCost: (nextLockedCar() ? nextLockedCar().cost : 0), gs: gs,
            dailyMode: dailyMode, dailyTriesLeft: dailyTriesLeft, dailyBestMedal: dailyBestMedal,
            valetPending: valetPending, streak: streak, medalsTotal: shelfTotal(),
-           activeTune: tuneLevel(activeCar), chromeCount: chromeCount() };
+           activeTune: tuneLevel(activeCar), chromeCount: chromeCount(),
+           levelSource: LEVEL_SOURCE, levelLoadError: LEVEL_LOAD_ERROR,
+           bonusCoins: bonusCoins.length,
+           bonusCoinsLeft: bonusCoins.filter(function(c) { return !c.collected; }).length,
+           runBonusCoins: runBonusCoins,
+           authoredLevels: AUTHORED_LEVELS, analyticsReady: gaReady };
 };
+}
+
+loadSheetLevels().then(function() { bootTightSpot(); });
 
 })();
 </script>
 <script>
-/* bespoke synth_track.py soundtrack: start on first gesture (autoplay policy).
-   On-screen mute button lives in the HUD/menu (GF.drawMuteIcon + GF.toggleMute,
-   bottom-right); the M key is a desktop shortcut for the same toggle. */
+/* ONE music system: the recorded loop, decoded through Web Audio (never an
+   <audio>/new Audio() element) on the first user gesture.
+   The synth-bed fallback is deliberately NOT used. It committed to the synth
+   whenever the file had not started within 6s, so a cold boot on a slow
+   connection played the synth while a warm reload played the recorded track —
+   the music CHANGED between restarts, and a late decode could leave two beds
+   racing. A failed fetch now retries the same file instead of swapping
+   instruments; if the file is genuinely unplayable the game stays on SFX only,
+   which is honest and is caught by the archive validator, not by a player.
+   Local mute: on-screen button in the HUD/menu, M key on desktop. */
 (function(){
-  if(!window.GF||!GF.music) return;
-  var go=function(){ GF.music('audio/bg_track.mp3', 0.6);
-    ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){document.removeEventListener(ev,go,true);}); };
+  if(!window.GF || !GF.music) return;
+  var FILE = 'audio/bg_loop.mp3', VOL = 0.6, MAX_TRIES = 4, tries = 0;
+  var play = function(){
+    tries++;
+    GF.music(FILE, VOL, null, function(){ if (tries < MAX_TRIES) setTimeout(play, 800 * tries); });
+  };
+  var go = function(){
+    ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){document.removeEventListener(ev,go,true);});
+    play();
+  };
   ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){document.addEventListener(ev,go,true);});
   document.addEventListener('keydown',function(e){ if(e.code==='KeyM'&&GF.toggleMute){ GF.toggleMute(); } });
 })();

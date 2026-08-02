@@ -711,6 +711,7 @@ function init(config) {
   // games not yet migrated to GP.
   if (window.__gpReady && window.gp) {
     // SDK already finished init before gf-lib loaded (unlikely but cheap to handle)
+    platform = 'gamepush';
     _onGpReady(window.gp);
   } else if (window.__gpKey) {
     // GP SDK is loading async; the index.html template installed a callback
@@ -761,11 +762,8 @@ function init(config) {
               AUDIO_MUTED = !!value;
               try { setMusicMuted(!!value); } catch (e) {}
               try {
-                if (_music) {
-                  _music.muted = AUDIO_MUTED;
-                  if (AUDIO_MUTED) { _music.pause(); }
-                  else if (_musicSrc) { var _p = _music.play(); if (_p && _p.catch) _p.catch(function () {}); }
-                }
+                if (_musicGain) _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol;
+                if (!AUDIO_MUTED) { audioCtx(); _startMusicNode(); }
               } catch (e) {}
             }
           });
@@ -805,9 +803,8 @@ function init(config) {
 // Platform-aware lifecycle. Games call GF.gameplayStart() when entering
 // the PLAYING state and GF.gameplayStop() on game-over/menu-return.
 // These no-op locally; on CG they're required for ad timing (Full Launch);
-// on Yandex they're a no-op today but kept here so games using GF only
-// need ONE set of calls. Safe to call repeatedly — the platform SDKs
-// dedupe internally.
+// on Yandex they signal the GameplayAPI (engagement/retention tracking).
+// Safe to call repeatedly — the platform SDKs dedupe internally.
 var platform = 'local';
 function gameplayStart() {
   try {
@@ -815,11 +812,21 @@ function gameplayStart() {
       window.CrazyGames.SDK.game.gameplayStart();
     }
   } catch (e) {}
+  try {
+    if (platform === 'yandex' && window.ysdk && window.ysdk.features && window.ysdk.features.GameplayAPI) {
+      window.ysdk.features.GameplayAPI.start();
+    }
+  } catch (e) {}
 }
 function gameplayStop() {
   try {
     if (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.game) {
       window.CrazyGames.SDK.game.gameplayStop();
+    }
+  } catch (e) {}
+  try {
+    if (platform === 'yandex' && window.ysdk && window.ysdk.features && window.ysdk.features.GameplayAPI) {
+      window.ysdk.features.GameplayAPI.stop();
     }
   } catch (e) {}
 }
@@ -1299,16 +1306,23 @@ function setMusicMuted(m) {
 // ── PUBLIC API ───────────────────────────────────────────────────────────
 // ── AUDIO: procedural SFX synth + bg-music loop + mute (reusable) ──────────
 // Games MUST ship sound before publish (Tim 2026-06-04). SFX are synthesized via
-// WebAudio (no asset files, tiny, reliable); music is an mp3 loop from the Suno
-// tool (Shared/tools/game-audio/gen_music.py → <game>/audio/bg_loop.mp3). Both
-// respect GF.muted (persisted) and start on the first user gesture (autoplay policy).
-var _ac = null, _music = null, _musicSrc = null, _musicVol = 0.4;
+// WebAudio (no asset files, tiny, reliable); music is an mp3 installed by
+// gen_soundtrack.sh (Suno when funded, curated CC0 fallback, local synth last).
+// The mp3 plays through WEB AUDIO (decode -> looping BufferSource), NEVER an HTML
+// media element (an audio/video tag or the Audio constructor) — an HTMLMediaElement
+// registers the OS MediaSession and IS REJECTED (Yandex 1.6.2.5 desktop system
+// player / 1.6.1.6 mobile notification,
+// and is the root of 1.3 keeps-playing-when-hidden + 4.7 plays-over-ads). Music +
+// SFX share one _ac context, so one _ac.suspend() silences everything on hide/ad.
+// Both respect GF.muted (persisted) and start on the first user gesture.
+var _ac = null, _musicBuf = null, _musicNode = null, _musicGain = null, _musicVol = 0.4, _musicUrl = null, _musicWant = false;
 var AUDIO_MUTED = false;
 var _extPaused = false;   // audio suspended over an ad / platform pause (Yandex 4.7 + 1.3)
 try { AUDIO_MUTED = (localStorage.getItem('gf_muted') === '1'); } catch (e) {}
 function audioCtx() {
   if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
-  if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch (e) {} }
+  // Never auto-resume under an ad / hidden tab — an SFX must not un-pause audio (1.3/4.7).
+  if (_ac && _ac.state === 'suspended' && !_extPaused && !document.hidden) { try { _ac.resume(); } catch (e) {} }
   return _ac;
 }
 function tone(freq, dur, type, gain, slideTo) {
@@ -1349,30 +1363,49 @@ var SFX_LIB = {
   error:   function () { tone(200, 0.12, 'square', 0.07, 140); },
 };
 function sfx(name) { var f = SFX_LIB[name]; if (f) f(); }
-function music(url, vol) {
-  if (!url) return;
+function _startMusicNode() {
+  if (_musicNode) return true;
+  if (!_ac || !_musicBuf || !_musicWant) return false;
   try {
-    if (!_music) {
-      _music = new Audio(); _music.loop = true; _music.preload = 'auto';
-      // Pause bg music on tab-hide, resume on return. GF.music games no longer
-      // call startMusic (which used to own this), so bind it here, once.
-      document.addEventListener('visibilitychange', function () {
-        if (!_music) return;
-        try {
-          if (document.hidden) _music.pause();
-          else if (!AUDIO_MUTED && _musicSrc) { var q = _music.play(); if (q && q.catch) q.catch(function () {}); }
-        } catch (e) {}
-      });
-    }
-    if (vol != null) _musicVol = vol;
-    _musicSrc = url; _music.src = url; _music.volume = _musicVol; _music.muted = AUDIO_MUTED;
-    if (!AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
-  } catch (e) {}
+    if (!_musicGain) { _musicGain = _ac.createGain(); _musicGain.connect(_ac.destination); }
+    _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol;
+    var s = _ac.createBufferSource(); s.buffer = _musicBuf; s.loop = true;
+    s.connect(_musicGain); s.start(0);
+    _musicNode = s;   // started once; suspend/resume freezes/continues it, never re-created
+    return true;
+  } catch (e) { return false; }
 }
-// Background music with a bespoke-track-FIRST, procedural-FALLBACK policy. The
-// factory's gen_soundtrack.sh renders a unique synth_track.py mp3 per game to
-// opts.file; bgMusic plays it on the first user gesture (autoplay policy) and,
-// if that file is missing or won't decode, falls back to the zero-asset
+// Web Audio bg-music: fetch -> decodeAudioData -> looping BufferSource. NO media
+// element (=> no OS media player). onOk fires when the loop is decoded+started,
+// onErr on a 404/decode failure (bgMusic uses these to fall back to procedural).
+function music(url, vol, onOk, onErr) {
+  if (!url) { if (onErr) onErr(); return; }
+  if (vol != null) _musicVol = vol;
+  _musicUrl = url; _musicWant = true;
+  var c = audioCtx(); if (!c) { if (onErr) onErr(); return; }
+  if (!_musicGain) { try { _musicGain = c.createGain(); _musicGain.connect(c.destination); } catch (e) {} }
+  if (_musicGain) { try { _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol; } catch (e) {} }
+  if (_musicBuf) { if (_startMusicNode()) { if (onOk) onOk(); } else if (onErr) onErr(); return; }
+  try {
+    fetch(url).then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
+      .then(function (ab) { return new Promise(function (res, rej) { try { c.decodeAudioData(ab, res, rej); } catch (e) { rej(e); } }); })
+      .then(function (buf) { _musicBuf = buf; if (_startMusicNode()) { if (onOk) onOk(); } else if (onErr) onErr(); })
+      .catch(function () { if (onErr) onErr(); });
+  } catch (e) { if (onErr) onErr(); }
+}
+// Tab-hide / minimize must silence the mp3 loop + SFX (Yandex 1.3). On Yandex
+// game_api_pause/resume (wired in init) is authoritative; this is the cross-platform
+// fallback for the _ac context (_mus.ctx procedural music has its own handler in
+// startMusic). No window 'blur' — it fires spuriously inside the platform iframe.
+(function () {
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch (e) {} }
+    else if (!AUDIO_MUTED && !_extPaused) { try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {} }
+  });
+})();
+// Background music with an mp3-FIRST, procedural-FALLBACK policy. The factory's
+// gen_soundtrack.sh writes opts.file; bgMusic plays it on the first user gesture
+// and, if that file is missing or won't decode, falls back to the zero-asset
 // procedural engine so a build is NEVER silent. Mute (GF.toggleMute) + tab-hide
 // pause are inherited from music()/startMusic(). This is the canonical call in
 // the new-game template — games no longer call startMusic() directly.
@@ -1385,34 +1418,30 @@ function bgMusic(opts) {
   var fallback = function () {
     if (done) return; done = true;
     if (tmr) { clearTimeout(tmr); tmr = null; }
-    // Kill any still-buffering mp3 so a late-resolving track can't overlap the bed.
-    if (_music) { try { _music.pause(); _music.src = ''; } catch (e) {} }
+    // Commit to procedural: block a LATE mp3 decode from also starting (would double
+    // up with the synth bed) and stop the mp3 node if it already started.
+    _musicWant = false;
+    if (_musicNode) { try { _musicNode.stop(); } catch (e) {} _musicNode = null; }
     startMusic({ preset: preset, muted: AUDIO_MUTED });
   };
   var go = function () {
     ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.removeEventListener(ev, go, true); });
     if (!file) { fallback(); return; }
-    try {
-      music(file, opts.vol != null ? opts.vol : 0.5);
-      if (_music) {
-        _music.addEventListener('playing', win, { once: true });   // mp3 won -> no fallback
-        _music.addEventListener('error', fallback, { once: true }); // 404/decode -> procedural
-      }
-      // Backstop: if the mp3 still hasn't started after 6s (and isn't just muted),
-      // assume failure and fall back. 'playing'/'error' above resolve the common cases.
-      tmr = setTimeout(function () { if (!done && !AUDIO_MUTED && (!_music || _music.paused)) fallback(); }, 6000);
-    } catch (e) { fallback(); }
+    // music() decodes the mp3 through Web Audio; win() on success locks out the
+    // procedural fallback, fallback() on 404/decode-fail swaps to the synth bed.
+    music(file, opts.vol != null ? opts.vol : 0.5, win, fallback);
+    // Backstop: if neither callback fired in 6s, fall back. NOT gated on mute — a
+    // muted+hung mp3 must still start the (silent) procedural bed so unmute has audio.
+    tmr = setTimeout(function () { if (!done && !_musicNode) fallback(); }, 6000);
   };
   ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.addEventListener(ev, go, true); });
 }
 function toggleMute() {
   AUDIO_MUTED = !AUDIO_MUTED;
   try { localStorage.setItem('gf_muted', AUDIO_MUTED ? '1' : '0'); } catch (e) {}
-  if (_music) {
-    _music.muted = AUDIO_MUTED;
-    if (AUDIO_MUTED) { try { _music.pause(); } catch (e) {} }
-    else { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
-  }
+  if (_musicGain) { try { _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol; } catch (e) {} }
+  try { setMusicMuted(AUDIO_MUTED); } catch (e) {}   // procedural fallback bed must honour the toggle too
+  if (!AUDIO_MUTED) { audioCtx(); _startMusicNode(); }   // ensure the mp3 loop is live when unmuted
   return AUDIO_MUTED;
 }
 // ── External pause (Yandex 4.7 rewarded-ad mute + 1.3 game_api_pause / CG) ──
@@ -1425,14 +1454,14 @@ function pauseAudio() {
   _extPaused = true;
   try { if (_mus.ctx && _mus.ctx.state === 'running') _mus.ctx.suspend(); } catch (e) {}
   try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch (e) {}
-  try { if (_music) _music.pause(); } catch (e) {}
 }
 function resumeAudio() {
   if (!_extPaused) return;
   _extPaused = false;
+  if (document.hidden) return;   // tab still hidden — let visibilitychange resume on show (don't un-mute a hidden tab, 1.3)
   try { if (_mus.ctx && _mus.on && _mus.ctx.state === 'suspended') { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; } } catch (e) {}
   try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {}
-  try { if (_music && _musicSrc && !AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); } } catch (e) {}
+  try { if (_musicWant && _musicBuf && !AUDIO_MUTED) _startMusicNode(); } catch (e) {}
 }
 // vector speaker / muted-speaker icon (never emoji) — games place + wire the click
 function drawMuteIcon(c, x, y, r, muted) {
@@ -1446,13 +1475,695 @@ function drawMuteIcon(c, x, y, r, muted) {
 // resume audio + (re)start music on the first user gesture (autoplay policy)
 (function () {
   var kick = function () {
-    audioCtx();
-    if (_music && _musicSrc && !AUDIO_MUTED && _music.paused) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+    var c = audioCtx();
+    if (_musicWant && _musicBuf) _startMusicNode();
+    if (c && c.state === 'suspended' && !_extPaused && !document.hidden) { try { c.resume(); } catch (e) {} }
   };
   window.addEventListener('pointerdown', kick, { passive: true });
   window.addEventListener('touchstart', kick, { passive: true });
   window.addEventListener('keydown', kick);
 })();
+
+// ---- REMOTE CONFIG (server-tunable DATA, never code) ---------------------
+// GF.remoteConfig(slug, defaults[, opts]) -> Promise<config>
+//
+// Live-ops channel: a PUBLISHED game re-tunes itself from our server without
+// re-uploading a build. Server: https://game-factory.tech/api/config?slug=<s>
+// (Cloudflare Pages function, KV-backed; writes via token-gated
+// /api/admin/config). Payload shape: { tuning, events, daily, motd, version }.
+//
+// CONTRACT (Yandex-safe by construction - read before touching):
+//   * DATA ONLY. The payload may carry numbers / strings / booleans / arrays
+//     of those / plain nested objects. NEVER code: no eval, no new Function,
+//     no dynamic <script>/import anywhere in this path (yandex-presubmit
+//     greps fail the build otherwise). Difficulty multipliers, prices, event
+//     flags (double_coins), a daily seed, motd copy - that is the universe.
+//   * CONTENT DRIFT GUARD: config may tune numbers / flags / localized copy
+//     of mechanics ALREADY IN THE BUILD that moderation reviewed. It must
+//     never introduce new content types, screens, or mechanics a moderator
+//     has not seen.
+//   * ALLOWLIST MERGE: `defaults` IS the schema. A remote key is accepted
+//     only when the same key path exists in defaults with the same primitive
+//     type; everything else is dropped. __proto__ / constructor / prototype
+//     keys are discarded (prototype-pollution guard). Numbers must be finite
+//     and are clamped to opts.clamps['dot.path'] = [min, max] when given,
+//     else to +/-1e6. Strings cap at 400 chars, arrays at 64 primitive
+//     items, nesting at depth 4, the whole payload at 8 KB.
+//   * NEVER BLOCKS BOOT: resolves IMMEDIATELY with the cached last-good
+//     config from localStorage deep-merged over defaults (plain defaults on
+//     first run). The fetch is stale-while-revalidate in the background with
+//     a ~2s abort; a fresh payload is cached for the NEXT session and ALSO
+//     handed to opts.onUpdate(merged) if provided. LoadingAPI.ready() and
+//     the first playable frame never wait on it. With the network fully
+//     blocked the game plays identically on defaults - REQUIRED behavior.
+//   * AD CADENCE: route cadence numbers through GF.ads.configure() ONLY -
+//     the wrapper below bakes hard floors (minGapMs >= 60s, startupGraceMs
+//     >= 30s) so a bad config is physically unable to make ads frequent
+//     enough to violate Yandex ad rules. Config can only tune WITHIN the
+//     legal bounds (or make ads rarer).
+//
+// YANDEX DEPLOYMENT NOTE: platform builds run cross-origin, so the domain
+// game-factory.tech must be whitelisted per game in Console -> Settings ->
+// External hosts AT SUBMISSION TIME (CSP connect-src; it cannot help a draft
+// already locked in moderation). Until whitelisted, the fetch just times out
+// and defaults apply - the required failure mode anyway. Gallery builds are
+// same-origin and need nothing.
+//
+// PILOT: the monster-band build (P5) is the designated pilot - the first
+// game to ship a live GF.remoteConfig call. Games built before this block
+// existed predate the lib: do NOT retrofit or re-upload them for this.
+//
+// Usage (call from onReady; it never blocks, so placement is forgiving):
+//   var CFG = { tuning: { speed_mult: 1, price_mult: 1 },
+//               events: { double_coins: false },
+//               daily:  { seed: 0 },
+//               motd:   { en: '', ru: '' }, version: 0 };
+//   GF.remoteConfig('my_game_key', CFG, {
+//     clamps: { 'tuning.speed_mult': [0.5, 2], 'tuning.price_mult': [0.5, 3] },
+//     onUpdate: function (c) { CFG = c; },  // optional mid-session refresh
+//   }).then(function (c) { CFG = c; });
+var RC_URL = 'https://game-factory.tech/api/config';
+var RC_MAX_BYTES = 8192;
+function rcBadKey(k) { return k === '__proto__' || k === 'constructor' || k === 'prototype'; }
+function rcClone(v) { try { return JSON.parse(JSON.stringify(v)); } catch (e) { return v; } }
+function rcNum(rv, dv, lo, hi) {
+  if (typeof rv !== 'number' || !isFinite(rv)) return dv;
+  return rv < lo ? lo : rv > hi ? hi : rv;
+}
+function rcAccept(dv, rv, clamps, path, depth) {
+  if (dv !== null && typeof dv === 'object' && !Array.isArray(dv)) {
+    if (depth >= 4) return rcClone(dv);
+    return rcMerge(dv, rv, clamps, path, depth + 1);
+  }
+  if (typeof dv === 'number') {
+    var c = (clamps && Object.prototype.hasOwnProperty.call(clamps, path)) ? clamps[path] : null;
+    if (c && c.length === 2) return rcNum(rv, dv, c[0], c[1]);
+    return rcNum(rv, dv, -1e6, 1e6);
+  }
+  if (typeof dv === 'string')  return typeof rv === 'string'  ? rv.slice(0, 400) : dv;
+  if (typeof dv === 'boolean') return typeof rv === 'boolean' ? rv : dv;
+  if (Array.isArray(dv)) {
+    if (!Array.isArray(rv)) return rcClone(dv);
+    var out = [];
+    for (var i = 0; i < rv.length && i < 64; i++) {
+      var v = rv[i];
+      if (typeof v === 'number' && isFinite(v)) out.push(rcNum(v, 0, -1e6, 1e6));
+      else if (typeof v === 'string')  out.push(v.slice(0, 400));
+      else if (typeof v === 'boolean') out.push(v);
+    }
+    return out;
+  }
+  return rcClone(dv); // default of unknown type (null etc.) - keep the default
+}
+function rcMerge(defs, remote, clamps, path, depth) {
+  var out = {};
+  var hasR = !!(remote && typeof remote === 'object' && !Array.isArray(remote));
+  for (var k in defs) {
+    if (!Object.prototype.hasOwnProperty.call(defs, k) || rcBadKey(k)) continue;
+    var p = path ? path + '.' + k : k;
+    var rv = (hasR && Object.prototype.hasOwnProperty.call(remote, k)) ? remote[k] : undefined;
+    out[k] = rcAccept(defs[k], rv, clamps, p, depth);
+  }
+  // `version` rides along even when defaults omit it, so a game/tool can read
+  // WHICH server config applied (0 = defaults / nothing fetched yet).
+  if (!path) out.version = rcNum(hasR ? remote.version : undefined, (typeof defs.version === 'number' && isFinite(defs.version)) ? defs.version : 0, 0, 2147483647);
+  return out;
+}
+function remoteConfig(slug, defaults, opts) {
+  opts = opts || {};
+  defaults = (defaults && typeof defaults === 'object' && !Array.isArray(defaults)) ? defaults : {};
+  slug = String(slug || '').toLowerCase().replace(/[^a-z0-9_-]/g, '').slice(0, 64);
+  var key = 'gf_rc_' + slug;
+  var cached = null;
+  try {
+    var raw = localStorage.getItem(key);
+    if (raw && raw.length <= RC_MAX_BYTES) cached = JSON.parse(raw);
+  } catch (e) { cached = null; }
+  var merged = rcMerge(defaults, cached, opts.clamps, '', 0);
+  // Background stale-while-revalidate refresh: starts AFTER resolve, off the
+  // boot path, capped by an abort timer so a dead or CSP-blocked endpoint
+  // costs nothing. Fresh data lands in localStorage for the next session.
+  if (slug && typeof fetch === 'function') {
+    setTimeout(function () {
+      var ctl = (typeof AbortController === 'function') ? new AbortController() : null;
+      var ms = (typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0) ? opts.timeoutMs : 2000;
+      var to = setTimeout(function () { try { if (ctl) ctl.abort(); } catch (e) {} }, ms);
+      fetch(RC_URL + '?slug=' + encodeURIComponent(slug), ctl ? { signal: ctl.signal } : {})
+        .then(function (res) { if (!res || !res.ok) throw new Error('rc_http'); return res.text(); })
+        .then(function (txt) {
+          clearTimeout(to);
+          if (!txt || txt.length > RC_MAX_BYTES) return;
+          var data = JSON.parse(txt);
+          if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+          try { localStorage.setItem(key, txt); } catch (e) {}
+          if (typeof opts.onUpdate === 'function') {
+            try { opts.onUpdate(rcMerge(defaults, data, opts.clamps, '', 0)); } catch (e) {}
+          }
+        })
+        .catch(function () { clearTimeout(to); });
+    }, 400);
+  }
+  return Promise.resolve(merged);
+}
+// Ad-cadence HARD FLOORS: wrap GF.ads.configure so nothing (remote config, a
+// buggy game, a typo) can set interstitial cadence below the Yandex-legal
+// bound. Guarded so lib snapshots without the ads helper skip it cleanly.
+(function () {
+  try {
+    if (typeof adsApi === 'undefined' || !adsApi || typeof adsApi.configure !== 'function') return;
+    var RC_AD_MIN_GAP_FLOOR = 60000; // Yandex 4.4: >= 60s between interstitials
+    var RC_AD_GRACE_FLOOR = 30000;   // never an interstitial in the opening 30s
+    var rawConfigure = adsApi.configure;
+    adsApi.configure = function (o) {
+      o = o || {};
+      var safe = {};
+      if (typeof o.minGapMs === 'number' && isFinite(o.minGapMs)) safe.minGapMs = Math.max(RC_AD_MIN_GAP_FLOOR, o.minGapMs);
+      if (typeof o.startupGraceMs === 'number' && isFinite(o.startupGraceMs)) safe.startupGraceMs = Math.max(RC_AD_GRACE_FLOOR, o.startupGraceMs);
+      return rawConfigure(safe);
+    };
+  } catch (e) {}
+})();
+
+// ---- GAME FUNNEL (disabled) -----------------------------------------------
+// Game-level analytics belong in GameAnalytics. Keep GF.funnel as a no-op so
+// older game code can call the compatibility API without producing Cloudflare KV writes.
+var funnelApi = {
+  get active() { return false; },
+  mark: function () {},
+  flush: function () {},
+};
+
+// ---- IN-APP PURCHASES (GF.payments) - Yandex Payments wrapper --------------
+// Yandex's catalog ML rewards revenue, so every game ships IAP-ready. This is
+// a thin, zero-dependency wrapper over ysdk.getPayments that no-ops gracefully
+// everywhere else (gallery / CrazyGames / GamePush have no equivalent here, so
+// the shop UI must simply not exist on those builds).
+//
+// WIRING A SHOP (the contract a game follows):
+//   1. onReady:  GF.initPayments().then(function (ok) {
+//                  if (!ok) return;                       // not Yandex / not enabled -> NO shop UI
+//                  GF.restorePurchases(function (list) {  // re-apply durables + reconcile
+//                    list.forEach(function (p) {
+//                      if (p.productID === 'noads') { st.noads = true; }       // durable: never consume
+//                      else if (p.productID === 'coins_m') {                   // consumable still in
+//                        GF.payments.consume(p.purchaseToken).then(function (done) { // getPurchases = paid
+//                          if (done) { st.coins += 500; GF.saveRun(); }        // but NOT granted yet ->
+//                        });                                                   // consume FIRST, grant after
+//                      }
+//                    });
+//                  });
+//                });
+//   2. Render shop buttons ONLY when GF.payments.available AND the product has
+//      a catalog entry - never a priceless or dead button. NEVER hardcode a
+//      price: draw entry.priceValue PLUS the YAN currency icon image from
+//      entry.priceCurrencyImage (Yandex REQUIRES the icon, not "YAN" text).
+//      Canvas pattern: var im = new Image(); im.crossOrigin = 'anonymous';
+//      im.src = entry.priceCurrencyImage; then drawImage next to the number.
+//   3. Purchases fire from an EXPLICIT user click only (never auto-open a shop):
+//        GF.buy('coins_m', function (purchase) { st.coins += 500; GF.saveRun(); },
+//               function (reason) { /* closed/failed - UI just stays */ });
+//      Consumables are consumed BEFORE onSuccess fires (consume-then-grant: a
+//      failed consume re-delivers via getPurchases on next boot, so granting
+//      first would dupe currency - the merge_guns free-cores bug). Permanent
+//      SKUs (ad-free, doublers) pass { consume: false } and re-apply on every
+//      boot via restorePurchases.
+//   4. Console side (per game, BEFORE this does anything): enable purchases in
+//      the Yandex Console, create products with matching ids, tick the
+//      "in-game purchases" flag on the draft. Until then initPayments resolves
+//      false and the game looks identical to a no-IAP build.
+var _pay = { obj: null, catalog: [], initP: null, busyTokens: {} };
+function _payNorm(p) {
+  p = p || {};
+  var d = p.purchaseData || {};
+  return {
+    productID: p.productID || p.productId || d.productID || d.productId || '',
+    purchaseToken: p.purchaseToken || d.purchaseToken || '',
+    developerPayload: p.developerPayload || d.developerPayload || '',
+    raw: p,
+  };
+}
+var paymentsApi = {
+  available: false,
+  // Cached getCatalog() result, normalized to plain objects:
+  //   { id, title, description, imageURI, price, priceValue,
+  //     priceCurrencyCode, priceCurrencyImage }
+  // priceCurrencyImage is the official YAN icon URL (medium) - draw it next to
+  // priceValue wherever a price shows. Empty array until init succeeds.
+  catalog: function () { return _pay.catalog; },
+  // Convenience lookup; null when the product is absent (button must not render).
+  product: function (id) {
+    for (var i = 0; i < _pay.catalog.length; i++) {
+      if (_pay.catalog[i].id === id) return _pay.catalog[i];
+    }
+    return null;
+  },
+  // Consume a consumable purchase by token. Resolves true on success, false on
+  // any failure (never rejects). Guarded so one token can't be double-processed
+  // by a concurrent buy + restore in the same session.
+  consume: function (purchaseToken) {
+    if (!purchaseToken || !_pay.obj || typeof _pay.obj.consumePurchase !== 'function') return Promise.resolve(false);
+    if (_pay.busyTokens[purchaseToken]) return Promise.resolve(false);
+    _pay.busyTokens[purchaseToken] = true;
+    try {
+      return _pay.obj.consumePurchase(purchaseToken)
+        .then(function () { return true; })
+        .catch(function () { delete _pay.busyTokens[purchaseToken]; return false; });
+    } catch (e) { delete _pay.busyTokens[purchaseToken]; return Promise.resolve(false); }
+  },
+  // Escape hatch to the raw ysdk payments object (advanced / debugging).
+  raw: function () { return _pay.obj; },
+};
+// GF.initPayments([ysdk]) -> Promise<boolean>. Call once from onReady (safe on
+// every platform). On Yandex: ysdk.getPayments({ signed: true }) + a one-shot
+// catalog fetch; flips GF.payments.available true on success. On ANY failure
+// (not Yandex, purchases not enabled in the Console, sandbox without the
+// purchases flag) it resolves false, never throws, never retries.
+function initPayments(sdk) {
+  if (_pay.initP) return _pay.initP;
+  _pay.initP = new Promise(function (resolve) {
+    try {
+      sdk = sdk || window.ysdk;
+      if (!sdk || typeof sdk.getPayments !== 'function') { resolve(false); return; }
+      sdk.getPayments({ signed: true }).then(function (p) {
+        _pay.obj = p;
+        paymentsApi.available = true;
+        // Catalog is best-effort: availability already lets restorePurchases
+        // re-apply owned durables even if the catalog read fails (no prices ->
+        // no buy buttons render, but the player keeps what they paid for).
+        var done = function () { resolve(true); };
+        try {
+          p.getCatalog().then(function (items) {
+            _pay.catalog = (items || []).map(function (it) {
+              it = it || {};
+              var iconUrl = '';
+              try { if (typeof it.getPriceCurrencyImage === 'function') iconUrl = it.getPriceCurrencyImage('medium') || ''; } catch (e) {}
+              return {
+                id: it.id || '',
+                title: it.title || '',
+                description: it.description || '',
+                imageURI: it.imageURI || '',
+                price: it.price || '',
+                priceValue: it.priceValue || '',
+                priceCurrencyCode: it.priceCurrencyCode || '',
+                priceCurrencyImage: iconUrl,
+              };
+            });
+            done();
+          }).catch(done);
+        } catch (e) { done(); }
+      }).catch(function () { resolve(false); });
+    } catch (e) { resolve(false); }
+  });
+  return _pay.initP;
+}
+// GF.buy(productId, onSuccess, onFail[, opts]) - purchase flow, USER CLICK ONLY.
+// opts.consume (default true): consumables are consumed FIRST, onSuccess(purchase)
+// fires only after the consume resolves (see the wiring comment for why). Pass
+// { consume: false } for permanent SKUs - they stay in getPurchases forever and
+// restorePurchases re-applies them each boot. opts.payload -> developerPayload.
+// Returns Promise<{ ok, purchase?, reason? }>; resolves, never rejects.
+function buy(productId, onSuccess, onFail, opts) {
+  opts = opts || {};
+  var fail = function (reason) {
+    if (typeof onFail === 'function') { try { onFail(reason); } catch (e) {} }
+    return { ok: false, reason: reason };
+  };
+  var win = function (purchase) {
+    if (typeof onSuccess === 'function') { try { onSuccess(purchase); } catch (e) {} }
+    return { ok: true, purchase: purchase };
+  };
+  if (!paymentsApi.available || !_pay.obj || typeof _pay.obj.purchase !== 'function') {
+    return Promise.resolve(fail('unavailable'));
+  }
+  var req = { id: String(productId) };
+  if (opts.payload != null) req.developerPayload = String(opts.payload);
+  try {
+    return _pay.obj.purchase(req).then(function (raw) {
+      var purchase = _payNorm(raw);
+      if (opts.consume === false) return win(purchase);
+      return paymentsApi.consume(purchase.purchaseToken).then(function (consumed) {
+        // Failed consume -> do NOT grant now; the purchase stays in
+        // getPurchases and the boot reconcile delivers it exactly once.
+        return consumed ? win(purchase) : fail('consume_failed');
+      });
+    }).catch(function () { return fail('purchase_failed'); });
+  } catch (e) { return Promise.resolve(fail('purchase_failed')); }
+}
+// GF.restorePurchases(cb) - call once after initPayments resolves true. cb gets
+// the normalized list ([{ productID, purchaseToken, developerPayload, raw }]).
+// Durables (ad-free, doublers): re-apply ownership flags. Consumables present
+// here were PAID but never granted (failed consume / closed tab): consume-then-
+// grant them via GF.payments.consume. cb always fires exactly once ([] off-
+// Yandex or on any failure); never throws.
+function restorePurchases(cb) {
+  var emit = function (list) {
+    if (typeof cb === 'function') { try { cb(list); } catch (e) {} }
+  };
+  if (!paymentsApi.available || !_pay.obj || typeof _pay.obj.getPurchases !== 'function') { emit([]); return; }
+  try {
+    _pay.obj.getPurchases().then(function (purchases) {
+      var out = [];
+      try { for (var i = 0; i < (purchases || []).length; i++) out.push(_payNorm(purchases[i])); } catch (e) {}
+      emit(out);
+    }).catch(function () { emit([]); });
+  } catch (e) { emit([]); }
+}
+
+// ---- GAME FEEL / JUICE (GF.juice) - pooled feedback primitives (WS-D) ------
+// Tested LIBRARY for game feel. Build agents call these primitives instead of
+// hand-rolling tweens / particles / shake per game (Tim 2026-06-11: feel comes
+// from a tested library, not per-game codegen). Zero-dependency, zero-DOM: the
+// module never owns the canvas, never adds listeners, never plays audio, never
+// allocates per frame (fixed pools, slots reused), and every call is safe
+// before GF.init (no-ops on empty state). All `ms` params are MILLISECONDS;
+// GF.juice.update(dt) takes SECONDS (the same dt GF passes to onUpdate).
+//
+// WIRING (6 lines inside the game's existing loop):
+//   onUpdate(dt):  GF.juice.update(dt);                  // RAW dt, once per frame
+//                  var gdt = dt * GF.juice.timeScale;    // game logic advances by gdt
+//   onDraw(ctx):   ctx.save(); ctx.translate(GF.juice.offsetX, GF.juice.offsetY);
+//                  /* world + HUD */ GF.juice.particles.draw(ctx); GF.juice.texts.draw(ctx);
+//                  ctx.restore();
+//                  GF.juice.drawFlash(ctx);              // LAST, outside the camera transform
+//
+// FEEL CHECKLIST (build agents MUST satisfy; the post-build-tester feel gate
+// probes it - two frames captured 80-150ms after a state-changing tap must
+// differ, and an SFX call must register):
+//   * EVERY player tap that changes state -> visible feedback within 100ms
+//     (tween / punch / particles.burst / floatText) AND a GF.sfx(...) call.
+//   * merge / kill / collect -> punch(target, 'scale', ...) + particles.burst
+//     + floatText('+N').
+//   * damage / death -> shake + flash (hitStop only on BIG hits).
+//   * purchase / upgrade / level-up -> celebratory multi-color burst +
+//     floatText + GF.sfx('reward'|'levelup').
+//   * Do NOT hand-roll per-game tween/particle systems - use these primitives.
+//
+// Timing model: hit-stop recovery, shake decay and flash decay run on RAW dt;
+// tweens / particles / texts advance on dt * timeScale, so the world and its
+// feedback freeze together during a hit-stop (the held impact frame). The
+// granular particles.update / texts.update exist only for games that do NOT
+// call GF.juice.update - calling both double-steps them.
+var J_TWEEN_CAP = 64, J_PROP_CAP = 8, J_PART_CAP = 256, J_TEXT_CAP = 32;
+var J_EASE = {
+  linear:         function (t) { return t; },
+  easeOutCubic:   function (t) { var u = 1 - t; return 1 - u * u * u; },
+  easeOutBack:    function (t) { var u = t - 1; return 1 + 2.70158 * u * u * u + 1.70158 * u * u; },
+  easeOutElastic: function (t) { if (t <= 0) return 0; if (t >= 1) return 1; return Math.pow(2, -10 * t) * Math.sin((t * 10 - 0.75) * (2 * Math.PI / 3)) + 1; },
+  easeInQuad:     function (t) { return t * t; },
+};
+// Tween pool: fixed slots with fixed-capacity per-prop arrays, reused forever.
+var _jTweens = [];
+(function () {
+  for (var i = 0; i < J_TWEEN_CAP; i++) {
+    _jTweens.push({ on: false, obj: null, n: 0, keys: new Array(J_PROP_CAP),
+      from: new Array(J_PROP_CAP), to: new Array(J_PROP_CAP), pon: new Array(J_PROP_CAP),
+      t: 0, dur: 1, ease: J_EASE.linear, done: null });
+  }
+})();
+var _jTwSteal = 0;
+// Release any live tween driving the same obj+prop (last-writer-wins, so a new
+// punch/tween never fights an old one). Returns the old tween's TARGET for that
+// prop (the true resting value) or null - punch uses it to avoid base drift.
+function _jRelease(obj, key) {
+  var base = null;
+  for (var i = 0; i < J_TWEEN_CAP; i++) {
+    var s = _jTweens[i];
+    if (!s.on || s.obj !== obj) continue;
+    for (var p = 0; p < s.n; p++) {
+      if (s.pon[p] && s.keys[p] === key) { base = s.to[p]; s.pon[p] = false; }
+    }
+  }
+  return base;
+}
+// GF.juice.tween(obj, props, ms, easing, onDone) -> opaque handle (recycled
+// after completion - do not retain). props = { propName: targetNumber, ... }
+// (numeric props only, max 8). easing: 'linear' | 'easeOutCubic' (default) |
+// 'easeOutBack' | 'easeOutElastic' | 'easeInQuad' | custom fn(t)->k.
+function jTween(obj, props, ms, easing, onDone) {
+  if (!obj || typeof obj !== 'object' || !props) return null;
+  var slot = null;
+  for (var i = 0; i < J_TWEEN_CAP; i++) { if (!_jTweens[i].on) { slot = _jTweens[i]; break; } }
+  if (!slot) {
+    // Pool exhausted: evict a live tween round-robin. Its onDone MUST still
+    // fire (same contract as natural completion in _jTweensUpdate) - game
+    // sequencing chained on it would otherwise stall forever (found in the
+    // 2026-06-11 review). slot.on stays true while the victim's callback runs
+    // so a re-entrant jTween() inside it cannot grab this exact slot mid-setup;
+    // released right after, then claimed for real below. Allocation-free.
+    slot = _jTweens[_jTwSteal % J_TWEEN_CAP]; _jTwSteal++;
+    var stolenCb = slot.done;
+    slot.done = null; slot.obj = null;
+    slot.on = true;
+    if (stolenCb) { try { stolenCb(); } catch (e) {} }
+    slot.on = false;
+  }
+  var n = 0;
+  for (var k in props) {
+    if (!Object.prototype.hasOwnProperty.call(props, k) || n >= J_PROP_CAP) continue;
+    var to = props[k], from = obj[k];
+    if (typeof to !== 'number' || !isFinite(to) || typeof from !== 'number' || !isFinite(from)) continue;
+    _jRelease(obj, k);
+    slot.keys[n] = k; slot.from[n] = from; slot.to[n] = to; slot.pon[n] = true; n++;
+  }
+  if (n === 0) return null;
+  var dur = (typeof ms === 'number' && isFinite(ms) && ms > 0) ? ms / 1000 : 0;
+  var ez = (typeof easing === 'function') ? easing : (J_EASE[easing] || J_EASE.easeOutCubic);
+  if (dur <= 0) {            // instant: apply targets now, fire onDone, no slot burned
+    try { for (var q = 0; q < n; q++) obj[slot.keys[q]] = slot.to[q]; } catch (e) {}
+    if (typeof onDone === 'function') { try { onDone(); } catch (e) {} }
+    return null;
+  }
+  slot.obj = obj; slot.n = n; slot.t = 0; slot.dur = dur; slot.ease = ez;
+  slot.done = (typeof onDone === 'function') ? onDone : null;
+  slot.on = true;
+  return slot;
+}
+function _jTweensUpdate(dt) {
+  for (var i = 0; i < J_TWEEN_CAP; i++) {
+    var s = _jTweens[i];
+    if (!s.on) continue;
+    s.t += dt;
+    var fin = s.t >= s.dur;
+    var k = fin ? 1 : s.ease(s.t / s.dur);
+    try {
+      for (var p = 0; p < s.n; p++) {
+        if (!s.pon[p]) continue;
+        s.obj[s.keys[p]] = fin ? s.to[p] : s.from[p] + (s.to[p] - s.from[p]) * k;
+      }
+    } catch (e) { fin = true; }   // frozen obj / throwing setter: kill the slot
+    if (fin) {
+      var cb = s.done;
+      s.on = false; s.obj = null; s.done = null;
+      if (cb) { try { cb(); } catch (e) {} }
+    }
+  }
+}
+// GF.juice.punch(obj, prop, amount, ms) - kick a numeric prop by +amount and
+// spring back to its resting value (easeOutElastic). Drift-safe under rapid
+// re-punches: the resting base is recovered from any in-flight punch's target.
+function jPunch(obj, prop, amount, ms) {
+  if (!obj || typeof obj !== 'object' || typeof amount !== 'number' || !isFinite(amount)) return null;
+  var base = _jRelease(obj, prop);
+  if (base === null) base = obj[prop];
+  if (typeof base !== 'number' || !isFinite(base)) return null;
+  try { obj[prop] = base + amount; } catch (e) { return null; }
+  var tgt = {}; tgt[prop] = base;
+  return jTween(obj, tgt, (typeof ms === 'number' && ms > 0) ? ms : 220, 'easeOutElastic');
+}
+// Screen shake: game applies GF.juice.offsetX/offsetY to its camera/canvas
+// transform each frame. intensity = max offset in design px (scaled by GF.S
+// internally); decays smoothly (quadratic falloff) over ms. Re-trigger keeps
+// the stronger of current-remaining vs new.
+var _jShake = { amp: 0, t: 0, dur: 1, x: 0, y: 0 };
+function jShake(intensity, ms) {
+  if (typeof intensity !== 'number' || !isFinite(intensity) || intensity <= 0) return;
+  var remain = _jShake.t > 0 ? _jShake.amp * (_jShake.t / _jShake.dur) : 0;
+  _jShake.amp = Math.max(remain, intensity);
+  _jShake.dur = _jShake.t = Math.max(1, (typeof ms === 'number' && isFinite(ms)) ? ms : 300) / 1000;
+}
+function _jShakeUpdate(dt) {
+  if (_jShake.t <= 0) { _jShake.x = 0; _jShake.y = 0; return; }
+  _jShake.t -= dt;
+  if (_jShake.t <= 0) { _jShake.t = 0; _jShake.amp = 0; _jShake.x = 0; _jShake.y = 0; return; }
+  var f = _jShake.t / _jShake.dur, p = _jShake.amp * f * f * S;
+  _jShake.x = (Math.random() * 2 - 1) * p;
+  _jShake.y = (Math.random() * 2 - 1) * p;
+}
+// Hit-stop: freezes GF.juice.timeScale to 0 for up to 120ms, then ramps back
+// to 1 over ~80ms automatically. The game multiplies its logic dt by timeScale.
+var _jStop = 0, _jScale = 1;
+function jHitStop(ms) {
+  if (typeof ms !== 'number' || !isFinite(ms) || ms <= 0) return;
+  var s = Math.min(ms, 120) / 1000;
+  if (s > _jStop) _jStop = s;
+}
+function _jStopUpdate(dt) {
+  if (_jStop > 0) {
+    _jStop -= dt;
+    _jScale = 0;
+    if (_jStop < 0) _jStop = 0;
+  } else if (_jScale < 1) {
+    _jScale = Math.min(1, _jScale + dt * 12);
+  }
+}
+// Particle pool: J_PART_CAP preallocated slots, swap-remove on death, steal
+// round-robin when full - a burst storm can never grow memory or tank a frame.
+var _jParts = new Array(J_PART_CAP), _jPartN = 0, _jPartSteal = 0;
+(function () {
+  for (var i = 0; i < J_PART_CAP; i++) _jParts[i] = { x: 0, y: 0, vx: 0, vy: 0, size: 1, life: 0, life0: 1, grav: 0, col: '#fff' };
+})();
+// GF.juice.particles.burst(x, y, opts) - opts (all optional):
+//   count (12), color ('#ffd34d') or colors [array, cycled], speed (170 px/s),
+//   gravity (420 px/s^2, negative floats up), size (5 px), life (0.55 s),
+//   angle (radians, default omni), spread (radians around angle, default 2PI).
+// Design-px units, scaled by GF.S internally.
+function jBurst(x, y, opts) {
+  if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
+  opts = opts || {};
+  var count = Math.min((opts.count | 0) > 0 ? (opts.count | 0) : 12, J_PART_CAP);
+  var cols = opts.colors, col = opts.color || '#ffd34d';
+  var speed = (typeof opts.speed === 'number' && isFinite(opts.speed)) ? opts.speed : 170;
+  var grav = (typeof opts.gravity === 'number' && isFinite(opts.gravity)) ? opts.gravity : 420;
+  var size = (typeof opts.size === 'number' && opts.size > 0) ? opts.size : 5;
+  var life = (typeof opts.life === 'number' && opts.life > 0) ? opts.life : 0.55;
+  var ang = (typeof opts.angle === 'number' && isFinite(opts.angle)) ? opts.angle : 0;
+  var spread = (typeof opts.spread === 'number' && isFinite(opts.spread)) ? opts.spread : Math.PI * 2;
+  for (var i = 0; i < count; i++) {
+    var p;
+    if (_jPartN < J_PART_CAP) p = _jParts[_jPartN++];
+    else { p = _jParts[_jPartSteal % J_PART_CAP]; _jPartSteal++; }   // pool full: recycle
+    var a = ang + (Math.random() - 0.5) * spread;
+    var sp = speed * (0.35 + Math.random() * 0.95) * S;
+    p.x = x; p.y = y;
+    p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp;
+    p.size = size * (0.6 + Math.random() * 0.8) * S;
+    p.life0 = p.life = life * (0.7 + Math.random() * 0.6);
+    p.grav = grav * S;
+    p.col = (cols && cols.length) ? cols[i % cols.length] : col;
+  }
+}
+function _jPartsUpdate(dt) {
+  for (var i = 0; i < _jPartN; i++) {
+    var p = _jParts[i];
+    p.life -= dt;
+    if (p.life <= 0) {
+      _jPartN--;
+      _jParts[i] = _jParts[_jPartN]; _jParts[_jPartN] = p;   // swap-remove, no alloc
+      i--;
+      continue;
+    }
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += p.grav * dt;
+  }
+}
+function jPartsDraw(c) {
+  if (!c || !_jPartN) return;
+  for (var i = 0; i < _jPartN; i++) {
+    var p = _jParts[i], lf = p.life / p.life0;
+    c.globalAlpha = lf < 0 ? 0 : lf > 1 ? 1 : lf;
+    c.fillStyle = p.col;
+    c.beginPath(); c.arc(p.x, p.y, p.size * (0.4 + 0.6 * lf), 0, Math.PI * 2); c.fill();
+  }
+  c.globalAlpha = 1;
+}
+// Floating text pool (score/damage popups): rise + fade, font precomputed at
+// spawn so draw allocates nothing.
+var _jTexts = new Array(J_TEXT_CAP), _jTextN = 0, _jTextSteal = 0;
+(function () {
+  for (var i = 0; i < J_TEXT_CAP; i++) _jTexts[i] = { x: 0, y: 0, txt: '', col: '#fff', font: '', life: 0, life0: 1, vy: 0 };
+})();
+// GF.juice.floatText(x, y, text, opts) - opts (all optional):
+//   color ('#fff'), size (16 design px), life (0.9 s), rise (46 px over life).
+function jFloatText(x, y, text, opts) {
+  if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
+  opts = opts || {};
+  var f;
+  if (_jTextN < J_TEXT_CAP) f = _jTexts[_jTextN++];
+  else { f = _jTexts[_jTextSteal % J_TEXT_CAP]; _jTextSteal++; }
+  var size = (typeof opts.size === 'number' && opts.size > 0) ? opts.size : 16;
+  var life = (typeof opts.life === 'number' && opts.life > 0) ? opts.life : 0.9;
+  var rise = (typeof opts.rise === 'number' && isFinite(opts.rise)) ? opts.rise : 46;
+  f.x = x; f.y = y; f.txt = String(text == null ? '' : text);
+  f.col = opts.color || '#fff';
+  f.font = 'bold ' + Math.round(clamp(size * S, 10, 34)) + 'px sans-serif';
+  f.life0 = f.life = life;
+  f.vy = -(rise * S) / life;
+}
+function _jTextsUpdate(dt) {
+  for (var i = 0; i < _jTextN; i++) {
+    var f = _jTexts[i];
+    f.life -= dt;
+    if (f.life <= 0) {
+      _jTextN--;
+      _jTexts[i] = _jTexts[_jTextN]; _jTexts[_jTextN] = f;
+      i--;
+      continue;
+    }
+    f.y += f.vy * dt;
+  }
+}
+function jTextsDraw(c) {
+  if (!c || !_jTextN) return;
+  c.textAlign = 'center'; c.textBaseline = 'alphabetic';
+  for (var i = 0; i < _jTextN; i++) {
+    var f = _jTexts[i], lf = f.life / f.life0;
+    c.globalAlpha = lf < 0 ? 0 : lf > 1 ? 1 : lf;
+    c.font = f.font;
+    c.fillStyle = f.col;
+    c.fillText(f.txt, f.x, f.y);
+  }
+  c.globalAlpha = 1;
+}
+// Full-screen flash: GF.juice.flash(color, ms[, peakAlpha]) then draw it LAST
+// each frame via GF.juice.drawFlash(ctx). Rect is padded so it still covers the
+// screen when drawn inside a shaken camera transform.
+var _jFlash = { col: '#fff', t: 0, dur: 1, peak: 0.45 };
+function jFlash(color, ms, peak) {
+  _jFlash.col = color || '#fff';
+  _jFlash.dur = _jFlash.t = Math.max(1, (typeof ms === 'number' && isFinite(ms) && ms > 0) ? ms : 120) / 1000;
+  _jFlash.peak = (typeof peak === 'number' && isFinite(peak)) ? clamp(peak, 0, 1) : 0.45;
+}
+function _jFlashUpdate(dt) { if (_jFlash.t > 0) { _jFlash.t -= dt; if (_jFlash.t < 0) _jFlash.t = 0; } }
+function jFlashDraw(c) {
+  if (!c || _jFlash.t <= 0) return;
+  var k = _jFlash.t / _jFlash.dur;
+  c.globalAlpha = _jFlash.peak * k * k;
+  c.fillStyle = _jFlash.col;
+  c.fillRect(-64, -64, W + 128, H + 128);
+  c.globalAlpha = 1;
+}
+// Master per-frame tick. RAW dt in SECONDS (pass GF's onUpdate dt straight in).
+function jUpdate(dt) {
+  dt = (typeof dt === 'number' && isFinite(dt) && dt > 0) ? (dt > 0.1 ? 0.1 : dt) : 0;
+  _jStopUpdate(dt);                 // raw time: recovery must run while frozen
+  var sdt = dt * _jScale;           // world time: feedback freezes with the game
+  _jTweensUpdate(sdt);
+  _jPartsUpdate(sdt);
+  _jTextsUpdate(sdt);
+  _jShakeUpdate(dt);                // raw time: shake/flash keep moving in a hit-stop
+  _jFlashUpdate(dt);
+}
+var juiceApi = {
+  update: jUpdate,
+  tween: jTween,
+  punch: jPunch,
+  shake: jShake,
+  hitStop: jHitStop,
+  get timeScale() { return _jScale; },
+  get offsetX() { return _jShake.x; },
+  get offsetY() { return _jShake.y; },
+  particles: { burst: jBurst, draw: jPartsDraw, update: _jPartsUpdate },
+  floatText: jFloatText,
+  texts: { draw: jTextsDraw, update: _jTextsUpdate },
+  flash: jFlash,
+  drawFlash: jFlashDraw,
+  // Live pool occupancy - used by the feel gate + harness to prove pooling.
+  counts: function () {
+    var tw = 0;
+    for (var i = 0; i < J_TWEEN_CAP; i++) if (_jTweens[i].on) tw++;
+    return { tweens: tw, particles: _jPartN, texts: _jTextN };
+  },
+};
 
 window.GF = {
   init: init,
@@ -1471,10 +2182,15 @@ window.GF = {
   clamp: clamp, lerp: lerp, dist: dist, rr: rr,
   // Input
   keys: keys, touch: touch,
-  // FX
+  // FX (legacy one-shots; prefer GF.juice below for anything new)
   spawnParticles: spawnParticles,
   spawnFloat: spawnFloat,
   setShake: setShake,
+  // Game feel / juice (REQUIRED on every state-changing tap - see the GAME
+  // FEEL / JUICE block above for the 6-line wiring + the FEEL CHECKLIST).
+  // GF.juice.update(dt) + tween/punch/shake/hitStop/particles.burst/floatText/
+  // flash; pooled, allocation-free per frame, safe before init.
+  juice: juiceApi,
   // Scroll regions (REQUIRED for any screen whose content can exceed the
   // viewport - long lists/grids). GF.makeScroll(id, {x,y,w,h}) -> controller
   // with .setViewport/.setContentHeight/.begin/.end/.draw/.handleWheel/.dragStart/
@@ -1488,11 +2204,26 @@ window.GF = {
   exposeReach: exposeReach,
   exposeTour: exposeTour,
   // Audio (REQUIRED before publish) — GF.sfx('merge'|'spawn'|'hit'|'levelup'|'unlock'|
-  // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
+  // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.bgMusic({file:'audio/bg_track.mp3'}),
   // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
   sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
-  // Procedural music bed (no-credit baseline; GF.music(mp3) is the Suno upgrade):
+  // Procedural music bed + mp3-first background helper:
   startMusic: startMusic, setMusicMuted: setMusicMuted, bgMusic: bgMusic,
+  // Remote config (live-ops DATA channel - see the REMOTE CONFIG block
+  // above for the contract: never code, never blocks boot, offline = defaults).
+  remoteConfig: remoteConfig,
+  // Game funnel compatibility hook. Game analytics belongs in GameAnalytics;
+  // GF.funnel is a no-op and must not send Cloudflare/Workers KV telemetry.
+  funnel: funnelApi,
+  // In-app purchases (Yandex Payments - see the IN-APP PURCHASES block above).
+  // GF.initPayments() in onReady -> GF.payments.available / .catalog() ->
+  // GF.buy(id, onSuccess, onFail[, {consume,payload}]) from a user click ->
+  // GF.restorePurchases(cb) reconcile on boot. Shop UI renders ONLY when
+  // available && catalog entry exists; price = priceValue + YAN icon image.
+  initPayments: initPayments,
+  payments: paymentsApi,
+  buy: buy,
+  restorePurchases: restorePurchases,
   // Suspend/resume ALL audio over an ad or platform pause (Yandex 4.7 + 1.3).
   // showAd() brackets these automatically; call directly only for custom flows.
   pauseAudio: pauseAudio, resumeAudio: resumeAudio,

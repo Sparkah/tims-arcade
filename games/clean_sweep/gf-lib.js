@@ -64,10 +64,27 @@ resize();
 //   - exposes GF.saveRun() — call after every state transition
 // The game keeps its own state shape; the lib only ferries JSON.
 var _persistKey = null, _persistGetter = null;
+function _platformStorage() {
+  try {
+    if (platform === 'gamepix' && window.GamePix && window.GamePix.localStorage) {
+      return window.GamePix.localStorage;
+    }
+  } catch (_) {}
+  return localStorage;
+}
+function storageGet(key) {
+  try { return _platformStorage().getItem(String(key)); } catch (_) { return null; }
+}
+function storageSet(key, value) {
+  try { _platformStorage().setItem(String(key), String(value)); } catch (_) {}
+}
+function storageRemove(key) {
+  try { _platformStorage().removeItem(String(key)); } catch (_) {}
+}
 function persist(key, getState, applyState) {
   _persistKey = key; _persistGetter = getState;
   try {
-    var raw = localStorage.getItem(key);
+    var raw = storageGet(key);
     if (raw) { applyState(JSON.parse(raw)); return true; }
   } catch (_) {}
   return false;
@@ -76,8 +93,8 @@ function saveRun() {
   if (!_persistKey || !_persistGetter) return;
   try {
     var s = _persistGetter();
-    if (s === null || s === undefined) { localStorage.removeItem(_persistKey); return; }
-    localStorage.setItem(_persistKey, JSON.stringify(s));
+    if (s === null || s === undefined) { storageRemove(_persistKey); return; }
+    storageSet(_persistKey, JSON.stringify(s));
   } catch (_) {}
 }
 
@@ -693,13 +710,39 @@ function init(config) {
           window.CrazyGames.SDK.game.loadingStop();
         }
       } catch (e) {}
+      if (platform === 'gamepix') {
+        _markGamePixLoaded(function () {
+          if (typeof config.onReady === 'function') config.onReady();
+          startLoop();
+        });
+        return;
+      }
       if (typeof config.onReady === 'function') config.onReady();
       startLoop();
     });
   }
+  function _markGamePixLoaded(done) {
+    var finished = false;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      done();
+    }
+    try {
+      if (window.GamePix && typeof window.GamePix.loading === 'function') window.GamePix.loading(100);
+      if (window.GamePix && typeof window.GamePix.loaded === 'function') {
+        var p = window.GamePix.loaded();
+        if (p && typeof p.then === 'function') p.then(finish).catch(finish);
+        else finish();
+        setTimeout(finish, 4000);
+        return;
+      }
+    } catch (e) {}
+    finish();
+  }
 
   // Platform detection: GamePush (gp global from gamepush SDK) >
-  // Yandex (YaGames) > CrazyGames > local/standalone.
+  // Yandex (YaGames) > CrazyGames > GamePix > local/standalone.
   // build_platforms.sh swaps the SDK <script> tag per zip, so at runtime
   // exactly one of these init paths fires.
   //
@@ -711,6 +754,7 @@ function init(config) {
   // games not yet migrated to GP.
   if (window.__gpReady && window.gp) {
     // SDK already finished init before gf-lib loaded (unlikely but cheap to handle)
+    platform = 'gamepush';
     _onGpReady(window.gp);
   } else if (window.__gpKey) {
     // GP SDK is loading async; the index.html template installed a callback
@@ -773,6 +817,17 @@ function init(config) {
       } catch (e) {}
     }).catch(boot);
     setTimeout(boot, 3000);
+  } else if (window.GamePix) {
+    platform = 'gamepix';
+    try {
+      if (typeof window.GamePix.loading === 'function') window.GamePix.loading(10);
+      if (typeof window.GamePix.lang === 'function') {
+        var gl = window.GamePix.lang();
+        if (gl) lang = String(gl).toLowerCase().startsWith('ru') ? 'ru' : 'en';
+      }
+    } catch (e) {}
+    boot();
+    setTimeout(boot, 3000);
   } else {
     // Standalone / Gallery: no platform SDK to await, so boot immediately.
     // (boot() is idempotent via the `booted` guard.) Waiting here just showed
@@ -819,6 +874,11 @@ function gameplayStart() {
       window.ysdk.features.GameplayAPI.start();
     }
   } catch (e) {}
+  try {
+    if (platform === 'gamepix' && window.GamePix && typeof window.GamePix.gameAction === 'function') {
+      window.GamePix.gameAction();
+    }
+  } catch (e) {}
 }
 function gameplayStop() {
   try {
@@ -830,6 +890,21 @@ function gameplayStop() {
     if (platform === 'yandex' && window.ysdk && window.ysdk.features && window.ysdk.features.GameplayAPI) {
       window.ysdk.features.GameplayAPI.stop();
     }
+  } catch (e) {}
+  try {
+    if (platform === 'gamepix' && window.GamePix && typeof window.GamePix.gameStop === 'function') {
+      window.GamePix.gameStop();
+    }
+  } catch (e) {}
+}
+function gamePixUpdateProgress() {
+  if (platform !== 'gamepix' || !window.GamePix || typeof window.__gfState !== 'function') return;
+  try {
+    var st = window.__gfState() || {};
+    var score = Number(st.score);
+    if (isFinite(score) && typeof window.GamePix.updateScore === 'function') window.GamePix.updateScore(score);
+    var level = Number(st.level != null ? st.level : st.lvl);
+    if (isFinite(level) && level > 0 && typeof window.GamePix.updateLevel === 'function') window.GamePix.updateLevel(level);
   } catch (e) {}
 }
 // Request an ad. Resolves regardless of outcome — caller should treat
@@ -872,6 +947,24 @@ function showAd(type) {
           pauseAudio();
           window.gp.ads.showFullscreen()
             .then(function () { ok({ shown: true, rewarded: false }); })
+            .catch(function () { ok({ shown: false, rewarded: false }); });
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+          return;
+        }
+      }
+      if (platform === 'gamepix' && window.GamePix) {
+        if (type === 'rewarded' && typeof window.GamePix.rewardAd === 'function') {
+          pauseAudio();
+          window.GamePix.rewardAd()
+            .then(function (res) { ok({ shown: true, rewarded: !!(res && res.success) }); })
+            .catch(function () { ok({ shown: false, rewarded: false }); });
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
+          return;
+        }
+        if (type !== 'rewarded' && typeof window.GamePix.interstitialAd === 'function') {
+          pauseAudio();
+          window.GamePix.interstitialAd()
+            .then(function (res) { ok({ shown: !(res && res.success === false), rewarded: false }); })
             .catch(function () { ok({ shown: false, rewarded: false }); });
           setTimeout(function () { ok({ shown: false, rewarded: false }); }, 30000);
           return;
@@ -970,6 +1063,7 @@ function _adsSdkReady() {
     if (platform === 'gamepush')   return !!(window.gp && window.gp.ads);
     if (platform === 'crazygames') return !!(window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad);
     if (platform === 'yandex')     return !!(window.ysdk && window.ysdk.adv);
+    if (platform === 'gamepix')    return !!(window.GamePix && (window.GamePix.interstitialAd || window.GamePix.rewardAd));
   } catch (e) {}
   return false;
 }
@@ -2222,6 +2316,7 @@ window.GF = {
   // Also calls platform gameplayStop() (CG ad lifecycle) — safe no-op elsewhere.
   gameEnded: function () {
     gameplayStop();
+    gamePixUpdateProgress();
     try { window.parent.postMessage({ type: 'gf:gameEnded' }, '*'); } catch (_) {}
   },
   // Tells the shell a new round / level just started. Call after the player
@@ -2256,6 +2351,9 @@ window.GF = {
     try {
       if (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.game && window.CrazyGames.SDK.game.happytime) {
         window.CrazyGames.SDK.game.happytime();
+      }
+      if (platform === 'gamepix' && window.GamePix && typeof window.GamePix.happyMoment === 'function') {
+        window.GamePix.happyMoment();
       }
     } catch (e) {}
   },

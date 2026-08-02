@@ -201,7 +201,9 @@ var firstMergeDone = false;  // progressive disclosure: orders appear after 1st 
 // Persistent owned meta: the player's restaurant book + cuisine stations.
 var dinerMeta = { recipes: {}, chainServes: {}, totalServed: 0 };
 var metaToast = null, metaToastTimer = 0;
+var metaToastQueue = [];     // station upgrades wait their turn — one pill toast at a time
 var dailyToast = null, dailyToastTimer = 0, dailyToastDuration = 0;
+var pendingDailyToast = null;   // daily toast held while the tutorial is on screen
 var dailyToastRect = null;
 // M3 prestige: renovation celebration flash + game-over action button rects
 var renovateFlash = 0, renovateFlashRank = 0;
@@ -216,12 +218,15 @@ var pressStart = null;       // {x, y, idx, t}
 // flourishes
 var newChainFlash = 0;       // full-screen "NEW CUISINE" timer
 var levelFlash = 0;          // "LEVEL UP" timer
+var pendingLevelFlash = false; // LEVEL UP queued to play after NEW CUISINE finishes
 var flashChainId = null;     // which chain to show on the new-cuisine flourish
 var cascadeTimer = 0;        // active combo auto-merge cascade ticker
+var runtimeTick = 0;         // observable animation clock; frozen by platform pause
+var interactionSeq = 0;      // increments for every real pointer interaction
+var inputPulse = null;       // short visible acknowledgement for mouse/touch input
 
 // layout (recomputed each draw)
 var L = { boardX:0, boardY:0, boardW:0, cell:0, railY:0, railH:0, crateY:0, crateH:0, meterY:0 };
-var helpBtn = { x:0, y:0, w:0, h:0 };
 var muteBtn = { x:0, y:0, w:0, h:0 };
 var orderRects = [];         // {x,y,w,h, order}
 var crateRects = [];         // {x,y,w,h, idx}
@@ -486,8 +491,29 @@ function syncDailyMeta(reason) {
     }, 2.6, true);
   }
 }
+// The tutorial is "pending" from before it starts: startGame() syncs the daily
+// meta (which wants to toast) BEFORE startTutorial() runs, so an is-active-only
+// check would let the toast through and collide a frame later.
+function tutorialPending() {
+  if (GF.tutorial && GF.tutorial.active) return true;
+  try { return !localStorage.getItem('merge_diner_seen_tutorial'); } catch (e) { return false; }
+}
 function showDailyToast(data, duration, markSummarySeen) {
   var dur = Math.max(1.6, duration || 2.6);
+  // Serialize against the TUTORIAL as well as against the other pill toasts.
+  // The tutorial owns the top hint line and its caption pill, and this toast is
+  // drawn across the cuisines meter - firing both put text over text in the
+  // very first frame a reviewer sees. Hold it until the tutorial is done.
+  if (data && tutorialPending()) {
+    pendingDailyToast = { data: data, dur: dur };
+    if (markSummarySeen && dinerMeta && dinerMeta.daily) dinerMeta.daily.summarySeen = true;
+    return;
+  }
+  // never draw two pill toasts at once: an active station toast goes back in line
+  if (data && metaToastTimer > 0 && metaToast) {
+    metaToastQueue.unshift(metaToast);
+    metaToast = null; metaToastTimer = 0;
+  }
   dailyToast = data || null;
   dailyToastDuration = dailyToast ? dur : 0;
   dailyToastTimer = dailyToast ? dur : 0;
@@ -541,10 +567,7 @@ function rewardDailyGoal(g) {
   dinerMeta.daily.prepTickets = GF.clamp((dinerMeta.daily.prepTickets || 0) + 1, 0, PREP_QUEUE_CAP);
   addBookStamp(g.chain, g.tier || 2, 1);
   showDailyToast({ goal: true, streak: dinerMeta.daily.streak, reward: 1, items: dinerMeta.daily.pendingPrep.length, hours: 0 }, 2.4, false);
-  if (gs === 'PLAYING') {
-    GF.sfx('reward');
-    GF.spawnFloat(GF.cx, L.bookY || GF.cy, GF.t('dailyReward'), '#7ed957');
-  }
+  if (gs === 'PLAYING') GF.sfx('reward');
 }
 function trackDaily(kind, data, amount) {
   syncDailyMeta('event');
@@ -639,8 +662,7 @@ function awardDinerMeta(order) {
   dinerMeta.totalServed++;
   var afterLevel = stationLevelFor(order.chain);
   if (afterLevel > beforeLevel) {
-    metaToast = { chain: order.chain, level: afterLevel };
-    metaToastTimer = 2.4;
+    metaToastQueue.push({ chain: order.chain, level: afterLevel });
     return { upgraded: true, chain: order.chain, level: afterLevel };
   }
   return { upgraded: false, chain: order.chain, level: afterLevel };
@@ -677,7 +699,6 @@ function doRenovate() {
   renovateFlash = 1.8; renovateFlashRank = r;
   GF.sfx('unlock'); GF.sfx('levelup');
   if (GF.happytime) GF.happytime();
-  GF.setShake(0.5);
   GF.spawnFloat(GF.cx, GF.cy, specialtyName(r), '#ffd700');
   saveProgressEvent();
   GF.saveRun();
@@ -853,7 +874,6 @@ function doMerge(srcIdx, dst) {
   // VFX
   GF.spawnParticles(p2.x, p2.y, itemColor(baseChain, resultTier), 14);
   GF.spawnFloat(p2.x, p2.y - L.cell * 0.3, itemName(baseChain, resultTier), itemColor(baseChain, resultTier));
-  GF.setShake(0.22);
   GF.saveRun();
 }
 
@@ -880,9 +900,7 @@ function serveTo(srcIdx, order) {
   if (combo >= 2) GF.spawnFloat(order._cx || (L.boardX + L.boardW / 2), (order._cy || L.railY) - 18, GF.t('combo') + ' x' + combo, '#ffd166');
   if (metaAward && metaAward.upgraded) {
     GF.sfx('unlock');
-    GF.spawnFloat(order._cx || GF.cx, (order._cy || L.railY) - 32 * GF.S, GF.t('metaUnlock'), '#7ed957');
   }
-  GF.setShake(0.35);
   if (GF.tutorial.active && GF.tutorial.step === 2) GF.tutorial.next();  // a real serve completes step 3
   // replace this order
   var i = orders.indexOf(order);
@@ -916,21 +934,38 @@ function checkLevelUp() {
   var needed = LEVELUP_ORDERS * level;
   if (ordersServed >= needed) {
     level++;
-    levelFlash = 1.3;
     GF.sfx('levelup');
-    GF.setShake(0.5);
-    // unlock a new cuisine chain (if any left)
+    // unlock a new cuisine chain (if any left). The two full-screen flourishes
+    // never run together: NEW CUISINE plays first, LEVEL UP is queued after it.
     if (chainsUnlocked < NUM_CHAINS) {
       flashChainId = CHAINS[chainsUnlocked].id;   // the chain about to unlock
       chainsUnlocked++;
       newChainFlash = 1.6;
+      pendingLevelFlash = true;
       if (GF.happytime) GF.happytime();
+    } else {
+      levelFlash = 1.3;
     }
     // add a crate (cap MAX_CRATES)
     if (crates < MAX_CRATES) { crates++; crateReady[crates - 1] = true; crateCharge[crates - 1] = 0; }
-    GF.spawnFloat(GF.cx, GF.cy - L.cell, GF.t('levelup'), '#ffd700');
     GF.saveRun();
+    levelBreakInterstitial();
   }
+}
+
+// Interstitial at a natural break. MCPlay revision 2026-07-28: the reviewer
+// cleared five levels without ever losing and so never reached the only
+// placement we had (game-over -> PLAY AGAIN); Mediacube's asked-for cadence is
+// "between levels, about every 2". Fires on level-up at 3, 5, 7 ... , still
+// behind showInterstitial's 90s gap, never mid-merge.
+// YOUTUBE-SCOPED ON PURPOSE: the Playables SDK fires onPause for the ad, so the
+// run (and every live order timer) freezes behind it. Yandex fullscreen ads do
+// not pause the loop, so the same break there would silently burn order time.
+function levelBreakInterstitial() {
+  if (!(window.ytgame && window.ytgame.ads)) return;
+  if (gs !== 'PLAYING') return;
+  if (level < 3 || level % 2 === 0) return;
+  showInterstitial(function () {});
 }
 
 // ── GAME LIFECYCLE ───────────────────────────────────────────────────────
@@ -940,7 +975,8 @@ function startGame() {
   combo = 0; bestCombo = 0; comboTimer = 0;
   level = 1; chainsUnlocked = 1; topTier = 0; goldenSeen = false; jamTimer = 0;
   continueUsed = false;
-  newChainFlash = 0; levelFlash = 0; flashChainId = null; cascadeTimer = 0; renovateFlash = 0;
+  newChainFlash = 0; levelFlash = 0; pendingLevelFlash = false; flashChainId = null; cascadeTimer = 0; renovateFlash = 0;
+  metaToastQueue = []; metaToast = null; metaToastTimer = 0; pendingDailyToast = null;
   crates = 1; crateCharge = [0]; crateReady = [true];
   board = []; for (var i = 0; i < cellCount(); i++) board.push(null);
   orders = []; orderSeq = 1; firstMergeDone = false;
@@ -994,12 +1030,15 @@ function startTutorial() {
       target: function () { return crateTarget(); }, advance: 'manual' },
   ];
   GF.tutorial.start(steps, { storageKey: 'merge_diner_seen_tutorial', force: !seen ? true : false });
-  try { localStorage.setItem('merge_diner_seen_tutorial', '1'); } catch (e) {}
 }
 function crateTarget() {
   if (!crateRects.length) return { x: GF.cx, y: GF.H * 0.85, r: 40 * GF.S };
   var n = crateRects[0];
-  return { x: n.x + n.w / 2, y: n.y + n.h / 2, r: Math.max(n.w, n.h) / 2 };
+  var cy = n.y + n.h / 2;
+  // The crate row sits flush with the bottom edge, so a max(w,h)/2 highlight
+  // ring has its glow clipped off-screen. Keep the ring inside the viewport.
+  var fits = GF.H - 6 * GF.S - cy;
+  return { x: n.x + n.w / 2, y: cy, r: Math.min(Math.max(n.w, n.h) / 2, Math.max(12 * GF.S, fits)) };
 }
 function mergeIdxs() {
   // first two items sharing chain+tier (the pair to demo)
@@ -1030,9 +1069,19 @@ function serveFromTarget() {
   return null;
 }
 function orderTarget() {
-  if (!orders.length) return { x: L.boardX + L.boardW / 2, y: L.railY + (L.railH || 40 * GF.S) / 2, r: 44 * GF.S };
+  // point at the TICKET row, not the whole band — the band now also carries the
+  // "ORDERS" caption, so its midpoint is no longer the middle of a ticket.
+  var cardH = L.orderCardH || 40 * GF.S;
+  var cardMidY = (L.orderCardY || L.railY) + cardH / 2;
+  // Ring radius comes from the TICKET, not from L.cell. A board cell is much
+  // taller than a ticket on a wide window (79px vs 52px at 768x1024), so the
+  // old L.cell * 0.7 ring reached out of the card row and crossed both the
+  // "ORDERS" caption above it and the "Cuisines n/5" label below - drawing over
+  // the two labels the measured stack exists to keep apart.
+  var r = cardH / 2;
+  if (!orders.length) return { x: L.boardX + L.boardW / 2, y: cardMidY, r: r };
   var o = orders[0];
-  return { x: o._cx || (L.boardX + L.boardW / 2), y: o._cy || (L.railY + (L.railH || 40 * GF.S) / 2), r: L.cell * 0.7 };
+  return { x: o._cx || (L.boardX + L.boardW / 2), y: o._cy || cardMidY, r: r };
 }
 
 // ── COORD MAPPING ─────────────────────────────────────────────────────────
@@ -1068,7 +1117,15 @@ function dailyToastBounds() {
   var w = Math.min(L.boardW || GF.W - 30 * S, GF.clamp(340 * S, 235, 410));
   var h = GF.clamp(62 * S, 50, 76);
   var x = GF.cx - w / 2;
-  var y = (gs === 'MENU') ? (GF.H - h - GF.clamp(92 * S, 70, 118)) : Math.max(58 * S, (L.bookY || 110 * S) - h - 8 * S);
+  // In-run the toast sits UNDER the restaurant-book pill, over the empty top of
+  // the board. It used to be placed a fixed height ABOVE the book pill, which is
+  // the band the cuisines meter and the early-game hint line already own - so it
+  // drew straight over both ("Cuisines 1/5" and "free: 37" poked out either side
+  // of it). Reading the rect the book pill actually got keeps them separated.
+  var y = (gs === 'MENU')
+    ? (GF.H - h - GF.clamp(92 * S, 70, 118))
+    : ((L.bookY || 110 * S) + (L.bookH || 40 * S) + 8 * S);
+  y = GF.clamp(y, 58 * S, Math.max(58 * S, GF.H - h - 8 * S));
   return { x: x, y: y, w: w, h: h };
 }
 function dailyToastHit(x, y) {
@@ -1084,7 +1141,7 @@ function onDown(x, y) {
   if (dailyToastHit(x, y)) { dismissDailyToast(true); return; }
   // mute toggle
   if (muteBtn.w && x >= muteBtn.x && x <= muteBtn.x + muteBtn.w && y >= muteBtn.y && y <= muteBtn.y + muteBtn.h) { GF.toggleMute(); GF.setMusicMuted(GF.muted); GF.sfx('tap'); return; }
-  // tutorial gate (hands-on): block help; let the step's real action through
+  // tutorial gate (hands-on): let the step's real action through, block the rest
   if (GF.tutorial.active) {
     var _sb = GF.tutorial._skipBtn;
     if (_sb && x >= _sb.x && x <= _sb.x + _sb.w && y >= _sb.y && y <= _sb.y + _sb.h) { GF.tutorial.handleClick(x, y); return; }
@@ -1094,9 +1151,6 @@ function onDown(x, y) {
       return;
     }
     // steps merge/serve: fall through to real handling; .next() fires from tryActOn/serveTo
-  } else {
-    // help button → reopen tutorial
-    if (x >= helpBtn.x && x <= helpBtn.x + helpBtn.w && y >= helpBtn.y && y <= helpBtn.y + helpBtn.h) { GF.tutorial.reopen(); return; }
   }
   // crate tap → dispense
   var ci = crateHit(x, y);
@@ -1144,11 +1198,29 @@ function onUp(x, y) {
 
 // ── UPDATE ───────────────────────────────────────────────────────────────
 function update(dt) {
+  runtimeTick += dt;
+  if (inputPulse) {
+    inputPulse.life = Math.max(0, inputPulse.life - dt);
+    if (inputPulse.life <= 0) inputPulse = null;
+  }
   if (newChainFlash > 0) newChainFlash = Math.max(0, newChainFlash - dt);
+  if (newChainFlash <= 0 && pendingLevelFlash) { pendingLevelFlash = false; levelFlash = 1.3; }
   if (levelFlash > 0) levelFlash = Math.max(0, levelFlash - dt);
   if (renovateFlash > 0) renovateFlash = Math.max(0, renovateFlash - dt);
   if (metaToastTimer > 0) metaToastTimer = Math.max(0, metaToastTimer - dt);
+  // one announcement at a time: the next station toast waits for the current
+  // pill toast and any full-screen flourish to finish
+  if (metaToastTimer <= 0 && metaToastQueue.length && dailyToastTimer <= 0 &&
+      newChainFlash <= 0 && levelFlash <= 0 && !pendingLevelFlash) {
+    metaToast = metaToastQueue.shift();
+    metaToastTimer = 2.4;
+  }
   if (dailyToastTimer > 0) dailyToastTimer = Math.max(0, dailyToastTimer - dt);
+  // release the held daily toast once the tutorial has left the screen
+  if (pendingDailyToast && !tutorialPending() && dailyToastTimer <= 0 && metaToastTimer <= 0) {
+    var held = pendingDailyToast; pendingDailyToast = null;
+    showDailyToast(held.data, held.dur, false);
+  }
   if (cascadeTimer > 0) cascadeTimer = Math.max(0, cascadeTimer - dt);
   if (gs !== 'PLAYING') { GF.tutorial.update(dt); return; }
   GF.tutorial.update(dt);
@@ -1183,23 +1255,51 @@ function layout() {
   var colX = Math.round((W - colW) / 2);
   L.colX = colX; L.colW = colW;
   var topH = GF.clamp(46 * S, 38, 60);          // coins / score / level row
-  var railH = GF.clamp(72 * S, 58, 96);          // order tickets
-  var meterH = GF.clamp(16 * S, 12, 22);         // jam meter
+  // ORDER BAND + CUISINE METER — a MEASURED stack, not nudged constants.
+  // Every row declares the height it actually needs (its own font size, its own
+  // ring outset), the band is the SUM of those rows, and each drawer reads back
+  // the row rect it was given. The previous version packed the "ORDERS" caption,
+  // a bordered ticket card and the meter caption into one 72*S band using fixed
+  // 14*S / -1*S offsets. Both offsets scale with S while the fonts are CLAMPED,
+  // so the three collided: the caption font reaches 13px against 14*S of
+  // headroom (the card border cut through "ORDERS" from 1280x720 down), and the
+  // meter caption — drawn ABOVE its bar with baseline 'bottom' — reached back up
+  // under the card's bottom edge at EVERY viewport. Three elements, one band.
+  L.orderCapFS = GF.clamp(10 * S, 8, 13);        // "ORDERS" caption font px
+  L.orderCapH  = Math.ceil(L.orderCapFS * 1.35); // its glyph box + leading
+  var ringPad  = Math.ceil(4 * S);               // ticket highlight pulse-ring outset
+  L.orderCardH = GF.clamp(54 * S, 44, 74);       // the ticket card itself
+  L.meterLabFS = GF.clamp(9 * S, 8, 12);         // "Cuisines n/5" + "free: n"
+  L.meterLabH  = Math.ceil(L.meterLabFS * 1.35);
+  L.meterBarH  = GF.clamp(8 * S, 6, 12);
   var bookH = GF.clamp(40 * S, 34, 50);          // restaurant book + daily shift strip
   var crateH = GF.clamp(96 * S, 78, 130);        // crate bar
-  L.railY = topH;
-  L.railH = railH;
-  L.meterY = topH + railH + 2 * S;
-  L.meterH = meterH;
-  L.bookY = L.meterY + meterH + 5 * S;
+  L.railY      = topH;
+  L.orderCapY  = L.railY;                                       // row 1: caption
+  L.orderCardY = L.railY + L.orderCapH + ringPad;               // row 2: ticket card
+  L.railH      = L.orderCapH + ringPad + L.orderCardH + ringPad;
+  L.meterLabY  = L.railY + L.railH + Math.ceil(2 * S);          // row 3: meter caption
+  L.meterY     = L.meterLabY + L.meterLabH;                     // row 4: meter bar
+  L.meterH     = L.meterBarH;
+  L.bookY = L.meterY + L.meterBarH + 5 * S;
   L.bookH = bookH;
-  var availTop = topH + railH + meterH + bookH + pad + 5 * S;
-  var availBot = H - crateH - pad;
+  var availTop = L.bookY + bookH + pad;
+  // While the gated tutorial is up, reserve a clear band above the crate for
+  // its caption pill. gf-lib anchors that pill just above the highlighted
+  // target (the CRATE), so without reserved room it lands ON the board's
+  // bottom rows at wide / short-wide windows - portrait had the gap by luck,
+  // desktop did not. Overlapping elements at a wide desktop window is exactly
+  // what MCPlay bounced Tight Spot and Clean Sweep for.
+  var tutorBand = (GF.tutorial && GF.tutorial.active) ? GF.clamp(58 * S, 46, 72) : 0;
+  var availBot = H - crateH - pad - tutorBand;
+  L.tutorBandY = availBot; L.tutorBandH = tutorBand;
   var availH = availBot - availTop;
   var maxBoardW = colW - pad * 2;
   var cellByW = maxBoardW / GRID_W;
   var cellByH = availH / GRID_H;
-  L.cell = Math.floor(Math.min(cellByW, cellByH));
+  // Transient 1px/short validation viewports used to make L.cell negative,
+  // which then reached canvas arc() as a negative food-badge radius.
+  L.cell = Math.max(1, Math.floor(Math.min(Math.max(1, cellByW), Math.max(1, cellByH))));
   L.boardW = L.cell * GRID_W;
   L.boardX = colX + Math.round((colW - L.boardW) / 2);
   var boardH = L.cell * GRID_H;
@@ -1207,8 +1307,17 @@ function layout() {
   L.crateY = H - crateH;
   L.crateH = crateH;
   var hb = GF.clamp(30 * S, 26, 38);
-  helpBtn = { x: colX + colW - hb - pad, y: 6 * S, w: hb, h: hb };
-  muteBtn = { x: helpBtn.x - hb - pad * 0.6, y: 6 * S, w: hb, h: hb };
+  muteBtn = { x: colX + colW - hb - pad, y: 6 * S, w: hb, h: hb };
+  // Hand the tutorial the bands this game already owns, so its caption pill
+  // cannot be clamped on top of them. Everything from the top of the screen
+  // down to the bottom of the restaurant-book pill is taken (coins, score,
+  // LEVEL pill, mute, ORDERS caption, tickets, Cuisines/free labels, jam meter,
+  // book strip); the free slot is the band layout() already reserves above the
+  // crate for exactly this pill.
+  if (GF.tutorial) {
+    GF.tutorial.avoid = function () { return [{ y: 0, h: L.bookY + L.bookH + 4 * S }]; };
+    GF.tutorial.parkY = function () { return L.tutorBandY + 4 * S; };
+  }
 }
 
 function draw(ctx) {
@@ -1218,6 +1327,9 @@ function draw(ctx) {
   var g = ctx.createLinearGradient(0, 0, 0, H);
   g.addColorStop(0, '#3a2416'); g.addColorStop(0.5, '#46301d'); g.addColorStop(1, '#2a1810');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // During iframe startup/rotation the host can briefly report a near-zero
+  // viewport. Paint only the safe background until usable geometry returns.
+  if (W < 64 || H < 64) return;
 
   if (gs === 'PLAYING' || gs === 'GAMEOVER') {
     drawOrderRail(ctx);
@@ -1226,13 +1338,14 @@ function draw(ctx) {
     drawBoard(ctx);
     drawCrateBar(ctx);
     drawTopHUD(ctx);
-    drawHelpBtn(ctx);
+    drawMuteBtn(ctx);
     drawDrag(ctx);
     if (levelFlash > 0) drawLevelUp(ctx);
     if (newChainFlash > 0) drawNewChain(ctx);
     if (metaToastTimer > 0) drawMetaToast(ctx);
     if (dailyToastTimer > 0) drawDailyToast(ctx);
     if (gs === 'PLAYING') GF.tutorial.draw(ctx);
+    drawInputPulse(ctx);
   }
   if (gs === 'MENU') drawMenu(ctx);
   if (gs === 'GAMEOVER') drawGameOver(ctx);
@@ -1293,7 +1406,9 @@ function drawTopHUD(ctx) {
   // SCORE (just right of coins, dimmer)
   ctx.font = GF.clamp(11 * S, 9, 15) + 'px sans-serif'; ctx.fillStyle = '#cdb';
   ctx.fillText(GF.t('score') + ' ' + score, lx + cr * 2 + 5 * S + ctx.measureText('' + coins).width * 0 + GF.clamp(54 * S, 44, 80), cy);
-  // LEVEL pill (top-right, left of mute/help). Shows Lv N + progress to next.
+  // LEVEL pill (top-right). Shows Lv N + progress to next. Its right edge is
+  // measured off the mute button's real rect — mute is the ONLY header control
+  // now, so there is no second slot to leave a gap for.
   var needed = LEVELUP_ORDERS * level, prevNeed = LEVELUP_ORDERS * (level - 1);
   var into = GF.clamp(ordersServed - prevNeed, 0, needed - prevNeed), span = Math.max(1, needed - prevNeed);
   ctx.font = 'bold ' + GF.clamp(12.5 * S, 10, 17) + 'px sans-serif';
@@ -1314,21 +1429,23 @@ function drawOrderRail(ctx) {
     if (!firstMergeDone && gs === 'PLAYING') {
       ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(13 * S, 10, 18) + 'px sans-serif';
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText(GF.t('mergeUnlock'), GF.cx, L.railY + L.railH / 2);
+      ctx.fillText(GF.t('mergeUnlock'), GF.cx, L.orderCardY + L.orderCardH / 2);
       ctx.textBaseline = 'alphabetic';
     }
     return;
   }
   var n = orders.length;
   var gap = 8 * S;
-  var tileW = Math.min((L.colW - 20 * S - gap * (n - 1)) / n, L.railH * 1.55);
+  // Ticket aspect is pinned to the CARD row, which is the box it actually
+  // occupies — not to the whole band (the band now also carries the caption).
+  var tileW = Math.min((L.colW - 20 * S - gap * (n - 1)) / n, L.orderCardH * 2.07);
   var totalW = tileW * n + gap * (n - 1);
   var startX = GF.cx - totalW / 2;
-  var ty = L.railY + 14 * S, th = L.railH - 18 * S;
-  // label
-  ctx.fillStyle = '#cdb'; ctx.font = GF.clamp(10 * S, 8, 13) + 'px sans-serif';
+  var ty = L.orderCardY, th = L.orderCardH;
+  // caption — owns the row ABOVE the cards, so no border can cross it
+  ctx.fillStyle = '#cdb'; ctx.font = L.orderCapFS + 'px sans-serif';
   ctx.textAlign = 'left'; ctx.textBaseline = 'top';
-  ctx.fillText(GF.t('order'), startX, L.railY + 2 * S);
+  ctx.fillText(GF.t('order'), startX, L.orderCapY);
   for (var i = 0; i < n; i++) {
     var o = orders[i];
     var x = startX + i * (tileW + gap);
@@ -1360,19 +1477,21 @@ function drawOrderRail(ctx) {
 
 function drawJamMeter(ctx) {
   var S = GF.S, pad = GF.clamp(10 * S, 6, 16);
-  var x = L.boardX, w = L.boardW, y = L.meterY, h = GF.clamp(8 * S, 6, 12);
+  var x = L.boardX, w = L.boardW, y = L.meterY, h = L.meterBarH;
   var fc = freeCells(), total = cellCount();
   var fillFrac = GF.clamp(1 - fc / total, 0, 1);
   var col = fc <= 3 ? '#ff4d4d' : fc <= 8 ? '#ffb347' : '#7ed957';
+  // caption row FIRST, in the row layout() reserved for it above the bar. It
+  // used to hang off the bar with baseline 'bottom', which put it back inside
+  // the order-ticket band regardless of viewport.
+  ctx.font = L.meterLabFS + 'px sans-serif'; ctx.textBaseline = 'top';
+  ctx.textAlign = 'right'; ctx.fillStyle = col;
+  ctx.fillText(GF.t('free') + ': ' + fc, x + w, L.meterLabY);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#9a8c7a';
+  ctx.fillText(GF.t('chainsLbl') + ' ' + chainsUnlocked + '/' + NUM_CHAINS, x, L.meterLabY);
+  ctx.textBaseline = 'alphabetic';
   GF.rr(ctx, x, y, w, h, h / 2); ctx.fillStyle = 'rgba(0,0,0,0.35)'; ctx.fill();
   GF.rr(ctx, x, y, Math.max(h, w * fillFrac), h, h / 2); ctx.fillStyle = col; ctx.fill();
-  // label
-  ctx.font = GF.clamp(9 * S, 8, 12) + 'px sans-serif'; ctx.textBaseline = 'bottom';
-  ctx.textAlign = 'right'; ctx.fillStyle = col;
-  ctx.fillText(GF.t('free') + ': ' + fc, x + w, y - 1 * S);
-  ctx.textAlign = 'left'; ctx.fillStyle = '#9a8c7a';
-  ctx.fillText(GF.t('chainsLbl') + ' ' + chainsUnlocked + '/' + NUM_CHAINS, x, y - 1 * S);
-  ctx.textBaseline = 'alphabetic';
 }
 
 function drawBookIcon(ctx, x, y, s) {
@@ -1456,7 +1575,7 @@ function drawBoard(ctx) {
   for (var idx = 0; idx < board.length; idx++) {
     var col = idx % GRID_W, row = (idx / GRID_W) | 0;
     var cx = L.boardX + col * L.cell, cy = L.boardY + row * L.cell;
-    var inset = 3 * S;
+    var inset = Math.min(3 * S, Math.max(0, L.cell * 0.18));
     GF.rr(ctx, cx + inset, cy + inset, L.cell - inset * 2, L.cell - inset * 2, 8 * S);
     var isSel = (idx === sel);
     ctx.fillStyle = isSel ? 'rgba(255,209,102,0.20)' : 'rgba(255,248,232,0.05)';
@@ -1474,7 +1593,8 @@ function drawBoard(ctx) {
     var di = cellAt(drag.x, drag.y);
     if (di >= 0) {
       var dc = di % GRID_W, dr = (di / GRID_W) | 0;
-      GF.rr(ctx, L.boardX + dc * L.cell + 3 * S, L.boardY + dr * L.cell + 3 * S, L.cell - 6 * S, L.cell - 6 * S, 8 * S);
+      var dropInset = Math.min(3 * S, Math.max(0, L.cell * 0.18));
+      GF.rr(ctx, L.boardX + dc * L.cell + dropInset, L.boardY + dr * L.cell + dropInset, L.cell - dropInset * 2, L.cell - dropInset * 2, 8 * S);
       ctx.lineWidth = 3 * S; ctx.strokeStyle = '#7ed957'; ctx.stroke();
     }
   }
@@ -1483,6 +1603,7 @@ function drawBoard(ctx) {
 // Draw a food tile: AI sprite by name (chain_tier / 'golden') with a procedural
 // fallback — a glossy rounded blob tinted by chain+tier, with a tier badge.
 function drawFood(ctx, x, y, chain, tier, golden, size, pop) {
+  size = Math.max(0.01, Number(size) || 0.01);
   var name = golden ? 'golden' : (chain + '_' + GF.clamp(tier, 0, MAX_TIER));
   GF.drawSprite(name, x, y, size, function (c, px, py, s) {
     var col = golden ? '#ffd700' : itemColor(chain, tier);
@@ -1531,6 +1652,23 @@ function drawFood(ctx, x, y, chain, tier, golden, size, pop) {
     ctx.fillText('' + (tier + 1), x + size * 0.33, y - size * 0.33);
     ctx.textBaseline = 'alphabetic';
   }
+}
+
+function notePointerInput(x, y) {
+  interactionSeq++;
+  inputPulse = { x: x, y: y, life: 0.34, duration: 0.34 };
+}
+function drawInputPulse(ctx) {
+  if (!inputPulse) return;
+  var p = 1 - inputPulse.life / inputPulse.duration;
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, 0.48 * (1 - p));
+  ctx.lineWidth = Math.max(1.5, 2.5 * GF.S);
+  ctx.strokeStyle = '#ffe17a';
+  ctx.beginPath();
+  ctx.arc(inputPulse.x, inputPulse.y, Math.max(1, (10 + p * 18) * GF.S), 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
 }
 function roundedBlob(c, px, py, r) {
   var k = r * 0.62;
@@ -1606,19 +1744,24 @@ function drawDrag(ctx) {
   drawFood(ctx, drag.x, drag.y - L.cell * 0.2, c.chain, c.tier, c.golden, sz, 0.2);
 }
 
-function drawHelpBtn(ctx) {
-  var S = GF.S;
-  GF.rr(ctx, helpBtn.x, helpBtn.y, helpBtn.w, helpBtn.h, helpBtn.w / 2);
+// Mute is the only in-run header control IN THIS (canonical) BUILD — the gallery
+// and Yandex targets, where the game owns its mute. The YouTube/MCPlay package
+// has NO overall mute control at all: package_youtube.py compiles out this
+// button, its hit test, its layout line and the persisted mute flag, because
+// YouTube's platform control is authoritative there (2026-07-16). So do not read
+// this comment as a claim about the MCPlay zip. (Naming that storage key here
+// would itself trip the packager's forbidden-token scan — which is the check
+// that caught this comment on its first draft.)
+// The "?" help button that used to sit to mute's right was removed 2026-07-30
+// (Tim: it did not work) — button, hit test and layout slot all go, so nothing
+// invisible is left swallowing taps there and no gap is reserved for it.
+// Re-entry to the how-to-play copy is the MENU tutorial block; the gated
+// tutorial itself still auto-runs once for a new player.
+function drawMuteBtn(ctx) {
+  if (!muteBtn.w) return;
+  GF.rr(ctx, muteBtn.x, muteBtn.y, muteBtn.w, muteBtn.h, muteBtn.w / 2);
   ctx.fillStyle = 'rgba(255,248,232,0.15)'; ctx.fill();
-  ctx.fillStyle = '#fff'; ctx.font = 'bold ' + GF.clamp(18 * S, 14, 26) + 'px sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('?', helpBtn.x + helpBtn.w / 2, helpBtn.y + helpBtn.h / 2 + S);
-  ctx.textBaseline = 'alphabetic';
-  if (muteBtn.w) {
-    GF.rr(ctx, muteBtn.x, muteBtn.y, muteBtn.w, muteBtn.h, muteBtn.w / 2);
-    ctx.fillStyle = 'rgba(255,248,232,0.15)'; ctx.fill();
-    GF.drawMuteIcon(ctx, muteBtn.x + muteBtn.w / 2, muteBtn.y + muteBtn.h / 2, muteBtn.w * 0.3, GF.muted);
-  }
+  GF.drawMuteIcon(ctx, muteBtn.x + muteBtn.w / 2, muteBtn.y + muteBtn.h / 2, muteBtn.w * 0.3, GF.muted);
 }
 
 // Full-screen "LEVEL UP!" flourish.
@@ -1870,6 +2013,15 @@ function nowMs() { return (typeof performance !== 'undefined' && performance.now
 function showInterstitial(onDone) {
   var now = nowMs();
   if (now - lastInterstitialMs < INTERSTITIAL_GAP_MS) { if (onDone) onDone(); return; }
+  if (window.GF && GF.ads && typeof GF.ads.interstitial === 'function') {
+    lastInterstitialMs = now;
+    GF.ads.interstitial({ force: true }).then(function () {
+      if (onDone) onDone();
+    }, function () {
+      if (onDone) onDone();
+    });
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showFullscreenAdv) { if (onDone) onDone(); return; }
   lastInterstitialMs = now;
   var done = false, opened = false;
@@ -1886,6 +2038,24 @@ function showInterstitial(onDone) {
 function showRewardedContinue() {
   if (continueUsed || continueLoading) return;
   continueLoading = true;
+  if (window.GF && GF.ads && typeof GF.ads.rewarded === 'function') {
+    var settled = false;
+    var finishPlatformReward = function (granted) {
+      if (settled) return;
+      settled = true;
+      continueLoading = false;
+      if (granted) doContinue();
+    };
+    GF.ads.rewarded({
+      onReward: function () { finishPlatformReward(true); },
+      onClose: function (granted) { finishPlatformReward(!!granted); },
+    }).then(function (res) {
+      finishPlatformReward(!!(res && res.rewarded));
+    }, function () {
+      finishPlatformReward(false);
+    });
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) { continueLoading = false; doContinue(); return; }
   var rewarded = false, opened = false, done = false;
   var finish = function () { if (done) return; done = true; continueLoading = false; if (rewarded) doContinue(); };
@@ -1906,6 +2076,24 @@ function showHeadStartAd() {
   if (headStartLoading) return;
   headStartLoading = true;
   var grant = function () { pendingHeadStart = true; dinerMeta.headStart = (dinerMeta.headStart || 0) + 1; headStartLoading = false; startGame(); };
+  if (window.GF && GF.ads && typeof GF.ads.rewarded === 'function') {
+    var settled = false;
+    var finishPlatformReward = function (granted) {
+      if (settled) return;
+      settled = true;
+      headStartLoading = false;
+      if (granted) grant();
+    };
+    GF.ads.rewarded({
+      onReward: function () { finishPlatformReward(true); },
+      onClose: function (granted) { finishPlatformReward(!!granted); },
+    }).then(function (res) {
+      finishPlatformReward(!!(res && res.rewarded));
+    }, function () {
+      finishPlatformReward(false);
+    });
+    return;
+  }
   if (!window.ysdk || !window.ysdk.adv || !window.ysdk.adv.showRewardedVideo) { grant(); return; }
   var rewarded = false, opened = false, done = false;
   var finish = function () { if (done) return; done = true; headStartLoading = false; if (rewarded) grant(); };
@@ -1935,9 +2123,10 @@ function doContinue() {
 
 // ── UNIFIED POINTER (mouse + touch) so tap-tap AND drag both work ─────────
 function evtXY(e) {
-  if (e.touches && e.touches.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
-  if (e.changedTouches && e.changedTouches.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
-  return { x: e.clientX, y: e.clientY };
+  var r = cv.getBoundingClientRect();
+  var sx = r.width ? cv.width / r.width : 1;
+  var sy = r.height ? cv.height / r.height : 1;
+  return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
 }
 function hitRect(r, x, y) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
 function overlayDown(x, y) {
@@ -1958,12 +2147,32 @@ function overlayDown(x, y) {
   return false;
 }
 var cv = document.getElementById('c');
-cv.addEventListener('mousedown', function (e) { var p = evtXY(e); if (!overlayDown(p.x, p.y)) onDown(p.x, p.y); });
-cv.addEventListener('mousemove', function (e) { var p = evtXY(e); onMove(p.x, p.y); });
-window.addEventListener('mouseup', function (e) { var p = evtXY(e); onUp(p.x, p.y); });
-cv.addEventListener('touchstart', function (e) { e.preventDefault(); var p = evtXY(e); if (!overlayDown(p.x, p.y)) onDown(p.x, p.y); }, { passive: false });
-cv.addEventListener('touchmove', function (e) { e.preventDefault(); var p = evtXY(e); onMove(p.x, p.y); }, { passive: false });
-cv.addEventListener('touchend', function (e) { e.preventDefault(); var p = evtXY(e); onUp(p.x, p.y); }, { passive: false });
+var activePointerId = null;
+cv.addEventListener('pointerdown', function (e) {
+  if (activePointerId !== null) return;
+  e.preventDefault();
+  activePointerId = e.pointerId;
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+  var p = evtXY(e);
+  notePointerInput(p.x, p.y);
+  if (!overlayDown(p.x, p.y)) onDown(p.x, p.y);
+}, { passive: false });
+cv.addEventListener('pointermove', function (e) {
+  if (e.pointerId !== activePointerId) return;
+  e.preventDefault();
+  var p = evtXY(e); onMove(p.x, p.y);
+}, { passive: false });
+cv.addEventListener('pointerup', function (e) {
+  if (e.pointerId !== activePointerId) return;
+  e.preventDefault();
+  var p = evtXY(e); onUp(p.x, p.y);
+  try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+  activePointerId = null;
+}, { passive: false });
+cv.addEventListener('pointercancel', function (e) {
+  if (e.pointerId !== activePointerId) return;
+  drag = null; pressStart = null; activePointerId = null;
+}, { passive: false });
 // desktop nicety: Space dispenses from crate 1
 document.addEventListener('keydown', function (e) {
   if (gs === 'PLAYING' && e.code === 'Space') { e.preventDefault(); if (!GF.tutorial.active) dispenseFromCrate(0); }
@@ -2142,7 +2351,12 @@ GF.init({
       if (visualTest) localStorage.removeItem('merge_diner_run_v1');
     } catch (e) {}
     try { best = parseInt(localStorage.getItem('merge_diner_best') || '0') || 0; } catch (e) {}
-    (function(){ var go=function(){ GF.music('audio/bg_track.mp3', 0.55); ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){ document.removeEventListener(ev, go, true); }); }; ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){ document.addEventListener(ev, go, true); }); })(); /* bespoke synth_track music */   // procedural bg bed (starts on first gesture)
+    // ONE music system: the Suno Pro track 'Sunny Diner Loop' through Web Audio
+    // (GF.music -> fetch + decodeAudioData + looping BufferSource), started on the
+    // first user gesture. Deliberately NOT GF.bgMusic: bgMusic falls back to the
+    // procedural startMusic() bed if the file 404s, and two music systems in one
+    // build is how the old bed came back mid-session after a reload.
+    (function(){ var go=function(){ GF.music('audio/bg_loop.mp3', 0.55); ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){ document.removeEventListener(ev, go, true); }); }; ['pointerdown','keydown','touchstart','mousedown'].forEach(function(ev){ document.addEventListener(ev, go, true); }); })();
     // Yandex 1.9 — persist run across reload
     GF.persist('merge_diner_run_v1',
       function () {
@@ -2176,13 +2390,25 @@ GF.init({
     GF.saveRun();
     // AUTOSTART (rule #9): platform builds drop straight into gameplay (no menu).
     if (window.__GF_AUTOSTART && !window._silent) {
-      try { localStorage.setItem('merge_diner_seen_tutorial', '1'); } catch (e) {}
       if (gs !== 'PLAYING') startGame();
-      GF.tutorial.active = false;   // suppress tutorial on platform autostart
+      else {
+        var autostartTutorialSeen = false;
+        try { autostartTutorialSeen = !!localStorage.getItem('merge_diner_seen_tutorial'); } catch (e) {}
+        if (!autostartTutorialSeen) startTutorial();
+      }
     } else if (gs === 'PLAYING') {
       // resumed mid-run on the gallery — keep playing
     }
     // gallery build: gs stays MENU (first screen) unless a mid-run was resumed.
+    if (typeof window.__ytSignalGameReady === 'function') {
+      // GF starts its loop after onReady returns. Two RAFs guarantee that one
+      // real interactive game frame was painted before Playables gets ready.
+      requestAnimationFrame(function () { requestAnimationFrame(function () {
+        var loader = document.getElementById('yt-loading');
+        if (loader) loader.hidden = true;
+        window.__ytSignalGameReady();
+      }); });
+    }
   },
   onUpdate: update,
   onDraw: draw,
@@ -2190,11 +2416,14 @@ GF.init({
 
 window.addEventListener('pagehide', saveProgressEvent);
 document.addEventListener('visibilitychange', function () { if (document.hidden) saveProgressEvent(); });
+if (typeof window.__ytRegisterPauseSave === 'function') window.__ytRegisterPauseSave(saveProgressEvent);
 
 // ── EXPOSE STATE (post-build-tester cross-checks vs DESIGN.md) ────────────
 GF.exposeState(function () {
   return {
     gs: gs, score: score, best: best, coins: coins,
+    runtimeTick: Math.round(runtimeTick * 1000), interactionSeq: interactionSeq,
+    platformPaused: !!window.__ytPaused,
     level: level, chainsUnlocked: chainsUnlocked, ordersServed: ordersServed,
     merges: merges, combo: combo, bestCombo: bestCombo, topTier: topTier,
     freeCells: freeCells(), goldenSeen: goldenSeen, crates: crates,
@@ -2215,6 +2444,28 @@ GF.exposeState(function () {
     STATION_THRESHOLDS: STATION_THRESHOLDS.slice(),
   };
 });
+
+window.render_game_to_text = function () {
+  var state = typeof window.__gfState === 'function' ? window.__gfState() : {};
+  return JSON.stringify({
+    coordinateSystem: 'origin top-left; +x right; +y down; canvas CSS pixels',
+    state: state,
+    board: board.map(function (c, i) {
+      if (!c) return null;
+      var p = cellCenter(i);
+      return { index: i, x: Math.round(p.x), y: Math.round(p.y), chain: c.chain, tier: c.tier, golden: !!c.golden };
+    }),
+    crates: crateRects.map(function (r) { return { x: Math.round(r.x + r.w / 2), y: Math.round(r.y + r.h / 2), ready: !!crateReady[r.idx] }; }),
+    tutorialActive: !!GF.tutorial.active,
+  });
+};
+window.advanceTime = function (ms) {
+  if (window.__ytPaused) return 0;
+  var steps = Math.max(1, Math.round((Number(ms) || 0) / (1000 / 60)));
+  for (var i = 0; i < steps; i++) update(1 / 60);
+  draw(GF.ctx);
+  return steps;
+};
 
 })();
 </script>
