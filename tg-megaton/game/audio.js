@@ -11,7 +11,14 @@
 // handles CC0 sample playback + procedural noise, while every entrypoint checks
 // GF.muted and startMusic() still routes background music through GF.bgMusic.
 var _nctx = null;
-function nctx() { if (_nctx) return _nctx; try { _nctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { _nctx = null; } return _nctx; }
+function nctx() {
+  if (_nctx) return _nctx;
+  try {
+    _nctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (window.GF && GF.registerAudioContext) GF.registerAudioContext(_nctx);
+  } catch (e) { _nctx = null; }
+  return _nctx;
+}
 function nNoise(c, t, dur, peak, ftype, freq, q) { var n = Math.max(1, c.sampleRate * dur | 0), buf = c.createBuffer(1, n, c.sampleRate), d = buf.getChannelData(0); for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n); var s = c.createBufferSource(); s.buffer = buf; var f = c.createBiquadFilter(); f.type = ftype; f.frequency.value = freq; if (q) f.Q.value = q; var g = c.createGain(); g.gain.setValueAtTime(peak, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); s.connect(f); f.connect(g); g.connect(c.destination); s.start(t); s.stop(t + dur + 0.03); }
 function nOsc(c, t, dur, peak, type, f0, f1) { var o = c.createOscillator(), g = c.createGain(); o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(peak, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + dur); o.connect(g); g.connect(c.destination); o.start(t); o.stop(t + dur + 0.03); }
 function nukeSound() {   // MEGATON: crack -> sub-boom -> mid body -> long rolling rumble -> debris hiss
