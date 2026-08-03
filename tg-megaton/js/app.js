@@ -23,7 +23,7 @@ import {
   var SUPPORT_URL = 'https://t.me/plutomanf';
   var GAMEANALYTICS_GAME_KEY = '28543ab05121fd7f4572508b5ff9c915';
   var GAMEANALYTICS_SECRET_KEY = '9f9f5cff08cda74e139d8f335322b5b90196c6c9';
-  var GAMEANALYTICS_BUILD = 'megaton-telegram-2026-06-27';
+  var GAMEANALYTICS_BUILD = 'megaton-telegram-2026-08-03';
   var API_TIMEOUT_MS = 8000;
   var gameAnalyticsStarted = false;
   var externalScriptLoads = {};
@@ -286,8 +286,19 @@ import {
       }
     } catch (e) {}
   }
+  function gaDesign(name, value) {
+    initGameAnalytics();
+    if (!gameAnalyticsStarted || typeof window.GameAnalytics !== 'function') return;
+    try {
+      var id = ('megaton:' + String(name || 'unknown')).replace(/[^A-Za-z0-9:_-]/g, '_');
+      id = id.split(':').slice(0, 5).map(function (part) { return part.slice(0, 32) || 'x'; }).join(':');
+      if (value != null && isFinite(Number(value))) window.GameAnalytics('addDesignEvent', id, Number(value));
+      else window.GameAnalytics('addDesignEvent', id);
+    } catch (e) {}
+  }
   window.__megatonAnalytics = {
     progression: gaProgression,
+    design: gaDesign,
     state: function (payload) {
       initGameAnalytics();
       if (!gameAnalyticsStarted || typeof window.GameAnalytics !== 'function') return;
@@ -1173,6 +1184,7 @@ import {
     }
     rec.claimedAt = Date.now();
     writeGachaState(st);
+    gaDesign('mission:claim:' + (mission.id || 'unknown'));
     grantMissionReward(mission, true);
     toast(uiText('toast_mission_claimed', { reward: rewardText(mission.reward) }), 1800);
     renderSkins();
@@ -1335,6 +1347,7 @@ import {
 
   function openShop(tab, opts) {
     localizeShell();
+    gaDesign('shop:open:' + (tab || 'boxes'));
     skinsScreen.hidden = false;
     setSkinTab(tab || 'boxes');
     setShopCloseGuide(!!(opts && opts.tutorialClose));
@@ -1345,6 +1358,7 @@ import {
 
   function openMissions() {
     localizeShell();
+    gaDesign('missions:open');
     setSkinTab('missions');
     skinsScreen.hidden = false;
   }
@@ -1728,6 +1742,7 @@ import {
     opts = opts || {};
     var box = BOXES[id];
     if (!box) return null;
+    gaDesign('gacha:open:' + id);
     if (PUBLIC_WEB_BUILD && (box.daily || box.ad || box.reward || box.localOnly)) {
       openTelegramGame('gamefactory');
       toast(uiText('toast_collect_tg'), 1800);
@@ -1956,6 +1971,7 @@ import {
     gameId: GAME_ID,
     hasTelegram: HAS_TG,
     telegram: tg,
+    analytics: gaDesign,
     products: PRODUCTS,
     pendingTonKey: 'megaton_ton_pending',
     pendingTonCreditKey: 'megaton_ton_credit_pending',
@@ -2104,6 +2120,7 @@ import {
 	      adBusy = false;
 	      result = result || { shown: false, rewarded: false };
 	      var ok = Boolean(result.rewarded || result.shown);
+	      gaDesign('ad:' + type + ':' + (result.network || 'none') + ':' + (result.rewarded ? 'rewarded' : result.shown ? 'shown' : (result.reason || 'fail')));
 	      if (!ok) toast(uiText('toast_ad_not_ready'), 1600);
 	      if (cb) cb(ok, result);
 	      return result;

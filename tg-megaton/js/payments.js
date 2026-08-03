@@ -30,6 +30,11 @@ export function createPayments(options) {
   var applyAuthoritativeState = options.applyAuthoritativeState || function () { return false; };
   var applyPaidInventorySnapshot = options.applyPaidInventorySnapshot || function () { return false; };
   var onAuthoritativeStateApplied = options.onAuthoritativeStateApplied || function () {};
+  var analyticsHook = typeof options.analytics === 'function' ? options.analytics : null;
+  function track(name, value) {
+    if (!analyticsHook) return;
+    try { analyticsHook(name, value); } catch (e) {}
+  }
 
   function checkoutProtocolFor(productId) {
     return requiresPaidGacha(productId) ? CHECKOUT_PROTOCOL : '';
@@ -174,6 +179,7 @@ export function createPayments(options) {
       return { applied: false, pending: true, error: 'paid_gacha_catalog_mismatch' };
     }
     forgetPendingPaidGacha(payload);
+    track('pay:applied:' + String(source || 'unknown') + ':' + productId);
     return { applied: true, result: applied, receipt: paidReceipt };
   }
 
@@ -217,6 +223,7 @@ export function createPayments(options) {
         );
         if (result.applied) {
           applied.push(result);
+          track('pay:resume_ok:' + row.productId);
           saveRemoteState('paid_gacha_resume');
           toast(uiText('toast_purchase_applied', {
             title: productTitle(row.productId, PRODUCTS[row.productId] || {})
@@ -323,6 +330,7 @@ export function createPayments(options) {
         var productId = verified.productId || pending.productId;
         var reward = await applyVerifiedProduct(productId, pending.payload, 'TON', verified.state, false, verified.stateRev);
         if (!reward.applied) return;
+        track('ton:resume_ok:' + productId);
         saveRemoteState('ton_purchase_resume');
         writePendingTon(null);
         toast(uiText('toast_ton_applied', { title: productTitle(pending.productId, PRODUCTS[pending.productId] || {}) }));
@@ -343,14 +351,17 @@ export function createPayments(options) {
       return { ok: false, status: 'not_telegram' };
     }
     try {
+      track('ton:start:' + id);
       toast(uiText('toast_ton_connecting'), 2400);
       var ui = await getTonConnectUI();
       var wallet = await waitForTonWallet(ui);
+      track('ton:wallet_ok:' + id);
       var order = await apiPost('/api/tg-ton-order', addCheckoutProtocol({
         game: GAME_ID,
         productId: id,
         initData: tg.initData
       }, id));
+      track('ton:order_ok:' + id);
       var pending = {
         payload: order.payload,
         productId: id,
@@ -370,8 +381,10 @@ export function createPayments(options) {
       });
       pending.boc = result && result.boc || null;
       writePendingTon(pending);
+      track('ton:tx_sent:' + id);
       toast(uiText('toast_ton_waiting'), 3000);
       var verified = await verifyTonPayment(pending, pending.boc, pending.walletAddress, 18);
+      track(verified && verified.paid ? 'ton:verify_ok:' + id : 'ton:verify_pending:' + id);
       if (verified && verified.paid) {
         var reward = await applyVerifiedProduct(verified.productId || id, pending.payload, 'TON', verified.state, false, verified.stateRev);
         if (!reward.applied) {
@@ -391,15 +404,18 @@ export function createPayments(options) {
       return { ok: true, status: 'pending' };
     } catch (e) {
       if (String(e && e.message || '').indexOf('wallet_not_connected') >= 0) {
+        track('ton:wallet_missing:' + id);
         toast(uiText('toast_ton_wallet_missing'));
         if (cb) cb('cancelled');
         return { ok: false, status: 'cancelled' };
       }
       if (String(e && e.message || '').indexOf('UserRejects') >= 0 || String(e && e.message || '').indexOf('reject') >= 0) {
+        track('ton:tx_rejected:' + id);
         toast(uiText('toast_ton_cancelled'));
         if (cb) cb('cancelled');
         return { ok: false, status: 'cancelled' };
       }
+      track('ton:error:' + id);
       toast(uiText('toast_ton_failed', { error: e && e.message || 'unknown_error' }));
       if (cb) cb('error');
       return { ok: false, status: 'error', error: e && e.message || 'unknown_error' };
@@ -447,6 +463,7 @@ export function createPayments(options) {
         if (cb) cb('pending_reward');
         return { ok: true, status: 'pending_reward', source: 'ton_credit' };
       }
+      track('credit:spend_ok:' + id);
       saveRemoteState('ton_credit_spend');
       writePendingTonCredit(null);
       if (reward.result !== 'gacha') {
@@ -457,6 +474,7 @@ export function createPayments(options) {
       return { ok: true, status: 'paid', source: 'ton_credit' };
     } catch (e) {
       if (e && e.status === 402) {
+        track('credit:insufficient:' + id);
         writePendingTonCredit(null);
         updateTonCreditFrom(e.data);
         toast(uiText('toast_credit_insufficient', {
@@ -515,6 +533,7 @@ export function createPayments(options) {
     currency = currency || 'XTR';
     var product = PRODUCTS[id];
     if (!product || product.disabled) return { ok: false, status: 'bad_product' };
+    track('pay:open:' + currency + ':' + id);
     if (currency === 'TON_CREDIT') return buyTonCreditProduct(id, cb);
     if (currency === 'TON') return buyTonProduct(id, cb);
     if (currency !== 'XTR') {
@@ -549,9 +568,11 @@ export function createPayments(options) {
       if (!res.ok || !data.invoiceLink) throw new Error(data.error || 'invoice_failed');
       return await new Promise(function (resolve) {
         tg.openInvoice(data.invoiceLink, function (status) {
+        track('pay:sheet:' + String(status || 'unknown') + ':' + id);
         if (status === 'paid') {
           waitForPurchase(data.payload, id).then(async function (serverPurchase) {
             if (!serverPurchase) {
+              track('pay:verify_timeout:' + id);
               if (!product.noAutoApply) rememberPendingPaidGacha(id, data.payload, 'XTR', false);
               toast(uiText('toast_receipt_pending'), 3200);
               if (cb) cb('pending_receipt');
@@ -589,6 +610,7 @@ export function createPayments(options) {
       });
       });
     } catch (e) {
+      track('pay:setup_fail:' + id);
       toast(uiText('toast_payment_setup_failed', { error: e.message }));
       if (cb) cb('error');
       return { ok: false, status: 'error', error: e.message };
