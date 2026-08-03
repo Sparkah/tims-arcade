@@ -1362,7 +1362,18 @@ function music(url, vol) {
   if (!url) return;
   try {
     if (!_music) {
-      _music = new Audio(); _music.loop = true; _music.preload = 'auto';
+      // NO media element here. An Audio()/<audio> registers an OS MediaSession,
+      // which Yandex rejects as a system media player (1.6.2.5 desktop /
+      // 1.6.1.6 mobile) and which is the root of audio-continues-when-hidden
+      // (1.3) and audio-over-ads (4.7) - CLAUDE.md hard rule #6.
+      //
+      // Megaton never calls GF.music/bgMusic/startMusic; it ships its own Web
+      // Audio engine in audio.js, so this path is unreachable in this build.
+      // Disabled rather than reimplemented: a game that actually wants GF music
+      // should take the current factory template, whose GF.music has been Web
+      // Audio since 2026-06-29. Replacing this whole library to delete one dead
+      // line would swap storage, ads, lifecycle, leaderboard and QA hooks too.
+      return;
       // Pause bg music on tab-hide, resume on return. GF.music games no longer
       // call startMusic (which used to own this), so bind it here, once.
       document.addEventListener('visibilitychange', function () {
