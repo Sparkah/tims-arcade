@@ -1363,6 +1363,7 @@ function setMusicMuted(m) {
 // gen_soundtrack.sh (Suno when funded, curated CC0 fallback, local synth last).
 // Both respect GF.muted (persisted) and start on the first user gesture.
 var _ac = null, _music = null, _musicSrc = null, _musicVol = 0.4;
+var _registeredAudioContexts = [], _registeredAudioVisibilityBound = false;
 var AUDIO_MUTED = false;
 var _extPaused = false;   // audio suspended over an ad / platform pause (Yandex 4.7 + 1.3)
 try { AUDIO_MUTED = (localStorage.getItem('gf_muted') === '1'); } catch (e) {}
@@ -1370,6 +1371,25 @@ function audioCtx() {
   if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
   if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch (e) {} }
   return _ac;
+}
+function registerAudioContext(ctx) {
+  if (!ctx || typeof ctx.suspend !== 'function' || typeof ctx.resume !== 'function') return false;
+  if (_registeredAudioContexts.indexOf(ctx) < 0) _registeredAudioContexts.push(ctx);
+  if (!_registeredAudioVisibilityBound) {
+    _registeredAudioVisibilityBound = true;
+    try {
+      document.addEventListener('visibilitychange', function () {
+        for (var i = 0; i < _registeredAudioContexts.length; i++) {
+          var registered = _registeredAudioContexts[i];
+          try {
+            if (document.hidden && registered.state === 'running') registered.suspend();
+            else if (!document.hidden && !_extPaused && !AUDIO_MUTED && registered.state === 'suspended') registered.resume();
+          } catch (e) {}
+        }
+      });
+    } catch (e) {}
+  }
+  return true;
 }
 function tone(freq, dur, type, gain, slideTo) {
   if (AUDIO_MUTED || _extPaused) return;
@@ -1413,6 +1433,10 @@ function music(url, vol) {
   if (!url) return;
   try {
     if (!_music) {
+      // Some portals reject an HTMLMediaElement because it registers an OS
+      // media session. Their platform adapter sets this flag so bgMusic falls
+      // back to the procedural WebAudio bed; Telegram/Itch keep the MP3 path.
+      if (window.__GF_DISABLE_MEDIA_ELEMENT === true) return;
       _music = new Audio(); _music.loop = true; _music.preload = 'auto';
       // Pause bg music on tab-hide, resume on return. GF.music games no longer
       // call startMusic (which used to own this), so bind it here, once.
@@ -1484,6 +1508,9 @@ function pauseAudio() {
   _extPaused = true;
   try { if (_mus.ctx && _mus.ctx.state === 'running') _mus.ctx.suspend(); } catch (e) {}
   try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch (e) {}
+  for (var i = 0; i < _registeredAudioContexts.length; i++) {
+    try { if (_registeredAudioContexts[i].state === 'running') _registeredAudioContexts[i].suspend(); } catch (e) {}
+  }
   try { if (_music) _music.pause(); } catch (e) {}
 }
 function resumeAudio() {
@@ -1491,6 +1518,9 @@ function resumeAudio() {
   _extPaused = false;
   try { if (_mus.ctx && _mus.on && _mus.ctx.state === 'suspended') { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; } } catch (e) {}
   try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {}
+  for (var i = 0; i < _registeredAudioContexts.length; i++) {
+    try { if (!AUDIO_MUTED && _registeredAudioContexts[i].state === 'suspended') _registeredAudioContexts[i].resume(); } catch (e) {}
+  }
   try { if (_music && _musicSrc && !AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); } } catch (e) {}
 }
 // vector speaker / muted-speaker icon (never emoji) — games place + wire the click
@@ -2236,6 +2266,7 @@ window.GF = {
   // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.bgMusic({file:'audio/bg_track.mp3'}),
   // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
   sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
+  registerAudioContext: registerAudioContext,
   // Procedural music bed + mp3-first background helper:
   startMusic: startMusic, setMusicMuted: setMusicMuted, bgMusic: bgMusic,
   // Remote config (live-ops DATA channel - see the REMOTE CONFIG block

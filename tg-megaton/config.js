@@ -1,10 +1,7 @@
 // Public, non-secret Mini App config.
 // AdsGram rewarded block for Megaton.
 window.MEGATON_ADSGRAM_BLOCK_ID = "36240";
-try {
-  var _adsgramTestBlock = (location.search.match(/[?&]adsgram=([0-9]+)/) || [])[1];
-  if (_adsgramTestBlock) window.MEGATON_ADSGRAM_BLOCK_ID = _adsgramTestBlock;
-} catch (e) {}
+window.MEGATON_ADSGRAM_SDK_SRC = "https://sad.adsgram.ai/js/sad.min.js";
 
 // Monetag Telegram Mini App zone. Paste the dashboard SDK tag's src into
 // MEGATON_MONETAG_SDK_SRC when available; the zone ID alone is not a script URL.
@@ -20,6 +17,7 @@ window.MEGATON_MONETAG_INAPP_SETTINGS = {
 
 window.MEGATON_TON_RECIPIENT = "UQCAFJyUz0GmYZmtiDz21WXGzOfWPQaBI6T5fPjIjhBn_i6Q";
 window.MEGATON_TON_MANIFEST_URL = "https://game-factory.tech/tg-megaton/tonconnect-manifest.json";
+window.MEGATON_TON_CONNECT_SDK_SRC = "https://unpkg.com/@tonconnect/ui@3.0.0/dist/tonconnect-ui.min.js";
 window.MEGATON_TON_PRICES = {
   starter: { ton: "0.20", nanotons: "200000000" },
   caps_pack: { ton: "0.40", nanotons: "400000000" },
