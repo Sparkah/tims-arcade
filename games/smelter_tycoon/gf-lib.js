@@ -198,7 +198,9 @@ function drawFloats() {
     ctx.globalAlpha = Math.max(0, f.life);
     ctx.font = 'bold ' + clamp(15*S, 11, 22) + 'px sans-serif';
     ctx.fillStyle = f.col; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    ctx.fillText(f.txt, f.x, f.y);
+    // 1.10.1: labels spawned near an edge must not bleed off the canvas
+    var tw = ctx.measureText(f.txt).width;
+    ctx.fillText(f.txt, clamp(f.x, tw / 2 + 4, W - tw / 2 - 4), Math.max(f.y, 14));
   }
   ctx.globalAlpha = 1;
 }
@@ -1443,6 +1445,19 @@ function resumeAudio() {
   try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {}
   try { if (_music && _musicSrc && !AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); } } catch (e) {}
 }
+// Introspection for the yandex-testing ad-audio proof (4.7/1.3): lets the
+// harness verify every audio source really suspends while an ad is open.
+function audioState() {
+  return {
+    muted: AUDIO_MUTED,
+    externalPaused: _extPaused,
+    musicCtx: (_mus.ctx && _mus.ctx.state) || '',
+    sfxCtx: (_ac && _ac.state) || '',
+    externalContexts: [],
+    mediaPaused: !_music || _music.paused,
+    mediaMuted: !_music || _music.muted
+  };
+}
 // vector speaker / muted-speaker icon (never emoji) — games place + wire the click
 function drawMuteIcon(c, x, y, r, muted) {
   c.save(); c.translate(x, y); c.lineWidth = Math.max(1.5, r * 0.16);
@@ -2205,7 +2220,7 @@ window.GF = {
   restorePurchases: restorePurchases,
   // Suspend/resume ALL audio over an ad or platform pause (Yandex 4.7 + 1.3).
   // showAd() brackets these automatically; call directly only for custom flows.
-  pauseAudio: pauseAudio, resumeAudio: resumeAudio,
+  pauseAudio: pauseAudio, resumeAudio: resumeAudio, audioState: audioState,
   hasSfx: function (n) { return !!SFX_LIB[n]; },
   get muted() { return AUDIO_MUTED; },
   // Sprites
@@ -2469,30 +2484,69 @@ window.GF = {
       var capW = c.measureText(capTxt).width;
       var maxW = Math.min(W * 0.88, 520 * S);
       while (capW > maxW && capFs > 11) { capFs--; c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif'; capW = c.measureText(capTxt).width; }
+      // 1.10.1 hard rule: if one line still can't fit at the minimum font size, WRAP.
+      // The pill must never exceed the viewport — long RU strings clipped at the edge
+      // are a moderation reject (critter_siege 2026-07-26). The LAST line reserves
+      // room for the skip label, and any single token wider than a line is
+      // hard-broken mid-token so no input can defeat the cap.
       var skipTxt = (lang === 'ru' ? 'пропустить ✕' : 'skip ✕');
       c.font = (capFs - 1) + 'px Inter, system-ui, sans-serif';
       var skipW = c.measureText(skipTxt).width;
-      var padX = 14 * S, gapX = 16 * S, pillH = clamp(32 * S, 27, 42);
-      var pillW = capW + padX * 2 + gapX + skipW;
+      c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif';
+      var padX = 14 * S, gapX = 16 * S, capLineH = capFs * 1.35;
+      var skipRoom = gapX + skipW;
+      var capLines = [capTxt];
+      if (capW + skipRoom > maxW) {
+        capLines = [];
+        var words = capTxt.split(' ');
+        // hard-break tokens that alone exceed a full line (URLs, compounds)
+        var toks = [];
+        for (var wi = 0; wi < words.length; wi++) {
+          var wd = words[wi];
+          while (c.measureText(wd).width > maxW && wd.length > 2) {
+            var cut = wd.length - 1;
+            while (cut > 1 && c.measureText(wd.slice(0, cut)).width > maxW) cut--;
+            toks.push(wd.slice(0, cut)); wd = wd.slice(cut);
+          }
+          toks.push(wd);
+        }
+        var cur = '';
+        for (var ti = 0; ti < toks.length; ti++) {
+          var tryS = cur ? cur + ' ' + toks[ti] : toks[ti];
+          if (c.measureText(tryS).width > maxW && cur) { capLines.push(cur); cur = toks[ti]; }
+          else cur = tryS;
+        }
+        if (cur) capLines.push(cur);
+        // last line must ALSO fit the skip label; spill one extra line if not
+        var lastTry = capLines[capLines.length - 1];
+        if (c.measureText(lastTry).width + skipRoom > maxW && capLines.length < 8) capLines.push('');
+        capW = 0;
+        for (var li = 0; li < capLines.length; li++) capW = Math.max(capW, c.measureText(capLines[li]).width);
+      }
+      var lastLineW = c.measureText(capLines[capLines.length - 1]).width;
+      var pillH = clamp(32 * S, 27, 42) + (capLines.length - 1) * capLineH;
+      var pillW = Math.min(padX * 2 + Math.max(capW, lastLineW + skipRoom), W - 16 * S);
       var ax = aTg.x, ay = aTg.y, ar = aTg.r || 40;
       if (aTo && typeof aTo.x === 'number') { ax = (aTg.x + aTo.x) / 2; ay = Math.min(aTg.y, aTo.y); ar = Math.max(aTg.r || 40, aTo.r || 40); }
       var pillY = ay - ar - pillH - 16 * S;
       if (pillY < 52 * S) pillY = (aTo ? Math.max(aTg.y, aTo.y) : aTg.y) + ar + 16 * S;
-      pillY = clamp(pillY, 52 * S, H - pillH - 12 * S);
-      var pillX = clamp(ax - pillW / 2, 8 * S, W - pillW - 8 * S);
+      pillY = Math.max(8, Math.min(pillY, H - pillH - 12 * S));
+      var pillX = Math.max(8 * S, Math.min(ax - pillW / 2, W - pillW - 8 * S));
       c.save();
       c.shadowColor = 'rgba(0,0,0,0.4)'; c.shadowBlur = 9 * S; c.shadowOffsetY = 3 * S;
       c.fillStyle = 'rgba(16, 20, 30, 0.9)';
-      rr(c, pillX, pillY, pillW, pillH, pillH / 2); c.fill();
+      rr(c, pillX, pillY, pillW, pillH, Math.min(pillH / 2, 21 * S)); c.fill();
       c.restore();
       c.textBaseline = 'middle';
       c.fillStyle = '#fff'; c.textAlign = 'left';
       c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif';
-      c.fillText(capTxt, pillX + padX, pillY + pillH / 2 + 1);
+      var capY0 = pillY + (pillH - (capLines.length - 1) * capLineH) / 2 + 1;
+      for (var ci = 0; ci < capLines.length; ci++) c.fillText(capLines[ci], pillX + padX, capY0 + ci * capLineH);
+      var skipX = pillX + padX + lastLineW + gapX;
       c.fillStyle = '#9cc'; c.font = (capFs - 1) + 'px Inter, system-ui, sans-serif';
-      c.fillText(skipTxt, pillX + padX + capW + gapX, pillY + pillH / 2 + 1);
+      c.fillText(skipTxt, skipX, capY0 + (capLines.length - 1) * capLineH);
       c.textBaseline = 'alphabetic';
-      state._skipBtn = { x: pillX + padX + capW + gapX - 8 * S, y: pillY - 5 * S, w: skipW + 24 * S, h: pillH + 10 * S };
+      state._skipBtn = { x: skipX - 8 * S, y: pillY - 5 * S, w: skipW + 24 * S, h: pillH + 10 * S };
     };
     state.handleClick = function (x, y) {
       if (!state.active) return false;

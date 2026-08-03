@@ -64,10 +64,27 @@ resize();
 //   - exposes GF.saveRun() — call after every state transition
 // The game keeps its own state shape; the lib only ferries JSON.
 var _persistKey = null, _persistGetter = null;
+function _platformStorage() {
+  try {
+    if (platform === 'gamepix' && window.GamePix && window.GamePix.localStorage) {
+      return window.GamePix.localStorage;
+    }
+  } catch (_) {}
+  return localStorage;
+}
+function storageGet(key) {
+  try { return _platformStorage().getItem(String(key)); } catch (_) { return null; }
+}
+function storageSet(key, value) {
+  try { _platformStorage().setItem(String(key), String(value)); } catch (_) {}
+}
+function storageRemove(key) {
+  try { _platformStorage().removeItem(String(key)); } catch (_) {}
+}
 function persist(key, getState, applyState) {
   _persistKey = key; _persistGetter = getState;
   try {
-    var raw = localStorage.getItem(key);
+    var raw = storageGet(key);
     if (raw) { applyState(JSON.parse(raw)); return true; }
   } catch (_) {}
   return false;
@@ -76,8 +93,8 @@ function saveRun() {
   if (!_persistKey || !_persistGetter) return;
   try {
     var s = _persistGetter();
-    if (s === null || s === undefined) { localStorage.removeItem(_persistKey); return; }
-    localStorage.setItem(_persistKey, JSON.stringify(s));
+    if (s === null || s === undefined) { storageRemove(_persistKey); return; }
+    storageSet(_persistKey, JSON.stringify(s));
   } catch (_) {}
 }
 
@@ -107,7 +124,12 @@ function rr(c, x, y, w, h, r) {
 var keys = {};
 document.addEventListener('keydown', function(e) { keys[e.code] = true; });
 document.addEventListener('keyup',   function(e) { keys[e.code] = false; });
-document.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+// Yandex 1.6.2.7 (desktop right-click) + 1.6.1.8 (mobile long-press): no browser
+// context menu, no text selection, no image drag on the game field. All three
+// games in the 2026-07-21 rejection wave were cited for this — full trio, always.
+['contextmenu', 'selectstart', 'dragstart'].forEach(function (ev) {
+  document.addEventListener(ev, function (e) { e.preventDefault(); }, { passive: false });
+});
 document.addEventListener('wheel', function(e) { e.preventDefault(); }, { passive: false });
 
 // ── TOUCH (joystick-style drag) ──────────────────────────────────────────
@@ -198,7 +220,9 @@ function drawFloats() {
     ctx.globalAlpha = Math.max(0, f.life);
     ctx.font = 'bold ' + clamp(15*S, 11, 22) + 'px sans-serif';
     ctx.fillStyle = f.col; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-    ctx.fillText(f.txt, f.x, f.y);
+    // 1.10.1: labels spawned near an edge must not bleed off the canvas
+    var tw = ctx.measureText(f.txt).width;
+    ctx.fillText(f.txt, clamp(f.x, tw / 2 + 4, W - tw / 2 - 4), Math.max(f.y, 14));
   }
   ctx.globalAlpha = 1;
 }
@@ -404,11 +428,16 @@ function exposeReach(getter) {
       if (typeof r.scrollMaxY === 'number') maxY = r.scrollMaxY;
       else if (r.scrollId && _scrollRegions[r.scrollId]) maxY = _scrollRegions[r.scrollId].maxOffset();
       var vpH = (typeof r.viewportH === 'number') ? r.viewportH : H;
+      var vpW = (typeof r.viewportW === 'number') ? r.viewportW : W;
+      var safeRight = Math.max(0, Number(r.safeRight || 0));
+      var safeBottom = Math.max(0, Number(r.safeBottom || 0));
       return {
         screen: r.screen != null ? String(r.screen) : '?',
         viewportH: Math.round(vpH),
-        viewportW: W,
+        viewportW: Math.round(vpW),
         screenH: Math.round(typeof r.screenH === 'number' ? r.screenH : H),
+        safeRight: Math.round(safeRight),
+        safeBottom: Math.round(safeBottom),
         scrollId: r.scrollId || null,
         scrollMaxY: Math.round(maxY),
         items: (r.items || []).map(function (it) {
@@ -633,28 +662,39 @@ function shareBlob(blob, opts) {
 var lastTs = 0, onUpdate = null, onDraw = null, isRunning = false;
 
 function frame(ts) {
-  var dt = Math.min((ts - lastTs) / 1000, 0.08);
-  lastTs = ts;
+  // The WHOLE body is guarded: one thrown frame (transient rotation viewport,
+  // mid-resize negative geometry, a bad sprite draw) must NEVER kill the rAF
+  // chain — a dead loop is a permanently blank canvas, which moderation reads
+  // as "game freezes" (Yandex 1.14, beast_bazaar 2026-07-31). On error: drop
+  // the frame, restore a clean ctx state, force a viewport re-sync, carry on.
+  try {
+    var dt = Math.min((ts - lastTs) / 1000, 0.08);
+    lastTs = ts;
 
-  // Re-sync the canvas to the live visible viewport BEFORE drawing, so no frame
-  // is ever rendered at a stale size. This eliminates the transient stretched /
-  // deformed frame a moderator catches mid-transition (Yandex 1.6.1.3 / 1.6.2.3).
-  // Cheap integer compare; resize() only runs on an actual dimension change.
-  if (W !== _vpW() || H !== _vpH()) resize();
+    // Re-sync the canvas to the live visible viewport BEFORE drawing, so no frame
+    // is ever rendered at a stale size. This eliminates the transient stretched /
+    // deformed frame a moderator catches mid-transition (Yandex 1.6.1.3 / 1.6.2.3).
+    // Cheap integer compare; resize() only runs on an actual dimension change.
+    if (W !== _vpW() || H !== _vpH()) resize();
 
-  updateParticles(dt);
-  updateFloats(dt);
-  updateShake(dt);
-  if (onUpdate) onUpdate(dt);
+    updateParticles(dt);
+    updateFloats(dt);
+    updateShake(dt);
+    if (onUpdate) onUpdate(dt);
 
-  var ofs = shakeOffset();
-  ctx.save();
-  ctx.translate(ofs.x, ofs.y);
-  if (onDraw) onDraw(ctx, dt);
-  drawParticles();
-  drawFloats();
-  ctx.restore();
-
+    var ofs = shakeOffset();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);   // heal any transform leaked by a prior bad frame
+    ctx.save();
+    ctx.translate(ofs.x, ofs.y);
+    if (onDraw) onDraw(ctx, dt);
+    drawParticles();
+    drawFloats();
+    ctx.restore();
+  } catch (e) {
+    try { ctx.setTransform(1, 0, 0, 1, 0, 0); } catch (_) {}
+    try { resize(); } catch (_) {}
+    window.__gfFrameErr = String((e && e.message) || e);   // QA probe hook, not a log
+  }
   requestAnimationFrame(frame);
 }
 
@@ -693,13 +733,39 @@ function init(config) {
           window.CrazyGames.SDK.game.loadingStop();
         }
       } catch (e) {}
+      if (platform === 'gamepix') {
+        _markGamePixLoaded(function () {
+          if (typeof config.onReady === 'function') config.onReady();
+          startLoop();
+        });
+        return;
+      }
       if (typeof config.onReady === 'function') config.onReady();
       startLoop();
     });
   }
+  function _markGamePixLoaded(done) {
+    var finished = false;
+    function finish() {
+      if (finished) return;
+      finished = true;
+      done();
+    }
+    try {
+      if (window.GamePix && typeof window.GamePix.loading === 'function') window.GamePix.loading(100);
+      if (window.GamePix && typeof window.GamePix.loaded === 'function') {
+        var p = window.GamePix.loaded();
+        if (p && typeof p.then === 'function') p.then(finish).catch(finish);
+        else finish();
+        setTimeout(finish, 4000);
+        return;
+      }
+    } catch (e) {}
+    finish();
+  }
 
   // Platform detection: GamePush (gp global from gamepush SDK) >
-  // Yandex (YaGames) > CrazyGames > local/standalone.
+  // Yandex (YaGames) > CrazyGames > GamePix > local/standalone.
   // build_platforms.sh swaps the SDK <script> tag per zip, so at runtime
   // exactly one of these init paths fires.
   //
@@ -711,6 +777,7 @@ function init(config) {
   // games not yet migrated to GP.
   if (window.__gpReady && window.gp) {
     // SDK already finished init before gf-lib loaded (unlikely but cheap to handle)
+    platform = 'gamepush';
     _onGpReady(window.gp);
   } else if (window.__gpKey) {
     // GP SDK is loading async; the index.html template installed a callback
@@ -761,17 +828,47 @@ function init(config) {
               AUDIO_MUTED = !!value;
               try { setMusicMuted(!!value); } catch (e) {}
               try {
-                if (_music) {
-                  _music.muted = AUDIO_MUTED;
-                  if (AUDIO_MUTED) { _music.pause(); }
-                  else if (_musicSrc) { var _p = _music.play(); if (_p && _p.catch) _p.catch(function () {}); }
-                }
+                if (_musicGain) _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol;
+                if (!AUDIO_MUTED) { audioCtx(); _startMusicNode(); }
               } catch (e) {}
             }
           });
         }
       } catch (e) {}
     }).catch(boot);
+    setTimeout(boot, 3000);
+  } else if (window.GamePix) {
+    platform = 'gamepix';
+    try {
+      if (typeof window.GamePix.loading === 'function') window.GamePix.loading(10);
+      if (typeof window.GamePix.lang === 'function') {
+        var gl = window.GamePix.lang();
+        if (gl) lang = String(gl).toLowerCase().startsWith('ru') ? 'ru' : 'en';
+      }
+      // GamePix rejects if game audio keeps playing during an ad. The SDK does
+      // NOT blur/hide the tab for its ads, so visibilitychange never fires —
+      // instead it signals ad open/close via GamePix.on.pause/resume, and the
+      // platform sound toggle via on.soundOff/soundOn. Wire every channel to the
+      // idempotent audio suspend/resume so GamePix's own auto-interstitials
+      // (happyMoment()/gameStop(), which the game never routes through showAd)
+      // go silent too — mirrors the Yandex game_api_pause hook above.
+      //
+      // THREE independent mute reasons share one resolver (_adMuteApply, module
+      // scope): an open SDK ad (pause/resume), the platform sound toggle
+      // (soundOff/soundOn), and showAd's own manual bracket (_manualAdOpen).
+      // Gating on the union means soundOn/resume can't un-mute mid-ad — not
+      // even while OUR interstitial is still open (the Shipwreck v2 leak).
+      // Handlers stay SDK-call-free: gameStop()/happyMoment() inside an ad
+      // path makes the SDK queue a SECOND auto-interstitial (stacked ad with
+      // no skip button = the 2026-07-03 GamePix rejection).
+      if (window.GamePix.on) {
+        window.GamePix.on.pause    = function () { _armAdOcclusionWindow(); _gpAd = true; _adMuteApply(); };
+        window.GamePix.on.resume   = function () { _armAdOcclusionWindow(); _engageGestureHoldIfBlind(); _gpAd = false; _adMuteApply(); _evaluateOcclusion(); };
+        window.GamePix.on.soundOff = function () { _gpMute = true; _adMuteApply(); };
+        window.GamePix.on.soundOn  = function () { _gpMute = false; _adMuteApply(); };
+      }
+    } catch (e) {}
+    boot();
     setTimeout(boot, 3000);
   } else {
     // Standalone / Gallery: no platform SDK to await, so boot immediately.
@@ -805,14 +902,28 @@ function init(config) {
 // Platform-aware lifecycle. Games call GF.gameplayStart() when entering
 // the PLAYING state and GF.gameplayStop() on game-over/menu-return.
 // These no-op locally; on CG they're required for ad timing (Full Launch);
-// on Yandex they're a no-op today but kept here so games using GF only
-// need ONE set of calls. Safe to call repeatedly — the platform SDKs
-// dedupe internally.
+// on Yandex they signal the GameplayAPI (engagement/retention tracking).
+// Safe to call repeatedly — the platform SDKs dedupe internally.
 var platform = 'local';
 function gameplayStart() {
   try {
     if (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.game) {
       window.CrazyGames.SDK.game.gameplayStart();
+    }
+  } catch (e) {}
+  try {
+    if (platform === 'yandex' && window.ysdk && window.ysdk.features && window.ysdk.features.GameplayAPI) {
+      window.ysdk.features.GameplayAPI.start();
+    }
+  } catch (e) {}
+  try {
+    // Never signal GamePix while an ad is open: canvas games keep running
+    // behind ads, and gameAction/gameStop/happyMoment during an ad window
+    // makes the SDK queue a SECOND auto-interstitial (stacked ad without a
+    // skip button — the 2026-07-03 GamePix rejection class).
+    if (platform === 'gamepix' && !_manualAdOpen && !_gpAd && window.GamePix && typeof window.GamePix.gameAction === 'function') {
+      if (_gpStopTimer) { clearTimeout(_gpStopTimer); _gpStopTimer = null; } // quick restart supersedes a pending stop
+      window.GamePix.gameAction();
     }
   } catch (e) {}
 }
@@ -821,6 +932,36 @@ function gameplayStop() {
     if (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.game) {
       window.CrazyGames.SDK.game.gameplayStop();
     }
+  } catch (e) {}
+  try {
+    if (platform === 'yandex' && window.ysdk && window.ysdk.features && window.ysdk.features.GameplayAPI) {
+      window.ysdk.features.GameplayAPI.stop();
+    }
+  } catch (e) {}
+  try {
+    // DEFERRED + ad-window-guarded: game code commonly runs GF.gameEnded()
+    // and then immediately requests an interstitial — a gameStop() answered
+    // instantly hands the SDK its own auto-ad opportunity microseconds before
+    // ours, stacking two ads on one break (the 2026-07-03 rejection). Fire it
+    // only if no ad opened in the window; gameplayStart() cancels it on a
+    // quick restart. Dropping a stop the SDK never needed is harmless.
+    if (platform === 'gamepix' && window.GamePix && typeof window.GamePix.gameStop === 'function') {
+      if (_gpStopTimer) clearTimeout(_gpStopTimer);
+      _gpStopTimer = setTimeout(function () {
+        _gpStopTimer = null;
+        if (!_manualAdOpen && !_gpAd) { try { window.GamePix.gameStop(); } catch (e) {} }
+      }, 1600);
+    }
+  } catch (e) {}
+}
+function gamePixUpdateProgress() {
+  if (platform !== 'gamepix' || !window.GamePix || typeof window.__gfState !== 'function') return;
+  try {
+    var st = window.__gfState() || {};
+    var score = Number(st.score);
+    if (isFinite(score) && typeof window.GamePix.updateScore === 'function') window.GamePix.updateScore(score);
+    var level = Number(st.level != null ? st.level : st.lvl);
+    if (isFinite(level) && level > 0 && typeof window.GamePix.updateLevel === 'function') window.GamePix.updateLevel(level);
   } catch (e) {}
 }
 // Request an ad. Resolves regardless of outcome — caller should treat
@@ -831,6 +972,13 @@ function gameplayStop() {
 //   { shown: bool, rewarded: bool }
 // Old callers that just `await GF.showAd()` still work — the resolved
 // object is truthy and they ignore it.
+// No-fill watchdog duration. Production default 30s; the yandex-testing
+// harness (game-level __gfAdTest hooks) shrinks it via window.__GF_AD_WATCHDOG_MS
+// so a silent-SDK recovery is provable in-test without waiting 30s.
+function _adWatchdogMs() {
+  var v = window.__GF_AD_WATCHDOG_MS;
+  return (typeof v === 'number' && v > 0) ? v : 30000;
+}
 function showAd(type) {
   type = type || 'midgame';
   return new Promise(function(rawOk) {
@@ -838,7 +986,10 @@ function showAd(type) {
     // (success / error / 30s no-fill timeout) exactly once. pauseAudio and
     // resumeAudio are idempotent.
     var _resolved = false;
-    var ok = function (res) { if (_resolved) return; _resolved = true; resumeAudio(); rawOk(res); };
+    // Clear only OUR reason, then let the shared resolver decide: if the SDK
+    // still signals an open ad (_gpAd) or a platform mute (_gpMute), the game
+    // STAYS silent — e.g. the 30s watchdog firing while the ad is still up.
+    var ok = function (res) { if (_resolved) return; _resolved = true; _armAdOcclusionWindow(); _engageGestureHoldIfBlind(); _manualAdOpen = false; _adMuteApply(); _evaluateOcclusion(); rawOk(res); };
     // Pause audio when the ad actually STARTS, not at request time — a no-fill /
     // adblock / 30s-watchdog path must never mute with no visible ad (CG: mute on
     // ad start; Yandex: pause on onOpen). GamePush's promise API has no reliable
@@ -850,31 +1001,49 @@ function showAd(type) {
       // the active platform supports. showRewardedVideo resolves to bool.
       if (platform === 'gamepush' && window.gp && window.gp.ads) {
         if (type === 'rewarded' && typeof window.gp.ads.showRewardedVideo === 'function') {
-          pauseAudio();
+          _adOpenPause();
           window.gp.ads.showRewardedVideo()
             .then(function (success) { ok({ shown: true, rewarded: !!success }); })
             .catch(function () { ok({ shown: false, rewarded: false }); });
-          setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, _adWatchdogMs());
           return;
         }
         // A rewarded request must NEVER fall through to a fullscreen ad (that
         // shows an unrewarded ad on a reward button). Only fullscreen for non-rewarded.
         if (type !== 'rewarded' && typeof window.gp.ads.showFullscreen === 'function') {
-          pauseAudio();
+          _adOpenPause();
           window.gp.ads.showFullscreen()
             .then(function () { ok({ shown: true, rewarded: false }); })
             .catch(function () { ok({ shown: false, rewarded: false }); });
-          setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, _adWatchdogMs());
+          return;
+        }
+      }
+      if (platform === 'gamepix' && window.GamePix) {
+        if (type === 'rewarded' && typeof window.GamePix.rewardAd === 'function') {
+          _adOpenPause();
+          window.GamePix.rewardAd()
+            .then(function (res) { ok({ shown: true, rewarded: !!(res && res.success) }); })
+            .catch(function () { ok({ shown: false, rewarded: false }); });
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, _adWatchdogMs());
+          return;
+        }
+        if (type !== 'rewarded' && typeof window.GamePix.interstitialAd === 'function') {
+          _adOpenPause();
+          window.GamePix.interstitialAd()
+            .then(function (res) { ok({ shown: !(res && res.success === false), rewarded: false }); })
+            .catch(function () { ok({ shown: false, rewarded: false }); });
+          setTimeout(function () { ok({ shown: false, rewarded: false }); }, _adWatchdogMs());
           return;
         }
       }
       if (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad) {
         window.CrazyGames.SDK.ad.requestAd(type, {
-          adStarted:  function () { pauseAudio(); },   // mute only once the ad is on screen
+          adStarted:  function () { _adOpenPause(); },   // mute only once the ad is on screen
           adFinished: function () { ok({ shown: true, rewarded: type === 'rewarded' }); },
           adError:    function () { ok({ shown: false, rewarded: false }); },
         });
-        setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
+        setTimeout(function () { ok({ shown: false, rewarded: false }); }, _adWatchdogMs());
         return;
       }
       if (platform === 'yandex' && window.ysdk && window.ysdk.adv) {
@@ -884,48 +1053,48 @@ function showAd(type) {
           // which can't pay out → a reward button would show an unrewarded ad. If
           // the rewarded API is missing, resolve cleanly so the UI recovers.
           if (typeof window.ysdk.adv.showRewardedVideo !== 'function') { ok({ shown: false, rewarded: false }); return; }
-          var _granted = false;
+          var _granted = false, _openedRewarded = false;
+          var _rewardedOpenTimer = setTimeout(function () { if (!_openedRewarded) ok({ shown: false, rewarded: false }); }, Math.min(4500, _adWatchdogMs()));
           window.ysdk.adv.showRewardedVideo({
             callbacks: {
-              onOpen:     function () { pauseAudio(); },
+              onOpen:     function () { _openedRewarded = true; if (_rewardedOpenTimer) { clearTimeout(_rewardedOpenTimer); _rewardedOpenTimer = null; } _adOpenPause(); },
               onRewarded: function () { _granted = true; },
               // onClose's arg isn't reliably passed for rewarded; _granted is the
               // source of truth for whether it actually played + paid out.
-              onClose:    function () { ok({ shown: _granted, rewarded: _granted }); },
-              onError:    function () { ok({ shown: false, rewarded: false }); },
+              onClose:    function () { if (_rewardedOpenTimer) { clearTimeout(_rewardedOpenTimer); _rewardedOpenTimer = null; } ok({ shown: _granted, rewarded: _granted }); },
+              onError:    function () { if (_rewardedOpenTimer) { clearTimeout(_rewardedOpenTimer); _rewardedOpenTimer = null; } ok({ shown: false, rewarded: false }); },
             },
           });
-          setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
           return;
         }
+        var _openedFullscreen = false;
+        var _fullscreenOpenTimer = setTimeout(function () { if (!_openedFullscreen) ok({ shown: false, rewarded: false }); }, Math.min(4500, _adWatchdogMs()));
         window.ysdk.adv.showFullscreenAdv({
           callbacks: {
             // Yandex passes wasShown=false when no ad actually displayed (e.g. an
             // over-frequent call) — honour it so the cap layer doesn't count a
             // phantom impression.
-            onOpen:  function () { pauseAudio(); },
-            onClose: function (wasShown) { ok({ shown: wasShown !== false, rewarded: false }); },
-            onError: function () { ok({ shown: false, rewarded: false }); },
+            onOpen:  function () { _openedFullscreen = true; if (_fullscreenOpenTimer) { clearTimeout(_fullscreenOpenTimer); _fullscreenOpenTimer = null; } _adOpenPause(); },
+            onClose: function (wasShown) { if (_fullscreenOpenTimer) { clearTimeout(_fullscreenOpenTimer); _fullscreenOpenTimer = null; } ok({ shown: wasShown !== false, rewarded: false }); },
+            onError: function () { if (_fullscreenOpenTimer) { clearTimeout(_fullscreenOpenTimer); _fullscreenOpenTimer = null; } ok({ shown: false, rewarded: false }); },
           },
         });
-        setTimeout(function () { ok({ shown: false, rewarded: false }); }, adWatchdogMs());
         return;
       }
     } catch (e) {}
     ok({ shown: false, rewarded: false });  // local / unknown → resolve immediately
   });
 }
-function adWatchdogMs() {
-  var ms = 30000;
-  try {
-    if (typeof window.__GF_AD_WATCHDOG_MS === 'number' && window.__GF_AD_WATCHDOG_MS >= 300) {
-      ms = window.__GF_AD_WATCHDOG_MS;
-    }
-  } catch (e) {}
-  return ms;
-}
 // Convenience: rewarded ad with callbacks. Audio pause/resume + the no-fill
 // watchdog are handled inside showAd; onReward fires ONLY on a confirmed reward.
+// Runtime QA hooks: yandex-testing's ad_audio_proof drives ads through these
+// without needing per-game adapters (mock SDK injects YaGames, then fires
+// __gfAds.*; the harness asserts audio stays silent for the ad's full run).
+window.__gfAds = {
+  fireRewarded:     function () { return showAd('rewarded'); },
+  fireInterstitial: function () { return showAd('midgame'); },
+};
+
 function rewardedAd(onReward, onSkip) {
   return showAd('rewarded').then(function (r) {
     if (r && r.rewarded) { if (onReward) onReward(); }
@@ -970,6 +1139,7 @@ function _adsSdkReady() {
     if (platform === 'gamepush')   return !!(window.gp && window.gp.ads);
     if (platform === 'crazygames') return !!(window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.ad);
     if (platform === 'yandex')     return !!(window.ysdk && window.ysdk.adv);
+    if (platform === 'gamepix')    return !!(window.GamePix && (window.GamePix.interstitialAd || window.GamePix.rewardAd));
   } catch (e) {}
   return false;
 }
@@ -1118,6 +1288,81 @@ var gpApi = {
     var gp = _gp();
     if (!gp || !gp.ads || typeof gp.ads.showPreloader !== 'function') return Promise.resolve();
     try { return gp.ads.showPreloader().catch(function () {}); } catch (e) { return Promise.resolve(); }
+  },
+};
+
+// ── Native Yandex leaderboard wrapper ──────────────────────────────────────
+// Current SDK uses ysdk.leaderboards.setScore/getEntries. Older builds exposed
+// getLeaderboards() with setLeaderboardScore/getLeaderboardEntries, so keep a
+// fallback while making GF.leaderboard prove real Yandex support to presubmit.
+function _lbPlayerName(player, fallback) {
+  return (player && (player.publicName || player.name)) || fallback || 'Player';
+}
+function _lbEntry(e, i) {
+  e = e || {};
+  var p = e.player || {};
+  return {
+    rank: e.rank || (i + 1),
+    score: e.score || 0,
+    name: _lbPlayerName(p, 'Player ' + (i + 1)),
+    player: p,
+    extraData: e.extraData || '',
+  };
+}
+function _yandexSetScore(tag, score) {
+  var sdk = window.ysdk;
+  if (!sdk) return Promise.resolve(false);
+  var n = Math.max(0, Math.floor(Number(score) || 0));
+  try {
+    if (sdk.leaderboards && typeof sdk.leaderboards.setScore === 'function') {
+      var available = typeof sdk.isAvailableMethod === 'function'
+        ? sdk.isAvailableMethod('leaderboards.setScore').catch(function () { return false; })
+        : Promise.resolve(true);
+      return available.then(function (ok) {
+        if (!ok) return false;
+        return sdk.leaderboards.setScore(tag, n).then(function () { return true; }).catch(function () { return false; });
+      }).catch(function () { return false; });
+    }
+    if (typeof sdk.getLeaderboards === 'function') {
+      return sdk.getLeaderboards().then(function (lb) {
+        if (!lb || typeof lb.setLeaderboardScore !== 'function') return false;
+        return lb.setLeaderboardScore(tag, n).then(function () { return true; }).catch(function () { return false; });
+      }).catch(function () { return false; });
+    }
+  } catch (e) {}
+  return Promise.resolve(false);
+}
+function _yandexGetEntries(tag, limit) {
+  var sdk = window.ysdk;
+  if (!sdk) return Promise.resolve([]);
+  var top = Math.max(1, Math.min(limit || 10, 20));
+  try {
+    if (sdk.leaderboards && typeof sdk.leaderboards.getEntries === 'function') {
+      return sdk.leaderboards.getEntries(tag, { quantityTop: top, includeUser: true, quantityAround: 3 })
+        .then(function (r) { return ((r && r.entries) || []).map(_lbEntry); })
+        .catch(function () { return []; });
+    }
+    if (typeof sdk.getLeaderboards === 'function') {
+      return sdk.getLeaderboards().then(function (lb) {
+        if (!lb || typeof lb.getLeaderboardEntries !== 'function') return [];
+        return lb.getLeaderboardEntries(tag, { quantityTop: top, includeUser: true, quantityAround: 3 })
+          .then(function (r) { return ((r && r.entries) || []).map(_lbEntry); })
+          .catch(function () { return []; });
+      }).catch(function () { return []; });
+    }
+  } catch (e) {}
+  return Promise.resolve([]);
+}
+var leaderboardApi = {
+  publish: function (tag, score) {
+    if (platform === 'gamepush') { gpApi.leaderboard.publish(tag, score); return Promise.resolve(true); }
+    if (platform === 'yandex') return _yandexSetScore(tag, score);
+    return Promise.resolve(false);
+  },
+  fetch: function (tag, limit) {
+    if (platform === 'gamepush') return gpApi.leaderboard.fetch(tag, limit);
+    if (platform === 'yandex') return _yandexGetEntries(tag, limit);
+    return Promise.resolve([]);
   },
 };
 
@@ -1308,16 +1553,32 @@ function setMusicMuted(m) {
 // ── PUBLIC API ───────────────────────────────────────────────────────────
 // ── AUDIO: procedural SFX synth + bg-music loop + mute (reusable) ──────────
 // Games MUST ship sound before publish (Tim 2026-06-04). SFX are synthesized via
-// WebAudio (no asset files, tiny, reliable); music is an mp3 loop from the Suno
-// tool (Shared/tools/game-audio/gen_music.py → <game>/audio/bg_loop.mp3). Both
-// respect GF.muted (persisted) and start on the first user gesture (autoplay policy).
-var _ac = null, _music = null, _musicSrc = null, _musicVol = 0.4;
+// WebAudio (no asset files, tiny, reliable); music is an mp3 installed by
+// gen_soundtrack.sh (Suno when funded, curated CC0 fallback, local synth last).
+// The mp3 plays through WEB AUDIO (decode -> looping BufferSource), NEVER an HTML
+// media element (an audio/video tag or the Audio constructor) — an HTMLMediaElement
+// registers the OS MediaSession and IS REJECTED (Yandex 1.6.2.5 desktop system
+// player / 1.6.1.6 mobile notification,
+// and is the root of 1.3 keeps-playing-when-hidden + 4.7 plays-over-ads). Music +
+// SFX share one _ac context, so one _ac.suspend() silences everything on hide/ad.
+// Both respect GF.muted (persisted) and start on the first user gesture.
+var _ac = null, _musicBuf = null, _musicNode = null, _musicGain = null, _musicVol = 0.4, _musicUrl = null, _musicWant = false;
 var AUDIO_MUTED = false;
 var _extPaused = false;   // audio suspended over an ad / platform pause (Yandex 4.7 + 1.3)
+var _externalAudioContexts = [];
+var _externalAudioResume = [];
 try { AUDIO_MUTED = (localStorage.getItem('gf_muted') === '1'); } catch (e) {}
+function registerAudioContext(ctx) {
+  if (!ctx) return ctx;
+  try {
+    if (_externalAudioContexts.indexOf(ctx) < 0) _externalAudioContexts.push(ctx);
+  } catch (e) {}
+  return ctx;
+}
 function audioCtx() {
   if (!_ac) { try { _ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
-  if (_ac && _ac.state === 'suspended') { try { _ac.resume(); } catch (e) {} }
+  // Never auto-resume under an ad / hidden tab — an SFX must not un-pause audio (1.3/4.7).
+  if (_ac && _ac.state === 'suspended' && !_extPaused && !document.hidden) { try { _ac.resume(); } catch (e) {} }
   return _ac;
 }
 function tone(freq, dur, type, gain, slideTo) {
@@ -1358,30 +1619,52 @@ var SFX_LIB = {
   error:   function () { tone(200, 0.12, 'square', 0.07, 140); },
 };
 function sfx(name) { var f = SFX_LIB[name]; if (f) f(); }
-function music(url, vol) {
-  if (!url) return;
+function _startMusicNode() {
+  if (_musicNode) return true;
+  if (!_ac || !_musicBuf || !_musicWant) return false;
   try {
-    if (!_music) {
-      _music = new Audio(); _music.loop = true; _music.preload = 'auto';
-      // Pause bg music on tab-hide, resume on return. GF.music games no longer
-      // call startMusic (which used to own this), so bind it here, once.
-      document.addEventListener('visibilitychange', function () {
-        if (!_music) return;
-        try {
-          if (document.hidden) _music.pause();
-          else if (!AUDIO_MUTED && _musicSrc) { var q = _music.play(); if (q && q.catch) q.catch(function () {}); }
-        } catch (e) {}
-      });
-    }
-    if (vol != null) _musicVol = vol;
-    _musicSrc = url; _music.src = url; _music.volume = _musicVol; _music.muted = AUDIO_MUTED;
-    if (!AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
-  } catch (e) {}
+    if (!_musicGain) { _musicGain = _ac.createGain(); _musicGain.connect(_ac.destination); }
+    _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol;
+    var s = _ac.createBufferSource(); s.buffer = _musicBuf; s.loop = true;
+    s.connect(_musicGain); s.start(0);
+    _musicNode = s;   // started once; suspend/resume freezes/continues it, never re-created
+    return true;
+  } catch (e) { return false; }
 }
-// Background music with a bespoke-track-FIRST, procedural-FALLBACK policy. The
-// factory's gen_soundtrack.sh renders a unique synth_track.py mp3 per game to
-// opts.file; bgMusic plays it on the first user gesture (autoplay policy) and,
-// if that file is missing or won't decode, falls back to the zero-asset
+// Web Audio bg-music: fetch -> decodeAudioData -> looping BufferSource. NO media
+// element (=> no OS media player). onOk fires when the loop is decoded+started,
+// onErr on a 404/decode failure (bgMusic uses these to fall back to procedural).
+function music(url, vol, onOk, onErr) {
+  if (!url) { if (onErr) onErr(); return; }
+  if (vol != null) _musicVol = vol;
+  _musicUrl = url; _musicWant = true;
+  var c = audioCtx(); if (!c) { if (onErr) onErr(); return; }
+  if (!_musicGain) { try { _musicGain = c.createGain(); _musicGain.connect(c.destination); } catch (e) {} }
+  if (_musicGain) { try { _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol; } catch (e) {} }
+  if (_musicBuf) { if (_startMusicNode()) { if (onOk) onOk(); } else if (onErr) onErr(); return; }
+  try {
+    fetch(url).then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.arrayBuffer(); })
+      .then(function (ab) { return new Promise(function (res, rej) { try { c.decodeAudioData(ab, res, rej); } catch (e) { rej(e); } }); })
+      .then(function (buf) { _musicBuf = buf; if (_startMusicNode()) { if (onOk) onOk(); } else if (onErr) onErr(); })
+      .catch(function () { if (onErr) onErr(); });
+  } catch (e) { if (onErr) onErr(); }
+}
+// Tab-hide / minimize must silence the mp3 loop + SFX (Yandex 1.3). On Yandex
+// game_api_pause/resume (wired in init) is authoritative; this is the cross-platform
+// fallback for the _ac context (_mus.ctx procedural music has its own handler in
+// startMusic). No window 'blur' — it fires spuriously inside the platform iframe.
+(function () {
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch (e) {} }
+    else if (!AUDIO_MUTED && !_extPaused) {
+      try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {}
+      resumeExternalAudioContexts();
+    }
+  });
+})();
+// Background music with an mp3-FIRST, procedural-FALLBACK policy. The factory's
+// gen_soundtrack.sh writes opts.file; bgMusic plays it on the first user gesture
+// and, if that file is missing or won't decode, falls back to the zero-asset
 // procedural engine so a build is NEVER silent. Mute (GF.toggleMute) + tab-hide
 // pause are inherited from music()/startMusic(). This is the canonical call in
 // the new-game template — games no longer call startMusic() directly.
@@ -1394,34 +1677,30 @@ function bgMusic(opts) {
   var fallback = function () {
     if (done) return; done = true;
     if (tmr) { clearTimeout(tmr); tmr = null; }
-    // Kill any still-buffering mp3 so a late-resolving track can't overlap the bed.
-    if (_music) { try { _music.pause(); _music.src = ''; } catch (e) {} }
+    // Commit to procedural: block a LATE mp3 decode from also starting (would double
+    // up with the synth bed) and stop the mp3 node if it already started.
+    _musicWant = false;
+    if (_musicNode) { try { _musicNode.stop(); } catch (e) {} _musicNode = null; }
     startMusic({ preset: preset, muted: AUDIO_MUTED });
   };
   var go = function () {
     ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.removeEventListener(ev, go, true); });
     if (!file) { fallback(); return; }
-    try {
-      music(file, opts.vol != null ? opts.vol : 0.5);
-      if (_music) {
-        _music.addEventListener('playing', win, { once: true });   // mp3 won -> no fallback
-        _music.addEventListener('error', fallback, { once: true }); // 404/decode -> procedural
-      }
-      // Backstop: if the mp3 still hasn't started after 6s (and isn't just muted),
-      // assume failure and fall back. 'playing'/'error' above resolve the common cases.
-      tmr = setTimeout(function () { if (!done && !AUDIO_MUTED && (!_music || _music.paused)) fallback(); }, 6000);
-    } catch (e) { fallback(); }
+    // music() decodes the mp3 through Web Audio; win() on success locks out the
+    // procedural fallback, fallback() on 404/decode-fail swaps to the synth bed.
+    music(file, opts.vol != null ? opts.vol : 0.5, win, fallback);
+    // Backstop: if neither callback fired in 6s, fall back. NOT gated on mute — a
+    // muted+hung mp3 must still start the (silent) procedural bed so unmute has audio.
+    tmr = setTimeout(function () { if (!done && !_musicNode) fallback(); }, 6000);
   };
   ['pointerdown', 'keydown', 'touchstart', 'mousedown'].forEach(function (ev) { document.addEventListener(ev, go, true); });
 }
 function toggleMute() {
   AUDIO_MUTED = !AUDIO_MUTED;
   try { localStorage.setItem('gf_muted', AUDIO_MUTED ? '1' : '0'); } catch (e) {}
-  if (_music) {
-    _music.muted = AUDIO_MUTED;
-    if (AUDIO_MUTED) { try { _music.pause(); } catch (e) {} }
-    else { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
-  }
+  if (_musicGain) { try { _musicGain.gain.value = AUDIO_MUTED ? 0 : _musicVol; } catch (e) {} }
+  try { setMusicMuted(AUDIO_MUTED); } catch (e) {}   // procedural fallback bed must honour the toggle too
+  if (!AUDIO_MUTED) { audioCtx(); _startMusicNode(); }   // ensure the mp3 loop is live when unmuted
   return AUDIO_MUTED;
 }
 // ── External pause (Yandex 4.7 rewarded-ad mute + 1.3 game_api_pause / CG) ──
@@ -1429,19 +1708,160 @@ function toggleMute() {
 // is open or the platform fires a pause event, then resume RESPECTING the mute
 // button. Idempotent via _extPaused so overlapping triggers (ad + tab-hide)
 // can't double-suspend/resume; tone() and the visibilitychange handler honour it.
+//
+// Ad-mute REASONS (single authority): the game may be silenced by an
+// SDK-signaled ad window (_gpAd: GamePix on.pause→on.resume), the platform
+// sound toggle (_gpMute: soundOff→soundOn), or our own showAd bracket
+// (_manualAdOpen: request→settled). Audio resumes only when NO reason holds —
+// a stray on.resume/soundOn landing while a manual ad is still on screen must
+// NOT un-mute over the ad (GamePix rejected Shipwreck Scrub v2 on exactly that
+// leak, 2026-07-03: "you can hear sounds in the background").
+var _gpAd = false, _gpMute = false, _manualAdOpen = false, _gpOccluded = false, _gpGestureHold = false;
+var _gpStopTimer = null, _gpHappyTimer = null; // deferred GamePix lifecycle signals (see gameplayStop)
+function _adMuteApply() { if (_gpAd || _gpMute || _manualAdOpen || _gpOccluded || _gpGestureHold) pauseAudio(); else resumeAudio(); }
+function _adOpenPause() { _armAdOcclusionWindow(); _manualAdOpen = true; pauseAudio(); }
+
+// Occlusion belt (GamePix Shipwreck v3 rejection, 2026-07-03): the platform
+// player can release EVERY SDK signal (resume/soundOn/the ad promise) while
+// its ad overlay is still covering the game — and gf-lib's own 30s showAd
+// watchdog releases _manualAdOpen mid-ad by design. No SDK message marks "the
+// overlay is actually gone", so a 4th reason keys on visual truth: while an ad
+// window is armed, a canvas that BECOMES covered (IntersectionObserver v2
+// trackVisibility — detects parent-page overlays across the iframe boundary)
+// holds the mute until it is really uncovered (hard cap below). Engagement is
+// transition-based so a persistent partial overlap (sticky banner clipping the
+// canvas) can never falsely mute; browsers without isVisible never engage.
+// FAIL MUTED, not audible: while the observer still reports the canvas covered
+// we hold the mute — a short timed release would recreate the rejection on any
+// ad the reviewer leaves open. Release = uncover, or a trusted in-game
+// pointerdown (a real overlay eats pointer events, so a tap reaching the game
+// proves the cover is gone). The cap is a distant failsafe only.
+var _OCC_ARM_TAIL_MS = 15000, _OCC_MAX_HOLD_MS = 600000;
+var _occCovered = false, _occBaselined = false, _occCoveredAt = 0, _occUnsupported = false;
+var _occArmedUntil = 0, _occWindowStartAt = 0, _occHoldStart = 0, _occTimer = 0, _occTries = 0;
+function _armAdOcclusionWindow() { // call BEFORE flipping an ad reason
+  var now = Date.now();
+  var wasOpen = _manualAdOpen || _gpAd || now < _occArmedUntil;
+  if (!wasOpen) _occWindowStartAt = now;
+  _occArmedUntil = now + _OCC_ARM_TAIL_MS;
+  _evaluateOcclusion();
+}
+function _evaluateOcclusion() {
+  var now = Date.now();
+  if (_gpOccluded) {
+    if (!_occCovered || now - _occHoldStart > _OCC_MAX_HOLD_MS) {
+      _gpOccluded = false;
+      if (_occTimer) { clearInterval(_occTimer); _occTimer = 0; }
+      _adMuteApply();
+    }
+    return;
+  }
+  var windowOpen = _manualAdOpen || _gpAd || now < _occArmedUntil;
+  if (_occCovered && windowOpen && _occCoveredAt >= _occWindowStartAt - 2500) {
+    _gpOccluded = true;
+    _occHoldStart = now;
+    if (!_occTimer) _occTimer = setInterval(_evaluateOcclusion, 1000); // drives the hard-cap release
+    _adMuteApply();
+  }
+}
+function _occReport(covered) {
+  if (!_occBaselined) { _occBaselined = true; _occCovered = covered; return; } // pre-existing cover can never engage
+  if (covered !== _occCovered) {
+    _occCovered = covered;
+    if (covered) _occCoveredAt = Date.now();
+    _evaluateOcclusion();
+  }
+}
+function _startOcclusionWatcher() {
+  try {
+    var target = document.querySelector('canvas');
+    if (!target) {
+      _occTries += 1;
+      if (_occTries < 40) setTimeout(_startOcclusionWatcher, 1000);
+      return;
+    }
+    var io = new IntersectionObserver(function (entries) {
+      var e = entries[entries.length - 1];
+      if (typeof e.isVisible !== 'boolean') { _occUnsupported = true; io.disconnect(); return; } // gesture-gated unmute takes over
+      _occReport(e.isVisible === false);
+    }, { threshold: [0, 1], trackVisibility: true, delay: 100 });
+    io.observe(target);
+  } catch (e) { _occUnsupported = true; }
+}
+_startOcclusionWatcher();
+// No-IO-v2 fallback (GamePix only): platform release signals proved
+// untrustworthy, so with no visual truth available the post-ad unmute waits
+// for the next user gesture instead of firing on the SDK's say-so.
+function _engageGestureHoldIfBlind() {
+  if (_occUnsupported && platform === 'gamepix') _gpGestureHold = true;
+}
+// A trusted pointerdown reaching the game = no overlay covers it: release the
+// gesture hold and any stale occlusion.
+try {
+  window.addEventListener('pointerdown', function (ev) {
+    if (ev && ev.isTrusted === false) return;
+    if (_gpGestureHold) { _gpGestureHold = false; _adMuteApply(); }
+    if (_gpOccluded) { _occCovered = false; _evaluateOcclusion(); }
+  }, { capture: true, passive: true });
+} catch (e) {}
+// Harness hook: drive the occlusion state machine deterministically.
+window.__gfAdTest = window.__gfAdTest || {};
+window.__gfAdTest.setOcclusion = function (covered) {
+  _occBaselined = true;
+  if (covered !== _occCovered) {
+    _occCovered = !!covered;
+    if (covered) _occCoveredAt = Date.now();
+    _evaluateOcclusion();
+  }
+  return { covered: _occCovered, occluded: _gpOccluded };
+};
 function pauseAudio() {
   if (_extPaused) return;
   _extPaused = true;
   try { if (_mus.ctx && _mus.ctx.state === 'running') _mus.ctx.suspend(); } catch (e) {}
   try { if (_ac && _ac.state === 'running') _ac.suspend(); } catch (e) {}
-  try { if (_music) _music.pause(); } catch (e) {}
+  _externalAudioResume = [];
+  for (var i = 0; i < _externalAudioContexts.length; i += 1) {
+    var ctx = _externalAudioContexts[i];
+    var shouldResume = false;
+    try {
+      shouldResume = !!(ctx && ctx.state === 'running');
+      if (shouldResume) ctx.suspend();
+    } catch (e) {}
+    _externalAudioResume[i] = shouldResume;
+  }
+}
+function resumeExternalAudioContexts() {
+  for (var i = 0; i < _externalAudioContexts.length; i += 1) {
+    try {
+      if (_externalAudioResume[i] && _externalAudioContexts[i] && _externalAudioContexts[i].state === 'suspended') {
+        _externalAudioContexts[i].resume();
+      }
+    } catch (e) {}
+  }
+  _externalAudioResume = [];
 }
 function resumeAudio() {
   if (!_extPaused) return;
   _extPaused = false;
+  if (document.hidden) return;   // tab still hidden — let visibilitychange resume on show (don't un-mute a hidden tab, 1.3)
   try { if (_mus.ctx && _mus.on && _mus.ctx.state === 'suspended') { _mus.ctx.resume(); _mus.next = _mus.ctx.currentTime + 0.1; } } catch (e) {}
   try { if (_ac && _ac.state === 'suspended') _ac.resume(); } catch (e) {}
-  try { if (_music && _musicSrc && !AUDIO_MUTED) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); } } catch (e) {}
+  resumeExternalAudioContexts();
+  try { if (_musicWant && _musicBuf && !AUDIO_MUTED) _startMusicNode(); } catch (e) {}
+}
+function audioState() {
+  return {
+    muted: AUDIO_MUTED,
+    externalPaused: _extPaused,
+    musicCtx: _mus.ctx ? _mus.ctx.state : '',
+    sfxCtx: _ac ? _ac.state : '',
+    externalContexts: _externalAudioContexts.map(function (ctx) {
+      try { return ctx && ctx.state || ''; } catch (e) { return 'error'; }
+    }),
+    mediaPaused: true,
+    mediaMuted: true
+  };
 }
 // vector speaker / muted-speaker icon (never emoji) — games place + wire the click
 function drawMuteIcon(c, x, y, r, muted) {
@@ -1455,8 +1875,9 @@ function drawMuteIcon(c, x, y, r, muted) {
 // resume audio + (re)start music on the first user gesture (autoplay policy)
 (function () {
   var kick = function () {
-    audioCtx();
-    if (_music && _musicSrc && !AUDIO_MUTED && _music.paused) { var p = _music.play(); if (p && p.catch) p.catch(function () {}); }
+    var c = audioCtx();
+    if (_musicWant && _musicBuf) _startMusicNode();
+    if (c && c.state === 'suspended' && !_extPaused && !document.hidden) { try { c.resume(); } catch (e) {} }
   };
   window.addEventListener('pointerdown', kick, { passive: true });
   window.addEventListener('touchstart', kick, { passive: true });
@@ -2183,16 +2604,15 @@ window.GF = {
   exposeReach: exposeReach,
   exposeTour: exposeTour,
   // Audio (REQUIRED before publish) — GF.sfx('merge'|'spawn'|'hit'|'levelup'|'unlock'|
-  // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.music('audio/bg_loop.mp3'),
+  // 'reward'|'win'|'lose'|'coin'|'click'|...), GF.bgMusic({file:'audio/bg_track.mp3'}),
   // GF.toggleMute(), GF.muted, GF.drawMuteIcon(ctx,x,y,r,muted). See Build Hygiene.
   sfx: sfx, tone: tone, arp: arp, music: music, toggleMute: toggleMute, drawMuteIcon: drawMuteIcon,
-  // Procedural music bed (no-credit baseline; GF.music(mp3) is the Suno upgrade):
+  // Procedural music bed + mp3-first background helper:
   startMusic: startMusic, setMusicMuted: setMusicMuted, bgMusic: bgMusic,
   // Remote config (live-ops DATA channel - see the REMOTE CONFIG block
   // above for the contract: never code, never blocks boot, offline = defaults).
   remoteConfig: remoteConfig,
-  // Game funnel compatibility hook. Game analytics belongs in GameAnalytics;
-  // GF.funnel is a no-op and must not send Cloudflare/Workers KV telemetry.
+  // Game-level first-party funnel is disabled; use GameAnalytics for game analytics.
   funnel: funnelApi,
   // In-app purchases (Yandex Payments - see the IN-APP PURCHASES block above).
   // GF.initPayments() in onReady -> GF.payments.available / .catalog() ->
@@ -2206,8 +2626,11 @@ window.GF = {
   // Suspend/resume ALL audio over an ad or platform pause (Yandex 4.7 + 1.3).
   // showAd() brackets these automatically; call directly only for custom flows.
   pauseAudio: pauseAudio, resumeAudio: resumeAudio,
+  registerAudioContext: registerAudioContext,
+  audioState: audioState,
   hasSfx: function (n) { return !!SFX_LIB[n]; },
   get muted() { return AUDIO_MUTED; },
+  get audioPaused() { return _extPaused; },
   // Sprites
   drawSprite: drawSprite,
   sprites: sprites,
@@ -2222,6 +2645,7 @@ window.GF = {
   // Also calls platform gameplayStop() (CG ad lifecycle) — safe no-op elsewhere.
   gameEnded: function () {
     gameplayStop();
+    gamePixUpdateProgress();
     try { window.parent.postMessage({ type: 'gf:gameEnded' }, '*'); } catch (_) {}
   },
   // Tells the shell a new round / level just started. Call after the player
@@ -2257,12 +2681,26 @@ window.GF = {
       if (platform === 'crazygames' && window.CrazyGames && window.CrazyGames.SDK && window.CrazyGames.SDK.game && window.CrazyGames.SDK.game.happytime) {
         window.CrazyGames.SDK.game.happytime();
       }
+      // DEFERRED + ad-window-guarded (see gameplayStop): games celebrate a win
+      // right where they request the level-break ad — an instant happyMoment()
+      // is an auto-ad opportunity stacked on ours. The SDK decides ad timing
+      // for happy moments anyway, so a short defer changes nothing.
+      if (platform === 'gamepix' && window.GamePix && typeof window.GamePix.happyMoment === 'function') {
+        if (_gpHappyTimer) clearTimeout(_gpHappyTimer);
+        _gpHappyTimer = setTimeout(function () {
+          _gpHappyTimer = null;
+          if (!_manualAdOpen && !_gpAd) { try { window.GamePix.happyMoment(); } catch (e) {} }
+        }, 1600);
+      }
     } catch (e) {}
   },
   get platform() { return platform; },
   // GamePush wrappers — no-op when GP isn't loaded, so games can call these
   // unconditionally. See _gp / gpApi above for the full surface.
   gp: gpApi,
+  // Platform leaderboard wrapper. On Yandex this uses native
+  // ysdk.leaderboards.setScore/getEntries with legacy getLeaderboards fallback.
+  leaderboard: leaderboardApi,
   // Register a state-getter for the post-build-tester gate.
   //   GF.exposeState(() => ({ gs, score, level, lives, ... }));
   // The gate calls window.__gfState() during playtest to verify the game
@@ -2271,6 +2709,15 @@ window.GF = {
     if (typeof getter !== 'function') return;
     window.__gfState = function () {
       try { return getter(); } catch (e) { return { __error: String(e) }; }
+    };
+    // Provider-neutral browser-QA bridge. Claude, Codex, Gemini, and local
+    // scripts all consume the same concise JSON state instead of depending on
+    // a model-specific browser tool. Games should expose every player-relevant
+    // value from the getter above; this wrapper deliberately performs no game
+    // actions and is therefore safe as read-only test instrumentation.
+    window.render_game_to_text = function () {
+      try { return JSON.stringify(window.__gfState()); }
+      catch (e) { return JSON.stringify({ __error: String(e) }); }
     };
   },
   // Register a BOT action contract for the autonomous progression probe (#276).
@@ -2469,30 +2916,69 @@ window.GF = {
       var capW = c.measureText(capTxt).width;
       var maxW = Math.min(W * 0.88, 520 * S);
       while (capW > maxW && capFs > 11) { capFs--; c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif'; capW = c.measureText(capTxt).width; }
+      // 1.10.1 hard rule: if one line still can't fit at the minimum font size, WRAP.
+      // The pill must never exceed the viewport — long RU strings clipped at the edge
+      // are a moderation reject (critter_siege 2026-07-26). The LAST line reserves
+      // room for the skip label, and any single token wider than a line is
+      // hard-broken mid-token so no input can defeat the cap.
       var skipTxt = (lang === 'ru' ? 'пропустить ✕' : 'skip ✕');
       c.font = (capFs - 1) + 'px Inter, system-ui, sans-serif';
       var skipW = c.measureText(skipTxt).width;
-      var padX = 14 * S, gapX = 16 * S, pillH = clamp(32 * S, 27, 42);
-      var pillW = capW + padX * 2 + gapX + skipW;
+      c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif';
+      var padX = 14 * S, gapX = 16 * S, capLineH = capFs * 1.35;
+      var skipRoom = gapX + skipW;
+      var capLines = [capTxt];
+      if (capW + skipRoom > maxW) {
+        capLines = [];
+        var words = capTxt.split(' ');
+        // hard-break tokens that alone exceed a full line (URLs, compounds)
+        var toks = [];
+        for (var wi = 0; wi < words.length; wi++) {
+          var wd = words[wi];
+          while (c.measureText(wd).width > maxW && wd.length > 2) {
+            var cut = wd.length - 1;
+            while (cut > 1 && c.measureText(wd.slice(0, cut)).width > maxW) cut--;
+            toks.push(wd.slice(0, cut)); wd = wd.slice(cut);
+          }
+          toks.push(wd);
+        }
+        var cur = '';
+        for (var ti = 0; ti < toks.length; ti++) {
+          var tryS = cur ? cur + ' ' + toks[ti] : toks[ti];
+          if (c.measureText(tryS).width > maxW && cur) { capLines.push(cur); cur = toks[ti]; }
+          else cur = tryS;
+        }
+        if (cur) capLines.push(cur);
+        // last line must ALSO fit the skip label; spill one extra line if not
+        var lastTry = capLines[capLines.length - 1];
+        if (c.measureText(lastTry).width + skipRoom > maxW && capLines.length < 8) capLines.push('');
+        capW = 0;
+        for (var li = 0; li < capLines.length; li++) capW = Math.max(capW, c.measureText(capLines[li]).width);
+      }
+      var lastLineW = c.measureText(capLines[capLines.length - 1]).width;
+      var pillH = clamp(32 * S, 27, 42) + (capLines.length - 1) * capLineH;
+      var pillW = Math.min(padX * 2 + Math.max(capW, lastLineW + skipRoom), W - 16 * S);
       var ax = aTg.x, ay = aTg.y, ar = aTg.r || 40;
       if (aTo && typeof aTo.x === 'number') { ax = (aTg.x + aTo.x) / 2; ay = Math.min(aTg.y, aTo.y); ar = Math.max(aTg.r || 40, aTo.r || 40); }
       var pillY = ay - ar - pillH - 16 * S;
       if (pillY < 52 * S) pillY = (aTo ? Math.max(aTg.y, aTo.y) : aTg.y) + ar + 16 * S;
-      pillY = clamp(pillY, 52 * S, H - pillH - 12 * S);
-      var pillX = clamp(ax - pillW / 2, 8 * S, W - pillW - 8 * S);
+      pillY = Math.max(8, Math.min(pillY, H - pillH - 12 * S));
+      var pillX = Math.max(8 * S, Math.min(ax - pillW / 2, W - pillW - 8 * S));
       c.save();
       c.shadowColor = 'rgba(0,0,0,0.4)'; c.shadowBlur = 9 * S; c.shadowOffsetY = 3 * S;
       c.fillStyle = 'rgba(16, 20, 30, 0.9)';
-      rr(c, pillX, pillY, pillW, pillH, pillH / 2); c.fill();
+      rr(c, pillX, pillY, pillW, pillH, Math.min(pillH / 2, 21 * S)); c.fill();
       c.restore();
       c.textBaseline = 'middle';
       c.fillStyle = '#fff'; c.textAlign = 'left';
       c.font = 'bold ' + capFs + 'px Inter, system-ui, sans-serif';
-      c.fillText(capTxt, pillX + padX, pillY + pillH / 2 + 1);
+      var capY0 = pillY + (pillH - (capLines.length - 1) * capLineH) / 2 + 1;
+      for (var ci = 0; ci < capLines.length; ci++) c.fillText(capLines[ci], pillX + padX, capY0 + ci * capLineH);
+      var skipX = pillX + padX + lastLineW + gapX;
       c.fillStyle = '#9cc'; c.font = (capFs - 1) + 'px Inter, system-ui, sans-serif';
-      c.fillText(skipTxt, pillX + padX + capW + gapX, pillY + pillH / 2 + 1);
+      c.fillText(skipTxt, skipX, capY0 + (capLines.length - 1) * capLineH);
       c.textBaseline = 'alphabetic';
-      state._skipBtn = { x: pillX + padX + capW + gapX - 8 * S, y: pillY - 5 * S, w: skipW + 24 * S, h: pillH + 10 * S };
+      state._skipBtn = { x: skipX - 8 * S, y: pillY - 5 * S, w: skipW + 24 * S, h: pillH + 10 * S };
     };
     state.handleClick = function (x, y) {
       if (!state.active) return false;
@@ -2543,6 +3029,20 @@ window.__gfStep = function (n, dt) {
   var i = 0;
   for (; i < n; i++) { try { if (onUpdate) onUpdate(dt); } catch (e) { return i; } }
   return i;
+};
+// Millisecond form of __gfStep for the shared browser-game-qa runner. This
+// advances the REAL update callback deterministically, then renders one frame.
+// It never calls __gfBot, _jumpLevel, or _setupForScreenshot: QA must still use
+// real keyboard/mouse/touch input for player actions and may use this only to
+// let ordinary game time pass between those actions.
+window.advanceTime = function (ms) {
+  ms = Math.max(0, Math.min(600000, Number(ms) || 0));
+  if (ms === 0) return 0;
+  var dt = 1 / 60;
+  var requested = Math.max(1, Math.round(ms / (dt * 1000)));
+  var advanced = window.__gfStep(requested, dt);
+  try { if (onDraw && ctx) onDraw(ctx); } catch (e) {}
+  return Math.round(advanced * dt * 1000);
 };
 // Deterministic PLAY/CTA locator for the QA gates (fixes the canvas-button
 // false-negative: random taps scattered across the viewport miss a canvas-drawn
