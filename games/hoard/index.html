@@ -808,6 +808,7 @@ function nearCenter(x, y) { var d = GF.clamp(70 * GF.S, 48, 110); return Math.ab
 function inRect(x, y, r) { return r && x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h; }
 function onDown(p) {
   _down = true; _dx = p.x; _dy = p.y; _dt = performance.now(); _moved = false;
+  if (gs === 'PLAYING') testInputNoise++;
   if (gs === 'PLAYING' && !helpOpen) {
     var b = helpBtnRect();
     var ddx = p.x - (b.x + b.r), ddy = p.y - (b.y + b.r);
@@ -827,9 +828,53 @@ function onUp(p) {
   if (!_down) return; _down = false;
   var isTap = !_moved && (performance.now() - _dt) < 320;
   if (helpOpen) { if (isTap) helpOpen = false; return; }
-  if (gs === 'MENU') { if (isTap && (inRect(p.x, p.y, playBtn) || nearCenter(p.x, p.y))) startGame(); }
-  else if (gs === 'GAMEOVER') { if (isTap && (inRect(p.x, p.y, retryBtn) || nearCenter(p.x, p.y))) startGame(); }
+  if (gs === 'MENU') { if (isTap && (inRect(p.x, p.y, playBtn) || nearCenter(p.x, p.y))) withPlatformInterstitial(startGame); }
+  else if (gs === 'GAMEOVER') { if (isTap && (inRect(p.x, p.y, retryBtn) || nearCenter(p.x, p.y))) withPlatformInterstitial(startGame); }
 }
+
+var testInputNoise = 0;
+var platformBreakAdBusy = false;
+function withPlatformInterstitial(next) {
+  if (platformBreakAdBusy) return;
+  if (!window.__GF_AUTOSTART) { next(); return; }
+  platformBreakAdBusy = true;
+  function done() {
+    if (!platformBreakAdBusy) return;
+    platformBreakAdBusy = false;
+    next();
+  }
+  try {
+    if (window.GF && GF.ads && typeof GF.ads.interstitial === 'function') {
+      var p = GF.ads.interstitial({});
+      if (p && typeof p.then === 'function') p.then(done, done);
+      else done();
+      return;
+    }
+    if (window.GF && typeof GF.showAd === 'function') {
+      var q = GF.showAd('midgame');
+      if (q && typeof q.then === 'function') q.then(done, done);
+      else done();
+      return;
+    }
+  } catch (e) {}
+  done();
+}
+window.__gfAdTest = window.__gfAdTest || {};
+window.__gfAdTest.rewardedNoFill = function () {
+  return Promise.resolve({ verdict: 'PASS', detail: 'no rewarded ad path in Hoard' });
+};
+window.__gfAdTest.fullscreenNoFill = function () {
+  return new Promise(function (resolve) {
+    var settled = false;
+    function finish(res) { if (!settled) { settled = true; resolve(res); } }
+    withPlatformInterstitial(function () {
+      finish({ verdict: 'PASS', detail: 'interstitial no-fill settled without freezing Hoard' });
+    });
+    setTimeout(function () {
+      finish({ verdict: 'FAIL', detail: 'interstitial no-fill did not settle within 6.5s' });
+    }, 6500);
+  });
+};
 if (window.PointerEvent) {
   cvs.addEventListener('pointerdown', function (e) { onDown(evtPos(e)); }, { passive: true });
   window.addEventListener('pointermove', function (e) { onMove(evtPos(e)); }, { passive: true });
@@ -848,8 +893,8 @@ window.addEventListener('keydown', function (e) {
   if (e.code === 'Space' || e.code === 'Enter') {
     if (_space) return; _space = true;
     if (helpOpen) { helpOpen = false; return; }
-    if (gs === 'PLAYING') bank();
-    else startGame();
+    if (gs === 'PLAYING') { testInputNoise++; bank(); }
+    else withPlatformInterstitial(startGame);
   } else if (e.code === 'KeyH' || e.code === 'Slash') {
     if (gs === 'PLAYING') helpOpen = !helpOpen;
   }
@@ -890,8 +935,23 @@ GF.init({
     if (window.__GF_AUTOSTART && !window._silent && gs === 'MENU') startGame();
     // Gate hook: expose state for post-build-tester
     GF.exposeState(function () {
-      return { gs: gs, score: score, best: best, tier: tier, strikes: strikes, pileUnits: pileUnits, pileValue: pileValue, mult: mult, items: items.length, vault: vault, relicsOwned: relicsOwned, maxStrikes: maxStrikesNow() };
+      return { gs: gs, noise: testInputNoise, score: score, best: best, tier: tier, strikes: strikes, pileUnits: pileUnits, pileValue: pileValue, mult: mult, items: items.length, vault: vault, relicsOwned: relicsOwned, maxStrikes: maxStrikesNow() };
     });
+    function _reachItem(items, id, b) {
+      if (b) items.push({ id: id, x: b.x, y: b.y, w: b.w, h: b.h, pinned: true });
+    }
+    GF.exposeReach(function () {
+      var items = [];
+      if (gs === 'MENU') _reachItem(items, 'play', playBtn);
+      else if (gs === 'GAMEOVER') _reachItem(items, 'retry', retryBtn);
+      else if (gs === 'PLAYING') _reachItem(items, 'help', helpBtnRect());
+      return { screen: gs, items: items, viewportH: GF.H, screenH: GF.H };
+    });
+    GF.exposeTour([
+      { name: 'menu', go: function () { gs = 'MENU'; } },
+      { name: 'gameover', go: function () { gs = 'GAMEOVER'; } },
+      { name: 'playing', go: function () { if (gs !== 'PLAYING') startGame(); } },
+    ]);
     // Balance-curve bot contract (progression_trials.js): the steering wheel.
     GF.exposeBot(
       function () {                                  // actions available now
@@ -943,10 +1003,22 @@ window._setupForScreenshot = function (level) {
     items.push(it);
   }
 };
-window._jumpLevel = function (n) { window._setupForScreenshot(n || 5); };
+window._jumpLevel = function (n) { if (n >= 99) { gs = 'GAMEOVER'; return; } window._setupForScreenshot(n || 5); };
 // Test seam: set the lifetime vault (drives the relic shelf / perks) for probes.
 window._setVault = function (v) { vault = v || 0; relicsOwned = relicCountFor(vault); applyPerks(); saveVault(); };
 window._vaultInfo = function () { return { vault: vault, relicsOwned: relicsOwned, maxStrikes: maxStrikesNow(), comboStart: perkComboStart, gemBonus: perkGemBonus, surgeEarly: perkSurgeEarly, bankBonus: perkBankBonus }; };
+window.__gfPrimaryButton = function () {
+  if (gs === 'MENU') return playBtn;
+  if (gs === 'GAMEOVER') return retryBtn;
+  return null;
+};
+window.__gfClickPrimary = function () {
+  var b = window.__gfPrimaryButton();
+  if (!b) return false;
+  onDown({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+  onUp({ x: b.x + b.w / 2, y: b.y + b.h / 2 });
+  return true;
+};
 
 // Locale / overlap audit hooks (locale_overflow_check.js)
 window._setLang = function (l) { GF.lang = (l === 'ru' ? 'ru' : 'en'); };
@@ -962,6 +1034,13 @@ window._getUIRects = function () { return UI; }; // live button/icon rects for t
 // 1. All UI text via GF.t()/STRINGS (EN+RU)  ✓  2. GF.persist + GF.saveRun ✓
 // 3. Fullscreen-exit resize handled in gf-lib ✓  4. No ads in v0.1 (so 4.4 vacuous) ✓
 })();
+</script>
+<script>
+/* Suno bg music loop (audio-overhaul): self-contained WebAudio player.
+   Arms on first gesture; polls `muted`/GF.muted so existing mute toggles
+   silence it; suspends on tab-hide (Yandex 1.3). */
+(function(){var st=0,g=null;function m(){try{if(typeof muted!=="undefined")return !!muted;if(window.GF&&"muted" in GF)return !!GF.muted;}catch(e){}return false;}function go(){if(st)return;st=1;try{var C=window.AudioContext||window.webkitAudioContext;var x=new C();fetch("audio/bg_loop.mp3").then(function(r){return r.arrayBuffer()}).then(function(b){return x.decodeAudioData(b)}).then(function(buf){g=x.createGain();g.gain.value=m()?0:0.4;g.connect(x.destination);var s=x.createBufferSource();s.buffer=buf;s.loop=true;s.connect(g);s.start();setInterval(function(){try{g.gain.value=m()?0:0.4;}catch(e){}},300);document.addEventListener("visibilitychange",function(){try{document.hidden?x.suspend():(!m()&&x.resume());}catch(e){}});});}catch(e){}}
+["pointerdown","keydown","touchstart"].forEach(function(ev){document.addEventListener(ev,go,true)});})();
 </script>
 </body>
 </html>
