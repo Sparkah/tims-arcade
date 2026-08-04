@@ -632,7 +632,68 @@ function nextRelic() {
   startRelic(n);
 }
 
-window._jumpLevel = function (n) { window._setupForScreenshot(n || 5); };
+var testInputNoise = 0;
+var platformBreakAdBusy = false;
+function withPlatformInterstitial(next) {
+  if (platformBreakAdBusy) return;
+  if (!window.__GF_AUTOSTART) { next(); return; }
+  platformBreakAdBusy = true;
+  function done() {
+    if (!platformBreakAdBusy) return;
+    platformBreakAdBusy = false;
+    next();
+  }
+  try {
+    if (window.GF && GF.ads && typeof GF.ads.interstitial === 'function') {
+      var p = GF.ads.interstitial({});
+      if (p && typeof p.then === 'function') p.then(done, done);
+      else done();
+      return;
+    }
+    if (window.GF && typeof GF.showAd === 'function') {
+      var q = GF.showAd('midgame');
+      if (q && typeof q.then === 'function') q.then(done, done);
+      else done();
+      return;
+    }
+  } catch (e) {}
+  done();
+}
+window.__gfAdTest = window.__gfAdTest || {};
+window.__gfAdTest.rewardedNoFill = function () {
+  return Promise.resolve({ verdict: 'PASS', detail: 'no rewarded ad path in Relic Restore' });
+};
+window.__gfAdTest.fullscreenNoFill = function () {
+  return new Promise(function (resolve) {
+    var settled = false;
+    function finish(res) { if (!settled) { settled = true; resolve(res); } }
+    withPlatformInterstitial(function () {
+      finish({ verdict: 'PASS', detail: 'interstitial no-fill settled without freezing Relic Restore' });
+    });
+    setTimeout(function () {
+      finish({ verdict: 'FAIL', detail: 'interstitial no-fill did not settle within 6.5s' });
+    }, 6500);
+  });
+};
+
+window._jumpLevel = function (n) { if (n >= 99) { gs = 'MENU'; return; } window._setupForScreenshot(n || 5); };
+window._setState = function (s) {
+  if (s === 'PLAYING') { if (gs !== 'PLAYING') startRelic(0); return; }
+  if (s === 'GAMEOVER' || s === 'GAME_OVER' || s === 'MENU') gs = 'MENU';
+};
+window.__gfPrimaryButton = function () {
+  if (gs === 'MENU') {
+    for (var i = 0; i < shopRects.length; i++) if (shopRects[i].kind === 'play') return shopRects[i];
+  }
+  if (gs === 'REVEAL' || gs === 'APPRAISE') return L.bigBtn;
+  return null;
+};
+window.__gfClickPrimary = function () {
+  var b = window.__gfPrimaryButton();
+  if (!b) return false;
+  onDown(b.x + b.w / 2, b.y + b.h / 2);
+  return true;
+};
 window._setupForScreenshot = function (lvl) {
   coins = 900; unlockedMax = 11; upWidth = 2; upSpeed = 1;
   // suppress tutorial so it never changes gs during screenshot capture
@@ -674,7 +735,7 @@ function overlayDown(x, y) {
     for (var i = 0; i < shopRects.length; i++) {
       var rc = shopRects[i];
       if (hit(rc, x, y)) {
-        if (rc.kind === 'play') { GF.sfx('tap'); startGame(); return true; }
+        if (rc.kind === 'play') { GF.sfx('tap'); withPlatformInterstitial(startGame); return true; }
         if (rc.kind === 'comm') { GF.sfx('tap'); welcomeT = 0; startRelic(GF.clamp(rc.idx | 0, 0, unlockedMax)); return true; }
         if (rc.kind === 'vault') { GF.sfx('tap'); vaultScroll = 0; _vaultFrom = 'MENU'; gs = 'VAULT'; return true; }
         if (rc.kind === 'relic' && rc.idx <= unlockedMax) { GF.sfx('tap'); startRelic(rc.idx); return true; }
@@ -690,7 +751,7 @@ function overlayDown(x, y) {
   }
   if (gs === 'REVEAL') {
     if (hit(revealVaultBtn, x, y)) { GF.sfx('tap'); vaultScroll = 0; _vaultFrom = 'REVEAL'; gs = 'VAULT'; return true; }
-    if (hit(L.bigBtn, x, y)) { GF.sfx('tap'); nextRelic(); return true; }
+    if (hit(L.bigBtn, x, y)) { GF.sfx('tap'); withPlatformInterstitial(nextRelic); return true; }
     if (hit(shopBtn, x, y)) { GF.sfx('tap'); openShop(); return true; }
     return true;
   }
@@ -728,6 +789,7 @@ function onDown(x, y) {
   if (gs === 'VAULT') { vDragging = true; vDragY = y; vDragMoved = 0; return; }
   if (gs === 'SHOP_OVERLAY') { shopDown(x, y); return; }
   if (gs !== 'PLAYING') { overlayDown(x, y); return; }
+  testInputNoise++;
   // HUD buttons
   if (hit(muteBtn, x, y)) { toggleMute(); return; }
   // tutorial gate (hands-on)
@@ -2386,6 +2448,7 @@ startRelic = function (idx) {
 GF.exposeState(function () {
   return {
     gs: gs, coins: coins, best: best, totalStars: totalStars,
+    noise: testInputNoise,
     relicIdx: relicIdx, stageI: stageI, stages: stageList.length,
     coverage: coverage, combo: combo, comboPeak: comboPeak,
     unlockedMax: unlockedMax, upWidth: upWidth, upSpeed: upSpeed, upShine: upShine,
@@ -2404,6 +2467,33 @@ GF.exposeState(function () {
     _stageKey: stageList[stageI] || null,
   };
 });
+
+function _reachItem(items, id, b) {
+  if (b) items.push({ id: id, x: b.x, y: b.y, w: b.w, h: b.h, pinned: true });
+}
+GF.exposeReach(function () {
+  var items = [];
+  if (gs === 'MENU') {
+    for (var i = 0; i < shopRects.length; i++) {
+      if (shopRects[i].kind === 'play' || shopRects[i].kind === 'comm' || shopRects[i].kind === 'vault') _reachItem(items, shopRects[i].kind, shopRects[i]);
+    }
+  } else if (gs === 'REVEAL' || gs === 'APPRAISE') {
+    _reachItem(items, 'primary', L.bigBtn);
+    _reachItem(items, 'vault', revealVaultBtn);
+    _reachItem(items, 'shop', shopBtn);
+  } else if (gs === 'PLAYING') {
+    _reachItem(items, 'mute', muteBtn);
+    _reachItem(items, 'help', helpBtn);
+  } else if (gs === 'SHOP_OVERLAY') {
+    _reachItem(items, 'back', L.bigBtn);
+  }
+  return { screen: gs, items: items, viewportH: GF.H, screenH: GF.H };
+});
+GF.exposeTour([
+  { name: 'menu', go: function () { gs = 'MENU'; } },
+  { name: 'reveal', go: function () { gs = 'REVEAL'; } },
+  { name: 'playing', go: function () { if (gs !== 'PLAYING') startRelic(0); } },
+]);
 
 // post-build-tester seams: live UI rects + the relic geometry (hygiene #8)
 window._rrBox = function () { return relicBox(); };
@@ -2439,6 +2529,13 @@ window._rrSimAway = function (hours, days) {
 window._rrPolish = function () { return polishVault(); };
 
 })();
+</script>
+<script>
+/* Suno bg music loop (audio-overhaul): self-contained WebAudio player.
+   Arms on first gesture; polls `muted`/GF.muted so existing mute toggles
+   silence it; suspends on tab-hide (Yandex 1.3). */
+(function(){var st=0,g=null;function m(){try{if(typeof muted!=="undefined")return !!muted;if(window.GF&&"muted" in GF)return !!GF.muted;}catch(e){}return false;}function go(){if(st)return;st=1;try{var C=window.AudioContext||window.webkitAudioContext;var x=new C();fetch("audio/bg_loop.mp3").then(function(r){return r.arrayBuffer()}).then(function(b){return x.decodeAudioData(b)}).then(function(buf){g=x.createGain();g.gain.value=m()?0:0.4;g.connect(x.destination);var s=x.createBufferSource();s.buffer=buf;s.loop=true;s.connect(g);s.start();setInterval(function(){try{g.gain.value=m()?0:0.4;}catch(e){}},300);document.addEventListener("visibilitychange",function(){try{document.hidden?x.suspend():(!m()&&x.resume());}catch(e){}});});}catch(e){}}
+["pointerdown","keydown","touchstart"].forEach(function(ev){document.addEventListener(ev,go,true)});})();
 </script>
 </body>
 </html>
