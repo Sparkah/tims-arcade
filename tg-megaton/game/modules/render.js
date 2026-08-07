@@ -21,7 +21,7 @@ var fireworkBursts, fireworksLvl, fit, flareLvl, flashWhite, glassLvl, godPower;
 var gs, hasWater, helpOpen, impactPulses, infernoLvl, infoOpen, interceptors;
 var lastCritBonus, lastFarRazed, lastFarTotal, lastPayout, lastShipsSunk;
 var lastShipsTotal, levelName, luckLvl, meltZones, meltdownLvl, mirvLvl, money;
-var mushrooms, nukeAmmo, orbitalLvl, orbitals, penLvl, pendingDbl, planes;
+var mushrooms, nukeAmmo, offerChipOn, orbitalLvl, orbitals, penLvl, pendingDbl, planes;
 var powerLvl, resultPct, resultWin, seismicLvl, settingsOpen, ships, shockLvl;
 var smoke, statsOpen, statsScroll, statsScrollMax, tidalLvl, toppleLvl;
 var totalEarned, totalW, tutStep, tutorialGiftChestImg, tutorialGiftOpen;
@@ -38,7 +38,7 @@ function syncState() {
     gs, hasWater, helpOpen, impactPulses, infernoLvl, infoOpen, interceptors,
     lastCritBonus, lastFarRazed, lastFarTotal, lastPayout, lastShipsSunk,
     lastShipsTotal, levelName, luckLvl, meltZones, meltdownLvl, mirvLvl, money,
-    mushrooms, nukeAmmo, orbitalLvl, orbitals, penLvl, pendingDbl, planes,
+    mushrooms, nukeAmmo, offerChipOn, orbitalLvl, orbitals, penLvl, pendingDbl, planes,
     powerLvl, resultPct, resultWin, seismicLvl, settingsOpen, ships, shockLvl,
     smoke, statsOpen, statsScroll, statsScrollMax, tidalLvl, toppleLvl,
     totalEarned, totalW, tutStep, tutorialGiftChestImg, tutorialGiftOpen,
@@ -55,7 +55,7 @@ function drawWeakpointMarkers(c) {
     var m = marks[i];
     var x = m.x, y = m.y, pulse = 0.68 + 0.32 * Math.sin(bgT * 5.4 + m.ci * 0.9 + m.cj * 1.1), r = GF.clamp(8.0 * S * fit, 6, 12) * (1 + pulse * 0.18);
     var col = m.color || (m.dist && m.dist !== 'down' ? dacc(m.dist) : PB.warn);
-    c.save(); c.translate(x, y); c.globalAlpha = 0.88 + pulse * 0.10; c.shadowColor = col; c.shadowBlur = 14 * S; c.strokeStyle = col; c.lineWidth = Math.max(1.7, 2.2 * S);
+    c.save(); c.translate(x, y); c.globalAlpha = 0.88 + pulse * 0.10; c.shadowColor = col; c.shadowBlur = mobileFx() ? 0 : (14 * S); c.strokeStyle = col; c.lineWidth = Math.max(1.7, 2.2 * S);
     c.rotate(Math.PI / 4); c.strokeRect(-r, -r, r * 2, r * 2); c.rotate(-Math.PI / 4);
     c.beginPath(); c.arc(0, 0, r * 0.96, 0, Math.PI * 2); c.stroke();
     c.fillStyle = rgba(col, 0.92); c.beginPath(); c.arc(0, 0, Math.max(2.2, r * 0.32), 0, Math.PI * 2); c.fill();
@@ -119,12 +119,21 @@ function drawCityObjects(c) {
     else drawShip(c, items[k].ship);
   }
 }
+var _skyGrad = null, _skyGradKey = '';
+function skyGradient(c, H, key, stops) {
+  var k = key + ':' + H;
+  if (!_skyGrad || _skyGradKey !== k) {
+    _skyGrad = c.createLinearGradient(0, 0, 0, H);
+    for (var i = 0; i < stops.length; i++) _skyGrad.addColorStop(stops[i][0], stops[i][1]);
+    _skyGradKey = k;
+  }
+  return _skyGrad;
+}
 function drawSky(c) {
   var W = GF.W, H = GF.H;
   if (cityTheme === 'station') { drawStarfield(c); return; }   // SPACE STATION floats in a starfield void
-  var g = c.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#6c5f3f'); g.addColorStop(0.55, '#403723'); g.addColorStop(1, '#211d13');
-  c.fillStyle = g; c.fillRect(0, 0, W, H);
+  c.fillStyle = skyGradient(c, H, 'day', [[0, '#6c5f3f'], [0.55, '#403723'], [1, '#211d13']]);
+  c.fillRect(0, 0, W, H);
   c.save();
   c.globalAlpha = 0.12; c.strokeStyle = PB.rule; c.lineWidth = 1;
   for (var y = 42; y < H; y += 36) { c.beginPath(); c.moveTo(0, y); c.lineTo(W, y + ((y / 36) % 2 ? 12 : -10)); c.stroke(); }
@@ -133,7 +142,7 @@ function drawSky(c) {
 }
 function drawStarfield(c) {   // deep-space backdrop: dark void + a curved planet limb + parallax stars (deterministic so it doesn't shimmer)
   var W = GF.W, H = GF.H, S = GF.S;
-  var g = c.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#020611'); g.addColorStop(0.55, '#04030e'); g.addColorStop(1, '#01030a'); c.fillStyle = g; c.fillRect(0, 0, W, H);
+  c.fillStyle = skyGradient(c, H, 'space', [[0, '#020611'], [0.55, '#04030e'], [1, '#01030a']]); c.fillRect(0, 0, W, H);
   for (var s = 0; s < 90; s++) { var sx = ((s * 73 + 17) % 100) / 100 * W, sy = ((s * 149 + 31) % 100) / 100 * H, tw = 0.4 + 0.6 * Math.sin(bgT * 1.4 + s * 1.7), r = (s % 7 === 0 ? 1.5 : 0.8) * S; c.globalAlpha = (0.25 + 0.55 * tw) * (s % 11 === 0 ? 1 : 0.7); c.fillStyle = s % 13 === 0 ? '#bfe6ff' : '#e8f2ff'; c.fillRect(sx, sy, r, r); }
   c.globalAlpha = 1;
   var px = W * 0.78, py = H * 0.14, pr = H * 0.3;   // a planet limb glowing in the corner (blue, NOT orange/red so it never reads as an explosion)
@@ -194,9 +203,13 @@ function drawGround(c) {
   for (var k = 0; k < craters.length; k++) {
     var cr = craters[k], x2 = isoX(cr.ci, cr.cj) + 0, y2 = isoY(cr.ci, cr.cj) + TH() / 2, rr = cr.r * cr.reveal; if (rr < 0.3) continue;
     var rx = rr * TW() / 2, ry = rr * TH() / 2;
-    var g = c.createRadialGradient(x2, y2, 2, x2, y2, rx);
-    g.addColorStop(0, 'rgba(8,6,6,0.92)'); g.addColorStop(0.7, 'rgba(22,15,12,0.7)'); g.addColorStop(1, 'rgba(22,15,12,0)');
-    c.fillStyle = g; c.beginPath(); c.ellipse(x2, y2, rx, ry, 0, 0, Math.PI * 2); c.fill();
+    if (mobileFx()) {   // low tier: flat crater scorch instead of a per-crater radial gradient
+      c.fillStyle = 'rgba(14,10,9,0.78)'; c.beginPath(); c.ellipse(x2, y2, rx * 0.88, ry * 0.88, 0, 0, Math.PI * 2); c.fill();
+    } else {
+      var g = c.createRadialGradient(x2, y2, 2, x2, y2, rx);
+      g.addColorStop(0, 'rgba(8,6,6,0.92)'); g.addColorStop(0.7, 'rgba(22,15,12,0.7)'); g.addColorStop(1, 'rgba(22,15,12,0)');
+      c.fillStyle = g; c.beginPath(); c.ellipse(x2, y2, rx, ry, 0, 0, Math.PI * 2); c.fill();
+    }
     c.save(); c.globalAlpha = 0.16 + 0.08 * fxRand(k * 37.9 + cr.ci * 11 + cr.cj * 19); c.strokeStyle = 'rgba(255,110,40,0.35)'; c.lineWidth = 2.2 * GF.S; strokeBrokenEllipse(c, x2, y2, rx * 0.42, ry * 0.42, 0, k * 101.7 + cr.ci * 13 + cr.cj * 23, mobileFx() ? 3 : 5, 0.55); c.restore();
   }
 }
@@ -229,12 +242,12 @@ function drawWaves(c) {
   for (var wi = 0; wi < waves.length; wi++) {
     var wv = waves[wi]; if (wv.t > 1.25) continue;
     var gx = isoX(wv.ci, wv.cj), gy = isoY(wv.ci, wv.cj) + TH() / 2, rx = wv.r * TW() / 2 * (wv.sx || 1), ry = wv.r * TH() / 2 * (wv.sy || 1), wr = wv.rot || 0;
-    if (wv.emp) { var ea = Math.max(0, 1 - wv.t / 0.7); c.save(); c.shadowColor = '#7fd4ff'; c.shadowBlur = 18 * GF.S; c.globalAlpha = ea; c.strokeStyle = '#cfeeff'; c.lineWidth = (3 + (1 - ea) * 6) * GF.S; c.beginPath(); c.ellipse(gx, gy, rx, ry, 0, 0, Math.PI * 2); c.stroke(); c.shadowBlur = 0; c.globalAlpha = ea * 0.5; c.strokeStyle = '#5aa6e0'; c.lineWidth = 2 * GF.S; c.beginPath(); c.ellipse(gx, gy, rx * 0.7, ry * 0.7, 0, 0, Math.PI * 2); c.stroke(); c.restore(); continue; }   // EMP = cyan pulse (never orange)
-    if (wv.glass) { var ga2 = Math.max(0, 1 - wv.t / 0.8); c.save(); c.shadowColor = THEMES.mall.accent; c.shadowBlur = 12 * GF.S; c.globalAlpha = ga2; c.strokeStyle = '#cffaff'; c.lineWidth = (2.5 + (1 - ga2) * 5) * GF.S; c.beginPath(); c.ellipse(gx, gy, rx, ry, 0, 0, Math.PI * 2); c.stroke(); c.restore(); continue; }   // GLASS STORM = pale-cyan shrapnel ring
+    if (wv.emp) { var ea = Math.max(0, 1 - wv.t / 0.7); c.save(); c.shadowColor = '#7fd4ff'; c.shadowBlur = mobileFx() ? 0 : (18 * GF.S); c.globalAlpha = ea; c.strokeStyle = '#cfeeff'; c.lineWidth = (3 + (1 - ea) * 6) * GF.S; c.beginPath(); c.ellipse(gx, gy, rx, ry, 0, 0, Math.PI * 2); c.stroke(); c.shadowBlur = 0; c.globalAlpha = ea * 0.5; c.strokeStyle = '#5aa6e0'; c.lineWidth = 2 * GF.S; c.beginPath(); c.ellipse(gx, gy, rx * 0.7, ry * 0.7, 0, 0, Math.PI * 2); c.stroke(); c.restore(); continue; }   // EMP = cyan pulse (never orange)
+    if (wv.glass) { var ga2 = Math.max(0, 1 - wv.t / 0.8); c.save(); c.shadowColor = THEMES.mall.accent; c.shadowBlur = mobileFx() ? 0 : (12 * GF.S); c.globalAlpha = ga2; c.strokeStyle = '#cffaff'; c.lineWidth = (2.5 + (1 - ga2) * 5) * GF.S; c.beginPath(); c.ellipse(gx, gy, rx, ry, 0, 0, Math.PI * 2); c.stroke(); c.restore(); continue; }   // GLASS STORM = pale-cyan shrapnel ring
     var a = Math.max(0, 1 - wv.t / 0.55);
     var waveCol = wv.color || '#ffa040', waveGlow = wv.glow || '#ffce9a';
     c.save();
-    c.shadowColor = waveGlow; c.shadowBlur = 10 * GF.S;
+    c.shadowColor = waveGlow; c.shadowBlur = mobileFx() ? 0 : (10 * GF.S);
     c.globalAlpha = a * 0.5; c.strokeStyle = '#fff'; c.lineWidth = (3 + (1 - a) * 6) * GF.S; strokeBrokenEllipse(c, gx, gy, rx, ry, wr, (wv.seed || 1) + 401, mobileFx() ? 4 : 7, 0.45);
     c.shadowBlur = 0; c.globalAlpha = a * 0.42; c.strokeStyle = waveCol; c.lineWidth = 2.1 * GF.S; strokeBrokenEllipse(c, gx, gy, rx * 0.85, ry * 0.85, wr * -0.7, (wv.seed || 1) + 503, mobileFx() ? 3 : 6, 0.55);
     c.restore();
@@ -254,7 +267,7 @@ function drawWaveFronts(c) {
     c.lineWidth = (mobileFx() ? 7 : 11) * S;
     strokeBrokenEllipse(c, gx, gy, rx * 1.02, ry * 1.05, rot, seed + 701, mobileFx() ? 4 : 7, 0.5);   // dust curtain riding the pressure front
     c.globalCompositeOperation = 'lighter';
-    c.shadowColor = wv.glow || wv.color || '#ffad55'; c.shadowBlur = 11 * S;
+    c.shadowColor = wv.glow || wv.color || '#ffad55'; c.shadowBlur = mobileFx() ? 0 : (11 * S);
     for (var q = 0; q < lineN; q++) {
       var n1 = fxRand(seed + q * 31.1), n2 = fxRand(seed + q * 47.7), n3 = fxRand(seed + q * 63.3);
       var aa = q / lineN * Math.PI * 2 + n1 * 0.45 + (wv.t * 0.9), seg = 0.055 + n2 * 0.11, rr = 0.92 + n3 * 0.18;
@@ -273,11 +286,15 @@ function drawImpactPulses(c) {
     c.save();
     c.globalCompositeOperation = 'lighter';
     c.globalAlpha = a * (p.main ? 0.42 : 0.26);
-    var g = c.createRadialGradient(p.x, p.y, 2, p.x, p.y, Math.max(rx, 20 * S));
-    g.addColorStop(0, rgba(p.accent, 0.68));
-    g.addColorStop(0.34, rgba(p.color, 0.28));
-    g.addColorStop(1, rgba(p.color, 0));
-    c.fillStyle = g;
+    if (mobileFx()) {   // low tier: flat additive glow instead of a per-fire radial gradient
+      c.fillStyle = rgba(p.color, 0.3);
+    } else {
+      var g = c.createRadialGradient(p.x, p.y, 2, p.x, p.y, Math.max(rx, 20 * S));
+      g.addColorStop(0, rgba(p.accent, 0.68));
+      g.addColorStop(0.34, rgba(p.color, 0.28));
+      g.addColorStop(1, rgba(p.color, 0));
+      c.fillStyle = g;
+    }
     c.beginPath(); c.ellipse(p.x, p.y + TH() * 0.12, rx, ry, rot, 0, Math.PI * 2); c.fill();
     c.globalAlpha = a * 0.42;
     c.strokeStyle = rgba(p.accent, 0.75); c.lineWidth = 1.1 * S;
@@ -407,7 +424,7 @@ function drawThemeProp(c, b, Hh, lx, ly) {
   // ---- OIL REFINERY ----
   if (b.fueltank && b.state !== 'rubble') { c.save(); var tr = TW() * 0.2; c.fillStyle = darken(b.col, 0.14); c.beginPath(); c.ellipse(cxp, topYp - tr * 0.3, tr, tr * 0.5, 0, 0, Math.PI * 2); c.fill(); c.strokeStyle = darken(b.col, -0.3); c.lineWidth = 1; c.beginPath(); c.ellipse(cxp, topYp - tr * 0.3, tr, tr * 0.5, 0, 0, Math.PI); c.stroke(); c.restore(); return; }   // cylindrical tank top
   if (b.distill && b.state === 'intact') { c.save(); c.strokeStyle = darken(b.col, -0.25); c.lineWidth = 1; for (var dz = 1; dz <= 3; dz++) { var dy2 = isoY(b.i + 0.5, b.j + 0.5) - Hh * (dz / 4) + ly; c.beginPath(); c.moveTo(cxp - TW() * 0.13, dy2); c.lineTo(cxp + TW() * 0.13, dy2); c.stroke(); } c.restore(); return; }   // distillation tower banding
-  if (b.flarestack && b.state === 'intact') { c.save(); c.strokeStyle = '#9aa0a6'; c.lineWidth = 1.6 * S; var fy1 = isoY(b.i + 0.5, b.j + 0.5) + ly; c.beginPath(); c.moveTo(cxp, fy1); c.lineTo(cxp, topYp); c.stroke(); var fl = 0.6 + 0.4 * Math.sin(bgT * 12 + b.i); var fg = c.createRadialGradient(cxp, topYp - 3 * S, 1, cxp, topYp - 3 * S, 7 * S * fl); fg.addColorStop(0, 'rgba(255,240,150,0.9)'); fg.addColorStop(0.5, 'rgba(255,138,59,0.7)'); fg.addColorStop(1, 'rgba(255,80,20,0)'); c.fillStyle = fg; c.beginPath(); c.arc(cxp, topYp - 4 * S, 6 * S * fl, 0, Math.PI * 2); c.fill(); c.restore(); return; }   // flare stack with a live flame (orange OK = real fire)
+  if (b.flarestack && b.state === 'intact') { c.save(); c.strokeStyle = '#9aa0a6'; c.lineWidth = 1.6 * S; var fy1 = isoY(b.i + 0.5, b.j + 0.5) + ly; c.beginPath(); c.moveTo(cxp, fy1); c.lineTo(cxp, topYp); c.stroke(); var fl = 0.6 + 0.4 * Math.sin(bgT * 12 + b.i); if (mobileFx()) { c.fillStyle = 'rgba(255,170,80,0.8)'; c.beginPath(); c.arc(cxp, topYp - 4 * S, 3.5 * S * fl, 0, Math.PI * 2); c.fill(); } else { var fg = c.createRadialGradient(cxp, topYp - 3 * S, 1, cxp, topYp - 3 * S, 7 * S * fl); fg.addColorStop(0, 'rgba(255,240,150,0.9)'); fg.addColorStop(0.5, 'rgba(255,138,59,0.7)'); fg.addColorStop(1, 'rgba(255,80,20,0)'); c.fillStyle = fg; c.beginPath(); c.arc(cxp, topYp - 4 * S, 6 * S * fl, 0, Math.PI * 2); c.fill(); } c.restore(); return; }   // flare stack with a live flame (orange OK = real fire)
   if (b.pipeline && b.state !== 'rubble') { c.save(); c.strokeStyle = darken(b.col, 0.1); c.lineWidth = 2 * S; c.beginPath(); c.moveTo(cxp - TW() * 0.22, topYp + TH() * 0.06); c.lineTo(cxp + TW() * 0.22, topYp - TH() * 0.06); c.stroke(); c.restore(); return; }   // pipeline run
   // ---- SKYSCRAPERS ----
   if (b.skytower && b.state === 'intact') { c.save(); c.globalAlpha = 0.5 + 0.4 * Math.sin(bgT * 3 + b.i); c.fillStyle = (Math.sin(bgT * 5) > 0) ? '#ff5050' : '#7a2020'; c.beginPath(); c.arc(cxp, topYp - 2 * S, 2 * S, 0, Math.PI * 2); c.fill(); c.restore(); if (!falling) { c.save(); c.globalAlpha = 0.3; c.fillStyle = AC; for (var gl = 1; gl <= 3; gl++) { var gy = isoY(b.i + 0.5, b.j + 0.5) - Hh * (gl / 4) + ly; c.fillRect(cxp - TW() * 0.14, gy, TW() * 0.28, 1.4 * S); } c.restore(); } return; }   // roof beacon + glass-band glints
@@ -525,7 +542,7 @@ function drawOrbitals(c) {   // ORBITAL STRIKE: a kinetic rod beam slamming down
     if (k < 1) { var lg = c.createLinearGradient(o.x, fall - 80 * S, o.x, fall); lg.addColorStop(0, 'rgba(127,212,255,0)'); lg.addColorStop(1, 'rgba(207,238,255,0.95)'); c.strokeStyle = lg; c.lineWidth = 5 * S; c.beginPath(); c.moveTo(o.x, fall - 80 * S); c.lineTo(o.x, fall); c.stroke();
       c.fillStyle = '#eaf6ff'; c.beginPath(); c.arc(o.x, fall, 4 * S, 0, Math.PI * 2); c.fill(); }
     if (k >= 1) { var ik = (o.t - 0.35) / 0.55, ia = Math.max(0, 1 - ik), rr = o.r * TW() / 2 * (0.4 + ik * 1.1), ry = o.r * TH() / 2 * (0.4 + ik * 1.1);   // expanding cyan impact disc on the deck
-      c.save(); c.globalAlpha = ia; c.shadowColor = '#7fd4ff'; c.shadowBlur = 16 * S; c.strokeStyle = '#cfeeff'; c.lineWidth = 4 * S; c.beginPath(); c.ellipse(o.x, o.y + TH() / 2, rr, ry, 0, 0, Math.PI * 2); c.stroke(); c.restore();
+      c.save(); c.globalAlpha = ia; c.shadowColor = '#7fd4ff'; c.shadowBlur = mobileFx() ? 0 : (16 * S); c.strokeStyle = '#cfeeff'; c.lineWidth = 4 * S; c.beginPath(); c.ellipse(o.x, o.y + TH() / 2, rr, ry, 0, 0, Math.PI * 2); c.stroke(); c.restore();
       c.save(); c.globalAlpha = ia * 0.8; var cg = c.createLinearGradient(o.x, o.y - 120 * S, o.x, o.y); cg.addColorStop(0, 'rgba(127,212,255,0)'); cg.addColorStop(1, 'rgba(127,212,255,' + (0.5 * ia) + ')'); c.fillStyle = cg; c.fillRect(o.x - 9 * S, o.y - 120 * S, 18 * S, 120 * S); c.restore(); }   // lingering plasma column
   }
 }
@@ -547,7 +564,7 @@ function drawFireworkBursts(c) {   // FIREWORKS: coloured aerial shell-bursts po
 function drawFaults(c) {   // SEISMIC: a jagged glowing crack tears across the ground along the fault line, widening then fading
   for (var i = 0; i < faults.length; i++) { var f = faults[i], S = GF.S, k = Math.min(1, f.t / 0.4), a = Math.max(0, 1 - (f.t - 0.4) / 0.7);
     var dx = Math.cos(f.ang), dy = Math.sin(f.ang), half = f.len * 0.5 * k;
-    c.save(); c.globalAlpha = a; c.strokeStyle = '#c98a3a'; c.shadowColor = '#ff8a3b'; c.shadowBlur = 10 * S; c.lineWidth = (2 + f.w) * S;
+    c.save(); c.globalAlpha = a; c.strokeStyle = '#c98a3a'; c.shadowColor = '#ff8a3b'; c.shadowBlur = mobileFx() ? 0 : (10 * S); c.lineWidth = (2 + f.w) * S;
     c.beginPath(); var steps = 16;
     for (var s = 0; s <= steps; s++) { var tt = (s / steps - 0.5) * 2, along = tt * half, jit = (s % 2 ? 1 : -1) * (0.18 + Math.random() * 0.12);
       var pci = f.ci + dx * along - dy * jit, pcj = f.cj + dy * along + dx * jit, px = isoX(pci, pcj), py = isoY(pci, pcj) + TH() / 2;
@@ -619,7 +636,7 @@ function drawMushroom(c, m) {
     blob(px, py, pr * (0.9 + n2 * 0.75) * capSX, pr * (0.72 + n3 * 0.52) * capSY, lean * 0.18 + (n1 - 0.5) * 0.5, mixHex(smokeCol, blast, 0.16), smokeCol, '#151210', cloudA * (0.28 + n2 * 0.25), null);
   }
   if (impact === 'cool_ring' || impact === 'glass_comet' || impact === 'blackbox_rod') {
-    c.globalAlpha = alpha * 0.72; c.strokeStyle = rgba(accent, 0.9); c.shadowColor = accent; c.shadowBlur = (cheap ? 6 : 12) * S; c.lineWidth = 3 * S;
+    c.globalAlpha = alpha * 0.72; c.strokeStyle = rgba(accent, 0.9); c.shadowColor = accent; c.shadowBlur = mobileFx() ? 0 : ((cheap ? 6 : 12) * S); c.lineWidth = 3 * S;
     c.beginPath(); c.ellipse(topX, topY + capR * 0.02, capR * 0.78 * capSX, capR * 0.24 * capSY, lean * 0.12, 0, Math.PI * 2); c.stroke(); c.shadowBlur = 0;
   }
   if (impact === 'firework' || impact === 'cap_pop' || impact === 'solar_crown') {
@@ -640,7 +657,7 @@ function drawMushroom(c, m) {
     c.lineWidth = 3 * S * sc; c.strokeStyle = 'rgba(3,3,3,0.64)'; c.beginPath(); c.arc(topX, topY + capR * 0.08, capR * 0.18, 0.1, Math.PI - 0.1); c.stroke();
   }
   if (impact === 'last_button') {
-    c.globalAlpha = alpha * 0.65; c.strokeStyle = rgba(blast, 0.9); c.shadowColor = blast; c.shadowBlur = (cheap ? 8 : 16) * S; c.lineWidth = 3 * S;
+    c.globalAlpha = alpha * 0.65; c.strokeStyle = rgba(blast, 0.9); c.shadowColor = blast; c.shadowBlur = mobileFx() ? 0 : ((cheap ? 8 : 16) * S); c.lineWidth = 3 * S;
     for (var hr = 0, rings = cheap ? 2 : 3; hr < rings; hr++) { c.beginPath(); c.ellipse(x + lean * capR * 0.18, y + TH() * 0.34, capR * (0.36 + hr * 0.22 + cloudT * 0.04) * capSX, capR * (0.11 + hr * 0.06), lean * 0.12, 0, Math.PI * 2); c.stroke(); }
   }
   c.restore();
@@ -649,7 +666,7 @@ function drawInterceptors(c) {
   for (var i = 0; i < interceptors.length; i++) { var it = interceptors[i];
     c.strokeStyle = 'rgba(40,200,115,0.72)'; c.lineWidth = 2.4 * GF.S; c.beginPath();
     for (var t2 = 0; t2 < it.trail.length; t2++) c[t2 ? 'lineTo' : 'moveTo'](it.trail[t2].x, it.trail[t2].y); c.stroke();
-    c.save(); c.shadowColor = PB.glow; c.shadowBlur = 8 * GF.S; c.fillStyle = PB.hi; c.beginPath(); c.arc(it.x, it.y, 3.2 * GF.S, 0, Math.PI * 2); c.fill(); c.restore();
+    c.save(); c.shadowColor = PB.glow; c.shadowBlur = mobileFx() ? 0 : (8 * GF.S); c.fillStyle = PB.hi; c.beginPath(); c.arc(it.x, it.y, 3.2 * GF.S, 0, Math.PI * 2); c.fill(); c.restore();
   }
 }
 function drawShip(c, sp) {
@@ -703,12 +720,12 @@ function drawWarhead(c) {
   c.rotate(wobble);
   c.save();
   if (pal.trail === 'white_beam' || body === 'rod') {
-    c.strokeStyle = rgba(pal.accent, 0.72); c.shadowColor = pal.accent; c.shadowBlur = 13 * S; c.lineWidth = 3 * S;
+    c.strokeStyle = rgba(pal.accent, 0.72); c.shadowColor = pal.accent; c.shadowBlur = mobileFx() ? 0 : (13 * S); c.lineWidth = 3 * S;
     c.beginPath(); c.moveTo(0, -42 * S); c.lineTo(0, -13 * S); c.stroke();
   } else {
     var tg = c.createLinearGradient(0, -39 * S, 0, -6 * S);
     tg.addColorStop(0, rgba(pal.blast, 0)); tg.addColorStop(0.45, rgba(pal.blast, 0.28)); tg.addColorStop(1, rgba(pal.accent, 0.72));
-    c.fillStyle = tg; c.shadowColor = pal.blast; c.shadowBlur = 12 * S; c.beginPath(); c.ellipse(0, -23 * S, 6.5 * S, 18 * S, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = tg; c.shadowColor = pal.blast; c.shadowBlur = mobileFx() ? 0 : (12 * S); c.beginPath(); c.ellipse(0, -23 * S, 6.5 * S, 18 * S, 0, 0, Math.PI * 2); c.fill();
     if (pal.trail === 'triple' || pal.trail === 'rotor_sparks') { c.fillStyle = rgba(pal.secondary, 0.36); c.beginPath(); c.ellipse(-6 * S, -20 * S, 2.5 * S, 12 * S, 0, 0, Math.PI * 2); c.ellipse(6 * S, -20 * S, 2.5 * S, 12 * S, 0, 0, Math.PI * 2); c.fill(); }
   }
   c.restore();
@@ -717,13 +734,13 @@ function drawWarhead(c) {
     var sz = GF.clamp(50 * S, 36, 72);
     c.rotate(-wobble);
     c.save();
-    c.shadowColor = pal.accent; c.shadowBlur = 10 * S;
+    c.shadowColor = pal.accent; c.shadowBlur = mobileFx() ? 0 : (10 * S);
     c.drawImage(icon, -sz / 2, -sz / 2, sz, sz);
     c.restore();
     c.restore();
     return;
   }
-  c.shadowColor = pal.primary; c.shadowBlur = 8 * S; c.lineWidth = 1.4 * S; c.strokeStyle = '#061008'; c.fillStyle = pal.primary;
+  c.shadowColor = pal.primary; c.shadowBlur = mobileFx() ? 0 : (8 * S); c.lineWidth = 1.4 * S; c.strokeStyle = '#061008'; c.fillStyle = pal.primary;
   if (body === 'drone') {
     c.beginPath(); roundRect(-13 * S, -7 * S, 26 * S, 17 * S, 5 * S); c.fill(); c.stroke();
     c.fillStyle = pal.accent; c.beginPath(); c.arc(-15 * S, -10 * S, 5 * S, 0, Math.PI * 2); c.arc(15 * S, -10 * S, 5 * S, 0, Math.PI * 2); c.fill();
@@ -760,7 +777,7 @@ function drawWarhead(c) {
   c.shadowBlur = 0;
   if (pal.style === 'hazard') { c.strokeStyle = '#17110a'; c.lineWidth = 2 * S; c.beginPath(); c.moveTo(-8 * S, -2 * S); c.lineTo(8 * S, 7 * S); c.moveTo(-7 * S, -10 * S); c.lineTo(7 * S, -2 * S); c.stroke(); }
   if (pal.style === 'candy') { c.fillStyle = rgba(pal.secondary, 0.9); c.beginPath(); c.arc(-3 * S, -5 * S, 1.8 * S, 0, Math.PI * 2); c.arc(4 * S, 2 * S, 1.5 * S, 0, Math.PI * 2); c.fill(); }
-  c.fillStyle = pal.accent; c.shadowColor = pal.accent; c.shadowBlur = 8 * S; c.beginPath(); c.arc(0, body === 'button' ? -6 * S : -2 * S, 2.6 * S, 0, Math.PI * 2); c.fill();
+  c.fillStyle = pal.accent; c.shadowColor = pal.accent; c.shadowBlur = mobileFx() ? 0 : (8 * S); c.beginPath(); c.arc(0, body === 'button' ? -6 * S : -2 * S, 2.6 * S, 0, Math.PI * 2); c.fill();
   c.restore();
 }
 function drawBlastPreview(c) {
@@ -918,7 +935,7 @@ function drawTutHand(c, tx, ty) {   // animated finger TAPPING the target (repla
   var ease = tri * tri * (3 - 2 * tri), lift = (1 - ease) * 17 * S, press = ease > 0.85;
   if (press) { var rp = (ease - 0.85) / 0.15; c.save(); c.globalAlpha = (1 - rp) * 0.6; c.strokeStyle = PB.warn; c.lineWidth = 2.6 * S; c.beginPath(); c.arc(tx, ty, (5 + rp * 22) * S, 0, Math.PI * 2); c.stroke(); c.restore(); }   // tap ripple on contact
   c.save(); c.translate(tx, ty - lift); var k = press ? 0.9 : 1; c.scale(k * S, k * S); c.rotate(-0.26); c.lineJoin = 'round'; c.lineCap = 'round';
-  c.shadowColor = 'rgba(0,0,0,0.32)'; c.shadowBlur = 7; c.shadowOffsetX = 2; c.shadowOffsetY = 4; c.fillStyle = '#ffd9b0'; c.strokeStyle = '#7a4e2c'; c.lineWidth = 2.4;
+  c.shadowColor = 'rgba(0,0,0,0.32)'; c.shadowBlur = mobileFx() ? 0 : (7); c.shadowOffsetX = 2; c.shadowOffsetY = 4; c.fillStyle = '#ffd9b0'; c.strokeStyle = '#7a4e2c'; c.lineWidth = 2.4;
   GF.rr(c, -15, 23, 30, 33, 13); c.fill(); c.stroke();           // palm / fist
   c.beginPath(); c.ellipse(-15, 31, 7, 10, -0.5, 0, Math.PI * 2); c.fill(); c.stroke();   // thumb
   GF.rr(c, -6, 0, 12, 30, 6); c.fill(); c.stroke();              // pointing finger (fingertip at the target)
@@ -936,11 +953,11 @@ function drawTutorial(c) {   // spotlight the live control, grey + lock everythi
     rg.addColorStop(0, 'rgba(18,15,9,0)'); rg.addColorStop(1, 'rgba(18,15,9,0.28)');   // light dim - the city stays clearly visible
     c.fillStyle = rg; c.fillRect(0, 0, W, H);
     if (isDaily && R.daily) {   // re-draw the daily crate on top of the scrim so it never appears behind the tutorial overlay
-      c.save(); GF.rr(c, R.daily.x, R.daily.y, R.daily.w, R.daily.h, 7 * S); var dgr = c.createLinearGradient(R.daily.x, R.daily.y, R.daily.x, R.daily.y + R.daily.h); dgr.addColorStop(0, '#ffe79a'); dgr.addColorStop(1, PB.warn); c.shadowColor = PB.warn; c.shadowBlur = 16 * S; c.fillStyle = dgr; c.fill(); c.restore();
+      c.save(); GF.rr(c, R.daily.x, R.daily.y, R.daily.w, R.daily.h, 7 * S); var dgr = c.createLinearGradient(R.daily.x, R.daily.y, R.daily.x, R.daily.y + R.daily.h); dgr.addColorStop(0, '#ffe79a'); dgr.addColorStop(1, PB.warn); c.shadowColor = PB.warn; c.shadowBlur = mobileFx() ? 0 : (16 * S); c.fillStyle = dgr; c.fill(); c.restore();
       var dx = R.daily.x + R.daily.w / 2, dy = R.daily.y + R.daily.h / 2, rr = R.daily.w * 0.24;
       c.strokeStyle = '#3a2600'; c.lineWidth = 2.3 * S; c.strokeRect(dx - rr, dy - rr * 0.85, rr * 2, rr * 1.7); c.beginPath(); c.moveTo(dx - rr, dy - rr * 0.85 + rr * 0.55); c.lineTo(dx + rr, dy - rr * 0.85 + rr * 0.55); c.moveTo(dx, dy - rr * 0.85); c.lineTo(dx, dy + rr * 0.85); c.stroke();
     }
-	    if (topBtn) { c.save(); c.globalAlpha = 0.5 + 0.45 * pulse; c.shadowColor = PB.warn; c.shadowBlur = 18 * S; c.strokeStyle = PB.warn; c.lineWidth = 2.8 * S; if (isGift) { GF.rr(c, tt.x - 4 * S, tt.y - 4 * S, tt.w + 8 * S, tt.h + 8 * S, 6 * S); c.stroke(); } else { c.beginPath(); c.arc(cx, cy, Math.max(tt.w, tt.h) * 0.82, 0, Math.PI * 2); c.stroke(); } c.restore(); }
+	    if (topBtn) { c.save(); c.globalAlpha = 0.5 + 0.45 * pulse; c.shadowColor = PB.warn; c.shadowBlur = mobileFx() ? 0 : (18 * S); c.strokeStyle = PB.warn; c.lineWidth = 2.8 * S; if (isGift) { GF.rr(c, tt.x - 4 * S, tt.y - 4 * S, tt.w + 8 * S, tt.h + 8 * S, 6 * S); c.stroke(); } else { c.beginPath(); c.arc(cx, cy, Math.max(tt.w, tt.h) * 0.82, 0, Math.PI * 2); c.stroke(); } c.restore(); }
 	    drawTutCaption(c, tutCaptionText(), cy);
 	    drawTutHand(c, cx, topBtn ? cy + tt.h * 0.95 : cy);   // top buttons: hand sits below so the target itself stays visible
   }   // no scrim / no message during the blast+result - it auto-returns to the upgrade step
@@ -957,7 +974,7 @@ function drawResultMetric(c, x, y, w, h, label, value, accent) {
 }
 function drawResult(c) {
   var W = GF.W, H = GF.H, S = GF.S;
-  R.again = R.next = R.dbl = null;
+  R.again = R.next = R.dbl = R.offerChip = null;
   c.fillStyle = 'rgba(9,7,4,0.78)'; c.fillRect(0, 0, W, H); c.textAlign = 'center';
   var topPad = GF.clamp(62 * S, 48, 90), bottomReserve = GF.clamp((mobileView() ? 128 : 96) * S, 82, 160);
   var availH = Math.max(260 * S, H - topPad - bottomReserve);
@@ -991,9 +1008,19 @@ function drawResult(c) {
     if (cityReinforced) { c.fillStyle = PB.hi; c.font = uiFont(GF.clamp(10.8 * S, 9, 14), '800'); wrapCentre(c, T('reinforces'), W / 2, lastY + msgLh * 1.18, pw - 58 * S, msgLh); }
     R.again = { x: bx, y: btnY, w: bw, h: bh }; bigBtn(c, R.again, T('launch_again'), null, PB.success, true);
   } else {
+    var stackTop = btnY;
     if (pendingDbl) {
       R.dbl = { x: bx, y: btnY - GF.clamp(48 * S, 40, 58) - 10 * S, w: bw, h: GF.clamp(48 * S, 40, 58) };
       modalBtn(c, R.dbl, godPower ? T('dbl_free') : T('dbl'), 'rgba(255,210,74,0.9)', '#191106', 'rgba(255,210,74,0.68)');
+      stackTop = R.dbl.y;
+    }
+    if (offerChipOn) {
+      var chipH = GF.clamp(34 * S, 28, 42);
+      var chipY = stackTop - chipH - 8 * S;
+      if (chipY >= detailY + 6 * S) {   // only when the modal has measured room above the button stack
+        R.offerChip = { x: bx, y: chipY, w: bw, h: chipH };
+        modalBtn(c, R.offerChip, T('deal_chip'), 'rgba(7,36,20,0.92)', '#54ff96', 'rgba(84,255,150,0.55)');
+      }
     }
     R.next = { x: bx, y: btnY, w: bw, h: bh }; bigBtn(c, R.next, T('next_city'), null, PB.success, true);
   }
@@ -1176,7 +1203,7 @@ function drawDemo(c, id, dx, dy, dw, dh) {
   } else if (id === 'seismic') {   // a straight red BAND (the fault) crosses the grid, green on both sides
     var fb = 0.5 + tt * 4.5;
     city(function (i, j) { return Math.abs(i - fb) <= 0.8 ? 1 : 0; });
-    var w1 = P(fb, -0.3), w2 = P(fb, N + 0.3); c.save(); c.strokeStyle = '#ffcf8a'; c.lineWidth = 2.4 * S; c.shadowColor = '#ff8a3b'; c.shadowBlur = 8 * S; c.globalAlpha = 0.85;
+    var w1 = P(fb, -0.3), w2 = P(fb, N + 0.3); c.save(); c.strokeStyle = '#ffcf8a'; c.lineWidth = 2.4 * S; c.shadowColor = '#ff8a3b'; c.shadowBlur = mobileFx() ? 0 : (8 * S); c.globalAlpha = 0.85;
     c.beginPath(); for (var sq = 0; sq <= 10; sq++) { var sty = GF.lerp(w1[1], w2[1], sq / 10) + th * 0.3, stx = GF.lerp(w1[0], w2[0], sq / 10) + (sq % 2 ? 3 : -3) * S; c[sq ? 'lineTo' : 'moveTo'](stx, sty); } c.stroke(); c.restore();   // the glowing crack down the fault
   } else if (id === 'inferno') {   // red BLOOMS at the tank cells, growing as each cooks off in turn (separate red pockets, green around)
     var tanks = [[1.5, 1.5], [3.5, 2.5], [2.5, 4.0]], lit2 = 1 + Math.floor(tt * 3);
@@ -1313,7 +1340,7 @@ function drawWelcome(c) {   // returning player: the Vault-Tec reactor banked ca
   c.fillStyle = 'rgba(1,10,5,0.88)'; c.fillRect(0, 0, W, H);
   var pw = Math.min(W - 30 * S, 380), ph = Math.min(H - 44 * S, 500), px = (W - pw) / 2, py = (H - ph) / 2;
   GF.rr(c, px, py, pw, ph, 14 * S); var g = c.createLinearGradient(0, py, 0, py + ph); g.addColorStop(0, 'rgba(11,42,27,0.99)'); g.addColorStop(1, 'rgba(4,18,12,0.99)'); c.fillStyle = g; c.fill(); c.lineWidth = 1.6; c.strokeStyle = PB.hi; c.stroke();
-  c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = PB.hi; c.font = '900 ' + GF.clamp(19 * S, 15, 26) + 'px ui-monospace,monospace'; c.save(); c.shadowColor = PB.glow; c.shadowBlur = 7; c.fillText(T('welcome_t'), W / 2, py + 28 * S); c.restore();
+  c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = PB.hi; c.font = '900 ' + GF.clamp(19 * S, 15, 26) + 'px ui-monospace,monospace'; c.save(); c.shadowColor = PB.glow; c.shadowBlur = mobileFx() ? 0 : (7); c.fillText(T('welcome_t'), W / 2, py + 28 * S); c.restore();
   c.fillStyle = PB.mid; c.font = GF.clamp(10.5 * S, 9, 14) + 'px ui-monospace,monospace'; var subEnd = wrapCentre(c, T('welcome_sub'), W / 2, py + 52 * S, pw - 44 * S, 15 * S);
   var bw = pw - 48 * S, bx = W / 2 - bw / 2, bh = GF.clamp(42 * S, 34, 54), gap = GF.clamp(9 * S, 7, 12), bottomPad = GF.clamp(14 * S, 10, 18);
   var by = py + ph - bh * 2 - gap - bottomPad, capPx = GF.clamp(28 * S, 21, 38);
@@ -1324,7 +1351,7 @@ function drawWelcome(c) {   // returning player: the Vault-Tec reactor banked ca
   if (mascotSpace < 96 * mascotScale) mascotScale = GF.clamp(mascotSpace / 96, 0.42, mascotScale);
   if (mascotSpace > 38) drawVaultBoy(c, W / 2, Math.max(mascotTop + 22 * mascotScale, Math.min(py + ph * 0.38, (mascotTop + mascotBottom) / 2)), mascotScale);
   c.textBaseline = 'middle'; c.fillStyle = PB.lo; c.font = GF.clamp(10 * S, 8, 13) + 'px ui-monospace,monospace'; c.fillText(T('away') + ' ' + dur(welcomeMs), W / 2, awayY);
-  c.fillStyle = PB.warn; c.font = '900 ' + capPx + 'px ui-monospace,monospace'; c.save(); c.shadowColor = PB.glow; c.shadowBlur = 10; c.fillText('+' + fmt(welcomeCaps) + ' ' + T('caps'), W / 2, capY); c.restore();
+  c.fillStyle = PB.warn; c.font = '900 ' + capPx + 'px ui-monospace,monospace'; c.save(); c.shadowColor = PB.glow; c.shadowBlur = mobileFx() ? 0 : (10); c.fillText('+' + fmt(welcomeCaps) + ' ' + T('caps'), W / 2, capY); c.restore();
   R.welcomeStars = null;
   R.welcomeDbl = { x: bx, y: by, w: bw, h: bh }; modalBtn(c, R.welcomeDbl, godPower ? T('collect_x2_free') : T('collect_x2'), 'rgba(255,210,74,0.86)', '#06210f');
   var by2 = by + bh + gap; R.welcomeCollect = { x: bx, y: by2, w: bw, h: bh }; modalBtn(c, R.welcomeCollect, T('collect'), 'rgba(8,28,16,0.92)', PB.hi, PB.mid);
@@ -1340,7 +1367,7 @@ function drawTutorialGift(c) {
   c.fillStyle = '#bfe9ff'; c.font = uiFont(GF.clamp(18 * S, 14, 24), '900'); c.fillText(T('gift_t'), W / 2, py + 30 * S);
   var cx = W / 2, cy = py + ph * 0.45, box = GF.clamp(112 * S, 84, 132);
   c.save();
-  c.shadowColor = '#7fd4ff'; c.shadowBlur = 18 * S;
+  c.shadowColor = '#7fd4ff'; c.shadowBlur = mobileFx() ? 0 : (18 * S);
   if (tutorialGiftChestImg.complete && tutorialGiftChestImg.naturalWidth) {
     c.drawImage(tutorialGiftChestImg, cx - box / 2, cy - box * 0.53, box, box);
   } else {

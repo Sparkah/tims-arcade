@@ -40,11 +40,13 @@ var mix = mixRgb;
 var money = 0, dispMoney = 0, totalEarned = 0, best = 0, cityTier = 0, powerLvl = 0, flareLvl = 0, penLvl = 0, mirvLvl = 0, shockLvl = 0, luckLvl = 0, empLvl = 0, orbitalLvl = 0, clusterLvl = 0, firestormLvl = 0, chainLvl = 0, glassLvl = 0, seismicLvl = 0, infernoLvl = 0, toppleLvl = 0, meltdownLvl = 0, tidalLvl = 0, fireworksLvl = 0, eyeLvl = 0, maxTier = 0, tutDone = false, starterGiven = false, upgDone = false, citiesRazed = 0, godPower = false;
 var lastSeen = 0, dailyStreak = 0, lastClaimDay = -1, welcomeCaps = 0, welcomeMs = 0, welcomeBuying = false;   // reactor (offline caps) + daily ration (login streak)
 var ownedSkins = [], skinCopies = {}, equippedSkin = null, skinBoosts = {}, gachaStats = {};   // local skin collection prototype; server authority comes later
+var setBoosts = {}, capsDealAvailable = false, lastOfferDay = -1;   // collection set bonuses + result-screen daily-deal chip (wrapper-fed)
+function setBoost(kind) { var v = setBoosts && Number(setBoosts[kind] || 0); return isFinite(v) ? Math.max(0, v) : 0; }
 function skinBoost(kind) { if (equippedSkin && equippedSkin.id && !equippedSkin.boost && (!skinBoosts || skinBoosts[kind] == null)) rehydrateEquippedSkin(); var v = skinBoosts && Number(skinBoosts[kind] || 0); return isFinite(v) ? Math.max(0, v) : 0; }
 function extraIncomeBonus() { return Math.min(0.85, luckLvl * 0.07 + skinBoost('crit_bonus')); }   // old luckLvl save field now means EXTRA INCOME
 function criticalPayoutChance() { return Math.min(0.28, 0.06 + luckLvl * 0.015 + skinBoost('crit_bonus')); }
 function criticalPayoutMult() { return Math.min(0.65, 0.35 + luckLvl * 0.03); }
-function payoutBoost(extraKind) { return 1 + skinBoost('caps_mult') + extraIncomeBonus() + (extraKind ? skinBoost(extraKind) : 0); }
+function payoutBoost(extraKind) { return 1 + skinBoost('caps_mult') + setBoost('caps_mult') + extraIncomeBonus() + (extraKind ? skinBoost(extraKind) : 0); }
 function skinBoostLabel() { return equippedSkin && equippedSkin.boost ? (equippedSkin.name + '  +' + Math.round(Number(equippedSkin.boost.value || 0) * 1000) / 10 + '% ' + equippedSkin.boost.label) : ''; }
 function uiFont(px, weight) { return (weight || '800') + ' ' + Math.round(px) + 'px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'; }
 function uiCorners(c, x, y, w, h, S, col) {
@@ -121,7 +123,23 @@ var fireballs = [], orbitals = [], faults = [], meltZones = [], fireworkBursts =
 var explosionAssets = [];
 var mushroomSourceAssets = [];
 var mushroomTintCanvas = null, mushroomTintCtx = null;
+// Perf governor: when real frame times stay bad the low-fx budget latches on
+// for the session, so weak phones AND weak desktops drop to the cheap path.
+var perfLowFx = false, _perfWin = [], _perfHot = 0, _perfLast = 0, _perfBadWins = 0;
+function perfSample(frameMs) {
+  if (perfLowFx || !(frameMs > 0) || frameMs > 500) return;   // ignore tab-hidden gaps
+  _perfWin.push(frameMs);
+  if (frameMs > 33.4) _perfHot += 1;
+  if (_perfWin.length < 90) return;
+  var sum = 0;
+  for (var i = 0; i < _perfWin.length; i++) sum += _perfWin[i];
+  var bad = sum / _perfWin.length > 24 || _perfHot >= 12;
+  _perfBadWins = bad ? _perfBadWins + 1 : 0;
+  if (_perfBadWins >= 2) perfLowFx = true;   // two consecutive bad windows = sustained, not a GC blip
+  _perfWin.length = 0; _perfHot = 0;
+}
 function mobileFx() {
+  if (perfLowFx) return true;
   var coarse = false;
   try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) {}
   return GF.W <= 520 || (coarse && GF.H > GF.W * 1.15);
@@ -459,7 +477,7 @@ function earlySupportTarget(index, count, ci, cj) {
   };
 }
 
-function powerCells() { return (BAL.BASE_CELLS + powerLvl * BAL.CELLS_PER_LVL) * (1 + skinBoost('yield_mult')); }
+function powerCells() { return (BAL.BASE_CELLS + powerLvl * BAL.CELLS_PER_LVL) * (1 + skinBoost('yield_mult') + setBoost('yield_mult')); }
 function wipePct() { return cityTier <= 1 ? 0.88 : cityTier <= 4 ? 0.86 : 0.85 + 0.10 * lateF(); }   // shared Itch curve; Telegram shop boosts can still help clear it
 function lateF() { return GF.clamp((cityTier - 9) / 9, 0, 1); }   // shared Itch curve for late district abilities
 function aprob(lvl, mx) { var f = GF.clamp(lvl / mx, 0, 1); return 0.04 + 0.96 * Math.pow(f, 2.4 + 3.6 * lateF()); }
@@ -1176,6 +1194,8 @@ function saveMeta(stampSeen) {
     skinCopies: Object.assign({}, skinCopies),
     equippedSkin: equippedSkin && equippedSkin.id || '',
     skinBoosts: skinBoosts,
+    setBoosts: setBoosts,
+    lastOfferDay: lastOfferDay,
     gachaStats: gachaStats
   });
 }
@@ -1230,6 +1250,8 @@ function loadMeta() {
       ? m.equippedSkin
       : (m.equippedSkin ? { id: m.equippedSkin, name: m.equippedSkin, boost: null } : null);
     skinBoosts = m.skinBoosts && typeof m.skinBoosts === 'object' ? m.skinBoosts : {};
+    setBoosts = m.setBoosts && typeof m.setBoosts === 'object' ? m.setBoosts : {};
+    lastOfferDay = isFinite(Number(m.lastOfferDay)) ? Number(m.lastOfferDay) : -1;
     gachaStats = m.gachaStats && typeof m.gachaStats === 'object' ? m.gachaStats : {};
     tutorialDailyClaimed = !!m.tutorialDailyClaimed;
     tutorialGiftClaimed = !!m.tutorialGiftClaimed;
@@ -1335,6 +1357,8 @@ function applySkinState(skin, state) {
   if (equippedSkin && !skinCopies[equippedSkin.id]) skinCopies[equippedSkin.id] = 1;
   skinBoosts = state.skinBoosts && typeof state.skinBoosts === 'object' ? Object.assign({}, state.skinBoosts) : {};
   if (equippedSkin && equippedSkin.boost && equippedSkin.boost.kind && !skinBoosts[equippedSkin.boost.kind]) skinBoosts[equippedSkin.boost.kind] = equippedSkin.boost.value;
+  if (state.setBoosts && typeof state.setBoosts === 'object') setBoosts = Object.assign({}, state.setBoosts);
+  if (state.capsDealAvailable != null) capsDealAvailable = !!state.capsDealAvailable;
   gachaStats = state.gachaStats && typeof state.gachaStats === 'object' ? Object.assign({}, state.gachaStats) : gachaStats;
 }
 
@@ -1432,8 +1456,9 @@ function toGame(e) { var r = GF.canvas.getBoundingClientRect(); var px = e.clien
 function openMissionsPanel() {
   try { if (typeof PLATFORM.openMissions === 'function') PLATFORM.openMissions(); } catch (e) {}
 }
-function openShopPanel(tab, tutorialClose) {
-  try { if (typeof PLATFORM.openShop === 'function') PLATFORM.openShop(tab || 'boxes', { tutorialClose: !!tutorialClose }); } catch (e) {}
+function offerChipOn() { return !!(resultWin && tutDone && cityTier >= 1 && capsDealAvailable && lastOfferDay !== dayNum()); }
+function openShopPanel(tab, tutorialClose, source) {
+  try { if (typeof PLATFORM.openShop === 'function') PLATFORM.openShop(tab || 'boxes', { tutorialClose: !!tutorialClose, source: source || '' }); } catch (e) {}
 }
 function onPress(x, y) {
   if (settingsOpen) {
@@ -1484,7 +1509,7 @@ function onPress(x, y) {
   if (inRect(R.view, x, y)) { cityView = !cityView; viewZoom = cityView ? GF.clamp(zoom || 1, 0.72, 2.6) : 1; infoOpen = null; return; }
   if (inRect(R.mute, x, y)) { settingsOpen = true; return; }
   if (gs === 'RESULT') {
-    if (resultWin) { if (pendingDbl && inRect(R.dbl, x, y)) { pendingDbl = false; if (godPower) { money += lastPayout; saveMeta(); GF.saveRun(); } else GF.ads.rewarded({ onReward: function () { money += lastPayout; saveMeta(); GF.saveRun(); }, onClose: function () {} }); return; } if (inRect(R.next, x, y)) nextCity(); }
+    if (resultWin) { if (pendingDbl && inRect(R.dbl, x, y)) { pendingDbl = false; if (godPower) { money += lastPayout; saveMeta(); GF.saveRun(); } else GF.ads.rewarded({ onReward: function () { money += lastPayout; saveMeta(); GF.saveRun(); }, onClose: function () {} }); return; } if (R.offerChip && inRect(R.offerChip, x, y)) { lastOfferDay = dayNum(); saveMeta(); openShopPanel('boxes', false, 'result_offer'); return; } if (inRect(R.next, x, y)) nextCity(); }
     else { if (inRect(R.again, x, y)) launchAgain(); }
     return;
   }
@@ -1520,6 +1545,9 @@ function stopPostLevelMotion() {
 
 // ── UPDATE ──────────────────────────────────────────────────────────────────
 function update(dt) {
+  var _perfNow = performance.now();   // raw rAF cadence: gf-lib clamps dt, so time it ourselves
+  if (_perfLast) perfSample(_perfNow - _perfLast);
+  _perfLast = _perfNow;
   bgT += dt; _collapseClock += dt; GF.juice.update(dt); dispMoney = GF.lerp(dispMoney, money, 0.2);
   if (tutAutoT > 0) { tutAutoT -= dt; if (tutAutoT <= 0 && gs === 'RESULT' && tutStep === 1) { tutAutoT = 0; launchAgain(); } }   // tutorial: whisk the player back to AIM so the next tap is the upgrade
   if (restartConfirm > 0) restartConfirm = Math.max(0, restartConfirm - dt);
@@ -1702,6 +1730,7 @@ var renderer = createRenderer({
       levelName: levelName, luckLvl: luckLvl, meltZones: meltZones,
       meltdownLvl: meltdownLvl, mirvLvl: mirvLvl, money: money,
       mushrooms: mushrooms, nukeAmmo: nukeAmmo, orbitalLvl: orbitalLvl,
+      offerChipOn: offerChipOn(),
       orbitals: orbitals, penLvl: penLvl, pendingDbl: pendingDbl, planes: planes,
       powerLvl: powerLvl, resultPct: resultPct, resultWin: resultWin,
       seismicLvl: seismicLvl, settingsOpen: settingsOpen, ships: ships,
@@ -1767,7 +1796,7 @@ HOOKS.__gfCam = function (z) { eyeLvl = 1; cityView = true; viewZoom = GF.clamp(
 HOOKS.__gfWeakpoints = function () { return weakpointTargets(64); };
 }
 
-HOOKS.__gfDbg = function () { return { loadoutOpen: loadoutOpen, dev: devOpen, power: powerLvl, powerLvl: powerLvl, yieldCells: Math.round(powerCells() * 100) / 100, flares: flareLvl, pen: penLvl, mirvLvl: mirvLvl, luckLvl: luckLvl, extraIncome: Math.round(extraIncomeBonus() * 100), critPayoutChance: Math.round(criticalPayoutChance() * 100), lastCritBonus: lastCritBonus, lastResultPct: Math.round(resultPct * 100), resultWin: resultWin, money: Math.round(money), tier: cityTier, gs: gs, restartConfirm: restartConfirm, destroyedPct: Math.round(destroyedW / Math.max(1, totalW) * 100), perks: (R.perk || []).length, detonate: !!R.detonate, shock: shockLvl, emp: empLvl, orbital: orbitalLvl, cluster: clusterLvl, firestorm: firestormLvl, chain: chainLvl, glass: glassLvl, seismic: seismicLvl, inferno: infernoLvl, topple: toppleLvl, meltdown: meltdownLvl, tidal: tidalLvl, fireworks: fireworksLvl, eyeLvl: eyeLvl, godPower: godPower, equippedSkin: equippedSkin && equippedSkin.id || '', skinBoosts: Object.assign({}, skinBoosts), ownedSkins: ownedSkins.length, boxesOpened: Number(gachaStats.boxesOpened || 0), theme: cityTheme, levelName: levelName || '', weakpoints: countWeakpoints(), weakpointHits: weakpointHits, lastWeakpointHits: lastWeakpointHits, atkMaxYield: atkMax('yield'), hasStation: hasStation, hasAirport: hasAirport, hasGhetto: hasGhetto, hasChinatown: hasChinatown, hasMall: hasMall, hasMountain: hasMountain, hasRefinery: hasRefinery, hasSkyscraper: hasSkyscraper, hasPowerplant: hasPowerplant, hasPort: hasPort, hasPark: hasPark, hasCathedral: hasCathedral, hasZombie: hasZombie, zombies: zombies.length, vehicles: vehicles.length, GRID: GRID, ships: ships.length, zone: zoneName, zoom: Math.round(zoom * 100) / 100, cityView: cityView, viewZoom: Math.round(viewZoom * 100) / 100, infoOpen: infoOpen, infoBadges: (R.info || []).length, starterGiven: starterGiven, upgDone: upgDone, perkIds: atkList().join(','), welcomeOpen: welcomeOpen, welcomeCaps: welcomeCaps, welcomeBuying: welcomeBuying, dailyOpen: dailyOpen, settingsOpen: settingsOpen, lang: GF.lang, muted: GF.muted, dailyClaimable: dailyClaimable(), dailyStreak: dailyStreak, activeNuke: activeNuke, nukeMult: nukeDef(activeNuke).mult, nukeAmmoWide: nukeAmmo.wide || 0, nukeAmmoTsar: nukeAmmo.tsar || 0, nukeChips: (R.nuke || []).length, actionCx: Math.round(R.actionCx || 0), actionCy: Math.round(R.actionCy || 0), aimX: Math.round(isoX(aim.ci, aim.cj)), aimY: Math.round(isoY(aim.ci, aim.cj) + TH() / 2), fxMobile: mobileFx(), fx: { waves: waves.length, chunks: chunks.length, dust: dust.length, fires: fires.length, smoke: smoke.length, fireballs: fireballs.length, mushrooms: mushrooms.length, meltZones: meltZones.length, fireworks: fireworkBursts.length, pulses: impactPulses.length, juice: GF.juice.counts() }, mushroomSources: mushroomSourceAssets.filter(function (a) { return a.ready; }).length, lastBlastProfile: lastBlastProfile, tutStep: tutStep, tutorialActive: tutorialActive(), tutorialGiftOpen: tutorialGiftOpen, tutorialGiftClaimed: tutorialGiftClaimed, tutorialDailyClaimed: tutorialDailyClaimed, tutTarget: (tutTarget() || {}).id || null }; };
+HOOKS.__gfDbg = function () { return { loadoutOpen: loadoutOpen, dev: devOpen, power: powerLvl, powerLvl: powerLvl, yieldCells: Math.round(powerCells() * 100) / 100, flares: flareLvl, pen: penLvl, mirvLvl: mirvLvl, luckLvl: luckLvl, extraIncome: Math.round(extraIncomeBonus() * 100), critPayoutChance: Math.round(criticalPayoutChance() * 100), lastCritBonus: lastCritBonus, lastResultPct: Math.round(resultPct * 100), resultWin: resultWin, money: Math.round(money), tier: cityTier, gs: gs, restartConfirm: restartConfirm, destroyedPct: Math.round(destroyedW / Math.max(1, totalW) * 100), perks: (R.perk || []).length, detonate: !!R.detonate, shock: shockLvl, emp: empLvl, orbital: orbitalLvl, cluster: clusterLvl, firestorm: firestormLvl, chain: chainLvl, glass: glassLvl, seismic: seismicLvl, inferno: infernoLvl, topple: toppleLvl, meltdown: meltdownLvl, tidal: tidalLvl, fireworks: fireworksLvl, eyeLvl: eyeLvl, godPower: godPower, equippedSkin: equippedSkin && equippedSkin.id || '', skinBoosts: Object.assign({}, skinBoosts), setBoosts: Object.assign({}, setBoosts), offerChipOn: offerChipOn(), capsDealAvailable: capsDealAvailable, ownedSkins: ownedSkins.length, boxesOpened: Number(gachaStats.boxesOpened || 0), theme: cityTheme, levelName: levelName || '', weakpoints: countWeakpoints(), weakpointHits: weakpointHits, lastWeakpointHits: lastWeakpointHits, atkMaxYield: atkMax('yield'), hasStation: hasStation, hasAirport: hasAirport, hasGhetto: hasGhetto, hasChinatown: hasChinatown, hasMall: hasMall, hasMountain: hasMountain, hasRefinery: hasRefinery, hasSkyscraper: hasSkyscraper, hasPowerplant: hasPowerplant, hasPort: hasPort, hasPark: hasPark, hasCathedral: hasCathedral, hasZombie: hasZombie, zombies: zombies.length, vehicles: vehicles.length, GRID: GRID, ships: ships.length, zone: zoneName, zoom: Math.round(zoom * 100) / 100, cityView: cityView, viewZoom: Math.round(viewZoom * 100) / 100, infoOpen: infoOpen, infoBadges: (R.info || []).length, starterGiven: starterGiven, upgDone: upgDone, perkIds: atkList().join(','), welcomeOpen: welcomeOpen, welcomeCaps: welcomeCaps, welcomeBuying: welcomeBuying, dailyOpen: dailyOpen, settingsOpen: settingsOpen, lang: GF.lang, muted: GF.muted, dailyClaimable: dailyClaimable(), dailyStreak: dailyStreak, activeNuke: activeNuke, nukeMult: nukeDef(activeNuke).mult, nukeAmmoWide: nukeAmmo.wide || 0, nukeAmmoTsar: nukeAmmo.tsar || 0, nukeChips: (R.nuke || []).length, actionCx: Math.round(R.actionCx || 0), actionCy: Math.round(R.actionCy || 0), aimX: Math.round(isoX(aim.ci, aim.cj)), aimY: Math.round(isoY(aim.ci, aim.cj) + TH() / 2), fxMobile: mobileFx(), perfLowFx: perfLowFx, fx: { waves: waves.length, chunks: chunks.length, dust: dust.length, fires: fires.length, smoke: smoke.length, fireballs: fireballs.length, mushrooms: mushrooms.length, meltZones: meltZones.length, fireworks: fireworkBursts.length, pulses: impactPulses.length, juice: GF.juice.counts() }, mushroomSources: mushroomSourceAssets.filter(function (a) { return a.ready; }).length, lastBlastProfile: lastBlastProfile, tutStep: tutStep, tutorialActive: tutorialActive(), tutorialGiftOpen: tutorialGiftOpen, tutorialGiftClaimed: tutorialGiftClaimed, tutorialDailyClaimed: tutorialDailyClaimed, tutTarget: (tutTarget() || {}).id || null }; };
 HOOKS.render_game_to_text = function () { return JSON.stringify(window.__gfDbg()); };
 HOOKS.advanceTime = function (ms) { if (window.__gfStep) window.__gfStep(Math.max(1, Math.round((ms || 16) / (1000 / 60))), 1 / 60); return window.render_game_to_text(); };
 

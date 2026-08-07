@@ -1,3 +1,65 @@
+export var SET_BONUS_TIERS = [
+  { rarity: 'common', need: 5, kind: 'caps_mult', value: 0.02 },
+  { rarity: 'rare', need: 4, kind: 'caps_mult', value: 0.03 },
+  { rarity: 'epic', need: 3, kind: 'yield_mult', value: 0.03 },
+  { rarity: 'legendary', need: 2, kind: 'caps_mult', value: 0.04 },
+  { rarity: 'mythic', need: 1, kind: 'yield_mult', value: 0.05 }
+];
+
+export var CAPS_PITY_THRESHOLD = 10;
+export var CAPS_PITY_TABLE = { epic: 0.8, legendary: 0.17, mythic: 0.03 };
+
+// Distinct owned collectibles per rarity -> earned set bonuses. Pure so tests
+// and the shop UI share one source of truth with the game-facing aggregate.
+export function computeSetBonuses(ownedIds, skinsById) {
+  var counts = { common: 0, rare: 0, epic: 0, legendary: 0, mythic: 0 };
+  var seen = {};
+  (Array.isArray(ownedIds) ? ownedIds : []).forEach(function (id) {
+    if (seen[id]) return;
+    seen[id] = true;
+    var skin = skinsById && skinsById[id];
+    if (skin && counts[skin.rarity] != null) counts[skin.rarity] += 1;
+  });
+  var boosts = {};
+  var tiers = SET_BONUS_TIERS.map(function (tier) {
+    var owned = counts[tier.rarity] || 0;
+    var earned = owned >= tier.need;
+    if (earned) boosts[tier.kind] = Math.round(((boosts[tier.kind] || 0) + tier.value) * 1000) / 1000;
+    return {
+      rarity: tier.rarity,
+      need: tier.need,
+      owned: Math.min(owned, tier.need),
+      total: owned,
+      earned: earned,
+      kind: tier.kind,
+      value: tier.value
+    };
+  });
+  return { boosts: boosts, tiers: tiers };
+}
+
+// Opens since the last epic+ pull from the caps crate. At CAPS_PITY_THRESHOLD
+// the next open is guaranteed epic+ via CAPS_PITY_TABLE.
+export function capsPityCount(stats) {
+  var n = Number(stats && stats.capsSinceEpic);
+  return isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+export function capsPityActive(stats) {
+  return capsPityCount(stats) >= CAPS_PITY_THRESHOLD - 1;
+}
+
+// First caps-crate open of each UTC day costs half. Pure: caller passes the
+// doubling base price and the current day number.
+export function capsCrateDealActive(stats, day) {
+  return !stats || Number(stats.capsDealDay) !== day;
+}
+
+export function capsCrateDealPrice(basePrice, stats, day) {
+  var price = Math.max(1, Math.round(Number(basePrice) || 1));
+  return capsCrateDealActive(stats, day) ? Math.max(1, Math.round(price * 0.5)) : price;
+}
+
 export function createCollectibleCatalog(SKIN_RARITIES) {
   var BOOSTS = [
     ['caps_mult', 'Caps gain'], ['yield_mult', 'Blast yield'], ['cost_disc', 'Upgrade discount'], ['crit_bonus', 'Extra income'],

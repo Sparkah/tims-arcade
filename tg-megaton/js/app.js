@@ -1,5 +1,14 @@
 import { createEconomy } from "./economy.js";
-import { createCollectibleCatalog } from "./collectibles.js";
+import {
+  createCollectibleCatalog,
+  computeSetBonuses,
+  capsPityCount,
+  capsPityActive,
+  capsCrateDealActive,
+  capsCrateDealPrice,
+  CAPS_PITY_THRESHOLD,
+  CAPS_PITY_TABLE
+} from "./collectibles.js";
 import { createPersistence } from "./persistence.js";
 import { createPayments } from "./payments.js";
 import { installTelegramAdapter } from "./platform-adapter.js";
@@ -96,6 +105,7 @@ import {
       no_payload: 'No payload equipped', fine_copy: 'Digital items are optional. Reward TON is in-game credit only; withdrawals are not enabled.', terms: 'Terms', reset: 'Reset', close: 'Close',
       caps: 'Caps', caps_lower: 'caps', stars: 'Stars', ton: 'TON', open: 'Open', open_free: 'Open Free', watch_ad: 'Watch Ad', claim: 'Claim', claimed: 'Claimed', start: 'Start', locked: 'Locked', tomorrow: 'Tomorrow', ready: 'Ready', ready_in: 'Ready in {time}', pending: 'Pending: {count}.', credit: 'Credit', use_ton_credit: 'Use credit', ton_credit: '{ton} TON credit', ton_credit_balance: 'TON credit: {ton} TON', ton_credit_note: 'Spend reward TON inside Megaton. Withdrawals are not enabled.',
       roll: 'roll', rolls: 'rolls', crate: 'crate', crates: 'crates', box: 'box', boxes: 'boxes', reward: 'Reward', mythic: 'mythic', legendary_plus_only: 'legendary+ only', rare_plus_only: 'rare+ only', opens_double_price: 'opens double price',
+      caps_deal_today: '-50% first open today', caps_pity_next: 'EPIC+ GUARANTEED next open', caps_pity_in: 'epic+ guaranteed in {count}', set_kind_caps: 'caps', set_kind_yield: 'yield', set_bonuses: 'Set bonuses',
       equipped: 'Equipped', equip: 'Equip', share: 'Share', sell: 'Sell', sell_for: 'Sell for {caps} caps', unknown_payload: 'Unknown Payload', locked_card: 'Locked', preparing_share: 'Preparing share...',
       all: 'All', rarity_common: 'Common', rarity_rare: 'Rare', rarity_epic: 'Epic', rarity_legendary: 'Legendary', rarity_mythic: 'Mythic',
       boost_caps_mult: 'Caps gain', boost_yield_mult: 'Blast yield', boost_cost_disc: 'Upgrade discount', boost_crit_bonus: 'Extra income', boost_offline_mult: 'Reactor gain', boost_nuke_cost_disc: 'Nuke discount', boost_daily_mult: 'Daily ration', boost_ship_bonus: 'Ship bonus',
@@ -121,6 +131,7 @@ import {
       no_payload: 'Скин не выбран', fine_copy: 'Цифровые предметы необязательны. Наградный TON - это игровой кредит; вывод пока не включён.', terms: 'Условия', reset: 'Сброс', close: 'Закрыть',
       caps: 'Крышки', caps_lower: 'крышек', stars: 'Stars', ton: 'TON', open: 'Открыть', open_free: 'Открыть бесплатно', watch_ad: 'Смотреть рекламу', claim: 'Забрать', claimed: 'Получено', start: 'Начать', locked: 'Закрыто', tomorrow: 'Завтра', ready: 'Готово', ready_in: 'Через {time}', pending: 'Ждёт: {count}.', credit: 'Кредит', use_ton_credit: 'Кредит', ton_credit: '{ton} TON-кредит', ton_credit_balance: 'TON-кредит: {ton} TON', ton_credit_note: 'Тратьте наградный TON внутри Megaton. Вывод пока не включён.',
       roll: 'ролл', rolls: 'роллов', crate: 'ящик', crates: 'ящиков', box: 'ящик', boxes: 'ящиков', reward: 'Награда', mythic: 'мифик', legendary_plus_only: 'только легендарный+', rare_plus_only: 'только редкий+', opens_double_price: 'цена удваивается',
+      caps_deal_today: '-50% на первое открытие сегодня', caps_pity_next: 'ЭПИК+ ГАРАНТИРОВАН в следующем', caps_pity_in: 'эпик+ гарантирован через {count}', set_kind_caps: 'крышки', set_kind_yield: 'мощность', set_bonuses: 'Бонусы наборов',
       equipped: 'Выбран', equip: 'Выбрать', share: 'Поделиться', sell: 'Продать', sell_for: 'Продать за {caps} крышек', unknown_payload: 'Неизвестный скин', locked_card: 'Закрыто', preparing_share: 'Готовим отправку...',
       all: 'Все', rarity_common: 'Обычный', rarity_rare: 'Редкий', rarity_epic: 'Эпик', rarity_legendary: 'Легенда', rarity_mythic: 'Мифик',
       boost_caps_mult: 'доход крышек', boost_yield_mult: 'мощность взрыва', boost_cost_disc: 'скидка улучшений', boost_crit_bonus: 'доп. доход', boost_offline_mult: 'доход реактора', boost_nuke_cost_disc: 'скидка бомб', boost_daily_mult: 'дневной паёк', boost_ship_bonus: 'бонус кораблей',
@@ -592,11 +603,17 @@ import {
   function capsCratePrice(st) {
     return Math.max(1, Math.round(BOXES.caps.caps * Math.pow(2, capsCrateOpenCount(st))));
   }
+  function capsCratePriceToday(st) {
+    return capsCrateDealPrice(capsCratePrice(st), st && st.gachaStats, dayNum());
+  }
   function syncEquippedSkinToGame(st) {
     var skin = currentSkin(st);
     try {
       var cw = game.contentWindow;
-      if (cw && typeof cw.__gfEquipSkin === 'function') cw.__gfEquipSkin(skin, st || baseGachaState(), { noSave: true });
+      var state = st || baseGachaState();
+      state.setBoosts = computeSetBonuses(state.ownedSkins, SKINS_BY_ID).boosts;
+      state.capsDealAvailable = capsCrateDealActive(state.gachaStats, dayNum());
+      if (cw && typeof cw.__gfEquipSkin === 'function') cw.__gfEquipSkin(skin, state, { noSave: true });
     } catch (e) {}
   }
   function telegramStartParam(value) {
@@ -804,8 +821,8 @@ import {
     }
     return card;
   }
-  function pickRarityFromTable(tableName) {
-    var table = DROP_TABLES[tableName] || DROP_TABLES.standard;
+  function pickRarityFromTable(tableName, tableOverride) {
+    var table = tableOverride || DROP_TABLES[tableName] || DROP_TABLES.standard;
     var r = Math.random();
     var acc = 0;
     for (var i = 0; i < SKIN_RARITIES.length; i += 1) {
@@ -815,8 +832,8 @@ import {
     }
     return table.common ? 'common' : 'rare';
   }
-  function pickSkin(box, index, gotRare) {
-    var rarity = pickRarityFromTable(box.dropTable || (box.guaranteeRare ? 'premium' : 'standard'));
+  function pickSkin(box, index, gotRare, tableOverride) {
+    var rarity = pickRarityFromTable(box.dropTable || (box.guaranteeRare ? 'premium' : 'standard'), tableOverride);
     var pool = SKINS.filter(function (s) { return s.rarity === rarity; });
     return pool[Math.floor(Math.random() * pool.length)] || SKINS[0];
   }
@@ -1347,7 +1364,7 @@ import {
 
   function openShop(tab, opts) {
     localizeShell();
-    gaDesign('shop:open:' + (tab || 'boxes'));
+    gaDesign('shop:open:' + (tab || 'boxes') + (opts && opts.source ? ':' + opts.source : ''));
     skinsScreen.hidden = false;
     setSkinTab(tab || 'boxes');
     setShopCloseGuide(!!(opts && opts.tutorialClose));
@@ -1406,7 +1423,7 @@ import {
       var disabled = box.daily && st.gachaStats.dailyLastDay === dayNum();
       var adWait = box.ad ? adCrateRemainingMs(st) : 0;
       if (adWait > 0) disabled = true;
-      var capsPrice = box.caps ? capsCratePrice(st) : 0;
+      var capsPrice = box.caps ? capsCratePriceToday(st) : 0;
       card.className = 'box-card ' + id + (box.premium ? ' premium' : '');
       var art = document.createElement('div');
       var img = document.createElement('img');
@@ -1432,6 +1449,14 @@ import {
       card.appendChild(h);
       card.appendChild(p);
       card.appendChild(meta);
+      if (box.caps) {
+        var capsPerks = document.createElement('p');
+        capsPerks.className = 'box-meta caps-perks';
+        var pityLeft = Math.max(0, CAPS_PITY_THRESHOLD - capsPityCount(st.gachaStats));
+        capsPerks.textContent = (capsCrateDealActive(st.gachaStats, dayNum()) ? uiText('caps_deal_today') + ' · ' : '')
+          + (capsPityActive(st.gachaStats) ? uiText('caps_pity_next') : uiText('caps_pity_in', { count: pityLeft }));
+        card.appendChild(capsPerks);
+      }
       if (box.paidProduct) {
         var row = document.createElement('div');
         var starsBtn = document.createElement('button');
@@ -1499,6 +1524,24 @@ import {
   function renderCollection(st) {
     renderFilters();
     skinGrid.textContent = '';
+    var sets = computeSetBonuses(st.ownedSkins, SKINS_BY_ID);
+    var strip = document.createElement('div');
+    strip.className = 'set-bonus-strip';
+    sets.tiers.forEach(function (tier) {
+      var row = document.createElement('div');
+      row.className = 'set-bonus-row' + (tier.earned ? ' earned' : '');
+      var label = document.createElement('span');
+      label.className = 'set-bonus-label rarity-' + tier.rarity;
+      label.textContent = rarityLabel(tier.rarity) + ' ' + Math.min(tier.total, tier.need) + '/' + tier.need;
+      var bonus = document.createElement('span');
+      bonus.className = 'set-bonus-value';
+      bonus.textContent = (tier.earned ? '✓ ' : '') + '+' + Math.round(tier.value * 100) + '% ' + uiText(tier.kind === 'caps_mult' ? 'set_kind_caps' : 'set_kind_yield');
+      row.appendChild(label);
+      row.appendChild(bonus);
+      strip.appendChild(row);
+    });
+    skinGrid.appendChild(strip);
+    var gridFrag = document.createDocumentFragment();
     SKINS.slice().sort(function (a, b) {
       function rank(s) {
         if (st.equippedSkin === s.id) return 0;
@@ -1510,8 +1553,9 @@ import {
       return SKIN_RARITIES.indexOf(b.rarity) - SKIN_RARITIES.indexOf(a.rarity);
     }).forEach(function (skin) {
       if (skinFilter !== 'all' && skin.rarity !== skinFilter) return;
-      skinGrid.appendChild(renderSkinCard(skin, st));
+      gridFrag.appendChild(renderSkinCard(skin, st));
     });
+    skinGrid.appendChild(gridFrag);
   }
 
   function appendWeeklyClaimButton() {
@@ -1775,10 +1819,14 @@ import {
       if (st.gachaStats.dailyLastDay === dayNum()) { toast(uiText('toast_daily_done'), 1600); return null; }
       st.gachaStats.dailyLastDay = dayNum();
     }
+    var capsDealUsed = false;
+    var capsPityUsed = false;
     if (box.caps) {
       var save = readLocalState() || {};
       var money = Number(save.money || 0);
-      var capsPrice = capsCratePrice(st);
+      var capsPrice = capsCratePriceToday(st);
+      capsDealUsed = capsCrateDealActive(st.gachaStats, dayNum());
+      capsPityUsed = capsPityActive(st.gachaStats);
       if (money < capsPrice) { toast(uiText('toast_need_caps', { caps: fmtCaps(capsPrice) }), 1600); return null; }
       var spentInGame = false;
       try {
@@ -1790,15 +1838,26 @@ import {
         chargedSave = save;
       }
       st.gachaStats.capsCrateOpens = capsCrateOpenCount(st) + 1;
+      if (capsDealUsed) {
+        st.gachaStats.capsDealDay = dayNum();
+        gaDesign('gacha:deal_used:caps');
+      }
+      if (capsPityUsed) gaDesign('gacha:pity_hit:caps');
     }
     if (box.localOnly) st.gachaStats.localTestOpens = Number(st.gachaStats.localTestOpens || 0) + 1;
     var gotRare = false;
     var pulled = [];
     for (var i = 0; i < box.rolls; i += 1) {
-      var skin = pickSkin(box, i, gotRare);
+      var skin = pickSkin(box, i, gotRare, capsPityUsed ? CAPS_PITY_TABLE : null);
       if (skin.rarity !== 'common') gotRare = true;
       grantSkin(skin, st);
       pulled.push(skin);
+    }
+    if (box.caps) {
+      var pulledEpicPlus = pulled.some(function (skin) {
+        return skin.rarity === 'epic' || skin.rarity === 'legendary' || skin.rarity === 'mythic';
+      });
+      st.gachaStats.capsSinceEpic = pulledEpicPlus ? 0 : capsPityCount(st.gachaStats) + 1;
     }
     var equipped = opts.autoEquip === false ? null : bestPulledSkin(pulled);
     if (equipped) equipGrantedSkin(st, equipped);
