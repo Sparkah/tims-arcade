@@ -13,13 +13,26 @@ import { isPlayableStudioCreation } from '../_lib/creationVisibility.js';
 
 const ID_RE = /^[0-9a-z]{8,40}$/;
 
+// The ONE external file a generated game may load. Hosting it and giving it CORS
+// headers (Gallery#91484aa) was NOT enough: `_headers` governs the library's own
+// response, while THIS file governs the game document's permission to request it.
+// Only the first half shipped, so every three.js build rendered a pitch-black
+// canvas under a working HUD -- silent, because the HUD is inline HTML that draws
+// fine and hides the dead canvas (Thermal Tail v11, 2026-08-06).
+// Byte-identical to THREE_LIB_URL in Shared/tools/vibe-relay/relay.js, whose
+// release gate now re-reads this file and refuses to ship a 3D build if they drift.
+export const THREE_LIB_URL = 'https://game-factory.tech/lib/three.min.js';
+
 const CSP = [
   // sandbox FIRST: opaque origin + no same-origin powers, applied to this doc.
   // Fullscreen is controlled by the embedding iframe's allowfullscreen attribute;
   // CSP sandbox has no valid allow-fullscreen token.
   "sandbox allow-scripts allow-pointer-lock",
   "default-src 'none'",
-  "script-src 'unsafe-inline'",
+  // 'unsafe-inline' for the game's own inline script, plus exactly one external
+  // URL. Deliberately NOT 'self' -- that would permit every same-origin script;
+  // this permits one byte-pinned file (the game's tag carries its SRI hash).
+  "script-src 'unsafe-inline' " + THREE_LIB_URL,
   "style-src 'unsafe-inline'",
   "img-src data: blob:",
   "media-src data: blob:",
