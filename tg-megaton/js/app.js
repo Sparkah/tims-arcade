@@ -1,4 +1,4 @@
-import { createEconomy } from "./economy.js";
+import { createEconomy } from "./economy.js?v=dad4281617";
 import {
   createCollectibleCatalog,
   computeSetBonuses,
@@ -8,17 +8,17 @@ import {
   capsCrateDealPrice,
   CAPS_PITY_THRESHOLD,
   CAPS_PITY_TABLE
-} from "./collectibles.js";
-import { createPersistence } from "./persistence.js";
-import { createPayments } from "./payments.js";
-import { installTelegramAdapter } from "./platform-adapter.js";
+} from "./collectibles.js?v=dad4281617";
+import { createPersistence } from "./persistence.js?v=dad4281617";
+import { createPayments } from "./payments.js?v=dad4281617";
+import { installTelegramAdapter } from "./platform-adapter.js?v=dad4281617";
 import {
   mergePaidGachaReceipt,
   mergePaidInventorySnapshot,
   sellableDuplicateCount,
   validatePaidGachaReceipt,
   validatePaidInventorySnapshot
-} from "./paid-inventory.js";
+} from "./paid-inventory.js?v=dad4281617";
 
 (function () {
   'use strict';

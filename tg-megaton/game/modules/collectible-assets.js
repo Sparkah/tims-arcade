@@ -1,4 +1,4 @@
-import { cleanAssetId, hexColor, safeAssetId } from './game-utils.js';
+import { cleanAssetId, hexColor, safeAssetId } from './game-utils.js?v=dad4281617';
 
 export function createCollectibleAssets({ ImageCtor, getClock, getSkin, palette }) {
   const iconCache = Object.create(null);

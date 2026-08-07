@@ -1,18 +1,18 @@
-import { STRINGS } from './modules/strings.js';
-import { createLanguageController } from './modules/language.js';
+import { STRINGS } from './modules/strings.js?v=dad4281617';
+import { createLanguageController } from './modules/language.js?v=dad4281617';
 import {
   BAL, PALETTE, FARPAL, THEMES, PB, DISTRICT_KEYS, NUKES,
   EXPLOSION_ASSET_SPECS, MUSHROOM_SOURCE_SPECS,
   districtPalette, districtFarPalette, districtColor, districtAccent,
-} from './modules/game-data.js';
+} from './modules/game-data.js?v=dad4281617';
 import {
   safeAssetId, cleanAssetId, hexColor, mixHex, rgba,
   darken, mixRgb, formatCompact,
-} from './modules/game-utils.js';
-import { createCollectibleAssets } from './modules/collectible-assets.js';
-import { createRenderer } from './modules/render.js';
-import { createSaveStore, migrateTutorialStep } from './modules/persistence.js';
-import { installHookSurface } from './modules/hook-surface.js';
+} from './modules/game-utils.js?v=dad4281617';
+import { createCollectibleAssets } from './modules/collectible-assets.js?v=dad4281617';
+import { createRenderer } from './modules/render.js?v=dad4281617';
+import { createSaveStore, migrateTutorialStep } from './modules/persistence.js?v=dad4281617';
+import { installHookSurface } from './modules/hook-surface.js?v=dad4281617';
 
 var PLATFORM = window.MegatonPlatform || {};
 var ALLOW_TEST_HOOKS = typeof PLATFORM.allowsTestHooks === 'function' && PLATFORM.allowsTestHooks();
